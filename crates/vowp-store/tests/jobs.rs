@@ -443,3 +443,89 @@ fn delete_job_only_when_unstarted() {
         "got {error:?}"
     );
 }
+
+#[test]
+fn count_jobs_by_state_groups_and_filters() {
+    let fixture = TestStore::new();
+    fixture.insert(new_job("pending-a", JobKind::Build, Role::Worker));
+    fixture.insert(new_job("pending-b", JobKind::Build, Role::Worker));
+    let done = fixture.insert(new_job("done-job", JobKind::Build, Role::Worker));
+    fixture
+        .store
+        .set_job_state(
+            &done.id,
+            JobState::Done,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("mark done");
+
+    let counts = fixture.store.count_jobs_by_state(None).expect("state counts");
+    assert_eq!(counts.get("pending"), Some(&2));
+    assert_eq!(counts.get("done"), Some(&1));
+    assert_eq!(counts.len(), 2);
+
+    let project = fixture
+        .store
+        .count_jobs_by_state(Some(&fixture.project))
+        .expect("project counts");
+    assert_eq!(project, counts);
+
+    let other = ProjectName::parse("other").expect("project");
+    assert!(
+        fixture
+            .store
+            .count_jobs_by_state(Some(&other))
+            .expect("other counts")
+            .is_empty()
+    );
+}
+
+#[test]
+fn nested_transaction_rolls_back_on_error() {
+    let fixture = TestStore::new();
+    let outer = JobId::parse("outer-job").expect("id");
+    let inner = JobId::parse("inner-job").expect("id");
+
+    let error = fixture
+        .store
+        .transaction(|tx| -> Result<(), vowp_store::StoreError> {
+            tx.insert_job(
+                &fixture.project,
+                &new_job("outer-job", JobKind::Build, Role::Worker),
+                "human",
+            )?;
+            let inner_result = tx.transaction(|nested| -> Result<(), vowp_store::StoreError> {
+                nested.insert_job(
+                    &fixture.project,
+                    &new_job("inner-job", JobKind::Build, Role::Worker),
+                    "human",
+                )?;
+                Err(vowp_store::StoreError::Conflict("inner rollback".to_owned()))
+            });
+            assert!(inner_result.is_err());
+            assert!(
+                tx.job(&inner).expect("lookup inner").is_none(),
+                "inner savepoint rolled back"
+            );
+            assert!(
+                tx.job(&outer).expect("lookup outer").is_some(),
+                "outer work still visible"
+            );
+            Err(vowp_store::StoreError::Conflict("outer rollback".to_owned()))
+        })
+        .expect_err("outer transaction must fail");
+
+    assert!(matches!(error, vowp_store::StoreError::Conflict(_)), "got {error:?}");
+    assert!(
+        fixture.store.job(&outer).expect("lookup outer").is_none(),
+        "outer rolled back"
+    );
+    assert!(
+        fixture.store.job(&inner).expect("lookup inner").is_none(),
+        "inner rolled back"
+    );
+    assert_eq!(fixture.store.list_jobs(&JobFilter::default()).expect("list").len(), 0);
+}
