@@ -26,7 +26,7 @@ pub struct Graph { /* jobs: BTreeMap<JobId, Job>, edges: Vec<Edge>, indexes */ }
 
 impl Graph {
     /// Validates and indexes. Errors: DuplicateJob, UnknownJob (edge endpoint not in `jobs`), SelfEdge, Cycle.
-    /// Cycle detection uses edges of kind Needs, Verifies, Escalates, Blocks (direction: src -> dst as stored, "src depends on dst");
+    /// Cycle detection uses edges of kind Needs, Verifies, Escalates, Blocks in **precedence direction** (rules 2–3 below: `a needs b` ⇒ b→a, `a blocks b` ⇒ a→b, `a verifies|escalates b` ⇒ b→a), the same direction `topo_order` uses; so `a needs b` plus `b blocks a` (both demand b before a) is valid, not a cycle;
     /// `Fixes` edges are the bounded loop edge and are ignored. Every `job.needs` entry must be mirrored by a `Needs` edge:
     /// `Graph::new` ADDS missing `Needs` edges from `job.needs` and errors (EdgeMismatch) if a Needs edge exists that is not in `job.needs`.
     pub fn new(jobs: Vec<Job>, edges: Vec<Edge>) -> Result<Graph, GraphError>;
@@ -302,7 +302,7 @@ impl GraphError { pub fn kind(&self) -> vowp_protocol::ErrorKind; }
 Graph
 - `graph_new_rejects_unknown_edge_endpoint` — `UnknownJob`.
 - `graph_new_rejects_duplicate_ids` / `graph_new_rejects_self_edge` — respective errors.
-- `graph_new_detects_needs_cycle_and_reports_path` — a→b→c→a gives `Cycle` with first==last.
+- `graph_new_detects_needs_cycle_and_reports_path`, `graph_needs_plus_blocks_same_direction_is_not_a_cycle` — a→b→c→a gives `Cycle` with first==last.
 - `graph_fixes_edge_may_form_loop` — `fix fixes orig` plus `orig needs fix`-free graph is accepted; a `fixes` back-edge never counts as a cycle.
 - `graph_adds_needs_edges_from_job_needs` / `graph_rejects_needs_edge_missing_in_job` — EdgeMismatch.
 - `ready_jobs_requires_all_needs_done` / `ready_jobs_respects_blocks_edge` / `ready_jobs_ignores_non_pending` / `ready_jobs_order_priority_then_age`.
