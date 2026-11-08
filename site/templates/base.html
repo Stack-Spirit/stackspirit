@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{title}}</title>
+  <meta name="description" content="{{description}}">
+  <link rel="stylesheet" href="{{root}}assets/style.css">
+</head>
+<body class="{{body_class}}">
+  <a class="skip-link" href="#content">Skip to content</a>
+  <div class="shell">
+    <header class="site-header">
+      <a class="brand" href="{{root}}index.html">
+        <span class="brand-mark" aria-hidden="true">V</span>
+        <span class="brand-text">VOWP</span>
+      </a>
+      <span class="brand-sub">Virtual Open Work-to-Production</span>
+    </header>
+
+    <div class="layout">
+      <input class="nav-toggle" type="checkbox" id="nav-toggle" aria-controls="site-nav">
+      <label class="nav-toggle-label" for="nav-toggle">
+        <span>Documentation</span>
+        <span class="nav-toggle-chevron" aria-hidden="true">▾</span>
+      </label>
+      <nav class="sidebar" id="site-nav" aria-label="Site">
+        {{nav}}
+      </nav>
+      <main class="content" id="content">
+        {{content}}
+      </main>
+    </div>
+
+    <footer class="site-footer">
+      <p>VOWP v0.1 · MIT · local-first supervision for AI coding agents.</p>
+      <p class="muted">Built from the repository's Markdown at build time. Deploying is a manual owner step.</p>
+    </footer>
+  </div>
+</body>
+</html>
