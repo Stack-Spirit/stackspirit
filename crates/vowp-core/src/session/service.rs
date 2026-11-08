@@ -107,6 +107,14 @@ impl SessionService {
     pub fn run_turn(&self, req: TurnRequest, cancel: &CancelToken) -> Result<TurnResult, CoreError> {
         let store = self.deps.open_store()?;
         let session = store.require_session(&req.session_id)?;
+        if session.state == SessionState::Switching {
+            return Err(CoreError::Store(StoreError::Conflict(
+                "session is switching; input is rejected".to_owned(),
+            )));
+        }
+        if session.state == SessionState::Closed {
+            return Err(CoreError::Invalid("session is closed; no further turns".to_owned()));
+        }
         self.check_cwd(&session.cwd)?;
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -165,7 +173,6 @@ impl SessionService {
             cost: vowp_protocol::Cost::unknown(),
             detail: String::new(),
         };
-        store.insert_run(&run)?;
 
         let attach = SessionExecutor {
             action: AttachAction::Attach,
@@ -175,7 +182,7 @@ impl SessionService {
             run_id: Some(run_id.clone()),
             reason: None,
         };
-        self.append(
+        let attach_event = self.append(
             &store,
             &log,
             executor.harness,
@@ -183,6 +190,7 @@ impl SessionService {
             Some(node.clone()),
             native.clone(),
         )?;
+        let attach_seq = attach_event.envelope.seq;
         self.append(
             &store,
             &log,
@@ -203,6 +211,7 @@ impl SessionService {
             Some(node.clone()),
             native.clone(),
         )?;
+        store.insert_run(&run)?;
         store.set_session_state(&req.session_id, SessionState::Running, Some(&executor))?;
 
         let start_input = vowp_protocol::StartInput {
@@ -235,6 +244,10 @@ impl SessionService {
         let mut terminal: Option<vowp_protocol::HarnessEvent> = None;
         let mut interrupted = false;
         loop {
+            if cancel.is_cancelled() && !interrupted {
+                interrupted = true;
+                let _ = adapter_run.interrupt();
+            }
             match adapter_run.events().recv_timeout(EVENT_POLL) {
                 Ok(event) => {
                     match &event.body {
@@ -249,12 +262,7 @@ impl SessionService {
                     }
                     self.append_harness(&store, &log, event, &executor, &node, native.as_deref())?;
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    if cancel.is_cancelled() && !interrupted {
-                        interrupted = true;
-                        let _ = adapter_run.interrupt();
-                    }
-                }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -307,10 +315,13 @@ impl SessionService {
                 executor.harness,
                 EventBody::Error(ErrorEvent {
                     kind: ErrorKind::AdapterFailed,
-                    message: summary
-                        .result_text
-                        .clone()
-                        .unwrap_or_else(|| "adapter ended without a result".to_owned()),
+                    message: vowp_adapters::classify::redact(
+                        &summary
+                            .result_text
+                            .clone()
+                            .unwrap_or_else(|| "adapter ended without a result".to_owned()),
+                        300,
+                    ),
                     retryable: summary.outcome == RunOutcome::Crash,
                 }),
                 Some(node.clone()),
@@ -318,11 +329,11 @@ impl SessionService {
             )?;
         }
 
-        let duration_ms = terminal.as_ref().and_then(|event| match &event.body {
-            EventBody::TurnEnded(ended) => ended.duration_ms,
-            _ => None,
-        });
-        self.append(
+        let (duration_ms, terminal_ts) = match terminal.as_ref().map(|event| (&event.body, event.ts)) {
+            Some((EventBody::TurnEnded(ended), ts)) => (ended.duration_ms, ts),
+            _ => (None, None),
+        };
+        self.append_event(
             &store,
             &log,
             executor.harness,
@@ -331,6 +342,7 @@ impl SessionService {
                 stop_reason: summary.stop_reason,
                 duration_ms,
             }),
+            terminal_ts,
             Some(node.clone()),
             summary.native_session_id.clone(),
         )?;
@@ -356,16 +368,21 @@ impl SessionService {
         )?;
         log.sync()?;
 
-        if let Some(native) = &summary.native_session_id {
-            store.upsert_native(&req.session_id, executor.harness, native, &node, log.last_seq())?;
+        if let Some(native_id) = &summary.native_session_id {
+            let first_seq = if native.as_deref() == Some(native_id.as_str()) {
+                attach_seq
+            } else {
+                log.last_seq()
+            };
+            store.upsert_native(&req.session_id, executor.harness, native_id, &node, first_seq)?;
             add_adapter_mapping(
                 &self.deps.paths,
                 &req.session_id,
                 AdapterMapping {
                     harness: executor.harness,
-                    native_session_id: native.clone(),
+                    native_session_id: native_id.clone(),
                     node: node.clone(),
-                    first_seq: log.last_seq(),
+                    first_seq,
                     created_at: self.deps.clock.now(),
                 },
             )?;
@@ -387,12 +404,15 @@ impl SessionService {
             limit_kind: summary.limit.as_ref().map(|limit| limit.kind),
             cost: summary.cost.clone(),
             native_session_id: summary.native_session_id.clone(),
-            detail: summary
-                .limit
-                .as_ref()
-                .map(|limit| limit.message.clone())
-                .or_else(|| summary.result_text.clone())
-                .unwrap_or_default(),
+            detail: vowp_adapters::classify::redact(
+                &summary
+                    .limit
+                    .as_ref()
+                    .map(|limit| limit.message.clone())
+                    .or_else(|| summary.result_text.clone())
+                    .unwrap_or_default(),
+                1500,
+            ),
         };
         store.finish_run(&run_id, &finish)?;
 
@@ -559,7 +579,7 @@ impl SessionService {
             HarnessKind::Vowp,
             EventBody::Error(ErrorEvent {
                 kind: ErrorKind::AdapterUnavailable,
-                message: detail.to_owned(),
+                message: vowp_adapters::classify::redact(detail, 300),
                 retryable: false,
             }),
             None,
@@ -826,7 +846,7 @@ impl SessionService {
             executor.harness,
             EventBody::Error(ErrorEvent {
                 kind: ErrorKind::AdapterUnavailable,
-                message: error.to_string(),
+                message: vowp_adapters::classify::redact(&error.to_string(), 300),
                 retryable: false,
             }),
             Some(node.clone()),
@@ -869,7 +889,7 @@ impl SessionService {
                 limit_kind: None,
                 cost: vowp_protocol::Cost::unknown(),
                 native_session_id: None,
-                detail: error.to_string(),
+                detail: vowp_adapters::classify::redact(&error.to_string(), 1500),
             },
         )?;
         Ok(())
@@ -878,19 +898,29 @@ impl SessionService {
 
 impl SessionOps for SessionService {
     fn create_session(&self, req: NewSession) -> Result<SessionId, ServiceError> {
-        SessionService::create_session(self, req).map_err(ServiceError::from)
+        SessionService::create_session(self, req).map_err(service_error)
     }
 
     fn run_turn(&self, req: TurnRequest, cancel: &CancelToken) -> Result<TurnResult, ServiceError> {
-        SessionService::run_turn(self, req, cancel).map_err(ServiceError::from)
+        SessionService::run_turn(self, req, cancel).map_err(service_error)
     }
 
     fn switch(&self, req: SwitchRequest) -> Result<Switch, ServiceError> {
-        SessionService::switch(self, &req).map_err(ServiceError::from)
+        SessionService::switch(self, &req).map_err(service_error)
     }
 
     fn write_capsule(&self, session: &SessionId, trigger: CapsuleTrigger) -> Result<Capsule, ServiceError> {
-        SessionService::write_capsule(self, session, trigger).map_err(ServiceError::from)
+        SessionService::write_capsule(self, session, trigger).map_err(service_error)
+    }
+}
+
+/// Converts a core error into the service boundary, preserving the exact missing-harness text.
+fn service_error(error: CoreError) -> ServiceError {
+    match error {
+        CoreError::Adapter(vowp_protocol::AdapterError::Unavailable(message)) if message == "harness not installed" => {
+            ServiceError::Failed(message)
+        }
+        other => ServiceError::from(other),
     }
 }
 

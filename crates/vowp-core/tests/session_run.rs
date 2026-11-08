@@ -659,6 +659,144 @@ fn session_switch_writes_capsule_and_lineage() {
 }
 
 #[test]
+fn run_turn_cancel_interrupts_streaming_adapter() {
+    let tmp = tempdir().expect("tempdir");
+    let (started_tx, started_rx) = channel();
+    let streaming = StreamingAdapter::new(started_tx);
+    let interrupts = streaming.interrupts.clone();
+    let deps = deps(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(streaming)),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "streaming cancel");
+    let cancel = CancelToken::default();
+    let canceller = cancel.clone();
+    let handle = std::thread::spawn(move || {
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("adapter started");
+        std::thread::sleep(Duration::from_millis(30));
+        canceller.cancel();
+    });
+
+    let (done_tx, done_rx) = channel();
+    let worker = {
+        let service = service.clone();
+        let session = session.clone();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let result = service.run_turn(turn(&session, opencode(), "stream"), &cancel);
+            let _ = done_tx.send(result);
+        })
+    };
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("a streaming run must return after cancellation")
+        .expect("interrupted turn returns a summary");
+    worker.join().expect("worker");
+    handle.join().expect("canceller");
+
+    assert!(interrupts.load(Ordering::SeqCst), "interrupt() was called");
+    assert_eq!(result.summary.outcome, RunOutcome::Killed);
+    let events = read_events(&deps, &session);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.body(), Ok(EventBody::AssistantMessage(_)))),
+        "the adapter was producing events when cancellation arrived"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.body(),
+        Ok(EventBody::TurnEnded(payload)) if payload.stop_reason == StopReason::Interrupted
+    )));
+}
+
+#[test]
+fn run_turn_rejects_switching_and_closed_sessions() {
+    let tmp = tempdir().expect("tempdir");
+    let fake = FakeAdapter::new(HarnessKind::Opencode, Vec::new());
+    let deps = deps(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(fake)),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "states");
+    let store = deps.open_store().expect("store");
+
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Switching, Some(&opencode()))
+        .expect("switching");
+    let error = service
+        .run_turn(turn(&session, opencode(), "work"), &CancelToken::default())
+        .expect_err("input is rejected while switching");
+    assert!(matches!(error, CoreError::Store(StoreError::Conflict(_))));
+
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Closed, None)
+        .expect("closed");
+    let error = service
+        .run_turn(turn(&session, opencode(), "work"), &CancelToken::default())
+        .expect_err("a closed session takes no turns");
+    assert!(matches!(error, CoreError::Invalid(_)));
+}
+
+#[test]
+fn missing_adapter_reports_harness_not_installed() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp, config_for(tmp.path()), AdapterRegistry::new());
+    let service = SessionService::new(deps);
+    let session = create_session(&service, &tmp, "missing adapter");
+    let error = SessionOps::run_turn(&service, turn(&session, opencode(), "work"), &CancelToken::default())
+        .expect_err("no adapter");
+    match error {
+        ServiceError::Failed(message) => assert_eq!(message, "harness not installed"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_turn_redacts_error_text_in_run_detail_and_event() {
+    let tmp = tempdir().expect("tempdir");
+    let secret = format!("{}{}", "sk-", "abcdefghijklmnopqrstuvwxyz");
+    let fake = FakeAdapter::new(HarnessKind::Opencode, Vec::new()).with_summary(RunSummary {
+        exit_code: Some(1),
+        outcome: RunOutcome::Error,
+        native_session_id: None,
+        cost: Cost::unknown(),
+        limit: None,
+        result_text: Some(format!("provider rejected {secret}")),
+        stop_reason: StopReason::Error,
+    });
+    let deps = deps(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(fake)),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "redaction");
+    let result = service
+        .run_turn(turn(&session, opencode(), "work"), &CancelToken::default())
+        .expect("error outcome is returned");
+    let store = deps.open_store().expect("store");
+    let run = store.require_run(&result.run_id).expect("run");
+    assert!(!run.detail.contains(&secret), "run.detail is redacted");
+    assert!(run.detail.contains("<redacted>"));
+    let events = read_events(&deps, &session);
+    let error = events
+        .iter()
+        .find_map(|event| match event.body() {
+            Ok(EventBody::Error(payload)) => Some(payload),
+            _ => None,
+        })
+        .expect("error event");
+    assert!(!error.message.contains(&secret));
+    assert!(error.message.contains("<redacted>"));
+}
+
+#[test]
 fn session_ops_trait_reports_conflict_as_service_failure() {
     let tmp = tempdir().expect("tempdir");
     let fake = FakeAdapter::new(HarnessKind::Opencode, Vec::new());
@@ -811,6 +949,129 @@ impl AdapterRun for NativeRun {
             limit: None,
             result_text: Some("ok".to_owned()),
             stop_reason: StopReason::EndTurn,
+        })
+    }
+}
+
+/// An adapter that keeps emitting assistant messages until interrupted.
+struct StreamingAdapter {
+    interrupts: Arc<AtomicBool>,
+    started: Arc<Mutex<Option<Sender<()>>>>,
+}
+
+impl StreamingAdapter {
+    fn new(started: Sender<()>) -> Self {
+        Self {
+            interrupts: Arc::new(AtomicBool::new(false)),
+            started: Arc::new(Mutex::new(Some(started))),
+        }
+    }
+}
+
+impl Adapter for StreamingAdapter {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::Opencode
+    }
+
+    fn probe(&self) -> ProbeResult {
+        ProbeResult {
+            ok: true,
+            version: Some("fake".to_owned()),
+            path: None,
+            detail: String::new(),
+        }
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
+
+    fn start(&self, _input: StartInput) -> Result<Box<dyn AdapterRun>, AdapterError> {
+        if let Some(started) = self.started.lock().expect("started sender").take() {
+            let _ = started.send(());
+        }
+        let (sender, receiver) = channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let producer_sender = sender.clone();
+        let producer_running = Arc::clone(&running);
+        std::thread::spawn(move || {
+            while producer_running.load(Ordering::SeqCst) {
+                if producer_sender
+                    .send(HarnessEvent {
+                        ts: None,
+                        actor: Actor::Assistant,
+                        body: EventBody::AssistantMessage(AssistantMessage {
+                            text: "streaming tick".to_owned(),
+                        }),
+                        raw: None,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Ok(Box::new(StreamingRun {
+            receiver,
+            sender: Mutex::new(Some(sender)),
+            running,
+            interrupts: Arc::clone(&self.interrupts),
+        }))
+    }
+}
+
+struct StreamingRun {
+    receiver: Receiver<HarnessEvent>,
+    sender: Mutex<Option<Sender<HarnessEvent>>>,
+    running: Arc<AtomicBool>,
+    interrupts: Arc<AtomicBool>,
+}
+
+impl AdapterRun for StreamingRun {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+
+    fn events(&self) -> &Receiver<HarnessEvent> {
+        &self.receiver
+    }
+
+    fn send(&mut self, _text: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported("no live input"))
+    }
+
+    fn interrupt(&mut self) -> Result<(), AdapterError> {
+        self.interrupts.store(true, Ordering::SeqCst);
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(sender) = self.sender.lock().expect("sender").take() {
+            let _ = sender.send(HarnessEvent {
+                ts: None,
+                actor: Actor::System,
+                body: EventBody::TurnEnded(TurnEnded {
+                    turn: 1,
+                    stop_reason: StopReason::Interrupted,
+                    duration_ms: None,
+                }),
+                raw: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), AdapterError> {
+        self.interrupt()
+    }
+
+    fn wait(&mut self) -> Result<RunSummary, AdapterError> {
+        Ok(RunSummary {
+            exit_code: None,
+            outcome: RunOutcome::Killed,
+            native_session_id: None,
+            cost: Cost::unknown(),
+            limit: None,
+            result_text: None,
+            stop_reason: StopReason::Interrupted,
         })
     }
 }

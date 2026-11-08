@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use vowp_protocol::{
     CancelToken, Capsule, CapsuleDraft, CapsuleTrigger, EventBody, EventEnvelope, EventType, Executor, ExecutorRef,
-    HarnessKind, RunPurpose, RunRole, SessionId, SessionRole, TurnRequest, schema_for_name,
+    HarnessKind, RunOutcome, RunPurpose, RunRole, SessionId, SessionRole, TurnRequest, schema_for_name,
 };
 use vowp_store::Store;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -31,6 +31,12 @@ const KEEP_TAIL_EVENTS: usize = 20;
 /// The capsule writer.
 pub struct CapsuleWriter {
     deps: Deps,
+}
+
+/// One capsule-estimator attempt: a parsed draft or a provider limit.
+enum DraftAttempt {
+    Draft(Box<CapsuleDraft>),
+    Limited(String),
 }
 
 impl CapsuleWriter {
@@ -65,9 +71,14 @@ impl CapsuleWriter {
             .cloned()
             .collect();
 
-        let (executor, rung) = self.capsule_executor()?;
+        let candidates = self.capsule_candidates()?;
+        let Some((first_executor, _)) = candidates.first() else {
+            let message = "capsule invalid after repair: no keeper rung available".to_owned();
+            self.log_error(session, &message)?;
+            return Err(CoreError::CapsuleInvalid(message));
+        };
         let from = ExecutorRef {
-            executor: row.executor.clone().unwrap_or_else(|| executor.clone()),
+            executor: row.executor.clone().unwrap_or_else(|| first_executor.clone()),
             node: Some(row.node.clone()),
         };
         let prompt = render_prompt(
@@ -89,26 +100,56 @@ impl CapsuleWriter {
                 title: format!("capsule {session}"),
                 cwd: Path::new(&row.cwd).to_path_buf(),
                 parent: Some(session.clone()),
-                executor: Some(executor.clone()),
+                executor: Some(first_executor.clone()),
             },
         )?;
 
-        let draft = match self.run_draft(&capsule_session, &executor, rung, &prompt, row.job_id.clone()) {
-            Ok(draft) => draft,
-            Err(first) => {
-                let repair = repair_prompt(&first.to_string());
-                match self.run_draft(&capsule_session, &executor, rung, &repair, row.job_id.clone()) {
-                    Ok(draft) => draft,
-                    Err(second) => {
-                        let message = format!("capsule invalid after repair: {second}");
-                        self.log_error(session, &message)?;
-                        return Err(CoreError::CapsuleInvalid(message));
+        let mut draft = None;
+        let mut last_limit = None;
+        for (executor, rung) in &candidates {
+            if self.provider_is_limited(&store, executor)? {
+                continue;
+            }
+            match self.run_draft(&capsule_session, executor, *rung, &prompt, row.job_id.clone()) {
+                Ok(DraftAttempt::Draft(value)) => {
+                    draft = Some((*value, *rung));
+                    break;
+                }
+                Ok(DraftAttempt::Limited(detail)) => {
+                    last_limit = Some(detail);
+                }
+                Err(first) => {
+                    let repair = repair_prompt(&first.to_string());
+                    match self.run_draft(&capsule_session, executor, *rung, &repair, row.job_id.clone()) {
+                        Ok(DraftAttempt::Draft(value)) => {
+                            draft = Some((*value, *rung));
+                            break;
+                        }
+                        Ok(DraftAttempt::Limited(detail)) => {
+                            last_limit = Some(detail);
+                        }
+                        Err(second) => {
+                            let message = format!("capsule invalid after repair: {second}");
+                            self.log_error(session, &message)?;
+                            return Err(CoreError::CapsuleInvalid(message));
+                        }
                     }
                 }
             }
+        }
+        let Some((draft, rung)) = draft else {
+            let detail = last_limit.unwrap_or_else(|| "no keeper rung is available".to_owned());
+            let message = format!("capsule invalid after repair: {detail}");
+            self.log_error(session, &message)?;
+            return Err(CoreError::CapsuleInvalid(message));
         };
 
-        let at_seq = events.last().map(|event| event.seq).unwrap_or(1).max(1);
+        let at_seq = since
+            .last()
+            .map(|event| event.seq)
+            .or_else(|| latest.as_ref().map(|capsule| capsule.at_seq))
+            .unwrap_or(1)
+            .max(1);
         let capsule = Capsule {
             version: vowp_protocol::CAPSULE_VERSION,
             capsule_id: vowp_protocol::CapsuleId::new(),
@@ -128,7 +169,7 @@ impl CapsuleWriter {
         };
         capsule.validate()?;
         persist_capsule(&self.deps, &store, &capsule)?;
-        self.record_state_ledger(&store, &capsule)?;
+        self.record_state_ledger(&store, &capsule, rung)?;
         Ok(capsule)
     }
 
@@ -185,27 +226,64 @@ impl CapsuleWriter {
         serde_json::from_str::<CapsuleDraft>(candidate).map_err(|error| CoreError::CapsuleInvalid(error.to_string()))
     }
 
-    /// Resolves the configured capsule executor and ladder rung.
-    fn capsule_executor(&self) -> Result<(Executor, u32), CoreError> {
-        if let Some(executor) = &self.deps.config.capsule.executor {
-            return Ok((executor.clone(), 0));
+    /// Resolves the capsule executors to try, selected rung first, then the remaining
+    /// rungs of the keeper profile.
+    ///
+    /// `[capsule].executor` selects the starting rung when it appears in the ladder;
+    /// without it the last (cheapest) keeper rung starts. Providers with an active
+    /// `limits` row are skipped by [`CapsuleWriter::provider_is_limited`].
+    fn capsule_candidates(&self) -> Result<Vec<(Executor, u32)>, CoreError> {
+        let keeper = self.deps.config.profiles.get("keeper");
+        match (&self.deps.config.capsule.executor, keeper) {
+            (Some(selected), Some(profile)) => {
+                let mut candidates = Vec::new();
+                if let Some(index) = profile.ladder.iter().position(|executor| executor == selected) {
+                    candidates.push((selected.clone(), index as u32));
+                    for (other_index, executor) in profile.ladder.iter().enumerate() {
+                        if other_index != index {
+                            candidates.push((executor.clone(), other_index as u32));
+                        }
+                    }
+                } else {
+                    candidates.push((selected.clone(), 0));
+                }
+                Ok(candidates)
+            }
+            (Some(selected), None) => Ok(vec![(selected.clone(), 0)]),
+            (None, Some(profile)) => {
+                let last = profile.ladder.len().saturating_sub(1);
+                let executor = profile
+                    .ladder
+                    .get(last)
+                    .cloned()
+                    .ok_or_else(|| CoreError::Invalid("keeper profile has an empty ladder".to_owned()))?;
+                let mut candidates = vec![(executor, last as u32)];
+                for (index, executor) in profile.ladder.iter().enumerate() {
+                    if index != last {
+                        candidates.push((executor.clone(), index as u32));
+                    }
+                }
+                Ok(candidates)
+            }
+            (None, None) => Err(CoreError::Invalid(
+                "no [capsule].executor and no keeper profile".to_owned(),
+            )),
         }
-        let keeper = self
-            .deps
-            .config
-            .profiles
-            .get("keeper")
-            .ok_or_else(|| CoreError::Invalid("no [capsule].executor and no keeper profile".to_owned()))?;
-        let rung = keeper.ladder.len().saturating_sub(1);
-        let executor = keeper
-            .ladder
-            .get(rung)
-            .cloned()
-            .ok_or_else(|| CoreError::Invalid("keeper profile has an empty ladder".to_owned()))?;
-        Ok((executor, rung as u32))
+    }
+
+    /// Returns whether the executor's provider has a limit row still in force.
+    fn provider_is_limited(&self, store: &Store, executor: &Executor) -> Result<bool, CoreError> {
+        let provider = executor.provider();
+        Ok(store
+            .active_limits(self.deps.clock.now())?
+            .iter()
+            .any(|limit| limit.provider == provider))
     }
 
     /// Runs one capsule turn and parses its final assistant message.
+    ///
+    /// A `Limit`/`Credits` outcome is returned as [`DraftAttempt::Limited`] so the caller
+    /// can try the next keeper rung instead of asking the limited executor to repair.
     fn run_draft(
         &self,
         capsule_session: &SessionId,
@@ -213,9 +291,9 @@ impl CapsuleWriter {
         rung: u32,
         prompt: &str,
         job_id: Option<vowp_protocol::JobId>,
-    ) -> Result<CapsuleDraft, CoreError> {
+    ) -> Result<DraftAttempt, CoreError> {
         let service = crate::session::service::SessionService::new(self.deps.clone());
-        let result = service.run_turn(
+        let result = match service.run_turn(
             TurnRequest {
                 session_id: capsule_session.clone(),
                 executor: ExecutorRef {
@@ -232,7 +310,18 @@ impl CapsuleWriter {
                 timeout: None,
             },
             &CancelToken::default(),
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(CoreError::Limited(limit)) => return Ok(DraftAttempt::Limited(limit.message)),
+            Err(error) => return Err(error),
+        };
+        if matches!(result.summary.outcome, RunOutcome::Limit | RunOutcome::Credits) {
+            let detail = result.summary.limit.as_ref().map_or_else(
+                || format!("capsule executor ended with {:?}", result.summary.outcome),
+                |limit| format!("{:?} limit from {}: {}", limit.kind, limit.provider, limit.message),
+            );
+            return Ok(DraftAttempt::Limited(detail));
+        }
         let text = last_assistant_text(&self.deps.paths, capsule_session)?
             .or(result.summary.result_text)
             .ok_or_else(|| CoreError::CapsuleInvalid("capsule executor returned no text".to_owned()))?;
@@ -259,7 +348,7 @@ impl CapsuleWriter {
             telemetry: Default::default(),
         }
         .validate()?;
-        Ok(draft)
+        Ok(DraftAttempt::Draft(Box::new(draft)))
     }
 
     /// Appends the error event to the summarised session.
@@ -287,8 +376,8 @@ impl CapsuleWriter {
         Ok(())
     }
 
-    /// Appends the `state` ledger row for a written capsule.
-    fn record_state_ledger(&self, store: &Store, capsule: &Capsule) -> Result<(), CoreError> {
+    /// Appends the `state` ledger row for a written capsule, recording the rung used.
+    fn record_state_ledger(&self, store: &Store, capsule: &Capsule, rung: u32) -> Result<(), CoreError> {
         store.append_ledger(&vowp_protocol::LedgerEntry {
             id: None,
             ts: self.deps.clock.now(),
@@ -307,6 +396,7 @@ impl CapsuleWriter {
                 "capsule_id": capsule.capsule_id,
                 "trigger": trigger_name(capsule.trigger),
                 "at_seq": capsule.at_seq,
+                "capsule_rung": rung,
             }),
         })?;
         Ok(())

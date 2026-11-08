@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::capsule::CapsuleWriter;
@@ -22,7 +23,7 @@ use vowp_protocol::{
 };
 use vowp_store::session_files::list_capsule_files;
 use vowp_store::session_log::SessionLog;
-use vowp_store::{NodePaths, SessionFilter};
+use vowp_store::{LedgerFilter, NodePaths, SessionFilter};
 use vowp_tmux::fake::FakeWindows;
 
 fn ts() -> Timestamp {
@@ -31,6 +32,10 @@ fn ts() -> Timestamp {
 
 fn executor() -> Executor {
     Executor::parse("opencode:deepseek/deepseek-flash#max").expect("executor")
+}
+
+fn claude() -> Executor {
+    Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("claude executor")
 }
 
 fn config_for(tmp: &Path) -> vowp_protocol::VowpConfig {
@@ -321,6 +326,61 @@ fn capsule_compaction_keeps_first_user_and_last_20() {
         assert!(prompt.contains(&format!("marker-{marker}")), "last-20 marker {marker}");
     }
     assert!(prompt.contains("[seq 81 · assistant] marker-39"));
+}
+
+#[test]
+fn capsule_limit_falls_back_to_next_keeper_rung() {
+    let tmp = tempdir().expect("tempdir");
+    let mut config = config_for(tmp.path());
+    let keeper = config.profiles.get_mut("keeper").expect("keeper profile");
+    keeper.ladder = vec![executor(), claude()];
+    config.capsule.executor = Some(executor());
+    let limit = LimitEvent {
+        kind: LimitKind::Quota,
+        provider: "deepseek".to_owned(),
+        resets_at: Some(Timestamp::from_unix_secs(1_794_164_400)),
+        message: "usage limit reached".to_owned(),
+        http_status: None,
+    };
+    let limited = FakeAdapter::new(HarnessKind::Opencode, Vec::new()).with_summary(RunSummary {
+        exit_code: Some(1),
+        outcome: RunOutcome::Limit,
+        native_session_id: None,
+        cost: Cost::unknown(),
+        limit: Some(limit),
+        result_text: None,
+        stop_reason: StopReason::Limit,
+    });
+    let fallback = ScriptedAdapter::new(HarnessKind::ClaudeCode, vec![good_draft("Fallback capsule")]);
+    let deps = deps_with_clock(
+        &tmp,
+        config,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(limited))
+            .with("claude-code", Arc::new(fallback.clone())),
+        FakeClock::at(ts()),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp);
+    let writer = CapsuleWriter::new(deps.clone());
+    let written = writer
+        .write(&session, CapsuleTrigger::Limit)
+        .expect("capsule written on the next rung");
+    assert_eq!(written.intent, "Fallback capsule");
+    assert_eq!(fallback.starts().len(), 1, "the next keeper rung ran once");
+    let store = deps.open_store().expect("store");
+    assert!(store.limit_for("deepseek").expect("limit").is_some());
+    let ledger = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::State),
+            ..LedgerFilter::default()
+        })
+        .expect("ledger");
+    let row = ledger
+        .iter()
+        .find(|entry| entry.session_id == Some(session.clone()) && entry.summary == "capsule written")
+        .expect("capsule state row");
+    assert_eq!(row.detail["capsule_rung"], serde_json::json!(1));
 }
 
 #[test]
