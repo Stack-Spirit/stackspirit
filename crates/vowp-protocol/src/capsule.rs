@@ -153,7 +153,10 @@ pub struct CapsuleDraft {
 }
 
 impl Capsule {
-    /// Checks the structural rules: non-empty intent and list items, version 1 and `at_seq >= 1`.
+    /// Checks the structural rules: non-empty intent, version 1 and `at_seq >= 1`.
+    ///
+    /// Every constraint, decision (`what` and `why`), state entry, file path, gotcha and
+    /// open question must also be non-empty; the error names the offending field.
     ///
     /// The protocol error vocabulary has no dedicated capsule variant, so failures are
     /// reported as [`ProtocolError::Config`] with the offending field named.
