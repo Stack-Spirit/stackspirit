@@ -97,9 +97,9 @@ vowp node add vps vps.example.com
 vowp doctor
 vowp up
 
-# watch from anywhere with SSH access
-vowp --node vps status
-vowp attach n04-graph --node vps
+# watch the local project
+vowp status
+vowp attach n04-graph
 ```
 
 If the project itself is homed on the VPS, run `vowp up` there and use `vowp --node vps status` from the

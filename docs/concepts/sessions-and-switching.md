@@ -207,9 +207,9 @@ origin session is never modified, and importing the same bundle twice creates tw
 | `inbox` | Open inbox items. |
 
 The windows are **views, never control channels**. VOWP tags its windows and only ever kills tagged
-windows. It never sends keystrokes to a harness TUI, never uses `respawn-pane` without an explicit
-command and never reads screen text for decisions — logs are authoritative. `vowp attach [job]` attaches
-to the tmux session; without tmux it falls back to `vowp session tail --follow`.
+windows. It never sends keystrokes to a harness TUI, never respawns a pane and never reads screen text
+for decisions — logs are authoritative. `vowp attach [job]` attaches to the tmux session; without tmux
+it falls back to `vowp session tail --follow`.
 
 ## Watching an interactive Claude Code session
 

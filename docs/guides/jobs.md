@@ -208,7 +208,7 @@ parked so a human can decide.
 A `review` gate is not evaluated by the command-gate runner. It is satisfied by an automatic verify job:
 
 1. The original reaches `reviewing`; the supervisor creates `<id>-verify-<attempt>` with role `verifier`,
-   the original's reads, `owns: []`, gates `[report]` and a `verifies` edge.
+   `reads` = the original's `owns` plus `reads`, `owns: []`, gates `[report]` and a `verifies` edge.
 2. The verifier runs in the original's worktree, read-only by policy, in its own session.
 3. Pass → the original moves to `merging`.
 4. Fail → a `<id>-fix-<attempt>` job is created with the findings, a `fixes` edge and the original's

@@ -25,7 +25,7 @@ guards = ["clean_tree", "head_equals_remote", "build", "no_active_jobs:./scripts
 approval = "human"                        # human | policy
 serving_bank = "./scripts/bank-serving.sh {target}"   # snapshot what is live BEFORE deploying
 probe = "./scripts/probe-prod.sh"
-rollback = "./scripts/rollback.sh {release}"          # optional explicit command
+rollback = "./scripts/rollback.sh"                    # optional explicit command
 ```
 
 | Key | Meaning |
@@ -90,7 +90,7 @@ build is not necessarily the deploy build.
 | `probing` | The deploy finished; the probe is running. |
 | `live` | Deploy and probe passed. |
 | `failed` | Deploy or probe failed; rollback is available. |
-| `rolled_back` | A rollback release points at this one. |
+| `rolled_back` | This release has been rolled back; its `rolled_back_by` field holds the rollback release id. |
 | `refused` | A guard or the diff refused the release; nothing was deployed. |
 
 The point of the state machine is that a refusal is a recorded outcome, not an error to route around.
@@ -100,9 +100,10 @@ automatically with a weakened check.
 ## Rollback
 
 `vowp rollback <release> [--yes]` redeploys the banked serving copy that was captured before the original
-deploy. It creates a new release row linked to the original by `rolled_back_by`, runs the environment's
-rollback command if one is configured, and appends the same release-log line format. Rollback does not
-re-run the promotion gates: the artifact being restored is the one that was live before.
+deploy. It creates a new rollback release row and sets the original release's `rolled_back_by` field to
+the new release id, runs the environment's rollback command if one is configured, and appends the same
+release-log line format. Rollback does not re-run the promotion gates: the artifact being restored is the
+one that was live before.
 
 ## Why this is stricter than "deploy on merge"
 

@@ -133,8 +133,7 @@ responsibility.
 The window manager is deliberately narrow:
 
 - It creates or attaches only the `vowp-<project>` session and tagged windows.
-- It never kills untagged windows, never respawns a pane without an explicit command and never sends
-  keystrokes.
+- It never kills untagged windows, never respawns a pane and never sends keystrokes.
 - A job window runs `vowp __window job <id>`, which is a read-only follower of the session log. The
   harness runs headless; the window is not a control channel.
 - `capture-pane` is for display only. Decisions come from the log and the database, never from screen
