@@ -269,7 +269,10 @@ fn t13_keeper_fail_notifies_parent_for_child_kinds() {
 #[test]
 fn t14_fix_merge_verify_job_gates_passed_goes_done() {
     for kind in [JobKind::Fix, JobKind::Merge, JobKind::Verify] {
-        let job_row = job("t14", JobState::Gating, kind);
+        let mut job_row = job("t14", JobState::Gating, kind);
+        // T14 wins over T15 even if the child kind carries a review gate: a child job never
+        // reaches reviewing/merging.
+        job_row.gates = vec![Gate::Review(ReviewGate { by: Role::Verifier })];
         assert_eq!(
             ok(&job_row, JobEvent::GatesPassed),
             Transition {

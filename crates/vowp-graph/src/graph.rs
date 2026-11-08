@@ -267,9 +267,10 @@ impl Graph {
 
     /// Returns a new graph with `job` replacing the stored job of the same id.
     ///
-    /// The result is revalidated exactly like [`Graph::new`]. `job.needs` is authoritative:
-    /// missing `Needs` edges are added and stale ones make the update fail with
-    /// [`GraphError::EdgeMismatch`].
+    /// An id that is not already in the graph is appended, so the method doubles as a
+    /// functional upsert. The result is revalidated exactly like [`Graph::new`]. `job.needs`
+    /// is authoritative: missing `Needs` edges are added and stale ones make the update fail
+    /// with [`GraphError::EdgeMismatch`].
     pub fn with_job_replaced(&self, job: Job) -> Result<Graph, GraphError> {
         let mut jobs: Vec<Job> = self.jobs.values().cloned().collect();
         match jobs.iter_mut().find(|existing| existing.id == job.id) {

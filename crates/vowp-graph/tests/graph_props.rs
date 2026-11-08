@@ -180,6 +180,36 @@ fn graph_fixes_edge_may_form_loop() {
             .iter()
             .any(|candidate| candidate.kind == EdgeKind::Needs && candidate.src == orig && candidate.dst == fix)
     );
+
+    // The other wrong reading of the loop edge (src -> dst) would form a cycle with this
+    // block edge; the correct implementation ignores Fixes and accepts the graph.
+    let jobs = vec![
+        job("orig", JobState::Fixing, &["crates/x/**"], &[], 50),
+        job("fix", JobState::Pending, &["crates/x/**"], &[], 50),
+    ];
+    let edges = vec![
+        edge("fix", "orig", EdgeKind::Fixes),
+        edge("orig", "fix", EdgeKind::Blocks),
+    ];
+    let graph = Graph::new(jobs, edges).expect("a fixes edge never participates in cycle detection");
+    assert_eq!(graph.fix_parent(&fix), Some(&orig));
+}
+
+#[test]
+fn graph_new_detects_cycle_through_verifies_and_escalates() {
+    let jobs = vec![
+        job("a", JobState::Pending, &[], &[], 50),
+        job("b", JobState::Pending, &[], &[], 50),
+        job("c", JobState::Pending, &[], &["a"], 50),
+    ];
+    let edges = vec![edge("a", "b", EdgeKind::Verifies), edge("b", "c", EdgeKind::Escalates)];
+    match Graph::new(jobs, edges) {
+        Err(GraphError::Cycle(path)) => {
+            assert_eq!(path.first(), path.last());
+            assert!(path.len() >= 4);
+        }
+        other => panic!("expected Cycle through verifies/escalates, got {other:?}"),
+    }
 }
 
 #[test]

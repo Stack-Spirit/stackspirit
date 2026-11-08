@@ -198,6 +198,9 @@ pub fn transition_with(job: &Job, ev: &JobEvent, bounds: &TransitionBounds) -> R
 
         // T2
         (JobState::Ready, JobEvent::Dispatched) => {
+            // T2's "already has a session / prior run" fact is not part of the pure-function
+            // inputs listed in crates/vowp-graph.md §3 rule 1; only `continues` is observable
+            // here, so a caller resuming a prior run overrides the purpose itself.
             let purpose = if matches!(job.kind, JobKind::Fix | JobKind::Merge) {
                 RunPurpose::Fix
             } else if job.continues > 0 {
