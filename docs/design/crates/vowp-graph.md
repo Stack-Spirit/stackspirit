@@ -58,7 +58,7 @@ Rules
 
 ## 3. State machine (`machine.rs`)
 
-The complete transition table is in **loops.md §2** (rows T1–T34); this module **implements that table exactly** and there is deliberately no second copy of it. Tests in §9 iterate over table rows by id.
+The complete transition table is in **loops.md §2** (rows T1–T35); this module **implements that table exactly** and there is deliberately no second copy of it. Tests in §9 iterate over table rows by id.
 
 ```rust
 /// Events the supervisor feeds into `transition`.
@@ -68,6 +68,7 @@ pub enum JobEvent {
     Dispatched,
     ReportReady,
     RunEndedNoReport,
+    RunRateLimited { until: Timestamp },   // T35: provider 429; delays the continue, consumes no counter
     Stalled { silent: bool },
     KeeperNudge, KeeperRestart, KeeperReplan, KeeperFail,
     GatesPassed, GatesFailed,
@@ -84,6 +85,7 @@ pub enum JobEvent {
 pub enum Effect {
     CreateWorktree,
     StartRun { purpose: RunPurpose },                // Start | Continue | Fix
+    DelayRun { purpose: RunPurpose, until: Timestamp }, // start that run only once `now >= until` (T35)
     StopRun,
     IncrementContinues, ResetContinues, IncrementHangRestarts, IncrementAttempts, ResetCounters,
     RunGates,
@@ -120,7 +122,7 @@ Rules
 3. The **Exhausted** branch (`attempts >= loop_.max_attempts`) of T18/T21/T28 returns by `loop_.on_exhausted`: Escalate ⇒ `Failed`, effects `[CreateDecisionJob, NotifyInbox{Decision}, WakeKeeper]`; Park ⇒ `Parked`, `[SetParkedReason(Exhausted), NotifyInbox{Question}]`; Fail ⇒ `Failed`, `[WakeKeeper]`.
 4. `GatesPassed` for jobs whose `kind ∈ {Fix, Merge}` ⇒ `Done` with `[NotifyParent]` (T14); otherwise `Reviewing` if any `Gate::Review` is present in `job.gates` else `Merging`.
 5. `Blocked`/`HumanPark` effect lists: include `StopRun` iff `job.state == Running`; `NotifyInbox{Question}` for reasons `Question|Auth|Credits|ProviderBlocked`, none for `Manual|Exhausted`; plus `SetParkedReason(reason)`.
-6. `Cancel` on a job whose `worktree` is `None` omits `CleanupWorktree`; on non-running jobs omits `StopRun`.
+6. `Cancel` returns `Cancelled` with `[StopRun]` only if the job is `Running` (else no effects); the worktree is kept (no `CleanupWorktree`).
 7. `JobState::is_terminal` jobs (`Done|Replanned|Cancelled`) accept **no** event (all return `InvalidTransition`).
 
 ```rust
@@ -309,7 +311,7 @@ Graph
 - proptest `prop_topo_order_is_valid` — for random DAGs (≤ 30 jobs), every job appears once and after all jobs it needs.
 - proptest `prop_ready_jobs_matches_brute_force` — compare with a naive O(n²) implementation over random states.
 
-State machine (one test per table row of loops.md §2, named `t01_pending_needs_satisfied_to_ready` … `t34_parked_or_failed_keeper_replan_to_replanned`; each builds a `Job` in the from-state with the guard inputs, calls `transition`, and asserts the exact `to` and the exact `effects` vector)
+State machine (one test per table row of loops.md §2, named `t01_pending_needs_satisfied_to_ready` … `t34_parked_or_failed_keeper_replan_to_replanned`, `t35_run_rate_limited_delays_continue_without_counter_change`; plus `t33_cancel_keeps_worktree_and_stops_only_running` (rows T29–T33 are covered by `blocked_effects_depend_on_reason_and_state` and these); each builds a `Job` in the from-state with the guard inputs, calls `transition`, and asserts the exact `to` and the exact `effects` vector)
 - `t04_t05_continue_guard_boundary` — `continues=1` → T4, `continues=2` → T5.
 - `t08_t09_hang_restart_boundary` — `hang_restarts=2` → T8, `3` → T9.
 - `t17_t18_attempts_boundary_and_on_exhausted_variants` — three `on_exhausted` values produce the three documented outcomes.

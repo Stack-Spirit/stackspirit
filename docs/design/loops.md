@@ -42,11 +42,11 @@ All time from `Clock`.
 6. **Verify scheduling (L3).** For each job in `reviewing` with no open `verify` job: create the verify job (§5.1). Verify-job completion arrives as `VerifyPassed|VerifyFailed`.
 7. **Merge queue.** If no merge is running and some job is `merging`: pick the oldest (`state_changed_at`) and spawn the merge runner (§6). Result: `MergeSucceeded|MergeConflict|MergeChecksFailed`.
 8. **Dispatch.** Build `DispatchCaps` (free slots from `workers`, provider capacity from `[providers.*].max_concurrent` minus open runs minus active `limits.concurrency_cap`, `limited` map from `limits`, profiles from config); `plan_dispatch(&graph,&running,&caps)`;
-   for each choice: `JobEvent::Dispatched` (state `running`), create worktree (`git worktree add <worktree_root>/<id> -b job/<id> <default_branch>`; for fix/merge jobs reuse the original's), create tmux window `job-<id>`, write brief, spawn the runner (§3).
+   for each choice: `JobEvent::Dispatched` (state `running`), create worktree (`git worktree add <worktree_root>/<id> -b job/<id> <default_branch>`; **verify, fix and merge jobs never create one: they run in the original's worktree**, whose path/branch are copied into their `worktree`/`branch` columns at creation), create tmux window `job-<id>`, write brief, spawn the runner (§3).
 9. **Planner/Keeper triggers (L4/L5).** Evaluate `planner_due` / `keeper_due` (§7) and start at most one planner turn and one keeper turn.
 10. **L6 probes.** For each `limits` row with `kind IN (quota,rate,unavailable)` and `now >= resets_at` (or `now >= last_probe_at + 15 min` after a failed probe) and no probe run open → start a probe (§8.5).
 11. **L9 schedules.** Run due schedules (§11).
-12. **Board and reports.** Write `~/.vowp/board.json` (jobs by state, slots, current planner/keeper executor, limits, cost totals, inbox count) every tick; every `checkpoint_minutes` (120) append a checkpoint section to `<project>/.vowp/reports/checkpoint.md` (what finished/failed, cost from receipts, limit/failover events). `vowp board` renders `board.json` + DB.
+12. **Board and reports.** Write `~/.vowp/board.json` (jobs by state, slots, current planner/keeper executor, limits, cost totals, inbox count) every tick; every `checkpoint_minutes` (120) write a checkpoint file `<project>/.vowp/checkpoints/<ts>.md` (what finished/failed, cost from receipts, limit/failover events). `vowp board` recomputes the same snapshot from the DB (`BoardSnapshot::collect`); `board.json` is only a convenience copy.
 13. **Loop rows + heartbeat.** Update `loops` rows (`last_run_at,next_run_at,last_status,fail_streak`) and write `~/.vowp/heartbeat` (the unix time as text, written to a temp file then renamed). Also `kv['supervisor_pid']`.
 
 Loop rows created on first `vowp up` (`name`, `kind`, `interval_secs`): `l1-supervisor` L1 60 · `l2-worker` L2 0 · `l3-verify` L3 0 · `l4-planner` L4 1800 · `l5-keeper` L5 1200 · `l6-failover` L6 0 · `l7-inbox` L7 0 · `l8-watchdog` L8 300 · `l9-schedules` L9 60. A `paused` loop is skipped by its step (L1 itself cannot be paused except via `kv['paused']`).
@@ -58,12 +58,12 @@ Defaults: `MAX_CONTINUES=2` (per attempt), `MAX_HANG_RESTARTS=3`, `max_attempts 
 Every transition also writes one ledger row (`kind=state`, summary `"<job>: <from> -> <to> (<event>)"`) — not listed as an effect.
 
 Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means `attempts >= max_attempts` and uses `on_exhausted`:
-**Escalate** ⇒ `Failed` + `CreateDecisionJob` + `NotifyInbox(Decision)`, **Park** ⇒ `Parked(Exhausted)` + `NotifyInbox(Question)`, **Fail** ⇒ `Failed` + `WakeKeeper`.
+**Escalate** ⇒ `Failed` + `CreateDecisionJob` + `NotifyInbox(Decision)` + `WakeKeeper`, **Park** ⇒ `Parked(Exhausted)` + `NotifyInbox(Question)`, **Fail** ⇒ `Failed` + `WakeKeeper`.
 
 | # | From | Event | Guard | To | Effects |
 |---|---|---|---|---|---|
 | T1 | pending | `NeedsSatisfied` | — | ready | — |
-| T2 | ready | `Dispatched` | — | running | `CreateWorktree`, `StartRun{Start}` (kind Fix/Merge jobs: `StartRun{Fix}`; if the job already has a session and `continues>0` or a prior run: `StartRun{Continue}`) |
+| T2 | ready | `Dispatched` | — | running | `CreateWorktree` (**kind Verify/Fix/Merge: no new worktree** — they reuse the target job's worktree/branch found through their `verifies`/`fixes` edge; the caller skips the effect), `StartRun{Start}` (kind Fix/Merge jobs: `StartRun{Fix}`; if the job already has a session and `continues>0` or a prior run: `StartRun{Continue}`) |
 | T3 | running | `ReportReady` | — | gating | `RunGates` |
 | T4 | running | `RunEndedNoReport` | `continues < 2` | running | `IncrementContinues`, `StartRun{Continue}` |
 | T5 | running | `RunEndedNoReport` | `continues >= 2` | stalled | `WakeKeeper` |
@@ -94,11 +94,12 @@ Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means 
 | T30 | any non-terminal | `HumanPark` | — | parked | `StopRun`, `SetParkedReason(Manual)` |
 | T31 | parked | `Resolved` | — | ready | `ClearParkedReason`, `ResetContinues` |
 | T32 | failed | `Retry` | — | ready | `ResetCounters` (attempts, continues, hang_restarts = 0) |
-| T33 | any non-terminal | `Cancel` | — | cancelled | `StopRun`, `CleanupWorktree` |
+| T33 | any non-terminal | `Cancel` | — | cancelled | `StopRun` (if running). The worktree and branch are **kept** for inspection (no `CleanupWorktree`) |
 | T34 | parked, failed | `KeeperReplan` | — | replanned | `WakePlanner` |
+| T35 | running | `RunRateLimited{until}` | — | running | `DelayRun{purpose: Continue, until}` (no counter changes; the run that hit the 429 does **not** consume `continues`; the caller stores `kv['delay:<job>']=until` and L1 starts the continue run when `now >= until`) |
 
 Terminal states: `done`, `replanned`, `cancelled`. **Any (state,event) pair not listed returns `GraphError::InvalidTransition`**; in particular no event leaves a terminal state.
-`NeedsSatisfied` is only emitted by L1 step 4; `Retry` on a non-`failed` job is invalid (CLI maps it to exit code 2 with a message).
+`NeedsSatisfied` is only emitted by L1 step 4; `Retry` on a non-`failed` job is invalid. The CLI `vowp job retry` therefore maps by state: `failed` → `Retry` (T32), `parked` → `Resolved` (T31), `stalled` → `KeeperRestart` (T11); any other state exits 4.
 Differences from plan §7.3: D1 (`gating`, `cancelled`), D5 (fix jobs on the original branch, no verify of their own), and `fixing → gating` (T22) instead of `fixing → reviewing`: the fix must pass the cheap
 command gates again before another verifier is spent (recorded as D17 in decisions.md).
 
@@ -160,7 +161,7 @@ Each evaluation writes one `gate_results` row (types.md §8 `GateResult`) and on
 ### 5.1 Creating the verify job (step 6, T15 → `StartVerify`)
 1. Create job `<id>-verify-<attempt>` (`kind=verify, role=verifier, profile=verifier`, `owns=[]`, `needs=[]`, `reads=owns+reads of the original`, gates `[report]`), edge `verify verifies original`.
    Its brief states: the original brief path, the diff command (`git diff <default_branch>...job/<id>`), the gate evidence summary (all `gate_results` of this attempt, tails included), and the rule "judge only against evidence and the brief; run the commands yourself; do not edit files".
-2. The verifier runs in **its own session**, in the original's worktree read-only by policy (permission preset), on a `verifier` slot (`max_verifiers`, 2).
+2. The verifier runs in **its own session**, in the original's worktree (the verify job's `worktree`/`branch` columns are copies; it has `owns=[]`, so it takes no ownership lock and the original — in `reviewing` — keeps the lock). Read-only by policy (permission preset), on a `verifier` slot (`max_verifiers`, 2).
 3. Verifier prompt ends with: "Write your report with front-matter `verdict: pass|fail` and, on fail, `findings:` as a list of concrete, checkable problems (file, command, expected, actual). Report `status: done` when you finished judging."
 
 ### 5.2 Result
@@ -194,7 +195,7 @@ Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per
 (a) an unseen event for the planner exists (job `done|failed|stalled|parked`, new inbox answer, finished verify, limit/failover event, schedule firing) **or** (b) `planner_heartbeat` (30 min) elapsed **or** (c) there is no active job (`pending|ready|running|gating|reviewing|fixing|merging`) but non-terminal jobs exist and `idle_gap` (15 min) elapsed.
 **Keeper due**: an unseen stall/failure event (`stalled`, `failed`, hang, run crash with continues exhausted, rate-limit re-queue) **or** `keeper_heartbeat` (20 min) elapsed; min gap 5 min; also when the planner's provider is limited (the keeper then *covers planning*: its prompt gains the planner duties and the planner digest).
 
-**Digest** (`Digest::build`, ≤ 24 000 chars, each item ≤ 600 chars): new jobs done/failed/stalled/parked since the last turn with gate evidence summaries and report `open_items`, open inbox items and answers, limit/failover state (who is limited until when), counts by state, cost totals (receipts), slot usage, the last 5 ledger errors, and (planner only) the checkpoint text. Keeper digest additionally has the last 60 lines of each stalled job's session log (pretty).
+**Digest** (`vowp_core::loops::digest::Digest::build`, ≤ 24 000 chars, each item ≤ 600 chars): new jobs done/failed/stalled/parked since the last turn with gate evidence summaries and report `open_items`, open inbox items and answers, limit/failover state (who is limited until when), counts by state, cost totals (receipts), slot usage, the last 5 ledger errors, and (planner only) the checkpoint text. Keeper digest additionally has the last 60 lines of each stalled job's session log (pretty).
 **Actions** are CLI calls the agent runs itself in its turn: `vowp job add|update|retry|park|cancel`, `vowp inbox answer`, writing brief files, and for the keeper `vowp job nudge <id>` / `vowp job restart <id>` (= requests `KeeperNudge|KeeperRestart`), `vowp job replan <id>`, `vowp job fail <id>`. These CLI commands only write `req:` rows (D2) — the next tick applies them. The planner/keeper never edits the DB or merges.
 **Failure of a planner turn:** counted in `limits` streak (§8.6); a failed turn is re-attempted at the next heartbeat, never in a tight loop.
 **Takeover and hand-back:** while `limits.claude` is active the keeper session is given the planner's capsule (SessionOps::write_capsule on the planner session, trigger `limit`) and the planner duties; when the probe succeeds (§8.5) the planner session resumes on rung 0 seeded with a fresh capsule written from the keeper's covering turns.
@@ -210,7 +211,7 @@ Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per
 | `Limit`/`quota` | write `limits(provider)`: `kind=quota`, `resets_at = event.resets_at + 2 min` (margin), `detail`; ledger `limit`; **hand off** (§8.4) the affected sessions to the next ladder rung whose provider is not limited, **only if** that rung is listed in the profile; else park (§8.3 credits path without inbox spam: one notice). `profile.on_quota=park` → park; `next` → switch, no probe-back. No `resets_at` known: `now + 60 min`. |
 | `Credits` | `limits(provider) kind=credits, resets_at=NULL`; **park every job whose profile's *current* rung provider is that provider** (`Blocked{Credits}`), one inbox `notice` ("credits exhausted for <provider>; top up and run `vowp inbox answer <id> resolved`"); stop dispatching to it. Never switch to another paid provider (plan §8 L6); `on_credits_exhausted` has only `park` in v0.1. |
 | `Auth` | `limits kind=auth, resets_at=NULL`; park jobs of that provider (`Blocked{Auth}`); inbox ("log in again with the harness's own login"); no retries. |
-| `Rate` | `limits kind=rate`, `resets_at = now + backoff` with `backoff = min(10 min × 2^streak, 60 min)` ±20 % jitter (deterministic LCG owned by the loop, seedable in tests). Set `concurrency_cap = max(1, running_on_provider − 1)` until `cap_until = resets_at`. The interrupted run does **not** consume `continues`: core treats the run as `RunEndedNoReport` but delays `StartRun{Continue}` until `resets_at` and sets `jobs.note="rate-limited; retry after <t>"`. |
+| `Rate` | `limits kind=rate`, `resets_at = now + backoff` with `backoff = min(10 min × 2^streak, 60 min)` ±20 % jitter (deterministic LCG owned by the loop, seedable in tests). Set `concurrency_cap = max(1, running_on_provider − 1)` until `cap_until = resets_at`. The interrupted run does **not** consume `continues`: core feeds `JobEvent::RunRateLimited{until: resets_at}` (T35) instead of `RunEndedNoReport`, which delays the continue run until `resets_at` and sets `jobs.note="rate-limited; retry after <t>"`. |
 | `Context` | write a capsule (`trigger=context`) then start a **fresh native session on the same harness** seeded with it (`SessionOps::switch` with `to = same executor`, reason `Context`); continue count unchanged. |
 | `Crash`/`Error`/`Killed` | no limit row (except §8.6); L2 continue path (T4). |
 

@@ -66,20 +66,20 @@ Nothing in this flow is stored only in memory: killing every process and running
 ```
 ~/.vowp/
 ├─ vowp.db                     SQLite (WAL: vowp.db-wal, vowp.db-shm)  — schema.sql
-├─ config.toml                 optional node-level defaults (same schema as vowp.toml, [node]/[providers]/[harnesses] only)
+├─ config.toml                 optional node-level defaults (type `NodeFile`, types.md §11: [node] [profiles] [providers] [harnesses] [capsule] only; no [project])
 ├─ supervisor.lock             pid of the running supervisor
-├─ heartbeat                   RFC3339 timestamp rewritten every tick (watchdog reads it)
+├─ heartbeat                   unix seconds (ASCII) rewritten every tick via tmp+rename (watchdog reads it; loops.md §10)
+├─ board.json                  BoardSnapshot JSON written every tick (external readers; `vowp board` recomputes from the DB)
 ├─ stop                        presence = "shut down" request
 ├─ sessions/<sessionId>/       one dir per universal session (portable: copy it to another node, `vowp reindex`)
 │    ├─ log.jsonl              append-only EventEnvelope lines (authoritative)
 │    ├─ blobs/<sha256>         spilled tool output / attachments (> 8192 bytes)
-│    ├─ capsules/<atSeq>-<ulid>.json
-│    ├─ adapters.json          {"claude-code": ["<native id>", …], "opencode": ["ses_…"]} (rebuildable)
+│    ├─ capsules/<at_seq:010>-<ulid>.json   (at_seq zero-padded to 10 digits)
+│    ├─ adapters.json          {"natives":[{"harness","native_session_id","node","first_seq","created_at"}]} (append-only, rebuildable)
 │    └─ .lock                  single-writer lock (pid)
-├─ runs/<runId>.raw.jsonl      raw harness stdout lines (display/debug; capped at 50 MB, rotated away after 14 days)
+├─ runs/<runId>.jsonl          raw harness stdout lines (display/debug; capped at 50 MB, rotated away after 14 days)
 ├─ runs/<runId>.stderr         last 64 KB of stderr
 ├─ logs/supervisor.log         structured loop log (see §6)
-├─ logs/board.txt              last rendered board (for `vowp board --once` and the tmux board window)
 ├─ backups/vowp-<ts>.db        `vowp backup` output
 └─ inbox/<inboxId>.md          human-readable copy of every inbox item (also in the DB)
 ```
@@ -93,7 +93,7 @@ Project directories (inside each project checkout, committed unless noted):
 ├─ opencode.jsonc                              agent definitions with permission presets
 └─ .vowp/
      ├─ jobs/<jobId>/brief.md  report.md       job contract and result (committed on the job branch)
-     ├─ graph.yaml                             optional `vowp graph export` snapshot
+     ├─ graph.yaml                             optional `vowp graph --export .vowp/graph.yaml` snapshot
      ├─ checkpoints/<ts>.md                    planner summaries (every 2 h)
      └─ releases.log                           one line per promotion/rollback (promote module)
 ```
@@ -104,7 +104,7 @@ Job worktrees live **outside** the repo: `<worktree_root>/<jobId>` (default `<re
 
 `vowp node add <name> <ssh-target>` inserts a `nodes` row. Any command accepts `--node <name>`: the CLI re-executes itself on that node as
 `ssh -o BatchMode=yes <target> vowp <same args minus --node> --json`-style passthrough (stdout/stderr/exit code are forwarded unchanged; `-t` is added only for
-`attach`/`session chat`). Nothing else crosses nodes in v0.1; session moves use export/import bundles (`sessions.md` §7). The remote needs `vowp` on its `PATH`.
+`attach`/`session chat`). Nothing else crosses nodes in v0.1; session moves use export/import bundles (`sessions.md` §6). The remote needs `vowp` on its `PATH`.
 
 ## 5. `vowp.toml`
 
@@ -121,7 +121,7 @@ Job worktrees live **outside** the repo: `<worktree_root>/<jobId>` (default `<re
 | **`[project]`** | `name` | string, **required** | — | project name (slug) |
 | | `path` | string | dir containing vowp.toml | main checkout |
 | | `remote` / `default_branch` | string | `origin` / `main` | merge target |
-| | `check_cmds` | [string] | `[]` | repo-wide checks run by the merge queue and appended as `cmd` gates to build jobs |
+| | `check_cmds` | [string] | `[]` | repo-wide checks run **only by the merge queue** on the rebased tree (never as per-job gates; per-job `cmd` gates are listed explicitly in the job's `gates`, e.g. `cargo test -p vowp-graph`) |
 | | `lock_files` | [string] | `["Cargo.lock"]` | files regenerated, not merged, on rebase conflicts |
 | | `always_allowed` | [string] | `["Cargo.lock"]` | paths any job may touch (owns_respected) |
 | | `worktree_root` | string | see §3 | |
@@ -195,7 +195,7 @@ permission_mode = "auto"
 env_pass = []                          # NAMES of env vars to forward (never values)
 
 [harnesses.opencode]
-extra_args = ["--auto"]
+extra_args = []                        # extra flags appended after the adapter's own argv (the adapter already passes --auto, do not repeat it)
 
 [harnesses.codex]                      # a generic cli adapter entry, driven by a mapping file
 mapping = ".vowp/adapters/codex.toml"
@@ -298,4 +298,4 @@ Resolution order for any setting: CLI flag > `vowp.toml` > `~/.vowp/config.toml`
 - DB: `PRAGMA user_version` migrations (`schema.sql` is migration 1). A newer DB than the binary → refuse to open (`StoreError::SchemaTooNew`).
 - Event log: `EventEnvelope` is frozen for v0.1; additions are new optional fields or new event types (readers ignore unknown *fields*; unknown *types* are a hard error in v0.1 and tolerated as opaque in v0.2).
 - Capsule: `version` field; v0.1 = 1.
-- Bundles: `format: "vowp-bundle-v1"` (`sessions.md` §7).
+- Bundles: `format: "vowp-bundle-v1"` (`sessions.md` §6).

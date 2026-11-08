@@ -62,8 +62,8 @@ pub fn window_name_for_job(job_id: &str) -> String;           // "job-<id>"
 /// Commands for the fixed windows; each is an argv run in that window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutSpec {
-    pub board: Vec<String>,        // e.g. ["vowp","board","--watch"]
-    pub supervisor: Vec<String>,   // e.g. ["vowp","supervisor-log","--follow"]
+    pub board: Vec<String>,        // e.g. ["vowp","__window","board"]
+    pub supervisor: Vec<String>,   // e.g. ["vowp","__window","supervisor"]
     pub planner: Vec<String>,
     pub keeper: Vec<String>,
     pub inbox: Vec<String>,

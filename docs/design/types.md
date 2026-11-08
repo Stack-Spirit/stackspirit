@@ -419,8 +419,8 @@ pub struct Note { pub text: String }
 
 ```json
 {"id":"01KA1V0Z8Q3M9W6E5T2R4N7B1C","session_id":"01KA1V0Z7A0000000000000000","seq":1,"ts":"2026-11-08T19:30:00.000Z","type":"session.created","actor":"system","source":{"harness":"vowp","node":"vps"},"payload":{"title":"n04-graph","cwd":"/home/dev/vowp-night/wt/n04-graph","project":"vowp","job_id":"n04-graph","role":"worker"},"replayable":true}
-{"id":"01KA1V10...","session_id":"01KA1V0Z7A0000000000000000","seq":6,"ts":"2026-11-08T19:30:12.481Z","type":"tool.call","actor":"assistant","source":{"harness":"opencode","model":"deepseek/deepseek-flash","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly"},"payload":{"call_id":"call_01_2ncr","name":"shell","input":{"command":"cargo test"}},"replayable":true}
-{"id":"01KA1V11...","session_id":"01KA1V0Z7A0000000000000000","seq":9,"ts":"2026-11-08T19:41:02.000Z","type":"limit","actor":"system","source":{"harness":"claude-code","model":"claude-sonnet-5-5","node":"local"},"payload":{"kind":"quota","provider":"claude","resets_at":"2026-11-08T22:20:00.000Z","message":"You've hit your limit · resets 11pm (Europe/Oslo)"},"replayable":true}
+{"id":"01KA1V10C3F7H9J2K4M6N8P0Q2","session_id":"01KA1V0Z7A0000000000000000","seq":6,"ts":"2026-11-08T19:30:12.481Z","type":"tool.call","actor":"assistant","source":{"harness":"opencode","model":"deepseek/deepseek-flash","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly"},"payload":{"call_id":"call_01_2ncr","name":"shell","input":{"command":"cargo test"}},"replayable":true}
+{"id":"01KA1V11D4G8J1K3M5N7P9R0S2","session_id":"01KA1V0Z7A0000000000000000","seq":9,"ts":"2026-11-08T19:41:02.000Z","type":"limit","actor":"system","source":{"harness":"claude-code","model":"claude-sonnet-5-5","node":"local"},"payload":{"kind":"quota","provider":"claude","resets_at":"2026-11-08T22:20:00.000Z","message":"You've hit your limit · resets 11pm (Europe/Oslo)"},"replayable":true}
 ```
 
 ---
@@ -467,7 +467,7 @@ pub struct CapsuleTelemetry { pub turns: u32, pub tokens_in: u64, pub tokens_out
 
 impl Capsule {
     pub fn validate(&self) -> Result<(), ProtocolError>;   // intent non-empty; version == CAPSULE_VERSION; at_seq >= 1; each list item non-empty
-    pub fn render_markdown(&self) -> String;               // the seed text for a target harness (sessions.md §6)
+    pub fn render_markdown(&self) -> String;               // the seed text for a target harness (sessions.md §4)
 }
 
 /// What the capsule-writing model must return (no ids/ts: VOWP fills those). Its JSON Schema is embedded in the prompt.
@@ -637,7 +637,7 @@ pub enum GateKind { Report, Cmd, OwnsRespected, Pushed, Review, Script, Deploy, 
 
 /// The default gate set for a job kind: build/fix/test -> [report, owns_respected, secret_scan, review(build only)] ;
 /// docs/spec -> [report, owns_respected, secret_scan, review]; verify/research/plan -> [report]; merge -> [report];
-/// decision/promote/release -> []. (build/test also get the project's `[project].check_cmds` as Cmd gates.)
+/// decision/promote/release -> []. Default sets contain no `cmd` gates: crate-specific commands are added per job (`vowp job add --gates …`); the project's `check_cmds` run only in the merge queue (loops.md §4, §6).
 pub fn default_gates(kind: JobKind) -> Vec<Gate>;
 
 /// Evidence recorded for one gate evaluation (`gate_results.evidence_json`).
@@ -871,6 +871,7 @@ pub enum LedgerKind { Dispatch, Gate, Merge, Cost, Switch, Limit, Promote, Rollb
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LedgerEntry { pub id: Option<i64>, pub ts: Timestamp, pub kind: LedgerKind, pub project: Option<ProjectName>,
                          pub job_id: Option<JobId>, pub run_id: Option<RunId>, pub session_id: Option<SessionId>,
+                         pub role: Option<RunRole> /* set on cost rows */,
                          pub provider: Option<String>, pub harness: Option<HarnessKind>, pub model: Option<String>,
                          pub cost: Option<Cost>, pub summary: String, pub detail: serde_json::Value }
 
@@ -922,15 +923,19 @@ pub struct ProjectConfig { pub name: ProjectName, pub path: Option<String>, pub 
                            pub default_branch: String /* "main" */, pub check_cmds: Vec<String>, pub lock_files: Vec<String> /* ["Cargo.lock"] */,
                            pub worktree_root: Option<String>, pub always_allowed: Vec<String> /* paths any job may touch: ["Cargo.lock"] */,
                            pub push: bool /* true */ }
-pub struct ProviderConfig { pub max_concurrent: u32, pub on_credits_exhausted: OnCreditsExhausted /* park */,
-                            pub prices: BTreeMap<String, PriceEntry> /* model -> $/M */ }
-pub enum OnCreditsExhausted { Park }                                      // v0.1: only park (never switch silently)
+pub struct ProviderConfig { #[serde(default = "four")] pub max_concurrent: u32 /* 4 */,
+                            #[serde(default)] pub on_credits_exhausted: OnCreditsExhausted /* park */,
+                            #[serde(default)] pub prices: BTreeMap<String, PriceEntry> /* model -> $/M; default empty */ }
+#[serde(rename_all = "snake_case")]
+pub enum OnCreditsExhausted { #[default] Park }                                      // v0.1: only park (never switch silently)
 pub struct PriceEntry { pub input_per_m: f64, pub output_per_m: f64, pub cache_read_per_m: Option<f64>, pub cache_write_per_m: Option<f64> }
 pub struct HarnessConfig { pub binary: Option<String>, pub extra_args: Vec<String>, pub env_pass: Vec<String> /* env var NAMES to forward */,
                            pub permission_mode: Option<String>, pub mapping: Option<String> /* cli adapter: path to mapping .toml */ }
-pub struct EnvConfig { pub checkout: String, pub deploy: Vec<String>, pub guards: Vec<String>, pub approval: Approval /* human */,
-                       pub serving_bank: Option<String>, pub probe: Option<String>, pub rollback: Option<String> }
-pub enum Approval { Human, Policy }
+pub struct EnvConfig { pub checkout: String /* required */, #[serde(default)] pub deploy: Vec<String>, #[serde(default)] pub guards: Vec<String>,
+                       #[serde(default)] pub approval: Approval /* human */,
+                       #[serde(default)] pub serving_bank: Option<String>, #[serde(default)] pub probe: Option<String>, #[serde(default)] pub rollback: Option<String> }
+#[serde(rename_all = "snake_case")]
+pub enum Approval { #[default] Human, Policy }
 pub struct LoopConfig { pub interval_secs: Option<u64>, pub state: Option<ActiveState>, #[serde(flatten)] pub bounds: LoopBounds }
                        // NOTE: serde cannot combine `flatten` with `deny_unknown_fields`, so LoopConfig (only) omits the attribute
                        // and VowpConfig::validate() rejects unknown keys by deserialising into toml::Table first.
@@ -941,8 +946,33 @@ pub struct CapsuleConfig { pub executor: Option<Executor> /* cheapest capable; d
 pub struct MergeConfig { pub rebase: bool /* true */, pub check_cmds: Vec<String> /* repo-wide; falls back to project.check_cmds */,
                          pub timeout_secs: u64 /* 2700 */, pub secret_scan: bool /* true */ }
 ```
-All structs except `LoopConfig` use `#[serde(deny_unknown_fields)]`, every field with a documented `#[serde(default…)]`. `Default` impls match the
-comments above.
+All structs except `LoopConfig` use `#[serde(deny_unknown_fields)]`. **Every field that is not marked `required` carries `#[serde(default)]` (or a named
+default fn) giving exactly the value in its comment**; `Default` impls match. Config enums (`OnCreditsExhausted`, `Approval`, `MissedPolicy`, `OnQuota`, `ActiveState`)
+use `#[serde(rename_all = "snake_case")]`. `JobLoop` (§7) likewise: `#[serde(default = "...")]` on `until` (`gates`), `max_attempts` (3), `on_exhausted` (`escalate`).
+The only required keys in the whole file are `[project] name`, each profile's `ladder`, each `[env.*] checkout`, and each `[[schedules]] name` + `action`.
+
+### Node-level file (`~/.vowp/config.toml`)
+
+`vowp.toml` requires `[project]`; the node file does not, so it has its own type with the node-wide subset:
+
+```rust
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeFile {
+    #[serde(default)] pub node: NodeConfig,
+    #[serde(default)] pub profiles: BTreeMap<String, Profile>,
+    #[serde(default)] pub providers: BTreeMap<String, ProviderConfig>,
+    #[serde(default)] pub harnesses: BTreeMap<String, HarnessConfig>,
+    #[serde(default)] pub capsule: CapsuleConfig,
+}
+impl NodeFile { pub fn from_toml(s: &str) -> Result<Self, ProtocolError>; }
+impl VowpConfig {
+    /// Resolution order (architecture.md §5.3): values in `self` (vowp.toml) win; map entries missing in `self` are filled from `node_file`;
+    /// scalar `[node]` fields are taken from the node file only where vowp.toml left them at the default (documented per field in tests).
+    pub fn with_node_defaults(self, node_file: &NodeFile) -> VowpConfig;
+}
+```
+`validate()` runs on the merged result (so a project may omit the four role profiles if the node file supplies them).
 
 ---
 

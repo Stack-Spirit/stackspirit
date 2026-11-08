@@ -102,6 +102,12 @@ pub trait GitOps: Send + Sync {
     fn status_clean(&self, repo: &Path) -> Result<bool, CoreError>;
     fn rebase(&self, worktree: &Path, onto: &str) -> Result<RebaseResult, CoreError>;
     fn rebase_abort(&self, worktree: &Path) -> Result<(), CoreError>;
+    fn rebase_continue(&self, worktree: &Path) -> Result<RebaseResult, CoreError>;                   // `git rebase --continue` (GIT_EDITOR=true): lockfile path, loops.md §6 step 2
+    fn add(&self, worktree: &Path, paths: &[String]) -> Result<(), CoreError>;                        // `git add -- <paths>`
+    fn checkout_path(&self, worktree: &Path, rev: &str, path: &str) -> Result<(), CoreError>;        // `git checkout <rev> -- <path>`
+    fn commit(&self, worktree: &Path, message: &str) -> Result<String, CoreError>;                    // returns the new short sha; message already ends with the AI-Assisted trailer
+    fn reset_hard(&self, repo: &Path, rev: &str) -> Result<(), CoreError>;                            // rejected-push recovery, loops.md §6 step 6
+    fn conflicted_files(&self, worktree: &Path) -> Result<Vec<String>, CoreError>;                    // `git diff --name-only --diff-filter=U`
     fn merge_ff_only(&self, repo: &Path, branch: &str) -> Result<(), CoreError>;
     fn push(&self, repo: &Path, remote: &str, branch: &str) -> Result<(), CoreError>;
     fn last_commit_time(&self, repo: &Path, rev: &str) -> Result<Option<Timestamp>, CoreError>;     // for stall "no new commits"
@@ -133,8 +139,10 @@ pub fn apply_direct(deps: &Deps, store: &Store, req: &Request) -> Result<(), Cor
 pub struct SessionService { /* Deps, session-level locks map */ }
 impl SessionService {
     pub fn new(deps: Deps) -> Self;
-    pub fn recover(&self, store: &Store) -> Result<RecoveryReport, CoreError>;      // startup: resolve `switches` rows left in 'started', close dangling runs (sessions.md §5.8)
+    pub fn recover(&self, store: &Store) -> Result<RecoveryReport, CoreError>;      // startup: resolve `switches` rows left in 'started', close dangling runs (sessions.md §5, crash recovery)
 }
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryReport { pub switches_completed: u32, pub switches_aborted: u32, pub runs_closed: u32, pub sessions_unlocked: u32 }
 impl vowp_protocol::SessionOps for SessionService { /* create_session, run_turn, switch, write_capsule */ }
 ```
 
@@ -143,7 +151,7 @@ impl vowp_protocol::SessionOps for SessionService { /* create_session, run_turn,
 2. Open the session's `SessionLog` (lockfile; a second concurrent writer → `Conflict`). Append `turn.started` (turn = last turn + 1) and, first time on this executor, `session.executor` (attach) with `native_session_id` from `session_natives` if resuming the same harness; if the session has no native session on this harness and a capsule exists, the prompt is `seed_prompt(capsule, tail_turns, prompt)`; else `prompt`.
 3. Append the `user.message`; insert the `runs` row (`started_at=now`, `purpose`, `profile`, `rung`, `window`); `Adapter::start(StartInput{ resume, prompt, cwd, env: configured env_pass values, … })`.
 4. Loop on `run.events()` with `recv_timeout(200 ms)`: append each event through `SessionLog::append` (blob spill >8192 B), update `sessions.last_seq`/`updated_at` and `session_events` index every 20 events and at the end; poll `cancel` → `interrupt()`.
-5. `wait()` → `RunSummary`; append `turn.ended` (stop_reason from summary), `cost` event (if cost known) and `limit` event (if any), `session.executor` detach; `sync()`.
+5. `wait()` → `RunSummary`; append, **in this order** (sessions.md §1 rule 8): `cost` event (if cost known), then `limit` (if any) or `error` (if any), then `turn.ended` (stop_reason from summary), then `session.executor` detach; `sync()`. (Adapters already emit `cost`/`limit`/`error` before their terminal `TurnEnded`; the session layer forwards them unchanged and only appends the ones the adapter did not emit.)
 6. Finish the run row (`finish_run`), upsert/clear `limits`, write the ledger rows (`ledger::record_run_cost`, price-table fallback when no receipt), return `TurnResult`. A `Limit/Credits/Auth/Context/Rate` outcome is **returned**, not raised: callers (loops) decide.
 
 ```rust
@@ -161,7 +169,7 @@ pub mod seed { pub fn seed_prompt(capsule: &Capsule, tail: &[EventEnvelope], tai
 pub mod switch { pub fn run_switch(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError>; }        // sessions.md §5
 pub mod bundle {
     pub const BUNDLE_FORMAT: &str = "vowp-bundle-v1";
-    pub struct Bundle { /* fields per sessions.md §7 */ }
+    pub struct Bundle { /* fields per sessions.md §6.1 */ }
     pub fn export(deps: &Deps, session: &SessionId, tail: usize) -> Result<Bundle, CoreError>;
     pub fn to_json(b: &Bundle) -> Result<String, CoreError>;  pub fn from_json(s: &str) -> Result<Bundle, CoreError>;  // verifies checksum + format
     pub fn import(deps: &Deps, b: &Bundle, executor: Option<ExecutorRef>) -> Result<SessionId, CoreError>;                // child session
@@ -187,12 +195,12 @@ pub struct GateRunner { /* Deps */ }
 impl GateRunner {
     pub fn new(deps: Deps) -> Self;
     pub fn evaluate(&self, ctx: &GateCtx, index: i32, gate: &Gate) -> Result<GateResult, CoreError>;   // never panics on bad input: failures are `passed=false` + evidence
-    /// All gates of the job in order, stopping at the first failure except `review` (evaluated separately by L3). Persists each result (`insert_gate_result`).
+    /// All gates of the job in `gates_json` order, **continuing after a failure** (so the fix prompt lists every finding) except that a failed `report` gate short-circuits the rest; `review` is not evaluated here (L3 does it). Persists each result (`insert_gate_result`).
     pub fn evaluate_all(&self, ctx: &GateCtx) -> Result<GatesOutcome, CoreError>;
     /// Repo-wide check for the merge queue (index -1): project check_cmds + secret_scan on the rebased tree.
     pub fn evaluate_merge_checks(&self, ctx: &GateCtx) -> Result<Vec<GateResult>, CoreError>;
 }
-pub struct GatesOutcome { pub results: Vec<GateResult>, pub all_passed_before_review: bool, pub first_failure: Option<usize>, pub needs_review: bool }
+pub struct GatesOutcome { pub results: Vec<GateResult>, pub all_passed_before_review: bool, pub first_failure: Option<usize> /* index of the first failed gate */, pub needs_review: bool }
 pub mod secret_scan {
     pub struct Rule { pub name: &'static str, pub regex: &'static str }
     pub fn rules() -> &'static [Rule];                                   // names: aws_access_key, github_pat, github_token, private_key_block, slack_token, openai_style_key, supabase_secret
@@ -204,7 +212,7 @@ pub fn parse_report_file(path: &Path) -> Result<Report, CoreError>;      // thin
 Tests: `report_gate_passes_with_required_fields`, `report_gate_fails_missing_field_lists_names`, `report_gate_missing_file_fails_with_evidence`, `report_gate_status_partial_fails_done_requirement` (a `report` gate requires `status: done` for `done`; `partial|blocked` never advance a job), `cmd_gate_exit_zero_passes`, `cmd_gate_wrong_exit_fails_with_tail`, `cmd_gate_expect_pattern`, `cmd_gate_timeout_kills_group_and_fails` (sleep 30 with timeout 1 s), `cmd_gate_tail_is_last_200_lines`,
 `owns_respected_pass_and_fail_with_real_git`, `owns_respected_allows_always_allowed_cargo_lock`, `pushed_gate_against_local_bare_remote`, `pushed_gate_fails_when_branch_absent`,
 `review_gate_reads_verifier_report_verdict`, `review_gate_pending_when_no_verify_job_yet`, `secret_scan_detects_each_rule_and_never_stores_value`, `secret_scan_only_added_lines`, `deploy_gate_runs_command_then_probe`, `deploy_gate_probe_mismatch_fails`,
-`file_exists_only_gate_rejected_by_validate` (anti-pattern ban), `evaluate_all_stops_at_first_failure_and_persists_results`, `evaluate_merge_checks_uses_project_check_cmds`.
+`file_exists_only_gate_rejected_by_validate` (anti-pattern ban), `evaluate_all_continues_after_failure_except_report_and_persists_results`, `evaluate_merge_checks_uses_project_check_cmds`.
 
 ## 5. `ledger` (n08b)
 
@@ -214,7 +222,7 @@ impl Ledger {
     pub fn new(deps: Deps) -> Self;
     pub fn record(&self, store: &Store, entry: LedgerEntry) -> Result<i64, CoreError>;
     pub fn record_dispatch(&self, store: &Store, job: &Job, run: &Run) -> Result<(), CoreError>;
-    /// One `cost` row per run: receipt cost from the summary, else `price::estimate`, else `unknown`. For claude-code runs
+    /// One `cost` row per run (with `role = run.role`, `provider`, `harness`, `model` copied so `cost_totals` never needs a join): receipt cost from the summary, else `price::estimate`, else `unknown`. For claude-code runs
     /// `detail_json = {"billed":false,"basis":"list"}` (subscription; adapters.md §6).
     pub fn record_run_cost(&self, store: &Store, run: &Run, summary: &RunSummary) -> Result<Cost, CoreError>;
     pub fn record_gate(&self, store: &Store, r: &GateResult) -> Result<(), CoreError>;
@@ -271,6 +279,9 @@ impl Supervisor {
     pub fn wake_handle(&self) -> WakeHandle;     // Sender<()> clone for runner threads
 }
 pub struct TickReport { pub at: Timestamp, pub steps: Vec<StepReport>, pub dispatched: Vec<JobId>, pub transitions: Vec<(JobId, JobState, JobState)>, pub merged: Vec<JobId> }
+/// Cloneable wake-up handle for L1: `wake()` sends `()` on an `mpsc::Sender<()>`; the loop `recv_timeout(tick)`s on the receiver. Never blocks.
+#[derive(Clone)] pub struct WakeHandle(/* mpsc::Sender<()> */);
+impl WakeHandle { pub fn wake(&self); pub fn channel() -> (WakeHandle, std::sync::mpsc::Receiver<()>); }
 pub struct StepReport { pub name: &'static str, pub ok: bool, pub detail: String }
 pub struct ReconcileReport { pub orphaned_runs: u32, pub switches_recovered: u32, pub schedules_caught_up: u32, pub windows_recreated: u32 }
 
@@ -288,11 +299,20 @@ pub mod l6 {   // failover (n08d)
         pub fn probe_due(&self, store: &Store, now: Timestamp) -> Result<Vec<String /*provider*/>, CoreError>;
         pub fn run_probe(&self, store: &Store, provider: &str) -> Result<ProbeVerdict, CoreError>;                              // one tiny turn via the adapter
     }
+    /// Result of one probe run: `Available` clears the `limits` row (and triggers probe-back), `StillLimited{resets_at}` re-arms it, `Failed(detail)` counts toward `probe_fail_streak` (D15).
+    pub enum ProbeVerdict { Available, StillLimited { resets_at: Option<Timestamp> }, Failed(String) }
     pub enum FailoverAction { None, Backoff { until: Timestamp }, NextRung { rung: usize }, ParkProvider { provider: String }, ParkJob { reason: ParkedReason }, FreshSessionWithCapsule, ProbeBack { provider: String } }
 }
+/// Input of `open_inbox`. `job_id = Some` parks that job with `ParkedReason::Question` for kinds Question/Approval (never Notice). `body` ≤ 4000 chars.
+pub struct NewInboxItem { pub project: Option<ProjectName>, pub job_id: Option<JobId>, pub kind: InboxKind, pub title: String, pub body: String, pub options: Vec<String> }
 pub mod l7 { pub fn open_inbox(store: &Store, deps: &Deps, item: NewInboxItem) -> Result<InboxId, CoreError>; pub fn on_answer(store: &Store, id: &InboxId) -> Result<(), CoreError>; }   // writes inbox/<id>.md copy too
 pub mod l8 { pub fn write_heartbeat(deps: &Deps) -> Result<(), CoreError>; pub fn heartbeat_age(paths: &NodePaths, now: Timestamp) -> Option<std::time::Duration>; pub const SYSTEMD_UNIT: &str; pub const CRON_CHECK_SH: &str; }  // text templates installed by n13
-pub mod digest { pub fn planner_digest(store: &Store, since: Timestamp, max_chars: usize) -> Result<String, CoreError>; pub fn keeper_digest(…) -> Result<String, CoreError>; }
+pub mod digest {   // loops.md §7 "Digest"; ≤ max_chars (default 24_000), each item ≤ 600 chars
+    pub struct Digest;
+    impl Digest {
+        pub fn build(store: &Store, cfg: &VowpConfig, role: Role /* Planner|Keeper */, since: Timestamp, max_chars: usize) -> Result<String, CoreError>;
+    }
+}
 ```
 Named tests live in `loops.md` §13 (drills) plus: `tick_step_failure_does_not_abort_tick`, `startup_marks_orphaned_runs_crash_and_continues_job`, `dispatch_respects_ownership_locks_and_slots`, `dispatch_skips_limited_provider_and_uses_next_rung`, `stall_judge_triggers_stop_and_continue`, `hang_before_first_output_restart_up_to_3`, `continue_twice_then_keeper`, `verify_fail_creates_fix_job_same_branch_max_3_then_escalates`, `merge_queue_happy_path_ff_push_to_local_bare_origin`, `merge_queue_conflict_creates_merge_job`, `merge_queue_cargo_lock_regenerated_not_merged`, `merge_queue_check_failure_returns_job_to_fixing`, `failover_drill_*`, `credits_park_all_jobs_of_provider_and_inbox`, `rate_backoff_lowers_concurrency_cap`, `auth_parks_with_inbox`, `three_unknown_failures_mark_unavailable_15min`, `inbox_answer_moves_parked_job_to_ready`, `planner_one_turn_at_a_time`, `keeper_covers_planner_when_provider_limited_and_hands_back`, `repeat_guard_trips_on_third_identical_action`, `board_and_heartbeat_written_each_tick`, `requests_drained_and_applied`, `paused_loop_is_skipped`.
 

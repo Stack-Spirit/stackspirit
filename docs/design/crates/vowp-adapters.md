@@ -259,6 +259,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 |---|---|
 | `opencode_probe_parses_version` | like claude (`2.0.28`) |
 | `opencode_argv_new_and_resume` | `run --format json --auto --model deepseek/deepseek-flash#max [--session ses_…] [--title …] <prompt last>`; stdin is null |
+| `opencode_tool_exit_code_from_nested_metadata` | fixture `opencode_tool_exit.jsonl` (real nested shape `state.metadata.metadata.exit`): `ToolResult.exit_code == Some(0)` and `Some(2)` for the second line |
 | `opencode_variant_sigil_only_when_present` | `#max` absent when `variant: None` |
 | `opencode_long_prompt_goes_through_file` | > 100 000 bytes → file under `<cwd>/.vowp/prompts/`, argv prompt is the pointer text |
 | `opencode_ok_fixture_events` | real fixture: one `TurnStarted{turn:1}`, `ToolCall`+`ToolResult` per `tool_use`, `AssistantMessage`, one `CostEvent` per `step_finish`, exactly one `TurnEnded(EndTurn)`; `SessionExecutor` first with native id |

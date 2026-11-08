@@ -25,7 +25,7 @@ Names in the spec are binding: same type, table, column, command and test names.
 | `plan.md` | The approved product plan (read-only here). |
 | `decisions.md` | Deviations/clarifications relative to the plan, each with its reason; open owner questions. |
 | `architecture.md` | Components and data flow, threading model, on-disk layout of a node, the full `vowp.toml` schema with an annotated example, error/logging conventions, security model. |
-| `schema.sql` | The complete SQLite schema (20 tables) with constraints, indexes and comments; WAL; migration by `PRAGMA user_version`. Loads in plain SQLite. |
+| `schema.sql` | The complete SQLite schema (19 tables; plus SQLite's internal `sqlite_sequence`) with constraints, indexes and comments; WAL; migration by `PRAGMA user_version`. Loads in plain SQLite. |
 | `types.md` | Every protocol type as Rust with serde attributes and JSON examples: ids, timestamps, events + payloads, capsule, job/edge/state, gates/evidence, brief & report front-matter, executor/profile, limit, cost, run, session, inbox, loop, schedule, release, config, adapter and service traits. |
 | `conventions.md` | Rust conventions, per-crate dependency list, test and fixture rules, naming. |
 | `crates/vowp-protocol.md` | Crate API beyond `types.md`: modules, helper traits (`Log`, `FakeClock`), tests. |

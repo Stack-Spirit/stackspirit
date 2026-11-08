@@ -26,7 +26,7 @@ project/.vowp/jobs/<job>/{brief.md,report.md}
 3. **fsync.** The log is flushed per append and fsynced by `sync()` which the session layer calls at: `turn.ended`, `session.executor` (detach), `switch`, `capsule`, `session.created`, and fatal `error`. A crash therefore
    loses at most the in-flight turn's tail; a torn last line is truncated on the next open (vowp-store.md §4.1 rule 5).
 4. **Blobs.** `tool.result.output` strictly larger than **8192 bytes** is written to `blobs/<sha256>` and replaced by `output_ref{sha256,bytes,preview(512 chars)}`. `file.change.diff_ref` and attachments always use blobs. Blob content is raw bytes, sha256 lowercase hex.
-5. **raw & replayable.** `raw` keeps the harness's original JSON for display (dropped if > 64 KiB). `replayable=false` for `assistant.reasoning`; reasoning is never fed into a capsule prompt or a seed.
+5. **raw & replayable.** `raw` keeps the harness's original JSON for display (adapters cap it at 16 KiB and replace larger values by a `{"truncated":true,…}` marker, adapters.md §7; the store drops any `raw` still > 64 KiB as a safety net). `replayable=false` for `assistant.reasoning`; reasoning is never fed into a capsule prompt or a seed.
 6. **Session ids** are ULIDs created on this node. Harness-side ids live in `session.executor` events (`native_session_id`), `adapters.json` and `session_natives`, never overwritten: a new harness run adds a new mapping.
 7. **The DB is an index.** `sessions`, `session_events`, `session_natives` (and cached `capsules`) are rebuilt by `vowp reindex` / `reindex()` (algorithm: vowp-store.md §4.3). Deleting `vowp.db` never loses session content. A session directory copied to another node opens there (`vowp reindex` on that node registers it, `node` of the session row becomes the local node name).
 8. **Event ordering in a turn** (adapters + session layer produce this order): `turn.started` → `user.message` (the prompt) → {`assistant.reasoning`, `tool.call`, `tool.result`, `file.change`, `plan`, `assistant.message`}* → `cost` → [`limit` | `error`] → `turn.ended`. `session.executor{attach}` precedes the first `turn.started` of a run and `session.executor{detach}` follows its `turn.ended`.
@@ -148,7 +148,7 @@ The log is never rewritten; a switch only appends events. Lineage = `switches` r
 
 ## 6. Export / import (cross-node, v0.1)
 
-`vowp session export <id> [--tail N] [-o file]` writes a **single JSON file** (no archive dependency): `vowp-bundle-v1`.
+`vowp session export <id> [--tail N] [--out file | -o file]` writes a **single JSON file** (no archive dependency): `vowp-bundle-v1`.
 `vowp session import <file> [--node …]` creates a **child session** on the importing node.
 
 ### 6.1 Format
@@ -185,7 +185,7 @@ Rust (in `vowp-core::session::bundle`): `pub struct Bundle { format: String, pro
 ### 6.3 Import algorithm
 
 1. Parse; reject `format != "vowp-bundle-v1"` (`unknown bundle format`), `protocol_version > PROTOCOL_VERSION` (`bundle too new`), checksum mismatch (`checksum mismatch`). No state is changed on rejection.
-2. Create a new session `S'` (fresh ULID) on this node: `SessionLog::create`; `parent_session_id = bundle.session.id`; `title = "<title> (imported)"`; `cwd` = `--cwd` or the bundle's cwd if allowed by `[node].cwd_allow`, else the project path.
+2. Create a new session `S'` (fresh ULID) on this node: `SessionLog::create`; `parent_session_id = bundle.session.id`; `title = "<title> (imported)"`; `cwd` = `--cwd` (`vowp session import --cwd`) or the bundle's cwd if allowed by `[node].cwd_allow`, else the project path.
 3. Append events, in order, each `sync()`ed at the end: `session.created{parent_session_id: <origin>}` → `note{text: "imported from <source_node> session <id> at seq <last_seq>"}` → `switch{from: bundle executor @ source_node, to: none-yet attach target, capsule_id, reason: user}` — the `to` is the importing node with the bundle's executor (so lineage is visible) → `capsule{...}` after writing the bundle capsule into `capsules/` with a **new** `capsule_id` (original kept in `note`) and `session_id = S'`. Tail events are **not** copied into `S'`'s log (they are history of the origin session); they are rendered into the seed as "last turns".
 4. Insert index rows (`reindex(Some(S'))`), set `last_capsule_id`; write blobs from `blobs_inline` into `S'/blobs` (verifying each digest) so previews can be opened.
 5. The first `run_turn` on `S'` uses `seed_prompt(capsule, tail_turns from the bundle tail, next_input)` (§4).

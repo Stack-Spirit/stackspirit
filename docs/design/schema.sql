@@ -287,6 +287,7 @@ CREATE TABLE ledger (                   -- append-only; never UPDATEd or DELETEd
   job_id      TEXT,
   run_id      TEXT,
   session_id  TEXT,
+  role        TEXT CHECK (role IS NULL OR role IN ('planner','keeper','worker','verifier','capsule','probe','merge','gate')),  -- RunRole of the run (cost grouping by role)
   provider    TEXT,
   harness     TEXT,
   model       TEXT,

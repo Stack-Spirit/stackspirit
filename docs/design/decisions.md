@@ -21,8 +21,8 @@ Anything not listed here follows the plan.
 | D14 | §11 `on_quota = "next_then_probe_back"` only | `OnQuota` enum: `next_then_probe_back` (default), `next`, `park` | Needed so non-Claude profiles can say what quota means. |
 | D15 | §5.2 limit detection "unknown repeated errors treated as unavailable for 15 min" | Exactly: 3 consecutive runs of the same provider ending `error`/`crash` with no limit signal ⇒ `limits.kind='unavailable'`, `resets_at = now + 15 min` | Gives the vague statement a testable threshold (from `night.py` `claude_fail_streak`). |
 | D16 | §16.3 job map is a seed | `job-map.md` splits it into concrete jobs (n02a–d, n06a1…, etc.) with disjoint ownership; ids keep the plan's `nNN` prefix | The brief for n00 asks for this. |
-| D17 | §7.3: fix round returns the job to `reviewing` | After a fix job finishes the original goes `fixing → gating` (command gates re-run first), then `reviewing`; a finished fix of a `merge` job returns to `merging`; a failed fix job ⇒ original `failed` (loops.md §2 T22) | Cheap command gates run before another verifier is spent. |
-| D18 | §13 CLI list | Adds keeper commands `vowp job nudge\|restart\|replan\|fail <id>` (write request rows), `vowp up --foreground\|--detach`, `vowp status --check`, files `~/.vowp/heartbeat` and `~/.vowp/board.json` | Needed for L5/L8 (loops.md §7, §10). |
+| D17 | §7.3: fix round returns the job to `reviewing` | After a fix job finishes the original goes `fixing → gating` (command gates re-run first), then `reviewing`; a finished fix of a `merge` job returns to `merging`; a failed fix job ⇒ original `failed` (loops.md §2 T22; a failed fix job is T24) | Cheap command gates run before another verifier is spent. |
+| D18 | §13 CLI list | Adds keeper commands `vowp job nudge\|restart\|replan\|fail <id>` (write request rows), `vowp up --foreground\|--detach`, `vowp down --kill-windows`, `vowp inbox ask`, `vowp status --check`, files `~/.vowp/heartbeat` and `~/.vowp/board.json` | Needed for L5/L8 (loops.md §7, §10). |
 
 ## Open questions recorded for the owner (none blocking)
 

@@ -51,10 +51,10 @@ Checks (each `ok|warn|fail` with detail): `home` writable; `db` opens + `integri
 `systemd --user` unit and cron watchdog installed (warn only); supervisor running; disk space ≥ 1 GB.
 Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status":"ok","detail":"tmux 3.4"}]}`.
 
-### `vowp up [--foreground] [--no-tmux] [--once]` · `vowp down [--force]` · `vowp status` · `vowp board [--once] [--interval <secs>]`
-- `up`: creates/ensures tmux session `vowp-<project>` with windows `board supervisor planner keeper inbox` (skipped with `--no-tmux`), then starts the supervisor. Default: detaches (re-executes itself with `--foreground` under `setsid`/nohup-style, writes `supervisor.lock`); `--foreground` runs the loop in this process (what systemd runs); `--once` runs exactly one tick then exits (used by tests and cron). Exit 4 if a supervisor is already running (`vowp status` shows it).
+### `vowp up [--foreground|--detach] [--no-tmux] [--once]` · `vowp down [--force] [--kill-windows]` · `vowp status` · `vowp board [--once] [--interval <secs>]`
+- `up`: creates/ensures tmux session `vowp-<project>` with windows `board supervisor planner keeper inbox` (skipped with `--no-tmux`), then starts the supervisor. Default (= `--detach`, also accepted explicitly; used by the watchdog): detaches (re-executes itself with `--foreground` under `setsid`/nohup-style, writes `supervisor.lock`); `--foreground` runs the loop in this process (what systemd runs); `--once` runs exactly one tick then exits (used by tests and cron). Exit 4 if a supervisor is already running (`vowp status` shows it).
 - `down`: writes `~/.vowp/stop`, waits ≤ 30 s for the lock to disappear; `--force` additionally sends SIGTERM to the pid. Running runs are interrupted and re-queued (`stalled`, not failed). Windows are left for inspection unless `--kill-windows`.
-- `status`: one screen — supervisor (pid, uptime, last tick age), jobs by state, slots busy/total, planner/keeper executors, limits with reset times, cost today, inbox open count. JSON: `{"supervisor":{"running":true,"pid":123,"last_tick":"…"},"jobs":{"running":3,…},"slots":{"busy":3,"total":4},"limits":[{"provider":"claude","kind":"quota","resets_at":"…"}],"cost_today_usd":1.23,"inbox_open":2}`. Exit 0 whether or not a supervisor runs (use `--json` `running` field; `vowp status --check` exits 1 if the heartbeat is older than 3 min — the watchdog uses this).
+- `status`: one screen — supervisor (pid, uptime, last tick age), jobs by state, slots busy/total, planner/keeper executors, limits with reset times, cost today, inbox open count. JSON: `{"supervisor":{"running":true,"pid":123,"last_tick":"…","heartbeat_age_secs":12,"paused":false},"jobs":{"running":3,…},"slots":{"busy":3,"total":4},"limits":[{"provider":"claude","kind":"quota","resets_at":"…"}],"cost_today_usd":1.23,"inbox_open":2}`. Exit 0 whether or not a supervisor runs (use `--json` `running` field; `vowp status --check` exits 1 if the heartbeat is older than 3 min — the watchdog uses this).
 - `board`: refreshing dashboard (clear+redraw every `--interval`, default 2 s; `--once` prints once): jobs by state with the running ones listed (job, executor, age, last event age), slots, limits, cost, inbox, last checkpoint. Reads only the DB.
 
 ## 3. Planning and the graph
@@ -70,10 +70,10 @@ Starts a planner turn (session role `planner`, executor = first available rung o
 | `job update <id> [--title] [--priority] [--profile] [--owns] [--reads] [--gates] [--add-needs a,b] [--remove-needs a] [--note text]` | `JobPatch`. Only jobs not in `running/gating/reviewing/merging` may change `owns`/`gates` (exit 4). |
 | `job ls [--state s,…] [--kind k] [--role r] [--all]` | table: `ID STATE KIND ROLE PRIO NEEDS ATTEMPTS UPDATED NOTE`; default hides `done/cancelled/replanned` unless `--all`. JSON: `[Job,…]`. |
 | `job show <id> [--brief] [--report] [--runs] [--gates]` | the job, its edges, last runs (executor, outcome, cost), last gate results with evidence tails; `--brief/--report` print the files. |
-| `job retry <id> [--reset-attempts]` | `failed|stalled|parked` → `ready` (resets `continues`; with `--reset-attempts` also `attempts`). Exit 4 from other states. |
+| `job retry <id> [--reset-attempts]` | by state: `failed` → `ready` (event `Retry`, counters reset), `parked` → `ready` (`Resolved`), `stalled` → `running` (`KeeperRestart`). `--reset-attempts` additionally zeroes `attempts`. Exit 4 from any other state. |
 | `job park <id> [--reason text]` | any non-terminal → `parked` (`parked_reason=manual`); stops its run (`interrupt` then `stop`). To resume use `job retry`. |
 | `job nudge <id> [--text t]` · `job restart <id>` · `job replan <id>` · `job fail <id> --reason t` | keeper commands (loops.md §7): enqueue a request row applying the corresponding `JobEvent` (`KeeperNudge|KeeperRestart|KeeperReplan|KeeperFail`); exit 4 if the job's state does not allow it. |
-| `job cancel <id>` | any non-terminal → `cancelled`; stops the run, releases the lock/worktree (kept on disk for inspection). Dependents stay `pending`; `vowp job ls` flags them `blocked-by-cancelled`. |
+| `job cancel <id>` | any non-terminal → `cancelled`; stops the run, releases the ownership lock (worktree and branch are kept on disk for inspection). Dependents stay `pending`; `vowp job ls` flags them `blocked-by-cancelled`. |
 
 ### `vowp graph [--mermaid] [--export <file.yaml>] [--import <file.yaml>] [--all]`
 Default: ASCII (one line per job grouped by depth: `n02a-protocol-foundation [done] ← n01-skeleton`). `--mermaid`: Mermaid `flowchart TD` with state classes. `--export`: YAML (jobs + edges) to the file (stdout if `-`). `--import`: validates then inserts missing jobs/edges (never overwrites; conflicts listed, exit 4). Formats: `crates/vowp-graph.md`.
@@ -91,10 +91,10 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is an ali
 | `session show <id> [--capsule] [--events <n>] [--lineage]` | metadata, executor history (`session.executor` events), switches, last capsule; `--events n` prints the last n events pretty |
 | `session new [--title t] [--executor <exec>] [--cwd dir] [--node n]` | creates an interactive session (role `user`), prints its id (used by `chat`) |
 | `session chat <id> [--executor <exec>]` | interactive loop on stdin/stdout: each line is a user turn (`SessionOps::run_turn`, streaming assistant text, tool calls shown as `· tool: <name>`); slash commands `/switch <harness:model[@e][#v]> [--node n]`, `/capsule`, `/export <file>`, `/events [n]`, `/quit`. Exits 6 on an unswitched limit with the hint to `/switch`. Non-TTY stdin: reads turns until EOF (scriptable). |
-| `session switch <id> --to <executor> [--node <n>] [--reason user\|limit\|…] [--no-seed-tail]` | runs the switch protocol (`sessions.md` §5): prints the capsule path and the new executor; exit 6 if the target provider is limited, 4 if the session is running a turn and `--force` is not given |
+| `session switch <id> --to <executor> [--node <n>] [--reason user\|limit\|…] [--no-seed-tail] [--force]` | runs the switch protocol (`sessions.md` §5): prints the capsule path and the new executor; exit 6 if the target provider is limited, 4 if the session is running a turn and `--force` is not given |
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
-| `session export <id> [--out <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
-| `session import <file> [--node n] [--executor <exec>]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached |
+| `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
+| `session import <file> [--node n] [--executor <exec>] [--cwd <dir>]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached |
 | `session watch [--claude-dir <dir>] [--once]` | *nice-to-have*: records interactive Claude Code sessions (read-only transcript importer) into canonical sessions; prints `watching N transcripts`; exit 1 if the dir is unreadable |
 | `session tail <id> [--follow] [--pretty] [--from <seq>]` | prints events (JSONL, or `--pretty` one line per event); `--follow` polls the file (200 ms). This is what job windows run (`vowp __window job <id>`). |
 
@@ -102,8 +102,8 @@ Pretty line format: `HH:MM:SS #seq type  summary` e.g. `19:30:12 #6 tool.call  s
 
 ## 5. Inbox, cost, nodes, loops, schedules, release
 
-### `vowp inbox ls [--all] · show <id> · answer <id> <text\|--approve\|--reject> [--by <name>] · dismiss <id>`
-`ls` lists open items (`ID KIND JOB TITLE AGE`); `--all` includes answered. `answer` stores the answer, sets `answered`, and (for an item with `job_id`) moves the parked job to `ready` on the next tick (`loops.md` §9). `--approve/--reject` are shorthand answers `approve`/`reject` valid for `approval` items. Exit 4 if already answered.
+### `vowp inbox ls [--all] · show <id> · ask <title> [--body t] [--job <id>] [--kind question\|approval\|notice] [--option a --option b] · answer <id> <text\|--approve\|--reject> [--by <name>] · dismiss <id>`
+`ask` creates an item (used by planner/keeper agents and scripts; with `--job` the job is parked with `parked(Question)` for kinds `question|approval`, never for `notice`; prints the item id). `ls` lists open items (`ID KIND JOB TITLE AGE`); `--all` includes answered. `answer` stores the answer, sets `answered`, and (for an item with `job_id`) moves the parked job to `ready` on the next tick (`loops.md` §9). `--approve/--reject` are shorthand answers `approve`/`reject` valid for `approval` items. Exit 4 if already answered.
 
 ### `vowp cost [--by job|role|provider|model|day] [--since <dur\|date>] [--job id]`
 Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `receipt`, `price-table`, `unknown` or `mixed`. Unknown costs are shown as `?` and counted separately (never as 0). JSON: `{"by":"job","rows":[{"key":"n04-graph","runs":3,"usd":0.42,"tokens":{…},"source":"receipt"}],"total":{…}}`.
@@ -143,7 +143,7 @@ Work→Production (`crates/vowp-core.md` §promote). `<change>` = commit/ref/job
 3. Execute `ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <ssh_target> vowp <argv…>` with stdin/stdout/stderr inherited; the remote exit code is returned unchanged; ssh failure (exit 255) ⇒ exit 7 with `{"error":{"kind":"remote",…}}` under `--json`.
 4. Arguments are passed as a single remote command string built with POSIX single-quote escaping (`shell_quote`, shared with `vowp-tmux`); no argument is ever interpolated unquoted.
 5. `session import` with `--node n`: the bundle file is streamed over ssh stdin (`vowp session import - …`); `session export --node n` writes the bundle locally from the remote's stdout.
-6. Cross-node `session switch --to … --node vps`: exports a bundle locally, imports on `vps`, runs the switch there, and records a `switch` event with `from_node`/`to_node` on both sides (`sessions.md` §5.7).
+6. Cross-node `session switch --to … --node vps`: exports a bundle locally, imports on `vps`, runs the switch there, and records a `switch` event with `from_node`/`to_node` on both sides (`sessions.md` §5 and §6).
 
 ## 8. Named tests (crate `vowp-cli`, hermetic: temp `--home`, temp git repos, fake harness scripts, `FakeWindows` / private tmux socket)
 

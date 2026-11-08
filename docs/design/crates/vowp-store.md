@@ -236,7 +236,7 @@ pub fn remove_schedule(&mut self, id_or_name: &str) -> Result<bool, StoreError>;
 /// Append-only. Returns rowid. Cost columns come from `e.cost` (usd NULL when None/Unknown).
 pub fn append_ledger(&mut self, e: &LedgerEntry) -> Result<i64, StoreError>;
 pub fn ledger_since(&self, f: &LedgerFilter) -> Result<Vec<LedgerEntry>, StoreError>;      // ascending id
-/// Sums `kind='cost'` rows grouped by `group`; ordered by usd DESC then key. `Day` groups by the UTC date of `ts`.
+/// Sums `kind='cost'` rows grouped by `group` (`Role` groups by `ledger.role`, `Job` by `job_id`, `Provider` by `provider`, `Model` by `model`; rows where the key column is NULL fall in the key `"(none)"`; no joins); ordered by usd DESC then key. `Day` groups by the UTC date of `ts`.
 pub fn cost_totals(&self, q: &CostQuery, group: CostGroup) -> Result<Vec<CostRow>, StoreError>;
 
 // ---- inbox / limits / releases
@@ -388,13 +388,13 @@ pub fn reindex(store: &mut Store, paths: &NodePaths, session: Option<&SessionId>
 
 8. `reindex(store, paths, session)` algorithm, per session directory `<id>` whose name parses as `SessionId` (others are skipped with a problem line):
    1. `SessionLogReader::iter()` over `log.jsonl`; a torn tail is ignored and counted; corruption (rule 5) → the session is skipped, problem recorded, other sessions continue.
-   2. In **one transaction** per session: delete that session's `session_events`, `session_natives`, `capsules` rows (not `sessions`, `runs`, `switches`, `ledger`, which are authoritative or separately derived);
+   2. In **one transaction** per session: delete that session's `session_events` and `session_natives` rows (**not** `capsules`, `sessions`, `runs`, `switches`, `ledger`: `switches.capsule_id` has `ON DELETE SET NULL`, so deleting capsule rows would silently clear every switch→capsule link);
       then for each event insert the `session_events` row; track `last_seq`, `log_bytes`, `updated_at = last event ts`.
    3. Rebuild the `sessions` row **if missing** (db deleted): from `session.created` (title, cwd, project, job_id, role, parent) and the latest `session.executor`
       (`executor` string, `node`), `state = idle` (or `closed` if a trailing `note` text `closed`; v0.1 always `idle`). If the row exists, only `last_seq`, `log_bytes`, `updated_at`, `executor` are refreshed.
    4. `session_natives` rebuilt from every `session.executor` attach event carrying `native_session_id` (`first_seq` = that event's seq), then merged with `adapters.json` (union).
-   5. `capsules` rebuilt from `capsules/*.json` (validate; invalid files → problem line, skipped); `sessions.last_capsule_id` = latest by `at_seq`.
-   6. `switches` rows missing from the DB are re-created from `switch` events (`state = completed`, `to_node` = the `to.node` or this node); existing rows untouched.
+   5. `capsules` **upserted** from `capsules/*.json` with `INSERT … ON CONFLICT(id) DO UPDATE` (never `INSERT OR REPLACE`/delete, which would fire the FK action); invalid files → problem line, skipped; capsule rows whose file is missing are left untouched and reported as a problem; `sessions.last_capsule_id` = latest by `at_seq`.
+   6. `switches` rows missing from the DB are re-created from `switch` events (`state = completed`, `to_node` = the `to.node` or this node); existing rows untouched (their `capsule_id` is preserved; a re-created row's `capsule_id` comes from the `switch` event's `capsule_id`, set only if that capsule row exists).
    Result: after `rm vowp.db && Store::open && reindex(None)`, `sessions`, `session_events`, `session_natives`, `capsules` (and lineage `switches`) equal the pre-deletion rows
    except fields that only the DB held (`sessions.state` of in-flight sessions, `job_id` when the creating event lacks it). **Content is never lost.**
 9. `reindex` is idempotent: running twice yields identical tables (test `reindex_is_idempotent`).
@@ -480,7 +480,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `log_big_tool_result_roundtrip` | 100 KB output appended and read back: `output_ref` resolves via `blobs().get` to the original text |
 | `capsule_file_roundtrip` | `write_capsule_file` → `read_capsule_file` equals input; file name starts with zero-padded `at_seq`; invalid capsule JSON → `Corrupt`/`Protocol` error |
 | `adapters_json_is_append_only` | add 2 mappings, re-adding the first is a no-op, file order preserved; missing file reads as empty |
-| `reindex_after_deleting_db_restores_index` | build a store+3 sessions with logs, capsules and adapters.json; snapshot index tables; delete the DB file; `Store::open` + `reindex(None)`; `sessions`, `session_events`, `session_natives`, `capsules` rows equal the snapshot (ignoring `state`) |
+| `reindex_after_deleting_db_restores_index` | build a store+3 sessions with logs, capsules and adapters.json; snapshot index tables; delete the DB file; `Store::open` + `reindex(None)`; `sessions`, `session_events`, `session_natives`, `capsules` rows equal the snapshot (ignoring `state`); in a second case the DB is NOT deleted and `switches` rows with `capsule_id` set still have it after `reindex` (`reindex_preserves_switch_capsule_links`) |
 | `reindex_is_idempotent` | run twice; tables identical |
 | `reindex_single_session_leaves_others` | modifying one log then `reindex(Some(id))` updates only that session's rows |
 | `reindex_skips_corrupt_session` | one session with a corrupt middle line: reported in `problems`, others indexed |
