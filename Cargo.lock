@@ -1238,6 +1238,8 @@ name = "vowp-core"
 version = "0.1.0-dev"
 dependencies = [
  "cron",
+ "globset",
+ "proptest",
  "regex",
  "serde",
  "serde_json",
