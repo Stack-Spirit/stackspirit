@@ -226,6 +226,7 @@ probe = "./scripts/probe-prod.sh"
 # ---- loop overrides ---------------------------------------------------------------------------------------
 [loops.l1-supervisor]
 stall_minutes = 20
+silent_minutes = 8
 same_action_max = 3
 
 [loops.l4-planner]

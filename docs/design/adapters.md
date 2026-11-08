@@ -141,8 +141,8 @@ Preference order for `LimitEvent.resets_at` / `RunSummary.limit.resets_at`:
 
 ### 2.6 Importer (nice-to-have, v0.1.x)
 
-`vowp session watch` reads `~/.claude/projects/**/<uuid>.jsonl` transcripts. Not part of the adapter run path; a function
-`claude_code::import_transcript(path, &mut impl FnMut(HarnessEvent))` reusing the same message mapping is specified in `crates/vowp-adapters.md` §5 as **optional**.
+`vowp session watch` reads `~/.claude/projects/**/<uuid>.jsonl` transcripts. Not part of the adapter run path; the
+`claude_code::import_transcript(path, tz_offset_minutes) -> Result<Vec<HarnessEvent>, AdapterError>` parser reusing the same message mapping is specified in `crates/vowp-adapters.md` §5 as **optional**. The core importer (`crates/vowp-core.md` §3, `ClaudeTranscriptImporter::scan_once`) owns directory scanning and byte offsets and calls this parser per file.
 
 ---
 

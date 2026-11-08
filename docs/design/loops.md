@@ -23,11 +23,11 @@ All time from `Clock`.
 
    | `kind` | Applied as |
    |---|---|
-   | `retry_job` | state-dependent: `failed` → `JobEvent::Retry` (T32; `reset_attempts` also zeroes `attempts`), `stalled` → `KeeperRestart` (T11); otherwise rejected (logged) |
+   | `retry_job` | state-dependent: `failed` → `JobEvent::Retry` (T32, resets `attempts`, `continues`, `hang_restarts`), `stalled` → `KeeperRestart` (T11); otherwise rejected (logged) |
    | `resolve_job` | `Resolved` (T31) |
    | `park_job` | `HumanPark` (T30) with `parked_reason=Manual`, note = reason |
    | `cancel_job` | `Cancel` (T33) |
-   | `nudge_job` | `KeeperNudge` (T10); `text` is appended to the continue prompt |
+   | `nudge_job` | `KeeperNudge` (T10): start a normal continue run (no extra text) |
    | `restart_job` | `KeeperRestart` (T11) |
    | `replan_job` | `KeeperReplan` (T12/T34) |
    | `fail_job` | `KeeperFail` (T13); note = reason |
@@ -62,14 +62,15 @@ All time from `Clock`.
 9. **Planner/Keeper triggers (L4/L5).** Evaluate `planner_due` / `keeper_due` (§7) and start at most one planner turn and one keeper turn.
 10. **L6 probes.** For each `limits` row with `kind IN (quota,rate,unavailable)` and `now >= resets_at` (or `now >= last_probe_at + 15 min` after a failed probe) and no probe run open → start a probe (§8.5).
 11. **L9 schedules.** Run due schedules (§11).
-12. **Board and reports.** Write `~/.vowp/board.json` (jobs by state, slots, current planner/keeper executor, limits, cost totals, inbox count) every tick; every `checkpoint_minutes` (120) write a checkpoint file `<project>/.vowp/checkpoints/<ts>.md` (what finished/failed, cost from receipts, limit/failover events). `vowp board` recomputes the same snapshot from the DB (`BoardSnapshot::collect`); `board.json` is only a convenience copy.
+12. **Board and reports.** Write `~/.vowp/board.json` (jobs by state, slots, current planner/keeper executor, limits, cost totals, inbox count) every tick; every `LoopBounds.checkpoint_minutes` (default 120) write a checkpoint file `<project>/.vowp/checkpoints/<ts>.md` (what finished/failed, cost from receipts, limit/failover events). `vowp board` recomputes the same snapshot from the DB (`BoardSnapshot::collect`); `board.json` is only a convenience copy.
 13. **Loop rows + heartbeat.** Update `loops` rows (`last_run_at,next_run_at,last_status,fail_streak`) and write `~/.vowp/heartbeat` (the unix time as text, written to a temp file then renamed). Also `kv['supervisor_pid']`.
 
 Loop rows created on first `vowp up` (`name`, `kind`, `interval_secs`): `l1-supervisor` L1 60 · `l2-worker` L2 0 · `l3-verify` L3 0 · `l4-planner` L4 1800 · `l5-keeper` L5 1200 · `l6-failover` L6 0 · `l7-inbox` L7 0 · `l8-watchdog` L8 300 · `l9-schedules` L9 60. A `paused` loop is skipped by its step (L1 itself cannot be paused except via `kv['paused']`).
 
 ## 2. The job state machine (`vowp_graph::transition` implements this table exactly)
 
-Defaults: `MAX_CONTINUES=2` (per attempt), `MAX_HANG_RESTARTS=3`, `max_attempts = job.loop.max_attempts` (3). `attempts` counts **fix rounds started**;
+Defaults: `MAX_CONTINUES=2` (per attempt), `MAX_HANG_RESTARTS=3`, `max_attempts = job.loop.max_attempts` (3). L1 reads the first two from
+`LoopBounds.max_continues` / `max_hang_restarts` (these defaults when unset); `attempts` counts **fix rounds started**;
 `continues` is reset to 0 whenever a new attempt or a retry begins. "Counter effects" are applied by the caller when the effect is listed; guards read the **current** job row.
 Every transition also writes one ledger row (`kind=state`, summary `"<job>: <from> -> <to> (<event>)"`) — not listed as an effect.
 
@@ -222,9 +223,9 @@ Pushes go only to `job/*` branches and to the default branch through this queue.
 
 Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per project, created on first use, resumed every turn. One turn at a time per role (`runs` open check). Their runs use `RunRole::Planner|Keeper`, `RunPurpose::Plan|Keep`, no job.
 
-**Planner due (`planner_due`)** — all must hold: not paused; no open planner run; provider available (else the keeper covers, below); `now - last_planner_turn >= planner_min_gap (5 min)`; and
-(a) an unseen event for the planner exists (job `done|failed|stalled|parked`, new inbox answer, finished verify, limit/failover event, schedule firing) **or** (b) `planner_heartbeat` (30 min) elapsed **or** (c) there is no active job (`pending|ready|running|gating|reviewing|fixing|merging`) but non-terminal jobs exist and `idle_gap` (15 min) elapsed.
-**Keeper due**: an unseen stall/failure event (`stalled`, `failed`, hang, run crash with continues exhausted, rate-limit re-queue) **or** `keeper_heartbeat` (20 min) elapsed; min gap 5 min; also when the planner's provider is limited (the keeper then *covers planning*: its prompt gains the planner duties and the planner digest).
+**Planner due (`planner_due`)** — all must hold: not paused; no open planner run; provider available (else the keeper covers, below); `now - last_planner_turn >= LoopBounds.planner_min_gap_minutes` (default 5 min); and
+(a) an unseen event for the planner exists (job `done|failed|stalled|parked`, new inbox answer, finished verify, limit/failover event, schedule firing) **or** (b) the `l4-planner` loop interval (`[loops.l4-planner].interval_secs`, default 30 min) elapsed **or** (c) there is no active job (`pending|ready|running|gating|reviewing|fixing|merging`) but non-terminal jobs exist and `LoopBounds.idle_gap_minutes` (default 15 min) elapsed.
+**Keeper due**: an unseen stall/failure event (`stalled`, `failed`, hang, run crash with continues exhausted, rate-limit re-queue) **or** the `l5-keeper` loop interval (`[loops.l5-keeper].interval_secs`, default 20 min) elapsed; min gap `LoopBounds.planner_min_gap_minutes` (default 5 min); also when the planner's provider is limited (the keeper then *covers planning*: its prompt gains the planner duties and the planner digest).
 
 **Digest** (`vowp_core::loops::digest::Digest::build`, ≤ 24 000 chars, each item ≤ 600 chars): new jobs done/failed/stalled/parked since the last turn with gate evidence summaries and report `open_items`, open inbox items and answers, limit/failover state (who is limited until when), counts by state, cost totals (receipts), slot usage, the last 5 ledger errors, and (planner only) the checkpoint text. Keeper digest additionally has the last 60 lines of each stalled job's session log (pretty).
 **Actions** are CLI calls the agent runs itself in its turn: `vowp job add|update|retry|park|cancel`, `vowp inbox answer`, writing brief files, and for the keeper `vowp job nudge <id>` / `vowp job restart <id>` (= requests `KeeperNudge|KeeperRestart`), `vowp job replan <id>`, `vowp job fail <id>`. These CLI commands only write `req:` rows (D2) — the next tick applies them. The planner/keeper never edits the DB or merges.
@@ -254,7 +255,7 @@ Plan §11: credits exhausted ⇒ **park every job on that provider**; it is neve
 4. Resolution: `vowp inbox answer <id> resolved` deletes the `limits` row and sends `Resolved` (T31) to every job parked for that provider/reason.
 
 ### 8.4 Capsule hand-off
-1. For a **session-backed role (planner, keeper)**: `SessionOps::switch(SwitchRequest{session, to: next rung ExecutorRef, reason: Limit|Failover, drain_secs: 5})` — freeze, capsule, stop, start target with capsule + last 2 turns as plain text, record `switch` (sessions.md §5).
+1. For a **session-backed role (planner, keeper)**: `SessionOps::switch(SwitchRequest{session, to: next rung ExecutorRef, reason: Limit|Failover, drain_secs: 5, seed_tail: true})` — freeze, capsule, stop, start target with capsule + last 2 turns as plain text, record `switch` (sessions.md §5).
 2. For a **job run** that was interrupted: the session continues on the next rung via the same `switch` call (new native session seeded with the capsule), then `StartRun{Continue}` (T4) runs there; the job's `rung` in `runs` is the new index. A job never changes node in v0.1 failover.
 3. If `SessionOps::switch` fails (probe of target fails, seed rejected twice): the session stays `blocked`, job is `Blocked{ProviderBlocked}`, inbox notice, ledger `switch` failure.
 
@@ -288,35 +289,38 @@ Per provider the loop counts consecutive runs ended `error|crash` with **no** li
 3. **Each tick (step 11)**, for every `active` schedule (and not `paused` loop `l9-schedules`):
    a. if `next_run_at IS NULL`: set it to `next_after(now)`; continue.
    b. if `next_run_at > now`: continue.
-   c. **Due.** `due = next_run_at`. Idempotency key `key = "<schedule_id>@<due>"`. If a ledger `schedule` row with `detail_json.key == key` exists → skip firing (already fired) and only advance.
+   c. **Due.** `due = next_run_at`. Idempotency key `key = "<schedule_id>@<due>"`. If a ledger `schedule` row with `detail_json.key == key` exists → do not fire again.
    d. **Missed-run policy** (the node may have been down): lateness `late = now - due`. If `late <= 2 × tick_secs` → fire normally. Else if `missed_policy = run_once` → fire **once** (for the earliest missed `due`, not N times); `skip` → don't fire, ledger `schedule` row "skipped missed run".
-   e. Fire = execute the action (below), write the ledger `schedule` row **first** (with the key) and the action's effects after, in that order, so a crash between them cannot double-fire (worst case: a lost firing, logged on restart as "key present, action not confirmed" — v0.1 accepts at-most-once).
-   f. Advance: `last_run_at=now`, `last_status`, `next_run_at = next_after(now)` (strictly in the future: all missed occurrences collapse).
+   e. **Advance before firing** (the order implemented by `ScheduleEngine::tick`): set `last_run_at=now`, `last_status`, and `next_run_at = next_after(now)` (strictly in the future: all missed occurrences collapse), then persist the row. A crash after this step loses at most one firing; it can never double-fire.
+   f. Fire (only when step d says so and no ledger row with `key` exists) = write the ledger `schedule` row with the key **first**, then execute the action (below) and its effects. A crash between the ledger row and the action leaves "key present, action not confirmed" (logged on restart); v0.1 accepts at-most-once.
 4. **Actions.** `JobTemplate{template}` → `Store::insert_job(template with id suffixed "-<yyyymmddhhmm>" of `due` UTC)`, `created_by="schedule:<id>"`, the job goes through the normal graph; `Loop{loop_name}` → mark the loop due now (a `run_loop` request); `Command{argv,cwd,timeout_secs}` → spawn without a shell, capture the last 200 lines into the ledger `detail_json`, exit ≠ 0 ⇒ `last_status="failed: exit N"` plus an inbox `notice` (once per schedule per day).
 5. Defaults installed by `vowp init` (all `state=paused` until the user enables them): planner heartbeat is **not** a schedule (it is L4's own heartbeat).
 
-## 12. Stall and no-progress rules (all numbers; each configurable in `[loops.*]` or `[project]`)
+## 12. Stall and no-progress rules
 
-| Rule | Value | Source |
+Defaults below. `LoopBounds` fields are configurable under `[loops.*]`; other values come from the config field named in
+the table or are fixed v0.1 constants.
+
+| Rule | Value | Source/config |
 |---|---|---|
-| Tick | 60 s | plan L1 |
-| Stalled: no new session event and no new commit | 20 min (`stall_minutes`) | plan §8 (night.py used 25) |
-| Hung before first output (0 bytes) | 8 min | night.py (D7) |
-| Automatic continues per attempt | 2 | plan L2 |
-| Hang restarts | 3 | night.py (D6) |
-| Fix rounds (`attempts`) | 3 = `loop.max_attempts` | plan L3 |
-| Same action repeated without new evidence | 3 (`RepeatGuard`) → stop the loop, escalate (`NotifyInbox(Decision)`) | plan §8 |
-| Planner heartbeat / keeper heartbeat | 30 min / 20 min | plan L4/L5 |
-| Min gap between planner/keeper turns | 5 min | night.py `planner_min_gap_min` |
-| Idle gap (nothing active, work remaining) | 15 min | night.py |
-| Checkpoint | every 120 min | night.py |
-| Gate timeout | 1800 s | night.py `gate_timeout` |
-| Merge budget | 2700 s | night.py `merge_timeout` |
-| Quota reset margin | +2 min | night.py |
-| Probe cadence after failed probe | 15 min | plan L6 |
-| Unknown-failure streak → unavailable | 3 runs → 15 min | D15 |
-| Drain on switch | 5 s | plan §5.3 |
-| Rate backoff | 10 min doubling to 60 min, ±20 % jitter | §8.2 |
+| Tick | 60 s | `[node].tick_secs` |
+| Stalled: no new session event and no new commit | 20 min (`stall_minutes`) | `LoopBounds.stall_minutes`; plan §8 (night.py used 25) |
+| Hung before first output (0 bytes) | 8 min (`silent_minutes`) | `LoopBounds.silent_minutes`; night.py (D7) |
+| Automatic continues per attempt | 2 (`max_continues`) | `LoopBounds.max_continues`; plan L2 |
+| Hang restarts | 3 (`max_hang_restarts`) | `LoopBounds.max_hang_restarts`; night.py (D6) |
+| Fix rounds (`attempts`) | 3 = `job.loop.max_attempts` | per job (`JobLoop`, not `LoopBounds`); plan L3 |
+| Same action repeated without new evidence | 3 (`RepeatGuard`) → stop the loop, escalate (`NotifyInbox(Decision)`) | `LoopBounds.same_action_max`; plan §8 |
+| Planner heartbeat / keeper heartbeat | 30 min / 20 min | `[loops.l4-planner].interval_secs` / `[loops.l5-keeper].interval_secs`; plan L4/L5 |
+| Min gap between planner/keeper turns | 5 min | `LoopBounds.planner_min_gap_minutes`; night.py `planner_min_gap_min` |
+| Idle gap (nothing active, work remaining) | 15 min | `LoopBounds.idle_gap_minutes`; night.py |
+| Checkpoint | every 120 min | `LoopBounds.checkpoint_minutes`; night.py |
+| Gate timeout | 1800 s | `CmdGate.timeout_secs` (default); night.py `gate_timeout` |
+| Merge budget | 2700 s | `[merge].timeout_secs`; night.py `merge_timeout` |
+| Quota reset margin | +2 min | fixed v0.1 constant; night.py |
+| Probe cadence after failed probe | 15 min | `LoopBounds.probe_interval_minutes`; plan L6 |
+| Unknown-failure streak → unavailable | 3 runs → 15 min | fixed v0.1 constant; D15 |
+| Drain on switch | 5 s | `SwitchRequest.drain_secs`; plan §5.3 |
+| Rate backoff | 10 min doubling to 60 min, ±20 % jitter | fixed v0.1 constants; §8.2 |
 
 `RepeatGuard` keys: `(job, action-kind)` with a fingerprint of the evidence (gate tails hash, report sha, run outcome). Three consecutive identical fingerprints for the same key ⇒ the job is moved to `failed` with `note="no progress: <action> x3"`, the loop trips (`loops.last_status`), inbox `decision`.
 

@@ -249,7 +249,7 @@ pub fn pointer_get<'a>(v: &'a serde_json::Value, ptr: &str) -> Option<&'a serde_
 
 ## 5. Optional importer (nice-to-have, n06b2 if time)
 
-`pub fn import_transcript(path: &Path, tz_offset_minutes: i32) -> Result<Vec<HarnessEvent>, AdapterError>` in `claude_code::import` reads a `~/.claude/projects/…/<uuid>.jsonl`
+`pub fn import_transcript(path: &Path, tz_offset_minutes: i32) -> Result<Vec<HarnessEvent>, AdapterError>` is re-exported as `claude_code::import_transcript` (implementation in `claude_code::import`). It reads a `~/.claude/projects/…/<uuid>.jsonl`
 transcript with the same block mapping as §2.2 of adapters.md (no result/cost lines). Used later by `vowp session watch` (cli.md). Not required for must-haves.
 
 ## 6. Errors

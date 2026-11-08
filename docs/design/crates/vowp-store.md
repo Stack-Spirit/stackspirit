@@ -121,7 +121,8 @@ pub enum CostGroup { Job, Role, Provider, Model, Day }
 pub struct CostQuery { pub since: Option<Timestamp>, pub until: Option<Timestamp>, pub project: Option<ProjectName>, pub job_id: Option<JobId> }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostRow { pub key: String /* job id | role | provider | model | YYYY-MM-DD (UTC) */, pub usd: f64 /* sum of known usd */,
-                     pub unknown_entries: u64 /* cost rows whose usd is NULL (never counted as free) */, pub tokens: Tokens, pub entries: u64 }
+                     pub receipt_entries: u64, pub price_table_entries: u64,
+                     pub unknown_entries: u64 /* cost rows whose usd is NULL (never counted as free) */, pub tokens: Tokens, pub entries: u64 /* receipt + price-table + unknown */ }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct RequestId(pub String);          // ULID
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request { pub id: RequestId, pub kind: String /* "retry_job" | "park_job" | "cancel_job" | "pause_loop" | ... (snake_case Request variant names, crates/vowp-core.md §2) */,
@@ -238,7 +239,7 @@ pub fn remove_schedule(&self, id_or_name: &str) -> Result<bool, StoreError>;
 /// Append-only. Returns rowid. Cost columns come from `e.cost` (usd NULL when None/Unknown).
 pub fn append_ledger(&self, e: &LedgerEntry) -> Result<i64, StoreError>;
 pub fn ledger_since(&self, f: &LedgerFilter) -> Result<Vec<LedgerEntry>, StoreError>;      // ascending id
-/// Sums `kind='cost'` rows grouped by `group` (`Role` groups by `ledger.role`, `Job` by `job_id`, `Provider` by `provider`, `Model` by `model`; rows where the key column is NULL fall in the key `"(none)"`; no joins); ordered by usd DESC then key. `Day` groups by the UTC date of `ts`.
+/// Sums `kind='cost'` rows grouped by `group` (`Role` groups by `ledger.role`, `Job` by `job_id`, `Provider` by `provider`, `Model` by `model`; rows where the key column is NULL fall in the key `"(none)"`; no joins); ordered by usd DESC then key. `Day` groups by the UTC date of `ts`. `CostRow` counts entries per `cost_source` so the CLI can print `receipt`, `price-table`, `unknown` or `mixed`.
 pub fn cost_totals(&self, q: &CostQuery, group: CostGroup) -> Result<Vec<CostRow>, StoreError>;
 
 // ---- inbox / limits / releases
@@ -466,7 +467,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `due_schedules_selects_active_due_only` | paused, future and due rows: only active-and-due returned, ordered by `next_run_at` |
 | `loop_fail_streak` | `record_loop_run(ok=false)` twice → streak 2; `ok=true` resets to 0 |
 | `ledger_is_append_only` | `UPDATE ledger` and `DELETE FROM ledger` via raw SQL both fail with the trigger message; `append_ledger` returns increasing ids |
-| `cost_totals_group_by_each_dimension` | seed 6 cost rows (2 jobs, 2 roles, 2 providers, 2 models, 2 days, one with `usd NULL`); for each `CostGroup` assert exact sums, `unknown_entries`, token totals, ordering |
+| `cost_totals_group_by_each_dimension` | seed 6 cost rows (2 jobs, 2 roles, 2 providers, 2 models, 2 days, one with `usd NULL`); for each `CostGroup` assert exact sums, `receipt_entries`/`price_table_entries`/`unknown_entries` (sum = `entries`), token totals, ordering |
 | `cost_totals_respects_filters` | `since/until/project/job_id` narrow the result |
 | `inbox_answer_flow` | open → `answer_inbox` ok; second answer → `Conflict`; CHECK `(state='open') = (answered_at IS NULL)` holds; `dismiss_inbox` on an open item yields `state='dismissed'` with `answered_at` set and `answer IS NULL`; dismissing an answered item → `Conflict` |
 | `limits_active_and_clear` | rows with past `resets_at`, future, and `None`: `active_limits(now)` = future + `None`; `clear_limit` removes; `upsert_limit` preserves `since` for same kind |

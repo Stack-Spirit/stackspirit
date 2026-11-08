@@ -118,7 +118,7 @@ The seed is appended to the log as a `user.message` with `note: "handoff"` (disp
 
 ## 5. Switch protocol
 
-`SessionOps::switch(SwitchRequest{session_id, to, reason, drain_secs=5})`. Triggers: user (`vowp session switch`), `limit` (L6), `crash` (only if configured), `context`, `failover`, `probe_back`.
+`SessionOps::switch(SwitchRequest{session_id, to, reason, drain_secs=5, seed_tail=true})`. Triggers: user (`vowp session switch`), `limit` (L6), `crash` (only if configured), `context`, `failover`, `probe_back`.
 Each step lists the log events and DB rows it changes. `S` = the source executor, `T` = the target.
 
 | # | Step | Log events | DB rows |
@@ -129,7 +129,7 @@ Each step lists the log events and DB rows it changes. `S` = the source executor
 | 4 | **Drain**: if a run is active, wait ≤ `drain_secs` for `turn.ended`; then `interrupt()` and wait 3 s; then `stop()` | `turn.ended{stop_reason: interrupted}` if the adapter did not emit one | `runs` finished (`outcome=killed`) |
 | 5 | **Capture capsule**: `write(session, trigger=Switch)` (§3; never debounced). If it fails after repair: if a previous capsule exists use it (and add `note` "stale capsule"), else abort (row 9) | `capsule` | `capsules` INSERT, `sessions.last_capsule_id` |
 | 6 | **Detach S**: stop adapter (idempotent) | `session.executor{detach, reason}` → `sync()` | `sessions.executor=NULL` |
-| 7 | **Start T**: build seed (§4) and call `run_turn` setup or, for a pure switch without input, start T **idle**: record the attach only (the seed is delivered with the next input) | `session.executor{attach, native_session_id?}` , `user.message{note:"handoff"}` if a turn is started | `sessions.executor=T`, `session_natives` upsert, `runs` INSERT if a turn started |
+| 7 | **Start T**: build seed (§4; include the last-turns section only when `SwitchRequest.seed_tail`, default true) and call `run_turn` setup or, for a pure switch without input, start T **idle**: record the attach only (the seed is delivered with the next input) | `session.executor{attach, native_session_id?}` , `user.message{note:"handoff"}` if a turn is started | `sessions.executor=T`, `session_natives` upsert, `runs` INSERT if a turn started |
 | 8 | **Record**: append `switch{switch_id, from, to, capsule_id, reason}`; `sync()`; `finish_switch(Completed)` | `switch` | `switches.state='completed'`, `ended_at` |
 | 9 | **Unfreeze**: state `idle` (or `running` if a turn was started on T) | — | `sessions.state` |
 | ✗ | **Abort** (any failure before step 6 completes): `finish_switch(Aborted, error)`; leave S attached; state returns to the pre-switch state (`blocked` stays `blocked`) | `error{kind, message}` | `switches.state='aborted'` |

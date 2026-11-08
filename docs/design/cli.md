@@ -40,7 +40,7 @@ vowp [GLOBAL FLAGS] <command> [args]
 ## 2. Setup and health
 
 ### `vowp init [--name <project>] [--force] [--no-framework]`
-In the current git repo: writes `vowp.toml` (the `[project]` table + the four default profiles from architecture.md §5.2 minus schedules), `.vowp/` (jobs/, checkpoints/), installs the framework files
+In the current git repo: writes `vowp.toml` (a `[node]` table with `tz_offset_minutes` set from the machine's current UTC offset, the `[project]` table, and the four default profiles from architecture.md §5.2 minus schedules), `.vowp/` (jobs/, checkpoints/), installs the framework files
 (`AGENTS.md`, `CLAUDE.md` containing `@AGENTS.md`, `.agents/skills/vowp-{worker,planner,verifier}/SKILL.md`, `opencode.jsonc`, brief/report templates) from the templates **embedded in the binary**,
 appends `.vowp/tmp/` to `.gitignore`, creates `~/.vowp` (db, dirs), registers the local node and the project, and creates the loop rows (`loops` table, default intervals). Existing files are never overwritten without `--force` (skipped files are listed).
 Human: `initialised project vowp at /path (8 files written, 2 skipped)`. JSON: `{"project":"vowp","path":"…","written":[…],"skipped":[…]}`. Exit 4 if already initialised and not `--force`.
@@ -70,9 +70,9 @@ Starts a planner turn (session role `planner`, executor = first available rung o
 | `job update <id> [--title] [--priority] [--profile] [--owns] [--reads] [--gates] [--add-needs a,b] [--remove-needs a] [--note text]` | `JobPatch`. Only jobs not in `running/gating/reviewing/merging` may change `owns`/`gates` (exit 4). |
 | `job ls [--state s,…] [--kind k] [--role r] [--all]` | table: `ID STATE KIND ROLE PRIO NEEDS ATTEMPTS UPDATED NOTE`; default hides `done/cancelled/replanned` unless `--all`. JSON: `[Job,…]`. |
 | `job show <id> [--brief] [--report] [--runs] [--gates]` | the job, its edges, last runs (executor, outcome, cost), last gate results with evidence tails; `--brief/--report` print the files. |
-| `job retry <id> [--reset-attempts]` | by state: `failed` → `ready` (event `Retry`, counters reset), `parked` → `ready` (`Resolved`), `stalled` → `running` (`KeeperRestart`). `--reset-attempts` additionally zeroes `attempts`. Exit 4 from any other state. |
+| `job retry <id>` | by state: `failed` → `ready` (event `Retry`, T32 resets `attempts`, `continues` and `hang_restarts`), `parked` → `ready` (`Resolved`), `stalled` → `running` (`KeeperRestart`). Exit 4 from any other state. |
 | `job park <id> [--reason text]` | any non-terminal → `parked` (`parked_reason=manual`); stops its run (`interrupt` then `stop`). To resume use `job retry`. |
-| `job nudge <id> [--text t]` · `job restart <id>` · `job replan <id>` · `job fail <id> --reason t` | keeper commands (loops.md §7): enqueue a request row applying the corresponding `JobEvent` (`KeeperNudge|KeeperRestart|KeeperReplan|KeeperFail`); exit 4 if the job's state does not allow it. |
+| `job nudge <id>` · `job restart <id>` · `job replan <id>` · `job fail <id> --reason t` | keeper commands (loops.md §7): enqueue a request row applying the corresponding `JobEvent` (`KeeperNudge|KeeperRestart|KeeperReplan|KeeperFail`); exit 4 if the job's state does not allow it. |
 | `job cancel <id>` | any non-terminal → `cancelled`; stops the run, releases the ownership lock (worktree and branch are kept on disk for inspection). Dependents stay `pending`; `vowp job ls` flags them `blocked-by-cancelled`. |
 
 ### `vowp graph [--mermaid] [--export <file.yaml>] [--import <file.yaml>] [--all]`
@@ -91,7 +91,7 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is an ali
 | `session show <id> [--capsule] [--events <n>] [--lineage]` | metadata, executor history (`session.executor` events), switches, last capsule; `--events n` prints the last n events pretty |
 | `session new [--title t] [--executor <exec>] [--cwd dir] [--node n]` | creates an interactive session (role `user`), prints its id (used by `chat`) |
 | `session chat <id> [--executor <exec>]` | interactive loop on stdin/stdout: each line is a user turn (`SessionOps::run_turn`, streaming assistant text, tool calls shown as `· tool: <name>`); slash commands `/switch <harness:model[@e][#v]> [--node n]`, `/capsule`, `/export <file>`, `/events [n]`, `/quit`. Exits 6 on an unswitched limit with the hint to `/switch`. Non-TTY stdin: reads turns until EOF (scriptable). |
-| `session switch <id> --to <executor> [--node <n>] [--reason user\|limit\|…] [--no-seed-tail] [--force]` | runs the switch protocol (`sessions.md` §5): prints the capsule path and the new executor; exit 6 if the target provider is limited, 4 if the session is running a turn and `--force` is not given |
+| `session switch <id> --to <executor> [--node <n>] [--reason user\|limit\|…] [--no-seed-tail] [--force]` | runs the switch protocol (`sessions.md` §5): prints the capsule path and the new executor; `--no-seed-tail` sets `SwitchRequest.seed_tail=false`; exit 6 if the target provider is limited, 4 if the session is running a turn and `--force` is not given |
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
 | `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
 | `session import <file> [--node n] [--executor <exec>] [--cwd <dir>]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached |
@@ -106,7 +106,7 @@ Pretty line format: `HH:MM:SS #seq type  summary` e.g. `19:30:12 #6 tool.call  s
 `ask` creates an item (used by planner/keeper agents and scripts; with `--job` the job is parked with `parked(Question)` for kinds `question|approval`, never for `notice`; prints the item id). `ls` lists open items (`ID KIND JOB TITLE AGE`); `--all` includes answered. `answer` stores the answer, sets `answered`, and (for an item with `job_id`) moves the parked job to `ready` on the next tick (`loops.md` §9). `--approve/--reject` are shorthand answers `approve`/`reject` valid for `approval` items. Exit 4 if already answered.
 
 ### `vowp cost [--by job|role|provider|model|day] [--since <dur\|date>] [--job id]`
-Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `receipt`, `price-table`, `unknown` or `mixed`. Unknown costs are shown as `?` and counted separately (never as 0). JSON: `{"by":"job","rows":[{"key":"n04-graph","runs":3,"usd":0.42,"tokens":{…},"source":"receipt"}],"total":{…}}`.
+Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `receipt`, `price-table`, `unknown` or `mixed`, derived from `CostRow.receipt_entries`/`price_table_entries`/`unknown_entries`: one source present → that source, more than one → `mixed`. Unknown costs are shown as `?` and counted separately (never as 0). JSON: `{"by":"job","rows":[{"key":"n04-graph","runs":3,"usd":0.42,"tokens":{…},"source":"receipt"}],"total":{…}}`.
 
 ### `vowp node add <name> <ssh-target> · ls · rm <name>`
 `add` records the node and tests `ssh -o BatchMode=yes <target> vowp --version` (stores the result in `capabilities`; failure is a warning unless `--strict`). `ls`: `NAME TARGET LOCAL LAST_SEEN VERSION`.

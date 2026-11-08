@@ -836,14 +836,19 @@ pub struct Project { pub name: ProjectName, pub path: String, pub remote_url: Op
 pub enum LoopKind { L1, L2, L3, L4, L5, L6, L7, L8, L9 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)] #[serde(rename_all = "snake_case")]
 pub enum ActiveState { Active, Paused }
-/// Per-loop bounds (stored in loops.bounds_json). Unused fields are omitted.
+/// Per-loop bounds (stored in loops.bounds_json). Unused fields are omitted. Fix rounds are per job:
+/// `JobLoop.max_attempts` is the single fix-round bound, not a loop setting.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LoopBounds {
     #[serde(skip_serializing_if = "Option::is_none")] pub max_continues: Option<u32>,      // L2 (default 2)
-    #[serde(skip_serializing_if = "Option::is_none")] pub max_fix_rounds: Option<u32>,     // L3 (default 3)
-    #[serde(skip_serializing_if = "Option::is_none")] pub stall_minutes: Option<u32>,      // L1 (default 20; 8 if the run printed nothing)
+    #[serde(skip_serializing_if = "Option::is_none")] pub stall_minutes: Option<u32>,      // L1 (default 20)
+    #[serde(skip_serializing_if = "Option::is_none")] pub silent_minutes: Option<u32>,     // L1, run printed no output (default 8)
+    #[serde(skip_serializing_if = "Option::is_none")] pub max_hang_restarts: Option<u32>,  // L2 (default 3)
     #[serde(skip_serializing_if = "Option::is_none")] pub same_action_max: Option<u32>,    // no-progress repeat bound (default 3)
     #[serde(skip_serializing_if = "Option::is_none")] pub probe_interval_minutes: Option<u32>, // L6 (default 15)
+    #[serde(skip_serializing_if = "Option::is_none")] pub planner_min_gap_minutes: Option<u32>, // L4/L5 (default 5)
+    #[serde(skip_serializing_if = "Option::is_none")] pub idle_gap_minutes: Option<u32>,   // L4 (default 15)
+    #[serde(skip_serializing_if = "Option::is_none")] pub checkpoint_minutes: Option<u32>, // L1 board/reports (default 120)
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Loop { pub name: String, pub kind: LoopKind, pub project: Option<ProjectName>, pub interval_secs: u64,
@@ -889,7 +894,7 @@ pub struct Release { pub id: ReleaseId, pub project: ProjectName, pub env: Strin
                      pub note: String, pub created_at: Timestamp, pub finished_at: Option<Timestamp> }
 ```
 
-Schedule JSON: `{"kind":"loop","loop_name":"l4-planner"}`; command: `{"kind":"command","argv":["vowp","backup"],"timeout_secs":1800}`.
+`ScheduleAction` JSON: `{"kind":"loop","loop_name":"l4-planner"}`; command: `{"kind":"command","argv":["vowp","backup"],"timeout_secs":1800}`. A full `Schedule` example is in §15 (`schedule.json`).
 
 ---
 
@@ -1067,14 +1072,16 @@ pub trait SessionOps: Send + Sync {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewSession { pub project: Option<ProjectName>, pub job_id: Option<JobId>, pub role: SessionRole, pub title: String,
-                        pub cwd: std::path::PathBuf, pub parent: Option<SessionId> }
+                        pub cwd: std::path::PathBuf, pub parent: Option<SessionId>,
+                        #[serde(default)] pub executor: Option<Executor> /* initial executor; `vowp session new --executor` */ }
 #[derive(Debug, Clone)]
 pub struct TurnRequest { pub session_id: SessionId, pub executor: ExecutorRef, pub purpose: RunPurpose, pub role: RunRole,
                          pub job_id: Option<JobId>, pub prompt: String, pub profile: Option<String>, pub rung: u32,
                          pub window: Option<String>, pub timeout: Option<std::time::Duration> }
 pub struct TurnResult { pub run_id: RunId, pub summary: RunSummary }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]   // Serialize/Deserialize/PartialEq are required: `vowp_core::requests::Request::SwitchSession` embeds it
-pub struct SwitchRequest { pub session_id: SessionId, pub to: ExecutorRef, pub reason: SwitchReason, pub drain_secs: u64 /* 5 */ }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SwitchRequest { pub session_id: SessionId, pub to: ExecutorRef, pub reason: SwitchReason, pub drain_secs: u64 /* 5 */,
+                           #[serde(default = "default_true")] pub seed_tail: bool /* true: seed includes the last tail_turns; false: capsule only (`--no-seed-tail`) */ }
 /// Cooperative cancellation shared between supervisor and runner threads (Arc<AtomicBool> inside).
 #[derive(Clone, Default)] pub struct CancelToken(/* Arc<AtomicBool> */);
 impl CancelToken { pub fn cancel(&self); pub fn is_cancelled(&self) -> bool; }
@@ -1147,4 +1154,37 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
  "guards":[{"name":"clean_tree","passed":true,"detail":""},{"name":"head_equals_remote","passed":true,"detail":"abc1234"}],
  "snapshot_path":"/home/dev/.vowp/banks/prod-20261108.tar","rollback_cmd":"./scripts/rollback.sh /home/dev/.vowp/banks/prod-20261108.tar",
  "probe":{"status":200},"approved_by":"owner","rolled_back_by":null,"note":"","created_at":"2026-11-08T23:12:00.000Z","finished_at":"2026-11-08T23:14:00.000Z"}
+```
+
+`Schedule` (`schedule.json`):
+
+```json
+{"id":"01KA1V60H8M2P5Q7R9S1T3V5W7","project":"vowp","name":"morning-report","spec_kind":"cron","spec":"0 7 * * 1-5","tz":"+02:00",
+ "action":{"kind":"loop","loop_name":"l4-planner"},"missed_policy":"run_once","state":"active","last_run_at":null,
+ "next_run_at":"2026-11-09T05:00:00.000Z","last_status":"ok","created_at":"2026-11-08T19:00:00.000Z"}
+```
+
+`GateResult` (`gate_result.json`):
+
+```json
+{"id":42,"job_id":"n04-graph","run_id":null,"attempt":0,"gate_index":1,
+ "gate":{"cmd":{"run":"cargo test -p vowp-graph","expect_exit":0,"expect_pattern":null,"timeout_secs":1800,"cwd":null}},
+ "passed":true,"evidence":{"kind":"cmd","command":"cargo test -p vowp-graph","exit_code":0,"timed_out":false,
+ "tail":"test result: ok. 31 passed","duration_ms":41234},"output_blob":null,"duration_ms":41234,"ts":"2026-11-08T20:03:00.000Z"}
+```
+
+`Worker` (`worker.json`):
+
+```json
+{"node":"vps","slot":1,"kind":"worker","state":"busy","run_id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"n04-graph",
+ "window":"job-n04-graph","updated_at":"2026-11-08T20:05:00.000Z"}
+```
+
+`Switch` (`switch.json`):
+
+```json
+{"id":"01KA1V70J9N3Q6R8S0T2V4W6X8","session_id":"01KA1V0Z7A0000000000000000",
+ "from_executor":"claude-code:claude-sonnet-5-5@medium","to_executor":"opencode:deepseek/deepseek-flash#max",
+ "from_node":"local","to_node":"vps","capsule_id":"cap_01KA1V2B000000000000000000","reason":"limit","state":"completed","error":null,
+ "started_at":"2026-11-08T19:41:03.000Z","ended_at":"2026-11-08T19:41:08.000Z","at_seq":142}
 ```

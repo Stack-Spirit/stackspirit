@@ -121,14 +121,13 @@ Tests (n07a, `tests/requests.rs`): `request_wire_form_matches_loops_md_for_every
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]   // wire form = the kv value: {"kind":"retry_job","payload":{"job":"n04-graph","reset_attempts":false}}
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]   // wire form = the kv value: {"kind":"retry_job","payload":{"job":"n04-graph"}}
 pub enum Request {
     ResolveJob { job: JobId },                       // parked -> ready (Resolved, T31); used by `vowp job retry` on a parked job
     RunLoop { name: String },                        // run that loop's step on the next tick (schedules, `Loop` action)
-    RetryJob { job: JobId, reset_attempts: bool }, ParkJob { job: JobId, reason: String }, CancelJob { job: JobId },
-    NudgeJob { job: JobId, text: Option<String> }, RestartJob { job: JobId }, ReplanJob { job: JobId }, FailJob { job: JobId, reason: String },   // keeper commands (loops.md §7)
+    RetryJob { job: JobId }, ParkJob { job: JobId, reason: String }, CancelJob { job: JobId },
+    NudgeJob { job: JobId }, RestartJob { job: JobId }, ReplanJob { job: JobId }, FailJob { job: JobId, reason: String },   // keeper commands (loops.md §7)
     AnswerInbox { id: InboxId }, PauseLoop { name: String }, ResumeLoop { name: String },
-    SwitchSession { request: SwitchRequest },        // not used by v0.1 CLI (switch runs inline); reserved
     Wake,
 }
 /// Stored as kv `req:<ULID>` = `serde_json::to_string(req)`; the store's `push_request(kind, payload)` receives `kind`/`payload` split from that JSON (so store and core agree byte-for-byte).
@@ -176,9 +175,9 @@ pub mod bundle {
     pub struct Bundle { /* fields per sessions.md §6.1 */ }
     pub fn export(deps: &Deps, session: &SessionId, tail: usize) -> Result<Bundle, CoreError>;
     pub fn to_json(b: &Bundle) -> Result<String, CoreError>;  pub fn from_json(s: &str) -> Result<Bundle, CoreError>;  // verifies checksum + format
-    pub fn import(deps: &Deps, b: &Bundle, executor: Option<ExecutorRef>) -> Result<SessionId, CoreError>;                // child session
+    pub fn import(deps: &Deps, b: &Bundle, executor: Option<ExecutorRef>, cwd: Option<&std::path::Path>) -> Result<SessionId, CoreError>;   // child session; cwd = `vowp session import --cwd`
 }
-pub mod importer { /* optional (nice-to-have): ClaudeTranscriptImporter::scan_once(dir) -> ImportReport, read-only, incremental by byte offset */ }
+pub mod importer { /* optional (nice-to-have): ClaudeTranscriptImporter::scan_once(dir) -> ImportReport, read-only, incremental by byte offset; parses each transcript file with vowp_adapters::claude_code::import_transcript(path, tz_offset_minutes) (crates/vowp-adapters.md §5) */ }
 ```
 
 Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode", FakeAdapter)` where `FakeAdapter` replays a fixture through the real `Adapter` trait — defined in `crates/vowp-core/tests/support/fake_adapter.rs`, built by n07a, copied by later jobs):
@@ -261,7 +260,7 @@ impl ScheduleEngine {
     pub fn new(deps: Deps) -> Self;
     pub fn sync_from_config(&self, store: &Store, cfg: &VowpConfig) -> Result<(), CoreError>;       // upsert [[schedules]] rows by name; compute next_run_at
     pub fn catch_up(&self, store: &Store, now: Timestamp) -> Result<Vec<DueRun>, CoreError>;        // startup: missed runs per missed_policy (run_once → one DueRun, skip → none) and re-arm
-    pub fn tick(&self, store: &Store, now: Timestamp) -> Result<Vec<DueRun>, CoreError>;            // due rows; advances next_run_at BEFORE firing (idempotency key = schedule id + due time)
+    pub fn tick(&self, store: &Store, now: Timestamp) -> Result<Vec<DueRun>, CoreError>;            // due rows; advances last_run_at/next_run_at BEFORE firing (idempotency key = schedule id + due time); `fire` writes the ledger row before the action (loops.md §11)
     pub fn fire(&self, store: &Store, due: &DueRun) -> Result<FireOutcome, CoreError>;               // JobTemplate -> insert job (suffix -yyyymmddhhmm); Loop -> push Request::Wake + loops.next_run_at=now; Command -> CommandRunner
 }
 pub struct DueRun { pub schedule: Schedule, pub due_at: Timestamp }

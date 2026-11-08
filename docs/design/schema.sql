@@ -221,7 +221,7 @@ CREATE TABLE capsules (
   version      INTEGER NOT NULL DEFAULT 1,           -- capsule schema version
   trigger      TEXT NOT NULL CHECK (trigger IN ('switch','manual','turn_end','limit','context','export','job_end')),
   author       TEXT,                    -- executor string of the model that wrote it
-  path         TEXT NOT NULL,           -- sessions/<id>/capsules/<at_seq>-<ulid>.json (authoritative copy)
+  path         TEXT NOT NULL,           -- sessions/<id>/capsules/<at_seq:010>-<ulid>.json (at_seq zero-padded to 10 digits; authoritative copy)
   body_json    TEXT NOT NULL CHECK (json_valid(body_json)),   -- cached copy of the file
   created_at   TEXT NOT NULL
 ) STRICT;
