@@ -1,23 +1,14 @@
-//! The `vowp` command-line binary.
+//! The `vowp` binary.
+//!
+//! Everything except argument wiring lives in `vowp-cli`'s library so commands are tested
+//! in-process. Spec: `docs/design/crates/vowp-cli.md` §1.
+
+#![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-
-    match args.next().as_deref() {
-        Some("--version" | "-V") => {
-            println!("vowp {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
-        }
-        Some(command) => {
-            eprintln!("vowp: unknown command `{command}`");
-            eprintln!("usage: vowp --version");
-            ExitCode::from(2)
-        }
-        None => {
-            eprintln!("usage: vowp --version");
-            ExitCode::from(2)
-        }
-    }
+    let mut io = vowp_cli::RealIo::new();
+    let code = vowp_cli::run(std::env::args().collect(), &mut io);
+    ExitCode::from(u8::try_from(code).unwrap_or(1))
 }

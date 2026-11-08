@@ -1228,9 +1228,18 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "toml",
+ "vowp-adapters",
  "vowp-core",
+ "vowp-graph",
  "vowp-protocol",
+ "vowp-store",
+ "vowp-tmux",
 ]
 
 [[package]]
