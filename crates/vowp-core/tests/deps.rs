@@ -162,9 +162,9 @@ fn system_runner_times_out_and_kills_process_group() {
     let started = tmp.path().join("started");
     let survived = tmp.path().join("survived");
     let script = format!(
-        "(sleep 0.6; printf survived > '{}') & printf started > '{}'; wait",
-        survived.display(),
-        started.display()
+        "printf started > '{}'; (sleep 3; printf survived > '{}') & wait",
+        started.display(),
+        survived.display()
     );
 
     let output = SystemRunner
@@ -173,7 +173,7 @@ fn system_runner_times_out_and_kills_process_group() {
             argv: Vec::new(),
             cwd: Some(tmp.path().to_path_buf()),
             env: Vec::new(),
-            timeout: Duration::from_millis(150),
+            timeout: Duration::from_secs(1),
         })
         .unwrap();
 
@@ -185,7 +185,7 @@ fn system_runner_times_out_and_kills_process_group() {
         output.duration
     );
     assert!(started.exists(), "the command never started");
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(Duration::from_secs(3));
     assert!(
         !survived.exists(),
         "the background child survived; the process group was not killed"
@@ -372,6 +372,24 @@ fn deps_open_store_creates_the_node_database() {
     let store = deps.open_store().unwrap();
     assert_eq!(store.schema_version().unwrap(), 1);
     assert!(tmp.path().join("vowp.db").is_file());
+}
+
+#[test]
+fn deps_open_store_uses_injected_clock() {
+    let tmp = tempdir().unwrap();
+    let fake_time = Timestamp::parse("2026-12-24T05:06:07Z").unwrap();
+    let mut deps = test_deps(tmp.path());
+    deps.clock = Arc::new(FakeClock::at(fake_time));
+    let store = deps.open_store().unwrap();
+
+    assert_eq!(store.clock().now(), fake_time);
+    store.push_request("wake", &serde_json::json!({})).unwrap();
+    let drained = store.take_requests().unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0].created_at, fake_time,
+        "store rows must be stamped by the injected clock"
+    );
 }
 
 #[test]

@@ -186,9 +186,12 @@ fn log_dropped(store: &Store, id: &RequestId, kind: &str, error: &CoreError) -> 
 }
 
 /// Applies one state-machine event and the effects that touch the job row.
+///
+/// The state change, counter updates and the ledger `state` row are written in one transaction.
 fn apply_job_event(store: &Store, job_id: &JobId, event: &JobEvent, note: Option<String>) -> Result<(), CoreError> {
     let job = store.require_job(job_id)?;
     let outcome = transition(&job, event)?;
+    let event_name = event_name(event);
 
     let mut attempts = job.attempts;
     let mut continues = job.continues;
@@ -225,7 +228,7 @@ fn apply_job_event(store: &Store, job_id: &JobId, event: &JobEvent, note: Option
     }
 
     store.transaction(|tx| {
-        tx.set_job_state(
+        let from = tx.set_job_state(
             job_id,
             outcome.to,
             &StateChange {
@@ -236,9 +239,61 @@ fn apply_job_event(store: &Store, job_id: &JobId, event: &JobEvent, note: Option
         if counters_changed {
             tx.set_job_counters(job_id, Some(attempts), Some(continues), Some(hang_restarts))?;
         }
+        let entry = LedgerEntry {
+            id: None,
+            ts: tx.clock().now(),
+            kind: LedgerKind::State,
+            project: Some(job.project.clone()),
+            job_id: Some(job_id.clone()),
+            run_id: None,
+            session_id: None,
+            role: None,
+            provider: None,
+            harness: None,
+            model: None,
+            cost: None,
+            summary: format!("{job_id}: {} -> {} ({event_name})", from.as_str(), outcome.to.as_str()),
+            detail: serde_json::json!({
+                "from": from.as_str(),
+                "to": outcome.to.as_str(),
+                "why": event_name,
+            }),
+        };
+        tx.append_ledger(&entry)?;
         Ok(())
     })?;
     Ok(())
+}
+
+/// Returns the canonical event name used in ledger `state` summaries.
+fn event_name(event: &JobEvent) -> String {
+    match event {
+        JobEvent::NeedsSatisfied => "NeedsSatisfied".to_owned(),
+        JobEvent::Dispatched => "Dispatched".to_owned(),
+        JobEvent::ReportReady => "ReportReady".to_owned(),
+        JobEvent::RunEndedNoReport => "RunEndedNoReport".to_owned(),
+        JobEvent::RunRateLimited { .. } => "RunRateLimited".to_owned(),
+        JobEvent::Stalled { silent } => format!("Stalled({silent})"),
+        JobEvent::KeeperNudge { .. } => "KeeperNudge".to_owned(),
+        JobEvent::KeeperRestart => "KeeperRestart".to_owned(),
+        JobEvent::KeeperReplan => "KeeperReplan".to_owned(),
+        JobEvent::KeeperFail => "KeeperFail".to_owned(),
+        JobEvent::GatesPassed => "GatesPassed".to_owned(),
+        JobEvent::GatesFailed => "GatesFailed".to_owned(),
+        JobEvent::VerifyPassed => "VerifyPassed".to_owned(),
+        JobEvent::VerifyFailed => "VerifyFailed".to_owned(),
+        JobEvent::FixDone { kind } => format!("FixDone({kind:?})"),
+        JobEvent::FixFailed => "FixFailed".to_owned(),
+        JobEvent::VerifierFailed => "VerifierFailed".to_owned(),
+        JobEvent::MergeSucceeded => "MergeSucceeded".to_owned(),
+        JobEvent::MergeConflict => "MergeConflict".to_owned(),
+        JobEvent::MergeChecksFailed => "MergeChecksFailed".to_owned(),
+        JobEvent::Blocked { .. } => "Blocked".to_owned(),
+        JobEvent::HumanPark => "HumanPark".to_owned(),
+        JobEvent::Resolved => "Resolved".to_owned(),
+        JobEvent::Retry => "Retry".to_owned(),
+        JobEvent::Cancel => "Cancel".to_owned(),
+    }
 }
 
 /// Resolves the parked job of an answered inbox item.

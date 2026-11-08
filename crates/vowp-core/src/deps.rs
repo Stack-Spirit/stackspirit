@@ -62,8 +62,9 @@ impl Deps {
     /// Opens a fresh store connection for the current thread.
     ///
     /// Each thread owns its connection: SQLite connections are not shared across threads.
+    /// The store stamps rows with this node's injected clock.
     pub fn open_store(&self) -> Result<Store, CoreError> {
-        Ok(Store::open(&self.paths)?)
+        Ok(Store::open(&self.paths)?.with_clock(self.clock.clone()))
     }
 }
 

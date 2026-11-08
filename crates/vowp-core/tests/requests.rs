@@ -353,6 +353,58 @@ fn apply_direct_retry_resolve_and_park() {
 }
 
 #[test]
+fn apply_direct_writes_state_ledger_row() {
+    let tmp = tempdir().unwrap();
+    let store = test_store(tmp.path());
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::at(now()));
+    let deps = test_deps(tmp.path(), clock, MemoryLog::new());
+    let project = insert_project(&store);
+
+    // Resolving a parked job writes one state row for the transition.
+    let resolve = insert_job(&store, &project, "resolve-ledger");
+    force_state(&store, &resolve, JobState::Parked);
+    apply_direct(
+        &deps,
+        &store,
+        &Request::ResolveJob {
+            job: resolve.id.clone(),
+        },
+    )
+    .unwrap();
+
+    let rows = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::State),
+            job_id: Some(resolve.id.clone()),
+            ..LedgerFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one transition must write exactly one state row");
+    let row = &rows[0];
+    assert_eq!(row.kind, LedgerKind::State);
+    assert_eq!(row.ts, now());
+    assert_eq!(row.project.as_ref(), Some(&project));
+    assert_eq!(row.job_id.as_ref(), Some(&resolve.id));
+    assert_eq!(row.summary, "resolve-ledger: parked -> ready (Resolved)");
+    assert_eq!(row.detail, json!({"from": "parked", "to": "ready", "why": "Resolved"}));
+
+    // Retry is a second transition and carries its own event name.
+    let retry = insert_job(&store, &project, "retry-ledger");
+    force_state(&store, &retry, JobState::Failed);
+    apply_direct(&deps, &store, &Request::RetryJob { job: retry.id.clone() }).unwrap();
+    let rows = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::State),
+            job_id: Some(retry.id.clone()),
+            ..LedgerFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].summary, "retry-ledger: failed -> ready (Retry)");
+    assert_eq!(rows[0].detail, json!({"from": "failed", "to": "ready", "why": "Retry"}));
+}
+
+#[test]
 fn apply_direct_handles_every_other_kind() {
     let tmp = tempdir().unwrap();
     let store = test_store(tmp.path());
