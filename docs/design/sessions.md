@@ -203,17 +203,19 @@ Records an interactive Claude Code session into the canonical store without runn
 
 ## 8. Named tests (consumers)
 
-Defined in the owning crate docs: log/blob/reindex tests in `crates/vowp-store.md` §6; `capsule_*`, `switch_*`, `export_*`, `import_*` in `crates/vowp-core.md` (session module). The protocol-level requirements those tests must cover:
+The tests live in `crates/vowp-store.md` §6 (log, blob, reindex) and `crates/vowp-core.md` §3 (session module); those files are the **only** place test names are defined. The table maps each requirement of this document to the exact test name that must prove it:
 
-| Test | Asserts |
-|---|---|
-| `capsule_prompt_contains_schema_and_events` | the filled template includes the CapsuleDraft schema, previous capsule JSON, and every non-reasoning event within `max_input_chars` |
-| `capsule_compaction_keeps_first_user_and_last_20` | oversize input drops tool results first, never the first user message or the last 20 events |
-| `capsule_repair_once_then_error_keeps_previous` | fake capsule executor returns garbage twice → `CapsuleInvalid`, previous capsule unchanged, `error` event appended; garbage then valid → success with exactly 2 runs |
-| `capsule_debounce_120s` | second `turn_end` capsule within 120 s returns the existing one; `switch` trigger ignores the debounce (uses `FakeClock`) |
-| `switch_happy_path_events_and_rows` | order of events `turn.ended`, `capsule`, `session.executor(detach)`, `session.executor(attach)`, `switch`; `switches.state=completed`; session executor = target |
-| `switch_target_probe_failure_aborts` | fake adapter `probe` not ok → session unchanged, `switches.state=aborted`, `error` event |
-| `switch_crash_recovery` | simulate crash after step 7 (attach written, no `switch` event): startup recovery writes the missing `switch` event and completes; crash before step 6 → aborted |
-| `export_import_roundtrip` | export a 30-event session, import into a second temp node: child has `parent_session_id`, 4 setup events, capsule validates, seed text contains the capsule intent and last 2 turns |
-| `import_rejects_tampered_bundle` | flip one byte in `tail` → `checksum mismatch`; `format: "vowp-bundle-v2"` → unknown format; no session created |
-| `export_inlines_only_small_blobs` | 60 KB blob inlined, 70 KB blob not |
+| Requirement (this document) | Exact test name | Crate |
+|---|---|---|
+| §3 prompt contains schema, previous capsule and in-budget events | `capsule_prompt_golden` | core |
+| §3 compaction keeps the first user message and the last 20 events, drops tool results first | `capsule_compaction_keeps_first_user_and_last_20` | core |
+| §3 one repair attempt then success (exactly 2 capsule runs) | `capsule_write_repairs_once_then_ok` | core |
+| §3 second invalid output keeps the previous capsule and appends an `error` event | `capsule_write_twice_invalid_keeps_previous_and_logs_error_event` | core |
+| §3 debounce 120 s, exempt triggers | `capsule_debounce_120s_except_manual_switch_limit_export` | core |
+| §5 happy-path event order and rows | `switch_happy_path_events_rows_and_lineage` | core |
+| §5 target probe fails → session unchanged, switch aborted | `switch_target_probe_fails_stays_on_source` | core |
+| §5 crash recovery (never attached → aborted; attached → completed) | `recover_started_switch_never_attached_is_aborted`, `recover_started_switch_attached_is_completed` | core |
+| §6 export → import round trip (child session, 4 setup events, seed text) | `bundle_export_import_roundtrip_child_session` | core |
+| §6 tampered bundle / unknown format rejected, nothing created | `bundle_checksum_mismatch_rejected`, `bundle_unknown_format_rejected` | core |
+| §6 only blobs ≤ 64 KiB inlined (60 KB yes, 70 KB no) | `bundle_inlines_small_blobs_only` | core |
+| §1 log, blob and reindex rules | the `log_*`, `blob_*`, `reindex_*` tests of vowp-store.md §6 | store |

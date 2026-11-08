@@ -346,7 +346,7 @@ pub struct BlobRef { pub sha256: String, pub bytes: u64, pub preview: String /* 
 pub struct SessionCreated {
     pub title: String, pub cwd: String,
     #[serde(default)] pub project: Option<ProjectName>, #[serde(default)] pub job_id: Option<JobId>,
-    #[serde(default)] pub role: Option<Role>, #[serde(default)] pub parent_session_id: Option<SessionId>,
+    #[serde(default)] pub role: Option<SessionRole>, #[serde(default)] pub parent_session_id: Option<SessionId>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)] #[serde(rename_all = "snake_case")]
 pub enum AttachAction { Attach, Detach }
@@ -1065,12 +1065,15 @@ pub trait SessionOps: Send + Sync {
     fn switch(&self, req: SwitchRequest) -> Result<Switch, ServiceError>;
     fn write_capsule(&self, session: &SessionId, trigger: CapsuleTrigger) -> Result<Capsule, ServiceError>;
 }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewSession { pub project: Option<ProjectName>, pub job_id: Option<JobId>, pub role: SessionRole, pub title: String,
                         pub cwd: std::path::PathBuf, pub parent: Option<SessionId> }
+#[derive(Debug, Clone)]
 pub struct TurnRequest { pub session_id: SessionId, pub executor: ExecutorRef, pub purpose: RunPurpose, pub role: RunRole,
                          pub job_id: Option<JobId>, pub prompt: String, pub profile: Option<String>, pub rung: u32,
                          pub window: Option<String>, pub timeout: Option<std::time::Duration> }
 pub struct TurnResult { pub run_id: RunId, pub summary: RunSummary }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]   // Serialize/Deserialize/PartialEq are required: `vowp_core::requests::Request::SwitchSession` embeds it
 pub struct SwitchRequest { pub session_id: SessionId, pub to: ExecutorRef, pub reason: SwitchReason, pub drain_secs: u64 /* 5 */ }
 /// Cooperative cancellation shared between supervisor and runner threads (Arc<AtomicBool> inside).
 #[derive(Clone, Default)] pub struct CancelToken(/* Arc<AtomicBool> */);
@@ -1090,3 +1093,58 @@ pub fn schema_for_name(name: &str) -> Option<serde_json::Value>;
 ```
 `vowp schema [name]` prints them. A test checks that every `types.md` example JSON validates against its schema (examples are
 copied into `crates/vowp-protocol/tests/fixtures/*.json`).
+
+---
+
+## 15. More JSON examples (fixtures)
+
+Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and validated against its schema by `types_md_examples_validate`
+(round trip: deserialize → serialize → equal `serde_json::Value`).
+
+`Profile` (`profile.json`) and `Edge` / `EdgeKind` (`edge.json`):
+
+```json
+{"ladder":["claude-code:claude-sonnet-5-5@medium","opencode:deepseek/deepseek-flash#max"],"on_quota":"next_then_probe_back"}
+{"src":"n04-graph","dst":"n02c-protocol-domain","kind":"needs"}
+```
+
+`Run` (`run.json`):
+
+```json
+{"id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"n04-graph","session_id":"01KA1V0Z7A0000000000000000","role":"worker","purpose":"start","profile":"worker","rung":0,
+ "executor":"opencode:deepseek/deepseek-flash#max","provider":"deepseek","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly","pid":4242,
+ "window":"job-n04-graph","cwd":"/home/dev/vowp-night/wt/n04-graph","started_at":"2026-11-08T20:01:00.000Z","ended_at":"2026-11-08T20:19:30.000Z",
+ "exit_code":0,"outcome":"ok","limit_kind":null,"cost":{"usd":0.42,"tokens":{"input":81000,"output":9100,"reasoning":0,"cache_read":240000,"cache_write":0},"source":"receipt"},"detail":""}
+```
+
+`Session` (`session.json`):
+
+```json
+{"id":"01KA1V0Z7A0000000000000000","project":"vowp","job_id":null,"role":"user","title":"design chat","parent_session_id":null,"node":"local","cwd":"/home/user/project",
+ "state":"idle","executor":"claude-code:claude-sonnet-5-5@medium","last_seq":42,"last_capsule_id":null,"log_bytes":18311,
+ "created_at":"2026-11-08T19:30:00.000Z","updated_at":"2026-11-08T19:41:02.000Z"}
+```
+
+`InboxItem` (`inbox_item.json`):
+
+```json
+{"id":"01KA1V40F6J9M3N5P7Q9R1S3T5","project":"vowp","job_id":"n10a-promote-core","kind":"approval","title":"Promote abc1234 to prod?",
+ "body":"Guards passed; diff equals the intended change.","options":["approve","reject"],"state":"open","answer":null,"answered_by":null,
+ "created_at":"2026-11-08T23:10:00.000Z","answered_at":null}
+```
+
+`Loop` (`loop.json`):
+
+```json
+{"name":"l4-planner","kind":"L4","project":"vowp","interval_secs":1800,"state":"active","bounds":{"same_action_max":3},
+ "last_run_at":"2026-11-08T22:30:00.000Z","next_run_at":"2026-11-08T23:00:00.000Z","last_status":"ok","fail_streak":0,"updated_at":"2026-11-08T22:30:01.000Z"}
+```
+
+`Release` (`release.json`):
+
+```json
+{"id":"01KA1V50G7K1N4P6Q8R0S2T4V6","project":"vowp","env":"prod","change_ref":"abc1234","from_commit":"def5678","to_commit":"abc1234","state":"live",
+ "guards":[{"name":"clean_tree","passed":true,"detail":""},{"name":"head_equals_remote","passed":true,"detail":"abc1234"}],
+ "snapshot_path":"/home/dev/.vowp/banks/prod-20261108.tar","rollback_cmd":"./scripts/rollback.sh /home/dev/.vowp/banks/prod-20261108.tar",
+ "probe":{"status":200},"approved_by":"owner","rolled_back_by":null,"note":"","created_at":"2026-11-08T23:12:00.000Z","finished_at":"2026-11-08T23:14:00.000Z"}
+```

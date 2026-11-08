@@ -312,7 +312,7 @@ Graph
 - proptest `prop_topo_order_is_valid` — for random DAGs (≤ 30 jobs), every job appears once and after all jobs it needs.
 - proptest `prop_ready_jobs_matches_brute_force` — compare with a naive O(n²) implementation over random states.
 
-State machine (one test per table row of loops.md §2, named `t01_pending_needs_satisfied_to_ready` … `t34_parked_or_failed_keeper_replan_to_replanned`, `t35_run_rate_limited_delays_continue_without_counter_change`; plus `t33_cancel_keeps_worktree_and_stops_only_running` (rows T29–T33 are covered by `blocked_effects_depend_on_reason_and_state` and these); each builds a `Job` in the from-state with the guard inputs, calls `transition`, and asserts the exact `to` and the exact `effects` vector)
+State machine (one test per table row of loops.md §2, named `t01_pending_needs_satisfied_to_ready` … `t12_stalled_keeper_replan_to_replanned`, `t34_parked_or_failed_keeper_replan_to_replanned`, `t35_run_rate_limited_delays_continue_without_counter_change`; plus `t33_cancel_keeps_worktree_and_stops_only_running` (rows T29–T33 are covered by `blocked_effects_depend_on_reason_and_state` and these); each builds a `Job` in the from-state with the guard inputs, calls `transition`, and asserts the exact `to` and the exact `effects` vector)
 - `t04_t05_continue_guard_boundary` — `continues=1` → T4, `continues=2` → T5.
 - `t08_t09_hang_restart_boundary` — `hang_restarts=2` → T8, `3` → T9.
 - `t17_t18_attempts_boundary_and_on_exhausted_variants` — three `on_exhausted` values produce the three documented outcomes.

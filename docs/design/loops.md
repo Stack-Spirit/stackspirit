@@ -13,14 +13,30 @@ sessions/switch are `sessions.md`. Numbers come from `night.py` where it worked 
 | outcome | `RunOutcome` of a finished run (types.md §9). |
 | rung | index into a profile's ladder. |
 
-### 1.1 L1 tick, exact order (`Supervisor::tick(&self)`)
+### 1.1 L1 tick, exact order (`Supervisor::tick(&mut self)`)
 
 Each step is wrapped so one failing step logs, records `loops.last_status`, bumps `fail_streak`, and does not skip later steps.
 All time from `Clock`.
 
 0. **Pause + requests.** If `kv['paused']='1'`, do only steps 0, 1, 12, 13 (no dispatch, no merges, no planner). Read and apply `req:*` rows
-   (`retry` → `JobEvent::Retry`, `park` → `HumanPark`, `cancel` → `Cancel`, `resolve` → `Resolved`, `pause|resume` → set `loops.state`,
-   `run_loop` → mark that loop due now). Delete each after applying; log a ledger `state` entry.
+   per the `Request` kinds of crates/vowp-core.md §2 (kv value `{"kind","payload"}`), **every** kind handled:
+
+   | `kind` | Applied as |
+   |---|---|
+   | `retry_job` | state-dependent: `failed` → `JobEvent::Retry` (T32; `reset_attempts` also zeroes `attempts`), `stalled` → `KeeperRestart` (T11); otherwise rejected (logged) |
+   | `resolve_job` | `Resolved` (T31) |
+   | `park_job` | `HumanPark` (T30) with `parked_reason=Manual`, note = reason |
+   | `cancel_job` | `Cancel` (T33) |
+   | `nudge_job` | `KeeperNudge` (T10); `text` is appended to the continue prompt |
+   | `restart_job` | `KeeperRestart` (T11) |
+   | `replan_job` | `KeeperReplan` (T12/T34) |
+   | `fail_job` | `KeeperFail` (T13); note = reason |
+   | `answer_inbox` | `l7::on_answer` (§9: resolves the item, sends `Resolved` to the parked job) |
+   | `pause_loop` / `resume_loop` | set `loops.state` (never `l1-supervisor`) |
+   | `run_loop` | mark that loop due now (`next_run_at = now`) |
+   | `wake` | no-op; only ends the idle wait early |
+
+   An event the state machine rejects (`InvalidTransition`) is logged and dropped, never retried. Delete each row after applying; log a ledger `state` entry. Test: `request_rows_apply_every_kind_end_to_end` (core, n08c).
 1. **Reconcile open runs.** For every `runs` row with `ended_at IS NULL` owned by this node: if no live runner thread has it **and** its
    `pid` is not alive (`kill(pid,0)` equivalent via `/proc/<pid>` existence check; no `unsafe`) → the supervisor restarted or the child
    vanished. Kill the process group if the pid is alive but unowned (orphan), finalise the run with `outcome=crash`, `detail="orphaned at supervisor start"`,
@@ -73,7 +89,7 @@ Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means 
 | T9 | running | `Stalled{silent:true}` | `hang_restarts >= 3` | stalled | `StopRun`, `WakeKeeper` |
 | T10 | stalled | `KeeperNudge` | — | running | `ResetContinues`, `StartRun{Continue}` |
 | T11 | stalled | `KeeperRestart` | — | running | `ResetContinues`, `StartRun{Start}` |
-| T12 | stalled, failed | `KeeperReplan` | — | replanned | `WakePlanner` |
+| T12 | stalled | `KeeperReplan` | — | replanned | `WakePlanner` |
 | T13 | stalled | `KeeperFail` | — | failed | `NotifyInbox(Notice)`; for kind ∈ {Fix, Merge, Verify} also `NotifyParent` (delivers the child-failure event of the table below) |
 | T14 | gating | `GatesPassed` | job kind ∈ {Fix, Merge, Verify} | done | `NotifyParent`: parent = `fixes` dst (Fix/Merge) or `verifies` dst (Verify). Delivers `FixDone{kind}` for Fix/Merge; for Verify the caller parses the verify report and delivers `VerifyPassed` (`verdict: pass`) or `VerifyFailed` (`verdict: fail`) to the original (T19–T21). No `CleanupWorktree` (the parent owns the worktree). These kinds **never** reach `reviewing`/`merging` |
 | T15 | gating | `GatesPassed` | kind ∉ {Fix, Merge, Verify} and job has a `review` gate | reviewing | `StartVerify` |
@@ -111,7 +127,7 @@ Their `gates` = `[report, cmd gates of the original]` (no `review`, no `owns_res
 ## 3. L2 — the worker loop
 
 1. **Start.** Dispatch (step 8) resolves the executor from `Profile::pick` (rung), creates a session (`SessionOps::create_session`, role worker, title = job id), writes the brief if missing,
-   opens window `job-<id>` running `vowp session tail <session> --follow --pretty`, spawns a runner thread calling `SessionOps::run_turn` with the **start prompt**:
+   opens window `job-<id>` running `vowp __window job <id>` (a read-only pretty follower of the job's latest session), spawns a runner thread calling `SessionOps::run_turn` with the **start prompt**:
 
    ```text
    You are the worker for job {job_id} of project {project}. Your working directory is the job worktree {worktree} on branch {branch}.
@@ -127,7 +143,7 @@ Their `gates` = `[report, cmd gates of the original]` (no `review`, no `owns_res
    commit, and write the report. Do not announce next steps — do them. ({n} of 2 automatic continues used; after that a supervisor will diagnose.)
    ```
    If the provider changed since the last run (limit failover), the turn runs on a fresh native session seeded with the capsule (§8.4).
-3. **Fix prompt** (T17/T20/T27, `RunPurpose::Fix`, the fix job's brief is generated with the findings): 
+3. **Fix prompt** (T17/T20/T27, `RunPurpose::Fix`, the fix job's brief is generated with the findings):
 
    ```text
    Job {parent_id} failed its checks (round {attempt} of {max}). Findings:
@@ -232,8 +248,8 @@ Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per
 
 ### 8.3 Parking all jobs of a provider (credits and auth — one policy)
 Plan §11: credits exhausted ⇒ **park every job on that provider**; it is never a failover trigger (unlike `quota`). Algorithm:
-1. For each job in `{pending, ready, running, stalled}` whose profile's **current rung** (the rung it is running on, or `Profile::pick` for jobs not yet started) has `Executor::provider() == provider`: send `JobEvent::Blocked{Credits|Auth}` (T29). A job whose ladder happens to contain another rung is **still parked**: credits/auth never advance the ladder (the owner decides after topping up/logging in).
-2. Jobs whose current rung is on a different provider are untouched.
+1. For each job in `{pending, ready, running, stalled}` — this set **includes the verify/fix/merge child jobs** (they are ordinary `jobs` rows with their own profile, so a pending verify job of a `reviewing` original, or a fix job of a `fixing` original, is parked like any other) — whose profile's **current rung** (the rung it is running on, or `Profile::pick` for jobs not yet started) has `Executor::provider() == provider`: send `JobEvent::Blocked{Credits|Auth}` (T29). A job whose ladder happens to contain another rung is **still parked**: credits/auth never advance the ladder (the owner decides after topping up/logging in).
+2. Jobs whose current rung is on a different provider are untouched. Parents in `gating`, `reviewing`, `fixing` or `merging` hold no harness run of their own (they wait for command gates, the merge queue, or their child job), so T29 deliberately has no such source states: once their child is parked they simply keep waiting, and `Resolved` on the child resumes the flow. Command gates and the merge queue use no provider and are unaffected.
 3. One inbox item per provider/kind (dedupe on `title`), text: "credits exhausted for <provider>; top up and run `vowp inbox answer <id> resolved`" (auth: "log in again with the harness's own login, then `… resolved`").
 4. Resolution: `vowp inbox answer <id> resolved` deletes the `limits` row and sends `Resolved` (T31) to every job parked for that provider/reason.
 
@@ -267,13 +283,13 @@ Per provider the loop counts consecutive runs ended `error|crash` with **no** li
 
 ## 11. L9 — schedules
 
-1. **Dialects.** `spec_kind=cron`: standard 5-field `min hour dom mon dow`. The `cron` crate requires 6/7 fields (seconds first), so the loop **prefixes `"0 "`** before parsing (`Schedule` parsed with `cron::Schedule::from_str`); a 6/7-field string is accepted as is. `spec_kind=interval`: `every <n><s|m|h|d>` (e.g. `every 30m`), minimum 60 s. `tz`: `UTC` or a fixed offset `+HH:MM` in v0.1 (D-open-question 2).
+1. **Dialects.** `spec_kind=cron`: standard 5-field `min hour dom mon dow`. The `cron` crate requires 6/7 fields (seconds first), so the loop **prefixes `"0 "`** before parsing (`Schedule` parsed with `cron::Schedule::from_str`); only 5-field cron is accepted in v0.1 (any other field count is a `Config` error, in line with architecture.md §5.3 rule 3). `spec_kind=interval`: `every <n><s|m|h|d>` (e.g. `every 30m`), minimum 60 s. `tz`: `UTC` or a fixed offset `+HH:MM` in v0.1 (D-open-question 2).
 2. **Next-run computation** `next_after(schedule, t: Timestamp) -> Option<Timestamp>`: cron → first match strictly after `t` evaluated in the schedule's offset, converted back to UTC; interval → `anchor + k·period` with `anchor = created_at`, smallest `k` such that result `> t`.
 3. **Each tick (step 11)**, for every `active` schedule (and not `paused` loop `l9-schedules`):
    a. if `next_run_at IS NULL`: set it to `next_after(now)`; continue.
    b. if `next_run_at > now`: continue.
-   c. **Due.** `due = next_run_at`. Idempotency key `key = "<schedule_id>@<due>"`. If a ledger `schedule` row with `detail_json.key == key` exists → skip firing (already fired) and only advance. 
-   d. **Missed-run policy** (the node may have been down): lateness `late = now - due`. If `late <= 2 × tick_secs` → fire normally. Else if `missed_policy = run_once` → fire **once** (for the earliest missed `due`, not N times); `skip` → don't fire, ledger `schedule` row "skipped missed run". 
+   c. **Due.** `due = next_run_at`. Idempotency key `key = "<schedule_id>@<due>"`. If a ledger `schedule` row with `detail_json.key == key` exists → skip firing (already fired) and only advance.
+   d. **Missed-run policy** (the node may have been down): lateness `late = now - due`. If `late <= 2 × tick_secs` → fire normally. Else if `missed_policy = run_once` → fire **once** (for the earliest missed `due`, not N times); `skip` → don't fire, ledger `schedule` row "skipped missed run".
    e. Fire = execute the action (below), write the ledger `schedule` row **first** (with the key) and the action's effects after, in that order, so a crash between them cannot double-fire (worst case: a lost firing, logged on restart as "key present, action not confirmed" — v0.1 accepts at-most-once).
    f. Advance: `last_run_at=now`, `last_status`, `next_run_at = next_after(now)` (strictly in the future: all missed occurrences collapse).
 4. **Actions.** `JobTemplate{template}` → `Store::insert_job(template with id suffixed "-<yyyymmddhhmm>" of `due` UTC)`, `created_by="schedule:<id>"`, the job goes through the normal graph; `Loop{loop_name}` → mark the loop due now (a `run_loop` request); `Command{argv,cwd,timeout_secs}` → spawn without a shell, capture the last 200 lines into the ledger `detail_json`, exit ≠ 0 ⇒ `last_status="failed: exit N"` plus an inbox `notice` (once per schedule per day).

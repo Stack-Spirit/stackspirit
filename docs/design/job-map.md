@@ -60,7 +60,7 @@ Slice: types.md §11–14 + architecture.md §5.3 validation rules. Acceptance: 
 
 ### W1 — `vowp-tmux` (spec: `crates/vowp-tmux.md`)
 
-**n05-tmux** · build · 75 min · n01 · `crates/vowp-tmux/**`. Acceptance: all tests in the crate doc, run on a private socket; `source_has_no_respawn_or_send_keys` safety grep test.
+**n05-tmux** · build · 75 min · n01 · `crates/vowp-tmux/**` (starts from n01's `Cargo.toml`, removing its `vowp-protocol` dependency). Acceptance: all tests in the crate doc, run on a private socket; `source_has_no_respawn_or_send_keys` safety grep test.
 
 ### W2 — adapters shared (spec: `crates/vowp-adapters.md` §1–3, `adapters.md` §1, §5, §9)
 
@@ -82,7 +82,7 @@ Acceptance (names from `crates/vowp-store.md` §6): `schema_file_is_identical_to
 
 ### W3 — `vowp-graph` (spec: `crates/vowp-graph.md`, `loops.md` §2)
 
-**n04a-graph-core** · build · 75 min · n02c · `crates/vowp-graph/{Cargo.toml,src/{lib,error,graph,machine}.rs}`, placeholders, `tests/{machine_table,graph_props}.rs`. Acceptance: the `t01_…`–`t35_…` transition tests, `invalid_pairs_are_rejected_for_every_state`, `prop_transition_never_panics_and_is_pure`, `prop_terminal_states_accept_nothing`, `prop_ready_jobs_matches_brute_force`, `prop_topo_order_is_valid`, `graph_new_*` rejection tests, `ready_jobs_*` tests (names from `crates/vowp-graph.md` §9).
+**n04a-graph-core** · build · 75 min · n02c · `crates/vowp-graph/{Cargo.toml,src/{lib,error,graph,machine}.rs}`, placeholders, `tests/{machine_table,graph_props}.rs`. Acceptance: the `t01_…`–`t37_…` transition tests (including `t12_…`, `t13_…`, `t14_…`, `t24_…`, `t33_…`, `t35_…`, `t36_…`, `t37_…`), `invalid_pairs_are_rejected_for_every_state`, `prop_transition_never_panics_and_is_pure`, `prop_terminal_states_accept_nothing`, `prop_ready_jobs_matches_brute_force`, `prop_topo_order_is_valid`, `graph_new_*` rejection tests, `ready_jobs_*` tests (names from `crates/vowp-graph.md` §9).
 **n04b-graph-dispatch** · build · 75 min · n04a · `src/{owns,dispatch,render,yaml,guards}.rs`, `tests/{owns,dispatch_props,render,yaml,guards}.rs`. Acceptance: `overlap_table`, `overlap_dotdot_and_absolute_are_global`, `overlap_empty_owns_never_overlaps`, `literal_prefix_examples`, `prop_overlap_is_conservative`, `path_allowed_matches_glob_semantics`, `locks_*`, `dispatch_*`, `prop_dispatch_never_two_overlapping_owns`, `render_ascii_golden`, `render_mermaid_golden`, `yaml_*`, `stall_judge_*`, `repeat_guard_*`, `attempts_left_saturates`.
 
 ### W4 — `vowp-core` session (spec: `crates/vowp-core.md` §1–3, `sessions.md`, `adapters.md` §6)

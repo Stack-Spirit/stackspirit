@@ -27,7 +27,7 @@ vowp-protocol  ←  vowp-store, vowp-graph, vowp-tmux, vowp-adapters
                            vowp-cli   (core + all)
 ```
 
-`vowp-graph` and `vowp-tmux` depend only on `vowp-protocol` (graph) / nothing (tmux: plain `std`). `vowp-store` depends on
+`vowp-graph` depends only on `vowp-protocol`; `vowp-tmux` on nothing (plain `std` + `thiserror`; the n01 skeleton's `vowp-protocol` dependency in its `Cargo.toml` is removed by n05). `vowp-store` depends on
 `vowp-protocol` only. `vowp-adapters` on `vowp-protocol` only. Cycles are forbidden.
 
 ## 3. Dependencies per crate (add with `cargo add -p <crate> <dep>`; features as listed)

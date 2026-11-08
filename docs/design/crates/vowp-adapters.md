@@ -160,13 +160,73 @@ impl StreamParser for OpencodeParser {}
 ```rust
 /// Deserialised mapping file (adapters.md §4.1). `deny_unknown_fields` everywhere.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
-pub struct Mapping { pub name: String, pub provider: Option<String>, pub version_argv: Option<Vec<String>>,
+pub struct Mapping { pub name: String, #[serde(default)] pub provider: Option<String>, #[serde(default)] pub version_argv: Option<Vec<String>>,
     pub command: CommandSpec, #[serde(default)] pub output: OutputSpec, #[serde(default, rename = "map")] pub rules: Vec<MapRule>,
     #[serde(default)] pub limits: LimitSpec, #[serde(default)] pub cost: CostSpec, #[serde(default)] pub exit: ExitSpec }
-// CommandSpec{argv, prompt_via: PromptVia, resume_argv, model_flag, model_arg, env, cwd_flag}; PromptVia::{Stdin, Arg, Flag(String)} (parsed from "stdin"|"arg"|"flag:<f>")
-// OutputSpec{format: OutputFormat::{Jsonl,Text}, native_session_pointer, text_chunk_lines}; MapRule{match_: Match, emit: String, fields: BTreeMap<String,String>}
-// Match{pointer, equals: Option<String>, regex: Option<String>, exists: Option<bool>}; LimitSpec{credits,auth,quota,rate,context: Vec<String>, resets_at: Option<ResetSpec>, tz_offset_minutes}
-// CostSpec{usd_pointer, input_pointer, output_pointer, reasoning_pointer, cache_read_pointer, cache_write_pointer}; ExitSpec{ok: Vec<i32>, limit: Vec<i32>, error_from_stderr: bool}
+/// `[command]` table. (Distinct from `vowp_core::CommandSpec`; lives in `vowp_adapters::cli`.)
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct CommandSpec {
+    pub argv: Vec<String>,                                   // required, non-empty
+    #[serde(default)] pub prompt_via: PromptVia,             // default Arg
+    #[serde(default)] pub resume_argv: Option<Vec<String>>,  // contains "{native_id}" exactly once
+    #[serde(default)] pub model_flag: Option<String>,
+    #[serde(default)] pub model_arg: Option<String>,
+    #[serde(default)] pub env: Vec<String>,                  // env var NAMES
+    #[serde(default)] pub cwd_flag: Option<String>,
+}
+/// TOML string form: "stdin" | "arg" | "flag:<--prompt>".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PromptVia { Stdin, #[default] Arg, Flag(String) }
+impl PromptVia { pub fn parse(s: &str) -> Result<Self, AdapterError>; }   // + serde Deserialize via try_from = "String"
+
+/// `[output]` table.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct OutputSpec {
+    #[serde(default)] pub format: OutputFormat,                          // default Jsonl
+    #[serde(default)] pub native_session_pointer: Option<String>,
+    #[serde(default = "default_text_chunk_lines")] pub text_chunk_lines: u32,   // 20
+}
+impl Default for OutputSpec { /* Jsonl, None, 20 */ }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)] #[serde(rename_all = "snake_case")]
+pub enum OutputFormat { #[default] Jsonl, Text }
+
+/// One `[[map]]` rule. TOML key `match` is a Rust keyword, hence the rename.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct MapRule {
+    #[serde(rename = "match")] pub match_: Match,
+    pub emit: String,                                                    // an EventType string (allowed list: adapters.md §4.1)
+    #[serde(default)] pub fields: std::collections::BTreeMap<String, String>,   // payload field -> JSON pointer, or "=literal"
+}
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct Match { pub pointer: String, #[serde(default)] pub equals: Option<String>, #[serde(default)] pub regex: Option<String>, #[serde(default)] pub exists: Option<bool> }
+// exactly one of equals / regex / exists must be set (validate()).
+
+/// `[limits]` table: case-insensitive regex lists per kind.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct LimitSpec {
+    #[serde(default)] pub credits: Vec<String>, #[serde(default)] pub auth: Vec<String>, #[serde(default)] pub quota: Vec<String>,
+    #[serde(default)] pub rate: Vec<String>, #[serde(default)] pub context: Vec<String>,
+    #[serde(default)] pub resets_at: Option<ResetSpec>,
+    #[serde(default)] pub tz_offset_minutes: i32,
+}
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct ResetSpec { pub regex: String /* first capture group = the time text */, pub kind: ResetKind }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)] #[serde(rename_all = "snake_case")]
+pub enum ResetKind { Unix, Clock }
+
+/// `[cost]` table: JSON pointers evaluated on every line, last value wins; empty string = not set.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct CostSpec {
+    #[serde(default)] pub usd_pointer: Option<String>, #[serde(default)] pub input_pointer: Option<String>,
+    #[serde(default)] pub output_pointer: Option<String>, #[serde(default)] pub reasoning_pointer: Option<String>,
+    #[serde(default)] pub cache_read_pointer: Option<String>, #[serde(default)] pub cache_write_pointer: Option<String>,
+}
+/// `[exit]` table.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)] #[serde(deny_unknown_fields)]
+pub struct ExitSpec { #[serde(default = "default_ok_codes")] pub ok: Vec<i32> /* [0] */, #[serde(default)] pub limit: Vec<i32>,
+                      #[serde(default = "default_true")] pub error_from_stderr: bool /* true */ }
+impl Default for ExitSpec { /* ok [0], limit [], error_from_stderr true */ }
+// An empty string for any Option<String> pointer is normalised to None by `Mapping::from_toml` before validation.
 impl Mapping {
     pub fn from_toml(s: &str) -> Result<Mapping, AdapterError>;                      // parse + validate
     pub fn validate(&self, path_for_errors: &str) -> Result<(), AdapterError>;       // adapters.md §4.2
@@ -185,7 +245,7 @@ impl StreamParser for CliParser {}
 pub fn pointer_get<'a>(v: &'a serde_json::Value, ptr: &str) -> Option<&'a serde_json::Value>;
 ```
 
-`AdapterRegistry` (name → `Arc<dyn Adapter>` from `VowpConfig`) is **not** here: it lives in `vowp-core::session` (n07), which constructs adapters from `[harnesses.*]`.
+`AdapterRegistry` (name → `Arc<dyn Adapter>` from `VowpConfig`) is **not** here: it lives in `vowp-core::deps` (n07a), which constructs adapters from `[harnesses.*]`.
 
 ## 5. Optional importer (nice-to-have, n06b2 if time)
 
@@ -205,7 +265,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | Test | Proves |
 |---|---|
 | `classify_claude_usage_limit_with_unix_suffix` | `Claude AI usage limit reached\|1794164400` → Quota, `resets_at = 2026-11-08T19:00:00Z` (exact, no margin) |
-| `classify_claude_hit_limit_clock_time_with_tz_offset` | `You've hit your limit · resets 11pm (Europe/Oslo)`, now 18:10Z, offset 60 → `22:02Z` same day |
+| `classify_claude_hit_limit_clock_time_with_tz_offset` | `You've hit your limit · resets 11pm (Europe/Oslo)`, now 18:10Z, offset 60 → `22:00Z` same day (exact, no margin) |
 | `classify_clock_time_rolls_to_next_day` | `resets 3pm` after 3pm → tomorrow |
 | `classify_five_hour_and_weekly_and_minutes` | `5-hour limit reached ∙ resets 3pm`, `weekly limit · resets Nov 12, 9am`, `resets 4:30 am` all parsed |
 | `classify_rate_529_429_overloaded` | Rate with `resets_at = now + 10 min` |

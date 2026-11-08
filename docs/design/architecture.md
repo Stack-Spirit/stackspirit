@@ -21,7 +21,7 @@ Data flow for one job (all names are the spec's):
 
 1. `vowp job add` (or the planner via the same CLI) → `Store::insert_job` → row in `jobs`, `edges`; brief written to `.vowp/jobs/<id>/brief.md`.
 2. **L1 tick** (`vowp-core::loops`) loads jobs+edges into a `vowp_graph::Graph`; `ready_jobs` + `plan_dispatch` choose jobs; for each choice the supervisor
-   creates the git worktree `job/<id>`, a session (`SessionOps::create_session`), a tmux window `job-<id>` running `vowp session tail --pretty --follow <session>`
+   creates the git worktree `job/<id>`, a session (`SessionOps::create_session`), a tmux window `job-<id>` running `vowp __window job <id>` (read-only: resolves the job's latest session and follows its log, `vowp session tail --pretty --follow`, so it keeps working across switches)
    (read-only view), and a **runner thread** calling `SessionOps::run_turn`.
 3. `run_turn` picks the executor from the job's profile ladder (`Profile::pick` with the `limits` table), spawns the adapter (`Adapter::start`), and for every
    `HarnessEvent` calls `SessionLog::append` (JSONL authoritative) and updates `runs` / `ledger` rows at the end. The harness never sees tmux.
@@ -260,7 +260,7 @@ secret_scan = true
 
 1. `profiles.*.ladder` non-empty, no duplicate rung, every executor parses; the four role names `planner keeper worker verifier` must exist **after merging** project over node config (otherwise `Config` error naming the missing profile).
 2. Each rung's provider (`Executor::provider()`) with `[providers.<p>]` present must have `max_concurrent ≥ 1`.
-3. `[[schedules]]`: exactly one of `cron` / `every`; cron parses (5 fields); `every` matches `^\d+[smhd]$` and is ≥ 60 s; `tz` is `UTC` or `±HH:MM`; names unique.
+3. `[[schedules]]`: exactly one of `cron` / `every`; `cron` has exactly **5** whitespace-separated fields (structural check in `VowpConfig::validate`, no `cron` crate in vowp-protocol; the full parse is `vowp_core::schedules::ScheduleSpec::parse`, run by `vowp doctor`, `vowp schedule add` and the supervisor at startup — a string that passes the structural check but fails the parse is a `Config` error there); `every` matches `^\d+[smhd]$` and is ≥ 60 s; `tz` is `UTC` or `±HH:MM`; names unique.
 4. `[env.*]`: `checkout` non-empty; `approval = "policy"` requires `guards` non-empty.
 5. Gate sets: every `Gate::validate()` passes; `deploy`/`script` gates must run a command (never a file-exists check): a `cmd`/`script`/`deploy` `run` that is only `test -f …`/`[ -f … ]`/`ls …` is rejected with `anti-pattern: gate must execute and check results`.
 6. `loops.<name>`: key must be a known loop name (`l1-supervisor … l9-schedules`).

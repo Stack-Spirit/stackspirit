@@ -71,6 +71,8 @@ impl NodePaths {
 
 ### 3.2 Store (`db.rs`)
 
+**Ownership model (binding for core):** every `Store` method, reads *and* writes, takes `&self` (rusqlite's `Connection::execute`/`unchecked_transaction` need only `&Connection`). A `Store` is `Send` but not `Sync`: each thread opens its own (`Deps::open_store`). Core APIs therefore take `&Store` everywhere.
+
 ```rust
 pub struct Store { /* rusqlite::Connection, Arc<dyn Clock> */ }
 pub const SCHEMA_VERSION: i64 = 1;
@@ -84,7 +86,7 @@ impl Store {
     pub fn clock(&self) -> &dyn Clock;
     pub fn schema_version(&self) -> Result<i64, StoreError>;                     // PRAGMA user_version
     /// Run `f` inside BEGIN IMMEDIATE .. COMMIT; rolls back on Err or panic-free early return.
-    pub fn transaction<T>(&mut self, f: impl FnOnce(&mut Store) -> Result<T, StoreError>) -> Result<T, StoreError>;
+    pub fn transaction<T>(&self, f: impl FnOnce(&Store) -> Result<T, StoreError>) -> Result<T, StoreError>;   // rusqlite `unchecked_transaction` (takes &Connection)
     /// SQLite online backup (rusqlite `backup` feature) to `to` (a file path; parent must exist; overwritten atomically via tmp+rename).
     pub fn backup(&self, to: &std::path::Path) -> Result<(), StoreError>;
     /// `PRAGMA integrity_check` → Ok(()) iff the single row is "ok"; also `PRAGMA foreign_key_check` must be empty.
@@ -137,14 +139,14 @@ Every insert stamps `created_at/updated_at` from `self.clock()` unless the type 
 
 ```rust
 // ---- nodes / projects
-pub fn upsert_node(&mut self, n: &Node) -> Result<(), StoreError>;
+pub fn upsert_node(&self, n: &Node) -> Result<(), StoreError>;
 pub fn node(&self, name: &NodeName) -> Result<Option<Node>, StoreError>;
 pub fn require_node(&self, name: &NodeName) -> Result<Node, StoreError>;
 pub fn local_node(&self) -> Result<Option<Node>, StoreError>;
 pub fn list_nodes(&self) -> Result<Vec<Node>, StoreError>;
-pub fn touch_node_seen(&mut self, name: &NodeName, at: Timestamp) -> Result<(), StoreError>;
-pub fn remove_node(&mut self, name: &NodeName) -> Result<(), StoreError>;          // refuses the local node
-pub fn upsert_project(&mut self, p: &Project) -> Result<(), StoreError>;
+pub fn touch_node_seen(&self, name: &NodeName, at: Timestamp) -> Result<(), StoreError>;
+pub fn remove_node(&self, name: &NodeName) -> Result<(), StoreError>;          // refuses the local node
+pub fn upsert_project(&self, p: &Project) -> Result<(), StoreError>;
 pub fn project(&self, name: &ProjectName) -> Result<Option<Project>, StoreError>;
 pub fn require_project(&self, name: &ProjectName) -> Result<Project, StoreError>;
 pub fn list_projects(&self) -> Result<Vec<Project>, StoreError>;
@@ -153,22 +155,22 @@ pub fn list_projects(&self) -> Result<Vec<Project>, StoreError>;
 /// Inserts with state Pending, defaults per types.md §7 (profile = role name, priority 50, brief/report paths
 /// `.vowp/jobs/<id>/{brief,report}.md`, gates = NewJob.gates or `default_gates(kind)`, loop = NewJob.loop_ or default),
 /// plus a `needs` edge per `new.needs`. All in one transaction. Errors: Conflict (duplicate id), NotFound (unknown need/project).
-pub fn insert_job(&mut self, project: &ProjectName, new: &NewJob, created_by: &str) -> Result<Job, StoreError>;
+pub fn insert_job(&self, project: &ProjectName, new: &NewJob, created_by: &str) -> Result<Job, StoreError>;
 pub fn job(&self, id: &JobId) -> Result<Option<Job>, StoreError>;                  // fills `needs` from edges
 pub fn require_job(&self, id: &JobId) -> Result<Job, StoreError>;
 pub fn list_jobs(&self, f: &JobFilter) -> Result<Vec<Job>, StoreError>;           // ordered by priority DESC, created_at, id
 /// Writes `state`, `state_changed_at = now`, `updated_at`, `note` (if given), `parked_reason` (set iff new state == Parked, else cleared).
 /// Does NOT check that the transition is legal: `vowp-graph::transition` decides, callers pass only legal ones.
 /// Returns the previous state. Errors: NotFound.
-pub fn set_job_state(&mut self, id: &JobId, state: JobState, change: &StateChange) -> Result<JobState, StoreError>;
-pub fn patch_job(&mut self, id: &JobId, patch: &JobPatch) -> Result<Job, StoreError>;   // applies JobPatch incl. add_needs/remove_needs; state untouched
-pub fn set_job_counters(&mut self, id: &JobId, attempts: Option<u32>, continues: Option<u32>, hang_restarts: Option<u32>) -> Result<(), StoreError>;
-pub fn set_job_workspace(&mut self, id: &JobId, branch: Option<&str>, worktree: Option<&str>) -> Result<(), StoreError>;
-pub fn touch_job_progress(&mut self, id: &JobId, at: Timestamp) -> Result<(), StoreError>;   // last_progress_at = max(existing, at)
-pub fn set_job_note(&mut self, id: &JobId, note: &str) -> Result<(), StoreError>;
-pub fn delete_job(&mut self, id: &JobId) -> Result<(), StoreError>;               // only state Pending|Cancelled|Replanned; else Conflict
-pub fn add_edge(&mut self, e: &Edge) -> Result<(), StoreError>;                   // idempotent; unknown ids → NotFound; src==dst → InvalidInput
-pub fn remove_edge(&mut self, e: &Edge) -> Result<bool, StoreError>;
+pub fn set_job_state(&self, id: &JobId, state: JobState, change: &StateChange) -> Result<JobState, StoreError>;
+pub fn patch_job(&self, id: &JobId, patch: &JobPatch) -> Result<Job, StoreError>;   // applies JobPatch incl. add_needs/remove_needs; state untouched
+pub fn set_job_counters(&self, id: &JobId, attempts: Option<u32>, continues: Option<u32>, hang_restarts: Option<u32>) -> Result<(), StoreError>;
+pub fn set_job_workspace(&self, id: &JobId, branch: Option<&str>, worktree: Option<&str>) -> Result<(), StoreError>;
+pub fn touch_job_progress(&self, id: &JobId, at: Timestamp) -> Result<(), StoreError>;   // last_progress_at = max(existing, at)
+pub fn set_job_note(&self, id: &JobId, note: &str) -> Result<(), StoreError>;
+pub fn delete_job(&self, id: &JobId) -> Result<(), StoreError>;               // only state Pending|Cancelled|Replanned; else Conflict
+pub fn add_edge(&self, e: &Edge) -> Result<(), StoreError>;                   // idempotent; unknown ids → NotFound; src==dst → InvalidInput
+pub fn remove_edge(&self, e: &Edge) -> Result<bool, StoreError>;
 pub fn list_edges(&self, project: Option<&ProjectName>) -> Result<Vec<Edge>, StoreError>;    // for vowp-graph
 pub fn edges_of(&self, id: &JobId) -> Result<Vec<Edge>, StoreError>;              // edges where src==id OR dst==id
 pub fn needs_of(&self, id: &JobId) -> Result<Vec<JobId>, StoreError>;             // dst of `needs` edges with src==id
@@ -176,96 +178,97 @@ pub fn dependents_of(&self, id: &JobId) -> Result<Vec<JobId>, StoreError>;      
 pub fn count_jobs_by_state(&self, project: Option<&ProjectName>) -> Result<std::collections::BTreeMap<JobState, u32>, StoreError>;
 
 // ---- runs / gate results / workers
-pub fn insert_run(&mut self, run: &Run) -> Result<(), StoreError>;                // run.ended_at None, outcome None (else InvalidInput)
+pub fn insert_run(&self, run: &Run) -> Result<(), StoreError>;                // run.ended_at None, outcome None (else InvalidInput)
 pub fn run(&self, id: &RunId) -> Result<Option<Run>, StoreError>;
 pub fn require_run(&self, id: &RunId) -> Result<Run, StoreError>;
-pub fn update_run_attach(&mut self, id: &RunId, pid: Option<u32>, native_session_id: Option<&str>, window: Option<&str>, session_id: Option<&SessionId>) -> Result<(), StoreError>;
+pub fn update_run_attach(&self, id: &RunId, pid: Option<u32>, native_session_id: Option<&str>, window: Option<&str>, session_id: Option<&SessionId>) -> Result<(), StoreError>;
 /// Sets ended_at = now, outcome, exit_code, limit_kind, cost + token columns, detail (truncated to last 1500 chars).
 /// Idempotent only in the sense that a second call returns Conflict (a run ends once).
-pub fn finish_run(&mut self, id: &RunId, fin: &RunFinish) -> Result<(), StoreError>;
+pub fn finish_run(&self, id: &RunId, fin: &RunFinish) -> Result<(), StoreError>;
 pub fn open_runs(&self) -> Result<Vec<Run>, StoreError>;                          // ended_at IS NULL
 pub fn runs_of_job(&self, id: &JobId) -> Result<Vec<Run>, StoreError>;            // oldest first
 pub fn last_run_of_job(&self, id: &JobId) -> Result<Option<Run>, StoreError>;
-pub fn insert_gate_result(&mut self, r: &GateResult) -> Result<i64, StoreError>;  // returns rowid; r.id ignored
+pub fn insert_gate_result(&self, r: &GateResult) -> Result<i64, StoreError>;  // returns rowid; r.id ignored
 pub fn gate_results_for(&self, job: &JobId, attempt: u32) -> Result<Vec<GateResult>, StoreError>;   // ordered by gate_index, id
 pub fn latest_gate_results(&self, job: &JobId) -> Result<Vec<GateResult>, StoreError>;               // newest attempt only
-pub fn upsert_worker(&mut self, w: &Worker) -> Result<(), StoreError>;
+pub fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError>;
 pub fn list_workers(&self, node: &NodeName) -> Result<Vec<Worker>, StoreError>;
-pub fn ensure_worker_slots(&mut self, node: &NodeName, kind: WorkerKind, count: u32) -> Result<(), StoreError>;  // creates idle slots 1..=count, removes idle slots above count
+pub fn ensure_worker_slots(&self, node: &NodeName, kind: WorkerKind, count: u32) -> Result<(), StoreError>;  // creates idle slots 1..=count, removes idle slots above count
 
 // ---- sessions index, events index, natives
-pub fn upsert_session(&mut self, s: &Session) -> Result<(), StoreError>;
+pub fn upsert_session(&self, s: &Session) -> Result<(), StoreError>;
 pub fn session(&self, id: &SessionId) -> Result<Option<Session>, StoreError>;
 pub fn require_session(&self, id: &SessionId) -> Result<Session, StoreError>;
 pub fn list_sessions(&self, f: &SessionFilter) -> Result<Vec<Session>, StoreError>;        // updated_at DESC
-pub fn set_session_state(&mut self, id: &SessionId, state: SessionState, executor: Option<&Executor>) -> Result<(), StoreError>;
-pub fn index_event(&mut self, row: &EventIndexRow) -> Result<(), StoreError>;             // also bumps sessions.last_seq / updated_at / log_bytes in the same tx
+pub fn set_session_state(&self, id: &SessionId, state: SessionState, executor: Option<&Executor>) -> Result<(), StoreError>;
+pub fn index_event(&self, row: &EventIndexRow) -> Result<(), StoreError>;             // also bumps sessions.last_seq / updated_at / log_bytes in the same tx
 pub fn event_rows(&self, id: &SessionId, after_seq: u64, limit: u32) -> Result<Vec<EventIndexRow>, StoreError>;
 pub fn event_row_by_id(&self, id: &EventId) -> Result<Option<EventIndexRow>, StoreError>;
-pub fn upsert_native(&mut self, session: &SessionId, harness: HarnessKind, native: &str, node: &NodeName, first_seq: u64) -> Result<(), StoreError>;
+pub fn upsert_native(&self, session: &SessionId, harness: HarnessKind, native: &str, node: &NodeName, first_seq: u64) -> Result<(), StoreError>;
 pub fn natives_of(&self, session: &SessionId) -> Result<Vec<SessionNative>, StoreError>;
 pub fn native_for(&self, session: &SessionId, harness: HarnessKind) -> Result<Option<String>, StoreError>;   // most recent
 pub struct SessionNative { pub session_id: SessionId, pub harness: HarnessKind, pub native_session_id: String, pub node: NodeName, pub first_seq: u64, pub created_at: Timestamp }
 
 // ---- capsules / switches
-pub fn insert_capsule(&mut self, c: &Capsule, path: &str) -> Result<(), StoreError>;       // also sets sessions.last_capsule_id
+pub fn insert_capsule(&self, c: &Capsule, path: &str) -> Result<(), StoreError>;       // also sets sessions.last_capsule_id
 pub fn capsule(&self, id: &CapsuleId) -> Result<Option<Capsule>, StoreError>;
 pub fn latest_capsule(&self, session: &SessionId) -> Result<Option<Capsule>, StoreError>;  // highest at_seq, then created_at
 pub fn list_capsules(&self, session: &SessionId) -> Result<Vec<Capsule>, StoreError>;      // newest first
-pub fn insert_switch(&mut self, s: &Switch) -> Result<(), StoreError>;
-pub fn finish_switch(&mut self, id: &SwitchId, state: SwitchState, error: Option<&str>) -> Result<(), StoreError>;   // state Completed|Aborted only
+pub fn insert_switch(&self, s: &Switch) -> Result<(), StoreError>;
+pub fn finish_switch(&self, id: &SwitchId, state: SwitchState, error: Option<&str>) -> Result<(), StoreError>;   // state Completed|Aborted only
 pub fn switch(&self, id: &SwitchId) -> Result<Option<Switch>, StoreError>;
 pub fn list_switches(&self, session: &SessionId) -> Result<Vec<Switch>, StoreError>;       // oldest first
 pub fn open_switches(&self) -> Result<Vec<Switch>, StoreError>;                            // state = Started (crash recovery)
 
 // ---- loops / schedules
-pub fn upsert_loop(&mut self, l: &Loop) -> Result<(), StoreError>;
+pub fn upsert_loop(&self, l: &Loop) -> Result<(), StoreError>;
 pub fn loop_(&self, name: &str) -> Result<Option<Loop>, StoreError>;
 pub fn list_loops(&self) -> Result<Vec<Loop>, StoreError>;
-pub fn set_loop_state(&mut self, name: &str, state: ActiveState) -> Result<(), StoreError>;
-pub fn record_loop_run(&mut self, name: &str, last_run: Timestamp, next_run: Option<Timestamp>, status: &str, ok: bool) -> Result<(), StoreError>; // ok=false → fail_streak+1 else 0
-pub fn insert_schedule(&mut self, s: &Schedule) -> Result<(), StoreError>;                  // name unique → Conflict
+pub fn set_loop_state(&self, name: &str, state: ActiveState) -> Result<(), StoreError>;
+pub fn record_loop_run(&self, name: &str, last_run: Timestamp, next_run: Option<Timestamp>, status: &str, ok: bool) -> Result<(), StoreError>; // ok=false → fail_streak+1 else 0
+pub fn insert_schedule(&self, s: &Schedule) -> Result<(), StoreError>;                  // name unique → Conflict
 pub fn schedule(&self, id_or_name: &str) -> Result<Option<Schedule>, StoreError>;
 pub fn list_schedules(&self) -> Result<Vec<Schedule>, StoreError>;
 pub fn due_schedules(&self, now: Timestamp) -> Result<Vec<Schedule>, StoreError>;           // state=Active AND next_run_at <= now, oldest next_run first
-pub fn record_schedule_run(&mut self, id: &ScheduleId, last_run: Timestamp, next_run: Option<Timestamp>, status: &str) -> Result<(), StoreError>;
-pub fn set_schedule_state(&mut self, id: &ScheduleId, state: ActiveState) -> Result<(), StoreError>;
-pub fn remove_schedule(&mut self, id_or_name: &str) -> Result<bool, StoreError>;
+pub fn record_schedule_run(&self, id: &ScheduleId, last_run: Timestamp, next_run: Option<Timestamp>, status: &str) -> Result<(), StoreError>;
+pub fn set_schedule_state(&self, id: &ScheduleId, state: ActiveState) -> Result<(), StoreError>;
+pub fn remove_schedule(&self, id_or_name: &str) -> Result<bool, StoreError>;
 
 // ---- ledger
 /// Append-only. Returns rowid. Cost columns come from `e.cost` (usd NULL when None/Unknown).
-pub fn append_ledger(&mut self, e: &LedgerEntry) -> Result<i64, StoreError>;
+pub fn append_ledger(&self, e: &LedgerEntry) -> Result<i64, StoreError>;
 pub fn ledger_since(&self, f: &LedgerFilter) -> Result<Vec<LedgerEntry>, StoreError>;      // ascending id
 /// Sums `kind='cost'` rows grouped by `group` (`Role` groups by `ledger.role`, `Job` by `job_id`, `Provider` by `provider`, `Model` by `model`; rows where the key column is NULL fall in the key `"(none)"`; no joins); ordered by usd DESC then key. `Day` groups by the UTC date of `ts`.
 pub fn cost_totals(&self, q: &CostQuery, group: CostGroup) -> Result<Vec<CostRow>, StoreError>;
 
 // ---- inbox / limits / releases
-pub fn insert_inbox(&mut self, i: &InboxItem) -> Result<(), StoreError>;
+pub fn insert_inbox(&self, i: &InboxItem) -> Result<(), StoreError>;
 pub fn inbox_item(&self, id: &InboxId) -> Result<Option<InboxItem>, StoreError>;
 pub fn list_inbox(&self, state: Option<InboxState>) -> Result<Vec<InboxItem>, StoreError>;  // oldest first
 /// Open → Answered. Conflict if not open. Does not touch the job (core does that).
-pub fn answer_inbox(&mut self, id: &InboxId, answer: &str, by: &str) -> Result<InboxItem, StoreError>;
-pub fn dismiss_inbox(&mut self, id: &InboxId, by: &str) -> Result<(), StoreError>;
-pub fn upsert_limit(&mut self, l: &Limit) -> Result<(), StoreError>;                       // keyed by provider; keeps `since` of an existing row with the same kind
+pub fn answer_inbox(&self, id: &InboxId, answer: &str, by: &str) -> Result<InboxItem, StoreError>;
+/// Sets `state='dismissed'`, `answered_by=by`, `answered_at=now`, `answer=NULL` (so the schema CHECK `(state='open') = (answered_at IS NULL)` holds). Conflict if not open.
+pub fn dismiss_inbox(&self, id: &InboxId, by: &str) -> Result<(), StoreError>;
+pub fn upsert_limit(&self, l: &Limit) -> Result<(), StoreError>;                       // keyed by provider; keeps `since` of an existing row with the same kind
 pub fn limit_for(&self, provider: &str) -> Result<Option<Limit>, StoreError>;              // row regardless of expiry
-pub fn clear_limit(&mut self, provider: &str) -> Result<bool, StoreError>;
+pub fn clear_limit(&self, provider: &str) -> Result<bool, StoreError>;
 /// Rows still in force at `now`: `resets_at IS NULL OR resets_at > now`.
 pub fn active_limits(&self, now: Timestamp) -> Result<Vec<Limit>, StoreError>;
-pub fn record_probe(&mut self, provider: &str, at: Timestamp, ok: bool) -> Result<(), StoreError>;   // sets last_probe_at; fail streak +1 or reset 0
-pub fn insert_release(&mut self, r: &Release) -> Result<(), StoreError>;
-pub fn update_release(&mut self, r: &Release) -> Result<(), StoreError>;
+pub fn record_probe(&self, provider: &str, at: Timestamp, ok: bool) -> Result<(), StoreError>;   // sets last_probe_at; fail streak +1 or reset 0
+pub fn insert_release(&self, r: &Release) -> Result<(), StoreError>;
+pub fn update_release(&self, r: &Release) -> Result<(), StoreError>;
 pub fn release(&self, id: &ReleaseId) -> Result<Option<Release>, StoreError>;
 pub fn list_releases(&self, project: &ProjectName, env: Option<&str>) -> Result<Vec<Release>, StoreError>;   // newest first
 
 // ---- kv and requests
 pub fn kv_get(&self, key: &str) -> Result<Option<String>, StoreError>;
-pub fn kv_set(&mut self, key: &str, value: &str) -> Result<(), StoreError>;
-pub fn kv_delete(&mut self, key: &str) -> Result<bool, StoreError>;
+pub fn kv_set(&self, key: &str, value: &str) -> Result<(), StoreError>;
+pub fn kv_delete(&self, key: &str) -> Result<bool, StoreError>;
 pub fn kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError>;
 /// CLI → supervisor requests (decisions.md D2): stores kv key `req:<ULID>` = json `{"kind":"<snake_case>","payload":{…}}` (the exact wire form of `vowp_core::requests::Request`; the store treats kind/payload opaquely).
-pub fn push_request(&mut self, kind: &str, payload: &serde_json::Value) -> Result<RequestId, StoreError>;
+pub fn push_request(&self, kind: &str, payload: &serde_json::Value) -> Result<RequestId, StoreError>;
 /// Atomically (one transaction) reads all `req:*` rows in id order and deletes them.
-pub fn take_requests(&mut self) -> Result<Vec<Request>, StoreError>;
+pub fn take_requests(&self) -> Result<Vec<Request>, StoreError>;
 ```
 
 ### 3.5 BlobStore (`blobs.rs`)
@@ -293,6 +296,9 @@ pub struct NewEvent { pub actor: Actor, pub source: EventSource, pub body: Event
 pub struct VerifyReport { pub lines: u64, pub last_seq: u64, pub problems: Vec<String> /* "line 12: seq 5 expected 4", "line 30: invalid JSON", ... */, pub torn_tail_bytes: u64 }
 impl VerifyReport { pub fn is_ok(&self) -> bool; }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenReport { pub torn_tail_bytes: u64 /* bytes truncated from a non-terminated final line */, pub events_found: u64 }
+
 pub struct SessionLog { /* File (append), path, session_id, next_seq, bytes, BlobStore, Arc<dyn Clock>, lock guard, dirty: bool */ }
 impl SessionLog {
     /// Creates `<session_dir>/{log.jsonl,blobs/,capsules/}` and the lock; fails with Conflict if log.jsonl already exists.
@@ -301,16 +307,18 @@ impl SessionLog {
     pub fn open(paths: &NodePaths, id: &SessionId, clock: Arc<dyn Clock>) -> Result<SessionLog, StoreError>;
     /// Read-only: no lock, no repair (a torn tail is ignored and reported by `verify`). Used by `session show`, `tail`, `export`, `reindex`.
     pub fn open_read(paths: &NodePaths, id: &SessionId) -> Result<SessionLogReader, StoreError>;
+    /// What `open` found/repaired (all zero for `create`). Lets callers and tests observe torn-tail repair.
+    pub fn open_report(&self) -> &OpenReport;
     pub fn session_id(&self) -> &SessionId;
     pub fn last_seq(&self) -> u64;
     pub fn byte_len(&self) -> u64;
     /// Spill big tool output (rule 3), assign seq/id/ts, write one line `json\n`, flush to the OS (no fsync). Returns the stored envelope
     /// and its `(byte_offset, byte_len)` so the caller can index it. Rejects: payload not matching `body` type (never happens), seq overflow.
-    pub fn append(&mut self, ev: NewEvent) -> Result<AppendedEvent, StoreError>;
+    pub fn append(&self, ev: NewEvent) -> Result<AppendedEvent, StoreError>;
     /// Appends a pre-built envelope verbatim (import/reindex tools). Requires `env.seq == last_seq+1` and `env.session_id == self.id` else `SeqGap`/`SessionMismatch`.
-    pub fn append_envelope(&mut self, env: &EventEnvelope) -> Result<AppendedEvent, StoreError>;
+    pub fn append_envelope(&self, env: &EventEnvelope) -> Result<AppendedEvent, StoreError>;
     /// fsync log file (and the directory entry once, after create). No-op if nothing is dirty.
-    pub fn sync(&mut self) -> Result<(), StoreError>;
+    pub fn sync(&self) -> Result<(), StoreError>;
     pub fn blobs(&self) -> &BlobStore;
 }
 impl Drop for SessionLog { /* best-effort sync(), then release the lock file */ }
@@ -353,7 +361,7 @@ pub fn add_adapter_mapping(paths: &NodePaths, id: &SessionId, m: AdapterMapping)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReindexReport { pub sessions: u32, pub events: u64, pub capsules: u32, pub natives: u32, pub torn_tails: u32, pub problems: Vec<String> }
 /// Rebuild the index tables for one session (Some) or every directory under sessions/ (None): see rule 8.
-pub fn reindex(store: &mut Store, paths: &NodePaths, session: Option<&SessionId>) -> Result<ReindexReport, StoreError>;
+pub fn reindex(store: &Store, paths: &NodePaths, session: Option<&SessionId>) -> Result<ReindexReport, StoreError>;
 ```
 
 ## 4. Behaviour rules
@@ -460,7 +468,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `ledger_is_append_only` | `UPDATE ledger` and `DELETE FROM ledger` via raw SQL both fail with the trigger message; `append_ledger` returns increasing ids |
 | `cost_totals_group_by_each_dimension` | seed 6 cost rows (2 jobs, 2 roles, 2 providers, 2 models, 2 days, one with `usd NULL`); for each `CostGroup` assert exact sums, `unknown_entries`, token totals, ordering |
 | `cost_totals_respects_filters` | `since/until/project/job_id` narrow the result |
-| `inbox_answer_flow` | open → `answer_inbox` ok; second answer → `Conflict`; CHECK `(state='open') = (answered_at IS NULL)` holds; dismiss works |
+| `inbox_answer_flow` | open → `answer_inbox` ok; second answer → `Conflict`; CHECK `(state='open') = (answered_at IS NULL)` holds; `dismiss_inbox` on an open item yields `state='dismissed'` with `answered_at` set and `answer IS NULL`; dismissing an answered item → `Conflict` |
 | `limits_active_and_clear` | rows with past `resets_at`, future, and `None`: `active_limits(now)` = future + `None`; `clear_limit` removes; `upsert_limit` preserves `since` for same kind |
 | `record_probe_streak` | failing probes increment `probe_fail_streak`, success resets |
 | `releases_roundtrip` | insert, `update_release` state transitions, `list_releases` newest first, `rolled_back_by` self-reference FK |
@@ -471,7 +479,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `blob_put_is_atomic_and_deduped` | two `put`s of equal bytes → same sha, one file; `get` after tampering the file → `Corrupt`; `path_of("../x")` → `InvalidInput` |
 | `log_append_assigns_seq_and_ts` | 5 appends with `FakeClock` → seq 1..5, ts from clock, `EventId`s unique and increasing, line offsets add up to file length |
 | `log_rejects_gap_and_duplicate_envelope` | `append_envelope` with seq 3 when last is 1 → `SeqGap{expected:2,got:3}`; seq 1 again → `SeqGap` |
-| `log_torn_tail_recovery` | write 4 events, truncate the file mid-line 4 (cut N bytes), `open` → `last_seq==3`, file truncated to the end of line 3, next `append` gets seq 4, `verify()` is ok and `torn_tail_bytes` was reported by the open call |
+| `log_torn_tail_recovery` | write 4 events, truncate the file mid-line 4 (cut N bytes), `open` → `last_seq==3`, file truncated to the end of line 3, next `append` gets seq 4, `verify()` is ok and `log.open_report().torn_tail_bytes` equals the number of bytes truncated |
 | `log_corrupt_middle_is_error_not_repair` | flip a byte inside line 2 of 4: `open` → `Corrupt{line:Some(2)}`, file unchanged; `open_read(...).verify()` lists the problem |
 | `log_survives_reopen_proptest` | proptest: random sequences (≤ 40) of events with random sync points and random reopen points; after the final reopen `read_all` equals the model: same events, strictly consecutive seqs from 1, no duplicates, no reordering |
 | `log_fsync_markers` | `sync()` on a clean log is a no-op (dirty flag false); appending sets dirty; `sync` clears it (observable via a test-only counter feature `#[cfg(test)] fn sync_count()`) |
@@ -481,6 +489,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `capsule_file_roundtrip` | `write_capsule_file` → `read_capsule_file` equals input; file name starts with zero-padded `at_seq`; invalid capsule JSON → `Corrupt`/`Protocol` error |
 | `adapters_json_is_append_only` | add 2 mappings, re-adding the first is a no-op, file order preserved; missing file reads as empty |
 | `reindex_after_deleting_db_restores_index` | build a store+3 sessions with logs, capsules and adapters.json; snapshot index tables; delete the DB file; `Store::open` + `reindex(None)`; `sessions`, `session_events`, `session_natives`, `capsules` rows equal the snapshot (ignoring `state`); in a second case the DB is NOT deleted and `switches` rows with `capsule_id` set still have it after `reindex` (`reindex_preserves_switch_capsule_links`) |
+| `reindex_restores_user_session_role` | a session created with role `user` (from `session.created`) keeps `sessions.role='user'` after `rm vowp.db` + reindex |
 | `reindex_is_idempotent` | run twice; tables identical |
 | `reindex_single_session_leaves_others` | modifying one log then `reindex(Some(id))` updates only that session's rows |
 | `reindex_skips_corrupt_session` | one session with a corrupt middle line: reported in `problems`, others indexed |

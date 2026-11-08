@@ -112,7 +112,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `done_when` = `"report has status: done and every gate passes"`.
 11. **`VowpConfig::validate`**: rules listed in `architecture.md` §5.3 (profile names referenced by jobs exist; every ladder valid;
     provider referenced by a ladder executor need not be declared; env guards known names or `script:`/`no_active_jobs:` prefix; cron strings
-    parse with the `cron` crate is checked in vowp-core, here only the `cron`/`every` XOR rule).
+    parse with the `cron` crate is checked in vowp-core `ScheduleSpec::parse`; here only: `cron`/`every` XOR, exactly 5 whitespace-separated cron fields, `every` pattern, tz format, unique names).
 12. **Schema export**: `all_schemas()` keys are the Rust type names (`"EventEnvelope"`, `"Capsule"`, `"CapsuleDraft"`, `"Job"`, `"NewJob"`, `"JobPatch"`,
     `"Gate"`, `"Evidence"`, `"GateResult"`, `"ReportFrontMatter"`, `"BriefFrontMatter"`, `"VowpConfig"`, `"Schedule"`, `"Release"`, `"InboxItem"`, `"Run"`,
     `"Session"`, `"Limit"`, `"Cost"`, `"Switch"`, `"Loop"`, `"Node"`, `"Project"`, `"LedgerEntry"`). Output is deterministic (BTreeMap, stable ordering).
@@ -143,6 +143,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `cost_add_source_degradation` | receipt+receipt=receipt sum; receipt+unknown → source unknown with partial usd; price-table+receipt → price-table |
 | `cost_validate_flags_inconsistent` | `{usd:Some, source:Unknown}` fails `validate` |
 | `tokens_add_and_total` | field-wise sum; `total()` |
+| `session_created_user_role_roundtrips` | `SessionCreated{role: Some(SessionRole::User), ..}` serialises `"role":"user"` and deserialises back (user sessions exist: `vowp session new`) |
 | `event_body_roundtrip_every_type` | one sample for each of the 17 types — `session.created`, `session.executor`, `turn.started`, `turn.ended`, `user.message`, `assistant.message`, `assistant.reasoning`, `tool.call`, `tool.result`, `file.change`, `plan`, `limit`, `cost`, `switch`, `capsule`, `error`, `note` — `from_parts(t, body.to_value()) == body` and `event_type()==t` |
 | `event_type_strings_stable` | `EventType::as_str()`/serde names equal the dotted strings in schema.sql's `session_events.type` CHECK (parses `include_str!("../../../docs/design/schema.sql")` — path relative to `crates/vowp-protocol/tests/`; the file must exist in the repo layout, there is **no literal fallback**; the test fails if the file or the CHECK list is missing) |
 | `envelope_new_sets_replayable` | reasoning → `replayable=false`; others `true`; json omits `raw` when `None` |

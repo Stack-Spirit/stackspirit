@@ -1,7 +1,7 @@
 # crates/vowp-tmux.md — safe tmux window manager
 
-Owner: job n05. Depends on `std` and `thiserror` only (no `vowp-protocol`: window names are plain strings; core maps job ids to names).
-tmux windows are **views**: they run a read-only pretty log follower (`vowp session tail <id> --follow --pretty`), never a harness TUI and never a control channel.
+Owner: job n05. Depends on `std` and `thiserror` only (no `vowp-protocol`: window names are plain strings; core maps job ids to names). **n05 starts from the n01 skeleton's `crates/vowp-tmux/Cargo.toml`, which declares `vowp-protocol`; n05 must remove that dependency** (and add `thiserror`, dev-dep `tempfile`), keeping the dependency direction of conventions.md §2.
+tmux windows are **views**: they run a read-only pretty log follower (`vowp __window job <id>`, which resolves the job's latest session and follows it with the `session tail --follow --pretty` renderer), never a harness TUI and never a control channel.
 
 ## 1. Module layout
 
@@ -32,6 +32,8 @@ pub trait WindowManager: Send + Sync {
     fn kill_window(&self, session: &str, name: &str) -> Result<(), TmuxError>;                       // refuses untagged windows
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>, TmuxError>;                     // Ok(vec![]) if the session does not exist
     fn window_exists(&self, session: &str, name: &str) -> Result<bool, TmuxError>;
+    /// Creates the fixed windows `board supervisor planner keeper inbox` (§4) in that order, idempotently. Part of the trait so core (which holds `Arc<dyn WindowManager>`) and CLI tests using `FakeWindows` can create the layout.
+    fn ensure_layout(&self, project: &str, spec: &LayoutSpec) -> Result<(), TmuxError>;
 }
 
 /// Real tmux. `socket = Some("name")` runs every command as `tmux -L name ...` (tests, private servers); `None` uses the default server (CLI only).
@@ -50,8 +52,6 @@ impl Tmux {
     pub fn kill_session(&self, session: &str) -> Result<(), TmuxError>;
     /// ["tmux", ("-L", sock)?, "attach-session", "-t", session] for the CLI to exec/spawn.
     pub fn attach_argv(&self, session: &str) -> Vec<String>;
-    /// Creates the fixed windows (§4). Idempotent.
-    pub fn ensure_layout(&self, project: &str, spec: &LayoutSpec) -> Result<(), TmuxError>;
     pub fn kill_server_for_tests(&self) -> Result<(), TmuxError>;                    // `tmux kill-server`; Err(Refused) when socket is None
 }
 impl WindowManager for Tmux {}
