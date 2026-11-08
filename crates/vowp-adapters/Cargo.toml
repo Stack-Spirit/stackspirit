@@ -16,6 +16,10 @@ thiserror = "2.0.21"
 time = "0.3.45"
 vowp-protocol = { path = "../vowp-protocol" }
 
+[features]
+default = []
+testing = []
+
 [lints]
 workspace = true
 
