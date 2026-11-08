@@ -12,7 +12,7 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
-use time::macros::format_description;
+use time::macros::{datetime, format_description};
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::ProtocolError;
@@ -20,6 +20,12 @@ use crate::error::ProtocolError;
 /// Canonical wire format: UTC, `T` separator, exactly three fractional digits, `Z` suffix.
 const RFC3339_MILLIS: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
+
+/// First instant that still has the canonical four-digit `YYYY` wire form.
+const MIN_UTC: OffsetDateTime = datetime!(0000-01-01 0:00:00 UTC);
+
+/// Last instant that still has the canonical four-digit `YYYY` wire form.
+const MAX_UTC: OffsetDateTime = datetime!(9999-12-31 23:59:59.999 UTC);
 
 /// A UTC instant with millisecond precision.
 ///
@@ -38,19 +44,32 @@ impl Timestamp {
 
     /// Builds a timestamp from whole Unix seconds.
     ///
-    /// Values outside the representable range fall back to the Unix epoch.
+    /// Values outside the canonical year range (0000–9999) are clamped to its nearest bound,
+    /// so the wire form always has a four-digit year.
     pub fn from_unix_secs(secs: i64) -> Self {
-        let odt = OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let odt = OffsetDateTime::from_unix_timestamp(secs).unwrap_or(if secs < 0 { MIN_UTC } else { MAX_UTC });
         Self::truncated(odt)
     }
 
     /// Builds a timestamp from Unix milliseconds (negative values are before 1970).
     ///
-    /// Values outside the representable range fall back to the Unix epoch.
+    /// Values outside the canonical year range (0000–9999) are clamped to its nearest bound.
     pub fn from_unix_millis(ms: i64) -> Self {
         let secs = ms.div_euclid(1000);
-        let millis = ms.rem_euclid(1000).unsigned_abs();
-        Self::from_unix_secs(secs).plus(Duration::from_millis(millis))
+        let millis = ms.rem_euclid(1000);
+        match OffsetDateTime::from_unix_timestamp(secs) {
+            Ok(odt) => {
+                let odt = odt.checked_add(time::Duration::milliseconds(millis)).unwrap_or(MAX_UTC);
+                Self::truncated(odt)
+            }
+            Err(_) => {
+                if ms < 0 {
+                    Self(MIN_UTC)
+                } else {
+                    Self(MAX_UTC)
+                }
+            }
+        }
     }
 
     /// Returns whole Unix seconds (rounded towards negative infinity for pre-1970 instants).
@@ -85,16 +104,22 @@ impl Timestamp {
         self.0.format(RFC3339_MILLIS).unwrap_or_default()
     }
 
-    /// Adds a duration; returns `self` unchanged if the result leaves the representable range.
+    /// Adds a duration, keeping millisecond precision and clamping to the canonical year range.
     pub fn plus(&self, d: Duration) -> Self {
         let d = time::Duration::try_from(d).unwrap_or(time::Duration::MAX);
-        Self(self.0.checked_add(d).unwrap_or(self.0))
+        match self.0.checked_add(d) {
+            Some(odt) => Self::truncated(odt),
+            None => Self(MAX_UTC),
+        }
     }
 
-    /// Subtracts a duration; returns `self` unchanged if the result leaves the representable range.
+    /// Subtracts a duration, keeping millisecond precision and clamping to the canonical year range.
     pub fn minus(&self, d: Duration) -> Self {
         let d = time::Duration::try_from(d).unwrap_or(time::Duration::MAX);
-        Self(self.0.checked_sub(d).unwrap_or(self.0))
+        match self.0.checked_sub(d) {
+            Some(odt) => Self::truncated(odt),
+            None => Self(MIN_UTC),
+        }
     }
 
     /// Returns the elapsed time since `earlier`, saturating at zero for future instants.
@@ -107,9 +132,10 @@ impl Timestamp {
         }
     }
 
-    /// Truncates an instant to millisecond precision and converts it to UTC.
+    /// Truncates an instant to millisecond precision, converts it to UTC and clamps it to the
+    /// canonical four-digit-year range.
     fn truncated(odt: OffsetDateTime) -> Self {
-        let odt = odt.to_offset(UtcOffset::UTC);
+        let odt = odt.to_offset(UtcOffset::UTC).clamp(MIN_UTC, MAX_UTC);
         let nanos = odt.nanosecond();
         let truncated = nanos - nanos % 1_000_000;
         Self(odt.replace_nanosecond(truncated).unwrap_or(odt))

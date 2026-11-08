@@ -47,6 +47,71 @@ fn timestamp_normalises_offsets() {
     assert_eq!(negative_offset, utc);
 }
 
+#[test]
+fn timestamp_plus_minus_keep_millisecond_precision() {
+    let start = Timestamp::parse("2026-11-08T19:25:47.123Z").unwrap();
+
+    for delta in [
+        Duration::from_nanos(1),
+        Duration::from_nanos(999_999),
+        Duration::from_micros(500),
+    ] {
+        let later = start.plus(delta);
+        assert_eq!(later, start, "sub-millisecond addition changed the instant");
+        assert_eq!(later.as_rfc3339(), "2026-11-08T19:25:47.123Z");
+        assert_eq!(later.unix_millis(), start.unix_millis());
+
+        // Subtraction floors the truncated instant, matching "truncate, never round".
+        let earlier = start.minus(delta);
+        assert_eq!(earlier.as_rfc3339(), "2026-11-08T19:25:47.122Z");
+        assert_eq!(earlier.unix_millis(), start.unix_millis() - 1);
+        assert!(earlier < start);
+    }
+
+    let one_ms_later = start.plus(Duration::from_millis(1));
+    assert!(start < one_ms_later);
+    assert_eq!(one_ms_later.as_rfc3339(), "2026-11-08T19:25:47.124Z");
+    assert_eq!(one_ms_later.minus(Duration::from_millis(1)), start);
+    assert_eq!(
+        start.cmp(&one_ms_later),
+        start.as_rfc3339().cmp(&one_ms_later.as_rfc3339())
+    );
+
+    // FakeClock::advance uses the same arithmetic.
+    let clock = FakeClock::at(start);
+    clock.advance(Duration::from_nanos(1));
+    assert_eq!(clock.now(), start);
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(clock.now(), one_ms_later);
+
+    // Saturating in both directions stays inside the canonical year range.
+    assert_eq!(start.plus(Duration::MAX), Timestamp::from_unix_secs(i64::MAX));
+    assert_eq!(start.minus(Duration::MAX), Timestamp::from_unix_secs(i64::MIN));
+}
+
+#[test]
+fn timestamp_clamps_to_four_digit_years() {
+    let min = Timestamp::from_unix_secs(-62_230_291_200);
+    assert_eq!(min.as_rfc3339(), "0000-01-01T00:00:00.000Z");
+    assert_eq!(min, Timestamp::from_unix_secs(i64::MIN));
+    assert_eq!(min, Timestamp::parse("0000-01-01T00:00:00.000Z").unwrap());
+    // One millisecond before year 0000 also clamps to the first representable instant.
+    assert_eq!(min, Timestamp::from_unix_millis(-62_167_219_200_001));
+
+    let max = Timestamp::from_unix_secs(253_402_300_800);
+    assert_eq!(max.as_rfc3339(), "9999-12-31T23:59:59.999Z");
+    assert_eq!(max, Timestamp::from_unix_secs(i64::MAX));
+    assert_eq!(max, Timestamp::parse("9999-12-31T23:59:59.999Z").unwrap());
+    assert_eq!(max, Timestamp::from_unix_millis(253_402_300_800_000));
+
+    assert!(min < max);
+    assert!(min.as_rfc3339() < max.as_rfc3339());
+    for ts in [min, max] {
+        assert_eq!(ts.as_rfc3339().len(), 24);
+        assert!(ts.as_rfc3339().starts_with(|c: char| c.is_ascii_digit()));
+    }
+}
+
 proptest! {
     #[test]
     fn timestamp_ordering_matches_strings(a in 0_i64..4_000_000_000_000, b in 0_i64..4_000_000_000_000) {

@@ -29,6 +29,12 @@ fn id_parse_roundtrip_all_types() {
             assert_invalid_id(<$ty>::parse(&text[..25]));
             assert_invalid_id(<$ty>::parse(&format!("{}!", &text[..25])));
             assert_invalid_id(<$ty>::parse("IIIIIIIIIIIIIIIIIIIIIIIIII"));
+            // Values above the 128-bit ULID maximum would be silently truncated.
+            assert_invalid_id(<$ty>::parse("80000000000000000000000000"));
+            assert_invalid_id(<$ty>::parse("Z0000000000000000000000000"));
+            // The maximum itself is canonical and round-trips unchanged.
+            let max = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ";
+            assert_eq!(<$ty>::parse(max).unwrap().to_string(), max);
         }};
     }
 

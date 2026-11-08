@@ -50,6 +50,15 @@ fn validate_ulid(s: &str, kind: &'static str, original: &str) -> Result<String, 
         });
     }
     let upper = s.to_ascii_uppercase();
+    // A ULID is 128 bits in 26 Crockford base32 characters, so the first character carries
+    // only two significant bits and must be 0-7. `ulid::Ulid::from_string` would otherwise
+    // silently truncate a larger value and return a different id.
+    if upper.as_bytes().first().is_some_and(|first| *first > b'7') {
+        return Err(ProtocolError::InvalidId {
+            kind,
+            value: original.to_owned(),
+        });
+    }
     let ulid = ulid::Ulid::from_string(&upper).map_err(|_| ProtocolError::InvalidId {
         kind,
         value: original.to_owned(),
