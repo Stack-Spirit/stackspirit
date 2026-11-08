@@ -261,7 +261,7 @@ impl ScheduleEngine {
     pub fn sync_from_config(&self, store: &Store, cfg: &VowpConfig) -> Result<(), CoreError>;       // upsert [[schedules]] rows by name; compute next_run_at
     pub fn catch_up(&self, store: &Store, now: Timestamp) -> Result<Vec<DueRun>, CoreError>;        // startup: missed runs per missed_policy (run_once → one DueRun, skip → none) and re-arm
     pub fn tick(&self, store: &Store, now: Timestamp) -> Result<Vec<DueRun>, CoreError>;            // due rows; advances last_run_at/next_run_at BEFORE firing (idempotency key = schedule id + due time); `fire` writes the ledger row before the action (loops.md §11)
-    pub fn fire(&self, store: &Store, due: &DueRun) -> Result<FireOutcome, CoreError>;               // JobTemplate -> insert job (suffix -yyyymmddhhmm); Loop -> push Request::Wake + loops.next_run_at=now; Command -> CommandRunner
+    pub fn fire(&self, store: &Store, due: &DueRun) -> Result<FireOutcome, CoreError>;               // JobTemplate -> insert job (suffix -yyyymmddhhmm); Loop -> push Request::RunLoop{name} (the request handler sets loops.next_run_at=now); Command -> CommandRunner
 }
 pub struct DueRun { pub schedule: Schedule, pub due_at: Timestamp }
 pub enum FireOutcome { JobCreated(JobId), LoopTriggered(String), CommandRan { exit_code: Option<i32> }, Skipped(String) }

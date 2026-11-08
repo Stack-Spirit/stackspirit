@@ -1066,7 +1066,8 @@ pub trait SessionOps: Send + Sync {
     /// Run one turn on `exec` (spawn adapter, append events, update runs/ledger rows), blocking until it ends.
     /// `seed` (capsule) is rendered as the prompt prefix when the session has no native session on this harness.
     fn run_turn(&self, req: TurnRequest, cancel: &CancelToken) -> Result<TurnResult, ServiceError>;
-    /// Switch protocol (sessions.md §5). Writes capsule, stops, starts the target with seed, records the switch.
+    /// Switch protocol (sessions.md §5). Writes capsule, stops, starts the target with the seed when a turn is started;
+    /// a pure switch starts the target idle and delivers the seed with the next input. Records the switch.
     fn switch(&self, req: SwitchRequest) -> Result<Switch, ServiceError>;
     fn write_capsule(&self, session: &SessionId, trigger: CapsuleTrigger) -> Result<Capsule, ServiceError>;
 }
