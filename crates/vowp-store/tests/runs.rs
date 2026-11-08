@@ -364,3 +364,28 @@ fn workers_slots_ensure() {
     assert_eq!(fixture.project.as_str(), "proj");
     assert_eq!(fixture.store.schema_version().expect("version"), 1);
 }
+
+#[test]
+fn insert_run_rejects_an_already_finished_run() {
+    let fixture = TestStore::new();
+    let ended_at = Timestamp::parse("2026-01-01T00:00:30.000Z").expect("timestamp");
+
+    let mut with_end = sample_run(&fixture.job);
+    with_end.ended_at = Some(ended_at);
+    let error = fixture.store.insert_run(&with_end).expect_err("ended run");
+    assert!(
+        matches!(error, vowp_store::StoreError::InvalidInput(_)),
+        "got {error:?}"
+    );
+
+    let mut with_outcome = sample_run(&fixture.job);
+    with_outcome.outcome = Some(RunOutcome::Ok);
+    let error = fixture.store.insert_run(&with_outcome).expect_err("finished run");
+    assert!(
+        matches!(error, vowp_store::StoreError::InvalidInput(_)),
+        "got {error:?}"
+    );
+
+    assert!(fixture.store.open_runs().expect("open runs").is_empty());
+    assert!(fixture.store.runs_of_job(&fixture.job.id).expect("runs").is_empty());
+}
