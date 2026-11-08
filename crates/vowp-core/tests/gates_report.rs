@@ -184,3 +184,26 @@ fn file_exists_only_gate_rejected_by_validate() {
     });
     validate_gate(&real).expect("a real command gate must validate");
 }
+
+#[test]
+fn validate_gate_rejects_nonzero_exit_without_pattern() {
+    let no_pattern = Gate::Cmd(CmdGate {
+        run: "grep -q 'needle' haystack.txt".to_owned(),
+        expect_exit: 1,
+        ..CmdGate::default()
+    });
+    match validate_gate(&no_pattern) {
+        Err(CoreError::Invalid(message)) => {
+            assert!(message.contains("expect_pattern"), "{message}");
+        }
+        other => panic!("a nonzero exit without a pattern should be rejected, got {other:?}"),
+    }
+
+    let negative = Gate::Cmd(CmdGate {
+        run: "grep -q 'needle' haystack.txt".to_owned(),
+        expect_exit: 1,
+        expect_pattern: Some("needle".to_owned()),
+        ..CmdGate::default()
+    });
+    validate_gate(&negative).expect("a negative gate with an expected pattern must validate");
+}

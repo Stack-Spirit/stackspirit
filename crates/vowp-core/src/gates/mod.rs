@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use regex::Regex;
-use vowp_protocol::{Evidence, Gate, Job, RunId};
+use vowp_protocol::{CmdGate, Evidence, Gate, Job, RunId};
 use vowp_store::Store;
 
 use crate::CoreError;
@@ -83,13 +83,18 @@ pub fn parse_report_file(path: &Path) -> Result<vowp_protocol::Report, CoreError
 /// Validates a gate definition, including the anti-pattern ban from `loops.md` §4.
 ///
 /// Command and script gates may not merely check that a file exists (`test -f`, `[ -e ]`,
-/// `ls`, `stat`, `cat`, bare `true` or `:`) because that does not show the work runs. Deploy
-/// gates must run a real command and end with a real probe. Protocol-level checks (non-empty
-/// command, compilable pattern, positive timeout) run first.
+/// `ls`, `stat`, `cat`, bare `true` or `:`) because that does not show the work runs. A
+/// command gate that expects a nonzero exit must also assert an expected pattern, so a
+/// command that fails for an unrelated reason cannot satisfy it. Deploy gates must run a
+/// real command and end with a real probe. Protocol-level checks (non-empty command,
+/// compilable pattern, positive timeout) run first.
 pub fn validate_gate(gate: &Gate) -> Result<(), CoreError> {
     gate.validate()?;
     match gate {
-        Gate::Cmd(cmd) | Gate::Script(cmd) => reject_file_existence_only(&cmd.run),
+        Gate::Cmd(cmd) | Gate::Script(cmd) => {
+            reject_nonzero_exit_without_pattern(cmd)?;
+            reject_file_existence_only(&cmd.run)
+        }
         Gate::Deploy(deploy) => {
             if is_file_existence_only(&deploy.run) {
                 return Err(CoreError::Invalid(format!(
@@ -97,10 +102,22 @@ pub fn validate_gate(gate: &Gate) -> Result<(), CoreError> {
                     deploy.run
                 )));
             }
+            reject_nonzero_exit_without_pattern(&deploy.probe)?;
             reject_file_existence_only(&deploy.probe.run)
         }
         Gate::Report(_) | Gate::OwnsRespected(_) | Gate::Pushed(_) | Gate::Review(_) | Gate::SecretScan(_) => Ok(()),
     }
+}
+
+/// Rejects a command gate that expects a nonzero exit without a pattern to match.
+fn reject_nonzero_exit_without_pattern(cmd: &CmdGate) -> Result<(), CoreError> {
+    if cmd.expect_exit != 0 && cmd.expect_pattern.is_none() {
+        return Err(CoreError::Invalid(format!(
+            "anti-pattern: command gate with expect_exit {} needs an expect_pattern: {}",
+            cmd.expect_exit, cmd.run
+        )));
+    }
+    Ok(())
 }
 
 /// Rejects a command that only checks whether a path exists.

@@ -29,10 +29,10 @@ fn setup(tmp: &Path) -> (vowp_core::Deps, Job, vowp_store::Store, std::path::Pat
     (deps, job, store, wt)
 }
 
-/// Inserts a verify job with a `verifies` edge to `original`.
-fn add_verify_job(store: &vowp_store::Store, original: &Job, wt: &Path) -> Job {
+/// Inserts a verify job for `attempt` with a `verifies` edge to `original`.
+fn add_verify_job(store: &vowp_store::Store, original: &Job, wt: &Path, attempt: u32) -> Job {
     let project = original.project.clone();
-    let id = format!("{}-verify-0", original.id);
+    let id = format!("{}-verify-{attempt}", original.id);
     let verify = insert_job(
         store,
         &project,
@@ -85,7 +85,7 @@ fn write_verifier_report(path: &Path, verify: &Job, verdict: &str, findings: &[&
 fn review_gate_reads_verifier_report_verdict() {
     let tmp = tempdir().unwrap();
     let (deps, job, store, wt) = setup(tmp.path());
-    let verify = add_verify_job(&store, &job, &wt);
+    let verify = add_verify_job(&store, &job, &wt, 0);
     let report_path = wt.join(&verify.report);
 
     write_verifier_report(&report_path, &verify, "pass", &[]);
@@ -156,6 +156,69 @@ fn review_gate_pending_when_no_verify_job_yet() {
             assert!(verify_job.is_none());
             assert!(verdict.is_none());
             assert!(findings.is_empty());
+        }
+        other => panic!("expected review evidence, got {other:?}"),
+    }
+}
+
+#[test]
+fn review_gate_ignores_verifier_from_earlier_attempt() {
+    let tmp = tempdir().unwrap();
+    let (deps, job, store, wt) = setup(tmp.path());
+
+    // Attempt 0 was verified and passed.
+    let earlier = add_verify_job(&store, &job, &wt, 0);
+    write_verifier_report(&wt.join(&earlier.report), &earlier, "pass", &[]);
+
+    // The job moves to attempt 1; no verifier has run for it yet.
+    store.set_job_counters(&job.id, Some(1), None, None).unwrap();
+    let job = store.require_job(&job.id).unwrap();
+    assert_eq!(job.attempts, 1);
+    let runner = GateRunner::new(deps.clone());
+    let context = ctx(&deps, &job, &store, &wt, &wt);
+
+    let missing = runner
+        .evaluate(&context, 0, &Gate::Review(ReviewGate::default()))
+        .unwrap();
+    assert!(
+        !missing.passed,
+        "an earlier attempt's passing verifier must not satisfy the current attempt: {:?}",
+        missing.evidence
+    );
+    match &missing.evidence {
+        Evidence::Review {
+            verify_job,
+            verdict,
+            findings,
+        } => {
+            assert!(verify_job.is_none(), "no current-attempt verifier exists");
+            assert!(verdict.is_none());
+            assert!(findings.is_empty());
+        }
+        other => panic!("expected review evidence, got {other:?}"),
+    }
+
+    // A current-attempt verifier that failed also fails the gate.
+    let current = add_verify_job(&store, &job, &wt, 1);
+    write_verifier_report(
+        &wt.join(&current.report),
+        &current,
+        "fail",
+        &["acceptable only after the fix"],
+    );
+    let failed = runner
+        .evaluate(&context, 0, &Gate::Review(ReviewGate::default()))
+        .unwrap();
+    assert!(!failed.passed);
+    match &failed.evidence {
+        Evidence::Review {
+            verify_job,
+            verdict,
+            findings,
+        } => {
+            assert_eq!(verify_job.as_ref(), Some(&current.id));
+            assert_eq!(*verdict, Some(Verdict::Fail));
+            assert_eq!(findings, &["acceptable only after the fix".to_owned()]);
         }
         other => panic!("expected review evidence, got {other:?}"),
     }

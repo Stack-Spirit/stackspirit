@@ -117,3 +117,30 @@ fn secret_scan_only_added_lines() {
     );
     assert!(scan_diff(&removed_only).is_empty(), "a removed secret is not a leak");
 }
+
+#[test]
+fn secret_scan_does_not_skip_added_line_starting_with_plus_plus() {
+    let secret = format!("sk-{}", "A".repeat(24));
+    // The added file line is "++ <secret>", so its diff line is "+++ <secret>".
+    let diff = format!(
+        "diff --git a/src/app.rs b/src/app.rs\n\
+         index 1111111..2222222 100644\n\
+         --- a/src/app.rs\n\
+         +++ b/src/app.rs\n\
+         @@ -1,1 +1,2 @@\n\
+         \x20let keep = 1;\n\
+         +++ {secret}\n"
+    );
+
+    let hits = scan_diff(&diff);
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "the added line must be scanned, not treated as a header: {hits:?}"
+    );
+    assert_eq!(hits[0].path, "src/app.rs");
+    assert_eq!(hits[0].line, 2, "the added line is new-file line 2");
+    assert_eq!(hits[0].rule, "sk_api_key");
+    assert!(!serde_json::to_string(&hits).unwrap().contains(&secret));
+}

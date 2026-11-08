@@ -170,25 +170,33 @@ pub fn scan_diff(diff: &str) -> Vec<SecretHit> {
     let mut hits = Vec::new();
     let mut path: Option<String> = None;
     let mut new_line = 0_u32;
+    let mut in_hunk = false;
     for line in diff.lines() {
         if line.starts_with("diff --git ") {
             path = None;
             new_line = 0;
+            in_hunk = false;
             continue;
         }
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            path = if rest == "/dev/null" {
-                None
-            } else {
-                Some(rest.strip_prefix("b/").unwrap_or(rest).to_owned())
-            };
-            continue;
+        if !in_hunk {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                path = if rest == "/dev/null" {
+                    None
+                } else {
+                    Some(rest.strip_prefix("b/").unwrap_or(rest).to_owned())
+                };
+                continue;
+            }
+            if line.starts_with("--- ") {
+                continue;
+            }
         }
         if line.starts_with("@@") {
             new_line = hunk_new_start(line).unwrap_or(0);
+            in_hunk = true;
             continue;
         }
-        if line.starts_with("+++ ") || line.starts_with("--- ") {
+        if !in_hunk {
             continue;
         }
         if let Some(added) = line.strip_prefix('+') {

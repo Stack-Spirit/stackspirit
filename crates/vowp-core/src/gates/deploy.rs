@@ -21,7 +21,13 @@ const DEPLOY_TIMEOUT_SECS: u64 = 1800;
 /// Evaluates a deploy gate.
 pub(crate) fn evaluate(ctx: &GateCtx<'_>, gate: &DeployGate) -> Outcome {
     let start = Instant::now();
-    let env = gate.env.as_ref().and_then(|name| ctx.deps.config.env.get(name));
+    let env = match gate.env.as_deref() {
+        Some(name) => match ctx.deps.config.env.get(name) {
+            Some(env) => Some(env),
+            None => return missing_environment(gate, name, start),
+        },
+        None => None,
+    };
     let cwd = checkout(ctx, env);
 
     let version_before = probe_version(ctx.deps, env, &cwd);
@@ -48,6 +54,28 @@ pub(crate) fn evaluate(ctx: &GateCtx<'_>, gate: &DeployGate) -> Outcome {
         },
         duration_ms: elapsed_ms(start),
         output_blob: probe.output_blob,
+    }
+}
+
+/// Builds a failed outcome for a deploy gate whose named environment is not configured.
+///
+/// Nothing runs in this case: deploying an unknown environment in the job worktree would
+/// report success while the real environment was never touched.
+fn missing_environment(gate: &DeployGate, name: &str, start: Instant) -> Outcome {
+    let duration_ms = elapsed_ms(start);
+    let message = format!("environment {name:?} is not configured; refusing to deploy in the job worktree");
+    Outcome {
+        passed: false,
+        evidence: Evidence::Deploy {
+            command: gate.run.clone(),
+            exit_code: None,
+            probe: Box::new(cmd::evidence(false, &gate.probe.run, None, false, message, duration_ms)),
+            version_before: None,
+            version_after: None,
+            rollback_cmd: None,
+        },
+        duration_ms,
+        output_blob: None,
     }
 }
 

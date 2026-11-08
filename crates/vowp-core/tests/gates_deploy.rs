@@ -143,3 +143,58 @@ fn deploy_gate_probe_mismatch_fails() {
         other => panic!("expected deploy evidence, got {other:?}"),
     }
 }
+
+#[test]
+fn deploy_gate_fails_on_unknown_env() {
+    let tmp = tempdir().unwrap();
+    let (deps, job, store, wt) = setup(tmp.path(), VowpConfig::with_defaults_for_tests());
+    let marker = wt.join("deployed-in-worktree");
+    let gate = DeployGate {
+        run: format!("printf deployed > '{}'", marker.display()),
+        probe: CmdGate {
+            run: "true".to_owned(),
+            ..CmdGate::default()
+        },
+        env: Some("missing".to_owned()),
+    };
+    let runner = GateRunner::new(deps.clone());
+    let context = ctx(&deps, &job, &store, &wt, &wt);
+    let result = runner.evaluate(&context, 0, &Gate::Deploy(gate)).unwrap();
+
+    assert!(!result.passed, "an unknown environment must fail the gate");
+    assert!(
+        !marker.exists(),
+        "the deploy command must never run in the job worktree"
+    );
+    match &result.evidence {
+        Evidence::Deploy {
+            command,
+            exit_code,
+            probe,
+            version_before,
+            version_after,
+            rollback_cmd,
+        } => {
+            assert_eq!(command, &format!("printf deployed > '{}'", marker.display()));
+            assert_eq!(*exit_code, None, "no deploy command ran");
+            assert_eq!(*version_before, None);
+            assert_eq!(*version_after, None);
+            assert_eq!(*rollback_cmd, None);
+            match probe.as_ref() {
+                Evidence::Cmd {
+                    exit_code: probe_exit,
+                    tail,
+                    ..
+                } => {
+                    assert_eq!(*probe_exit, None, "the probe did not run");
+                    assert!(
+                        tail.contains("missing"),
+                        "evidence must name the missing environment: {tail:?}"
+                    );
+                }
+                other => panic!("expected cmd probe evidence, got {other:?}"),
+            }
+        }
+        other => panic!("expected deploy evidence, got {other:?}"),
+    }
+}

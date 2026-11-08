@@ -98,18 +98,16 @@ fn latest_verify_job(ctx: &GateCtx<'_>) -> Result<Option<Job>, crate::CoreError>
         }
     }
     let attempt_suffix = format!("-verify-{}", ctx.attempt);
-    let matching: Vec<Job> = candidates
-        .iter()
+    let mut matching: Vec<Job> = candidates
+        .into_iter()
         .filter(|job| job.id.as_str().ends_with(&attempt_suffix))
-        .cloned()
         .collect();
-    let mut pool = if matching.is_empty() { candidates } else { matching };
-    pool.sort_by(|left, right| {
+    matching.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
             .then_with(|| left.id.as_str().cmp(right.id.as_str()))
     });
-    Ok(pool.pop())
+    Ok(matching.pop())
 }
 
 /// Resolves the verifier's report path, preferring its recorded worktree.
