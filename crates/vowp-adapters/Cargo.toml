@@ -1,0 +1,23 @@
+[package]
+name = "vowp-adapters"
+description = "Harness adapters for Claude Code, opencode and generic CLI agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+time = "0.3.45"
+vowp-protocol = { path = "../vowp-protocol" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

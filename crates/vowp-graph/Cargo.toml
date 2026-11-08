@@ -1,0 +1,21 @@
+[package]
+name = "vowp-graph"
+description = "Deterministic job graph, state machine, ownership and scheduling for VOWP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+globset = "0.4.19"
+serde = "1.0.229"
+thiserror = "2.0.21"
+vowp-protocol = { path = "../vowp-protocol" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.11.0"

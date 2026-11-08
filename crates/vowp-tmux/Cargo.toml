@@ -1,0 +1,19 @@
+[package]
+name = "vowp-tmux"
+description = "Safe tmux window management for VOWP job sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = "2.0.21"
+vowp-protocol = { path = "../vowp-protocol" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
