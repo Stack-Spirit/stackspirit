@@ -159,8 +159,8 @@ take. An inbox answer unparks only the jobs waiting on that item.
 **`session switch` exits 6.** The target provider is limited. Pick another rung, or wait for the reset.
 
 **`session switch` exits 4.** The session is already switching, or a turn is running. An active turn
-without `--force` is a conflict; stop it or pass `--force` explicitly. Only automatic failover uses the
-drain phase internally.
+without `--force` is a conflict; stop it or pass `--force` explicitly. The drain phase is used by
+automatic switches (failover and context pressure) and by a forced manual switch.
 
 **The target probe fails.** The session stays on the source and is still readable. Check that the target
 harness is installed and the executor string parses. For a remote node, run `vowp --node <n> doctor`.

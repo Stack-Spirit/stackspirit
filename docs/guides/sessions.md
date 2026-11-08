@@ -76,8 +76,9 @@ Useful flags:
   target, and both sides record the node transition.
 - `--no-seed-tail` seeds with the capsule only, not the last turns. Use it when the tail contains
   irrelevant or sensitive material.
-- `--force` allows a switch while a turn is running. Without it, an active turn is a conflict (exit 4);
-  automatic failover uses the drain phase internally.
+- `--force` allows a switch while a turn is running. Without it, an active turn is a conflict (exit 4).
+  The drain phase is used by automatic switches (failover and context pressure) and by a forced manual
+  switch.
 
 Exit 6 means the target provider is limited. Exit 4 means the session is already switching or a turn is
 running without `--force`. On a target probe failure the session stays on the source and remains

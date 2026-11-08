@@ -85,7 +85,7 @@ vowp job add \
   --id hello-docs \
   --title "Write the hello page" \
   --kind docs \
-  --owns "docs/hello.md" \
+  --owns "docs/hello.md,README.md" \
   --gates "report,owns_respected,secret_scan,review" \
   --brief - <<'BRIEF'
 # Goal
@@ -110,7 +110,7 @@ how to run it, and where the tests live.
 
 # Out of scope
 
-- Any file outside `docs/hello.md`.
+- Any file outside `docs/hello.md` and `README.md`.
 - Code changes.
 
 # Done when

@@ -103,8 +103,10 @@ vowp attach n04-graph --node vps
 ```
 
 If the project itself is homed on the VPS, run `vowp up` there and use `vowp --node vps status` from the
-laptop. The laptop does not need the database; it only needs SSH and the same binary for remote
-commands.
+laptop. The laptop still needs its own initialized VOWP home with the `vps` node registered — for example
+`vowp init` in a small local project and then `vowp node add vps vps.example.com` — because `--node`
+looks the node up in the local database before it opens SSH. It does not need the VPS project's database
+or session store.
 
 ## Security notes
 

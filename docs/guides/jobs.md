@@ -260,6 +260,6 @@ requests need a running supervisor to be applied.
 | The report gate says "commit not found" | The report lists a sha from before a rebase, or a fabricated sha. | Commit first, then write the report with the real shas. |
 | A job waits in `ready` | No free slot, an overlapping ownership lock, or a limited provider. | Check `vowp status`, `vowp job show`, and the limits section. Do not force a second worker. |
 | A verifier keeps failing | The findings are vague or the job is too large. | Make the verifier's findings concrete; split the job. |
-| A fix loop repeats | The same command fails without new evidence. | After three identical fingerprints the job fails and a decision job is created; read the gate tails. |
+| A fix loop repeats | The same command fails without new evidence. | After three identical fingerprints the job is moved to `failed` with a no-progress note and a decision item is opened in the inbox. It does not create a `<id>-decision` job; only `on_exhausted = escalate` does that. Read the gate tails. |
 
 Next: [operating a node](operating.md) to run the supervisor that executes these jobs.
