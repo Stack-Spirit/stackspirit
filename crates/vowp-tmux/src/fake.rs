@@ -92,6 +92,11 @@ impl FakeWindows {
         if argv.is_empty() {
             return Err(TmuxError::EmptyCommand);
         }
+        if let Some(cwd) = &cwd {
+            if !cwd.is_dir() {
+                return Err(TmuxError::InvalidCwd(cwd.display().to_string()));
+            }
+        }
         let mut state = self.state();
         state.sessions.entry(session.to_owned()).or_default();
         push_window(
@@ -333,5 +338,25 @@ mod tests {
         fake.kill_window("vowp-demo", "job-1").unwrap();
         assert_eq!(fake.killed(), vec![("vowp-demo".to_owned(), "job-1".to_owned())]);
         assert!(!fake.window_exists("vowp-demo", "job-1").unwrap());
+    }
+
+    #[test]
+    fn fake_layout_rejects_bad_cwd() {
+        let fake = FakeWindows::new();
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let spec = LayoutSpec {
+            board: vec!["sleep".to_owned(), "30".to_owned()],
+            supervisor: vec!["sleep".to_owned(), "30".to_owned()],
+            planner: vec!["sleep".to_owned(), "30".to_owned()],
+            keeper: vec!["sleep".to_owned(), "30".to_owned()],
+            inbox: vec!["sleep".to_owned(), "30".to_owned()],
+            cwd: Some(missing),
+        };
+        assert!(matches!(
+            fake.ensure_layout("bad-cwd", &spec),
+            Err(TmuxError::InvalidCwd(_))
+        ));
+        assert!(fake.list_windows("vowp-bad-cwd").unwrap().is_empty());
     }
 }

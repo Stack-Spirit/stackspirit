@@ -176,24 +176,22 @@ impl Tmux {
 
     fn execute(&self, args: &[String]) -> Result<Completed, TmuxError> {
         let mut child = self.command(args).spawn().map_err(spawn_error)?;
+        let stdout_reader = child.stdout.take().map(spawn_reader);
+        let stderr_reader = child.stderr.take().map(spawn_reader);
         let deadline = Instant::now() + TIMEOUT;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let mut stdout = String::new();
-                    let mut stderr = String::new();
-                    if let Some(mut pipe) = child.stdout.take() {
-                        pipe.read_to_string(&mut stdout)?;
-                    }
-                    if let Some(mut pipe) = child.stderr.take() {
-                        pipe.read_to_string(&mut stderr)?;
-                    }
+                    let stdout = join_reader(stdout_reader)?;
+                    let stderr = join_reader(stderr_reader)?;
                     return Ok(Completed { status, stdout, stderr });
                 }
                 Ok(None) => {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
+                        discard_reader(stdout_reader);
+                        discard_reader(stderr_reader);
                         return Err(TmuxError::Timeout(TIMEOUT));
                     }
                     std::thread::sleep(POLL_INTERVAL);
@@ -201,6 +199,8 @@ impl Tmux {
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    discard_reader(stdout_reader);
+                    discard_reader(stderr_reader);
                     return Err(TmuxError::Io(error));
                 }
             }
@@ -354,6 +354,31 @@ fn spawn_error(error: std::io::Error) -> TmuxError {
     match error.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => TmuxError::NotInstalled,
         _ => TmuxError::Io(error),
+    }
+}
+
+fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<std::io::Result<String>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        pipe.read_to_end(&mut buffer)?;
+        Ok(String::from_utf8_lossy(&buffer).into_owned())
+    })
+}
+
+fn join_reader(handle: Option<std::thread::JoinHandle<std::io::Result<String>>>) -> Result<String, TmuxError> {
+    match handle {
+        Some(handle) => match handle.join() {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(error)) => Err(TmuxError::Io(error)),
+            Err(_) => Err(TmuxError::Io(std::io::Error::other("tmux output reader panicked"))),
+        },
+        None => Ok(String::new()),
+    }
+}
+
+fn discard_reader(handle: Option<std::thread::JoinHandle<std::io::Result<String>>>) {
+    if let Some(handle) = handle {
+        let _ = handle.join();
     }
 }
 

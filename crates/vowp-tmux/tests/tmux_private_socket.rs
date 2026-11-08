@@ -110,6 +110,44 @@ fn new_window_tags_and_runs_command() {
 }
 
 #[test]
+fn capture_pane_drains_large_output() {
+    let Some(guard) = PrivateTmux::new() else {
+        return;
+    };
+    guard.tmux.ensure_session("vowp-large").unwrap();
+    let history = guard.raw(&["set-option", "-g", "history-limit", "5000"]);
+    assert!(
+        history.status.success(),
+        "raw set-option failed: {}",
+        String::from_utf8_lossy(&history.stderr)
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("DONE");
+    let script = concat!(
+        "i=0; while [ $i -lt 3000 ]; do ",
+        "printf \"line-%04d-abcdefghijklmnopqrstuvwxyz0123456789\\n\" \"$i\"; ",
+        "i=$((i+1)); done; touch DONE; sleep 60"
+    );
+    let spec = WindowSpec {
+        argv: vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+        cwd: Some(dir.path().to_path_buf()),
+        env: Vec::new(),
+    };
+    guard.tmux.new_window("vowp-large", "job-large", &spec).unwrap();
+    assert!(poll_until(|| marker.exists()), "large-output command did not finish");
+
+    let captured = guard.tmux.capture_pane("vowp-large", "job-large", 2000).unwrap();
+    assert!(captured.len() > 64 * 1024, "captured only {} bytes", captured.len());
+    assert!(captured.contains("line-2999"), "last line was not captured");
+    assert!(
+        captured.lines().count() >= 1500,
+        "captured only {} lines",
+        captured.lines().count()
+    );
+}
+
+#[test]
 fn new_window_rejects_duplicate_and_empty_argv() {
     let Some(guard) = PrivateTmux::new() else {
         return;
