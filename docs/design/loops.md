@@ -9,7 +9,7 @@ sessions/switch are `sessions.md`. Numbers come from `night.py` where it worked 
 | Term | Meaning |
 |---|---|
 | tick | one pass of L1, every `[node].tick_secs` (60 s). Never blocks on a long operation: gates, merges, verifies, planner turns and harness runs execute on **runner threads** (`std::thread`) that report completion through an `mpsc` channel + DB rows; L1 only polls them. |
-| request | a CLI → supervisor message: a `kv` row with key `req:<ulid>` and JSON value `{"op":"retry|park|cancel|resolve|pause|resume|run_loop","job":..,"loop":..}`; consumed (deleted) at tick step 0. |
+| request | a CLI → supervisor message: a `kv` row with key `req:<ulid>` and JSON value `{"kind":"<snake_case request kind>","payload":{…}}` exactly as defined by `vowp_core::requests::Request` (crates/vowp-core.md §2: kinds `retry_job park_job cancel_job resolve_job nudge_job restart_job replan_job fail_job answer_inbox pause_loop resume_loop run_loop wake`); consumed (deleted) at tick step 0. |
 | outcome | `RunOutcome` of a finished run (types.md §9). |
 | rung | index into a profile's ladder. |
 
@@ -39,7 +39,7 @@ All time from `Clock`.
    - `gating`: step 5. `reviewing`: step 6. `merging`: step 7. `fixing`: wait for the fix/merge job (its `FixDone` arrives from step 2/5 of that job).
    - `ready`: step 8. `stalled|failed|parked`: L5 wakeups (step 9) or human requests; nothing automatic except §9 resolution.
 5. **Gates.** For each job in `gating` with no gate runner active: spawn a gate runner thread (§4). On completion: `GatesPassed` or `GatesFailed`; write `gate_results` rows + ledger `gate`.
-6. **Verify scheduling (L3).** For each job in `reviewing` with no open `verify` job: create the verify job (§5.1). Verify-job completion arrives as `VerifyPassed|VerifyFailed`.
+6. **Verify scheduling (L3).** For each job in `reviewing` with no open `verify` job: create the verify job (§5.1). A verify job runs the normal path `running → gating → done` (T3, T14; gates `[report]`) and is **never merged**; on T14 the caller parses its report (`l3::parse_verdict`), writes the `review` `GateResult` (evidence `Review{verify_job, verdict, findings}`) for the original and delivers `VerifyPassed|VerifyFailed` to it. A failed verify job (T36/T13) delivers `VerifierFailed` (T37).
 7. **Merge queue.** If no merge is running and some job is `merging`: pick the oldest (`state_changed_at`) and spawn the merge runner (§6). Result: `MergeSucceeded|MergeConflict|MergeChecksFailed`.
 8. **Dispatch.** Build `DispatchCaps` (free slots from `workers`, provider capacity from `[providers.*].max_concurrent` minus open runs minus active `limits.concurrency_cap`, `limited` map from `limits`, profiles from config); `plan_dispatch(&graph,&running,&caps)`;
    for each choice: `JobEvent::Dispatched` (state `running`), create worktree (`git worktree add <worktree_root>/<id> -b job/<id> <default_branch>`; **verify, fix and merge jobs never create one: they run in the original's worktree**, whose path/branch are copied into their `worktree`/`branch` columns at creation), create tmux window `job-<id>`, write brief, spawn the runner (§3).
@@ -74,12 +74,12 @@ Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means 
 | T10 | stalled | `KeeperNudge` | — | running | `ResetContinues`, `StartRun{Continue}` |
 | T11 | stalled | `KeeperRestart` | — | running | `ResetContinues`, `StartRun{Start}` |
 | T12 | stalled, failed | `KeeperReplan` | — | replanned | `WakePlanner` |
-| T13 | stalled | `KeeperFail` | — | failed | `NotifyInbox(Notice)` |
-| T14 | gating | `GatesPassed` | job kind ∈ {Fix, Merge} | done | `NotifyParent` (parent = `fixes` dst; delivers `FixDone` to it), `CleanupWorktree` **not** (parent owns it) |
-| T15 | gating | `GatesPassed` | job has a `review` gate | reviewing | `StartVerify` |
-| T16 | gating | `GatesPassed` | otherwise | merging | `EnqueueMerge` |
-| T17 | gating | `GatesFailed` | `attempts < max_attempts` | fixing | `IncrementAttempts`, `CreateFixJob{Fix}` |
-| T18 | gating | `GatesFailed` | `Exhausted` | per `on_exhausted` | as above |
+| T13 | stalled | `KeeperFail` | — | failed | `NotifyInbox(Notice)`; for kind ∈ {Fix, Merge, Verify} also `NotifyParent` (delivers the child-failure event of the table below) |
+| T14 | gating | `GatesPassed` | job kind ∈ {Fix, Merge, Verify} | done | `NotifyParent`: parent = `fixes` dst (Fix/Merge) or `verifies` dst (Verify). Delivers `FixDone{kind}` for Fix/Merge; for Verify the caller parses the verify report and delivers `VerifyPassed` (`verdict: pass`) or `VerifyFailed` (`verdict: fail`) to the original (T19–T21). No `CleanupWorktree` (the parent owns the worktree). These kinds **never** reach `reviewing`/`merging` |
+| T15 | gating | `GatesPassed` | kind ∉ {Fix, Merge, Verify} and job has a `review` gate | reviewing | `StartVerify` |
+| T16 | gating | `GatesPassed` | kind ∉ {Fix, Merge, Verify}, no `review` gate | merging | `EnqueueMerge` |
+| T17 | gating | `GatesFailed` | kind ∉ {Fix, Merge, Verify}, `attempts < max_attempts` | fixing | `IncrementAttempts`, `CreateFixJob{Fix}` |
+| T18 | gating | `GatesFailed` | kind ∉ {Fix, Merge, Verify}, `Exhausted` | per `on_exhausted` | as above |
 | T19 | reviewing | `VerifyPassed` | — | merging | `EnqueueMerge` |
 | T20 | reviewing | `VerifyFailed` | `attempts < max_attempts` | fixing | `IncrementAttempts`, `CreateFixJob{Fix}` |
 | T21 | reviewing | `VerifyFailed` | `Exhausted` | per `on_exhausted` | as above |
@@ -91,11 +91,13 @@ Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means 
 | T27 | merging | `MergeChecksFailed` | `attempts < max_attempts` | fixing | `IncrementAttempts`, `CreateFixJob{Fix}` |
 | T28 | merging | `MergeConflict` / `MergeChecksFailed` | `Exhausted` | per `on_exhausted` | as above |
 | T29 | pending, ready, running, stalled, failed | `Blocked{reason}` | — | parked | `StopRun` (if running), `NotifyInbox(Question)` for Question/Auth/Credits/ProviderBlocked, `SetParkedReason` |
-| T30 | any non-terminal | `HumanPark` | — | parked | `StopRun`, `SetParkedReason(Manual)` |
+| T30 | any non-terminal | `HumanPark` | — | parked | `StopRun` (if running), `SetParkedReason(Manual)` |
 | T31 | parked | `Resolved` | — | ready | `ClearParkedReason`, `ResetContinues` |
 | T32 | failed | `Retry` | — | ready | `ResetCounters` (attempts, continues, hang_restarts = 0) |
 | T33 | any non-terminal | `Cancel` | — | cancelled | `StopRun` (if running). The worktree and branch are **kept** for inspection (no `CleanupWorktree`) |
 | T34 | parked, failed | `KeeperReplan` | — | replanned | `WakePlanner` |
+| T36 | gating | `GatesFailed` | kind ∈ {Fix, Merge, Verify} (**never creates a fix-of-fix**) | failed | `NotifyParent`: Fix/Merge → parent receives `FixFailed` (T24); Verify → parent receives `VerifierFailed` (T37); `NotifyInbox(Notice)` |
+| T37 | reviewing | `VerifierFailed` (verify job ended `failed`, or its report had no usable verdict twice) | — | parked | `SetParkedReason(Question)`, `NotifyInbox(Question)` ("verifier could not produce a verdict for <job>"); `Resolved` later returns the job to `ready` |
 | T35 | running | `RunRateLimited{until}` | — | running | `DelayRun{purpose: Continue, until}` (no counter changes; the run that hit the 429 does **not** consume `continues`; the caller stores `kv['delay:<job>']=until` and L1 starts the continue run when `now >= until`) |
 
 Terminal states: `done`, `replanned`, `cancelled`. **Any (state,event) pair not listed returns `GraphError::InvalidTransition`**; in particular no event leaves a terminal state.
@@ -152,7 +154,20 @@ Each evaluation writes one `gate_results` row (types.md §8 `GateResult`) and on
 | `deploy` | 1. run `run` (cwd = env checkout); 2. record `version_before/after` if the env defines `probe`; 3. run the `probe` CmdGate **after** the deploy; both must pass; evidence includes `rollback_cmd` from `[env.*].rollback` | deploy exit ok **and** probe passes |
 | `secret_scan` | scan the added lines of `git diff <default_branch>...job/<id>` with the rules below; **never store matched text** | zero hits |
 
-**Secret rules (names only recorded; patterns from `night.py SECRET_RE`):** `sk_api_key` (`sk-[A-Za-z0-9_-]{20,}`), `supabase_secret` (`sb_secret_[A-Za-z0-9_-]{10,}`), `github_token` (`ghp_[A-Za-z0-9]{20,}` and `github_pat_[A-Za-z0-9_]{20,}`), `aws_access_key` (`AKIA[0-9A-Z]{16}`), `private_key_block` (`-----BEGIN [A-Z ]*PRIVATE KEY-----`), `slack_token` (`xox[abp]-[A-Za-z0-9-]{10,}`). A hit stores `{path, line, rule}` only. Files named `.env*`, `*.pem`, `id_*` in a diff fail the gate by name (`rule: "secret_file"`).
+**Secret rules — the single canonical table** (names are what `SecretHit.rule` stores and what tests assert; patterns derive from `night.py SECRET_RE`; matched text is never stored):
+
+| `rule` | Pattern (regex, applied to added lines) |
+|---|---|
+| `sk_api_key` | `sk-[A-Za-z0-9_-]{20,}` |
+| `supabase_secret` | `sb_secret_[A-Za-z0-9_-]{10,}` |
+| `github_token` | `ghp_[A-Za-z0-9]{20,}` |
+| `github_pat` | `github_pat_[A-Za-z0-9_]{20,}` |
+| `aws_access_key` | `AKIA[0-9A-Z]{16}` |
+| `private_key_block` | `-----BEGIN [A-Z ]*PRIVATE KEY-----` |
+| `slack_token` | `xox[abp]-[A-Za-z0-9-]{10,}` |
+| `secret_file` | not a content rule: a file **path** in the diff matching `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*` (hit has `line: 0`) |
+
+A hit stores `{path, line, rule}` only. `vowp_core::gates::secret_scan::rules()` returns exactly the seven content rules above in this order; `scan_paths` implements `secret_file`.
 
 **Anti-pattern ban (enforced in `Gate::validate`, types.md §8):** a gate may not merely check that a file exists for anything that must *work*. Concretely `validate` rejects: a `cmd`/`script` whose `run` is only `test -f …`/`[ -e … ]`/`ls …`/`stat …`/`cat …` (regex `^\s*(test\s+-[fed]|\[\s+-[fed]|ls|stat|cat|true|:)\b`), a `cmd` with `expect_exit` ≠ 0 and no `expect_pattern` (negative gates need a pattern), and a `deploy` gate without a `probe` whose `run` is non-trivial. The `report` gate is exempt (existence **plus parsed content** is its purpose).
 
@@ -165,14 +180,14 @@ Each evaluation writes one `gate_results` row (types.md §8 `GateResult`) and on
 3. Verifier prompt ends with: "Write your report with front-matter `verdict: pass|fail` and, on fail, `findings:` as a list of concrete, checkable problems (file, command, expected, actual). Report `status: done` when you finished judging."
 
 ### 5.2 Result
-4. Verify job report parsed: `verdict: pass` → `VerifyPassed` for the original. `verdict: fail` (≥1 finding required; a fail without findings is treated as `partial` → the verify job is retried once, then `Blocked{Question}`) → `VerifyFailed`.
+4. Verify job reaches `done` (T14), then its report is parsed: `verdict: pass` → `VerifyPassed` for the original. `verdict: fail` (≥1 finding required; a fail without findings is treated as `partial` → the verify job is retried once, then `Blocked{Question}`) → `VerifyFailed`.
 5. Fix creation (T20): job `<id>-fix-<attempt>` (`kind=fix`, role/profile/owns copied, `needs=[]`, edge `fix fixes original`, brief = fix prompt + findings). Fix job `done` ⇒ `FixDone{Fix}` to the original (T22).
 6. Bound: `attempts` ≤ `loop.max_attempts` (3). Exhausted → `on_exhausted` (§2): **escalate** creates `<id>-decision` (`kind=decision`, edge `decision escalates original`, `decision blocks <dependents>` for every job that `needs` the original) and an inbox item (kind `decision`, options `["retry","replan","cancel"]`).
-7. A verify job that itself ends `failed|stalled` is retried by the same L2 rules; a verifier provider limit goes through L6.
+7. A verify job that itself ends `stalled` is handled by the same L2/keeper rules (T4–T13); when it ends `failed` the original gets `VerifierFailed` (T37); a verifier provider limit goes through L6.
 
 ## 6. Merge queue (step 7)
 
-One merge at a time per project (`workers`-independent; runs on a runner thread). Input: job in `merging` (never a fix/merge job: those go `done` at T14).
+One merge at a time per project (`workers`-independent; runs on a runner thread). Input: job in `merging` (never a fix/merge/verify job: those go `done` at T14).
 
 1. `git fetch <remote>`; record `main_before = rev-parse <remote>/<default_branch>`.
 2. In the job worktree: `git rebase <remote>/<default_branch>` (if `merge.rebase=false`: skip, require ff-ability).
@@ -208,15 +223,19 @@ Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per
 ### 8.2 Actions by kind (applied at tick step 2, before job events)
 | `outcome` / kind | Action |
 |---|---|
-| `Limit`/`quota` | write `limits(provider)`: `kind=quota`, `resets_at = event.resets_at + 2 min` (margin), `detail`; ledger `limit`; **hand off** (§8.4) the affected sessions to the next ladder rung whose provider is not limited, **only if** that rung is listed in the profile; else park (§8.3 credits path without inbox spam: one notice). `profile.on_quota=park` → park; `next` → switch, no probe-back. No `resets_at` known: `now + 60 min`. |
-| `Credits` | `limits(provider) kind=credits, resets_at=NULL`; **park every job whose profile's *current* rung provider is that provider** (`Blocked{Credits}`), one inbox `notice` ("credits exhausted for <provider>; top up and run `vowp inbox answer <id> resolved`"); stop dispatching to it. Never switch to another paid provider (plan §8 L6); `on_credits_exhausted` has only `park` in v0.1. |
-| `Auth` | `limits kind=auth, resets_at=NULL`; park jobs of that provider (`Blocked{Auth}`); inbox ("log in again with the harness's own login"); no retries. |
+| `Limit`/`quota` | write `limits(provider)`: `kind=quota`, `resets_at = event.resets_at + 2 min` (the single +2 min margin; adapters report exact times, adapters.md §2.4), `detail`; ledger `limit`; **hand off** (§8.4) the affected sessions to the next ladder rung whose provider is not limited, **only if** that rung is listed in the profile; else park the affected jobs with `Blocked{ProviderBlocked}` and one inbox notice. `profile.on_quota=park` → park; `next` → switch, no probe-back. No `resets_at` known: `now + 60 min`. |
+| `Credits` | `limits(provider) kind=credits, resets_at=NULL`; **park every job whose profile's *current* rung provider is that provider** (`Blocked{Credits}`, §8.3), one inbox item; stop dispatching to it. Never switch to another paid provider (plan §8 L6); `on_credits_exhausted` has only `park` in v0.1. |
+| `Auth` | `limits kind=auth, resets_at=NULL`; park jobs of that provider (§8.3, `Blocked{Auth}`); no retries. |
 | `Rate` | `limits kind=rate`, `resets_at = now + backoff` with `backoff = min(10 min × 2^streak, 60 min)` ±20 % jitter (deterministic LCG owned by the loop, seedable in tests). Set `concurrency_cap = max(1, running_on_provider − 1)` until `cap_until = resets_at`. The interrupted run does **not** consume `continues`: core feeds `JobEvent::RunRateLimited{until: resets_at}` (T35) instead of `RunEndedNoReport`, which delays the continue run until `resets_at` and sets `jobs.note="rate-limited; retry after <t>"`. |
 | `Context` | write a capsule (`trigger=context`) then start a **fresh native session on the same harness** seeded with it (`SessionOps::switch` with `to = same executor`, reason `Context`); continue count unchanged. |
 | `Crash`/`Error`/`Killed` | no limit row (except §8.6); L2 continue path (T4). |
 
-### 8.3 Parking all jobs of a provider
-For each job in `{pending, ready, running, stalled}` whose profile ladder is **entirely** limited-by-credits/auth (no usable rung): `JobEvent::Blocked{Credits|Auth}`; jobs with another usable rung are untouched. A single inbox item per provider/kind (dedupe on `title`). Resolution: `vowp inbox answer <id> resolved` deletes the `limits` row and sends `Resolved` to the parked jobs.
+### 8.3 Parking all jobs of a provider (credits and auth — one policy)
+Plan §11: credits exhausted ⇒ **park every job on that provider**; it is never a failover trigger (unlike `quota`). Algorithm:
+1. For each job in `{pending, ready, running, stalled}` whose profile's **current rung** (the rung it is running on, or `Profile::pick` for jobs not yet started) has `Executor::provider() == provider`: send `JobEvent::Blocked{Credits|Auth}` (T29). A job whose ladder happens to contain another rung is **still parked**: credits/auth never advance the ladder (the owner decides after topping up/logging in).
+2. Jobs whose current rung is on a different provider are untouched.
+3. One inbox item per provider/kind (dedupe on `title`), text: "credits exhausted for <provider>; top up and run `vowp inbox answer <id> resolved`" (auth: "log in again with the harness's own login, then `… resolved`").
+4. Resolution: `vowp inbox answer <id> resolved` deletes the `limits` row and sends `Resolved` (T31) to every job parked for that provider/reason.
 
 ### 8.4 Capsule hand-off
 1. For a **session-backed role (planner, keeper)**: `SessionOps::switch(SwitchRequest{session, to: next rung ExecutorRef, reason: Limit|Failover, drain_secs: 5})` — freeze, capsule, stop, start target with capsule + last 2 turns as plain text, record `switch` (sessions.md §5).

@@ -155,6 +155,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `gate_short_form_table` | the table in rule 8, both directions; `"cargo test -p x"` → Cmd with `expect_exit 0` and timeout 1800 |
 | `gate_serde_matches_plan_yaml` | `{"cmd":{"run":"x","expect_exit":0}}`, `{"owns_respected":true}`, `{"review":{"by":"verifier"}}` round-trip; unknown gate key errors |
 | `gate_validate_rejects_bad_regex_and_empty_run` | `expect_pattern:"("` → `InvalidGate` |
+| `job_patch_json_roundtrip_with_loop_and_defaults` | `{}` → all-default patch; `{"loop":{"until":"gates","max_attempts":2,"on_exhausted":"park"}}` round-trips through the `loop` key; `add_needs` omitted deserializes to empty |
 | `default_gates_per_kind` | build ⇒ has report+owns_respected+secret_scan+review; verify ⇒ only report; decision ⇒ empty |
 | `evidence_serde_tagged` | each `Evidence` variant round-trips with `"kind"` tag; `SecretHit` has no value field |
 | `report_parse_good` | fixture `report_ok.md` (structured and free-string `tests`) parses; body preserved |

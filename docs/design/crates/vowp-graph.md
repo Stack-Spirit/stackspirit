@@ -58,7 +58,7 @@ Rules
 
 ## 3. State machine (`machine.rs`)
 
-The complete transition table is in **loops.md §2** (rows T1–T35); this module **implements that table exactly** and there is deliberately no second copy of it. Tests in §9 iterate over table rows by id.
+The complete transition table is in **loops.md §2** (rows T1–T37); this module **implements that table exactly** and there is deliberately no second copy of it. Tests in §9 iterate over table rows by id.
 
 ```rust
 /// Events the supervisor feeds into `transition`.
@@ -75,6 +75,7 @@ pub enum JobEvent {
     VerifyPassed, VerifyFailed,
     FixDone { kind: JobKind },           // kind of the finished fix job: Fix or Merge
     FixFailed,
+    VerifierFailed,                        // T37: the verify job failed or yielded no verdict
     MergeSucceeded, MergeConflict, MergeChecksFailed,
     Blocked { reason: ParkedReason },
     HumanPark, Resolved, Retry, Cancel,
@@ -120,7 +121,7 @@ Rules
 1. `transition` is a pure function of `(job.state, job.kind, job.continues, job.hang_restarts, job.attempts, job.loop_, job.gates, ev)`. It never mutates `job`.
 2. Unlisted `(state, event)` ⇒ `Err(GraphError::InvalidTransition { state, event })` (event as `format!("{ev:?}")`).
 3. The **Exhausted** branch (`attempts >= loop_.max_attempts`) of T18/T21/T28 returns by `loop_.on_exhausted`: Escalate ⇒ `Failed`, effects `[CreateDecisionJob, NotifyInbox{Decision}, WakeKeeper]`; Park ⇒ `Parked`, `[SetParkedReason(Exhausted), NotifyInbox{Question}]`; Fail ⇒ `Failed`, `[WakeKeeper]`.
-4. `GatesPassed` for jobs whose `kind ∈ {Fix, Merge}` ⇒ `Done` with `[NotifyParent]` (T14); otherwise `Reviewing` if any `Gate::Review` is present in `job.gates` else `Merging`.
+4. `GatesPassed` for jobs whose `kind ∈ {Fix, Merge, Verify}` ⇒ `Done` with `[NotifyParent]` (T14); `GatesFailed` for those kinds ⇒ `Failed` with `[NotifyParent, NotifyInbox{Notice}]` (T36, never a fix-of-fix); `KeeperFail` on those kinds adds `NotifyParent` (T13); for all other kinds `Reviewing` if any `Gate::Review` is present in `job.gates` else `Merging`.
 5. `Blocked`/`HumanPark` effect lists: include `StopRun` iff `job.state == Running`; `NotifyInbox{Question}` for reasons `Question|Auth|Credits|ProviderBlocked`, none for `Manual|Exhausted`; plus `SetParkedReason(reason)`.
 6. `Cancel` returns `Cancelled` with `[StopRun]` only if the job is `Running` (else no effects); the worktree is kept (no `CleanupWorktree`).
 7. `JobState::is_terminal` jobs (`Done|Replanned|Cancelled`) accept **no** event (all return `InvalidTransition`).
@@ -315,7 +316,7 @@ State machine (one test per table row of loops.md §2, named `t01_pending_needs_
 - `t04_t05_continue_guard_boundary` — `continues=1` → T4, `continues=2` → T5.
 - `t08_t09_hang_restart_boundary` — `hang_restarts=2` → T8, `3` → T9.
 - `t17_t18_attempts_boundary_and_on_exhausted_variants` — three `on_exhausted` values produce the three documented outcomes.
-- `t14_fix_job_gates_passed_goes_done` / `t15_t16_review_gate_selects_reviewing_or_merging`.
+- `t14_fix_merge_verify_job_gates_passed_goes_done`, `t36_gates_failed_on_fix_merge_verify_job_fails_with_notify_parent_no_fix_of_fix`, `t24_fix_failed_fails_original`, `t37_verifier_failed_parks_original_with_question`, `t13_keeper_fail_notifies_parent_for_child_kinds` / `t15_t16_review_gate_selects_reviewing_or_merging`.
 - `blocked_effects_depend_on_reason_and_state`.
 - `invalid_pairs_are_rejected_for_every_state` — exhaustive loop over all (state, event) pairs: ok iff the pair appears in the table-derived allow-list embedded in the test.
 - proptest `prop_terminal_states_accept_nothing` — any terminal-state job + any event ⇒ `InvalidTransition`.

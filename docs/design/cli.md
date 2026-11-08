@@ -76,7 +76,7 @@ Starts a planner turn (session role `planner`, executor = first available rung o
 | `job cancel <id>` | any non-terminal → `cancelled`; stops the run, releases the ownership lock (worktree and branch are kept on disk for inspection). Dependents stay `pending`; `vowp job ls` flags them `blocked-by-cancelled`. |
 
 ### `vowp graph [--mermaid] [--export <file.yaml>] [--import <file.yaml>] [--all]`
-Default: ASCII (one line per job grouped by depth: `n02a-protocol-foundation [done] ← n01-skeleton`). `--mermaid`: Mermaid `flowchart TD` with state classes. `--export`: YAML (jobs + edges) to the file (stdout if `-`). `--import`: validates then inserts missing jobs/edges (never overwrites; conflicts listed, exit 4). Formats: `crates/vowp-graph.md`.
+Default: ASCII, exactly `render_ascii` of `vowp-graph` (one line per job ordered by layer: `L1 n02a-protocol-foundation [running] vowp-protocol foundation  <- n01-skeleton`). `--mermaid`: exactly `render_mermaid` (`graph TD`, one node per job, edges per kind; no `classDef` — state colours are v0.2). `--export`: YAML (jobs + edges) to the file (stdout if `-`). `--import`: validates then inserts missing jobs/edges (never overwrites; conflicts listed, exit 4). Formats: `crates/vowp-graph.md`.
 
 ### `vowp attach [<job>] [--node <n>]`
 `tmux attach -t vowp-<project>:job-<id>` (or the session's `board` window with no job). Exec's tmux (inherits the TTY). If tmux is absent or the window is gone: falls back to `vowp session tail --follow` of the job's latest session. Exit 3 if the job has no session.

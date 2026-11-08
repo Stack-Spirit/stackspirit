@@ -21,6 +21,7 @@ Observed facts below come from real runs (Claude Code 2.1.319 `stream-json`, ope
   `Limit` (classified limit), `Error`, `Interrupted` (stop/interrupt requested by caller), `Crash` (killed by signal / no result line and non-zero exit),
   `MaxTurns` (harness said so). A `LimitEvent`/`ErrorEvent` event precedes the `TurnEnded` when applicable; a `CostEvent` is emitted at end of run
   (claude) or per step (opencode) *before* `TurnEnded`.
+- **Framing is core's, not the adapter's.** Adapters never emit `SessionExecutor` or `TurnStarted`. Core (`run_turn`, crates/vowp-core.md §3) appends, in this order: `session.executor{attach}` → `turn.started` → `user.message` → the adapter's events → (`cost`, `limit`|`error`, `turn.ended` as emitted by the adapter; core appends a missing `turn.ended` itself) → `session.executor{detach}` (carrying `RunSummary.native_session_id`). The adapter's terminal `TurnEnded` is still mandatory on every exit path.
 - `stop()` is idempotent: SIGTERM to the process group, wait up to 3 s, SIGKILL; a second call is a no-op returning `Ok`.
   `interrupt()`: SIGINT to the group, then `stop()` if the child is still alive after 5 s. Both set `Interrupted` so `wait()` reports `outcome = Killed`.
 - `wait()` blocks until exit and thread joins; calling it again returns a clone of the stored summary.
@@ -71,7 +72,7 @@ Every line is one JSON object with `type`. `session_id` appears on every message
 
 | stream-json | Condition | Emits |
 |---|---|---|
-| `{"type":"system","subtype":"init",…}` | first line | `SessionExecutor{action: Attach, executor, node: (filled by core), native_session_id: session_id, run_id: None}` actor `system`. Also records `model` from `init.model` (used for later events' `source.model`). Other `system` subtypes (`hook_*`, `status`, …) → `Note{text: "system:<subtype>"}` only when `subtype` is not `init`; ignore if noisy (`hook_started`, `hook_response`). |
+| `{"type":"system","subtype":"init",…}` | first line | **no event** (framing — `session.executor` attach/detach and `turn.started` — is owned by core, see below). Records `session_id` as the native id (exposed as `RunSummary.native_session_id` and in every later event's `source.native_session_id`). Also records `model` from `init.model` (used for later events' `source.model`). Other `system` subtypes (`hook_*`, `status`, …) → `Note{text: "system:<subtype>"}` only when `subtype` is not `init`; ignore if noisy (`hook_started`, `hook_response`). |
 | `{"type":"assistant","message":{content:[…]}}` | each content block, in order | `text` → `AssistantMessage{text}` (skip empty); `thinking` → `AssistantReasoning{text: thinking}` **only if `thinking` is non-empty** (the sample shows `"thinking":""` with an opaque `signature`; the signature is never stored) ; `tool_use{id,name,input}` → `ToolCall{call_id:id, name, input}` |
 | `{"type":"user","message":{content:[{type:"tool_result",tool_use_id,content,is_error?}]}}` | each tool_result block | `ToolResult{call_id: tool_use_id, ok: !is_error.unwrap_or(false), output / output_ref}` — `content` is a **string or an array of `{type:"text",text}` blocks** (both seen): join text blocks with `\n`. Adapters always emit `output: Some(full text)` and never `output_ref`: the session layer (`vowp-store` `SessionLog::append`) spills outputs > 8192 bytes to `blobs/<sha256>` and rewrites the payload. |
 | `{"type":"user",…}` with `text` blocks (replayed user text) | | ignored |
@@ -107,10 +108,10 @@ Texts appear in `result.result`, in stderr, or as plain non-JSON stdout lines. E
 
 | Text | kind | reset |
 |---|---|---|
-| `Claude AI usage limit reached\|1794164400` | Quota | unix `1794164400` (+2 min) |
-| `You've hit your limit · resets 11pm (Europe/Oslo)` | Quota | next 23:00 in the node's tz (see §2.4) +2 min |
-| `5-hour limit reached ∙ resets 3pm` | Quota | next 15:00 local +2 min |
-| `You've hit your weekly limit · resets Nov 12, 9am` | Quota | that date 09:00 local +2 min (weekly) |
+| `Claude AI usage limit reached\|1794164400` | Quota | unix `1794164400` = `2026-11-08T19:00:00Z` |
+| `You've hit your limit · resets 11pm (Europe/Oslo)` | Quota | next 23:00 in the node's tz (see §2.4) |
+| `5-hour limit reached ∙ resets 3pm` | Quota | next 15:00 local |
+| `You've hit your weekly limit · resets Nov 12, 9am` | Quota | that date 09:00 local (weekly) |
 | `Session limit reached ∙ resets 4:30 am` | Quota | 04:30 |
 | `API Error: 429 {"type":"error","error":{"type":"rate_limit_error",…}}` | Rate | now + 10 min |
 | `API Error: 529 Overloaded` / `overloaded_error` | Rate | now + 10 min |
@@ -122,11 +123,13 @@ Regexes: see §5.3 (shared with every adapter).
 
 ### 2.4 Reset time
 
+**Margin rule (single place):** adapters report the **exact** reset time the harness gave (no margin). The +2 min safety margin is added **once**, by core's L6 when it writes `limits.resets_at` (loops.md §8.1). Nothing else adds it.
+
 Preference order for `LimitEvent.resets_at` / `RunSummary.limit.resets_at`:
 
-1. **Structured:** the *rejected* `rate_limit_event.rate_limit_info`: `max(resetsAt of every window in unifiedWindows whose status == "rejected", and the top-level resetsAt if the top-level status == "rejected")`, unix seconds (`1794164400` = 2026-11-08T21:40:00Z in the sample). Add 2 minutes.
-2. `|<10 digits>` suffix in the text → unix seconds. Add 2 minutes.
-3. Clock-time text (`resets 11pm`, `resets 3pm`, `resets 4:30 am`, `resets Nov 12, 9am`) parsed by `parse_reset_time(text, now, tz_offset_minutes)` (§5.2). The text names a zone like `(Europe/Oslo)`; v0.1 cannot resolve IANA names (decisions.md open question 2), so: use `StartInput`-independent config `ClaudeConfig.tz_offset_minutes` (default `0`; core fills it from `[node] tz_offset_minutes`, which `vowp init` writes from the machine's current offset) and ignore the zone name. Result is the next occurrence strictly after `now`, +2 min.
+1. **Structured:** the *rejected* `rate_limit_event.rate_limit_info`: `max(resetsAt of every window in unifiedWindows whose status == "rejected", and the top-level resetsAt if the top-level status == "rejected")`, unix seconds (`1794164400` = 2026-11-08T19:00:00Z).
+2. `|<10 digits>` suffix in the text → unix seconds.
+3. Clock-time text (`resets 11pm`, `resets 3pm`, `resets 4:30 am`, `resets Nov 12, 9am`) parsed by `parse_reset_time(text, now, tz_offset_minutes)` (§5.2). The text names a zone like `(Europe/Oslo)`; v0.1 cannot resolve IANA names (decisions.md open question 2), so: use `StartInput`-independent config `ClaudeConfig.tz_offset_minutes` (default `0`; core fills it from `[node] tz_offset_minutes`, which `vowp init` writes from the machine's current offset) and ignore the zone name. Result is the next occurrence strictly after `now` (no margin).
 4. Fallback `now + 60 min` (quota) — still a `Limit`.
 
 `Rate` kind: `resets_at = now + 10 min` (`TRANSIENT_BACKOFF_MIN` constant `10`, in `classify`).
@@ -163,7 +166,7 @@ Prompt size: Linux's per-argument cap is 128 KiB. If `prompt.len() > 100_000` by
 
 - `--auto` is mandatory: opencode must never open a permission dialog (principle 2.1). No keystrokes, ever.
 - New session: no `--session`. The id is learned from the first event's top-level `sessionID` (e.g. `ses_e439617b6ffepWG4UNK521b6ly`) and reported as `RunSummary.native_session_id`
-  and in a `SessionExecutor{Attach, native_session_id}` event the adapter emits at the first line.
+  and in `RunSummary.native_session_id` (core writes it into the detach event and `adapters.json`); the adapter emits **no** framing event.
 - `--model` variant sigil: the Executor stores `variant = Some("max")`; `model_arg()` renders `deepseek/deepseek-flash#max`.
 - Binary: `OpencodeConfig.binary` (default first `opencode` on `PATH`, falling back to `$HOME/.opencode/bin/opencode` — checked with `Path::exists`, only for the user's own HOME read from `StartInput.env`'s `HOME`… the adapter reads `HOME` from the process env for this single lookup).
 
@@ -174,8 +177,8 @@ Every stdout line is a JSON object with `type`, `timestamp` (unix **milliseconds
 
 | opencode line | Emits (in order) |
 |---|---|
-| first line of the run (any type) | `SessionExecutor{Attach, native_session_id: sessionID}` (once) |
-| `step_start` (`part.type="step-start"`, `part.messageID`) | `TurnStarted{turn: n}` where `n` increments per `step_start` **only for the first step of the run**; later steps emit nothing (a run is one turn; steps are tool-loop iterations). Concretely: emit `TurnStarted{turn: 1}` on the first `step_start` only. |
+| first line of the run (any type) | no event: records `sessionID` as the native id (`source.native_session_id` on later events, `RunSummary.native_session_id`) |
+| `step_start` (`part.type="step-start"`, `part.messageID`) | **no event** (core emits `turn.started`; steps are tool-loop iterations of one turn) |
 | `tool_use`, `part.type="tool"`, `part.state.status="completed"` | `ToolCall{call_id: part.id, name: part.tool, input: part.state.input}` then `ToolResult{call_id: part.id, ok: true, output: part.state.output (string; if not a string, its JSON text), exit_code: JSON pointer `/state/metadata/metadata/exit` (the real nested shape: `state.metadata = {"metadata":{"status":"completed","truncated":false,"exit":0},"content":[…]}`), falling back to `/state/metadata/exit`, else None}`; both events carry `ts` from `part.state.time.start` / `.end` (ms) when present, else `timestamp`. **One line → two events.** For tool names `edit`, `write`, `patch`, `multiedit` (if `state.input.filePath` or `path` exists) additionally emit `FileChange{path, op: Modify (Create for `write` when output says created, else Modify)}` — best-effort; core's owns gate uses git, not these events. |
 | `tool_use` with `state.status="error"` | `ToolCall{…}` + `ToolResult{ok: false, output: part.state.error}` (observed: `{"status":"error","input":{…},"error":"Web search cancelled","time":{start,end}}`). **Not** a run error: the harness continues. |
 | `tool_use` with `state.status` ∈ {`pending`,`running`} | ignored (the final line carries the result; v0.1 only sees completed/error) |
@@ -293,7 +296,7 @@ error_from_stderr = true             # classify stderr tail even on exit 0 if a 
   Cost: pointers evaluated on every line; at `finish()` build `Cost` (`source: Receipt` if `usd_pointer` produced a number, else `Unknown`).
 - `text`: stdout split into lines; every `text_chunk_lines` lines (or at EOF, or after 2 s of silence is **not** implemented — no timers) flush
   `AssistantMessage{text: chunk}`. stderr is classified. No tool events.
-- The first event is `SessionExecutor{Attach, native_session_id}` if a native id is known (via pointer) else with `None`.
+- No framing events: the first event is the first content event; the native id (if the mapping defines a pointer) is reported in `RunSummary.native_session_id`.
 - Terminal `TurnEnded` rules: exit ∈ `exit.ok` → `EndTurn`; limit classification → `Limit`; else `Error`/`Crash`.
 - `capabilities()`: `can_resume_native = resume_argv.is_some()`, `can_inject_assistant_history: false`, `can_switch_model_in_session: false`, `live_input: false`, `emits_reasoning: any rule emits assistant.reasoning`, `emits_cost_receipts: usd_pointer set`, `reports_resets_at: resets_at set`.
 
@@ -369,7 +372,6 @@ pub struct Classified {
     pub http_status: Option<u16>,
 }
 pub const TRANSIENT_BACKOFF_MIN: u32 = 10;
-pub const RESET_MARGIN_MIN: u32 = 2;
 pub const QUOTA_FALLBACK_MIN: u32 = 60;
 
 /// Classify error text. `provider_hint` is informational ("claude", "deepseek", "" ) and selects nothing in v0.1 except the
@@ -380,7 +382,7 @@ pub fn classify_text(provider_hint: &str, text: &str, http_status: Option<u16>, 
 /// Parse a reset time out of limit text, per §2.4 rules 2-3. `None` if none found.
 pub fn parse_reset_time(text: &str, now: Timestamp, tz_offset_minutes: i32) -> Option<Timestamp>;
 
-/// Claude `rate_limit_info` object -> reset time (§2.4 rule 1). Adds RESET_MARGIN_MIN.
+/// Claude `rate_limit_info` object -> reset time (§2.4 rule 1). No margin added.
 pub fn reset_from_rate_limit_info(info: &serde_json::Value) -> Option<Timestamp>;
 
 /// Strip secret-looking substrings, collapse whitespace, truncate to `max_chars` (on a char boundary) with a trailing "…".
@@ -392,16 +394,16 @@ pub fn extract_http_status(text: &str) -> Option<u16>;
 
 ### 5.2 `parse_reset_time` algorithm
 
-1. `\|(\d{10})\b` → `Timestamp::from_unix_secs`, **+2 min**.
+1. `\|(\d{10})\b` → `Timestamp::from_unix_secs` (exact).
 2. Else regex `(?i)resets?\s+(?:at\s+)?(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>am|pm)?`:
    - `h` 12-hour with `ap`: `pm && h<12 → h+12`; `am && h==12 → 0`; without `ap`, `h` is 24-hour; reject `h>23` or `m>59`.
    - Work in local time = UTC + `tz_offset_minutes`. If `mon/day` present: that date in the current local year (if already past by > 1 day, next year); else today at `h:m`, and if that is `<= now` add one day.
-   - Convert back to UTC and **+2 min**.
+   - Convert back to UTC (no margin).
 3. Else `None`.
 
 Examples (`now = 2026-11-08T18:10:00Z`, `tz_offset_minutes = 60`, i.e. local 19:10):
-`"resets 11pm"` → `2026-11-08T22:02:00Z`; `"resets 3pm"` → next day `2026-11-09T14:02:00Z`; `"resets 4:30 am"` → `2026-11-09T03:32:00Z`;
-`"resets Nov 12, 9am"` → `2026-11-12T08:02:00Z`; `"…|1794164400"` → `2026-11-08T21:42:00Z`.
+`"resets 11pm"` → `2026-11-08T22:00:00Z`; `"resets 3pm"` → next day `2026-11-09T14:00:00Z`; `"resets 4:30 am"` → `2026-11-09T03:30:00Z`;
+`"resets Nov 12, 9am"` → `2026-11-12T08:00:00Z`; `"…|1794164400"` → `2026-11-08T19:00:00Z`.
 
 ### 5.3 Rules (precedence **credits > auth > quota > rate > context**; first matching class wins; matching is case-insensitive)
 

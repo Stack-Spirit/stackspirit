@@ -266,6 +266,7 @@ secret_scan = true
 6. `loops.<name>`: key must be a known loop name (`l1-supervisor … l9-schedules`).
 7. `owns`-style globs elsewhere (`always_allowed`) compile with `globset`.
 8. Unknown keys anywhere → error with the key path (serde `deny_unknown_fields`).
+9. `[node]`: `max_workers ≥ 1`, `max_verifiers ≥ 1`, `tick_secs ≥ 1` (error path `node.max_workers` etc.).
 
 Resolution order for any setting: CLI flag > `vowp.toml` > `~/.vowp/config.toml` > built-in default.
 

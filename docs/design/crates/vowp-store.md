@@ -122,7 +122,7 @@ pub struct CostRow { pub key: String /* job id | role | provider | model | YYYY-
                      pub unknown_entries: u64 /* cost rows whose usd is NULL (never counted as free) */, pub tokens: Tokens, pub entries: u64 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct RequestId(pub String);          // ULID
 #[derive(Debug, Clone, PartialEq)]
-pub struct Request { pub id: RequestId, pub kind: String /* "job.retry" | "job.park" | "job.cancel" | "loop.pause" | ... */,
+pub struct Request { pub id: RequestId, pub kind: String /* "retry_job" | "park_job" | "cancel_job" | "pause_loop" | ... (snake_case Request variant names, crates/vowp-core.md §2) */,
                      pub payload: serde_json::Value, pub created_at: Timestamp }
 #[derive(Debug, Clone, Default)]
 pub struct LedgerFilter { pub kind: Option<LedgerKind>, pub job_id: Option<JobId>, pub since: Option<Timestamp>, pub limit: Option<u32> }
@@ -262,7 +262,7 @@ pub fn kv_get(&self, key: &str) -> Result<Option<String>, StoreError>;
 pub fn kv_set(&mut self, key: &str, value: &str) -> Result<(), StoreError>;
 pub fn kv_delete(&mut self, key: &str) -> Result<bool, StoreError>;
 pub fn kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError>;
-/// CLI → supervisor requests (decisions.md D2): stores kv key `req:<ULID>` = json {"kind","payload"}.
+/// CLI → supervisor requests (decisions.md D2): stores kv key `req:<ULID>` = json `{"kind":"<snake_case>","payload":{…}}` (the exact wire form of `vowp_core::requests::Request`; the store treats kind/payload opaquely).
 pub fn push_request(&mut self, kind: &str, payload: &serde_json::Value) -> Result<RequestId, StoreError>;
 /// Atomically (one transaction) reads all `req:*` rows in id order and deletes them.
 pub fn take_requests(&mut self) -> Result<Vec<Request>, StoreError>;
@@ -438,7 +438,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 
 | Test | Asserts |
 |---|---|
-| `schema_file_is_identical_to_design` | if `../../docs/design/schema.sql` exists relative to `CARGO_MANIFEST_DIR`, `include_str!("schema/001_init.sql")` equals it byte-for-byte (skipped silently outside the repo) |
+| `schema_file_is_identical_to_design` | `include_str!("../src/schema/001_init.sql") == include_str!("../../../docs/design/schema.sql")` (paths relative to `crates/vowp-store/tests/`); the file must exist in the repo layout — **no skip, no fallback**: a missing file is a compile error, a difference is a test failure |
 | `open_creates_schema_version_1` | fresh temp DB: `schema_version()==1`, tables listed in schema.sql all exist, WAL mode (`PRAGMA journal_mode` = `wal`), `foreign_keys` = 1 |
 | `open_refuses_newer_schema` | set `PRAGMA user_version = 99` on a temp DB file, `Store::open_path` → `SchemaTooNew{found:99,supported:1}`, file bytes unchanged |
 | `open_is_idempotent` | open twice on the same file: no error, `node_id` kv unchanged |

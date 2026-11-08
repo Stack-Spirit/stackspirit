@@ -204,7 +204,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 
 | Test | Proves |
 |---|---|
-| `classify_claude_usage_limit_with_unix_suffix` | `Claude AI usage limit reached\|1794164400` → Quota, `resets_at = 2026-11-08T21:42:00Z` |
+| `classify_claude_usage_limit_with_unix_suffix` | `Claude AI usage limit reached\|1794164400` → Quota, `resets_at = 2026-11-08T19:00:00Z` (exact, no margin) |
 | `classify_claude_hit_limit_clock_time_with_tz_offset` | `You've hit your limit · resets 11pm (Europe/Oslo)`, now 18:10Z, offset 60 → `22:02Z` same day |
 | `classify_clock_time_rolls_to_next_day` | `resets 3pm` after 3pm → tomorrow |
 | `classify_five_hour_and_weekly_and_minutes` | `5-hour limit reached ∙ resets 3pm`, `weekly limit · resets Nov 12, 9am`, `resets 4:30 am` all parsed |
@@ -214,7 +214,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `classify_context_texts` | `prompt is too long: 210000 tokens > 200000 maximum` → Context |
 | `classify_precedence_credits_auth_quota_rate_context` | table-driven: strings matching several classes pick the documented winner |
 | `classify_unrelated_text_is_none` | `"all tests passed"` → None; JSON key `rate_limit_event` in a message is not fed (documented) |
-| `reset_from_rate_limit_info_picks_max_rejected_window` | sample object with five_hour rejected & seven_day allowed → five_hour resetsAt+2min; both rejected → max |
+| `reset_from_rate_limit_info_picks_max_rejected_window` | sample object with five_hour rejected & seven_day allowed → five_hour resetsAt exactly; both rejected → max |
 | `redact_removes_secret_shapes_and_truncates` | each pattern in adapters.md §5.4 → `<redacted>`; output ≤ 300 chars; char-boundary safe on multibyte input |
 | `extract_http_status_variants` | `"statusCode":402`, `HTTP 401`, `API Error: 529` |
 | `proc_spawn_collects_events_and_exit` | fake script prints 3 lines, parser stub emits events, channel order, `wait()` summary, channel closes |
@@ -237,9 +237,9 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `claude_argv_resume_effort_system_note` | `--resume <id>`, `--effort medium`, `--append-system-prompt`, `--permission-mode auto` default, extra args order |
 | `claude_prompt_goes_to_stdin` | `FAKE_STDIN_OUT` file equals the prompt exactly (incl. multibyte, > 200 KB prompt works) |
 | `claude_prompt_via_arg_fallback` | `prompt_via_arg=true` → last argv element |
-| `claude_ok_fixture_events` | `claude_ok.jsonl` → `SessionExecutor(Attach, native id 607b6f5f…)`, `AssistantMessage("ok")`, `CostEvent{usd 0.0349033, tokens input 2/output 4/cache_read 11873/cache_write 8418}`, `TurnEnded(EndTurn)`; no limit event for `allowed` rate event; summary outcome Ok |
+| `claude_ok_fixture_events` | `claude_ok.jsonl` → `AssistantMessage("ok")`, `CostEvent{usd 0.0349033, tokens input 2/output 4/cache_read 11873/cache_write 8418}`, `TurnEnded(EndTurn)`; no limit event for `allowed` rate event; no framing events; summary outcome Ok and `summary.native_session_id == Some("607b6f5f-88b0-4133-8716-9270d9d52c99")` |
 | `claude_tool_use_fixture_events` | `ToolCall` + `ToolResult` for both string and array-of-blocks content; empty thinking produces no `AssistantReasoning`; signatures absent from all events and raw |
-| `claude_rate_limit_rejected_fixture` | `LimitEvent{Quota, provider claude, resets_at = resetsAt+2min}`, `RunSummary.outcome = Limit`, `limit.resets_at` equal, stop_reason `Limit`, even with exit 0 |
+| `claude_rate_limit_rejected_fixture` | `LimitEvent{Quota, provider claude, resets_at = resetsAt exactly}`, `RunSummary.outcome = Limit`, `limit.resets_at` equal, stop_reason `Limit`, even with exit 0 |
 | `claude_usage_limit_text_fixture` | is_error result text → Limit with unix reset |
 | `claude_weekly_limit_fixture` | date form with tz offset |
 | `claude_429_fixture` | Rate, `resets_at = now+10min` using the injected `now` |
@@ -262,7 +262,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `opencode_tool_exit_code_from_nested_metadata` | fixture `opencode_tool_exit.jsonl` (real nested shape `state.metadata.metadata.exit`): `ToolResult.exit_code == Some(0)` and `Some(2)` for the second line |
 | `opencode_variant_sigil_only_when_present` | `#max` absent when `variant: None` |
 | `opencode_long_prompt_goes_through_file` | > 100 000 bytes → file under `<cwd>/.vowp/prompts/`, argv prompt is the pointer text |
-| `opencode_ok_fixture_events` | real fixture: one `TurnStarted{turn:1}`, `ToolCall`+`ToolResult` per `tool_use`, `AssistantMessage`, one `CostEvent` per `step_finish`, exactly one `TurnEnded(EndTurn)`; `SessionExecutor` first with native id |
+| `opencode_ok_fixture_events` | real fixture: no `TurnStarted`/`SessionExecutor`, `ToolCall`+`ToolResult` per `tool_use`, `AssistantMessage`, one `CostEvent` per `step_finish`, exactly one `TurnEnded(EndTurn)`; `summary.native_session_id` = the fixture's `ses_…` id |
 | `opencode_tool_use_line_becomes_two_events_in_order` | call before result, same `call_id`, ts from `state.time` |
 | `opencode_tool_error_is_not_run_error` | `state.status:"error"` → `ToolResult{ok:false, output "Web search cancelled"}`, outcome Ok |
 | `opencode_cost_sums_over_steps` | `RunSummary.cost.usd` = sum of `part.cost`, tokens summed incl. cache read, `source: Receipt` |

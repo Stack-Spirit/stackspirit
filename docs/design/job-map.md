@@ -53,14 +53,14 @@ Slice: types.md §1–4 (ids, Timestamp, Clock/FakeClock, ErrorKind/ProtocolErro
 Slice: types.md §5–6 (EventEnvelope, EventType, every payload, `EventBody` parts/from_parts/summary, BlobRef, Capsule/CapsuleDraft validate + `render_markdown` golden). Acceptance: `event_body_roundtrip_every_type`, `envelope_*`, `capsule_*` tests.
 
 **n02c-protocol-domain** · build · 75 min · n02a · `src/{job,gate,report,run,session,inbox,loops,release}.rs`, `tests/{job,gate,report,domain}.rs`, fixtures `job_*.json`, `report_*.md`, `brief_*.md`.
-Slice: types.md §7–10 (Job/NewJob/JobPatch/states, Gate/Evidence/default_gates/short forms, Report/Brief front-matter, Run/Worker/Session/Switch/InboxItem/Loop/Schedule/Ledger/Release). Acceptance: exactly the tests of `crates/vowp-protocol.md` §6 for these modules: `gate_short_form_table`, `gate_serde_matches_plan_yaml`, `gate_validate_rejects_bad_regex_and_empty_run`, `default_gates_per_kind`, `evidence_serde_tagged`, `report_parse_good`, `report_parse_bad_cases`, `report_missing_fields`, `brief_roundtrip_and_from_job` (+ the domain-row serde tests listed there).
+Slice: types.md §7–10 (Job/NewJob/JobPatch/states, Gate/Evidence/default_gates/short forms, Report/Brief front-matter, Run/Worker/Session/Switch/InboxItem/Loop/Schedule/Ledger/Release). Acceptance: exactly the tests of `crates/vowp-protocol.md` §6 for these modules: `gate_short_form_table`, `gate_serde_matches_plan_yaml`, `gate_validate_rejects_bad_regex_and_empty_run`, `default_gates_per_kind`, `evidence_serde_tagged`, `report_parse_good`, `report_parse_bad_cases`, `report_missing_fields`, `brief_roundtrip_and_from_job`, `job_patch_json_roundtrip_with_loop_and_defaults` (+ the domain-row serde tests listed there).
 
 **n02d-protocol-config-traits** · build · 75 min · n02a, (n02b, n02c for compile: `needs` all three) · `src/{config,adapter,services,schema}.rs`, `tests/{config,schema,traits}.rs`, `tests/fixtures/vowp.example.toml` (byte-identical to architecture.md §5.2 — a test asserts it when the repo docs are reachable).
 Slice: types.md §11–14 + architecture.md §5.3 validation rules. Acceptance: `config_example_parses`, `config_rejects_unknown_fields_and_bad_values` (covering validation rules 1–8), `config_defaults_are_documented_values`, `service_cancel_token`, `schema_export_covers_listed_types`, `types_md_examples_validate` (names from `crates/vowp-protocol.md` §6), plus `NodeFile`/`with_node_defaults` merge tests.
 
 ### W1 — `vowp-tmux` (spec: `crates/vowp-tmux.md`)
 
-**n05-tmux** · build · 75 min · n01 · `crates/vowp-tmux/**`. Acceptance: all tests in the crate doc, run on a private socket; `tmux_source_has_no_respawn_or_send_keys` safety grep test.
+**n05-tmux** · build · 75 min · n01 · `crates/vowp-tmux/**`. Acceptance: all tests in the crate doc, run on a private socket; `source_has_no_respawn_or_send_keys` safety grep test.
 
 ### W2 — adapters shared (spec: `crates/vowp-adapters.md` §1–3, `adapters.md` §1, §5, §9)
 

@@ -117,17 +117,22 @@ pub struct SystemGit { /* CommandRunner */ }   // runs real `git`; tests use rea
 ```
 
 ### `requests.rs` — CLI→supervisor requests (decision D2)
+Tests (n07a, `tests/requests.rs`): `request_wire_form_matches_loops_md_for_every_kind` (serialises each variant, asserts `{"kind":…,"payload":…}` and decodes back), `request_push_drain_roundtrip_via_store`, `undecodable_request_is_dropped_and_logged`, `apply_direct_retry_resolve_and_park`.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]   // wire form = the kv value: {"kind":"retry_job","payload":{"job":"n04-graph","reset_attempts":false}}
 pub enum Request {
+    ResolveJob { job: JobId },                       // parked -> ready (Resolved, T31); used by `vowp job retry` on a parked job
+    RunLoop { name: String },                        // run that loop's step on the next tick (schedules, `Loop` action)
     RetryJob { job: JobId, reset_attempts: bool }, ParkJob { job: JobId, reason: String }, CancelJob { job: JobId },
     NudgeJob { job: JobId, text: Option<String> }, RestartJob { job: JobId }, ReplanJob { job: JobId }, FailJob { job: JobId, reason: String },   // keeper commands (loops.md §7)
     AnswerInbox { id: InboxId }, PauseLoop { name: String }, ResumeLoop { name: String },
     SwitchSession { request: SwitchRequest },        // not used by v0.1 CLI (switch runs inline); reserved
     Wake,
 }
+/// Stored as kv `req:<ULID>` = `serde_json::to_string(req)`; the store's `push_request(kind, payload)` receives `kind`/`payload` split from that JSON (so store and core agree byte-for-byte).
 pub fn push(store: &Store, req: &Request) -> Result<RequestId, CoreError>;      // thin wrapper over Store::push_request
 pub fn drain(store: &Store) -> Result<Vec<(RequestId, Request)>, CoreError>;     // take_requests + decode; undecodable rows are logged & dropped
 pub fn apply_direct(deps: &Deps, store: &Store, req: &Request) -> Result<(), CoreError>;   // used by the CLI when no supervisor runs
@@ -148,10 +153,10 @@ impl vowp_protocol::SessionOps for SessionService { /* create_session, run_turn,
 
 `run_turn` algorithm (numbered, normative):
 1. Check `cwd` against the allow-list (`Refused` otherwise). Resolve adapter via `AdapterRegistry::get`; missing → `ServiceError::Failed("harness not installed")`.
-2. Open the session's `SessionLog` (lockfile; a second concurrent writer → `Conflict`). Append `turn.started` (turn = last turn + 1) and, first time on this executor, `session.executor` (attach) with `native_session_id` from `session_natives` if resuming the same harness; if the session has no native session on this harness and a capsule exists, the prompt is `seed_prompt(capsule, tail_turns, prompt)`; else `prompt`.
+2. Open the session's `SessionLog` (lockfile; a second concurrent writer → `Conflict`). Append **first** `session.executor` (attach; every run, not only the first on an executor) and **then** `turn.started` (turn = last turn + 1); the attach carries `native_session_id` from `session_natives` if resuming the same harness; if the session has no native session on this harness and a capsule exists, the prompt is `seed_prompt(capsule, tail_turns, prompt)`; else `prompt`.
 3. Append the `user.message`; insert the `runs` row (`started_at=now`, `purpose`, `profile`, `rung`, `window`); `Adapter::start(StartInput{ resume, prompt, cwd, env: configured env_pass values, … })`.
 4. Loop on `run.events()` with `recv_timeout(200 ms)`: append each event through `SessionLog::append` (blob spill >8192 B), update `sessions.last_seq`/`updated_at` and `session_events` index every 20 events and at the end; poll `cancel` → `interrupt()`.
-5. `wait()` → `RunSummary`; append, **in this order** (sessions.md §1 rule 8): `cost` event (if cost known), then `limit` (if any) or `error` (if any), then `turn.ended` (stop_reason from summary), then `session.executor` detach; `sync()`. (Adapters already emit `cost`/`limit`/`error` before their terminal `TurnEnded`; the session layer forwards them unchanged and only appends the ones the adapter did not emit.)
+5. `wait()` → `RunSummary`; append, **in this order** (sessions.md §1 rule 8): `cost` event (if cost known), then `limit` (if any) or `error` (if any), then `turn.ended` (stop_reason from summary), then `session.executor` detach carrying `summary.native_session_id` (also written to `session_natives` / `adapters.json`); `sync()`. (Adapters already emit `cost`/`limit`/`error` before their terminal `TurnEnded`; the session layer forwards them unchanged and only appends the ones the adapter did not emit.)
 6. Finish the run row (`finish_run`), upsert/clear `limits`, write the ledger rows (`ledger::record_run_cost`, price-table fallback when no receipt), return `TurnResult`. A `Limit/Credits/Auth/Context/Rate` outcome is **returned**, not raised: callers (loops) decide.
 
 ```rust
@@ -178,7 +183,7 @@ pub mod importer { /* optional (nice-to-have): ClaudeTranscriptImporter::scan_on
 ```
 
 Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode", FakeAdapter)` where `FakeAdapter` replays a fixture through the real `Adapter` trait — defined in `crates/vowp-core/tests/support/fake_adapter.rs`, built by n07a, copied by later jobs):
-`run_turn_appends_events_and_finishes_run`, `run_turn_resumes_native_session_same_harness`, `run_turn_seeds_capsule_on_new_harness`, `run_turn_cwd_outside_allow_list_refused`, `run_turn_cancel_interrupts_adapter`,
+`run_turn_appends_events_and_finishes_run`, `run_turn_frames_attach_then_turn_started_once_per_run_without_adapter_duplicates` (real parsers over claude/opencode fixtures: exactly one `session.executor` attach, one `turn.started`, order attach → turn.started → user.message), `limit_resets_at_gets_single_two_minute_margin` (fixture `|1794164400` → `limits.resets_at = 19:02:00Z`), `run_turn_resumes_native_session_same_harness`, `run_turn_seeds_capsule_on_new_harness`, `run_turn_cwd_outside_allow_list_refused`, `run_turn_cancel_interrupts_adapter`,
 `run_turn_limit_outcome_returned_not_raised_and_limits_row_written`, `run_turn_large_tool_output_spilled_to_blob`, `second_writer_on_same_session_conflicts`,
 `capsule_prompt_golden`, `capsule_parse_draft_with_fences_and_prose`, `capsule_write_valid_first_try`, `capsule_write_repairs_once_then_ok`, `capsule_write_twice_invalid_keeps_previous_and_logs_error_event`,
 `capsule_debounce_120s_except_manual_switch_limit_export`, `seed_prompt_golden_with_two_turn_tail`, `seed_prompt_never_contains_tool_calls_as_native`,
@@ -203,15 +208,16 @@ impl GateRunner {
 pub struct GatesOutcome { pub results: Vec<GateResult>, pub all_passed_before_review: bool, pub first_failure: Option<usize> /* index of the first failed gate */, pub needs_review: bool }
 pub mod secret_scan {
     pub struct Rule { pub name: &'static str, pub regex: &'static str }
-    pub fn rules() -> &'static [Rule];                                   // names: aws_access_key, github_pat, github_token, private_key_block, slack_token, openai_style_key, supabase_secret
+    pub fn rules() -> &'static [Rule];                                   // exactly the 7 content rules of loops.md §4 "Secret rules", in that order: sk_api_key, supabase_secret, github_token, github_pat, aws_access_key, private_key_block, slack_token
     pub fn scan_text(path: &str, text: &str) -> Vec<SecretHit>;           // hits carry rule NAME + line only
+    pub fn scan_paths(paths: &[String]) -> Vec<SecretHit>;                // rule `secret_file` (line 0) for .env*, *.pem, id_rsa*, id_ed25519*
     pub fn scan_diff(diff: &str) -> Vec<SecretHit>;                       // only added lines (`+`), path from `+++ b/…`
 }
 pub fn parse_report_file(path: &Path) -> Result<Report, CoreError>;      // thin wrapper, for gates + loops
 ```
 Tests: `report_gate_passes_with_required_fields`, `report_gate_fails_missing_field_lists_names`, `report_gate_missing_file_fails_with_evidence`, `report_gate_status_partial_fails_done_requirement` (a `report` gate requires `status: done` for `done`; `partial|blocked` never advance a job), `cmd_gate_exit_zero_passes`, `cmd_gate_wrong_exit_fails_with_tail`, `cmd_gate_expect_pattern`, `cmd_gate_timeout_kills_group_and_fails` (sleep 30 with timeout 1 s), `cmd_gate_tail_is_last_200_lines`,
 `owns_respected_pass_and_fail_with_real_git`, `owns_respected_allows_always_allowed_cargo_lock`, `pushed_gate_against_local_bare_remote`, `pushed_gate_fails_when_branch_absent`,
-`review_gate_reads_verifier_report_verdict`, `review_gate_pending_when_no_verify_job_yet`, `secret_scan_detects_each_rule_and_never_stores_value`, `secret_scan_only_added_lines`, `deploy_gate_runs_command_then_probe`, `deploy_gate_probe_mismatch_fails`,
+`review_gate_reads_verifier_report_verdict`, `review_gate_pending_when_no_verify_job_yet`, `secret_scan_detects_each_rule_by_exact_name_and_never_stores_value`, `secret_scan_flags_secret_file_paths`, `secret_scan_only_added_lines`, `deploy_gate_runs_command_then_probe`, `deploy_gate_probe_mismatch_fails`,
 `file_exists_only_gate_rejected_by_validate` (anti-pattern ban), `evaluate_all_continues_after_failure_except_report_and_persists_results`, `evaluate_merge_checks_uses_project_check_cmds`.
 
 ## 5. `ledger` (n08b)
@@ -290,7 +296,8 @@ pub struct RunnerPool { /* JoinHandles + CancelTokens by RunId */ }
 impl RunnerPool { pub fn spawn(&mut self, job: Job, choice: vowp_graph::DispatchChoice, deps: Deps, wake: WakeHandle) -> Result<RunId, CoreError>; pub fn cancel(&self, run: &RunId); pub fn cancel_all(&self); pub fn active(&self) -> usize; }
 
 pub mod l2 { pub fn start_prompt(job: &Job, brief: &str) -> String; pub fn continue_prompt(job: &Job) -> String; pub fn fix_prompt(job: &Job, findings: &[String]) -> String; }   // text templates: loops.md §3 (golden-tested)
-pub mod l3 { pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summary: &str) -> String; pub fn parse_verdict(report: &Report) -> Result<(Verdict, Vec<String>), CoreError>; }
+pub mod l3 { pub fn on_verify_done(store: &Store, verify_job: &Job) -> Result<JobEvent, CoreError>;   // reads the verify report, writes the review GateResult for the original, returns VerifyPassed|VerifyFailed (T14/T19–T21)
+    pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summary: &str) -> String; pub fn parse_verdict(report: &Report) -> Result<(Verdict, Vec<String>), CoreError>; }
 pub mod merge_queue { pub struct MergeQueue { /* Deps, GateRunner */ } impl MergeQueue { pub fn step(&self, store: &Store) -> Result<MergeStep, CoreError>; } pub enum MergeStep { Idle, Merged(JobId), Conflict { job: JobId, files: Vec<String> }, ChecksFailed { job: JobId }, InProgress } }
 pub mod l6 {   // failover (n08d)
     pub struct Failover { /* Deps */ }
@@ -314,7 +321,7 @@ pub mod digest {   // loops.md §7 "Digest"; ≤ max_chars (default 24_000), eac
     }
 }
 ```
-Named tests live in `loops.md` §13 (drills) plus: `tick_step_failure_does_not_abort_tick`, `startup_marks_orphaned_runs_crash_and_continues_job`, `dispatch_respects_ownership_locks_and_slots`, `dispatch_skips_limited_provider_and_uses_next_rung`, `stall_judge_triggers_stop_and_continue`, `hang_before_first_output_restart_up_to_3`, `continue_twice_then_keeper`, `verify_fail_creates_fix_job_same_branch_max_3_then_escalates`, `merge_queue_happy_path_ff_push_to_local_bare_origin`, `merge_queue_conflict_creates_merge_job`, `merge_queue_cargo_lock_regenerated_not_merged`, `merge_queue_check_failure_returns_job_to_fixing`, `failover_drill_*`, `credits_park_all_jobs_of_provider_and_inbox`, `rate_backoff_lowers_concurrency_cap`, `auth_parks_with_inbox`, `three_unknown_failures_mark_unavailable_15min`, `inbox_answer_moves_parked_job_to_ready`, `planner_one_turn_at_a_time`, `keeper_covers_planner_when_provider_limited_and_hands_back`, `repeat_guard_trips_on_third_identical_action`, `board_and_heartbeat_written_each_tick`, `requests_drained_and_applied`, `paused_loop_is_skipped`.
+Named tests live in `loops.md` §13 (drills) plus: `tick_step_failure_does_not_abort_tick`, `startup_marks_orphaned_runs_crash_and_continues_job`, `dispatch_respects_ownership_locks_and_slots`, `dispatch_skips_limited_provider_and_uses_next_rung`, `stall_judge_triggers_stop_and_continue`, `hang_before_first_output_restart_up_to_3`, `continue_twice_then_keeper`, `verify_fail_creates_fix_job_same_branch_max_3_then_escalates`, `verify_job_goes_done_via_gating_never_merged_and_original_receives_verdict`, `failed_fix_job_gates_fail_original_not_fix_of_fix`, `failed_verify_job_parks_original_with_question`, `merge_queue_happy_path_ff_push_to_local_bare_origin`, `merge_queue_conflict_creates_merge_job`, `merge_queue_cargo_lock_regenerated_not_merged`, `merge_queue_check_failure_returns_job_to_fixing`, `failover_drill_*`, `credits_park_all_jobs_of_provider_and_inbox`, `rate_backoff_lowers_concurrency_cap`, `auth_parks_with_inbox`, `three_unknown_failures_mark_unavailable_15min`, `inbox_answer_moves_parked_job_to_ready`, `planner_one_turn_at_a_time`, `keeper_covers_planner_when_provider_limited_and_hands_back`, `repeat_guard_trips_on_third_identical_action`, `board_and_heartbeat_written_each_tick`, `requests_drained_and_applied`, `paused_loop_is_skipped`.
 
 ## 8. `promote` (n10) — nice-to-have
 

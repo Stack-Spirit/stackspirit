@@ -353,7 +353,7 @@ pub enum AttachAction { Attach, Detach }
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 pub struct SessionExecutor {
     pub action: AttachAction, pub executor: Executor, pub node: NodeName,
-    #[serde(default)] pub native_session_id: Option<String>,     // known at attach (resume) or filled on the first harness event
+    #[serde(default)] pub native_session_id: Option<String>,     // known at attach only when resuming (or a pre-chosen claude `--session-id`); otherwise set on the detach event and in `adapters.json`
     #[serde(default)] pub run_id: Option<RunId>,
     #[serde(default)] pub reason: Option<String>,                 // for detach: "turn_done" | "limit" | "crash" | "switch" | ...
 }
@@ -428,7 +428,7 @@ pub struct Note { pub text: String }
 ## 6. Capsule (`capsule`)
 
 Unchanged in spirit from the session-harness plan §9.1; JSON keys are `snake_case`. Stored at
-`sessions/<id>/capsules/<at_seq>-<ulid>.json` and in `capsules.body_json`.
+`sessions/<id>/capsules/<at_seq:010>-<ulid>.json` (at_seq zero-padded to 10 digits, e.g. `0000000142-01KA1V2B….json`) and in `capsules.body_json`.
 
 ```rust
 pub const CAPSULE_VERSION: u32 = 1;
@@ -572,8 +572,10 @@ pub struct NewJob {
 pub struct JobPatch {
     pub title: Option<String>, pub priority: Option<i32>, pub profile: Option<String>,
     pub owns: Option<Vec<String>>, pub reads: Option<Vec<String>>, pub gates: Option<Vec<Gate>>,
-    pub loop_: Option<JobLoop>, pub add_needs: Vec<JobId>, pub remove_needs: Vec<JobId>, pub note: Option<String>,
+    #[serde(rename = "loop")] pub loop_: Option<JobLoop>,
+    #[serde(default)] pub add_needs: Vec<JobId>, #[serde(default)] pub remove_needs: Vec<JobId>, pub note: Option<String>,
 }
+// Every Option field is `#[serde(default, skip_serializing_if = "Option::is_none")]` so `{}` and `{"loop":{…}}` deserialize. Test `job_patch_json_roundtrip_with_loop_and_defaults` (crates/vowp-protocol.md §6).
 ```
 
 JSON (`vowp job show n04-graph --json`):
