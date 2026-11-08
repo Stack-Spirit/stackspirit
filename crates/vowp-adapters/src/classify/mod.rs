@@ -249,9 +249,11 @@ fn month_from_name(name: &str) -> Option<Month> {
 
 /// Extracts the latest reset from a Claude `rate_limit_info` object (adapters.md §2.4).
 ///
-/// Uses the maximum `resetsAt` among rejected `unifiedWindows`, plus the top-level
-/// `resetsAt` when the top-level status is `"rejected"`. Returns `None` when no window is
-/// rejected. No margin is added.
+/// `unifiedWindows` is accepted in both shapes Claude emits: the object map seen in real
+/// streams (`{"five_hour": {…}, "seven_day": {…}}`) and an array of window objects. Uses
+/// the maximum `resetsAt` among rejected windows, plus the top-level `resetsAt` when the
+/// top-level status is `"rejected"`; allowed windows are ignored. Returns `None` when no
+/// window is rejected. No margin is added.
 pub fn reset_from_rate_limit_info(info: &serde_json::Value) -> Option<Timestamp> {
     let mut latest: Option<i64> = None;
     let mut consider = |value: Option<&serde_json::Value>| {
@@ -264,12 +266,25 @@ pub fn reset_from_rate_limit_info(info: &serde_json::Value) -> Option<Timestamp>
         consider(info.get("resetsAt"));
     }
 
-    if let Some(windows) = info.get("unifiedWindows").and_then(serde_json::Value::as_array) {
-        for window in windows {
-            if window.get("status").and_then(serde_json::Value::as_str) == Some("rejected") {
-                consider(window.get("resetsAt"));
+    let is_rejected =
+        |window: &serde_json::Value| window.get("status").and_then(serde_json::Value::as_str) == Some("rejected");
+
+    match info.get("unifiedWindows") {
+        Some(serde_json::Value::Array(windows)) => {
+            for window in windows {
+                if is_rejected(window) {
+                    consider(window.get("resetsAt"));
+                }
             }
         }
+        Some(serde_json::Value::Object(windows)) => {
+            for window in windows.values() {
+                if is_rejected(window) {
+                    consider(window.get("resetsAt"));
+                }
+            }
+        }
+        _ => {}
     }
 
     latest.map(Timestamp::from_unix_secs)

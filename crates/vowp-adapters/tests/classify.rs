@@ -1,6 +1,8 @@
 //! Classification, reset-time, redaction and HTTP-status tests.
 //! Spec: `docs/design/crates/vowp-adapters.md` §7 (n06z) and `docs/design/adapters.md` §5.
 
+use std::path::Path;
+
 use vowp_adapters::classify::{
     QUOTA_FALLBACK_MIN, TRANSIENT_BACKOFF_MIN, classify_text, extract_http_status, parse_reset_time, redact,
     reset_from_rate_limit_info,
@@ -13,6 +15,25 @@ fn now() -> Timestamp {
 
 fn ts(value: &str) -> Timestamp {
     Timestamp::parse(value).expect("test timestamp is valid")
+}
+
+fn fixture_path(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+}
+
+/// Returns the `rate_limit_info` object of the first `rate_limit_event` in a fixture.
+fn rate_limit_info_from_fixture(name: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(fixture_path(name)).expect("fixture is readable");
+    for line in text.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("fixture line is JSON");
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("rate_limit_event") {
+            return value
+                .get("rate_limit_info")
+                .cloned()
+                .expect("rate_limit_event carries rate_limit_info");
+        }
+    }
+    panic!("fixture {name} has no rate_limit_event");
 }
 
 #[test]
@@ -224,6 +245,63 @@ fn reset_from_rate_limit_info_picks_max_rejected_window() {
         "unifiedWindows": [{"type": "five_hour", "status": "allowed", "resetsAt": 1794164400}]
     });
     assert_eq!(reset_from_rate_limit_info(&allowed), None);
+}
+
+#[test]
+fn reset_from_rate_limit_info_object_shape_real_fixture() {
+    let info = rate_limit_info_from_fixture("claude_rate_limit_rejected.jsonl");
+
+    let reset = reset_from_rate_limit_info(&info).expect("rejected rate limit has a reset");
+    assert_eq!(reset.unix_secs(), 1_794_164_400);
+    assert_eq!(reset, ts("2026-11-08T19:00:00Z"));
+
+    // The real stream uses the object map. With the top-level status ignored, the
+    // rejected five_hour window itself must supply the reset (the array-only parser
+    // returned None here).
+    let mut windows_only = info;
+    windows_only["status"] = serde_json::json!("allowed");
+    assert_eq!(
+        reset_from_rate_limit_info(&windows_only),
+        Some(ts("2026-11-08T19:00:00Z"))
+    );
+}
+
+#[test]
+fn reset_from_rate_limit_info_array_shape() {
+    let info = serde_json::json!({
+        "status": "allowed",
+        "resetsAt": 1794560400,
+        "unifiedWindows": [
+            {"type": "five_hour", "status": "allowed", "resetsAt": 1794560400},
+            {"type": "seven_day", "status": "rejected", "resetsAt": 1794164400}
+        ]
+    });
+    assert_eq!(reset_from_rate_limit_info(&info), Some(ts("2026-11-08T19:00:00Z")));
+}
+
+#[test]
+fn reset_picks_latest_rejected_window() {
+    let object = serde_json::json!({
+        "status": "rejected",
+        "resetsAt": 1794164400,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 1.0, "status": "rejected", "resetsAt": 1794164400},
+            "seven_day": {"utilization": 1.0, "status": "rejected", "resetsAt": 1794171600},
+            "overage": {"utilization": 0.4, "status": "allowed", "resetsAt": 1794560400}
+        }
+    });
+    assert_eq!(reset_from_rate_limit_info(&object), Some(ts("2026-11-08T21:00:00Z")));
+
+    // The same rule applies to the array shape, independent of window order.
+    let array = serde_json::json!({
+        "status": "allowed",
+        "unifiedWindows": [
+            {"type": "seven_day", "status": "allowed", "resetsAt": 1794560400},
+            {"type": "seven_day", "status": "rejected", "resetsAt": 1794171600},
+            {"type": "five_hour", "status": "rejected", "resetsAt": 1794164400}
+        ]
+    });
+    assert_eq!(reset_from_rate_limit_info(&array), Some(ts("2026-11-08T21:00:00Z")));
 }
 
 #[test]
