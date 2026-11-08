@@ -115,7 +115,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     parse with the `cron` crate is checked in vowp-core `ScheduleSpec::parse`; here only: `cron`/`every` XOR, exactly 5 whitespace-separated cron fields, `every` pattern, tz format, unique names).
 12. **Schema export**: `all_schemas()` keys are the Rust type names (`"EventEnvelope"`, `"Capsule"`, `"CapsuleDraft"`, `"Job"`, `"NewJob"`, `"JobPatch"`,
     `"Gate"`, `"Evidence"`, `"GateResult"`, `"ReportFrontMatter"`, `"BriefFrontMatter"`, `"VowpConfig"`, `"Schedule"`, `"Release"`, `"InboxItem"`, `"Run"`,
-    `"Session"`, `"Limit"`, `"Cost"`, `"Switch"`, `"Loop"`, `"Node"`, `"Project"`, `"LedgerEntry"`). Output is deterministic (BTreeMap, stable ordering).
+    `"Worker"`, `"Session"`, `"Limit"`, `"Cost"`, `"Switch"`, `"Loop"`, `"Node"`, `"Project"`, `"LedgerEntry"`). Output is deterministic (BTreeMap, stable ordering).
 13. **No panics**: all constructors/parsers return `Result`; regex literals inside use `// invariant:` comments.
 
 ## 5. Error enum
@@ -167,7 +167,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `config_rejects_unknown_fields_and_bad_values` | unknown key in `[node]`, both `cron` and `every` on a schedule, empty ladder, `max_workers=0` → errors |
 | `config_defaults_are_documented_values` | `NodeConfig::default()`: name `local`, 4, 2, 60, tz 0; `MergeConfig::default()`: rebase true, 2700, secret_scan true |
 | `schema_export_covers_listed_types` | `all_schemas()` has every key of rule 12; each value is an object with `"$schema"` or `"type"`/`"definitions"`; deterministic across two calls |
-| `types_md_examples_validate` | each JSON example fixture (`job.json`, `capsule.json`, `cost.json`, `limit.json`, `events.jsonl`, `schedule_*.json`) deserialises into its Rust type and validates against its exported schema (use a tiny structural checker: required properties present, no unknown top-level keys for `deny_unknown_fields` types) |
+| `types_md_examples_validate` | each JSON example fixture from types.md §15 (`job.json`, `capsule.json`, `cost.json`, `limit.json`, `events.jsonl`, `profile.json`, `edge.json`, `run.json`, `session.json`, `inbox_item.json`, `loop.json`, `release.json`, `schedule.json`, `gate_result.json`, `worker.json`, `switch.json`) deserialises into its Rust type and validates against its exported schema (use a tiny structural checker: required properties present, no unknown top-level keys for `deny_unknown_fields` types) |
 | `log_format_line` | `format_log_line` golden string; `MemoryLog` records in order |
 | `service_cancel_token` | clones share cancellation; `ServiceError` Display strings |
 

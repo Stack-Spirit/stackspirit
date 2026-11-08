@@ -255,7 +255,7 @@ Plan §11: credits exhausted ⇒ **park every job on that provider**; it is neve
 4. Resolution: `vowp inbox answer <id> resolved` deletes the `limits` row and sends `Resolved` (T31) to every job parked for that provider/reason.
 
 ### 8.4 Capsule hand-off
-1. For a **session-backed role (planner, keeper)**: `SessionOps::switch(SwitchRequest{session, to: next rung ExecutorRef, reason: Limit|Failover, drain_secs: 5, seed_tail: true})` — freeze, capsule, stop, start target with capsule + last 2 turns as plain text, record `switch` (sessions.md §5).
+1. For a **session-backed role (planner, keeper)**: `SessionOps::switch(SwitchRequest{session, to: next rung ExecutorRef, reason: Limit|Failover, drain_secs: 5})` — freeze, capsule, stop, start target with capsule + last 2 turns as plain text, record `switch` (sessions.md §5).
 2. For a **job run** that was interrupted: the session continues on the next rung via the same `switch` call (new native session seeded with the capsule), then `StartRun{Continue}` (T4) runs there; the job's `rung` in `runs` is the new index. A job never changes node in v0.1 failover.
 3. If `SessionOps::switch` fails (probe of target fails, seed rejected twice): the session stays `blocked`, job is `Blocked{ProviderBlocked}`, inbox notice, ledger `switch` failure.
 

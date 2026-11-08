@@ -99,7 +99,7 @@ Rules:
 ## 4. Seeding a target harness
 
 Used by `switch` and by `run_turn` when a session has no native session on the target harness. Never replays native tool calls; handoff is plain text (`can_inject_assistant_history=false` in v0.1).
-`seed_prompt(capsule, tail_turns, next_input) -> String` =
+`seed_prompt(capsule, tail, tail_turns, next_input) -> String`, where `tail` is the session events of the last complete turns (the caller selects them) and `tail_turns` bounds how many complete turns are rendered =
 
 ```text
 [VOWP handoff] You are continuing session {session_id}, started on {from_executor}. Prior work summary follows.
@@ -118,7 +118,7 @@ The seed is appended to the log as a `user.message` with `note: "handoff"` (disp
 
 ## 5. Switch protocol
 
-`SessionOps::switch(SwitchRequest{session_id, to, reason, drain_secs=5, seed_tail=true})`. Triggers: user (`vowp session switch`), `limit` (L6), `crash` (only if configured), `context`, `failover`, `probe_back`.
+`SessionOps::switch(SwitchRequest{session_id, to, reason, drain_secs=5})`. Triggers: user (`vowp session switch`), `limit` (L6), `crash` (only if configured), `context`, `failover`, `probe_back`.
 Each step lists the log events and DB rows it changes. `S` = the source executor, `T` = the target.
 
 | # | Step | Log events | DB rows |
@@ -129,7 +129,7 @@ Each step lists the log events and DB rows it changes. `S` = the source executor
 | 4 | **Drain**: if a run is active, wait ≤ `drain_secs` for `turn.ended`; then `interrupt()` and wait 3 s; then `stop()` | `turn.ended{stop_reason: interrupted}` if the adapter did not emit one | `runs` finished (`outcome=killed`) |
 | 5 | **Capture capsule**: `write(session, trigger=Switch)` (§3; never debounced). If it fails after repair: if a previous capsule exists use it (and add `note` "stale capsule"), else abort (row 9) | `capsule` | `capsules` INSERT, `sessions.last_capsule_id` |
 | 6 | **Detach S**: stop adapter (idempotent) | `session.executor{detach, reason}` → `sync()` | `sessions.executor=NULL` |
-| 7 | **Start T**: build seed (§4; include the last-turns section only when `SwitchRequest.seed_tail`, default true) and call `run_turn` setup or, for a pure switch without input, start T **idle**: record the attach only (the seed is delivered with the next input) | `session.executor{attach, native_session_id?}` , `user.message{note:"handoff"}` if a turn is started | `sessions.executor=T`, `session_natives` upsert, `runs` INSERT if a turn started |
+| 7 | **Start T**: build seed (§4) and call `run_turn` setup or, for a pure switch without input, start T **idle**: record the attach only (the seed is delivered with the next input) | `session.executor{attach, native_session_id?}` , `user.message{note:"handoff"}` if a turn is started | `sessions.executor=T`, `session_natives` upsert, `runs` INSERT if a turn started |
 | 8 | **Record**: append `switch{switch_id, from, to, capsule_id, reason}`; `sync()`; `finish_switch(Completed)` | `switch` | `switches.state='completed'`, `ended_at` |
 | 9 | **Unfreeze**: state `idle` (or `running` if a turn was started on T) | — | `sessions.state` |
 | ✗ | **Abort** (any failure before step 6 completes): `finish_switch(Aborted, error)`; leave S attached; state returns to the pre-switch state (`blocked` stays `blocked`) | `error{kind, message}` | `switches.state='aborted'` |
@@ -188,7 +188,7 @@ Rust (in `vowp-core::session::bundle`): `pub struct Bundle { format: String, pro
 2. Create a new session `S'` (fresh ULID) on this node: `SessionLog::create`; `parent_session_id = bundle.session.id`; `title = "<title> (imported)"`; `cwd` = `--cwd` (`vowp session import --cwd`) or the bundle's cwd if allowed by `[node].cwd_allow`, else the project path.
 3. Append events, in order, each `sync()`ed at the end: `session.created{parent_session_id: <origin>}` → `note{text: "imported from <source_node> session <id> at seq <last_seq>"}` → `switch{from: bundle executor @ source_node, to: none-yet attach target, capsule_id, reason: user}` — the `to` is the importing node with the bundle's executor (so lineage is visible) → `capsule{...}` after writing the bundle capsule into `capsules/` with a **new** `capsule_id` (original kept in `note`) and `session_id = S'`. Tail events are **not** copied into `S'`'s log (they are history of the origin session); they are rendered into the seed as "last turns".
 4. Insert index rows (`reindex(Some(S'))`), set `last_capsule_id`; write blobs from `blobs_inline` into `S'/blobs` (verifying each digest) so previews can be opened.
-5. The first `run_turn` on `S'` uses `seed_prompt(capsule, tail_turns from the bundle tail, next_input)` (§4).
+5. The first `run_turn` on `S'` uses `seed_prompt(capsule, tail_from_bundle, tail_turns, next_input)` (§4).
 6. Importing the same bundle twice creates two independent children (no dedupe); the origin session is never modified.
 
 ## 7. `vowp session watch` importer (v0.1 optional / nice-to-have)

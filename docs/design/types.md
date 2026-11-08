@@ -1080,8 +1080,7 @@ pub struct TurnRequest { pub session_id: SessionId, pub executor: ExecutorRef, p
                          pub window: Option<String>, pub timeout: Option<std::time::Duration> }
 pub struct TurnResult { pub run_id: RunId, pub summary: RunSummary }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct SwitchRequest { pub session_id: SessionId, pub to: ExecutorRef, pub reason: SwitchReason, pub drain_secs: u64 /* 5 */,
-                           #[serde(default = "default_true")] pub seed_tail: bool /* true: seed includes the last tail_turns; false: capsule only (`--no-seed-tail`) */ }
+pub struct SwitchRequest { pub session_id: SessionId, pub to: ExecutorRef, pub reason: SwitchReason, pub drain_secs: u64 /* 5 */ }
 /// Cooperative cancellation shared between supervisor and runner threads (Arc<AtomicBool> inside).
 #[derive(Clone, Default)] pub struct CancelToken(/* Arc<AtomicBool> */);
 impl CancelToken { pub fn cancel(&self); pub fn is_cancelled(&self) -> bool; }
