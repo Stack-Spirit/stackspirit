@@ -22,6 +22,12 @@ use super::mapping::{MapRule, Mapping, OutputFormat, ResetKind, allowed_emit, re
 /// Maximum number of bytes kept from non-JSON stdout for classification.
 const NOISE_TAIL_BYTES: usize = 4096;
 
+/// Serialised `raw` values larger than this are replaced by a truncated marker.
+const RAW_CAP_BYTES: usize = 16 * 1024;
+
+/// Bytes of the original raw payload kept in that marker.
+const RAW_HEAD_BYTES: usize = 2 * 1024;
+
 /// Evaluates an RFC 6901 JSON pointer (`"/a/0/b"`; `""` = the whole value).
 ///
 /// Returns `None` for a missing object key, an out-of-range or non-numeric array index,
@@ -82,6 +88,7 @@ pub struct CliParser {
     noise: String,
     error_messages: Vec<String>,
     saw_error: bool,
+    last_json: Option<Value>,
 }
 
 impl CliParser {
@@ -94,12 +101,16 @@ impl CliParser {
             .iter()
             .enumerate()
             .map(|(index, rule)| match &rule.match_.regex {
-                Some(pattern) => Regex::new(pattern).map(Some).map_err(|error| {
-                    mapping_error(format!(
-                        "map rule {} match.regex {pattern:?} does not compile: {error}",
-                        index + 1
-                    ))
-                }),
+                Some(pattern) => RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map(Some)
+                    .map_err(|error| {
+                        mapping_error(format!(
+                            "map rule {} match.regex {pattern:?} does not compile: {error}",
+                            index + 1
+                        ))
+                    }),
                 None => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -142,6 +153,7 @@ impl CliParser {
             noise: String::new(),
             error_messages: Vec::new(),
             saw_error: false,
+            last_json: None,
         })
     }
 
@@ -151,6 +163,7 @@ impl CliParser {
             self.push_noise(line);
             return Vec::new();
         };
+        self.last_json = Some(value.clone());
 
         self.update_native_id(&value);
         self.update_cost(&value);
@@ -423,6 +436,8 @@ impl StreamParser for CliParser {
             (RunOutcome::Error, StopReason::Error)
         };
 
+        let terminal_raw = self.last_json.as_ref().map(raw_json);
+
         if cost.usd.is_some() {
             events.push(HarnessEvent {
                 ts: None,
@@ -435,11 +450,23 @@ impl StreamParser for CliParser {
             });
         }
         if let Some(limit) = &limit {
+            if limit.kind == LimitKind::Context && !self.saw_error {
+                events.push(HarnessEvent {
+                    ts: None,
+                    actor: Actor::System,
+                    body: EventBody::Error(ErrorEvent {
+                        kind: ErrorKind::Limit,
+                        message: limit.message.clone(),
+                        retryable: false,
+                    }),
+                    raw: terminal_raw.clone(),
+                });
+            }
             events.push(HarnessEvent {
                 ts: None,
                 actor: Actor::System,
                 body: EventBody::Limit(limit.clone()),
-                raw: None,
+                raw: terminal_raw.clone(),
             });
         }
         if matches!(outcome, RunOutcome::Error | RunOutcome::Crash) {
@@ -451,7 +478,7 @@ impl StreamParser for CliParser {
                     message: self.error_detail(exit, stderr_tail),
                     retryable: false,
                 }),
-                raw: None,
+                raw: terminal_raw,
             });
         }
         events.push(HarnessEvent {
@@ -534,12 +561,50 @@ fn build_event(rule: &MapRule, value: &Value) -> Result<HarnessEvent, RuleError>
 
     let body = EventBody::from_parts(event_type, Value::Object(payload))
         .map_err(|error| RuleError::Invalid(error.to_string()))?;
+    let raw = matches!(
+        event_type,
+        EventType::ToolCall | EventType::ToolResult | EventType::Error
+    )
+    .then(|| raw_json(value));
     Ok(HarnessEvent {
         ts: None,
         actor: actor_for(event_type),
         body,
-        raw: None,
+        raw,
     })
+}
+
+/// Redacts secret-looking string leaves and caps the serialised `raw` value at 16 KiB.
+fn raw_json(value: &Value) -> Value {
+    let redacted = redact_value(value);
+    let serialised = serde_json::to_string(&redacted).unwrap_or_default();
+    let bytes = serialised.len();
+    if bytes <= RAW_CAP_BYTES {
+        return redacted;
+    }
+    let mut end = RAW_HEAD_BYTES.min(serialised.len());
+    while end > 0 && !serialised.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::json!({
+        "truncated": true,
+        "bytes": bytes,
+        "head": &serialised[..end],
+    })
+}
+
+/// Recursively redacts every string leaf of a JSON value.
+fn redact_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact(text, text.chars().count().max(1))),
+        Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| (key.clone(), redact_value(item)))
+                .collect::<Map<String, Value>>(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Parses a `=literal` field value as JSON when possible, else as a plain string.

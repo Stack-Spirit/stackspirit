@@ -237,9 +237,22 @@ fn mapping_rejects_unknown_keys_and_secret_looking_env_values() {
         &format!("name = \"demo\"\n[command]\nargv = [\"demo\"]\nenv = [\"OPENAI_API_KEY\", \"{secret}\"]\n"),
         "secret",
     );
-    assert_rejected(
-        &format!("name = \"demo\"\n[command]\nargv = [\"demo\"]\nenv = [\"OPENAI_API_KEY={secret}\"]\n"),
-        &prefix,
+    let error = Mapping::from_toml(&format!(
+        "name = \"demo\"\n[command]\nargv = [\"demo\"]\nenv = [\"OPENAI_API_KEY={secret}\"]\n"
+    ))
+    .expect_err("a secret-shaped env value must be rejected");
+    assert!(
+        matches!(error, AdapterError::Mapping { .. }),
+        "expected a mapping error, got {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("command.env[0]"),
+        "error should name the offending env entry: {message}"
+    );
+    assert!(
+        !message.contains(&secret) && !message.contains(&prefix),
+        "error must not echo the secret value: {message}"
     );
 
     let cleaned = mapping(
@@ -251,6 +264,86 @@ fn mapping_rejects_unknown_keys_and_secret_looking_env_values() {
     assert_eq!(cleaned.command.cwd_flag, None);
     assert_eq!(cleaned.output.native_session_pointer, None);
     assert_eq!(cleaned.cost.usd_pointer, None);
+}
+
+#[test]
+fn mapping_accepts_dotted_keys_and_hex_ints() {
+    let map = mapping(
+        "name = \"demo\"\n\
+         command.argv = [\"demo\", \"--json\"]\n\
+         command.prompt_via = \"stdin\"\n\
+         output.format = \"jsonl\"\n\
+         output.text_chunk_lines = 0x14\n\
+         limits.tz_offset_minutes = 0x3c\n\
+         [[map]]\n\
+         match.pointer = \"/type\"\n\
+         match.equals = \"note\"\n\
+         emit = \"note\"\n\
+         fields.text = \"/text\"\n\
+         [exit]\n\
+         ok = [0x0]\n",
+    );
+
+    assert_eq!(map.command.argv, ["demo", "--json"]);
+    assert_eq!(map.command.prompt_via, vowp_adapters::cli::PromptVia::Stdin);
+    assert_eq!(map.output.format, OutputFormat::Jsonl);
+    assert_eq!(map.output.text_chunk_lines, 20);
+    assert_eq!(map.limits.tz_offset_minutes, 60);
+    assert_eq!(map.rules.len(), 1);
+    assert_eq!(map.rules[0].match_.pointer, "/type");
+    assert_eq!(map.rules[0].match_.equals.as_deref(), Some("note"));
+    assert_eq!(map.rules[0].fields.get("text").map(String::as_str), Some("/text"));
+    assert_eq!(map.exit.ok, [0]);
+}
+
+#[test]
+fn mapping_rejects_unknown_fields() {
+    let cases = [
+        (
+            "root",
+            "name = \"demo\"\nbogus = 1\n[command]\nargv = [\"demo\"]\n",
+            "bogus",
+        ),
+        (
+            "command",
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\nshell = true\n",
+            "shell",
+        ),
+        (
+            "limits",
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\n[limits]\nbogus = []\n",
+            "bogus",
+        ),
+        (
+            "cost",
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\n[cost]\nbogus = \"/x\"\n",
+            "bogus",
+        ),
+        (
+            "exit",
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\n[exit]\nbogus = [0]\n",
+            "bogus",
+        ),
+        (
+            "map rule",
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\n[[map]]\n\
+             match = { pointer = \"/type\", equals = \"x\" }\nemit = \"note\"\n\
+             fields = { text = \"/text\" }\nbogus = 1\n",
+            "bogus",
+        ),
+        (
+            "match",
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\n[[map]]\n\
+             match = { pointer = \"/type\", equals = \"x\", bogus = true }\nemit = \"note\"\n\
+             fields = { text = \"/text\" }\n",
+            "bogus",
+        ),
+    ];
+
+    for (label, toml, needle) in cases {
+        assert_rejected(toml, needle);
+        println!("rejected unknown {label} field as expected");
+    }
 }
 
 #[test]
@@ -379,6 +472,229 @@ fn cli_error_emit_defaults_kind_and_classifies() {
     assert_eq!(summary.outcome, RunOutcome::Limit);
     assert_eq!(summary.stop_reason, StopReason::Limit);
     assert_eq!(turn_ended(&terminal), &StopReason::Limit);
+}
+
+#[test]
+fn cli_mapped_events_carry_redacted_raw() {
+    let prefix = format!("{}{}", "s", "k-");
+    let secret = format!("{prefix}{}", "abcdefghijklmnopqrstuvwx");
+    let mapping = mapping(
+        "name = \"demo\"\n[command]\nargv = [\"demo\"]\n\
+         [[map]]\nmatch = { pointer = \"/type\", equals = \"call\" }\nemit = \"tool.call\"\n\
+         fields = { call_id = \"/id\", name = \"/name\", input = \"/input\" }\n\
+         [[map]]\nmatch = { pointer = \"/type\", equals = \"error\" }\nemit = \"error\"\n\
+         fields = { message = \"/message\" }\n",
+    );
+    let mut parser = parser(mapping);
+
+    let call_line = format!(r#"{{"type":"call","id":"c1","name":"shell","input":{{"command":"{secret}"}}}}"#);
+    let call_events = parser.feed_line(&call_line);
+    let call = call_events
+        .iter()
+        .find(|event| matches!(event.body, EventBody::ToolCall(_)))
+        .expect("the call rule emits a tool.call");
+    let raw = call.raw.as_ref().expect("tool.call carries raw");
+    assert_eq!(raw["type"], "call");
+    assert_eq!(raw["input"]["command"], "<redacted>");
+    assert!(!raw.to_string().contains(&secret));
+
+    let error_events = parser.feed_line(r#"{"type":"error","message":"boom"}"#);
+    let error = error_events
+        .iter()
+        .find(|event| matches!(event.body, EventBody::Error(_)))
+        .expect("the error rule emits an error");
+    assert_eq!(error.raw.as_ref().expect("error carries raw")["message"], "boom");
+
+    let (terminal, summary) = finish_run(parser, Some(1), "boom");
+    assert_eq!(summary.outcome, RunOutcome::Error);
+    assert!(
+        terminal
+            .iter()
+            .find(|event| matches!(event.body, EventBody::Error(_)))
+            .expect("the terminal error carries raw")
+            .raw
+            .is_some()
+    );
+}
+
+#[test]
+fn cli_context_limit_emits_error_before_turn_ended() {
+    let mapping = mapping("name = \"demo\"\n[command]\nargv = [\"demo\"]\n[limits]\ncontext = [\"context length\"]\n");
+    let (events, summary) = finish_run(parser(mapping), Some(1), "context length exceeded");
+    assert_eq!(summary.outcome, RunOutcome::Context);
+
+    let error_index = events
+        .iter()
+        .position(|event| matches!(event.body, EventBody::Error(_)))
+        .expect("a context limit also emits an error event");
+    let limit_index = events
+        .iter()
+        .position(|event| matches!(event.body, EventBody::Limit(_)))
+        .expect("a limit event is emitted");
+    assert!(error_index < limit_index, "the error event precedes the limit event");
+    let EventBody::Error(error) = &events[error_index].body else {
+        panic!("event at {error_index} is not an error");
+    };
+    assert_eq!(error.kind, ErrorKind::Limit);
+    assert_eq!(turn_ended(&events), &StopReason::Limit);
+}
+
+#[test]
+fn cli_mapping_file_and_probe() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join("demo.toml");
+    std::fs::write(
+        &path,
+        "name = \"demo\"\nversion_argv = [\"echo\", \"2.3.4\"]\n[command]\nargv = [\"echo\"]\n",
+    )
+    .expect("write mapping file");
+    let adapter = CliAdapter::from_mapping_file(&path).expect("load mapping file");
+    assert_eq!(adapter.mapping().name, "demo");
+    let probe = adapter.probe();
+    assert!(probe.ok);
+    assert_eq!(probe.version.as_deref(), Some("2.3.4"));
+    assert!(probe.path.is_some());
+
+    let missing = CliAdapter::from_mapping(mapping(
+        "name = \"demo\"\nversion_argv = [\"vowp-missing-binary-xyz\", \"--version\"]\n\
+         [command]\nargv = [\"demo\"]\n",
+    ))
+    .expect("adapter");
+    let probe = missing.probe();
+    assert!(!probe.ok);
+    assert_eq!(probe.version, None);
+    assert_eq!(probe.path, None);
+    assert!(probe.detail.contains("not found"), "detail was {:?}", probe.detail);
+}
+
+#[test]
+fn cli_map_regex_is_case_insensitive() {
+    let mapping = mapping(
+        "name = \"demo\"\n[command]\nargv = [\"demo\"]\n\
+         [[map]]\nmatch = { pointer = \"/type\", regex = \"^TOOL_\" }\nemit = \"note\"\n\
+         fields = { text = \"/text\" }\n",
+    );
+    let mut parser = parser(mapping);
+    let events = parser.feed_line(r#"{"type":"tool_call","text":"matched"}"#);
+    assert_eq!(notes(&events), ["matched"]);
+}
+
+#[test]
+fn cli_argv_model_cwd_and_env_filtering() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("temp dir");
+    let script = temp.path().join("harness.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGV_OUT\"\n\
+         if [ -n \"$ENV_OUT\" ]; then env > \"$ENV_OUT\"; fi\n",
+    )
+    .expect("write harness");
+    let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod harness");
+
+    let toml = format!(
+        "name = \"demo\"\n[command]\nargv = [\"{}\", \"--json\"]\nprompt_via = \"stdin\"\n\
+         model_flag = \"--model\"\nmodel_arg = \"static-model\"\ncwd_flag = \"--cwd\"\n\
+         env = [\"ARGV_OUT\", \"ENV_OUT\"]\n",
+        script.display()
+    );
+    let adapter = CliAdapter::from_mapping(mapping(&toml)).expect("adapter");
+
+    let argv_out = temp.path().join("argv.txt");
+    let env_out = temp.path().join("env.txt");
+    let input = start_input(
+        temp.path(),
+        "prompt",
+        None,
+        &[
+            ("ARGV_OUT", argv_out.to_string_lossy().into_owned()),
+            ("ENV_OUT", env_out.to_string_lossy().into_owned()),
+            ("CANARY_VALUE", "must-not-leak".to_owned()),
+        ],
+    );
+    let mut run = adapter.start(input).expect("start harness");
+    run.wait().expect("wait");
+    assert_eq!(
+        argv_lines(&argv_out),
+        [
+            "--json".to_owned(),
+            "--model".to_owned(),
+            "static-model".to_owned(),
+            "--cwd".to_owned(),
+            temp.path().to_string_lossy().into_owned(),
+        ]
+    );
+    let env_text = std::fs::read_to_string(&env_out).expect("read env");
+    assert!(env_text.lines().any(|line| line.starts_with("ARGV_OUT=")));
+    assert!(env_text.lines().any(|line| line.starts_with("ENV_OUT=")));
+    assert!(
+        !env_text.lines().any(|line| line.starts_with("CANARY_VALUE=")),
+        "only the mapping's env names may be passed through"
+    );
+
+    // Without a static model_arg, an executor effort becomes the model value.
+    let toml = format!(
+        "name = \"demo\"\n[command]\nargv = [\"{}\", \"--json\"]\nprompt_via = \"stdin\"\n\
+         model_flag = \"--model\"\nenv = [\"ARGV_OUT\"]\n",
+        script.display()
+    );
+    let adapter = CliAdapter::from_mapping(mapping(&toml)).expect("adapter");
+    let argv_out = temp.path().join("effort-argv.txt");
+    let mut input = start_input(
+        temp.path(),
+        "prompt",
+        None,
+        &[("ARGV_OUT", argv_out.to_string_lossy().into_owned())],
+    );
+    input.executor.effort = Some("max".to_owned());
+    let mut run = adapter.start(input).expect("start harness");
+    run.wait().expect("wait");
+    assert_eq!(argv_lines(&argv_out), ["--json", "--model", "max"]);
+}
+
+#[test]
+fn cli_error_from_stderr_and_warning_only_stderr() {
+    fn configured(extra: &str) -> Mapping {
+        mapping(&format!(
+            "name = \"demo\"\n[command]\nargv = [\"demo\"]\n[limits]\nquota = [\"quota exceeded\"]\n{extra}"
+        ))
+    }
+
+    let (events, summary) = finish_run(parser(configured("")), Some(0), "quota exceeded");
+    assert_eq!(summary.outcome, RunOutcome::Limit);
+    assert_eq!(limit_events(&events).len(), 1);
+
+    let (events, summary) = finish_run(
+        parser(configured("[exit]\nerror_from_stderr = false\n")),
+        Some(0),
+        "quota exceeded",
+    );
+    assert_eq!(summary.outcome, RunOutcome::Ok);
+    assert!(limit_events(&events).is_empty());
+
+    let (events, summary) = finish_run(parser(configured("")), Some(0), "warning: cache miss");
+    assert_eq!(summary.outcome, RunOutcome::Ok, "warning-only stderr is not a limit");
+    assert!(limit_events(&events).is_empty());
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn cli_gemini_fixture_sidecar_is_applied() {
+    use vowp_adapters::testing::{FixtureKind, parse_fixture};
+
+    let parsed = parse_fixture(
+        FixtureKind::Cli(mapping(include_str!("fixtures/cli_gemini_like.toml"))),
+        &fixture("cli_gemini_like.txt"),
+    );
+    assert_eq!(parsed.summary.exit_code, Some(1));
+    assert_eq!(parsed.summary.outcome, RunOutcome::Limit);
+    let limits = limit_events(&parsed.events);
+    assert_eq!(limits.len(), 1);
+    assert_eq!(limits[0].kind, LimitKind::Quota);
+    assert_eq!(limits[0].provider, "google");
 }
 
 #[test]

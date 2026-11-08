@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use regex::{Regex, RegexBuilder};
+use regex::RegexBuilder;
 use serde::Deserialize;
 use vowp_protocol::{AdapterError, EventType};
 
@@ -25,10 +25,7 @@ pub struct Mapping {
     #[serde(default)]
     pub version_argv: Option<Vec<String>>,
     /// How to launch the harness.
-    ///
-    /// Boxed to keep [`Mapping`] small: the shared test helper enum in `testing.rs` holds
-    /// one by value.
-    pub command: Box<CommandSpec>,
+    pub command: CommandSpec,
     /// How to read its output.
     #[serde(default)]
     pub output: OutputSpec,
@@ -36,20 +33,14 @@ pub struct Mapping {
     #[serde(default, rename = "map")]
     pub rules: Vec<MapRule>,
     /// Limit text patterns.
-    ///
-    /// Boxed for the same reason as [`Mapping::command`].
     #[serde(default)]
-    pub limits: Box<LimitSpec>,
+    pub limits: LimitSpec,
     /// JSON pointers carrying cost and token counts.
-    ///
-    /// Boxed for the same reason as [`Mapping::command`].
     #[serde(default)]
-    pub cost: Box<CostSpec>,
+    pub cost: CostSpec,
     /// Exit-code rules.
-    ///
-    /// Boxed for the same reason as [`Mapping::command`].
     #[serde(default)]
-    pub exit: Box<ExitSpec>,
+    pub exit: ExitSpec,
 }
 
 /// `[command]` table. Distinct from `vowp_core::CommandSpec`.
@@ -393,11 +384,14 @@ impl Mapping {
                 )));
             }
             if let Some(pattern) = &rule.match_.regex {
-                Regex::new(pattern).map_err(|error| {
-                    fail(format!(
-                        "map rule {number} match.regex {pattern:?} does not compile: {error}"
-                    ))
-                })?;
+                RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|error| {
+                        fail(format!(
+                            "map rule {number} match.regex {pattern:?} does not compile: {error}"
+                        ))
+                    })?;
             }
             let Some(event_type) = allowed_emit(&rule.emit) else {
                 return Err(fail(format!(
@@ -469,7 +463,7 @@ impl Mapping {
         for (index, name) in self.command.env.iter().enumerate() {
             if looks_like_secret(name) {
                 return Err(fail(format!(
-                    "command.env[{index}] {name:?} looks like a secret value; list variable names only"
+                    "command.env[{index}] looks like a secret value; list variable names only"
                 )));
             }
             if !valid_env_name(name) {
@@ -519,8 +513,7 @@ impl Mapping {
 
 /// Parses and validates `text`, naming `path` in parse and validation errors.
 pub(super) fn parse_toml(text: &str, path: &str) -> Result<Mapping, AdapterError> {
-    let value = super::toml_lite::parse(text).map_err(|message| mapping_error(path, message))?;
-    let mut mapping: Mapping = serde_json::from_value(value).map_err(|error| mapping_error(path, error.to_string()))?;
+    let mut mapping: Mapping = toml::from_str(text).map_err(|error| mapping_error(path, error.to_string()))?;
     mapping.normalise();
     mapping.validate(path)?;
     Ok(mapping)

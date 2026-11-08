@@ -8,7 +8,6 @@
 mod adapter;
 mod mapping;
 mod parser;
-mod toml_lite;
 
 pub use adapter::CliAdapter;
 pub use mapping::{
