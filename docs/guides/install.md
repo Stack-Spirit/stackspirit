@@ -78,7 +78,8 @@ vowp init --name my-project
 
 It writes `vowp.toml`, installs the framework files from [`framework/`](../../framework/README.md) into the
 repository, appends `.vowp/tmp/` to `.gitignore`, creates `~/.vowp`, registers the local node and project,
-and creates the loop rows. Existing files are skipped unless you pass `--force`.
+and seeds the default loop rows. `vowp up` also ensures the loop rows on startup, so an existing project
+picks up the current defaults. Existing files are skipped unless you pass `--force`.
 
 ## Verify the node
 

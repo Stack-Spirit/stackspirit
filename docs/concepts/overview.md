@@ -61,7 +61,8 @@ graph, the state machine, the evidence and the handoff format.
 
 One `vowp` binary contains everything. `vowp up` is the long-running supervisor; every other invocation
 is a short-lived client of the same SQLite database (WAL mode). A node runs at most one supervisor per
-project home, enforced by a lock file. There is no daemon, no socket and no network listener in v0.1.
+project home, enforced by a lock file. There is no daemon, no listening socket and no network listener in
+v0.1.
 
 ## Vocabulary
 

@@ -71,9 +71,12 @@ Built-in guards:
 | `head_equals_remote` | The checkout's HEAD equals the remote default branch (fast-forward-only clone). |
 | `build` | The target's build command succeeds. |
 | `no_active_jobs` | No job is currently running in the project, or the named custom script allows it. |
+| `upload_set` | The configured upload-set check passes: the files the deploy would upload match the intended build (for example a `.vercelignore` listing). |
 
 A custom guard is a command after the colon (`no_active_jobs:./scripts/guard.sh`). It must execute and
 check a real result; a file-existence check is not a guard. The same anti-pattern ban as gates applies.
+`upload_set` is a probe-style custom check configured for the environment; it exists because a local
+build is not necessarily the deploy build.
 
 ## Release states
 
@@ -108,7 +111,8 @@ Three failures motivated the design:
 - **Live is not always git.** A manual change, a generated asset or a different branch can be serving.
   Banking the live copy and diffing against it catches that.
 - **A local build is not the deploy build.** Upload-set rules (`.vercelignore`, include lists, generated
-  files) can make the deployed artifact differ from the local checkout. The diff and probe catch it.
+  files) can make the deployed artifact differ from the local checkout. The `upload_set` guard, the diff
+  and the probe catch it.
 - **A refused deploy must stay refused.** Working around a guard during the night is how a bad deploy
   becomes a worse morning. VOWP records the refusal and asks the owner.
 

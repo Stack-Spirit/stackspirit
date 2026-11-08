@@ -83,9 +83,10 @@ vowp loops pause l4-planner
 vowp loops resume l4-planner
 ```
 
-The rows are created on the first `vowp up`: `l1-supervisor` (60 s), `l2-worker`, `l3-verify`,
-`l4-planner` (1800 s), `l5-keeper` (1200 s), `l6-failover`, `l7-inbox`, `l8-watchdog` (300 s) and
-`l9-schedules` (60 s). The table shows state, interval, last/next run, status and failure streak.
+The rows are seeded by `vowp init` and ensured on the first `vowp up` (startup is idempotent):
+`l1-supervisor` (60 s), `l2-worker`, `l3-verify`, `l4-planner` (1800 s), `l5-keeper` (1200 s),
+`l6-failover`, `l7-inbox`, `l8-watchdog` (300 s) and `l9-schedules` (60 s). The table shows state,
+interval, last/next run, status and failure streak.
 
 `l1-supervisor` cannot be paused on its own; use `vowp down`. Pausing a loop skips its step but does not
 cancel work already running. A loop that repeats the same action three times without new evidence stops

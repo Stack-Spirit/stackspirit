@@ -49,7 +49,7 @@ Trust boundaries:
 
 | Rule | Enforcement |
 |---|---|
-| **Local only** | The supervisor opens no sockets in v0.1. There is no HTTP API. Remote access is SSH through the `--node` flag; the v0.2 API will bind `127.0.0.1` only. |
+| **Local only** | The supervisor opens no listening sockets in v0.1. There is no HTTP API. Remote access is SSH through the `--node` flag; the v0.2 API will bind `127.0.0.1` only. |
 | **No credentials stored** | `vowp.db`, logs and reports hold no tokens. `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. `vowp doctor` reports presence by name and never calls the network. |
 | **Stock binaries only** | Adapters spawn `claude`, `opencode` or a configured CLI exactly as a user would. No client spoofing, no "sign in with Claude" inside VOWP, no token forwarding. The optional `session watch` importer reads transcript JSONL read-only; it does not read auth files. |
 | **cwd allow-list** | Before a run, the session layer checks that the working directory is inside the job worktree, the project path, the worktree root or `[node].cwd_allow`. Anything else is refused. |
@@ -179,7 +179,9 @@ Be explicit about the limits:
   still pass. Do not rely on the scan as the only control.
 - **Production correctness.** Guards and probes catch the cases they are configured to catch. They are
   not a substitute for reviewing the change.
-- **Network egress by harnesses.** VOWP itself makes no network calls, but the harnesses it starts do.
+- **Network egress.** The supervisor opens no listening sockets and makes no model-provider calls, but it
+  is not offline. The merge queue runs `git fetch` and `git push` against the configured remote, the
+  `--node` flag runs commands over SSH, and the harnesses it starts make their own provider calls.
   Restrict egress at the OS or network level if that matters to you.
 
 ## Hardening checklist

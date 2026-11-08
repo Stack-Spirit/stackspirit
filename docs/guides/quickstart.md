@@ -43,8 +43,8 @@ vowp init --name my-project
 
 This writes `vowp.toml` with the four default profiles, installs the framework files (`AGENTS.md`,
 `CLAUDE.md`, skills and `opencode.jsonc`), creates `.vowp/`, registers the local node and project, and
-creates the loop rows. Existing files are skipped, not overwritten. If the project was already
-initialised, the command exits 4 unless you pass `--force`.
+seeds the default loop rows. `vowp up` also ensures those rows on startup. Existing files are skipped,
+not overwritten. If the project was already initialised, the command exits 4 unless you pass `--force`.
 
 Read `vowp.toml` before continuing. In particular:
 

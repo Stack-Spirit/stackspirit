@@ -91,8 +91,9 @@ vowp session capsule <id>
 vowp session capsule <id> --print
 ```
 
-A capsule is written automatically on switch, limit, context pressure, job end and export, and debounced
-to one per 120 seconds except for those triggers. The manual command bypasses the debounce. `--print`
+A capsule is written automatically on switch, limit, context pressure, turn end, job end and export. It is
+debounced to one per session per 120 seconds, except for the switch, manual, export and limit triggers,
+which never debounce. The manual command uses the manual trigger and bypasses the debounce. `--print`
 prints the Markdown seed instead of just the id.
 
 A capsule carries intent, constraints, decisions, state, files, gotchas, open questions and telemetry.

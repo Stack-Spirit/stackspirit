@@ -122,9 +122,9 @@ A capsule is a structured handoff: intent, constraints, decisions, state (done, 
 next steps), files, gotchas, open questions and telemetry. It is JSON validated against the protocol
 schema, stored both as a file and in `vowp.db`.
 
-- **When:** an explicit switch, a provider limit, context pressure, a manual request, a job end, or an
-  export. Debounced to one capsule per session per 120 seconds, except for switch, manual, export and
-  limit triggers.
+- **When:** an explicit switch, a provider limit, context pressure, a turn end, a manual request, a job
+  end, or an export. Debounced to one capsule per session per 120 seconds, except for switch, manual,
+  export and limit triggers.
 - **Who writes it:** the cheapest capable executor on the node, by default the last rung of the `keeper`
   profile. The capsule run gets its own throwaway session so it never pollutes the log it summarises.
 - **Input:** the previous capsule plus replayable events after its `at_seq`. Tool results are dropped
@@ -152,7 +152,9 @@ another executor. The same protocol runs automatically for failover and context 
 | 8. Record | Append `switch`, sync, mark the row completed. |
 | 9. Unfreeze | Return to `idle`, or `running` if a turn started on the target. |
 
-The target is seeded with the capsule and the last two complete turns as **plain text**:
+A CLI switch refuses an active turn without `--force` (exit 4); the drain step is used by automatic
+switches (failover and context pressure) and by a forced switch. The target is seeded with the capsule and
+the last two complete turns as **plain text**:
 
 ```
 [VOWP handoff] You are continuing session <id>, started on <executor>.
