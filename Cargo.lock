@@ -1250,7 +1250,6 @@ version = "0.1.0-dev"
 dependencies = [
  "tempfile",
  "thiserror",
- "vowp-protocol",
 ]
 
 [[package]]

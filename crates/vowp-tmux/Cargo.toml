@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 thiserror = "2.0.21"
-vowp-protocol = { path = "../vowp-protocol" }
 
 [lints]
 workspace = true
