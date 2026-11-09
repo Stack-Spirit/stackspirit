@@ -109,7 +109,7 @@ These are useful but unscoped. They are not commitments.
 ## Good first issues
 
 These are small, real tasks found by reading the current code. Each entry names the files to touch and
-the behaviour a reviewer can check. They are also tracked as issues in the repository.
+the behaviour a reviewer can check.
 
 ### 1. Emit JSON from `vowp graph --json`
 

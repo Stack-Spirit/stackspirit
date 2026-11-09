@@ -12,9 +12,10 @@ The examples use placeholders so they work with any server, provider and harness
 | `<your-user>` | The dedicated Linux account that runs VOWP. |
 | `<your-repo>` | The git URL of the project VOWP will manage. |
 | `<your-project>` | The project directory name and the name passed to `vowp init`. |
-| `<your-harness>` | A supported harness: `claude-code`, `opencode`, or a generic `cli` mapping name. |
-| `<your-model>` | A model identifier that your harness accepts. |
-| `<your-provider>` | The provider key used by limits and cost: `claude` for Claude Code, the text before `/` for opencode, or the generic mapping entry name. |
+| `<your-harness>` | A built-in harness: `claude-code` or `opencode`. |
+| `<your-model>` | A model identifier that your built-in harness accepts. |
+| `<your-mapping>` | The name of a generic `cli` adapter mapping, used as `cli:<your-mapping>` and `[harnesses.<your-mapping>]`. |
+| `<your-provider>` | The provider key used by limits and cost: `claude` for Claude Code, the text before `/` for opencode, or `<your-mapping>` for a generic CLI. |
 | `<your-node>` | The node name you register on another machine, when you use more than one node. |
 
 > **Status: current.** Every command on this page is implemented. The systemd unit is a generic
@@ -78,12 +79,9 @@ cargo --version
 rustc --version
 ```
 
-Install and sign in to your harness with its own tooling, as `<your-user>`. For example, run the
-harness's login command and then its version command. The exact names depend on the harness:
-
-```sh
-<your-harness> --version
-```
+Install and sign in to your harness with its own tooling, as `<your-user>`. Run its login and version
+commands exactly as its documentation says; for a generic CLI, that is the command named in your
+mapping file.
 
 A harness that needs a provider key reads it from the environment exactly as it does outside VOWP.
 VOWP stores only environment-variable **names**, never values. See the
@@ -129,9 +127,12 @@ runs the work. The executor grammar is:
 harness ":" model [ "@" effort ] [ "#" variant ]
 ```
 
-`@effort` is Claude Code only, `#variant` is opencode only, and a generic CLI uses the mapping entry
-name as its model. Edit the `[profiles.*]` and `[harnesses.*]` tables in `vowp.toml` to match what
-you installed:
+`@effort` is Claude Code only and `#variant` is opencode only. A built-in harness uses
+`<your-harness>:<your-model>`. A generic CLI uses `cli:<your-mapping>`, where the model part is the
+mapping name. Edit the `[profiles.*]` and `[harnesses.*]` tables in `vowp.toml` to match what you
+installed.
+
+For `claude-code` or `opencode`:
 
 ```toml
 [node]
@@ -159,16 +160,45 @@ env_pass = ["<YOUR_PROVIDER_API_KEY>"]   # names only, never values
 max_concurrent = 2
 ```
 
+For a generic CLI, key the harness table by the mapping name and use `cli:<your-mapping>` in the
+ladder:
+
+```toml
+[profiles.planner]
+ladder = ["cli:<your-mapping>"]
+on_quota = "next_then_probe_back"
+
+[profiles.keeper]
+ladder = ["cli:<your-mapping>"]
+
+[profiles.worker]
+ladder = ["cli:<your-mapping>"]
+
+[profiles.verifier]
+ladder = ["cli:<your-mapping>"]
+
+[harnesses.<your-mapping>]
+mapping = ".vowp/adapters/<your-mapping>.toml"
+env_pass = ["<YOUR_PROVIDER_API_KEY>"]   # names only, never values
+
+[providers.<your-mapping>]
+max_concurrent = 2
+```
+
 All four roles must have a profile. Points to check:
 
 - **Ladder order.** Rung 0 is preferred. Add more rungs only for providers you are willing to use;
   VOWP never switches to a provider that is not in the ladder.
 - **`on_quota`.** `next_then_probe_back` moves to the next rung and probes the limited one after its
   reset; `next` stays on the next rung; `park` asks a human. All three are supported.
-- **Harness table.** The table key is the harness part of the executor. For a generic CLI entry, set
-  `mapping = ".vowp/adapters/<your-harness>.toml"` instead of a binary.
-- **Provider table.** Use the provider key from the executor. For opencode that is the text before
-  the first `/`; for Claude Code it is `claude`; for a generic CLI it is the mapping entry name.
+- **Built-in harnesses.** `claude-code` and `opencode` are built in. Their table keys are those names,
+  and the executor is `<harness>:<model>`.
+- **Generic CLI.** The executor is `cli:<your-mapping>`, and the table is
+  `[harnesses.<your-mapping>]` with `mapping = ...`. Do not write `[harnesses.cli]` or a
+  `<mapping>:<model>` executor; the parser only accepts `cli` as the harness name.
+- **Provider table.** Use the provider key from the executor. For Claude Code it is `claude`; for
+  opencode it is the text before the first `/`; for a generic CLI it is the mapping name from
+  `cli:<mapping>`.
 - **Secrets.** Put provider values in the environment, not in `vowp.toml`. `env_pass` lists the
   variable names to forward to the harness child process.
 - **Optional price table.** If a harness reports usage without a cost, you can add
@@ -194,7 +224,7 @@ that matter most on a VPS:
 | `db` | Move an unsupported or corrupt database aside; do not delete a database from a newer binary. |
 | `git` / `tmux` | Install the missing program or fix `PATH`; tmux is a warning, but jobs need it. |
 | `config` | Fix the named key in `vowp.toml`. |
-| `harness:<name>` | Install the harness or set `[harnesses.<name>].binary` to its absolute path. |
+| `harness:claude-code` / `harness:opencode` | Install the harness or set `[harnesses.<name>].binary` to its absolute path. |
 | `providers` | Set the named environment variable in the environment that starts the supervisor. An absent variable is a warning, but the harness may still need it. |
 
 A missing harness is a `fail` because dispatch would fail later. A missing tmux is a `warn`, but a
@@ -218,7 +248,15 @@ vowp job add \
   --kind docs \
   --owns "docs/**" \
   --gates "report,owns_respected,secret_scan,review" \
-  --brief-file /tmp/hello-brief.md
+  --brief - <<'BRIEF'
+# Goal
+
+Write `docs/hello.md` with a short introduction to the project.
+
+# Done when
+
+The page exists and the report has `status: done`.
+BRIEF
 
 vowp graph
 vowp job show hello-docs --gates
@@ -233,7 +271,7 @@ vowp status
 
 `--once` runs a single tick and exits. For the first long run, either leave `vowp up` running in a
 detached tmux layout or use the systemd unit below. `vowp up` exits 4 if a supervisor is already
-running for this project home.
+running for this node home.
 
 ## Run `vowp up` under systemd
 
@@ -288,7 +326,7 @@ journalctl --user -u vowp-<your-project> -f
 ```
 
 When systemd owns the process, stop or restart it with `systemctl --user stop|restart
-vowp-<your-project>`. Do not start a second `vowp up` for the same project home.
+vowp-<your-project>`. Do not start a second `vowp up` for the same node home.
 
 ## Status, logs and attach
 
@@ -374,7 +412,7 @@ provider calls.
 To drive this server from a laptop, register it as a node on the machine that holds the project:
 
 ```sh
-vowp node add <your-node> <your-vps>
+vowp node add <your-node> <your-user>@<your-vps>
 vowp node ls
 vowp --node <your-node> status
 ```
@@ -388,7 +426,7 @@ session between nodes.
 | Symptom | Check |
 |---|---|
 | `vowp: command not found` under systemd | `PATH` and `ExecStart` in the unit; use absolute paths. |
-| `doctor` fails `harness:<name>` | The harness is installed and signed in as `<your-user>`; check `[harnesses.<name>].binary`. |
+| `doctor` fails `harness:claude-code` / `harness:opencode` | The harness is installed and signed in as `<your-user>`; check `[harnesses.<name>].binary`. |
 | `doctor` reports a provider `absent` | Set the variable in the environment that starts the unit, or in its `EnvironmentFile`. |
 | No tmux session after `vowp up` | Read `~/.vowp/logs/supervisor.log`; install tmux and check the private socket directory. |
 | A job is parked | Read `vowp inbox ls` and `vowp job show <id>`; a provider limit or a question is the usual cause. |
