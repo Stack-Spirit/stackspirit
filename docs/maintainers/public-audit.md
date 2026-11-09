@@ -216,4 +216,4 @@ it into each release archive (or the owner can add a root `THIRD-PARTY-LICENSES.
       published.
 - [ ] The orchestrator follows the runbook in `scripts/audit/go-public.md`; p01 has not pushed, tagged
       or published anything. (The runbook lives under `scripts/audit/` because p01's owned paths do not
-      include `docs/maintainers/go-public.md`.)
+      include the separate `docs/maintainers/` runbook path.)
