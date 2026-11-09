@@ -1,6 +1,6 @@
 # crates/vowp-graph.md — DAG, state machine, ownership locks, dispatch
 
-Owner: job n04. Depends on `vowp-protocol`, `globset`, `thiserror`, `serde_yaml_ng`. **Pure functions only**: no I/O, no clock reads (time is passed in), no
+Depends on `vowp-protocol`, `globset`, `thiserror`, `serde_yaml_ng`. **Pure functions only**: no I/O, no clock reads (time is passed in), no
 threads, no DB. `vowp-core` feeds it rows from `vowp-store` and applies the effects it returns.
 
 ## 1. Module layout
@@ -204,16 +204,16 @@ pub fn render_mermaid(g: &Graph) -> String;
 ```
 **ASCII**: one line per job ordered by `(layer, id)`: `L{layer} {id} [{state}] {title≤48 chars}{"  <- " + needs comma-separated if any}`; a trailing line per non-needs edge group is **not** printed (ASCII shows needs only). Output ends with `\n`.
 ```
-L0 n01-skeleton [done] Cargo workspace skeleton
-L1 n02a-protocol-foundation [running] vowp-protocol foundation  <- n01-skeleton
-L2 n04-graph [pending] vowp-graph  <- n02a-protocol-foundation
+L0 skeleton [done] Cargo workspace skeleton
+L1 protocol [running] protocol types  <- skeleton
+L2 graph-engine [pending] graph engine  <- protocol
 ```
-**Mermaid**: first line `graph TD`; one node line per job ordered by id: `    n04_graph["n04-graph (pending)"]` (node key = id with `-` → `_`, label escaped: `"` → `'`); then edge lines ordered by `(kind, src, dst)`: `needs` as `dst_key --> src_key` (dependency flows into dependent); `verifies` `src -.->|verifies| dst`; `fixes` `src ==>|fixes| dst`; `escalates` `src -.->|escalates| dst`; `blocks` `src -->|blocks| dst`. Then `classDef` lines are NOT emitted (state colours are v0.2).
+**Mermaid**: first line `graph TD`; one node line per job ordered by id: `    graph_engine["graph-engine (pending)"]` (node key = id with `-` → `_`, label escaped: `"` → `'`); then edge lines ordered by `(kind, src, dst)`: `needs` as `dst_key --> src_key` (dependency flows into dependent); `verifies` `src -.->|verifies| dst`; `fixes` `src ==>|fixes| dst`; `escalates` `src -.->|escalates| dst`; `blocks` `src -->|blocks| dst`. Then `classDef` lines are NOT emitted (state colours are v0.2).
 ```
 graph TD
-    n01_skeleton["n01-skeleton (done)"]
-    n02a["n02a (running)"]
-    n01_skeleton --> n02a
+    skeleton["skeleton (done)"]
+    protocol["protocol (running)"]
+    skeleton --> protocol
 ```
 
 ## 7. YAML export/import (`yaml.rs`)
@@ -227,19 +227,19 @@ Format (stable, sorted by job id, 2-space indent):
 ```yaml
 version: 1
 jobs:
-  - id: n04-graph
-    title: vowp-graph
+  - id: graph-engine
+    title: graph engine
     kind: build
     role: worker
     profile: worker
     priority: 50
-    needs: [n02a-protocol-foundation]
+    needs: [protocol]
     owns: ["crates/vowp-graph/**"]
     reads: ["docs/design/**"]
     gates: [{report: {fields: [status, branch, commits, tests]}}, {cmd: {run: "cargo test -p vowp-graph", expect_exit: 0}}, {owns_respected: true}, {review: {by: verifier}}]
     loop: {until: gates, max_attempts: 3, on_exhausted: escalate}
 edges:
-  - {src: n04-graph-verify-0, dst: n04-graph, kind: verifies}
+  - {src: graph-engine-verify-0, dst: graph-engine, kind: verifies}
 ```
 State, counters, timestamps, branch/worktree are **not** exported (a graph file is a plan, not a run). Import validates gates (`Gate::validate`), ids (`JobId::parse`), `version == 1`, and runs `Graph`-style cycle/unknown-id checks over the imported set.
 

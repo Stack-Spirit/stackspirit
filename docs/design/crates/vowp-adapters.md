@@ -1,30 +1,29 @@
 # crate `vowp-adapters`
 
-Behaviour of each adapter is specified in `adapters.md`; this file is the **API, module ownership and tests**. Depends only on `vowp-protocol`
+Behaviour of each adapter is specified in `adapters.md`; this file is the **API, module layout and tests**. Depends only on `vowp-protocol`
 (+ `serde`, `serde_json`, `thiserror`, `toml`, `regex`; dev: `tempfile`, `pretty_assertions`). No `unsafe`, no tokio, no network.
 
-## 1. Modules and ownership
+## 1. Modules
 
-n01 creates `src/lib.rs` declaring the three adapter modules. Two shared modules are needed first, so a small job **n06z** (before n06a/b/c) owns
-`src/lib.rs` (edits), `src/classify/**`, `src/proc/**`, `src/testing.rs`, `tests/fakes/**`. After n06z, `lib.rs` is frozen.
+The shared modules (`classify`, `proc`, `stream`, `testing`) are the foundation for the three adapter modules.
 
 ```
 crates/vowp-adapters/
-  Cargo.toml                      n01 creates; deps added by n06z (shared) / adapter jobs add nothing new except toml (n06c)
-  src/lib.rs                      n06z (final form below)
-  src/classify/mod.rs             n06z   classify_text, parse_reset_time, redact, ...      (adapters.md §5)
-  src/proc/mod.rs                 n06z   process-group spawn, reader threads, signals, RunHandle
-  src/testing.rs                  n06z   parse_fixture, FixtureKind (cfg(test) or feature "testing")
-  src/stream.rs                   n06z   StreamParser trait, ParsedRun
-  src/opencode/mod.rs             n06a   (+ submodules src/opencode/*.rs, same owner)
-  src/claude_code/mod.rs          n06b   (+ src/claude_code/*.rs)
-  src/cli/mod.rs                  n06c   (+ src/cli/*.rs)
-  tests/fixtures/claude_*.jsonl   n06b          tests/fixtures/opencode_*.jsonl  n06a        tests/fixtures/cli_*  n06c
-  tests/fakes/fake-*.sh           n06z (all three, written once from adapters.md §9)
-  tests/*.rs                      each adapter job owns tests named after it: claude_code.rs (n06b), opencode.rs (n06a), cli.rs (n06c), classify.rs/proc.rs (n06z)
+  Cargo.toml
+  src/lib.rs                      (final form below)
+  src/classify/mod.rs             classify_text, parse_reset_time, redact, ...      (adapters.md §5)
+  src/proc/mod.rs                 process-group spawn, reader threads, signals, RunHandle
+  src/testing.rs                  parse_fixture, FixtureKind (cfg(test) or feature "testing")
+  src/stream.rs                   StreamParser trait, ParsedRun
+  src/opencode/mod.rs             (+ submodules src/opencode/*.rs)
+  src/claude_code/mod.rs          (+ src/claude_code/*.rs)
+  src/cli/mod.rs                  (+ src/cli/*.rs)
+  tests/fixtures/claude_*.jsonl           tests/fixtures/opencode_*.jsonl         tests/fixtures/cli_*
+  tests/fakes/fake-*.sh           all three, written once from adapters.md §9
+  tests/*.rs                      claude_code.rs, opencode.rs, cli.rs, classify.rs, proc.rs
 ```
 
-Final `src/lib.rs` (written by n06z, adapter module files may be empty stubs until their jobs land — stubs must compile and be replaced, never left as the feature):
+Final `src/lib.rs`:
 
 ```rust
 //! Harness adapters: claude-code, opencode, generic cli. Spec: docs/design/adapters.md
@@ -45,7 +44,7 @@ pub use cli::{CliAdapter, Mapping};
 
 Cargo feature `testing = []` in `Cargo.toml`.
 
-## 2. `stream` — parser trait (n06z)
+## 2. `stream` — parser trait
 
 ```rust
 /// Incremental, process-free parser of one harness's stdout. Adapters own one per run. Pure: no I/O, no clock except via the `now` given.
@@ -66,7 +65,7 @@ pub struct ParsedRun { pub events: Vec<HarnessEvent>, pub summary: RunSummary }
 
 (`finish` returns the terminal events too; the shared `proc::RunHandle` appends them to the channel. This refines the one-line sketch in the brief: `finish(self, exit, stderr_tail) -> RunSummary`.)
 
-## 3. `proc` — process plumbing (n06z)
+## 3. `proc` — process plumbing
 
 ```rust
 /// How to launch one child.
@@ -112,7 +111,7 @@ Reader/waiter rules: stdout reader uses `BufRead::read_until(b'\n')` (lossy UTF-
 
 ## 4. Public adapter API
 
-### 4.1 claude-code (n06b)
+### 4.1 claude-code
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -135,7 +134,7 @@ impl ClaudeParser { pub fn new(now: Timestamp, tz_offset_minutes: i32, executor:
 impl StreamParser for ClaudeParser {}
 ```
 
-### 4.2 opencode (n06a)
+### 4.2 opencode
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -155,7 +154,7 @@ impl OpencodeParser { pub fn new(now: Timestamp, tz_offset_minutes: i32, executo
 impl StreamParser for OpencodeParser {}
 ```
 
-### 4.3 generic cli (n06c)
+### 4.3 generic cli
 
 ```rust
 /// Deserialised mapping file (adapters.md §4.1). `deny_unknown_fields` everywhere.
@@ -245,12 +244,12 @@ impl StreamParser for CliParser {}
 pub fn pointer_get<'a>(v: &'a serde_json::Value, ptr: &str) -> Option<&'a serde_json::Value>;
 ```
 
-`AdapterRegistry` (name → `Arc<dyn Adapter>` from `VowpConfig`) is **not** here: it lives in `vowp-core::deps` (n07a), which constructs adapters from `[harnesses.*]`.
+`AdapterRegistry` (name → `Arc<dyn Adapter>` from `VowpConfig`) is **not** here: it lives in `vowp-core::deps`, which constructs adapters from `[harnesses.*]`.
 
-## 5. Optional importer (nice-to-have, n06b2 if time)
+## 5. Optional importer
 
 `pub fn import_transcript(path: &Path, tz_offset_minutes: i32) -> Result<Vec<HarnessEvent>, AdapterError>` is re-exported as `claude_code::import_transcript` (implementation in `claude_code::import`). It reads a `~/.claude/projects/…/<uuid>.jsonl`
-transcript with the same block mapping as §2.2 of adapters.md (no result/cost lines). Used later by `vowp session watch` (cli.md). Not required for must-haves.
+transcript with the same block mapping as §2.2 of adapters.md (no result/cost lines). Used later by `vowp session watch` (cli.md). Not required for v0.1.
 
 ## 6. Errors
 
@@ -260,7 +259,7 @@ transcript with the same block mapping as §2.2 of adapters.md (no result/cost l
 
 All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 
-### n06z — classify / proc (`tests/classify.rs`, `tests/proc.rs`, unit tests inside the modules)
+### classify / proc (`tests/classify.rs`, `tests/proc.rs`, unit tests inside the modules)
 
 | Test | Proves |
 |---|---|
@@ -288,7 +287,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `resolve_binary_finds_on_path_and_rejects_non_executable` | temp dir PATH |
 | `signal_group_refuses_pid_0_1_and_own_group` | returns `InvalidInput` |
 
-### n06b — claude-code (`tests/claude_code.rs`)
+### claude-code (`tests/claude_code.rs`)
 
 | Test | Proves |
 |---|---|
@@ -313,12 +312,12 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `claude_cost_thinking_tokens_split` | `output = output_tokens − thinking`, `reasoning = thinking`, total equals harness |
 | `claude_raw_cap_and_redaction` | 40 KB tool result → raw truncated marker; a fake `sk-…` in tool output absent from `raw` |
 
-### n06a — opencode (`tests/opencode.rs`)
+### opencode (`tests/opencode.rs`)
 
 | Test | Proves |
 |---|---|
 | `opencode_probe_parses_version` | like claude (`2.0.28`) |
-| `opencode_argv_new_and_resume` | `run --format json --auto --model deepseek/deepseek-flash#max [--session ses_…] [--title …] <prompt last>`; stdin is null |
+| `opencode_argv_new_and_resume` | `run --format json --auto --model provider/model-b#max [--session ses_…] [--title …] <prompt last>`; stdin is null |
 | `opencode_tool_exit_code_from_nested_metadata` | fixture `opencode_tool_exit.jsonl` (real nested shape `state.metadata.metadata.exit`): `ToolResult.exit_code == Some(0)` and `Some(2)` for the second line |
 | `opencode_variant_sigil_only_when_present` | `#max` absent when `variant: None` |
 | `opencode_long_prompt_goes_through_file` | > 100 000 bytes → file under `<cwd>/.vowp/prompts/`, argv prompt is the pointer text |
@@ -327,7 +326,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `opencode_tool_error_is_not_run_error` | `state.status:"error"` → `ToolResult{ok:false, output "Web search cancelled"}`, outcome Ok |
 | `opencode_cost_sums_over_steps` | `RunSummary.cost.usd` = sum of `part.cost`, tokens summed incl. cache read, `source: Receipt` |
 | `opencode_no_receipt_is_unknown_cost` | run with no `step_finish` → `Cost::unknown()` (usd None) |
-| `opencode_402_fixture_is_credits` | outcome Credits, `LimitEvent{Credits, provider deepseek}`, exit non-zero |
+| `opencode_402_fixture_is_credits` | outcome Credits, `LimitEvent{Credits, provider provider-a}`, exit non-zero |
 | `opencode_429_fixture_is_rate` | Rate + 10 min |
 | `opencode_auth_fixture` | Auth |
 | `opencode_context_fixture` | `LimitEvent{Context}` + `ErrorEvent` |
@@ -335,7 +334,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `opencode_silent_run_then_stop` | `FAKE_HANG=1` with no output: adapter does not time out by itself; `stop()` → Killed |
 | `opencode_end_to_end_with_fake_script` | start/wait with `fake-opencode.sh` and `opencode_ok.jsonl` |
 
-### n06c — cli (`tests/cli.rs`)
+### cli (`tests/cli.rs`)
 
 | Test | Proves |
 |---|---|
@@ -353,6 +352,6 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `cli_end_to_end_with_fake_script` | start/wait with `fake-cli.sh` |
 | `cli_pointer_get_cases` | `/a/0/b`, `""`, missing, escaped `~0 ~1` |
 
-### Cross-adapter (in `vowp-core` tests, n07; listed here so the contract is covered)
+### Cross-adapter (in `vowp-core` tests, listed here so the contract is covered)
 
-`adapters_emit_terminal_turn_ended_on_every_exit_path` (claude, opencode, cli × {ok, error exit, killed, spawn fail after start}) — a parametrised test in `crates/vowp-core/tests/adapter_contract.rs`, owned by **n07b** (runs after n06a/b/c merged; no separate job).
+`adapters_emit_terminal_turn_ended_on_every_exit_path` (claude, opencode, cli × {ok, error exit, killed, spawn fail after start}) — a parametrised test in `crates/vowp-core/tests/adapter_contract.rs`.

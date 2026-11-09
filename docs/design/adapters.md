@@ -1,10 +1,10 @@
 # adapters.md — driving harnesses headlessly
 
-Consumers: n06z (classify + proc), n06a (opencode), n06b (claude-code), n06c (generic cli), and n07/n08 (callers).
+Used by the adapter implementations and their callers.
 Types are in `types.md` §12 (trait, `StartInput`, `RunSummary`, `AdapterError`) and §5 (events). Crate API: `crates/vowp-adapters.md`.
-Rules that never bend (plan §2.1): stock binaries, official headless JSON modes, **no TUI scraping, no keystrokes, no token handling**.
+Rules that never bend (design summary §1): stock binaries, official headless JSON modes, **no TUI scraping, no keystrokes, no credential handling**.
 
-Observed facts below come from real runs (Claude Code 2.1.319 `stream-json`, opencode 2.0.28 `run --format json`) and from `night.py`.
+Observed facts below come from real harness runs (Claude Code 2.1.319 `stream-json`, opencode 2.0.28 `run --format json`).
 
 ---
 
@@ -46,7 +46,7 @@ claude -p --output-format stream-json --verbose
        [--effort <executor.effort>]
        --permission-mode <permission_mode | "auto">
        [--append-system-prompt <system_note>]
-       [--add-dir <dir>]...                       # from ClaudeConfig.add_dirs (night.py needed this; default none)
+       [--add-dir <dir>]...                       # from ClaudeConfig.add_dirs (default none)
        ( --resume <resume>  |  --session-id <new_native_id> )   # exactly one when resume/new_native_id is Some; neither otherwise
        [<extra_args>...]                          # ClaudeConfig.extra_args, verbatim, last before the prompt
 ```
@@ -54,7 +54,7 @@ claude -p --output-format stream-json --verbose
 **Prompt goes on stdin**, not argv. Reasons: `argv` is visible in `ps`/`/proc` to every local user (prompts contain briefs and sometimes pasted
 paths), and Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`) which a capsule seed + brief can exceed. `claude -p` reads the prompt from
 stdin when no positional prompt is given (documented headless behaviour). The adapter writes the prompt, closes stdin, then starts reading.
-(`night.py` passed it as the last arg and worked; stdin is the deliberate improvement. If `probe()` finds the stdin form unsupported — it never has — fall back to
+If `probe()` finds the stdin form unsupported — it never has — fall back to
 the last-arg form: `ClaudeConfig.prompt_via_arg: bool`, default `false`.)
 
 Rules:
@@ -152,28 +152,28 @@ Preference order for `LimitEvent.resets_at` / `RunSummary.limit.resets_at`:
 
 ```
 opencode run --format json --auto
-         --model <executor.model_arg()>            # "deepseek/deepseek-flash#max" : provider/model#variant, '#variant' only if Some
+         --model <executor.model_arg()>            # "provider/model#variant", '#variant' only if Some
          [--session <resume>]                      # when resume is Some
          [--title "vowp <role> <job_id>"]          # optional, from OpencodeConfig.title (core fills it); shows in the opencode app
          [<extra_args>...]
          <prompt>                                  # LAST positional argument
 ```
 
-`night.py` ran exactly this with `stdin=DEVNULL` and the prompt as final argument; that form is **proven**. The adapter closes stdin immediately (`Stdio::null()`).
+The adapter closes stdin immediately (`Stdio::null()`).
 Prompt size: Linux's per-argument cap is 128 KiB. If `prompt.len() > 100_000` bytes the adapter writes the prompt to
 `<cwd>/.vowp/prompts/<run-or-session>-<n>.md` (creating the directory; `.vowp/` is git-ignored by `vowp init`) and passes
 `Read the instructions in .vowp/prompts/<file> and follow them exactly.` instead. The prompt also shows up in `ps`; briefs are not secret (secrets are never put in prompts: AGENTS.md).
 
-- `--auto` is mandatory: opencode must never open a permission dialog (principle 2.1). No keystrokes, ever.
+- `--auto` is mandatory: opencode must never open a permission dialog (design summary principle 1). No keystrokes, ever.
 - New session: no `--session`. The id is learned from the first event's top-level `sessionID` (e.g. `ses_e439617b6ffepWG4UNK521b6ly`) and reported as `RunSummary.native_session_id`
   and in `RunSummary.native_session_id` (core writes it into the detach event and `adapters.json`); the adapter emits **no** framing event.
-- `--model` variant sigil: the Executor stores `variant = Some("max")`; `model_arg()` renders `deepseek/deepseek-flash#max`.
+- `--model` variant sigil: the Executor stores `variant = Some("max")`; `model_arg()` renders `provider/model#max`.
 - Binary: `OpencodeConfig.binary` (default first `opencode` on `PATH`, falling back to `$HOME/.opencode/bin/opencode` — checked with `Path::exists`, only for the user's own HOME read from `StartInput.env`'s `HOME`… the adapter reads `HOME` from the process env for this single lookup).
 
 ### 3.2 Event mapping (real data, opencode 2.0.28)
 
 Every stdout line is a JSON object with `type`, `timestamp` (unix **milliseconds**), top-level `sessionID`, and `part`. Observed distinct shapes: `step_start`, `tool_use`
-(status `completed` or `error`), `text`, `step_finish`. (No `reasoning` line was observed on DeepSeek runs, but see the reasoning row.) Errors are `type:"error"`.
+(status `completed` or `error`), `text`, `step_finish`. (No `reasoning` line was observed in the recorded runs, but see the reasoning row.) Errors are `type:"error"`.
 
 | opencode line | Emits (in order) |
 |---|---|
@@ -194,7 +194,7 @@ Every stdout line is a JSON object with `type`, `timestamp` (unix **milliseconds
 3. Else non-zero exit → `Crash` if killed by signal (exit `None`), else `Error`.
 4. `Killed` if `stop()`/`interrupt()`/timeout fired.
 
-**Provider text for `provider` in `LimitEvent`:** `executor.provider()` (text before `/` in the model), e.g. `deepseek`.
+**Provider text for `provider` in `LimitEvent`:** `executor.provider()` (the text before `/` in the model).
 
 ### 3.3 Provider error classification (opencode)
 
@@ -210,7 +210,7 @@ opencode forwards provider HTTP errors inside the `error` line or on stderr. Mat
 
 ### 3.4 Observed behaviours the adapter must respect
 
-- opencode sometimes prints **nothing at all** for minutes after start (seen 2026-11-08). The adapter does not time out; L1 kills runs silent for 8 min and continues them.
+- opencode sometimes prints **nothing at all** for minutes after start. The adapter does not time out; L1 kills runs silent for 8 min and continues them.
 - A `tool_use` can fail (`state.status = error`) while the run still exits 0.
 - Sessions created by `run` appear in the opencode app; `--title` helps recognising them.
 - `sessionID` is present on every line including `error`; use the first seen.
@@ -356,7 +356,7 @@ ok = [0]
 
 ---
 
-## 5. Classification (`vowp_adapters::classify`, owned by n06z)
+## 5. Classification (`vowp_adapters::classify`)
 
 Used by all adapters and by core (gate output, probe results).
 
@@ -374,7 +374,7 @@ pub struct Classified {
 pub const TRANSIENT_BACKOFF_MIN: u32 = 10;
 pub const QUOTA_FALLBACK_MIN: u32 = 60;
 
-/// Classify error text. `provider_hint` is informational ("claude", "deepseek", "" ) and selects nothing in v0.1 except the
+/// Classify error text. `provider_hint` is informational ("claude", "provider", "" ) and selects nothing in v0.1 except the
 /// message prefix; `http_status` (if the harness gave a number) takes part: 402 -> Credits, 401/403 -> Auth, 429/529 -> Rate.
 /// Returns None if nothing matches. NOTE: callers apply the exit-code gate (§5.5); this function is pure.
 pub fn classify_text(provider_hint: &str, text: &str, http_status: Option<u16>, now: Timestamp, tz_offset_minutes: i32) -> Option<Classified>;
@@ -415,7 +415,7 @@ Examples (`now = 2026-11-08T18:10:00Z`, `tz_offset_minutes = 60`, i.e. local 19:
 | Rate | `rate[_ ]limit\|\b429\b\|\b529\b\|overloaded\|too many requests\|\bbusy\b` | 429, 529 |
 | Context | `prompt is too long\|context (?:window\|length) (?:exceeded\|overflow)\|maximum context length\|context_length_exceeded\|input is too long\|exceeds the context` | — |
 
-Note the quota class contains `resets? \d` (very broad, from `night.py`). A text that matches *both* Quota and Rate (`rate_limit_error … resets 5pm`)
+Note the quota class contains `resets? \d` (very broad). A text that matches *both* Quota and Rate (`rate_limit_error … resets 5pm`)
 is Quota. Plain `429` without quota words is Rate. `"rate_limit_event"` as a JSON key name must **not** match: callers feed only message text (`result` string, error message fields, stderr, noise), never whole JSON lines.
 
 ### 5.4 Redaction
@@ -424,7 +424,7 @@ is Quota. Plain `429` without quota words is Rate. `"rate_limit_event"` as a JSO
 `-----BEGIN [A-Z ]*PRIVATE KEY-----`, `xox[abp]-[A-Za-z0-9-]{10,}`, `Bearer [A-Za-z0-9._~+/-]{20,}`, and `(?i)(api[_-]?key|token|secret|password)["']?\s*[:=]\s*["']?[^\s"']{8,}` (replaced by `<redacted>`).
 It never fails and is applied to every `message` in `LimitEvent`/`ErrorEvent`/`RunSummary.limit` and to `Run.detail`.
 
-### 5.5 Exit-code gating (from `night.py`)
+### 5.5 Exit-code gating
 
 A limit regex hit counts only if **(exit code != 0) OR (an error was seen: `result.is_error`, an opencode `type:"error"` line, `rate_limit_event` rejected, or non-empty stderr tail that itself matched)**.
 Exit 0 with no error signal and a model that merely *talks about* "usage limit" in its text is `Ok`. The adapter builds the classifier input from error sources only
@@ -443,7 +443,7 @@ for one provider ⇒ limits row `unavailable` for 15 min** (decisions.md D15).
 | Adapter | Source | Mapping |
 |---|---|---|
 | claude-code | `result.total_cost_usd` + `result.usage` | `Cost::receipt(total_cost_usd, Tokens{input: usage.input_tokens, output: usage.output_tokens − thinking_tokens (clamped ≥ 0), reasoning: usage.output_tokens_details.thinking_tokens, cache_read: usage.cache_read_input_tokens, cache_write: usage.cache_creation_input_tokens})` (`output_tokens` already includes thinking tokens, so `Tokens::total()` equals the harness's own count). The figure is a **list-price equivalent**: on a subscription nothing is billed (`modelUsage.<m>.costBasis: "list"`). The `CostEvent` is still `source: Receipt`, and the ledger row's `detail_json` gets `{"billed": false, "basis": "list"}` (core sets it for `claude-code` runs; `RunSummary` has no field for it). |
-| opencode | each `step_finish.part.cost`, `.tokens` | one `CostEvent` per step; sums via `Cost::add`; `source: Receipt`. `reasoning` is separate from `output` in opencode tokens (DeepSeek bills reasoning as output; core's totals count both). |
+| opencode | each `step_finish.part.cost`, `.tokens` | one `CostEvent` per step; sums via `Cost::add`; `source: Receipt`. `reasoning` is separate from `output` in opencode tokens (some providers bill reasoning as output; core's totals count both). |
 | cli | `[cost]` pointers | `Receipt` if `usd_pointer` yields a number, else `Unknown` (usd `None`). |
 | none seen | — | `Cost::unknown()` (never zero). A run that ended without any receipt (crash before `result`/`step_finish`) is `Unknown`. |
 

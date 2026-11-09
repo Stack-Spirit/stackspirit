@@ -1,11 +1,11 @@
 # conventions.md — Rust conventions, dependencies, tests, naming
 
-Binding for every build job. It restates `AGENTS.md` (which wins on conflict) and adds the details a worker needs.
+Binding for every contribution. It adds the details a contributor needs to the repository's contribution rules.
 
 ## 1. Language and tooling
 
 - Stable Rust, edition 2024, toolchain from `rust-toolchain.toml`. No nightly features, **no `unsafe`**
-  (`#![forbid(unsafe_code)]` in every crate's `lib.rs`/`main.rs`; n01 adds it).
+  (`#![forbid(unsafe_code)]` in every crate's `lib.rs`/`main.rs`).
 - Before every commit: `cargo fmt --all`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`.
 - Plain threads and blocking I/O (`std::thread`, `std::sync::mpsc`, `std::process`). **No `tokio` in v0.1** (no crate needs it:
   every harness is a child process with a stdout pipe; one reader thread per pipe). `axum`/`tokio` arrive with the v0.2 daemon.
@@ -27,7 +27,7 @@ vowp-protocol  ←  vowp-store, vowp-graph, vowp-tmux, vowp-adapters
                            vowp-cli   (core + all)
 ```
 
-`vowp-graph` depends only on `vowp-protocol`; `vowp-tmux` on nothing (plain `std` + `thiserror`; the n01 skeleton's `vowp-protocol` dependency in its `Cargo.toml` is removed by n05). `vowp-store` depends on
+`vowp-graph` depends only on `vowp-protocol`; `vowp-tmux` on nothing (plain `std` + `thiserror`). `vowp-store` depends on
 `vowp-protocol` only. `vowp-adapters` on `vowp-protocol` only. Cycles are forbidden.
 
 ## 3. Dependencies per crate (add with `cargo add -p <crate> <dep>`; features as listed)
@@ -43,7 +43,7 @@ vowp-protocol  ←  vowp-store, vowp-graph, vowp-tmux, vowp-adapters
 | `vowp-cli` | all workspace crates, `clap` (derive), `anyhow`, `serde_json`, `time`, `signal-hook` (safe signal flags for SIGTERM/SIGINT) | `tempfile`, `assert_cmd` (optional) |
 
 Rules: versions are whatever `cargo add` resolves (real and current); never write a version by hand. Prefer deps already in
-the workspace; `[workspace.dependencies]` is owned by n01 — if a needed dep is missing there, add it to your own crate only.
+the workspace; if a needed dep is missing from `[workspace.dependencies]`, add it to your own crate only.
 `serde_yaml_ng` is the maintained fork of the deprecated `serde_yaml`; if `cargo add` cannot resolve it, use `serde_norway`
 and record that in the report (same API surface; only `from_str`/`to_string` are used).
 
@@ -54,7 +54,7 @@ and record that in the report (same API surface; only `from_str`/`to_string` are
 - Errors carry context (path, id, command) in fields, not pre-formatted strings, so `--json` output can include them.
 - Libraries never print. Logging goes through the tiny `Log` trait in `vowp-protocol` (`fn log(&self, level: Level, target: &str, msg: &str)`)
   injected into `Supervisor`; the CLI's implementation writes `~/.vowp/logs/supervisor.log` lines
-  `2026-11-08T19:25:47.123Z INFO l1 job n04-graph: running -> gating`. Never log prompts, env values or secret-looking strings.
+  `2026-11-08T19:25:47.123Z INFO l1 job graph-engine: running -> gating`. Never log prompts, env values or secret-looking strings.
 - Panics are bugs: loops run each tick under `std::panic::catch_unwind` in `vowp-core` only, logging and counting `fail_streak`.
 
 ## 5. Tests are real and hermetic

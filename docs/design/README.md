@@ -1,29 +1,24 @@
-# VOWP v0.1 implementation spec — index
+# VOWP v0.1 design specification — index
 
-This directory turns the approved design (`plan.md`) into a spec precise enough to build each crate without inventing architecture.
-`plan.md` is the product decision record and is **not** edited; every deviation or clarification is in `decisions.md`.
+This directory describes how VOWP works: architecture, types, database schema, behavioural contracts and the command line. `plan.md` is the design summary; `decisions.md` records every place where the detailed spec tightens or clarifies it.
 
 ## How to use it
 
-**If you are a build worker** (an AI agent with one job): your brief names the spec sections you implement. Read, in this order:
+**If you are a contributor**: start with `architecture.md`, then the crate file for the area you want to change, and update the spec in the same change as the code.
 
-1. `AGENTS.md` at the repo root (rules), then `conventions.md` (Rust rules, dependency list, test rules).
+1. `conventions.md` (Rust rules, dependency list, test rules).
 2. `types.md` for every type you touch — types are defined **once**, in `vowp-protocol`; never redefine them.
-3. Your crate's file in `crates/` — module layout, the complete public API with exact signatures, behaviour rules, and the **named tests** you must implement.
-4. The behavioural document your crate is part of (`adapters.md`, `loops.md`, `sessions.md`, `cli.md`) and `schema.sql` if you touch the database.
-5. Your job's entry in `job-map.md` (what you own, what you need, acceptance tests).
+3. Your crate's file in `crates/` — module layout, the complete public API with exact signatures, behaviour rules, and the **named tests** that prove it.
+4. The behavioural document your change is part of (`adapters.md`, `loops.md`, `sessions.md`, `cli.md`) and `schema.sql` if you touch the database.
 
-Names in the spec are binding: same type, table, column, command and test names. If the spec is ambiguous or wrong, write the question under
-`questions_for_owner` in your report (status `blocked` or `partial`); do not invent a different design.
-
-**If you are a human contributor**: start with `architecture.md`, then the crate file for the area you want to change; update the spec in the same PR as the code.
+Names in the spec are binding: same type, table, column, command and test names. If the spec is ambiguous or wrong, open an issue rather than inventing a different design.
 
 ## Files
 
 | File | What it defines |
 |---|---|
-| `plan.md` | The approved product plan (read-only here). |
-| `decisions.md` | Deviations/clarifications relative to the plan, each with its reason; open owner questions. |
+| `plan.md` | The design summary: principles, concepts, architecture and behaviour. |
+| `decisions.md` | Deviations/clarifications relative to the design summary, each with its reason; open owner questions. |
 | `architecture.md` | Components and data flow, threading model, on-disk layout of a node, the full `vowp.toml` schema with an annotated example, error/logging conventions, security model. |
 | `schema.sql` | The complete SQLite schema (19 tables; plus SQLite's internal `sqlite_sequence`) with constraints, indexes and comments; WAL; migration by `PRAGMA user_version`. Loads in plain SQLite. |
 | `types.md` | Every protocol type as Rust with serde attributes and JSON examples: ids, timestamps, events + payloads, capsule, job/edge/state, gates/evidence, brief & report front-matter, executor/profile, limit, cost, run, session, inbox, loop, schedule, release, config, adapter and service traits. |
@@ -39,7 +34,6 @@ Names in the spec are binding: same type, table, column, command and test names.
 | `loops.md` | L1–L9, the job state-machine transition table, gates, merge queue, failover, inbox, watchdog, schedules, drills. |
 | `sessions.md` | Canonical event log, reindex, capsule writer, switch protocol, export/import bundle. |
 | `cli.md` | Every v0.1 command: arguments, flags, human and `--json` output, exit codes, `--node` over ssh. |
-| `job-map.md` | The build plan: concrete jobs (id, title, owns, needs, spec slice, acceptance tests), ordered must-haves first. |
 
 ## Vocabulary (one meaning everywhere)
 

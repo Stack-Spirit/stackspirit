@@ -4,16 +4,16 @@ Every type here lives in `vowp-protocol` and is the **only** definition: other c
 All types derive `Debug, Clone, PartialEq, Serialize, Deserialize` (and `Eq`/`Hash`/`Copy` where noted as "plain
 enum/id") and `schemars::JsonSchema`. JSON is the wire format for logs, bundles, `--json` CLI output and the DB JSON
 columns (`schema.sql`). Names are `snake_case` in JSON, except event-type strings (`session.created`) and executor
-strings (`opencode:deepseek/deepseek-flash#max`).
+strings (`opencode:provider/model#max`).
 
-Module → file map (created by n02a with empty placeholders, filled by n02a–d, see `job-map.md`):
+Module → file map:
 
-| Module | Contents | Job |
-|---|---|---|
-| `ids`, `time`, `error`, `cost`, `limit`, `executor` | foundations | n02a |
-| `event`, `capsule` | event log + capsule | n02b |
-| `job`, `gate`, `report`, `run`, `session`, `inbox`, `loops`, `release` | domain rows | n02c |
-| `config`, `adapter`, `services`, `schema` | `vowp.toml`, adapter trait, service traits, JSON Schema export | n02d |
+| Module | Contents |
+|---|---|
+| `ids`, `time`, `error`, `cost`, `limit`, `executor` | foundations |
+| `event`, `capsule` | event log + capsule |
+| `job`, `gate`, `report`, `run`, `session`, `inbox`, `loops`, `release` | domain rows |
+| `config`, `adapter`, `services`, `schema` | `vowp.toml`, adapter trait, service traits, JSON Schema export |
 
 `lib.rs` re-exports everything at the crate root (`vowp_protocol::Job`), plus `vowp_protocol::prelude::*`.
 
@@ -34,7 +34,7 @@ id_type!(InboxId);     // 26-char ULID
 id_type!(ReleaseId);   // 26-char ULID
 id_type!(ScheduleId);  // 26-char ULID
 id_type!(CapsuleId);   // "cap_" + 26-char ULID
-id_type!(JobId);       // slug: ^[a-z0-9][a-z0-9-]{0,63}$   (e.g. "n04-graph")
+id_type!(JobId);       // slug: ^[a-z0-9][a-z0-9-]{0,63}$   (e.g. "graph-engine")
 id_type!(NodeName);    // slug, same pattern as JobId
 id_type!(ProjectName); // slug, same pattern as JobId
 
@@ -126,8 +126,8 @@ pub enum HarnessKind {
 impl HarnessKind { pub fn as_str(&self) -> &'static str; pub fn parse(s: &str) -> Result<Self, ProtocolError>; }
 
 /// One concrete way to run a model: `harness:model[@effort][#variant]`.
-///   claude-code:claude-sonnet-5-5@medium            -> harness=ClaudeCode model="claude-sonnet-5-5" effort=Some("medium")
-///   opencode:deepseek/deepseek-flash#max            -> harness=Opencode  model="deepseek/deepseek-flash" variant=Some("max")
+///   claude-code:model-a@medium                     -> harness=ClaudeCode model="model-a" effort=Some("medium")
+///   opencode:provider/model-b#max                  -> harness=Opencode  model="provider/model-b" variant=Some("max")
 ///   cli:codex                                       -> harness=Cli       model="codex" (name of a [harnesses.<name>] entry)
 /// Canonical Display/serde form is exactly that string. `harness:` is mandatory; model may contain '/' ':' '.' '-' '_'
 /// but not '@' or '#'; effort and variant are `[a-z0-9_-]+`.
@@ -142,8 +142,8 @@ pub struct Executor {
 impl Executor {
     pub fn parse(s: &str) -> Result<Self, ProtocolError>;          // FromStr too
     pub fn provider(&self) -> String;   // limits key. claude-code -> "claude"; opencode -> text before first '/' of model
-                                        // ("deepseek"); cli -> the model/entry name
-    pub fn model_arg(&self) -> String;  // opencode: "deepseek/deepseek-flash#max"; claude-code: "claude-sonnet-5-5"
+                                        // (e.g. "provider"); cli -> the model/entry name
+    pub fn model_arg(&self) -> String;  // opencode: "provider/model-b#max"; claude-code: "model-a"
 }
 
 /// Where an executor runs: the executor plus the node. `node == None` means "this node".
@@ -179,7 +179,7 @@ impl Profile {
 }
 ```
 
-JSON: `"claude-code:claude-sonnet-5-5@medium"` (an `Executor` is a JSON string).
+JSON: `"claude-code:model-a@medium"` (an `Executor` is a JSON string).
 
 ---
 
@@ -223,7 +223,7 @@ pub enum LimitKind { Quota, Credits, Rate, Context, Auth }
 /// `limits` table row. `Unavailable` (used only in the table, never in events) = repeated unknown failures.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Limit {
-    pub provider: String,                    // "claude", "deepseek"
+    pub provider: String,                    // "claude", "provider"
     pub harness: Option<HarnessKind>,
     pub kind: LimitRowKind,
     pub resets_at: Option<Timestamp>,        // None = until a human resolves it (credits, auth)
@@ -418,16 +418,16 @@ pub struct Note { pub text: String }
 ### 5.3 Example log lines
 
 ```json
-{"id":"01KA1V0Z8Q3M9W6E5T2R4N7B1C","session_id":"01KA1V0Z7A0000000000000000","seq":1,"ts":"2026-11-08T19:30:00.000Z","type":"session.created","actor":"system","source":{"harness":"vowp","node":"vps"},"payload":{"title":"n04-graph","cwd":"/home/user/project","project":"vowp","job_id":"n04-graph","role":"worker"},"replayable":true}
-{"id":"01KA1V10C3F7H9J2K4M6N8P0Q2","session_id":"01KA1V0Z7A0000000000000000","seq":6,"ts":"2026-11-08T19:30:12.481Z","type":"tool.call","actor":"assistant","source":{"harness":"opencode","model":"deepseek/deepseek-flash","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly"},"payload":{"call_id":"call_01_2ncr","name":"shell","input":{"command":"cargo test"}},"replayable":true}
-{"id":"01KA1V11D4G8J1K3M5N7P9R0S2","session_id":"01KA1V0Z7A0000000000000000","seq":9,"ts":"2026-11-08T19:41:02.000Z","type":"limit","actor":"system","source":{"harness":"claude-code","model":"claude-sonnet-5-5","node":"local"},"payload":{"kind":"quota","provider":"claude","resets_at":"2026-11-08T22:20:00.000Z","message":"You've hit your limit · resets 11pm (Europe/Oslo)"},"replayable":true}
+{"id":"01KA1V0Z8Q3M9W6E5T2R4N7B1C","session_id":"01KA1V0Z7A0000000000000000","seq":1,"ts":"2026-11-08T19:30:00.000Z","type":"session.created","actor":"system","source":{"harness":"vowp","node":"server"},"payload":{"title":"graph-engine","cwd":"/home/user/project","project":"vowp","job_id":"graph-engine","role":"worker"},"replayable":true}
+{"id":"01KA1V10C3F7H9J2K4M6N8P0Q2","session_id":"01KA1V0Z7A0000000000000000","seq":6,"ts":"2026-11-08T19:30:12.481Z","type":"tool.call","actor":"assistant","source":{"harness":"opencode","model":"provider/model-b","node":"server","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly"},"payload":{"call_id":"call_01_2ncr","name":"shell","input":{"command":"cargo test"}},"replayable":true}
+{"id":"01KA1V11D4G8J1K3M5N7P9R0S2","session_id":"01KA1V0Z7A0000000000000000","seq":9,"ts":"2026-11-08T19:41:02.000Z","type":"limit","actor":"system","source":{"harness":"claude-code","model":"model-a","node":"local"},"payload":{"kind":"quota","provider":"claude","resets_at":"2026-11-08T22:20:00.000Z","message":"You've hit your limit · resets 11pm (Europe/Oslo)"},"replayable":true}
 ```
 
 ---
 
 ## 6. Capsule (`capsule`)
 
-Unchanged in spirit from the session-harness plan §9.1; JSON keys are `snake_case`. Stored at
+Unchanged in spirit from the capsule design in the session model; JSON keys are `snake_case`. Stored at
 `sessions/<id>/capsules/<at_seq:010>-<ulid>.json` (at_seq zero-padded to 10 digits, e.g. `0000000142-01KA1V2B….json`) and in `capsules.body_json`.
 
 ```rust
@@ -482,13 +482,13 @@ pub struct CapsuleDraft {
 
 ```json
 {"version":1,"capsule_id":"cap_01KA1V2B000000000000000000","session_id":"01KA1V0Z7A0000000000000000","created_at":"2026-11-08T19:41:09.000Z","at_seq":142,"trigger":"limit",
- "from":{"executor":"claude-code:claude-sonnet-5-5@medium","node":"vps"},
- "intent":"Plan the VOWP night graph and keep the job table consistent.",
+ "from":{"executor":"claude-code:model-a@medium","node":"server"},
+ "intent":"Add the graph scheduler and its tests.",
  "constraints":["no public actions"],"decisions":[{"what":"fix jobs reuse the job branch","why":"keeps one diff to review","at_seq":88}],
- "state":{"done":["n00 reviewed"],"in_progress":["n04 split"],"blocked":[],"next_steps":["dispatch n05"]},
+ "state":{"done":["protocol types reviewed"],"in_progress":["graph split"],"blocked":[],"next_steps":["dispatch tests"]},
  "files":[{"path":"docs/design/loops.md","role":"modified","note":"added L6"}],
- "gotchas":["cargo shim needs a long timeout"],"open_questions":[],
- "telemetry":{"turns":12,"tokens_in":84000,"tokens_out":9100,"usd":0.21}}
+ "gotchas":["the executor reports reasoning tokens separately"],"open_questions":[],
+ "telemetry":{"turns":12,"tokens_in":84000,"tokens_out":9100,"usd":null}}
 ```
 
 ---
@@ -578,15 +578,15 @@ pub struct JobPatch {
 // Every Option field is `#[serde(default, skip_serializing_if = "Option::is_none")]` so `{}` and `{"loop":{…}}` deserialize. Test `job_patch_json_roundtrip_with_loop_and_defaults` (crates/vowp-protocol.md §6).
 ```
 
-JSON (`vowp job show n04-graph --json`):
+JSON (`vowp job show graph-engine --json`):
 
 ```json
-{"id":"n04-graph","project":"vowp","title":"vowp-graph","kind":"build","role":"worker","profile":"worker","state":"running","priority":50,
- "needs":["n02a-protocol-foundation"],"owns":["crates/vowp-graph/**"],"reads":["docs/design/**"],
- "brief":".vowp/jobs/n04-graph/brief.md","report":".vowp/jobs/n04-graph/report.md",
+{"id":"graph-engine","project":"vowp","title":"vowp-graph","kind":"build","role":"worker","profile":"worker","state":"running","priority":50,
+ "needs":["protocol"],"owns":["crates/vowp-graph/**"],"reads":["docs/design/**"],
+ "brief":".vowp/jobs/graph-engine/brief.md","report":".vowp/jobs/graph-engine/report.md",
  "gates":[{"report":{"fields":["status","branch","commits","tests"]}},{"cmd":{"run":"cargo test -p vowp-graph","expect_exit":0}},{"owns_respected":true},{"review":{"by":"verifier"}}],
  "loop":{"until":"gates","max_attempts":3,"on_exhausted":"escalate"},
- "branch":"job/n04-graph","worktree":"/home/user/project","attempts":0,"continues":0,"hang_restarts":0,
+ "branch":"job/graph-engine","worktree":"/home/user/project","attempts":0,"continues":0,"hang_restarts":0,
  "parked_reason":null,"note":"","created_by":"planner","last_progress_at":"2026-11-08T20:10:00.000Z",
  "state_changed_at":"2026-11-08T20:01:00.000Z","created_at":"2026-11-08T19:50:00.000Z","updated_at":"2026-11-08T20:10:00.000Z"}
 ```
@@ -596,7 +596,7 @@ JSON (`vowp job show n04-graph --json`):
 ## 8. Gates, evidence, reports, briefs (`gate`, `report`)
 
 ```rust
-/// Externally tagged, matches the plan's YAML:  `- cmd: { run: "...", expect_exit: 0 }`, `- owns_respected: true`.
+/// Externally tagged, matches the brief YAML:  `- cmd: { run: "...", expect_exit: 0 }`, `- owns_respected: true`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Gate {
@@ -687,7 +687,7 @@ pub struct ReportFrontMatter {
     pub status: ReportStatus,
     pub branch: String,
     #[serde(default)] pub commits: Vec<String>,
-    /// Either the plan's structured form or a free string. The brief for n00 used a string; both are accepted.
+    /// Either the structured form or a free string. Free-string briefs are accepted for compatibility; both are accepted.
     #[serde(default)] pub tests: Option<TestsField>,
     #[serde(default)] pub files_changed: Vec<String>,
     #[serde(default)] pub open_items: Vec<String>,
@@ -738,14 +738,14 @@ Example brief:
 
 ```markdown
 ---
-job: n04-graph
+job: graph-engine
 owns: ["crates/vowp-graph/**"]
 must_not_touch: ["everything else"]
-needs_done: [n02a-protocol-foundation]
+needs_done: [protocol]
 gates: [report, "cargo test -p vowp-graph", owns_respected, review]
 done_when: "report has status: done and every gate passes"
 ---
-# n04 …
+# graph-engine …
 ```
 
 ---
@@ -1056,7 +1056,7 @@ Classification helpers shared by adapters live in `vowp-adapters` (see `adapters
 
 ## 13. Service traits (`services`)
 
-These decouple `vowp-core` modules owned by different jobs (loops ↔ session). Real implementations are in `vowp-core::session`;
+These decouple `vowp-core` modules from each other (loops ↔ session). Real implementations are in `vowp-core::session`;
 tests of `loops` use fakes written in the test code.
 
 ```rust
@@ -1111,16 +1111,16 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
 `Profile` (`profile.json`) and `Edge` / `EdgeKind` (`edge.json`):
 
 ```json
-{"ladder":["claude-code:claude-sonnet-5-5@medium","opencode:deepseek/deepseek-flash#max"],"on_quota":"next_then_probe_back"}
-{"src":"n04-graph","dst":"n02c-protocol-domain","kind":"needs"}
+{"ladder":["claude-code:model-a@medium","opencode:provider/model-b#max"],"on_quota":"next_then_probe_back"}
+{"src":"graph-engine","dst":"protocol","kind":"needs"}
 ```
 
 `Run` (`run.json`):
 
 ```json
-{"id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"n04-graph","session_id":"01KA1V0Z7A0000000000000000","role":"worker","purpose":"start","profile":"worker","rung":0,
- "executor":"opencode:deepseek/deepseek-flash#max","provider":"deepseek","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly","pid":4242,
- "window":"job-n04-graph","cwd":"/home/user/project","started_at":"2026-11-08T20:01:00.000Z","ended_at":"2026-11-08T20:19:30.000Z",
+{"id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"graph-engine","session_id":"01KA1V0Z7A0000000000000000","role":"worker","purpose":"start","profile":"worker","rung":0,
+ "executor":"opencode:provider/model-b#max","provider":"provider","node":"server","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly","pid":4242,
+ "window":"job-graph-engine","cwd":"/home/user/project","started_at":"2026-11-08T20:01:00.000Z","ended_at":"2026-11-08T20:19:30.000Z",
  "exit_code":0,"outcome":"ok","limit_kind":null,"cost":{"usd":0.42,"tokens":{"input":81000,"output":9100,"reasoning":0,"cache_read":240000,"cache_write":0},"source":"receipt"},"detail":""}
 ```
 
@@ -1128,14 +1128,14 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
 
 ```json
 {"id":"01KA1V0Z7A0000000000000000","project":"vowp","job_id":null,"role":"user","title":"design chat","parent_session_id":null,"node":"local","cwd":"/home/user/project",
- "state":"idle","executor":"claude-code:claude-sonnet-5-5@medium","last_seq":42,"last_capsule_id":null,"log_bytes":18311,
+ "state":"idle","executor":"claude-code:model-a@medium","last_seq":42,"last_capsule_id":null,"log_bytes":18311,
  "created_at":"2026-11-08T19:30:00.000Z","updated_at":"2026-11-08T19:41:02.000Z"}
 ```
 
 `InboxItem` (`inbox_item.json`):
 
 ```json
-{"id":"01KA1V40F6J9M3N5P7Q9R1S3T5","project":"vowp","job_id":"n10a-promote-core","kind":"approval","title":"Promote abc1234 to prod?",
+{"id":"01KA1V40F6J9M3N5P7Q9R1S3T5","project":"vowp","job_id":"promote-core","kind":"approval","title":"Promote abc1234 to prod?",
  "body":"Guards passed; diff equals the intended change.","options":["approve","reject"],"state":"open","answer":null,"answered_by":null,
  "created_at":"2026-11-08T23:10:00.000Z","answered_at":null}
 ```
@@ -1167,7 +1167,7 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
 `GateResult` (`gate_result.json`):
 
 ```json
-{"id":42,"job_id":"n04-graph","run_id":null,"attempt":0,"gate_index":1,
+{"id":42,"job_id":"graph-engine","run_id":null,"attempt":0,"gate_index":1,
  "gate":{"cmd":{"run":"cargo test -p vowp-graph","expect_exit":0,"expect_pattern":null,"timeout_secs":1800,"cwd":null}},
  "passed":true,"evidence":{"kind":"cmd","command":"cargo test -p vowp-graph","exit_code":0,"timed_out":false,
  "tail":"test result: ok. 31 passed","duration_ms":41234},"output_blob":null,"duration_ms":41234,"ts":"2026-11-08T20:03:00.000Z"}
@@ -1176,15 +1176,15 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
 `Worker` (`worker.json`):
 
 ```json
-{"node":"vps","slot":1,"kind":"worker","state":"busy","run_id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"n04-graph",
- "window":"job-n04-graph","updated_at":"2026-11-08T20:05:00.000Z"}
+{"node":"server","slot":1,"kind":"worker","state":"busy","run_id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"graph-engine",
+ "window":"job-graph-engine","updated_at":"2026-11-08T20:05:00.000Z"}
 ```
 
 `Switch` (`switch.json`):
 
 ```json
 {"id":"01KA1V70J9N3Q6R8S0T2V4W6X8","session_id":"01KA1V0Z7A0000000000000000",
- "from_executor":"claude-code:claude-sonnet-5-5@medium","to_executor":"opencode:deepseek/deepseek-flash#max",
- "from_node":"local","to_node":"vps","capsule_id":"cap_01KA1V2B000000000000000000","reason":"limit","state":"completed","error":null,
+ "from_executor":"claude-code:model-a@medium","to_executor":"opencode:provider/model-b#max",
+ "from_node":"local","to_node":"server","capsule_id":"cap_01KA1V2B000000000000000000","reason":"limit","state":"completed","error":null,
  "started_at":"2026-11-08T19:41:03.000Z","ended_at":"2026-11-08T19:41:08.000Z","at_seq":142}
 ```

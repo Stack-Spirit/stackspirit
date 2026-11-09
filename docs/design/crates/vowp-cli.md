@@ -4,7 +4,7 @@ Thin binary over `vowp-core`: argument parsing (clap derive), rendering (human +
 All behaviour of commands is in `cli.md`; this file fixes the **module layout, ownership, shared API and tests**. `anyhow` is allowed only here
 (`main.rs`); inner modules return `CliError`. Dependencies: `conventions.md` §3.
 
-## 1. Module layout and ownership
+## 1. Module layout
 
 The crate is `[[bin]] name = "vowp"`, with a tiny `src/lib.rs` exposing `pub fn run(args: Vec<String>, io: &mut dyn IoStreams) -> i32` so tests call commands in-process
 (no subprocess needed except for the few `assert_cmd` smoke tests).
@@ -12,27 +12,26 @@ The crate is `[[bin]] name = "vowp"`, with a tiny `src/lib.rs` exposing `pub fn 
 ```
 crates/vowp-cli/
   Cargo.toml
-  src/main.rs         n09a  fn main() -> ExitCode { vowp_cli::run(std::env::args().collect(), &mut RealIo) }   (anyhow only here, for panics/IO setup)
-  src/lib.rs          n09a  pub fn run, IoStreams trait (stdout/stderr/stdin writers+readers; tests use a buffer impl), re-exports
-  src/cli.rs          n09a  clap derive structs for EVERY command in cli.md (global flags + subcommand enum), parse -> `Command`
-  src/ctx.rs          n09a  Ctx { paths, deps: vowp_core::Deps, project: ProjectName, json: bool, color: bool }, Ctx::build(&Global) (loads vowp.toml, opens Deps with SystemRunner/SystemGit/Tmux)
-  src/output.rs       n09a  Table (aligned columns), `Out::{human, json}`, time formatting, `json_error`
-  src/errors.rs       n09a  CliError + exit-code mapping (cli.md §1.1)
-  src/remote.rs       n09a  --node over ssh: build_ssh_argv, run_remote
-  src/signals.rs      n09b  SIGTERM/SIGINT -> CancelToken with signal_hook::flag
-  src/cmd/mod.rs      n09a  `pub mod` for all of the below and `pub fn dispatch(ctx, Command) -> Result<i32, CliError>`
-  src/cmd/init.rs  doctor.rs  job.rs  graph.rs            n09a
-  src/cmd/up.rs  status.rs  board.rs  attach.rs  plan.rs  window.rs   n09b   (`up`,`down`, `status`, `board`, `attach`, `plan`, hidden `__window`)
-  src/cmd/session.rs  inbox.rs  cost.rs  node.rs  loops.rs  schedule.rs  maint.rs  n09c   (`maint` = reindex, backup, schema, version)
-  src/cmd/promote.rs  n10b  (`promote`, `rollback`, `releases`)
-  src/framework.rs    n09a  embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list (n11's files); `init` writes them
-  tests/*.rs          each job owns the tests of its commands
+  src/main.rs         fn main() -> ExitCode { vowp_cli::run(std::env::args().collect(), &mut RealIo) }   (anyhow only here, for panics/IO setup)
+  src/lib.rs          pub fn run, IoStreams trait (stdout/stderr/stdin writers+readers; tests use a buffer impl), re-exports
+  src/cli.rs          clap derive structs for EVERY command in cli.md (global flags + subcommand enum), parse -> `Command`
+  src/ctx.rs          Ctx { paths, deps: vowp_core::Deps, project: ProjectName, json: bool, color: bool }, Ctx::build(&Global) (loads vowp.toml, opens Deps with SystemRunner/SystemGit/Tmux)
+  src/output.rs       Table (aligned columns), `Out::{human, json}`, time formatting, `json_error`
+  src/errors.rs       CliError + exit-code mapping (cli.md §1.1)
+  src/remote.rs       --node over ssh: build_ssh_argv, run_remote
+  src/signals.rs      SIGTERM/SIGINT -> CancelToken with signal_hook::flag
+  src/cmd/mod.rs      `pub mod` for all of the below and `pub fn dispatch(ctx, Command) -> Result<i32, CliError>`
+  src/cmd/init.rs  doctor.rs  job.rs  graph.rs
+  src/cmd/up.rs  status.rs  board.rs  attach.rs  plan.rs  window.rs   (`up`,`down`, `status`, `board`, `attach`, `plan`, hidden `__window`)
+  src/cmd/session.rs  inbox.rs  cost.rs  node.rs  loops.rs  schedule.rs  maint.rs   (`maint` = reindex, backup, schema, version)
+  src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
+  src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
+  tests/*.rs          tests for the commands
 ```
-n09a creates every `cmd/*.rs` of the later jobs as a file containing exactly `pub fn run(...) -> Result<i32, CliError> { Err(CliError::NotImplemented("<command>")) }`
-(stubs are **explicitly allowed** here, exit code 1, message `not implemented in this build`); the owning job replaces the stub entirely. No command may ship as a stub in a final build: n09c's
-acceptance test `no_command_returns_not_implemented` iterates every command in `cli.rs` with `--help`-free dry arguments and fails on `NotImplemented`.
+Every command module in `src/cmd/` is real code. A command that cannot run returns an explicit error (exit code 1, message `not implemented in this build`);
+no command may ship as a stub in a final build: the acceptance test `no_command_returns_not_implemented` iterates every command in `cli.rs` with `--help`-free dry arguments and fails on `NotImplemented`.
 
-## 2. Shared API (n09a; frozen afterwards)
+## 2. Shared API (frozen)
 
 ```rust
 pub trait IoStreams { fn out(&mut self) -> &mut dyn std::io::Write; fn err(&mut self) -> &mut dyn std::io::Write; fn input(&mut self) -> &mut dyn std::io::BufRead; fn is_tty(&self) -> bool; }
@@ -75,8 +74,8 @@ pub mod remote {
 
 ## 4. Named tests
 
-Listed in `cli.md` §8 (all of them are owned by the job implementing the command, grouped by the file table above). Additional: `help_lists_every_v0_1_command` (n09a, compares clap's subcommand set with a constant list copied from `cli.md`),
-`no_command_returns_not_implemented` (n09c), `json_flag_outputs_valid_json_for_every_listing_command` (n09c), `exit_codes_follow_error_kind` (n09a), `ctx_build_requires_init` (n09a), `io_streams_buffer_impl_captures_output` (n09a).
+Listed in `cli.md` §8, grouped by the file table above. Additional: `help_lists_every_v0_1_command` (compares clap's subcommand set with a constant list copied from `cli.md`),
+`no_command_returns_not_implemented`, `json_flag_outputs_valid_json_for_every_listing_command`, `exit_codes_follow_error_kind`, `ctx_build_requires_init`, `io_streams_buffer_impl_captures_output`.
 
 ## 5. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

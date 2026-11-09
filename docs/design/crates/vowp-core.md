@@ -2,32 +2,28 @@
 
 Orchestration library: universal sessions (capsule, switch), the supervisor loops L1–L8 and merge queue, gates, ledger/cost, schedules (L9), promotion.
 Depends on `vowp-protocol`, `vowp-store`, `vowp-graph`, `vowp-tmux`, `vowp-adapters`. Behaviour is specified in `loops.md`, `sessions.md`, `adapters.md`; this file is
-**module layout, ownership, public API and tests**. Dependencies: see `conventions.md` §3. No `unsafe`, no tokio.
+**module layout, public API and tests**. Dependencies: see `conventions.md` §3. No `unsafe`, no tokio.
 
-## 1. Modules and ownership
-
-n01 creates `src/lib.rs` declaring `session, loops, gates, ledger, schedules, promote` (each `src/<m>/mod.rs`). Those stubs are not enough: modules share a few
-foundation items, so a small first job **n07a core-foundation** (before n07/n08/n10) owns `src/lib.rs`, `src/error.rs`, `src/deps.rs`, `src/requests.rs`, and may edit each `src/<m>/mod.rs`
-only to add the `pub mod` lines listed below as empty files with a `//!` comment. After n07a the files `lib.rs`, `error.rs`, `deps.rs`, `requests.rs` are frozen.
+## 1. Modules
 
 ```
 crates/vowp-core/src/
-  lib.rs          n07a  pub mod error, deps, requests, session, loops, gates, ledger, schedules, promote; re-exports
-  error.rs        n07a  CoreError
-  deps.rs         n07a  Deps, CommandRunner, SystemRunner, GitOps, SystemGit, AdapterRegistry, Rng
-  requests.rs     n07a  Request enum + (de)serialisation for CLI→supervisor kv requests
-  session/        n07   mod.rs service.rs capsule.rs seed.rs switch.rs recovery.rs bundle.rs importer.rs(optional)
-  gates/          n08a  mod.rs runner.rs report.rs cmd.rs owns.rs pushed.rs review.rs deploy.rs secret_scan.rs
-  ledger/         n08b  mod.rs record.rs price.rs board.rs report.rs
-  schedules/      n08b  mod.rs spec.rs engine.rs
-  loops/          n08c  mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs   (L1, L2, L3, merge queue, dispatch)
-                  n08d  l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs  (+ the `pub mod` lines for them in loops/mod.rs; n08d needs n08c)
-  promote/        n10   mod.rs guards.rs bank.rs promoter.rs releases_log.rs
-tests/            each job owns tests named after its module: session_*.rs (n07), gates_*.rs (n08a), ledger_*.rs schedules_*.rs (n08b), loops_*.rs drills_*.rs (n08c/n08d), promote_*.rs (n10)
-tests/fixtures/   shared recorded fixtures are copied from vowp-adapters fixtures by each job that needs them (no cross-crate path reads)
+  lib.rs          pub mod error, deps, requests, session, loops, gates, ledger, schedules, promote; re-exports
+  error.rs        CoreError
+  deps.rs         Deps, CommandRunner, SystemRunner, GitOps, SystemGit, AdapterRegistry, Rng
+  requests.rs     Request enum + (de)serialisation for CLI→supervisor kv requests
+  session/        mod.rs service.rs capsule.rs seed.rs switch.rs recovery.rs bundle.rs importer.rs(optional)
+  gates/          mod.rs runner.rs report.rs cmd.rs owns.rs pushed.rs review.rs deploy.rs secret_scan.rs
+  ledger/         mod.rs record.rs price.rs board.rs report.rs
+  schedules/      mod.rs spec.rs engine.rs
+  loops/          mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs
+                  l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
+  promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
+tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs
+tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
 
-## 2. Foundation (n07a): `error`, `deps`, `requests`
+## 2. Foundation: `error`, `deps`, `requests`
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -117,11 +113,11 @@ pub struct SystemGit { /* CommandRunner */ }   // runs real `git`; tests use rea
 ```
 
 ### `requests.rs` — CLI→supervisor requests (decision D2)
-Tests (n07a, `tests/requests.rs`): `request_wire_form_matches_loops_md_for_every_kind` (serialises each variant, asserts `{"kind":…,"payload":…}` and decodes back), `request_push_drain_roundtrip_via_store`, `undecodable_request_is_dropped_and_logged`, `apply_direct_retry_resolve_and_park`.
+Tests (`tests/requests.rs`): `request_wire_form_matches_loops_md_for_every_kind` (serialises each variant, asserts `{"kind":…,"payload":…}` and decodes back), `request_push_drain_roundtrip_via_store`, `undecodable_request_is_dropped_and_logged`, `apply_direct_retry_resolve_and_park`.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]   // wire form = the kv value: {"kind":"retry_job","payload":{"job":"n04-graph"}}
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]   // wire form = the kv value: {"kind":"retry_job","payload":{"job":"graph-engine"}}
 pub enum Request {
     ResolveJob { job: JobId },                       // parked -> ready (Resolved, T31); used by `vowp job retry` on a parked job
     RunLoop { name: String },                        // run that loop's step on the next tick (schedules, `Loop` action)
@@ -136,7 +132,7 @@ pub fn drain(store: &Store) -> Result<Vec<(RequestId, Request)>, CoreError>;    
 pub fn apply_direct(deps: &Deps, store: &Store, req: &Request) -> Result<(), CoreError>;   // used by the CLI when no supervisor runs
 ```
 
-## 3. `session` (n07) — spec `sessions.md`
+## 3. `session` — spec `sessions.md`
 
 ```rust
 pub struct SessionService { /* Deps, session-level locks map */ }
@@ -193,7 +189,7 @@ pub mod bundle {
 pub mod importer { /* optional (nice-to-have): ClaudeTranscriptImporter::scan_once(dir) -> ImportReport, read-only, incremental by byte offset; parses each transcript file with vowp_adapters::claude_code::import_transcript(path, tz_offset_minutes) (crates/vowp-adapters.md §5) */ }
 ```
 
-Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode", FakeAdapter)` where `FakeAdapter` replays a fixture through the real `Adapter` trait — defined in `crates/vowp-core/tests/support/fake_adapter.rs`, built by n07a, copied by later jobs):
+Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode", FakeAdapter)` where `FakeAdapter` replays a fixture through the real `Adapter` trait — defined in `crates/vowp-core/tests/support/fake_adapter.rs`):
 `run_turn_appends_events_and_finishes_run`, `run_turn_frames_attach_then_turn_started_once_per_run_without_adapter_duplicates` (real parsers over claude/opencode fixtures: exactly one `session.executor` attach, one `turn.started`, order attach → turn.started → user.message), `limit_resets_at_gets_single_two_minute_margin` (fixture `|1794164400` → `limits.resets_at = 19:02:00Z`), `run_turn_resumes_native_session_same_harness`, `run_turn_seeds_capsule_on_new_harness`, `run_turn_cwd_outside_allow_list_refused`, `run_turn_cancel_interrupts_adapter`,
 `run_turn_limit_outcome_returned_not_raised_and_limits_row_written`, `run_turn_large_tool_output_spilled_to_blob`, `second_writer_on_same_session_conflicts`,
 `capsule_prompt_golden`, `capsule_parse_draft_with_fences_and_prose`, `capsule_write_valid_first_try`, `capsule_compaction_keeps_first_user_and_last_20` (oversize input drops tool results first; never the first user message or the last 20 events), `capsule_write_repairs_once_then_ok`, `capsule_write_twice_invalid_keeps_previous_and_logs_error_event`,
@@ -208,7 +204,7 @@ Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode
 (the positive path returns well inside the deadline), and `recover_switch_event_carries_recovered_capsule_id`
 (recovery links the capsule it recovered on both the event and the row).
 
-## 4. `gates` (n08a) — spec `loops.md` §4
+## 4. `gates` — spec `loops.md` §4
 
 ```rust
 pub struct GateCtx<'a> { pub deps: &'a Deps, pub job: &'a Job, pub run_id: Option<RunId>, pub worktree: &'a Path, pub repo: &'a Path,
@@ -237,7 +233,7 @@ Tests: `report_gate_passes_with_required_fields`, `report_gate_fails_missing_fie
 `review_gate_reads_verifier_report_verdict`, `review_gate_pending_when_no_verify_job_yet`, `secret_scan_detects_each_rule_by_exact_name_and_never_stores_value`, `secret_scan_flags_secret_file_paths`, `secret_scan_only_added_lines`, `deploy_gate_runs_command_then_probe`, `deploy_gate_probe_mismatch_fails`,
 `file_exists_only_gate_rejected_by_validate` (anti-pattern ban), `evaluate_all_continues_after_failure_except_report_and_persists_results`, `evaluate_merge_checks_uses_project_check_cmds`.
 
-## 5. `ledger` (n08b)
+## 5. `ledger`
 
 ```rust
 pub struct Ledger { /* Deps */ }
@@ -266,7 +262,7 @@ pub mod report {
 ```
 Tests: `record_run_cost_receipt_vs_price_table_vs_unknown`, `price_estimate_math_per_million`, `claude_cost_marked_not_billed`, `ledger_rows_are_append_only_via_store_trigger`, `board_snapshot_counts_and_render_golden`, `night_report_lists_limits_and_switches_golden`, `cost_totals_never_count_unknown_as_zero`.
 
-## 6. `schedules` (n08b) — spec `loops.md` §11
+## 6. `schedules` — spec `loops.md` §11
 
 ```rust
 pub struct ScheduleSpec { /* parsed Cron(cron::Schedule + offset) | Interval(Duration) */ }
@@ -287,7 +283,7 @@ pub enum FireOutcome { JobCreated(JobId), LoopTriggered(String), CommandRan { ex
 ```
 Tests (all with `FakeClock`): `cron_five_field_next_runs_golden`, `cron_weekday_window`, `interval_every_30m`, `fixed_offset_tz_shifts_next_run`, `bad_cron_rejected`, `six_field_cron_rejected`, `tick_fires_due_and_advances_next_before_fire`, `double_tick_same_instant_fires_once`, `catch_up_run_once_after_three_missed_fires_once`, `catch_up_skip_fires_none_but_rearms`, `job_template_creates_job_with_suffix`, `command_action_runs_with_timeout`, `paused_schedule_never_fires`, `proptest_next_after_is_strictly_greater_and_matches_cron`.
 
-## 7. `loops` (n08c, n08d) — spec `loops.md`
+## 7. `loops` — spec `loops.md`
 
 ```rust
 pub struct Supervisor { /* Deps, project, Store, RunnerPool, GateRunner, Ledger, ScheduleEngine, SessionService, state */ }
@@ -316,7 +312,7 @@ pub mod l2 { pub fn start_prompt(job: &Job, brief: &str) -> String; pub fn conti
 pub mod l3 { pub fn on_verify_done(store: &Store, verify_job: &Job) -> Result<JobEvent, CoreError>;   // reads the verify report, writes the review GateResult for the original, returns VerifyPassed|VerifyFailed (T14/T19–T21)
     pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summary: &str) -> String; pub fn parse_verdict(report: &Report) -> Result<(Verdict, Vec<String>), CoreError>; }
 pub mod merge_queue { pub struct MergeQueue { /* Deps, GateRunner */ } impl MergeQueue { pub fn step(&self, store: &Store) -> Result<MergeStep, CoreError>; } pub enum MergeStep { Idle, Merged(JobId), Conflict { job: JobId, files: Vec<String> }, ChecksFailed { job: JobId }, InProgress } }
-pub mod l6 {   // failover (n08d)
+pub mod l6 {   // failover
     pub struct Failover { /* Deps */ }
     impl Failover {
         pub fn on_run_outcome(&self, store: &Store, run: &Run, summary: &RunSummary) -> Result<FailoverAction, CoreError>;   // writes `limits`, inbox, ledger; pure decision otherwise
@@ -330,7 +326,7 @@ pub mod l6 {   // failover (n08d)
 /// Input of `open_inbox`. `job_id = Some` parks that job with `ParkedReason::Question` for kinds Question/Approval (never Notice). `body` ≤ 4000 chars.
 pub struct NewInboxItem { pub project: Option<ProjectName>, pub job_id: Option<JobId>, pub kind: InboxKind, pub title: String, pub body: String, pub options: Vec<String> }
 pub mod l7 { pub fn open_inbox(store: &Store, deps: &Deps, item: NewInboxItem) -> Result<InboxId, CoreError>; pub fn on_answer(store: &Store, id: &InboxId) -> Result<(), CoreError>; }   // writes inbox/<id>.md copy too
-pub mod l8 { pub fn write_heartbeat(deps: &Deps) -> Result<(), CoreError>; pub fn heartbeat_age(paths: &NodePaths, now: Timestamp) -> Option<std::time::Duration>; pub const SYSTEMD_UNIT: &str; pub const CRON_CHECK_SH: &str; }  // text templates installed by n13
+pub mod l8 { pub fn write_heartbeat(deps: &Deps) -> Result<(), CoreError>; pub fn heartbeat_age(paths: &NodePaths, now: Timestamp) -> Option<std::time::Duration>; pub const SYSTEMD_UNIT: &str; pub const CRON_CHECK_SH: &str; }  // text templates installed by the install script
 pub mod digest {   // loops.md §7 "Digest"; ≤ max_chars (default 24_000), each item ≤ 600 chars
     pub struct Digest;
     impl Digest {
@@ -340,13 +336,13 @@ pub mod digest {   // loops.md §7 "Digest"; ≤ max_chars (default 24_000), eac
 ```
 Named tests live in `loops.md` §13 (drills) plus: `tick_step_failure_does_not_abort_tick`, `startup_marks_orphaned_runs_crash_and_continues_job`, `dispatch_respects_ownership_locks_and_slots`, `dispatch_skips_limited_provider_and_uses_next_rung`, `stall_judge_triggers_stop_and_continue`, `hang_before_first_output_restart_up_to_3`, `continue_twice_then_keeper`, `verify_fail_creates_fix_job_same_branch_max_3_then_escalates`, `verify_job_goes_done_via_gating_never_merged_and_original_receives_verdict`, `failed_fix_job_gates_fail_original_not_fix_of_fix`, `failed_verify_job_parks_original_with_question`, `merge_queue_happy_path_ff_push_to_local_bare_origin`, `merge_queue_conflict_creates_merge_job`, `merge_queue_cargo_lock_regenerated_not_merged`, `merge_queue_check_failure_returns_job_to_fixing`, `failover_drill_*`, `credits_park_all_jobs_of_provider_and_inbox`, `credits_park_parks_verify_and_fix_child_jobs_and_leaves_waiting_parents`, `rate_backoff_lowers_concurrency_cap`, `auth_parks_with_inbox`, `three_unknown_failures_mark_unavailable_15min`, `inbox_answer_moves_parked_job_to_ready`, `planner_one_turn_at_a_time`, `keeper_covers_planner_when_provider_limited_and_hands_back`, `repeat_guard_trips_on_third_identical_action`, `board_and_heartbeat_written_each_tick`, `requests_drained_and_applied`, `request_rows_apply_every_kind_end_to_end` (push one row of each kind through `requests::push`, run `tick`, assert the resulting job/loop/inbox state and that the rows are deleted), `paused_loop_is_skipped`.
 
-## 8. `promote` (n10) — nice-to-have
+## 8. `promote` — optional
 
 ```rust
 pub struct Promoter { /* Deps, GateRunner */ }
 impl Promoter {
     pub fn new(deps: Deps) -> Self;
-    /// plan §10: guards → serving bank → diff candidate vs serving → approval → deploy → probe → record. Returns the release in its final state for this call
+    /// design summary §9: guards → serving bank → diff candidate vs serving → approval → deploy → probe → record. Returns the release in its final state for this call
     /// (`Approved`→`Live`, or stopped at `Guarded`/`Banked` awaiting an inbox approval, or `Refused`/`Failed`). Re-entrant: called again after the approval is answered.
     pub fn promote(&self, store: &Store, project: &ProjectName, env: &str, change: &str, opts: PromoteOpts) -> Result<Release, CoreError>;
     pub fn rollback(&self, store: &Store, release: &ReleaseId, opts: PromoteOpts) -> Result<Release, CoreError>;      // runs the banked rollback_cmd
@@ -359,7 +355,7 @@ pub mod guards {
 }
 pub mod bank { pub fn bank_serving(deps: &Deps, env: &EnvConfig, target: &str, to: &Path) -> Result<BankedServing, CoreError>; pub struct BankedServing { pub path: PathBuf, pub commit: Option<String>, pub rollback_cmd: String } }
 ```
-Rules: (1) a failing guard ⇒ `Release.state = Refused`, ledger `promote`, exit 5 at the CLI; **no retry, no workaround** (plan §10, §16.5). (2) the diff between candidate and the banked serving copy must equal the files of the intended change; otherwise `Refused` ("live is not always git"). (3) the `upload_set` guard runs the project's upload-set check (e.g. `.vercelignore` listing) via `env.probe`-style custom guard: it exists to catch "a local build is not the deploy build". (4) approval `human` ⇒ inbox `approval` item, state `Banked` until answered; the supervisor calls `promote` again on answer. (5) `releases.log` line appended on every terminal state: `<ts> <env> <release id> <state> <from>-><to> rollback: <cmd>`.
+Rules: (1) a failing guard ⇒ `Release.state = Refused`, ledger `promote`, exit 5 at the CLI; **no retry, no workaround** (design summary §9). (2) the diff between candidate and the banked serving copy must equal the files of the intended change; otherwise `Refused` ("live is not always git"). (3) the `upload_set` guard runs the project's upload-set check (e.g. `.vercelignore` listing) via `env.probe`-style custom guard: it exists to catch "a local build is not the deploy build". (4) approval `human` ⇒ inbox `approval` item, state `Banked` until answered; the supervisor calls `promote` again on answer. (5) `releases.log` line appended on every terminal state: `<ts> <env> <release id> <state> <from>-><to> rollback: <cmd>`.
 Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp files): `guards_clean_tree_dirty_fails`, `guards_head_equals_remote_behind_fails`, `guard_failure_marks_refused_and_never_deploys`, `serving_bank_runs_before_deploy_order_asserted_via_script_log`, `diff_unexpected_files_refused`, `human_approval_creates_inbox_and_waits`, `answer_approve_then_promote_goes_live_and_records_rollback_cmd`, `policy_approval_with_yes_deploys`, `yes_flag_never_bypasses_human_approval`, `probe_mismatch_marks_failed_with_rollback_available`, `rollback_runs_banked_command_and_links_releases`, `releases_log_lines_appended`, `dry_run_runs_guards_only`.
 
 ## 9. Out of scope (v0.2)

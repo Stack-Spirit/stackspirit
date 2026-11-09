@@ -1,6 +1,6 @@
 # cli.md — the `vowp` command line (v0.1)
 
-Implemented by `vowp-cli` (n09) on top of `vowp-core`. Every command below is a v0.1 command from plan §13 (plus the few additions in `decisions.md` D12).
+Implemented by `vowp-cli` on top of `vowp-core`. Every command below is a v0.1 command from the design summary §12 (plus the few additions in `decisions.md` D12).
 Crate API and module split: `crates/vowp-cli.md`.
 
 ## 1. Global behaviour
@@ -19,7 +19,7 @@ vowp [GLOBAL FLAGS] <command> [args]
 
 - Human output: aligned tables, no colour when stdout is not a TTY or `NO_COLOR` is set, timestamps shown as local `HH:MM` for today / `MM-DD HH:MM` otherwise; `--json` always uses RFC 3339 UTC.
 - Ids are accepted by unique prefix (sessions, runs, inbox, releases: ≥ 6 chars of the ULID; ambiguous prefix → exit 2 listing candidates). Jobs need the full slug.
-- Mutating commands print what they did in one line (`added job n04-graph (pending)`); with `--json` they print the affected object.
+- Mutating commands print what they did in one line (`added job graph-engine (pending)`); with `--json` they print the affected object.
 - Reading commands work while the supervisor runs (WAL). Commands that change job state (`retry`, `park`, `cancel`) enqueue a request row (decision D2) and wait up to 5 s for the supervisor to apply it; with no supervisor running they apply it directly through `vowp_graph::transition`.
 
 ### 1.1 Exit codes
@@ -47,7 +47,7 @@ Human: `initialised project vowp at /path (8 files written, 2 skipped)`. JSON: `
 
 ### `vowp doctor`
 Checks (each `ok|warn|fail` with detail): `home` writable; `db` opens + `integrity_check` + schema version; `git` version; `tmux` version (warn if absent); harness probes via adapters
-(`claude`, `opencode`, each `Adapter::probe`); `vowp.toml` parses + validates and every `[[schedules]]` cron/interval/timezone parses with `ScheduleSpec::parse` (an invalid entry fails the `schedules` check with the schedule name and error); profile ladders resolve to installed harnesses; providers reachable **only by env-var-name presence** (`DEEPSEEK_API_KEY` set? — never prints the value, never calls the network);
+(`claude`, `opencode`, each `Adapter::probe`); `vowp.toml` parses + validates and every `[[schedules]]` cron/interval/timezone parses with `ScheduleSpec::parse` (an invalid entry fails the `schedules` check with the schedule name and error); profile ladders resolve to installed harnesses; providers reachable **only by env-var-name presence** (`PROVIDER_API_KEY` set? — never prints the value, never calls the network);
 `systemd --user` unit and cron watchdog installed (warn only); supervisor running; disk space ≥ 1 GB.
 Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status":"ok","detail":"tmux 3.4"}]}`.
 
@@ -76,7 +76,7 @@ Starts a planner turn (session role `planner`, executor = first available rung o
 | `job cancel <id>` | any non-terminal → `cancelled`; stops the run, releases the ownership lock (worktree and branch are kept on disk for inspection). Dependents stay `pending`; `vowp job ls` flags them `blocked-by-cancelled`. |
 
 ### `vowp graph [--mermaid] [--export <file.yaml>] [--import <file.yaml>] [--all]`
-Default: ASCII, exactly `render_ascii` of `vowp-graph` (one line per job ordered by layer: `L1 n02a-protocol-foundation [running] vowp-protocol foundation  <- n01-skeleton`). `--mermaid`: exactly `render_mermaid` (`graph TD`, one node per job, edges per kind; no `classDef` — state colours are v0.2). `--export`: YAML (jobs + edges) to the file (stdout if `-`). `--import`: validates then inserts missing jobs/edges (never overwrites; conflicts listed, exit 4). Formats: `crates/vowp-graph.md`.
+Default: ASCII, exactly `render_ascii` of `vowp-graph` (one line per job ordered by layer: `L1 graph-engine [running] graph engine  <- protocol`). `--mermaid`: exactly `render_mermaid` (`graph TD`, one node per job, edges per kind; no `classDef` — state colours are v0.2). `--export`: YAML (jobs + edges) to the file (stdout if `-`). `--import`: validates then inserts missing jobs/edges (never overwrites; conflicts listed, exit 4). Formats: `crates/vowp-graph.md`.
 
 ### `vowp attach [<job>] [--node <n>]`
 `tmux attach -t vowp-<project>:job-<id>` (or the session's `board` window with no job). Exec's tmux (inherits the TTY). If tmux is absent or the window is gone: falls back to `vowp session tail --follow` of the job's latest session. Exit 3 if the job has no session.
@@ -106,7 +106,7 @@ Pretty line format: `HH:MM:SS #seq type  summary` e.g. `19:30:12 #6 tool.call  s
 `ask` creates an item (used by planner/keeper agents and scripts; with `--job` the job is parked with `parked(Question)` for kinds `question|approval`, never for `notice`; prints the item id). `ls` lists open items (`ID KIND JOB TITLE AGE`); `--all` includes answered. `answer` stores the answer, sets `answered`, and (for an item with `job_id`) moves the parked job to `ready` on the next tick (`loops.md` §9). `--approve/--reject` are shorthand answers `approve`/`reject` valid for `approval` items. Exit 4 if already answered.
 
 ### `vowp cost [--by job|role|provider|model|day] [--since <dur\|date>] [--job id]`
-Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `receipt`, `price-table`, `unknown` or `mixed`, derived from `CostRow.receipt_entries`/`price_table_entries`/`unknown_entries`: one source present → that source, more than one → `mixed`. Unknown costs are shown as `?` and counted separately (never as 0). JSON: `{"by":"job","rows":[{"key":"n04-graph","runs":3,"usd":0.42,"tokens":{…},"source":"receipt"}],"total":{…}}`.
+Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `receipt`, `price-table`, `unknown` or `mixed`, derived from `CostRow.receipt_entries`/`price_table_entries`/`unknown_entries`: one source present → that source, more than one → `mixed`. Unknown costs are shown as `?` and counted separately (never as 0). JSON: `{"by":"job","rows":[{"key":"graph-engine","runs":3,"usd":0.42,"tokens":{…},"source":"receipt"}],"total":{…}}`.
 
 ### `vowp node add <name> <ssh-target> · ls · rm <name>`
 `add` records the node and tests `ssh -o BatchMode=yes <target> vowp --version` (stores the result in `capabilities`; failure is a warning unless `--strict`). `ls`: `NAME TARGET LOCAL LAST_SEEN VERSION`.

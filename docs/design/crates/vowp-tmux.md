@@ -1,6 +1,6 @@
 # crates/vowp-tmux.md — safe tmux window manager
 
-Owner: job n05. Depends on `std` and `thiserror` only (no `vowp-protocol`: window names are plain strings; core maps job ids to names). **n05 starts from the n01 skeleton's `crates/vowp-tmux/Cargo.toml`, which declares `vowp-protocol`; n05 must remove that dependency** (and add `thiserror`, dev-dep `tempfile`), keeping the dependency direction of conventions.md §2.
+Depends on `std` and `thiserror` only (no `vowp-protocol`: window names are plain strings; core maps job ids to names), keeping the dependency direction of conventions.md §2.
 tmux windows are **views**: they run a read-only pretty log follower (`vowp __window job <id>`, which resolves the job's latest session and follows it with the `session tail --follow --pretty` renderer), never a harness TUI and never a control channel.
 
 ## 1. Module layout
@@ -94,7 +94,7 @@ pub mod fake {
 
 ## 3. Behaviour rules and invariants
 
-1. **No respawn, no keystrokes — ever.** The crate exposes no `respawn-pane`, `respawn-window` or `send-keys` capability and never builds such a command line. Recycling a window means `kill_window` then `new_window`. (Plan §6.1; the "respawn-pane restarted six old workers" incident.) A test greps the source (§8).
+1. **No respawn, no keystrokes — ever.** The crate exposes no `respawn-pane`, `respawn-window` or `send-keys` capability and never builds such a command line. Recycling a window means `kill_window` then `new_window`. (Design summary §5.1.) A test greps the source (§8).
 2. **Only `vowp-` sessions.** Every operation taking a `session` first checks `session.starts_with("vowp-")` and `validate_name`; otherwise `Err(TmuxError::ForeignSession)`. `list_windows`/`window_exists` included. Other tmux sessions (`main0`) are invisible and untouchable.
 3. **Tagging.** `new_window` always runs, immediately after creation, `tmux set-option -w -t <session>:<name> @vowp 1` (and creates the window with `-P -F '#{window_id}'` so the tag targets the returned window id, not a name, closing the race with name reuse). Untagged windows are never killed: `kill_window` queries `show-options -w -v @vowp`; absent/≠`1` ⇒ `Err(NotTagged)`.
 4. **`kill_session`** refuses a session containing any untagged window (`Err(NotTagged)`); an empty/non-existent session is `Ok`.
@@ -156,7 +156,7 @@ Tests never use the default server, never `TMUX` env of the user (the test sets 
 Unit (`quote.rs`, no tmux)
 - `shell_quote_plain_and_empty` — `a b` → `'a b'`, `` → `''`.
 - `shell_quote_embedded_single_quote` — `it's` → `'it'\''s'`; `$(rm -rf /)`/`;`/backticks/newlines round-trip through `sh -c 'printf %s <quoted>'` and print the original string exactly (this test spawns `sh`, no tmux).
-- `validate_name_rules` — accepts `job-n04.graph_1`, rejects empty, `-x`, `a b`, `a/b`, `a:b`, `a;b`, 65 chars.
+- `validate_name_rules` — accepts `job-graph.engine_1`, rejects empty, `-x`, `a b`, `a/b`, `a:b`, `a;b`, 65 chars.
 - `window_name_for_job_prefix` / `session_name_for_project_prefix`.
 - `command_string_builds_quoted_argv_with_env` — internal fn producing the tmux command string for `["echo","a b","c'd"]` + `env K=V` yields the exact expected string.
 

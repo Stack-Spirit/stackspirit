@@ -36,9 +36,7 @@ existing crates it builds on, open questions and a first-issue-sized slice.
 | [`cross-node-sync.md`](cross-node-sync.md) | Cross-node session sync. | `session pull` built on the v0.1 bundle. |
 | [`cost-dashboard.md`](cost-dashboard.md) | Cost dashboard. | JSON endpoint plus a table view. |
 
-The maintainer-ready issue bodies and labels for the roadmap's "Good first issues" section are in
-[`../../maintainers/issue-drafts.md`](../../maintainers/issue-drafts.md); that file is an issue
-tracker aid, not a v0.2 design note.
+The maintainer-ready issue bodies and labels for the roadmap's "Good first issues" section are tracked with the project's issue tracker, not in this directory.
 
 ## Dependency order
 

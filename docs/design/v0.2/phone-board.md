@@ -5,7 +5,7 @@ Status: current for the commands shown; this note is design only. v0.1 has a ter
 
 ## Goal
 
-One screen that answers "is the night shift healthy?" from a phone in a few seconds:
+One screen that answers "is the system healthy?" from a phone in a few seconds:
 
 - Jobs by state as compact cards, with the running jobs first.
 - For each running job: id, executor, age and seconds since the last event.

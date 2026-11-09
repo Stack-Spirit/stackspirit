@@ -20,7 +20,7 @@ decoration, not the source of truth.
 ## Non-goals
 
 - Budget enforcement, hard caps or automatic provider switching. v0.1 reports cost; it does not cap it
-  (`docs/design/plan.md` principle 7).
+  (`plan.md` principle 7).
 - Provider invoices, credit balances or a network call to a pricing API.
 - Multi-currency support. The ledger is USD.
 - A second ledger or a second aggregation rule.

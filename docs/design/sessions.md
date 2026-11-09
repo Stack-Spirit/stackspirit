@@ -1,7 +1,7 @@
 # sessions.md — universal sessions: log, capsule, switch, export/import
 
 File- and protocol-level rules. Consumed by `vowp-store` (files, `SessionLog`, reindex: `crates/vowp-store.md`), `vowp-core::session`
-(n07: capsule writer, switch, export/import, `SessionOps` impl) and `vowp-cli` (`session` commands: `cli.md`). Types are in `types.md` (§5 events, §6 capsule, §9 sessions).
+(capsule writer, switch, export/import, `SessionOps` impl) and `vowp-cli` (`session` commands: `cli.md`). Types are in `types.md` (§5 events, §6 capsule, §9 sessions).
 
 ## 1. Canonical event log
 
@@ -49,12 +49,12 @@ project/.vowp/jobs/<job>/{brief.md,report.md}
 
 ## 3. Capsule writer
 
-Implemented in `vowp-core::session::capsule` (n07). Signature: `CapsuleWriter::write(&self, session: &SessionId, trigger: CapsuleTrigger) -> Result<Capsule, CoreError>`.
+Implemented in `vowp-core::session::capsule`. Signature: `CapsuleWriter::write(&self, session: &SessionId, trigger: CapsuleTrigger) -> Result<Capsule, CoreError>`.
 
 **When:** explicit `switch`, `limit` event, context pressure, `vowp session capsule <id>` (manual), job end (`job_end`), export. Debounce: at most one capsule per session per **120 s**
 unless the trigger is `Switch`, `Manual`, `Export` or `Limit` (those never debounce; a debounced call returns the latest existing capsule).
 
-**Executor:** `[capsule].executor` or, by default, the last rung of the `keeper` profile (cheapest capable; default `opencode:deepseek/deepseek-flash#max`). The capsule run is a
+**Executor:** `[capsule].executor` or, by default, the last rung of the `keeper` profile (the cheapest capable executor; no fixed model). The capsule run is a
 `run` row with `role=capsule`, `purpose=capsule`, in its **own throwaway session** (never the session being summarised), so it does not pollute the log.
 
 **Input compaction** (all from `log.jsonl`, `replayable` events only):
@@ -159,13 +159,13 @@ The log is never rewritten; a switch only appends events. Lineage = `switches` r
   "protocol_version": 1,
   "exported_at": "2026-11-08T19:42:00.000Z",
   "source_node": "local",
-  "session": { "id": "01KA1V0Z7A0000000000000000", "title": "planner", "role": "planner", "cwd": "/Users/me/proj", "project": "vowp", "executor": "claude-code:claude-sonnet-5-5@medium", "state": "blocked", "last_seq": 142, "parent_session_id": null, "job_id": null,
+  "session": { "id": "01KA1V0Z7A0000000000000000", "title": "planner", "role": "planner", "cwd": "/home/user/proj", "project": "vowp", "executor": "claude-code:model-a@medium", "state": "blocked", "last_seq": 142, "parent_session_id": null, "job_id": null,
                "node": "local", "last_capsule_id": "cap_01KA1V2B000000000000000000", "log_bytes": 51234, "created_at": "2026-11-08T18:00:00.000Z", "updated_at": "2026-11-08T19:41:09.000Z" },
   "capsule": { "version": 1, "capsule_id": "cap_01KA1V3C000000000000000000", "session_id": "01KA1V0Z7A0000000000000000", "created_at": "2026-11-08T19:42:00.000Z", "at_seq": 142, "trigger": "export",
-               "from": {"executor": "claude-code:claude-sonnet-5-5@medium", "node": "local"}, "intent": "…", "state": {"done": [], "in_progress": [], "blocked": [], "next_steps": []},
+               "from": {"executor": "claude-code:model-a@medium", "node": "local"}, "intent": "…", "state": {"done": [], "in_progress": [], "blocked": [], "next_steps": []},
                "telemetry": {"turns": 12, "tokens_in": 84000, "tokens_out": 9100, "usd": null} },
   "tail": [ { "id": "01KA…", "session_id": "01KA1V0Z7A0000000000000000", "seq": 141, "ts": "…", "type": "user.message", "actor": "user", "source": {"harness": "claude-code"}, "payload": {"text": "…"}, "replayable": true } ],
-  "lineage": [ { "id": "01KA…", "session_id": "01KA1V0Z7A0000000000000000", "from_executor": null, "to_executor": "claude-code:claude-sonnet-5-5@medium", "from_node": null, "to_node": "local", "capsule_id": null, "reason": "user", "state": "completed", "error": null, "started_at": "…", "ended_at": "…", "at_seq": 1 } ],
+  "lineage": [ { "id": "01KA…", "session_id": "01KA1V0Z7A0000000000000000", "from_executor": null, "to_executor": "claude-code:model-a@medium", "from_node": null, "to_node": "local", "capsule_id": null, "reason": "user", "state": "completed", "error": null, "started_at": "…", "ended_at": "…", "at_seq": 1 } ],
   "blobs_inline": { "<sha256>": "<base64 bytes>" },
   "checksum": "sha256:<64 hex>"
 }
@@ -199,7 +199,7 @@ Records an interactive Claude Code session into the canonical store without runn
 2. Map each Claude transcript line to events (`harness=claude-code`, `native_session_id` = uuid): user text → `user.message`; assistant text blocks → `assistant.message`; `thinking` blocks → `assistant.reasoning` (`replayable=false`); `tool_use` → `tool.call`; `tool_result` → `tool.result` (spill > 8192 bytes); usage → `cost` (`source: unknown`, tokens only — subscription sessions have no receipt); unknown line types are skipped and counted.
 3. Incremental: the importer stores the last processed **byte offset** and last transcript line uuid in `adapters.json`-sibling file `watch.json` (`{"claude_file": "...", "offset": N}`); each poll (every 2 s, plain thread) reads from `offset`, only whole lines (`\n`-terminated), appends events, `sync()`s every 20 events and at EOF-idle.
 4. One canonical session per Claude uuid (created on first sight, `role=user`, title = first user message ≤ 60 chars). A truncated/rewritten file (size < offset) restarts from 0 and skips events already imported by matching the `tool_use_id`/message uuid recorded in `raw`.
-5. Tests (n07, optional): `watch_imports_fixture_transcript` (recorded sanitized transcript → expected event types/count), `watch_is_incremental` (append lines, only new events appended), `watch_never_writes_claude_files` (read-only open flags; directory unchanged).
+5. Tests (optional): `watch_imports_fixture_transcript` (recorded sanitized transcript → expected event types/count), `watch_is_incremental` (append lines, only new events appended), `watch_never_writes_claude_files` (read-only open flags; directory unchanged).
 
 ## 8. Named tests (consumers)
 

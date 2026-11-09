@@ -1,6 +1,6 @@
 # crate `vowp-store`
 
-Owned by n03 (whole crate; see `job-map.md` n03a/b/c). Depends on `vowp-protocol` only (conventions.md §2–3).
+Depends on `vowp-protocol` only (conventions.md §2–3).
 
 ## 1. Purpose
 
@@ -20,7 +20,7 @@ crates/vowp-store/
   src/lib.rs            // forbid(unsafe), warn(missing_docs); re-exports
   src/error.rs          // StoreError
   src/paths.rs          // NodePaths
-  src/schema/001_init.sql   // BYTE-IDENTICAL copy of docs/design/schema.sql (n03a copies it)
+  src/schema/001_init.sql   // BYTE-IDENTICAL copy of docs/design/schema.sql
   src/db.rs             // Store, open/migrate/pragmas/transaction/backup/integrity_check
   src/convert.rs        // private: row <-> protocol type helpers, ts/enum <-> TEXT
   src/repo_nodes.rs     // nodes, projects
@@ -37,7 +37,7 @@ crates/vowp-store/
   tests/*.rs
 ```
 
-Job split: **n03a** = `lib.rs, error, paths, schema/, db, convert, repo_nodes, repo_jobs, repo_runs` (and creates empty placeholder files for every other module, declared in `lib.rs` up front); **n03b** = `repo_sessions, repo_loops, repo_ledger, repo_misc`; **n03c** = `blobs, session_log, session_files, reindex`.
+The module split follows the four concerns: connection/schema and the node/job/run repositories; the session, loop, ledger and misc repositories; and the blob store, session log, session files and reindex.
 
 ## 3. Public API
 
@@ -101,7 +101,7 @@ Migration/pragma rules (all in `Store::open*`):
 3. If `v == 0` and the DB has no tables: run migration list `[001_init.sql]` from index *v* upward, each inside one transaction; the last statement of
    each migration file sets `PRAGMA user_version = N`. If `v == 0` but tables exist → `StoreError::Corrupt("unversioned database")`.
 4. Migrations are `const MIGRATIONS: &[&str] = &[include_str!("schema/001_init.sql")]`. `001_init.sql` is **byte-identical** to
-   `docs/design/schema.sql`; n03 copies it. Future schema changes are new files `002_*.sql` and a new design amendment — never edits to 001.
+   `docs/design/schema.sql`; it is copied byte for byte. Future schema changes are new files `002_*.sql` and a new design amendment — never edits to 001.
 5. Insert `kv('schema_created_at')` and `kv('node_id')` (a fresh ULID) on first creation.
 
 ### 3.3 Filters and small structs

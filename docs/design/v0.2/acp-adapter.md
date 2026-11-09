@@ -1,7 +1,7 @@
 # v0.2 — ACP adapter
 
 Status: design only. v0.1 ships the `claude-code`, `opencode` and generic `cli` adapters. ACP is a
-v0.2 adapter in `docs/design/plan.md` §5.2 and is out of scope in
+v0.2 adapter in `plan.md` §4.2 and is out of scope in
 `docs/design/crates/vowp-protocol.md` §7.
 
 ## Goal

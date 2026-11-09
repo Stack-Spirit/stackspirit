@@ -1,8 +1,8 @@
 # loops.md — L1–L9, the job state machine, gates, merge queue, failover
 
-Behavioural spec for `vowp-core::{loops, gates, ledger, schedules}` (job n08) and everything that reads their rows. Vocabulary is
+Behavioural spec for `vowp-core::{loops, gates, ledger, schedules}` and everything that reads their rows. Vocabulary is
 `types.md` / `schema.sql`; pure logic (transitions, dispatch, stall judging) is `crates/vowp-graph.md`; adapters are `adapters.md`;
-sessions/switch are `sessions.md`. Numbers come from `night.py` where it worked in production-like use.
+sessions/switch are `sessions.md`.
 
 ## 1. Vocabulary and the L1 tick
 
@@ -36,7 +36,7 @@ All time from `Clock`.
    | `run_loop` | mark that loop due now (`next_run_at = now`) |
    | `wake` | no-op; only ends the idle wait early |
 
-   An event the state machine rejects (`InvalidTransition`) is logged and dropped, never retried. Delete each row after applying; log a ledger `state` entry. Test: `request_rows_apply_every_kind_end_to_end` (core, n08c).
+   An event the state machine rejects (`InvalidTransition`) is logged and dropped, never retried. Delete each row after applying; log a ledger `state` entry. Test: `request_rows_apply_every_kind_end_to_end` (core).
 1. **Reconcile open runs.** For every `runs` row with `ended_at IS NULL` owned by this node: if no live runner thread has it **and** its
    `pid` is not alive (`kill(pid,0)` equivalent via `/proc/<pid>` existence check; no `unsafe`) → the supervisor restarted or the child
    vanished. Kill the process group if the pid is alive but unowned (orphan), finalise the run with `outcome=crash`, `detail="orphaned at supervisor start"`,
@@ -119,7 +119,7 @@ Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means 
 
 Terminal states: `done`, `replanned`, `cancelled`. **Any (state,event) pair not listed returns `GraphError::InvalidTransition`**; in particular no event leaves a terminal state.
 `NeedsSatisfied` is only emitted by L1 step 4; `Retry` on a non-`failed` job is invalid. The CLI `vowp job retry` therefore maps by state: `failed` → `Retry` (T32), `parked` → `Resolved` (T31), `stalled` → `KeeperRestart` (T11); any other state exits 4.
-Differences from plan §7.3: D1 (`gating`, `cancelled`), D5 (fix jobs on the original branch, no verify of their own), and `fixing → gating` (T22) instead of `fixing → reviewing`: the fix must pass the cheap
+Differences from the design summary §6.3: D1 (`gating`, `cancelled`), D5 (fix jobs on the original branch, no verify of their own), and `fixing → gating` (T22) instead of `fixing → reviewing`: the fix must pass the cheap
 command gates again before another verifier is spent (recorded as D17 in decisions.md).
 
 Fix/merge jobs are normal `jobs` rows (`kind` fix/merge, `fixes` edge `fix -> original`, `role` = the original's role, `owns`/`worktree`/`branch` copied from the original so ownership locks see them as the same owner; they are **not** counted as an overlapping lock against the original, which is in `fixing`: `OwnsLocks` treats `fixes` pairs as one holder).
@@ -171,7 +171,7 @@ Each evaluation writes one `gate_results` row (types.md §8 `GateResult`) and on
 | `deploy` | 1. run `run` (cwd = env checkout); 2. record `version_before/after` if the env defines `probe`; 3. run the `probe` CmdGate **after** the deploy; both must pass; evidence includes `rollback_cmd` from `[env.*].rollback` | deploy exit ok **and** probe passes |
 | `secret_scan` | scan the added lines of `git diff <default_branch>...job/<id>` with the rules below; **never store matched text** | zero hits |
 
-**Secret rules — the single canonical table** (names are what `SecretHit.rule` stores and what tests assert; patterns derive from `night.py SECRET_RE`; matched text is never stored):
+**Secret rules — the single canonical table** (names are what `SecretHit.rule` stores and what tests assert; matched text is never stored):
 
 | `rule` | Pattern (regex, applied to added lines) |
 |---|---|
@@ -230,7 +230,7 @@ Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per
 **Digest** (`vowp_core::loops::digest::Digest::build`, ≤ 24 000 chars, each item ≤ 600 chars): new jobs done/failed/stalled/parked since the last turn with gate evidence summaries and report `open_items`, open inbox items and answers, limit/failover state (who is limited until when), counts by state, cost totals (receipts), slot usage, the last 5 ledger errors, and (planner only) the checkpoint text. Keeper digest additionally has the last 60 lines of each stalled job's session log (pretty).
 **Actions** are CLI calls the agent runs itself in its turn: `vowp job add|update|retry|park|cancel`, `vowp inbox answer`, writing brief files, and for the keeper `vowp job nudge <id>` / `vowp job restart <id>` (= requests `KeeperNudge|KeeperRestart`), `vowp job replan <id>`, `vowp job fail <id>`. These CLI commands only write `req:` rows (D2) — the next tick applies them. The planner/keeper never edits the DB or merges.
 **Failure of a planner turn:** counted in `limits` streak (§8.6); a failed turn is re-attempted at the next heartbeat, never in a tight loop.
-**Takeover and hand-back:** while `limits.claude` is active the keeper session is given the planner's capsule (SessionOps::write_capsule on the planner session, trigger `limit`) and the planner duties; when the probe succeeds (§8.5) the planner session resumes on rung 0 seeded with a fresh capsule written from the keeper's covering turns.
+**Takeover and hand-back:** while the planner's rung-0 provider is limited the keeper session is given the planner's capsule (SessionOps::write_capsule on the planner session, trigger `limit`) and the planner duties; when the probe succeeds (§8.5) the planner session resumes on rung 0 seeded with a fresh capsule written from the keeper's covering turns.
 
 ## 8. L6 — failover and probe-back
 
@@ -241,14 +241,14 @@ Both are **sessions** with a fixed role (`SessionRole::Planner|Keeper`), one per
 | `outcome` / kind | Action |
 |---|---|
 | `Limit`/`quota` | write `limits(provider)`: `kind=quota`, `resets_at = event.resets_at + 2 min` (the single +2 min margin; adapters report exact times, adapters.md §2.4), `detail`; ledger `limit`; **hand off** (§8.4) the affected sessions to the next ladder rung whose provider is not limited, **only if** that rung is listed in the profile; else park the affected jobs with `Blocked{ProviderBlocked}` and one inbox notice. `profile.on_quota=park` → park; `next` → switch, no probe-back. No `resets_at` known: `now + 60 min`. |
-| `Credits` | `limits(provider) kind=credits, resets_at=NULL`; **park every job whose profile's *current* rung provider is that provider** (`Blocked{Credits}`, §8.3), one inbox item; stop dispatching to it. Never switch to another paid provider (plan §8 L6); `on_credits_exhausted` has only `park` in v0.1. |
+| `Credits` | `limits(provider) kind=credits, resets_at=NULL`; **park every job whose profile's *current* rung provider is that provider** (`Blocked{Credits}`, §8.3), one inbox item; stop dispatching to it. Never switch to another paid provider (L6); `on_credits_exhausted` has only `park` in v0.1. |
 | `Auth` | `limits kind=auth, resets_at=NULL`; park jobs of that provider (§8.3, `Blocked{Auth}`); no retries. |
 | `Rate` | `limits kind=rate`, `resets_at = now + backoff` with `backoff = min(10 min × 2^streak, 60 min)` ±20 % jitter (deterministic LCG owned by the loop, seedable in tests). Set `concurrency_cap = max(1, running_on_provider − 1)` until `cap_until = resets_at`. The interrupted run does **not** consume `continues`: core feeds `JobEvent::RunRateLimited{until: resets_at}` (T35) instead of `RunEndedNoReport`, which delays the continue run until `resets_at` and sets `jobs.note="rate-limited; retry after <t>"`. |
 | `Context` | write a capsule (`trigger=context`) then start a **fresh native session on the same harness** seeded with it (`SessionOps::switch` with `to = same executor`, reason `Context`); continue count unchanged. |
 | `Crash`/`Error`/`Killed` | no limit row (except §8.6); L2 continue path (T4). |
 
 ### 8.3 Parking all jobs of a provider (credits and auth — one policy)
-Plan §11: credits exhausted ⇒ **park every job on that provider**; it is never a failover trigger (unlike `quota`). Algorithm:
+Design summary §10: credits exhausted ⇒ **park every job on that provider**; it is never a failover trigger (unlike `quota`). Algorithm:
 1. For each job in `{pending, ready, running, stalled}` — this set **includes the verify/fix/merge child jobs** (they are ordinary `jobs` rows with their own profile, so a pending verify job of a `reviewing` original, or a fix job of a `fixing` original, is parked like any other) — whose profile's **current rung** (the rung it is running on, or `Profile::pick` for jobs not yet started) has `Executor::provider() == provider`: send `JobEvent::Blocked{Credits|Auth}` (T29). A job whose ladder happens to contain another rung is **still parked**: credits/auth never advance the ladder (the owner decides after topping up/logging in).
 2. Jobs whose current rung is on a different provider are untouched. Parents in `gating`, `reviewing`, `fixing` or `merging` hold no harness run of their own (they wait for command gates, the merge queue, or their child job), so T29 deliberately has no such source states: once their child is parked they simply keep waiting, and `Resolved` on the child resumes the flow. Command gates and the merge queue use no provider and are unaffected.
 3. One inbox item per provider/kind (dedupe on `title`), text: "credits exhausted for <provider>; top up and run `vowp inbox answer <id> resolved`" (auth: "log in again with the harness's own login, then `… resolved`").
@@ -278,7 +278,7 @@ Per provider the loop counts consecutive runs ended `error|crash` with **no** li
 
 ## 10. L8 — watchdog
 
-- **systemd user unit** `vowp.service` (file shipped by n13): `ExecStart=%h/.local/bin/vowp up --foreground`, `Restart=always`, `RestartSec=5`, `WantedBy=default.target`; `loginctl enable-linger` documented. `vowp up --foreground` runs the supervisor loop in-process (no tmux attach) and also ensures the tmux session.
+- **systemd user unit** `vowp.service` (file shipped by the install script): `ExecStart=%h/.local/bin/vowp up --foreground`, `Restart=always`, `RestartSec=5`, `WantedBy=default.target`; `loginctl enable-linger` documented. `vowp up --foreground` runs the supervisor loop in-process (no tmux attach) and also ensures the tmux session.
 - **Heartbeat contract:** L1 step 13 writes `~/.vowp/heartbeat` (unix seconds, ASCII). The cron check (`*/5 * * * *`, script `scripts/vowp-watchdog.sh`): read the file; if missing or `now - value > 180` s → `systemctl --user restart vowp.service` (or `vowp up --detach` when systemd is unavailable), then append a line to `~/.vowp/logs/watchdog.log`. `vowp status --json` exposes `{"heartbeat_age_secs":..,"paused":..,"pid":..}` for it.
 - On restart the supervisor performs the §1.1 step-1 reconcile (orphans → crash → L2 continues). Nothing else is needed: DB + logs are the state.
 
@@ -304,38 +304,38 @@ the table or are fixed v0.1 constants.
 | Rule | Value | Source/config |
 |---|---|---|
 | Tick | 60 s | `[node].tick_secs` |
-| Stalled: no new session event and no new commit | 20 min (`stall_minutes`) | `LoopBounds.stall_minutes`; plan §8 (night.py used 25) |
-| Hung before first output (0 bytes) | 8 min (`silent_minutes`) | `LoopBounds.silent_minutes`; night.py (D7) |
-| Automatic continues per attempt | 2 (`max_continues`) | `LoopBounds.max_continues`; plan L2 |
-| Hang restarts | 3 (`max_hang_restarts`) | `LoopBounds.max_hang_restarts`; night.py (D6) |
-| Fix rounds (`attempts`) | 3 = `job.loop.max_attempts` | per job (`JobLoop`, not `LoopBounds`); plan L3 |
-| Same action repeated without new evidence | 3 (`RepeatGuard`) → stop the loop, escalate (`NotifyInbox(Decision)`) | `LoopBounds.same_action_max`; plan §8 |
-| Planner heartbeat / keeper heartbeat | 30 min / 20 min | `[loops.l4-planner].interval_secs` / `[loops.l5-keeper].interval_secs`; plan L4/L5 |
-| Min gap between planner/keeper turns | 5 min | `LoopBounds.planner_min_gap_minutes`; night.py `planner_min_gap_min` |
-| Idle gap (nothing active, work remaining) | 15 min | `LoopBounds.idle_gap_minutes`; night.py |
-| Checkpoint | every 120 min | `LoopBounds.checkpoint_minutes`; night.py |
-| Gate timeout | 1800 s | `CmdGate.timeout_secs` (default); night.py `gate_timeout` |
-| Merge budget | 2700 s | `[merge].timeout_secs`; night.py `merge_timeout` |
-| Quota reset margin | +2 min | fixed v0.1 constant; night.py |
-| Probe cadence after failed probe | 15 min | `LoopBounds.probe_interval_minutes`; plan L6 |
+| Stalled: no new session event and no new commit | 20 min (`stall_minutes`) | `LoopBounds.stall_minutes` |
+| Hung before first output (0 bytes) | 8 min (`silent_minutes`) | `LoopBounds.silent_minutes` (D7) |
+| Automatic continues per attempt | 2 (`max_continues`) | `LoopBounds.max_continues` (L2) |
+| Hang restarts | 3 (`max_hang_restarts`) | `LoopBounds.max_hang_restarts` (D6) |
+| Fix rounds (`attempts`) | 3 = `job.loop.max_attempts` | per job (`JobLoop`, not `LoopBounds`); L3 |
+| Same action repeated without new evidence | 3 (`RepeatGuard`) → stop the loop, escalate (`NotifyInbox(Decision)`) | `LoopBounds.same_action_max` |
+| Planner heartbeat / keeper heartbeat | 30 min / 20 min | `[loops.l4-planner].interval_secs` / `[loops.l5-keeper].interval_secs`; L4/L5 |
+| Min gap between planner/keeper turns | 5 min | `LoopBounds.planner_min_gap_minutes` |
+| Idle gap (nothing active, work remaining) | 15 min | `LoopBounds.idle_gap_minutes` |
+| Checkpoint | every 120 min | `LoopBounds.checkpoint_minutes` |
+| Gate timeout | 1800 s | `CmdGate.timeout_secs` (default) |
+| Merge budget | 2700 s | `[merge].timeout_secs` |
+| Quota reset margin | +2 min | fixed v0.1 constant |
+| Probe cadence after failed probe | 15 min | `LoopBounds.probe_interval_minutes`; L6 |
 | Unknown-failure streak → unavailable | 3 runs → 15 min | fixed v0.1 constant; D15 |
-| Drain on switch | 5 s | `SwitchRequest.drain_secs`; plan §5.3 |
+| Drain on switch | 5 s | `SwitchRequest.drain_secs`; sessions.md §5 |
 | Rate backoff | 10 min doubling to 60 min, ±20 % jitter | fixed v0.1 constants; §8.2 |
 
 `RepeatGuard` keys: `(job, action-kind)` with a fingerprint of the evidence (gate tails hash, report sha, run outcome). Three consecutive identical fingerprints for the same key ⇒ the job is moved to `failed` with `note="no progress: <action> x3"`, the loop trips (`loops.last_status`), inbox `decision`.
 
-## 13. Drill tests (n08, `crates/vowp-core/tests/drills.rs`) — fake harness scripts and `FakeClock` only
+## 13. Drill tests (`crates/vowp-core/tests/drills*.rs`) — fake harness scripts and `FakeClock` only
 
 All drills use: temp project dir with a bare `origin` + clone, a `Store` on a temp dir, `FakeWindows`, `FakeClock`, and fake harness scripts from `vowp-adapters/tests/fakes/` (copied path via a `FAKES_DIR` helper in the test). No network, no real tmux needed.
 
 | Test | Given | When | Then |
 |---|---|---|---|
-| `drill_failover_and_probe_back` | planner profile `[claude-code:…@medium, opencode:deepseek/deepseek-flash#max]`; fake claude emits `Claude AI usage limit reached\|<unix t+3h>` and exits 1 | planner turn runs; tick; clock advances past `resets_at+2m`; fake claude then succeeds; ticks continue | `limits(claude)` row kind `quota`, `resets_at = t+3h+2m`; a `switch` row reason `limit` with a capsule; the next planner turn used the opencode fake; after the reset exactly one `probe` run is made, row deleted, a second `switch` reason `probe_back`; ledger shows both; no jobs parked |
+| `drill_failover_and_probe_back` | planner profile `[claude-code:model-a@medium, opencode:provider/model-b#max]`; fake claude emits `Claude AI usage limit reached\|<unix t+3h>` and exits 1 | planner turn runs; tick; clock advances past `resets_at+2m`; fake claude then succeeds; ticks continue | `limits(claude)` row kind `quota`, `resets_at = t+3h+2m`; a `switch` row reason `limit` with a capsule; the next planner turn used the opencode fake; after the reset exactly one `probe` run is made, row deleted, a second `switch` reason `probe_back`; ledger shows both; no jobs parked |
 | `drill_crash_continue` | worker job running; fake opencode kills itself (`kill -9`) after 1 event, no report | tick ×2 | run outcome `crash`, job stays `running` with `continues=1`, a `Continue` run started; after 2 more crashes job `stalled`, keeper woken (`WakeKeeper`) |
 | `drill_stall_hang` | fake harness prints nothing and sleeps | clock +9 min, tick | run stopped, `hang_restarts=1`, fresh start; after 3 → `stalled` |
 | `drill_merge_conflict` | two jobs edit the same file (owns disjoint by mistake), A merged first | B reaches `merging` | `MergeConflict`; job B `fixing`, a `merge` job created with `fixes` edge, same worktree; fake worker resolves + reports; B returns to `merging` and merges ff-only; `origin/main` contains both; repo-wide check cmd (`true` replaced by a script) ran once per merge |
 | `drill_merge_lockfile` | both jobs change `Cargo.lock` only | merge B | no merge job; lockfile commit by queue; ledger `merge` row has `lockfile_refreshed=true` |
-| `drill_credits_park` | two jobs on provider `deepseek`; fake opencode prints a 402 / `insufficient balance` error | tick | `limits(deepseek) kind=credits resets_at NULL`; both jobs `parked(credits)`; exactly one inbox item; no run started on any other provider; after `inbox answer … resolved`, jobs `ready` |
+| `drill_credits_park` | two jobs on provider `provider-a`; fake opencode prints a 402 / `insufficient balance` error | tick | `limits(provider-a) kind=credits resets_at NULL`; both jobs `parked(credits)`; exactly one inbox item; no run started on any other provider; after `inbox answer … resolved`, jobs `ready` |
 | `drill_gate_fail_fix_loop` | job whose `cmd` gate fails twice then passes (fake worker edits a file based on the fix prompt) | run to completion | attempts=2, two fix jobs, then `reviewing`→`merging`→`done`; a third failing config ends `failed` + decision job + inbox item (`on_exhausted=escalate`) |
 | `drill_schedule_missed_run` | schedule `every 30m`, `missed_policy=run_once`; clock stopped 3 h, then ticks | restart supervisor, tick | exactly one job created (not 6), key recorded, `next_run_at` in the future; with `skip` zero jobs; double tick at the same `due` creates one job |
 | `drill_orphan_reconcile` | open `runs` row with a dead pid | tick | run finalised `crash`, job continues via L2 |

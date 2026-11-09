@@ -7,12 +7,12 @@ Spec for VOWP v0.1. Product rationale: `plan.md`. Deviations: `decisions.md`. Ty
 ```
  vowp (one static binary, crate vowp-cli)
    ├─ CLI commands ──────────────────────────────► vowp-core (library)  ──► vowp-store  (SQLite + session logs + blobs)
-   │                                                 ├ session   (n07)      ├► vowp-graph  (pure: DAG, state machine, dispatch)
-   │  `vowp up` = supervisor process                 ├ loops     (n08) L1–L8├► vowp-tmux   (window manager, private-socket tested)
-   │  `vowp session tail` = read-only log follower   ├ gates     (n08)      ├► vowp-adapters (claude-code | opencode | cli)
-   │                                                 ├ ledger    (n08)      └► vowp-protocol (types, traits, config, Clock)
-   │                                                 ├ schedules (n08) L9
-   │                                                 └ promote   (n10)
+   │                                                 ├ session             ├► vowp-graph  (pure: DAG, state machine, dispatch)
+   │  `vowp up` = supervisor process                 ├ loops L1–L8         ├► vowp-tmux   (window manager, private-socket tested)
+   │  `vowp session tail` = read-only log follower   ├ gates               ├► vowp-adapters (claude-code | opencode | cli)
+   │                                                 ├ ledger              └► vowp-protocol (types, traits, config, Clock)
+   │                                                 ├ schedules L9
+   │                                                 └ promote
    ▼
  harness child processes (claude -p … / opencode run … / generic cli) — one process per run, headless JSON on stdout
 ```
@@ -280,7 +280,7 @@ Resolution order for any setting: CLI flag > `vowp.toml` > `~/.vowp/config.toml`
 - **Never logged**: prompts, env values, tool outputs, anything matching a secret pattern. Run/limit `detail` strings are redacted by `vowp_adapters::classify::redact` before storage.
 - **Machine-readable output**: every CLI command supports `--json`; errors in `--json` mode are `{"error":{"kind":"not_found","message":"job n99 not found","hint":"vowp job ls"}}` on stdout with the matching exit code.
 
-## 7. Security model (plan §14, made concrete)
+## 7. Security model (design summary §13, made concrete)
 
 | Rule | Enforcement |
 |---|---|

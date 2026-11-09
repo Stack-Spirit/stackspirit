@@ -1,6 +1,6 @@
 # crate `vowp-protocol`
 
-Owned by n02a–n02d (see `job-map.md`). Depends on nothing in the workspace. Everything else depends on it.
+Depends on nothing in the workspace. Everything else depends on it.
 
 ## 1. Purpose
 
@@ -16,33 +16,32 @@ rules, and the tests.
 crates/vowp-protocol/
   Cargo.toml
   src/lib.rs          // #![forbid(unsafe_code)] #![warn(missing_docs)]; `pub mod` for each below; re-exports; `pub mod prelude`
-  src/ids.rs          // n02a   types.md §1
-  src/time.rs         // n02a   Timestamp, Clock, SystemClock, FakeClock
-  src/error.rs        // n02a   ErrorKind, ProtocolError
-  src/log.rs          // n02a   Log, Level, NullLog, MemoryLog
-  src/cost.rs         // n02a   CostSource, Tokens, Cost
-  src/limit.rs        // n02a   LimitKind, LimitRowKind, Limit
-  src/executor.rs     // n02a   HarnessKind, Executor, ExecutorRef, Role, OnQuota, Profile
-  src/event.rs        // n02b   Actor, EventSource, EventType, EventEnvelope, HarnessEvent, EventBody + payload structs, BlobRef
-  src/capsule.rs      // n02b   Capsule, CapsuleDraft, ...
-  src/job.rs          // n02c   JobKind, JobState, EdgeKind, Edge, Job, NewJob, JobPatch, JobLoop, ParkedReason
-  src/gate.rs         // n02c   Gate, GateKind, Evidence, GateResult, SecretHit, default_gates
-  src/report.rs       // n02c   Report, ReportFrontMatter, Brief, BriefFrontMatter, Verdict, ReportStatus
-  src/run.rs          // n02c   Run, RunRole, RunPurpose, RunOutcome, Worker*
-  src/session.rs      // n02c   Session, SessionState, SessionRole, EventIndexRow, Switch, SwitchState, Node, Project, LedgerEntry, LedgerKind
-  src/inbox.rs        // n02c   InboxItem, InboxKind, InboxState
-  src/loops.rs        // n02c   Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
-  src/release.rs      // n02c   Release, ReleaseState, GuardResult
-  src/config.rs       // n02d   VowpConfig and sub-structs
-  src/adapter.rs      // n02d   Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
-  src/services.rs     // n02d   SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
-  src/schema.rs       // n02d   all_schemas, schema_for_name
+  src/ids.rs          // types.md §1
+  src/time.rs         // Timestamp, Clock, SystemClock, FakeClock
+  src/error.rs        // ErrorKind, ProtocolError
+  src/log.rs          // Log, Level, NullLog, MemoryLog
+  src/cost.rs         // CostSource, Tokens, Cost
+  src/limit.rs        // LimitKind, LimitRowKind, Limit
+  src/executor.rs     // HarnessKind, Executor, ExecutorRef, Role, OnQuota, Profile
+  src/event.rs        // Actor, EventSource, EventType, EventEnvelope, HarnessEvent, EventBody + payload structs, BlobRef
+  src/capsule.rs      // Capsule, CapsuleDraft, ...
+  src/job.rs          // JobKind, JobState, EdgeKind, Edge, Job, NewJob, JobPatch, JobLoop, ParkedReason
+  src/gate.rs         // Gate, GateKind, Evidence, GateResult, SecretHit, default_gates
+  src/report.rs       // Report, ReportFrontMatter, Brief, BriefFrontMatter, Verdict, ReportStatus
+  src/run.rs          // Run, RunRole, RunPurpose, RunOutcome, Worker*
+  src/session.rs      // Session, SessionState, SessionRole, EventIndexRow, Switch, SwitchState, Node, Project, LedgerEntry, LedgerKind
+  src/inbox.rs        // InboxItem, InboxKind, InboxState
+  src/loops.rs        // Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
+  src/release.rs      // Release, ReleaseState, GuardResult
+  src/config.rs       // VowpConfig and sub-structs
+  src/adapter.rs      // Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
+  src/services.rs     // SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
+  src/schema.rs       // all_schemas, schema_for_name
   tests/fixtures/     // JSON examples from types.md, vowp.example.toml
   tests/*.rs
 ```
 
-Module-to-job rule: n02a writes `lib.rs` declaring **all** modules and creates every other module file as an empty file with only a
-`//! owned by n02x` doc line, so n02b–d only ever edit their own files. `lib.rs` re-exports with `pub use <module>::*;` for every module.
+`lib.rs` declares **all** modules and re-exports with `pub use <module>::*;` for every module.
 
 ## 3. Extra public items (not in types.md)
 
@@ -62,7 +61,7 @@ pub struct NullLog;
 #[derive(Clone, Default)]
 pub struct MemoryLog { /* Arc<Mutex<Vec<(Level, String, String)>>> */ }
 impl MemoryLog { pub fn new() -> Self; pub fn lines(&self) -> Vec<(Level, String, String)>; pub fn contains(&self, needle: &str) -> bool; }
-/// Formats the canonical line: `2026-11-08T19:25:47.123Z INFO l1 job n04-graph: running -> gating`
+/// Formats the canonical line: `2026-11-08T19:25:47.123Z INFO l1 job graph-engine: running -> gating`
 pub fn format_log_line(ts: Timestamp, level: Level, target: &str, msg: &str) -> String;
 
 // ---- lib.rs ----
@@ -128,7 +127,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | Test | Asserts |
 |---|---|
 | `id_parse_roundtrip_all_types` | every id type: `parse(x.to_string()) == x`; invalid length/charset/uppercase-normalisation cases rejected/accepted per rule 4 |
-| `slug_ids_reject_bad_input` | `""`, `"-a"`, `"A"`, 65 chars, `"a b"`, `"a-"` → `InvalidId`; `"n04-graph"` ok |
+| `slug_ids_reject_bad_input` | `""`, `"-a"`, `"A"`, 65 chars, `"a b"`, `"a-"` → `InvalidId`; `"graph-engine"` ok |
 | `ulid_new_is_monotonic` | 10 000 `EventId::new()` strictly increasing as strings, including within one ms |
 | `capsule_id_prefix` | `CapsuleId::new()` starts with `cap_`, `.ulid()` is 26 chars |
 | `timestamp_roundtrip_and_ms_truncation` | `"2026-11-08T19:25:47.123456Z"` → `as_rfc3339()=="…47.123Z"`; `from_unix_millis(ms).unix_millis()==ms` |
@@ -136,7 +135,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `timestamp_ordering_matches_strings` | proptest: `a<b ⇔ a.as_rfc3339()<b.as_rfc3339()` |
 | `fake_clock_advances` | `FakeClock::at(t)`, `advance(90s)` → `now()==t+90s`; clones share state |
 | `executor_parse_table` | valid: the three examples in types.md §3 + `opencode:anthropic/claude-x#high`; invalid: no colon, `@` on opencode, `#` on claude-code, empty model, unknown harness, `claude-code:m@Hi` → `InvalidExecutor`; each valid one `to_string()` back to input |
-| `executor_provider_and_model_arg` | `provider()` = `claude`/`deepseek`/`codex`; `model_arg()` = `deepseek/deepseek-flash#max` |
+| `executor_provider_and_model_arg` | `provider()` = `claude`/`provider`/`codex`; `model_arg()` = `provider/model-b#max` |
 | `executor_serde_is_string` | `serde_json::to_string(&e)` is a JSON string equal to Display; deserialising bad string errors |
 | `profile_validate_rejects_empty_and_duplicates` | empty ladder, duplicate rung → error |
 | `profile_pick_skips_limited_rungs` | 2-rung ladder: claude limited until future → rung 1; limited until past → rung 0; `None` (indefinite) → skipped; both limited → `None` |
@@ -163,7 +162,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `report_parse_bad_cases` | no fence, unterminated fence, invalid YAML, missing `branch`, `status: finished` → `FrontMatter` error each |
 | `report_missing_fields` | required list `[status,branch,commits,tests]` on a report lacking `tests` → `["tests"]`; empty `commits: []` counts as present |
 | `brief_roundtrip_and_from_job` | `Brief::parse(render(b)) == b`; `from_job` output matches types.md §8.2 example |
-| `config_example_parses` | `VowpConfig::from_toml(include_str!("fixtures/vowp.example.toml"))` is Ok and `validate()` Ok; asserts profile `planner` has 2 rungs, provider `deepseek.max_concurrent==6`, 2 schedules (`morning-report`, `nightly-backup`), `providers.claude.prices` empty and `env.work.approval == Human` (defaults applied). **`tests/fixtures/vowp.example.toml` must be byte-identical to the TOML block in `architecture.md` §5.2** (the n02d job copies it; a repo-level test `example_matches_architecture_md` reads `include_str!("../../../docs/design/architecture.md")` (must exist), extracts the first ```toml block of §5.2 and compares) |
+| `config_example_parses` | `VowpConfig::from_toml(include_str!("fixtures/vowp.example.toml"))` is Ok and `validate()` Ok; asserts profile `planner` has 2 rungs, provider `deepseek.max_concurrent==6`, 2 schedules (`morning-report`, `nightly-backup`), `providers.claude.prices` empty and `env.work.approval == Human` (defaults applied). **`tests/fixtures/vowp.example.toml` must be byte-identical to the TOML block in `architecture.md` §5.2** (the fixture is copied from it; a repo-level test `example_matches_architecture_md` reads `include_str!("../../../docs/design/architecture.md")` (must exist), extracts the first ```toml block of §5.2 and compares) |
 | `config_rejects_unknown_fields_and_bad_values` | unknown key in `[node]`, both `cron` and `every` on a schedule, empty ladder, `max_workers=0` → errors |
 | `config_defaults_are_documented_values` | `NodeConfig::default()`: name `local`, 4, 2, 60, tz 0; `MergeConfig::default()`: rebase true, 2700, secret_scan true |
 | `schema_export_covers_listed_types` | `all_schemas()` has every key of rule 12; each value is an object with `"$schema"` or `"type"`/`"definitions"`; deterministic across two calls |
