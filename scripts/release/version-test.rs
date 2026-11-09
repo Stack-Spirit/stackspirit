@@ -1,9 +1,7 @@
 //! Integration test for the `vowp --version` output.
 //!
-//! The publishable `vowp-cli` package manifest lives at the workspace root (see the comment
-//! in the root `Cargo.toml`), so this test is wired up as the `version` target there. It is
-//! the same check as `crates/vowp-cli/tests/version.rs`, which the packaging job does not own
-//! and therefore cannot update with the release version.
+//! It checks that `vowp --version` succeeds, prints `vowp <package version>`, and reports
+//! the expected package version `0.1.0`.
 
 use std::process::Command;
 

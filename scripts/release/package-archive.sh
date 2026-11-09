@@ -11,8 +11,7 @@
 # The archive is dist/vowp-<version>-<target>.tar.gz and contains a top-level
 # directory of the same name with vowp, LICENSE, README.md and
 # THIRD-PARTY-LICENSES.md. The script refuses a missing or empty input and
-# prints the sorted tar listing, exactly as the release workflow's Package step
-# did before this script existed.
+# prints the sorted tar listing.
 #
 # Exit status: 0 on success, 2 on a usage error, 1 on a packaging failure.
 
@@ -21,7 +20,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 usage() {
-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
