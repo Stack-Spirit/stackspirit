@@ -92,6 +92,8 @@ targets and creates a *draft* GitHub release). Neither workflow has run yet.
 - `session watch`: transcripts are imported on the first scan; `--follow` on a TTY asks for `--once`.
   The Claude Code transcript importer used by the adapter (`claude_code::import_transcript`) is not
   implemented.
+- The first turn after a `session switch` passes no caller-chosen native session id
+  (`new_native_id: None` in `session/switch.rs`); a fresh session gets a generated uuid-v4.
 - Interval schedules align to the Unix epoch, not to the schedule's creation time.
 - Time zones: UTC or a fixed offset only; IANA zones are deferred to v0.2.
 - `[env.*]` has no `build` key; the promotion build guard runs `[merge].check_cmds`, else
