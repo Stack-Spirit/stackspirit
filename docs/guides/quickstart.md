@@ -4,10 +4,11 @@ This walkthrough takes one git repository from "nothing installed" to a supervis
 running, then stops it cleanly. It uses one small documentation job so you can watch the full lifecycle
 without changing code.
 
-> **Status: mixed.** `vowp init`, `vowp doctor`, `vowp job` and `vowp graph` work today. The supervisor,
-> board, attach, plan, inbox and down commands are marked *(planned)*. The build-from-source steps in
-> [install](install.md) work today. The example project `examples/hello-vowp` *(planned)* will offer a
-> runnable three-job graph with fake adapters.
+> **Status: current.** Every command in this walkthrough is implemented: `vowp init`, `vowp doctor`,
+> `vowp job`, `vowp graph`, `vowp plan`, `vowp up`, `vowp status`, `vowp board`, `vowp attach`,
+> `vowp inbox` and `vowp down`. The build-from-source steps in [install](install.md) work today. For a
+> runnable three-job graph with fake adapters, see the
+> [hello-vowp example](../../examples/hello-vowp/README.md).
 
 ## 0. Build and install
 
@@ -48,7 +49,7 @@ creates `.vowp/`, registers the local node and project, and seeds the nine defau
 **active**. Existing framework files are skipped and listed, except `CLAUDE.md`, which keeps its content
 and gains `@AGENTS.md` when that line is missing; an already initialised project exits 4 unless you pass
 `--force`. The key `vowp.toml` defaults and file list are in the
-[install guide](install.md#prepare-a-project-repository). `vowp up` *(planned)* will also ensure the loop
+[install guide](install.md#prepare-a-project-repository). `vowp up` also ensures the loop
 rows on startup.
 
 Read `vowp.toml` before continuing. In particular:
@@ -69,9 +70,9 @@ Fix every `fail` before starting the supervisor:
 | Check | What to do |
 |---|---|
 | `home` | Make `~/.vowp` writable, or pass `--home <dir>` consistently. |
-| `db` | Move an unsupported or corrupt database aside; `vowp reindex` *(planned)* rebuilds session indexes, not decisions. |
+| `db` | Move an unsupported or corrupt database aside; `vowp reindex` rebuilds session indexes, not decisions. |
 | `git` | Install git and make sure it is on `PATH`. |
-| `tmux` | Install tmux, or accept the warning and run `vowp up --no-tmux` *(planned)*. |
+| `tmux` | Install tmux, or accept the warning and run `vowp up --no-tmux`. |
 | `config` | Fix `vowp.toml`; the error names the key path. |
 | `schedules` | Fix the named `[[schedules]]` entry; its cron, interval or timezone did not parse. |
 | `harness:claude-code` / `harness:opencode` | Install the harness, or change the profile ladder to one that is installed. |
@@ -139,7 +140,6 @@ job and its edges; `--gates --runs` adds its gates and (once it has run) its run
 If you would rather let an agent propose the graph first:
 
 ```sh
-# (planned)
 vowp plan "Add a hello page that explains the project" --dry-run
 ```
 
@@ -148,10 +148,7 @@ without `--dry-run` to let the planner create jobs through the CLI.
 
 ## 6. Start the supervisor
 
-**Planned section:** the supervisor, status, board and attach commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp up
 ```
 
@@ -162,7 +159,6 @@ the current terminal, or `vowp up --once` to run exactly one tick (useful for te
 Check it:
 
 ```sh
-# (planned)
 vowp status
 vowp board
 ```
@@ -171,7 +167,6 @@ vowp board
 open inbox count. `vowp board` is the refreshing view. With tmux installed:
 
 ```sh
-# (planned)
 vowp attach hello-docs
 ```
 
@@ -195,7 +190,6 @@ pending → ready → running → gating → reviewing → merging → done
 Check the inbox at any time:
 
 ```sh
-# (planned)
 vowp inbox ls
 vowp inbox answer <id> "Use the existing title style"
 ```
@@ -204,10 +198,7 @@ Answering unparks only the asking job. Everything else keeps running.
 
 ## 8. Stop cleanly
 
-**Planned section:** the stop and restart commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp down
 ```
 

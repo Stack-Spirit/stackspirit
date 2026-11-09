@@ -149,6 +149,10 @@ pub struct RecoveryReport { pub switches_completed: u32, pub switches_aborted: u
 impl vowp_protocol::SessionOps for SessionService { /* create_session, run_turn, switch, write_capsule */ }
 ```
 
+Delegation is explicit: `SessionService::switch` calls `switch::run_switch`, and
+`SessionService::recover` calls `recovery::recover`. The `SessionOps::switch` impl calls the inherent
+`SessionService::switch`, so the trait, the CLI and the loops share one switch implementation.
+
 `run_turn` algorithm (numbered, normative):
 1. Check `cwd` against the allow-list (`Refused` otherwise). Resolve adapter via `AdapterRegistry::get`; missing → `ServiceError::Failed("harness not installed")`.
 2. Open the session's `SessionLog` (lockfile; a second concurrent writer → `Conflict`). Append **first** `session.executor` (attach; every run, not only the first on an executor) and **then** `turn.started` (turn = last turn + 1); the attach carries `native_session_id` from `session_natives` if resuming the same harness; if the session has no native session on this harness and a capsule exists, the prompt is `seed_prompt(capsule, tail, tail_turns, prompt)` where `tail` = the events of the last `[capsule].tail_turns` complete turns; else `prompt`.
@@ -169,7 +173,16 @@ pub mod capsule {
     }
 }
 pub mod seed { pub fn seed_prompt(capsule: &Capsule, tail: &[EventEnvelope], tail_turns: u32, next_input: &str) -> String; }   // sessions.md §4
-pub mod switch { pub fn run_switch(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError>; }        // sessions.md §5
+pub mod switch {
+    /// Sleeps between bounded drain polls; tests inject one that advances a `FakeClock`.
+    pub trait DrainSleeper: Send + Sync { fn sleep(&self, duration: std::time::Duration); }
+    /// Production sleeper: blocks the current thread. [`run_switch`] uses it.
+    pub struct SystemSleeper;
+    pub fn run_switch(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError>;        // sessions.md §5
+    pub fn run_switch_with_sleeper(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken, sleeper: &dyn DrainSleeper) -> Result<Switch, CoreError>;   // public test hook for deterministic drain deadlines
+    pub fn run_switch_with_input(deps: &Deps, req: &SwitchRequest, next_input: &str, cancel: &CancelToken) -> Result<Switch, CoreError>;   // seeded failover/context variant
+    // Drain waits are bounded by DrainDeadline (injected clock plus a monotonic backstop).
+}
 pub mod bundle {
     pub const BUNDLE_FORMAT: &str = "vowp-bundle-v1";
     pub struct Bundle { /* fields per sessions.md §6.1 */ }
@@ -188,6 +201,12 @@ Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode
 `switch_happy_path_events_rows_and_lineage`, `switch_target_probe_fails_stays_on_source`, `switch_drain_timeout_interrupts_after_5s_fakeclock`, `switch_seed_rejected_retries_capsule_only_then_aborts`,
 `recover_started_switch_never_attached_is_aborted`, `recover_started_switch_attached_is_completed`, `bundle_export_import_roundtrip_child_session`, `bundle_checksum_mismatch_rejected`, `bundle_unknown_format_rejected`, `bundle_inlines_small_blobs_only`,
 `failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content` (end-to-end with two fake adapters).
+
+`tests/switch_drain.rs` covers the bounded-drain hook: `drain_is_bounded_when_writer_never_released`
+(an unowned writer makes the switch abort within the deadline), `drain_is_bounded_when_runner_never_finishes`
+(a runner that ignores INT/TERM still returns `SwitchAborted`), `drain_releases_promptly_when_runner_finishes`
+(the positive path returns well inside the deadline), and `recover_switch_event_carries_recovered_capsule_id`
+(recovery links the capsule it recovered on both the event and the row).
 
 ## 4. `gates` (n08a) — spec `loops.md` §4
 

@@ -8,9 +8,8 @@ action needs an explicit human approval by default.
 This page describes the model and what it does **not** protect against. The vulnerability-reporting
 policy is in [`SECURITY.md`](../SECURITY.md).
 
-> **Status: mixed.** Gates, promotion and `vowp doctor` are current. The supervisor and session
-> commands on this page are *(planned)* until n09b/n09c merge, and the remaining rules are binding on
-> the parts of the implementation still landing.
+> **Status: current.** Gates, promotion, `vowp doctor`, the supervisor and the session commands on this
+> page are implemented, and these rules are binding on the code on `main`.
 
 ## Reporting a vulnerability
 
@@ -106,7 +105,7 @@ temporary directory and a fake value.
 - limit messages that may include account details before redaction.
 
 Treat `~/.vowp` like a work journal: back it up if you need it, restrict access to your user account,
-and never paste raw logs into a public issue. `vowp backup` *(planned)* copies the database, not the
+and never paste raw logs into a public issue. `vowp backup` copies the database, not the
 session directories; if you need the logs, copy `~/.vowp` while the supervisor is stopped or use a
 filesystem snapshot.
 
@@ -134,13 +133,13 @@ The window manager is deliberately narrow:
 
 - It creates or attaches only the `vowp-<project>` session and tagged windows.
 - It never kills untagged windows, never respawns a pane and never sends keystrokes.
-- A job window runs `vowp __window job <id>` *(planned)*, which is a read-only follower of the session
+- A job window runs `vowp __window job <id>`, which is a read-only follower of the session
   log. The harness runs headless; the window is not a control channel.
 - `capture-pane` is for display only. Decisions come from the log and the database, never from screen
   text.
 
-If tmux is absent, `vowp up --no-tmux` *(planned)* runs without windows. `vowp attach` *(planned)* falls
-back to `vowp session tail --follow` *(planned)*.
+If tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach <job>` falls
+back to `vowp session tail --follow`.
 
 ## Multi-node and SSH
 

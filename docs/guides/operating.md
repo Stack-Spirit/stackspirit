@@ -2,18 +2,14 @@
 
 A node runs one supervisor per project home. The supervisor is a plain process that ticks every 60
 seconds, reconciles the database and the session logs, and starts or stops work. Everything it knows
-survives a crash; `vowp up` *(planned)* again reconciles and continues.
+survives a crash; `vowp up` again reconciles and continues.
 
-> **Status: mixed.** The supervisor core and `vowp doctor` are current, but the lifecycle commands in
-> this page (`up`, `down`, `status`, `board`, `loops`, `backup`, `reindex`, `cost`) are *(planned)* until
-> n09b/n09c merge.
+> **Status: current.** The supervisor core, `vowp doctor` and every lifecycle, status, board, loop,
+> backup, reindex and cost command on this page are implemented.
 
 ## Start and stop
 
-**Planned section:** the lifecycle commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp up                          # ensure tmux windows, detach the supervisor
 vowp up --foreground             # run the loop in this process (what systemd runs)
 vowp up --no-tmux                # no window manager
@@ -33,10 +29,7 @@ killed process is detected and replaced; do not delete the database to "fix" a l
 
 ## Status and the board
 
-**Planned section:** the status and board commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp status
 vowp status --json
 vowp status --check             # exit 1 when the heartbeat is older than 3 min
@@ -61,8 +54,9 @@ tail -F ~/.vowp/logs/supervisor.log
 ```
 
 Each line is `<timestamp> <LEVEL> <target> <message>`, with targets such as `l1`, `l2`, `l3`, `merge`,
-`gates`, `session`, `adapter`, `tmux` and `cli`. Levels are `ERROR`, `WARN`, `INFO` and `DEBUG`; set
-`VOWP_LOG=debug` for more detail. The file rotates at 10 MB and keeps three old files.
+`gates`, `session`, `adapter`, `tmux` and `cli`. Levels are `ERROR`, `WARN`, `INFO` and `DEBUG`. The
+file is append-only and grows until you rotate it; v0.1 has no built-in rotation, so use your normal
+log rotation for `~/.vowp/logs/supervisor.log`.
 
 | Path | What it is |
 |---|---|
@@ -81,10 +75,7 @@ file contents.
 
 ## Loops
 
-**Planned section:** the loop commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp loops
 vowp loops pause l4-planner
 vowp loops resume l4-planner
@@ -107,10 +98,7 @@ or run a command. Missed runs while the node was down either run once (`run_once
 
 ## Backups and reindex
 
-**Planned section:** the backup and reindex commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp backup
 vowp backup --to /backup/vowp-before-upgrade.db
 vowp reindex
@@ -127,21 +115,17 @@ of hand-editing `vowp.db`.
 
 ## Watchdog
 
-**Planned section:** the `vowp up`/`vowp status` checks here are not implemented yet.
-
 The design uses two layers: a systemd user unit with `Restart=always` (or an equivalent process
 supervisor) and a five-minute cron check that reads `~/.vowp/heartbeat` and restarts the service when it
-is missing or older than 180 seconds. The installer that writes these files is a separate v0.1 job
-(planned), so a source build does not install them yet.
+is missing or older than 180 seconds. The repository ships
+[`scripts/install.sh`](../../scripts/README.md), which installs the binary, the unit and the cron check;
+a source build does not install them until you run it.
 
-Until then, run `vowp up --foreground` under your own process supervisor, or keep a terminal open with
-`vowp up` and check `vowp status --check` from cron. The watchdog itself never decides job state; it only
-restarts the supervisor, which then reconciles.
+Alternatively, run `vowp up --foreground` under your own process supervisor, or keep a terminal open
+with `vowp up` and check `vowp status --check` from cron. The watchdog itself never decides job state; it
+only restarts the supervisor, which then reconciles.
 
 ## Upgrade the binary
-
-**Planned section:** the `vowp down` and `vowp up` steps here are not implemented yet; `vowp doctor`
-is current.
 
 1. `vowp down`.
 2. Build or install the new binary over the old one.
@@ -154,10 +138,7 @@ binary is safe only if the old binary understands the schema, so restore the bac
 
 ## Costs
 
-**Planned section:** the cost commands here are not implemented yet.
-
 ```sh
-# (planned)
 vowp cost
 vowp cost --by provider --since 7d
 vowp cost --by job --job n04-graph
@@ -168,8 +149,6 @@ Rows show runs, USD, tokens, cache reads and the source (`receipt`, `price-table
 harness receipt when available; otherwise a labelled price-table estimate, otherwise unknown.
 
 ## Routine checks
-
-**Planned section:** the commands below are not implemented yet.
 
 Once a day:
 

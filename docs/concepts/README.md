@@ -1,8 +1,7 @@
 # Concepts
 
-These pages explain how VOWP is put together and why. They describe the v0.1 design that the
-implementation is being built from. Implemented commands are described as current; commands that have
-not landed yet are marked *(planned)*. The binding specification is in
+These pages explain how VOWP is put together and why. They describe the v0.1 design and the
+implementation on `main`; every command shown is implemented. The binding specification is in
 [`docs/design/`](../design/README.md).
 
 | Page | Read it for |

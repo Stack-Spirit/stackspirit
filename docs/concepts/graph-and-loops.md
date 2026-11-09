@@ -4,8 +4,8 @@ The graph is the plan; the loops are what keep it moving. A job is a node in the
 does it, and a gate is how the result is checked. The supervisor is a deterministic program that walks
 the graph every tick, starts work, records evidence and moves states. Models are asked for judgment only.
 
-> **Status: mixed.** The graph engine and the `vowp job`/`vowp graph` commands are current. Supervisor
-> commands such as `vowp up` and `vowp status` are still *(planned)*.
+> **Status: current.** The graph engine and the `vowp job`/`vowp graph` commands are implemented; the
+> supervisor commands such as `vowp up` and `vowp status` that drive the loops are implemented too.
 
 ## Jobs
 
@@ -92,8 +92,8 @@ The transition table, guards and counter effects are in
 `failed → ready`, `parked → ready` and `stalled → running`; anything else is a conflict. `vowp job park`
 and `vowp job cancel` stop a run and keep the evidence. Keeper commands (`nudge`, `restart`, `replan`,
 `fail`) enqueue a request row that the next tick applies; the CLI never reaches into a running process.
-These commands are implemented today; the supervisor commands (`vowp up` *(planned)*,
-`vowp status` *(planned)*) that apply keeper requests are still to come.
+These commands are implemented today, including the supervisor commands (`vowp up`,
+`vowp status`) that apply keeper requests.
 
 ## Scheduling rules
 

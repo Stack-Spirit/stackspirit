@@ -1,10 +1,12 @@
 # Install
 
-VOWP is a single Rust binary. In v0.1 you build it from source; prebuilt release archives, an
-`install.sh`, Homebrew and an npm wrapper are planned for the first public release.
+VOWP is a single Rust binary. In v0.1 you build it from source; prebuilt release archives, Homebrew
+and an npm wrapper are planned for the first public release. The repository also ships a per-user
+[install script](../../scripts/README.md) that installs the binary, the systemd user unit and the cron
+watchdog.
 
-> **Status: mixed.** The build commands and `vowp init`/`vowp doctor` work today. Commands that have not
-> landed yet are marked *(planned)*.
+> **Status: current.** The build commands, `vowp init`, `vowp doctor` and the install script work today;
+> every command referenced on this page is implemented.
 
 ## Prerequisites
 
@@ -63,6 +65,20 @@ vowp --version
 `cargo install` writes to `~/.cargo/bin` by default. If that directory is not on your `PATH`, add it in
 your shell profile, or pass `--root <dir>` and add `<dir>/bin` instead.
 
+## Install the systemd unit and watchdog
+
+The repository ships a per-user installer for the binary, the systemd user unit and the five-minute
+cron watchdog. It never needs root and supports a dry run:
+
+```sh
+./scripts/install.sh --dry-run
+./scripts/install.sh
+```
+
+Use `--no-service` or `--no-cron` to skip either part, and `--linger` to keep the supervisor running
+after logout. The installed paths and the uninstall command are documented in
+[`scripts/README.md`](../../scripts/README.md).
+
 ## Prepare a project repository
 
 VOWP manages an existing git repository; it does not create one for you. The project must have a
@@ -82,8 +98,11 @@ current UTC offset; `[project] remote = "origin"`, `default_branch = "main"`,
 `lock_files = ["Cargo.lock"]`, `always_allowed = ["Cargo.lock"]` and `push = true`; the four profiles
 (`planner` starts with `claude-code:claude-sonnet-5-5@medium` then
 `opencode:deepseek/deepseek-flash#max`; `keeper`, `worker` and `verifier` use the opencode executor; all
-`on_quota = "next_then_probe_back"`); `[capsule] min_interval_secs = 120` and `tail_turns = 2`; and
-`[merge] rebase = true`, `timeout_secs = 2700` and `secret_scan = true`.
+`on_quota = "next_then_probe_back"`); `[capsule] min_interval_secs = 120`, `max_input_chars = 200000`
+and `tail_turns = 2`; and `[merge] rebase = true`, `check_cmds = []`, `timeout_secs = 2700` and
+`secret_scan = true`. The list here is a key subset: the generated file also contains empty
+`[providers]`, `[harnesses]`, `[env]`, `[gates]` and `[loops]` tables, and
+`[project].check_cmds = []`.
 
 It also installs the embedded framework files from [`framework/`](../../framework/README.md)
 (`AGENTS.md`, `CLAUDE.md`, four `.claude/skills/vowp-*/SKILL.md` files, `opencode.jsonc`, and the
@@ -97,7 +116,7 @@ On a fresh repository, `--no-framework` writes only `vowp.toml` and `.gitignore`
 framework files are skipped and listed, with one exception: an existing `CLAUDE.md` keeps its content and
 gains `@AGENTS.md` when that line is missing (the file counts as written); if it already contains the
 line it is skipped. A second `init` exits 4 with `project already initialised ...; use --force`, and
-`--force` overwrites the generated files. `vowp up` *(planned)* will also ensure the loop rows on
+`--force` overwrites the generated files. `vowp up` also ensures the loop rows on
 startup, so an existing project picks up the current defaults.
 
 ## Verify the node

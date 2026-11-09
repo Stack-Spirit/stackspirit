@@ -11,12 +11,11 @@ VOWP does not fork or spoof a harness. It drives the official headless/JSON inte
 conversation in its own append-only event log, and stores no credentials. Model choices are settings in a
 profile ladder, not assumptions baked into a job.
 
-> **Status: mixed (pre-release).** VOWP v0.1 is under construction in owner-scoped jobs. The complete
-> design lives in [`docs/design/`](docs/design/README.md); the implementation is landing crate by crate.
-> `vowp init`, `vowp doctor`, the `vowp job` commands, `vowp graph`, `vowp promote`, `vowp rollback`,
-> `vowp releases` and `vowp --version` work today. Commands that have not landed yet are marked
-> *(planned)*. The build-from-source commands below work today. See the
-> [job map](docs/design/job-map.md) for what lands when.
+> **Status: current (pre-release).** The v0.1 CLI is complete: every command in the user
+> documentation is implemented. The build-from-source commands below work today. For a runnable
+> project, see the [hello-vowp example](examples/hello-vowp/README.md); for an unattended
+> per-user install with the systemd unit and watchdog, see the
+> [install scripts](scripts/README.md). The design lives in [`docs/design/`](docs/design/README.md).
 
 ## Why VOWP
 
@@ -53,7 +52,7 @@ you ──► vowp CLI ──► SQLite + session logs (~/.vowp)
               harness child processes: claude -p … / opencode run … / generic cli
 ```
 
-1. **Plan the graph.** Jobs are added with `vowp job add` (or by the planner from `vowp plan` *(planned)*).
+1. **Plan the graph.** Jobs are added with `vowp job add` (or by the planner from `vowp plan`).
    Each job has a brief, owned paths, dependencies and gates.
 2. **Dispatch.** L1 picks ready jobs by priority and ownership locks, creates a git worktree and branch
    `job/<id>`, opens a tmux window and starts the worker session.
@@ -83,19 +82,20 @@ cargo install --path crates/vowp-cli
 vowp --version
 ```
 
-The first project flow starts with commands that work today:
+The first project flow starts with:
 
 ```sh
 vowp init --name hello-vowp
 vowp doctor
 
-# (planned) — the supervisor commands land with n09b
+# start the supervisor and check it
 vowp up
 vowp status
 ```
 
-See the [quickstart guide](docs/guides/quickstart.md) for the full walkthrough, and the
-[install guide](docs/guides/install.md) for harness and node prerequisites.
+See the [quickstart guide](docs/guides/quickstart.md) for the full walkthrough, the
+[hello-vowp example](examples/hello-vowp/README.md) for a runnable three-job graph with fake adapters,
+and the [install guide](docs/guides/install.md) for harness, node and script prerequisites.
 
 ## Documentation
 

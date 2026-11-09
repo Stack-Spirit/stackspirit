@@ -216,7 +216,7 @@ pub fn capsule(&self, id: &CapsuleId) -> Result<Option<Capsule>, StoreError>;
 pub fn latest_capsule(&self, session: &SessionId) -> Result<Option<Capsule>, StoreError>;  // highest at_seq, then created_at
 pub fn list_capsules(&self, session: &SessionId) -> Result<Vec<Capsule>, StoreError>;      // newest first
 pub fn insert_switch(&self, s: &Switch) -> Result<(), StoreError>;
-pub fn finish_switch(&self, id: &SwitchId, state: SwitchState, error: Option<&str>) -> Result<(), StoreError>;   // state Completed|Aborted only
+pub fn finish_switch(&self, id: &SwitchId, state: SwitchState, error: Option<&str>, capsule_id: Option<&CapsuleId>) -> Result<(), StoreError>;   // state Completed|Aborted only; capsule_id links the captured capsule (COALESCE keeps an existing link)
 pub fn switch(&self, id: &SwitchId) -> Result<Option<Switch>, StoreError>;
 pub fn list_switches(&self, session: &SessionId) -> Result<Vec<Switch>, StoreError>;       // oldest first
 pub fn open_switches(&self) -> Result<Vec<Switch>, StoreError>;                            // state = Started (crash recovery)
@@ -463,7 +463,8 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `workers_slots_ensure` | `ensure_worker_slots(node,Worker,4)` creates 1..=4 idle; shrinking to 2 removes idle 3–4 but keeps a busy slot 4 |
 | `session_index_and_natives` | `upsert_session`, `index_event` bumps `last_seq`, `native_for` returns most recent, duplicate `(session,harness,native)` is a no-op |
 | `capsule_insert_sets_last_capsule` | `insert_capsule` updates `sessions.last_capsule_id`; `latest_capsule` picks highest `at_seq` |
-| `switch_lifecycle_and_open_switches` | `insert_switch` (Started) shows in `open_switches`; `finish_switch(Completed)` removes it; `finish_switch(Started)` → `InvalidInput` |
+| `switch_lifecycle_and_open_switches` | `insert_switch` (Started) shows in `open_switches`; `finish_switch(..., Completed, None, None)` removes it; `finish_switch(..., Started, ...)` → `InvalidInput`; a missing id → `NotFound` |
+| `finish_switch_links_capsule` | `finish_switch(..., Completed, None, Some(capsule))` links the capsule and sets `ended_at`; `finish_switch(..., Aborted, Some(error), None)` records the error and leaves an unlinked row unlinked |
 | `due_schedules_selects_active_due_only` | paused, future and due rows: only active-and-due returned, ordered by `next_run_at` |
 | `loop_fail_streak` | `record_loop_run(ok=false)` twice → streak 2; `ok=true` resets to 0 |
 | `ledger_is_append_only` | `UPDATE ledger` and `DELETE FROM ledger` via raw SQL both fail with the trigger message; `append_ledger` returns increasing ids |

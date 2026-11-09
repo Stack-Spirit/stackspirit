@@ -1,13 +1,13 @@
 # Troubleshooting
 
-Start with the evidence the supervisor already records: `vowp status` *(planned)*, `vowp doctor`,
+Start with the evidence the supervisor already records: `vowp status`, `vowp doctor`,
 `vowp job show`, the session log and `~/.vowp/logs/supervisor.log`. Most "stuck" jobs are waiting on a
 dependency, a slot, an ownership lock, a provider limit or a human answer, and the state plus the note
 says which.
 
-> **Status: mixed.** `vowp init`, `vowp doctor`, the `vowp job` commands and `vowp graph` are current.
-> Supervisor, session, inbox, schedule, cost, backup and reindex commands are marked *(planned)* until
-> n09b/n09c merge.
+> **Status: current.** The v0.1 CLI is complete: `vowp init`, `vowp doctor`, the `vowp job` commands,
+> `vowp graph`, the supervisor, session, inbox, schedule, cost, backup and reindex commands are all
+> implemented.
 
 ## First: exit codes
 
@@ -28,11 +28,9 @@ the same.
 
 ## Install and build
 
-**`vowp: unknown command` after a build.** Check the spelling against `vowp --help`. A command that is
-defined but has not landed yet returns `not implemented: <command>` once a project context exists. Before
-`vowp init`, commands that need the project home can first exit 3 with the error "vowp home is not
-initialised"; run `vowp init` to reach the implementation error. See the [job map](design/job-map.md) for
-what is still to come.
+**`vowp: unknown command` after a build.** Check the spelling against `vowp --help`. Before `vowp init`,
+commands that need the project home exit 3 with "vowp home is not initialised"; run `vowp init` first.
+The v0.1 CLI has no command stubs left.
 
 **The wrong binary runs.** Two installs on `PATH`:
 
@@ -62,8 +60,6 @@ default. Add that directory to `PATH`, or install with `--root <dir>` and add `<
 
 ## `vowp doctor`
 
-**Planned section:** the `vowp reindex` and `vowp up` references here are not implemented yet.
-
 `doctor` exits 0 only when no check is a `fail`. A `warn` is informational.
 
 | Check | Remedy |
@@ -71,18 +67,16 @@ default. Add that directory to `PATH`, or install with `--root <dir>` and add `<
 | `home` | Make `~/.vowp` writable, or pass the same `--home` to every command. |
 | `db` | If it reports a schema version newer than the binary, upgrade the binary; do not delete the database. If it reports corruption, stop the supervisor, restore a backup, and use `vowp reindex` only for session indexes. |
 | `git` | Install git and ensure it is on `PATH` for non-interactive shells. |
-| `tmux` (warn) | Install tmux, or accept `vowp up --no-tmux` *(planned)* and no live windows. |
+| `tmux` (warn) | Install tmux, or accept `vowp up --no-tmux` and no live windows. |
 | `config` | The error names the key path. Unknown keys are errors (`deny_unknown_fields`); remove or correct the key. |
 | `schedules` | A `[[schedules]]` entry did not parse; the check names the schedule and the error. |
 | `harness:claude-code` / `harness:opencode` | Install the harness or fix its binary path in `[harnesses.<name>].binary`. A missing harness is a `fail` because a profile that cannot resolve would fail later. |
 | `providers` | The check prints each variable **name** with `present` or `absent`; it never prints the value and never calls the network. Set it in the shell that starts the supervisor. |
-| `systemd` / `watchdog` (warn) | The watchdog installer is a separate v0.1 job; a source build does not install a unit yet. |
-| `supervisor` (warn) | Not running. Start it with `vowp up` *(planned)* if you expect one. |
+| `systemd` / `watchdog` (warn) | Run [`scripts/install.sh`](../scripts/README.md) to install the user unit and cron check; a source build does not install them. |
+| `supervisor` (warn) | Not running. Start it with `vowp up` if you expect one. |
 | `disk` | Free at least 1 GB; runs and blobs grow with tool output. |
 
 ## Supervisor
-
-**Planned section:** the supervisor commands here are not implemented yet.
 
 **`vowp up` exits 4.** A supervisor is already running for this project home. `vowp status` shows the
 pid. Do not start a second one; use `vowp down` or `vowp status --check` to decide whether it is alive.
@@ -106,9 +100,6 @@ a loop problem without leaving a supervisor running.
 
 Use `vowp job show <id> --runs --gates` first. The job's state, `parked_reason`, `note`, last run
 outcome and gate evidence usually identify the blocker.
-
-**Planned section:** the `vowp status`, `vowp session` and `vowp inbox` references below are not
-implemented yet; the `vowp job` commands are current.
 
 | State / symptom | Likely cause | What to do |
 |---|---|---|
@@ -154,8 +145,6 @@ only checks a file exists is rejected by validation for a reason.
 
 ## Providers and limits
 
-**Planned section:** the `vowp status` and `vowp inbox` checks below are not implemented yet.
-
 | Limit | Meaning | Action |
 |---|---|---|
 | `quota` | A subscription window is exhausted. | VOWP records the reset (+2 min), switches to the next rung with a capsule and probes back. If no rung remains, the job parks with `ProviderBlocked`; answer after the reset. |
@@ -169,8 +158,6 @@ Check `vowp status` for active limits and reset times, and `vowp inbox ls` for t
 take. An inbox answer unparks only the jobs waiting on that item.
 
 ## Sessions
-
-**Planned section:** the `vowp session` commands here are not implemented yet; `vowp doctor` is current.
 
 **`session switch` exits 6.** The target provider is limited. Pick another rung, or wait for the reset.
 
@@ -197,8 +184,6 @@ permissions. The importer never writes to Claude's files.
 
 ## Schedules
 
-**Planned section:** the `vowp schedule` and `vowp loops` commands here are not implemented yet.
-
 - A bad cron or an interval under 60 seconds exits 2. v0.1 accepts exactly five whitespace-separated
   cron fields; six-field cron with seconds is rejected.
 - `tz` is `UTC` or a fixed offset such as `+02:00`; IANA names are v0.2.
@@ -211,14 +196,12 @@ permissions. The importer never writes to Claude's files.
 
 ## Costs
 
-`vowp cost` *(planned)* shows `receipt`, `price-table`, `unknown` or `mixed` per row. An unknown cost is
+`vowp cost` shows `receipt`, `price-table`, `unknown` or `mixed` per row. An unknown cost is
 `?` and is counted separately; it is never assumed free. If every row is unknown, the harness is not reporting
 usage and no `[providers.<p>.prices]` entry exists for the model. Add a price table only for models you
 know; otherwise leave it unknown.
 
 ## Database, backup and reindex
-
-**Planned section:** the `vowp reindex` and `vowp backup` commands here are not implemented yet.
 
 - **Schema too new.** The database was written by a newer binary. Upgrade the binary; if you must go
   back, restore a pre-upgrade backup. VOWP refuses to guess at a newer schema.
@@ -230,8 +213,6 @@ know; otherwise leave it unknown.
   not copy session directories; back up `~/.vowp` separately if you need the logs.
 
 ## tmux
-
-**Planned section:** the `vowp up`, `vowp attach` and `vowp down` commands here are not implemented yet.
 
 | Symptom | Fix |
 |---|---|
@@ -255,11 +236,8 @@ know; otherwise leave it unknown.
 When you need help, collect:
 
 ```sh
-# (planned)
 vowp status --json
 vowp inbox ls
-
-# current
 vowp doctor --json
 vowp job show <id> --runs --gates
 vowp graph

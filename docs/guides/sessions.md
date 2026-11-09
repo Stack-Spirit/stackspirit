@@ -4,13 +4,12 @@ A session is a conversation with a stable VOWP id. The harness underneath can ch
 Claude Code, hit a limit, switch to DeepSeek on a VPS, and come back when the quota resets. The log and
 the lineage stay one session.
 
-> **Status: planned.** The session store and adapters are current, but the `vowp session` and `vowp chat`
-> commands are *(planned)* until n09c merges.
+> **Status: current.** The session store, adapters, `vowp session` commands and the `vowp chat` alias
+> are implemented.
 
 ## List and inspect
 
 ```sh
-# (planned)
 vowp session ls
 vowp session show <id>
 vowp session show <id> --events 20
@@ -31,7 +30,6 @@ and lists the candidates. Jobs need the full slug.
 ## Create and chat
 
 ```sh
-# (planned)
 vowp session new --title "Refactor the parser" --executor opencode:deepseek/deepseek-flash#max
 vowp chat <id>
 vowp session chat <id>
@@ -57,7 +55,6 @@ be switched automatically exits 6 with the hint to `/switch`.
 ## Switch
 
 ```sh
-# (planned)
 vowp session switch <id> --to opencode:deepseek/deepseek-flash#max
 vowp session switch <id> --to claude-code:claude-sonnet-5-5@medium --reason user
 vowp session switch <id> --to <executor> --node vps
@@ -85,7 +82,6 @@ readable.
 ## Capsules
 
 ```sh
-# (planned)
 vowp session capsule <id>
 vowp session capsule <id> --print
 ```
@@ -102,7 +98,6 @@ capsule is kept and an `error` event is appended; the session does not silently 
 ## Export and import
 
 ```sh
-# (planned)
 vowp session export <id>
 vowp session export <id> --out planner.vowp-bundle.json --tail 50
 vowp session import planner.vowp-bundle.json
@@ -129,7 +124,6 @@ Common rejections:
 ## Watch an interactive Claude Code session
 
 ```sh
-# (planned)
 vowp session watch --once
 vowp session watch --claude-dir ~/.claude
 ```

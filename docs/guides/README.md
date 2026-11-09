@@ -1,10 +1,12 @@
 # Guides
 
-These guides walk through installing, running and operating VOWP. They describe the intended v0.1
-experience. `vowp init`, `vowp doctor`, the `vowp job` commands, `vowp graph` and the promotion commands
-work today; commands that have not landed yet are marked *(planned)*.
+These guides walk through installing, running and operating VOWP. They describe the v0.1 experience on
+`main`: every command shown is implemented, including `vowp init`, `vowp doctor`, the `vowp job`
+commands, `vowp graph`, the supervisor commands and promotion.
 
-> **Status: mixed.** The build-from-source commands work today as well.
+> **Status: current.** The build-from-source commands and the per-user install script work today. For a
+> runnable three-job graph with fake adapters, see the
+> [hello-vowp example](../../examples/hello-vowp/README.md).
 
 | Guide | Start here if you want to… |
 |---|---|

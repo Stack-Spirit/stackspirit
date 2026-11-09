@@ -4,8 +4,8 @@ A VOWP project is homed on one node. That node runs the supervisor, owns the dat
 worktrees, and decides job state. Other nodes are reachable over SSH; in v0.1 there is no cross-node
 sync, replication or shared database.
 
-> **Status: mixed.** `vowp init`, `vowp doctor` and the `--node` flag are current. Node registration
-> (`vowp node ...`) and cross-node session commands are *(planned)* until n09c merges.
+> **Status: current.** `vowp init`, `vowp doctor`, the `--node` flag, node registration
+> (`vowp node add/ls/rm`) and cross-node session commands are implemented.
 
 ## What a node is
 
@@ -36,7 +36,6 @@ sides together.
 ## Register a node
 
 ```sh
-# (planned)
 vowp node add vps vps.example.com
 vowp node ls
 vowp node rm vps
@@ -52,10 +51,8 @@ The local node is registered by `vowp init`; you normally do not add it by hand.
 ## Run a command remotely
 
 ```sh
-# --node is current; job ls is implemented
+# --node is current; these run on the registered vps
 vowp --node vps job ls
-
-# (planned) — status and session commands
 vowp --node vps status
 vowp --node vps session ls
 vowp --node vps session tail <id> --follow
@@ -72,7 +69,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <target> vowp <args…>
 255 from SSH becomes exit 7 (`remote`), including a missing remote `vowp`. If the target is the local
 node, the flag is ignored and the command runs in-process.
 
-**Planned section:** the cross-node session commands below are not implemented yet.
+The cross-node session commands keep the bundle as the unit of movement:
 
 - `vowp session import <file> --node vps` streams the bundle over SSH stdin; the remote never needs the
   file path.
@@ -92,22 +89,27 @@ not change node during failover in v0.1.
 
 ## Example: laptop and VPS
 
-**Planned section:** node registration, supervisor and attach commands in this example are not
-implemented yet.
+Replace `vps.example.com` with the SSH target you prepared above. `vowp node add` records the target
+and probes it, so a successful probe is the quickest sign that the `--node vps` commands will work.
 
 ```sh
 # on the laptop, where the project is homed
 vowp init --name my-project
 vowp doctor
 
-# (planned) — registration and supervisor commands
 vowp node add vps vps.example.com
+vowp node ls
 vowp up
 
-# watch the local project (planned)
+# watch the local project and run a command on the VPS
 vowp status
-vowp attach n04-graph
+vowp attach
+vowp --node vps job ls
 ```
+
+If `node add` warns that the probe failed, fix SSH or the remote `PATH` first (or use `--strict` to
+make the failure an error); the node row is still written, but `--node` will fail until SSH to that
+target works.
 
 If the project itself is homed on the VPS, run `vowp up` there and use `vowp --node vps status` from the
 laptop. The laptop still needs its own initialized VOWP home with the `vps` node registered — for example

@@ -4,8 +4,8 @@ A VOWP session is one conversation with a stable id that outlives the harness pr
 Code, opencode, a generic CLI tool or a future adapter can each take a turn; the canonical log records
 what the user, the model and the tools did, and a capsule carries the context across the handoff.
 
-> **Status: planned.** The store, adapters and session core are current, but the `vowp session` and
-> `vowp chat` commands are *(planned)* until n09c merges.
+> **Status: current.** The store, adapters, session core and the `vowp session`/`vowp chat` commands
+> are implemented.
 
 ## Why a universal session
 
@@ -145,7 +145,7 @@ another executor. The same protocol runs automatically for failover and context 
 | 1. Freeze | Refuse if already switching; reject new input. |
 | 2. Plan | Insert a `switches` row (`started`) with source, target, reason and last seq. |
 | 3. Probe | `probe()` the target adapter; for a remote node, run `vowp --node <n> doctor --json`. Failure aborts. |
-| 4. Drain | Wait up to 5 seconds for the current turn, then interrupt and stop. |
+| 4. Drain | Wait up to 5 seconds for the current turn, then interrupt and stop. The interrupt, stop, runner and log-release waits are bounded too; an expired drain aborts the switch and restores the source. |
 | 5. Capsule | Write a switch capsule (never debounced). Use the previous one if repair fails. |
 | 6. Detach | Stop the source and append `session.executor{detach}`. |
 | 7. Start | Attach the target; deliver the seed with the next turn or start it idle. |
@@ -182,7 +182,6 @@ second gets a conflict and retries on the next tick.
 Cross-node movement in v0.1 is a file, not sync:
 
 ```sh
-# (planned)
 vowp session export <id> --out planner.vowp-bundle.json
 vowp session import planner.vowp-bundle.json --node vps
 ```
@@ -208,12 +207,12 @@ origin session is never modified, and importing the same bundle twice creates tw
 
 The windows are **views, never control channels**. VOWP tags its windows and only ever kills tagged
 windows. It never sends keystrokes to a harness TUI, never respawns a pane and never reads screen text
-for decisions — logs are authoritative. `vowp attach [job]` attaches to the tmux session; without tmux
-it falls back to `vowp session tail --follow`.
+for decisions — logs are authoritative. `vowp attach [job]` attaches to the tmux session; without tmux,
+`vowp attach <job>` falls back to `vowp session tail --follow`.
 
 ## Watching an interactive Claude Code session
 
-The optional `vowp session watch` importer (nice-to-have in v0.1) records an interactive Claude Code
+The optional `vowp session watch` importer (included in v0.1) records an interactive Claude Code
 session into the canonical store without running it. It reads the transcript JSONL under
 `$CLAUDE_CONFIG_DIR` or `~/.claude/projects/…` with read-only opens, maps user/assistant/tool/thinking
 lines to events, stores a byte offset for incremental polling and never writes to Claude's files. A
