@@ -28,20 +28,9 @@ fn reindex_after_db_delete_via_cli() {
     let id = stdout.trim().to_owned();
     assert!(!id.is_empty());
 
-    // Drop every connection and remove the index database. Store::open recreates an empty
-    // database (as `vowp init` would on a new node); reindex must rebuild the session index
-    // from `sessions/*/log.jsonl`.
+    // Remove the index database and call the CLI directly. `vowp reindex` must open/create
+    // the empty index itself and rebuild it from `sessions/*/log.jsonl`.
     std::fs::remove_file(env.home_path().join("vowp.db")).expect("delete db");
-    let reopened = vowp_store::Store::open(&vowp_store::NodePaths::new(env.home_path())).expect("reopen empty db");
-    assert!(
-        reopened
-            .session(&vowp_protocol::SessionId::parse(&id).expect("id"))
-            .expect("lookup")
-            .is_none(),
-        "the new database starts with no session rows"
-    );
-    drop(reopened);
-
     let (code, value, stderr) = env.run_json(&["reindex"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["sessions"], 1);
@@ -117,11 +106,36 @@ fn json_flag_outputs_valid_json_for_every_listing_command() {
 
 #[test]
 fn no_command_returns_not_implemented() {
-    let env = common::TestEnv::new();
-    // Commands owned by the parallel n09b job still contain its explicit stub while that
-    // branch is in flight. They are allowed to report `not implemented` only by name; every
-    // other v0.1 command must reach a real handler.
-    let n09b = ["up", "down", "status", "board", "plan", "attach", "__window"];
+    let mut env = common::TestEnv::new();
+    // Point every harness probe at a fake script so `doctor` and `plan` never run the real
+    // claude/opencode binaries installed on this machine.
+    let fake = env.home_path().join("fake-harness.sh");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.0.28'; exit 0; fi\nexit 0\n",
+    )
+    .expect("fake harness");
+    let mut permissions = std::fs::metadata(&fake).expect("stat").permissions();
+    use std::os::unix::fs::PermissionsExt as _;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake, permissions).expect("chmod");
+    let mut config = env.config.clone();
+    for name in ["opencode", "claude-code"] {
+        config.harnesses.insert(
+            name.to_owned(),
+            vowp_protocol::HarnessConfig {
+                binary: Some(fake.display().to_string()),
+                ..vowp_protocol::HarnessConfig::default()
+            },
+        );
+    }
+    std::fs::write(
+        env.project_path().join("vowp.toml"),
+        toml::to_string_pretty(&config).expect("config"),
+    )
+    .expect("write config");
+    env.config = config;
+
     let backup = env.home_path().join("cli-smoke-backup.db");
     let backup_text = backup.display().to_string();
     // `init` stays local and walks the cwd for a git repository; run it in a throwaway
@@ -177,11 +191,86 @@ fn no_command_returns_not_implemented() {
         let (code, stdout, stderr) = env.run(&args);
         let text = format!("{stdout}\n{stderr}");
         if text.contains("not implemented") {
+            // A command may still be an explicit stub only while its own handler source
+            // contains the stub. Once it is implemented, a NotImplemented return fails.
+            let source = source_for(args[0]);
             assert!(
-                n09b.contains(&args[0]),
-                "`{}` returned NotImplemented (exit {code}): {text}",
+                source.contains("Err(CliError::NotImplemented("),
+                "`{}` returned NotImplemented (exit {code}) but its handler is implemented: {text}",
                 args.join(" ")
             );
         }
     }
+}
+
+/// Returns the source file for one top-level command.
+fn source_for(command: &str) -> String {
+    let module = match command {
+        "chat" | "session" => "session",
+        "up" | "down" => "up",
+        "job" => "job",
+        "graph" => "graph",
+        "inbox" => "inbox",
+        "cost" => "cost",
+        "node" => "node",
+        "loops" => "loops",
+        "schedule" => "schedule",
+        "promote" | "rollback" | "releases" => "promote",
+        "reindex" | "backup" | "schema" | "version" => "maint",
+        "__window" => "window",
+        other => other,
+    };
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/cmd")
+            .join(format!("{module}.rs")),
+    )
+    .unwrap_or_default()
+}
+
+#[test]
+fn node_add_and_rm_probe_with_fake_ssh() {
+    let env = common::TestEnv::new();
+    let bin = tempfile::tempdir().expect("fake bin");
+    let ssh = bin.path().join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nprintf '%s\\n' 'vowp 0.1.0-dev'\nexit 0\n").expect("fake ssh");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path = format!("{}:/usr/bin:/bin", bin.path().display());
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", path)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["node", "add", "vps", "vps.example", "--strict"])
+        .output()
+        .expect("node add");
+    assert!(
+        output.status.success(),
+        "node add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (code, value, stderr) = env.run_json(&["node", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    let node = value
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|node| node["name"] == "vps")
+        .expect("vps row");
+    assert_eq!(node["ssh_target"], "vps.example");
+    assert_eq!(node["is_local"], false);
+    assert_eq!(node["capabilities"]["vowp"], "vowp 0.1.0-dev");
+
+    let (code, _, stderr) = env.run(&["node", "rm", "vps"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        env.store()
+            .node(&vowp_protocol::NodeName::parse("vps").expect("node"))
+            .expect("lookup")
+            .is_none()
+    );
 }

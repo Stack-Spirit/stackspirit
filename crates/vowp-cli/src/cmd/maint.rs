@@ -4,6 +4,8 @@
 //! SQLite's online backup API, schema prints the exported wire schemas and version prints the
 //! binary, git and schema versions.
 
+use std::process::Command;
+
 use serde::Serialize;
 use vowp_store::{NodePaths, SessionFilter, Store};
 
@@ -132,9 +134,7 @@ fn schema(ctx: &Ctx, io: &mut dyn IoStreams, args: &SchemaArgs) -> Result<i32, C
 fn version(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     let store = ctx.store()?;
     let schema = store.schema_version()?;
-    let git = option_env!("VOWP_GIT_SHA")
-        .or(option_env!("GIT_SHA"))
-        .unwrap_or("unknown");
+    let git = git_sha();
     if ctx.json() {
         print_json(
             io,
@@ -148,6 +148,17 @@ fn version(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
         writeln!(io.out(), "vowp {} ({git}) schema {schema}", env!("CARGO_PKG_VERSION"))?;
     }
     Ok(0)
+}
+
+/// Returns the git sha compiled in by the release build, else the checkout's short HEAD.
+fn git_sha() -> String {
+    if let Some(sha) = option_env!("VOWP_GIT_SHA").or(option_env!("GIT_SHA")) {
+        return sha.to_owned();
+    }
+    match Command::new("git").args(["rev-parse", "--short", "HEAD"]).output() {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        _ => "unknown".to_owned(),
+    }
 }
 
 /// Formats a timestamp for a backup file name.

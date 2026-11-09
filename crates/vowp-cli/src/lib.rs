@@ -179,6 +179,19 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     if let Command::Init(args) = &command {
         return cmd::init::run(&global, io, args);
     }
+    // `reindex` is the documented recovery path when the index database is gone: open (or
+    // create) it before `Ctx::build` applies its "run vowp init" guard to every other command.
+    if matches!(command, Command::Reindex(_)) {
+        let paths = ctx::node_paths(&global)?;
+        if !paths.db_path().is_file() {
+            vowp_store::Store::open(&paths)?;
+        }
+    }
+    // Cross-node session export/import/switch stream a bundle instead of forwarding a local
+    // id or path to the remote node (cli.md §7.5–§7.6).
+    if let Some(code) = cmd::session::maybe_run_remote(&global, io, &command)? {
+        return Ok(code);
+    }
     if let Some(code) = remote::maybe_run(&global, &command, original_args)? {
         return Ok(code);
     }

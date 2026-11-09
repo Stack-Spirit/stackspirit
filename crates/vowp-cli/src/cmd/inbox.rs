@@ -211,6 +211,9 @@ fn dismiss(ctx: &Ctx, io: &mut dyn IoStreams, args: &InboxDismissArgs) -> Result
 }
 
 /// Parks a job with the given reason through the graph transition table.
+///
+/// `inbox ask` is one of the short CLI mutations D2 lets write directly under WAL; running
+/// the same graph transition keeps the state machine authoritative.
 fn park_job(store: &Store, job_id: &JobId, reason: ParkedReason) -> Result<(), CliError> {
     let job = store.require_job(job_id)?;
     if job.state == vowp_protocol::JobState::Parked {

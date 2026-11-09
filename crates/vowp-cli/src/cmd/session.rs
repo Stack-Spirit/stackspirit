@@ -4,22 +4,25 @@
 //! append-only log; the rows here are the store index. Ids are accepted by unique prefix of
 //! at least six characters.
 
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Duration;
 
 use time::{OffsetDateTime, macros::format_description};
 use vowp_core::session::bundle;
 use vowp_core::session::service::SessionService;
 use vowp_protocol::{
-    AttachAction, CancelToken, CapsuleTrigger, EventBody, EventEnvelope, Executor, ExecutorRef, NewSession, RunOutcome,
-    RunPurpose, RunRole, Session, SessionId, SessionRole, SessionState, SwitchReason, Timestamp, TurnRequest,
+    Actor, AttachAction, CancelToken, CapsuleTrigger, EventBody, EventEnvelope, EventSource, Executor, ExecutorRef,
+    HarnessKind, NewSession, NodeName, RunOutcome, RunPurpose, RunRole, Session, SessionId, SessionRole, SessionState,
+    Switch, SwitchEvent, SwitchId, SwitchReason, SwitchState, Timestamp, TurnRequest,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{SessionFilter, Store};
 
 use crate::cli::{
-    ChatArgs, SessionCapsuleArgs, SessionCommand, SessionExportArgs, SessionImportArgs, SessionLsArgs, SessionNewArgs,
-    SessionShowArgs, SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
+    ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionExportArgs, SessionImportArgs, SessionLsArgs,
+    SessionNewArgs, SessionShowArgs, SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
 };
 use crate::output::{Table, local_time_at, print_json};
 use crate::{CliError, Ctx, IoStreams};
@@ -37,6 +40,393 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SessionCommand) -> Resul
         SessionCommand::Import(args) => import(ctx, io, args),
         SessionCommand::Watch(args) => watch(ctx, io, args),
         SessionCommand::Tail(args) => tail(ctx, io, args),
+    }
+}
+
+/// Runs a session subcommand that targets a remote node.
+///
+/// `cli.md` §7.5–§7.6 requires export, import and switch to cross the node boundary as a
+/// `vowp-bundle-v1` document instead of forwarding an id or a local path over ssh. This
+/// function is called before the generic `--node` redirect so it can run the local half of
+/// those flows itself.
+pub fn maybe_run_remote(
+    global: &Global,
+    io: &mut dyn IoStreams,
+    command: &crate::cli::Command,
+) -> Result<Option<i32>, CliError> {
+    let crate::cli::Command::Session { command } = command else {
+        return Ok(None);
+    };
+    let node = match command {
+        SessionCommand::New(args) => args.node.as_deref().or(global.node.as_deref()),
+        SessionCommand::Switch(args) => args.node.as_deref().or(global.node.as_deref()),
+        SessionCommand::Import(args) => args.node.as_deref().or(global.node.as_deref()),
+        SessionCommand::Export(_) => global.node.as_deref(),
+        _ => None,
+    };
+    let Some(node) = node else {
+        return Ok(None);
+    };
+    let name = NodeName::parse(node)?;
+    let paths = crate::ctx::node_paths(global)?;
+    let store = Store::open(&paths)?;
+    let row = store.require_node(&name)?;
+    if row.is_local {
+        return Ok(None);
+    }
+    let target = row
+        .ssh_target
+        .as_deref()
+        .ok_or_else(|| CliError::Invalid(format!("node {name} has no ssh target")))?;
+    let ctx = Ctx::build(global, io)?;
+    let code = match command {
+        SessionCommand::New(args) => remote_new(&ctx, io, target, args)?,
+        SessionCommand::Switch(args) => remote_switch(&ctx, io, target, &name, args)?,
+        SessionCommand::Export(args) => remote_export(&ctx, io, target, args)?,
+        SessionCommand::Import(args) => remote_import(&ctx, io, target, args)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(code))
+}
+
+/// One captured remote invocation.
+struct RemoteRun {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// Runs `ssh … vowp <args>` with optional stdin and captured output.
+fn run_remote_capture(target: &str, args: &[String], stdin: Option<&str>) -> Result<RemoteRun, CliError> {
+    let argv = crate::remote::build_ssh_argv(target, args, false);
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| CliError::Remote("empty ssh argv".to_owned()))?;
+    let mut command = ProcessCommand::new(program);
+    command
+        .args(rest)
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| CliError::Remote(format!("ssh {target}: {error}")))?;
+    if let Some(text) = stdin
+        && let Some(mut pipe) = child.stdin.take()
+    {
+        pipe.write_all(text.as_bytes())?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| CliError::Remote(format!("ssh {target}: {error}")))?;
+    let code = output
+        .status
+        .code()
+        .ok_or_else(|| CliError::Remote(format!("ssh {target} terminated by a signal")))?;
+    if code == 255 {
+        return Err(CliError::Remote(format!("ssh {target} failed with exit 255")));
+    }
+    Ok(RemoteRun {
+        code,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// Returns the global arguments a remote session command needs to select the project.
+fn remote_prefix(ctx: &Ctx) -> Vec<String> {
+    vec!["--project".to_owned(), ctx.project().to_string()]
+}
+
+/// Writes a failed remote invocation's output and returns its exit code.
+fn relay_failure(io: &mut dyn IoStreams, run: &RemoteRun) -> Result<i32, CliError> {
+    if !run.stdout.is_empty() {
+        ia_write(io.out(), &run.stdout)?;
+    }
+    if !run.stderr.is_empty() {
+        ia_write(io.err(), &run.stderr)?;
+    }
+    Ok(run.code)
+}
+
+/// Writes bytes, adding no formatting of its own.
+fn ia_write(stream: &mut dyn std::io::Write, text: &str) -> Result<(), CliError> {
+    stream.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// Parses a remote `--json` session document.
+fn parse_remote_session(run: &RemoteRun) -> Result<Session, CliError> {
+    serde_json::from_str(&run.stdout)
+        .map_err(|error| CliError::Remote(format!("remote printed an invalid session document: {error}")))
+}
+
+/// Creates a session on a remote node.
+fn remote_new(ctx: &Ctx, io: &mut dyn IoStreams, target: &str, args: &SessionNewArgs) -> Result<i32, CliError> {
+    let mut remote = remote_prefix(ctx);
+    remote.extend(["--json".to_owned(), "session".to_owned(), "new".to_owned()]);
+    if let Some(title) = &args.title {
+        remote.extend(["--title".to_owned(), title.clone()]);
+    }
+    if let Some(executor) = &args.executor {
+        remote.extend(["--executor".to_owned(), executor.clone()]);
+    }
+    if let Some(cwd) = &args.cwd {
+        remote.extend(["--cwd".to_owned(), cwd.display().to_string()]);
+    }
+    let run = run_remote_capture(target, &remote, None)?;
+    if run.code != 0 {
+        return relay_failure(io, &run);
+    }
+    let session = parse_remote_session(&run)?;
+    if ctx.json() {
+        print_json(io, &session)?;
+    } else {
+        writeln!(io.out(), "{}", session.id)?;
+    }
+    Ok(0)
+}
+
+/// Exports a remote session to a local bundle file.
+fn remote_export(ctx: &Ctx, io: &mut dyn IoStreams, target: &str, args: &SessionExportArgs) -> Result<i32, CliError> {
+    let mut remote = remote_prefix(ctx);
+    remote.extend([
+        "session".to_owned(),
+        "export".to_owned(),
+        args.id.clone(),
+        "--out".to_owned(),
+        "-".to_owned(),
+    ]);
+    if let Some(tail) = args.tail {
+        remote.extend(["--tail".to_owned(), tail.to_string()]);
+    }
+    let run = run_remote_capture(target, &remote, None)?;
+    if run.code != 0 {
+        return relay_failure(io, &run);
+    }
+    let bundle = bundle::from_json(&run.stdout)?;
+    if args.out.as_deref() == Some(std::path::Path::new("-")) {
+        ia_write(io.out(), &run.stdout)?;
+        return Ok(0);
+    }
+    let path = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("{}.vowp-bundle.json", bundle.session.id)));
+    std::fs::write(&path, &run.stdout)?;
+    if ctx.json() {
+        print_json(
+            io,
+            &ExportOutput {
+                path: Some(path.display().to_string()),
+                session: bundle.session.id.clone(),
+                format: bundle::BUNDLE_FORMAT,
+                events: bundle.tail.len(),
+            },
+        )?;
+    } else {
+        writeln!(io.out(), "{}", path.display())?;
+    }
+    Ok(0)
+}
+
+/// Imports a local bundle on a remote node, streaming it over ssh stdin.
+fn remote_import(ctx: &Ctx, io: &mut dyn IoStreams, target: &str, args: &SessionImportArgs) -> Result<i32, CliError> {
+    let text = if args.file == "-" {
+        crate::read_stdin(io)?
+    } else {
+        std::fs::read_to_string(&args.file)?
+    };
+    let mut remote = remote_prefix(ctx);
+    remote.extend([
+        "--json".to_owned(),
+        "session".to_owned(),
+        "import".to_owned(),
+        "-".to_owned(),
+    ]);
+    if let Some(executor) = &args.executor {
+        remote.extend(["--executor".to_owned(), executor.clone()]);
+    }
+    if let Some(cwd) = &args.cwd {
+        remote.extend(["--cwd".to_owned(), cwd.display().to_string()]);
+    }
+    let run = run_remote_capture(target, &remote, Some(&text))?;
+    if run.code != 0 {
+        return relay_failure(io, &run);
+    }
+    let session = parse_remote_session(&run)?;
+    if ctx.json() {
+        print_json(io, &session)?;
+    } else {
+        writeln!(io.out(), "{}", session.id)?;
+    }
+    Ok(0)
+}
+
+/// Moves a session to a remote node: export locally, import remotely, switch there.
+fn remote_switch(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    target: &str,
+    remote_node: &NodeName,
+    args: &SessionSwitchArgs,
+) -> Result<i32, CliError> {
+    let store = ctx.store()?;
+    let session = resolve_session(&store, &args.id)?;
+    if session.state == SessionState::Running && !args.force {
+        return Err(CliError::Conflict(format!(
+            "session {} is running a turn; pass --force to switch",
+            session.id
+        )));
+    }
+    let executor = Executor::parse(&args.to)?;
+    let reason = parse_reason(args.reason.as_deref())?;
+    let provider = executor.provider();
+    if store
+        .active_limits(ctx.clock().now())?
+        .iter()
+        .any(|limit| limit.provider == provider)
+    {
+        return Err(CliError::Limited(format!("provider {provider} is limited")));
+    }
+
+    let bundle = bundle::export(ctx.deps(), &session.id, 20)?;
+    let text = bundle::to_json(&bundle)?;
+    let mut import = remote_prefix(ctx);
+    import.extend([
+        "--json".to_owned(),
+        "session".to_owned(),
+        "import".to_owned(),
+        "-".to_owned(),
+        "--executor".to_owned(),
+        args.to.clone(),
+    ]);
+    let imported = run_remote_capture(target, &import, Some(&text))?;
+    if imported.code != 0 {
+        return relay_failure(io, &imported);
+    }
+    let child = parse_remote_session(&imported)?;
+
+    let mut remote = remote_prefix(ctx);
+    remote.extend([
+        "--json".to_owned(),
+        "session".to_owned(),
+        "switch".to_owned(),
+        child.id.to_string(),
+        "--to".to_owned(),
+        args.to.clone(),
+        "--reason".to_owned(),
+        reason_name(reason).to_owned(),
+    ]);
+    if args.force {
+        remote.push("--force".to_owned());
+    }
+    let switched = run_remote_capture(target, &remote, None)?;
+    if switched.code != 0 {
+        return relay_failure(io, &switched);
+    }
+
+    let local = record_local_cross_switch(
+        ctx,
+        &session,
+        executor,
+        remote_node.clone(),
+        bundle.capsule.capsule_id.clone(),
+        reason,
+    )?;
+    if ctx.json() {
+        print_json(io, &local)?;
+    } else {
+        let capsule = local
+            .capsule_id
+            .as_ref()
+            .and_then(|id| capsule_path(ctx, &session.id, id))
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_owned());
+        writeln!(
+            io.out(),
+            "switched session {} to {} on {} (capsule {capsule}, remote session {})",
+            session.id,
+            local.to_executor,
+            remote_node,
+            child.id
+        )?;
+    }
+    Ok(0)
+}
+
+/// Appends the local side of a cross-node switch and inserts its completed row.
+fn record_local_cross_switch(
+    ctx: &Ctx,
+    session: &Session,
+    executor: Executor,
+    remote_node: NodeName,
+    capsule_id: vowp_protocol::CapsuleId,
+    reason: SwitchReason,
+) -> Result<Switch, CliError> {
+    let store = ctx.store()?;
+    let now = ctx.clock().now();
+    let switch_id = SwitchId::new();
+    let from = session.executor.clone().map(|executor| ExecutorRef {
+        executor,
+        node: Some(session.node.clone()),
+    });
+    let to = ExecutorRef {
+        executor: executor.clone(),
+        node: Some(remote_node.clone()),
+    };
+    let log =
+        SessionLog::open(ctx.paths(), &session.id, ctx.deps().clock.clone()).map_err(vowp_core::CoreError::from)?;
+    let appended = log
+        .append(vowp_store::session_log::NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(ctx.config().node.name.clone()),
+                native_session_id: None,
+            },
+            body: EventBody::Switch(SwitchEvent {
+                switch_id: switch_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                capsule_id: Some(capsule_id.clone()),
+                reason,
+            }),
+            raw: None,
+            ts: None,
+        })
+        .map_err(vowp_core::CoreError::from)?;
+    store.index_event(&vowp_store::session_log::index_row(&appended))?;
+    log.sync().map_err(vowp_core::CoreError::from)?;
+    let switch = Switch {
+        id: switch_id,
+        session_id: session.id.clone(),
+        from_executor: session.executor.clone(),
+        to_executor: executor,
+        from_node: Some(session.node.clone()),
+        to_node: remote_node,
+        capsule_id: Some(capsule_id),
+        reason,
+        state: SwitchState::Completed,
+        error: None,
+        started_at: now,
+        ended_at: Some(now),
+        at_seq: session.last_seq,
+    };
+    store.insert_switch(&switch)?;
+    Ok(switch)
+}
+
+/// Returns the wire name of a switch reason.
+fn reason_name(reason: SwitchReason) -> &'static str {
+    match reason {
+        SwitchReason::User => "user",
+        SwitchReason::Limit => "limit",
+        SwitchReason::Crash => "crash",
+        SwitchReason::Context => "context",
+        SwitchReason::Failover => "failover",
+        SwitchReason::ProbeBack => "probe_back",
     }
 }
 
@@ -267,9 +657,11 @@ fn new_session(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionNewArgs) -> Resu
         let store = ctx.store()?;
         let row = store.require_node(&name)?;
         if !row.is_local {
-            return Err(CliError::Remote(format!(
-                "session new on node {name} is not available in this build"
-            )));
+            let target = row
+                .ssh_target
+                .as_deref()
+                .ok_or_else(|| CliError::Invalid(format!("node {name} has no ssh target")))?;
+            return remote_new(ctx, io, target, args);
         }
     }
     let title = args.title.clone().unwrap_or_else(|| "interactive".to_owned());
@@ -439,9 +831,11 @@ fn switch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionSwitchArgs) -> Result
     if let Some(node) = &node {
         let row = store.require_node(node)?;
         if !row.is_local {
-            return Err(CliError::Remote(format!(
-                "cross-node session switch to {node} is not available in this build"
-            )));
+            let target = row
+                .ssh_target
+                .as_deref()
+                .ok_or_else(|| CliError::Invalid(format!("node {node} has no ssh target")))?;
+            return remote_switch(ctx, io, target, node, args);
         }
     }
     let reason = parse_reason(args.reason.as_deref())?;
@@ -449,16 +843,18 @@ fn switch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionSwitchArgs) -> Result
     if ctx.json() {
         print_json(io, &switch)?;
     } else {
+        let capsule = switch
+            .capsule_id
+            .as_ref()
+            .and_then(|id| capsule_path(ctx, &session.id, id))
+            .map(|path| path.display().to_string())
+            .or_else(|| switch.capsule_id.as_ref().map(ToString::to_string))
+            .unwrap_or_else(|| "none".to_owned());
         writeln!(
             io.out(),
-            "switched session {} to {} (capsule {})",
+            "switched session {} to {} (capsule {capsule})",
             session.id,
-            switch.to_executor,
-            switch
-                .capsule_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "none".to_owned())
+            switch.to_executor
         )?;
     }
     Ok(0)
@@ -563,9 +959,11 @@ fn import(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionImportArgs) -> Result
         let store = ctx.store()?;
         let row = store.require_node(&name)?;
         if !row.is_local {
-            return Err(CliError::Remote(format!(
-                "session import on node {name} is not available in this build"
-            )));
+            let target = row
+                .ssh_target
+                .as_deref()
+                .ok_or_else(|| CliError::Invalid(format!("node {name} has no ssh target")))?;
+            return remote_import(ctx, io, target, args);
         }
     }
     let text = if args.file == "-" {
@@ -873,6 +1271,16 @@ fn last_event(store: &Store, session: &Session) -> Option<vowp_protocol::EventIn
         .event_rows(&session.id, session.last_seq.saturating_sub(1), 1)
         .ok()
         .and_then(|mut rows| rows.pop())
+}
+
+/// Returns the on-disk capsule file matching `capsule_id`.
+fn capsule_path(ctx: &Ctx, session: &SessionId, capsule_id: &vowp_protocol::CapsuleId) -> Option<PathBuf> {
+    let files = vowp_store::session_files::list_capsule_files(ctx.paths(), session).ok()?;
+    files.into_iter().find(|path| {
+        vowp_store::session_files::read_capsule_file(path)
+            .map(|capsule| &capsule.capsule_id == capsule_id)
+            .unwrap_or(false)
+    })
 }
 
 /// Resolves a session id or unique prefix.
