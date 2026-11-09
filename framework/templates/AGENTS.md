@@ -21,7 +21,7 @@ These rules apply to every agent and every harness. A job's brief can add rules;
 - Commit in your own worktree on the job branch. Small, focused commits with a clear subject.
 - Never push. The supervisor's merge queue is the only writer of the main branch.
 - Never rewrite shared history, force-push, or delete a branch you do not own.
-- End every commit message with the trailer `AI-Assisted: <model> via vowp-night`.
+- End every commit message with the trailer `AI-Assisted: <model> via VOWP`.
 
 ## Secrets
 

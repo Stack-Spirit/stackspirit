@@ -4,8 +4,8 @@ These are the harness-neutral files that `vowp init` installs into a project so 
 Code, opencode, or another harness — follows the same job contract. They are generic: replace the example
 paths and commands with the project's own.
 
-Nothing here is embedded in the `vowp` binary yet; that is a separate CLI/job. This directory is the source
-of truth for the templates, skills, opencode agent presets and the validation script.
+`vowp init` embeds these files in the `vowp` binary and writes them into the project. This directory is
+the source of truth for the templates, skills, opencode agent presets and the validation script.
 
 ## What each file is
 
@@ -22,9 +22,9 @@ of truth for the templates, skills, opencode agent presets and the validation sc
 | `opencode/opencode.jsonc` | `<repo>/opencode.jsonc` | opencode V2 agent definitions for `planner`, `keeper`, `worker` and `verifier`, with permission presets that never ask for a keystroke. |
 | `check.sh` | not installed | Validates the templates, skills, JSONC and (when `opencode` is installed) agent loading. |
 
-`vowp init` should install the brief/report templates under `.vowp/templates/`, then copy the matching
-template to `.vowp/jobs/<job-id>/brief.md` when a job is added. A job's report is written by its worker to
-`.vowp/jobs/<job-id>/report.md`. The graph node stores those paths.
+`vowp init` installs the brief/report templates under `.vowp/templates/`. When a job is added without a
+custom brief, `vowp job add` writes the brief template body to `.vowp/jobs/<job-id>/brief.md`. A worker
+writes its report to `.vowp/jobs/<job-id>/report.md`. The graph node stores those paths.
 
 If the project already has an `AGENTS.md`, `CLAUDE.md` or `opencode.jsonc`, `vowp init` must merge or append,
 never silently overwrite it. In particular, `CLAUDE.md` may contain an existing import; keep it and add
@@ -32,7 +32,7 @@ never silently overwrite it. In particular, `CLAUDE.md` may contain an existing 
 
 ## Where each harness loads skills
 
-Checked against the current documentation on 2026-11-08 and against `opencode v2.0.28`.
+Checked against the current documentation and against `opencode v2.0.28`.
 
 | Harness | Project locations it reads | Global locations | Source |
 |---|---|---|---|
@@ -50,9 +50,8 @@ Checked against the current documentation on 2026-11-08 and against `opencode v2
   symlink to `.claude/skills` rather than committing a second copy; opencode's precedence gives the later
   source the same skill ID, and two copies can drift.
 
-The design plan's §12 mentions `.agents/skills/`. The harness documentation above is the authority: use
-`.claude/skills/` as the single installed location, and keep the source under `framework/skills/` for the
-binary to embed.
+The harness documentation above is the authority: use `.claude/skills/` as the single installed
+location, and keep the source under `framework/skills/` for the binary to embed.
 
 opencode also accepts extra local directories or HTTP catalogs via the top-level `skills` array
 (<https://opencode.ai/docs/skills/#sources>). That is optional and not used by `vowp init`.
@@ -114,8 +113,6 @@ The script checks:
 `check.sh` never calls a model. It is self-contained apart from `python3` with PyYAML, `jq` is not required,
 and the opencode step is read-only and uses a temporary directory.
 
-## Open items
-
-- Claude Code skill/import loading is verified by the orchestrator's live Claude Code check; this job does
-  not run the `claude` CLI (the brief forbids it).
-- Embedding these files in the `vowp` binary and implementing `vowp init` are CLI jobs, not this one.
+If an installed skill does not appear in a harness, check that `vowp init` wrote
+`.claude/skills/vowp-*/SKILL.md` and that the harness's own skill listing sees that directory. Claude Code
+and opencode both read project skills from `.claude/skills/`.

@@ -30,7 +30,7 @@ You own exactly one job. The brief is the contract; the graph node is the index.
 
 - Commit small and focused on the job branch. Do not amend or rewrite shared history.
 - Never push. The supervisor's merge queue is the only writer of the main branch.
-- End every commit message with `AI-Assisted: <model> via vowp-night`.
+- End every commit message with `AI-Assisted: <model> via VOWP`.
 
 ## Report
 
