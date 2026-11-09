@@ -13,6 +13,45 @@ model adapters only, and record every breakage as a fixable defect.
 - **Environment:** Linux, tmux 3.4, Python 3.12, stable Rust from `rust-toolchain.toml`;
   no network, no real `claude`/`opencode`, no real `HOME`.
 
+## Incident and prevention: the default tmux server
+
+While manually reproducing D1 I ran this command from a shell that had no private
+`TMUX_TMPDIR` and no `TMUX` variable:
+
+```sh
+tmux -L default kill-server
+```
+
+`-L default` addresses the owner's default server (`/tmp/tmux-<uid>/default`), not a
+dogfood server. It killed the owner's tmux sessions, potentially interrupting live
+night-shift panes. The command was meant to clean up a test server; there was no private
+socket in that shell. The night supervisor recreated its `vowp-night` session at 06:12:28
+(board/log plus the current job windows), and no file under `~/vowp-night` was edited by
+me. This is a hard `must_not_touch` breach; the job report records it for the owner.
+
+The committed harness and docs now make the same mistake impossible:
+
+1. `scripts/dogfood/run.sh` unsets `TMUX`/`TMUX_PANE` before any call, resolves the real
+   `tmux` binary **before** prepending the fake-harness directory to `PATH`, and asserts
+   that `command -v tmux` is the wrapper (not the real binary).
+2. The wrapper `scripts/dogfood/fake-harness/tmux` always execs
+   `"$VOWP_DOGFOOD_REAL_TMUX" -L "$VOWP_DOGFOOD_TMUX_SOCKET"` and refuses an unset or
+   `default` socket name before spawning tmux.
+3. `run.sh` gives every phase a unique `VOWP_DOGFOOD_TMUX_SOCKET` and a private
+   `TMUX_TMPDIR` under the phase directory; the cleanup trap kills only that private
+   socket. The two layers mean a missing `-L` would still land in the private
+   `TMUX_TMPDIR`, not the owner's server.
+4. Every `vowp` tmux call goes through `PATH`, so the wrapper covers the CLI's
+   `Tmux::new(None)` calls too.
+5. The D1 reproduction below exports a private `HOME` and `TMUX_TMPDIR` and unsets
+   `TMUX`, `TMUX_PANE` and `VOWP_HOME`; it never names the default socket.
+6. Rule for all repros: never run `tmux` without a private `-L`/`TMUX_TMPDIR`; `-L
+   default` is forbidden.
+
+Residual risk: the `vowp` binary itself still creates `Tmux::new(None)` and does not
+propagate `--home` to windows (D1/D6/D7). The harness wrapper is the guard until the CLI
+owns a no-default-server policy.
+
 ## What the harness does
 
 Both phases create a fresh temporary directory with a private `HOME`, `TMPDIR`, VOWP

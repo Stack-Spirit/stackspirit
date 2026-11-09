@@ -94,6 +94,12 @@ say "work directory $WORK"
 PATH="$FAKE_DIR:$PATH"
 export PATH VOWP_DOGFOOD_REAL_TMUX="$REAL_TMUX"
 
+# Every tmux call, including the ones the vowp binary makes by name, must resolve to
+# the wrapper that inserts -L. Refuse any other binary.
+TMUX_ON_PATH=$(command -v tmux 2>/dev/null || true)
+[ "$TMUX_ON_PATH" = "$FAKE_DIR/tmux" ] \
+    || fail "tmux on PATH is not the private-socket wrapper: ${TMUX_ON_PATH:-missing}"
+
 diagnostics() {
     [ -n "$P_REPO" ] && [ -d "$P_REPO" ] || return 0
     {
@@ -167,6 +173,9 @@ start_phase() {
     export TMPDIR="$phase_root/tmp"
     export TMUX_TMPDIR="$phase_root/tmux"
     export VOWP_DOGFOOD_TMUX_SOCKET="$P_SOCK"
+    case "$VOWP_DOGFOOD_TMUX_SOCKET" in
+        ""|default) fail "[$PHASE] refusing to use the default tmux server" ;;
+    esac
     export VOWP_DOGFOOD_FAKE_LOG="$phase_root/fake.log"
     mkdir -p "$HOME" "$TMPDIR" "$TMUX_TMPDIR" "$P_HOME" "$phase_root"
     say "[$PHASE] HOME=$HOME"

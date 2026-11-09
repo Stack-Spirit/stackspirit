@@ -10,10 +10,12 @@
 
 set -eu
 
-if [ -z "${VOWP_DOGFOOD_TMUX_SOCKET:-}" ]; then
-    printf '%s\n' "fake tmux: VOWP_DOGFOOD_TMUX_SOCKET is not set" >&2
-    exit 1
-fi
+case "${VOWP_DOGFOOD_TMUX_SOCKET:-}" in
+    ""|default)
+        printf '%s\n' "fake tmux: refusing to use the default tmux server" >&2
+        exit 1
+        ;;
+esac
 if [ -z "${VOWP_DOGFOOD_REAL_TMUX:-}" ]; then
     printf '%s\n' "fake tmux: VOWP_DOGFOOD_REAL_TMUX is not set" >&2
     exit 1
