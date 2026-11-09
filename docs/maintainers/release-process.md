@@ -50,8 +50,9 @@ https://github.com/syver777/vowp/releases/download/vX.Y.Z/SHA256SUMS
    `macos-15-intel` (x86_64 macOS) and `macos-15` (aarch64 macOS). The Linux
    archives are built against Ubuntu 22.04's glibc 2.35. It builds with
    `cargo build --release --locked -p vowp-cli --bin vowp --target <target>`,
-   runs `vowp --version` and compares it with the release version, checks the
-   third-party licence bundle is current, then creates the archive with
+   runs `vowp --version` and compares it with the release version. The
+   x86_64 Linux runner also checks the third-party licence bundle is current,
+   then every runner creates the archive with
    `scripts/release/package-archive.sh`, the per-archive `.sha256`, and uploads
    both as a workflow artifact. The archive contains `vowp`, `LICENSE`,
    `README.md` and `THIRD-PARTY-LICENSES.md`.

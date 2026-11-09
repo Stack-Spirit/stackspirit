@@ -6,9 +6,12 @@ bundle is generated from `cargo metadata --format-version 1 --locked` by
 The release workflow checks it is current and copies it into every archive as
 `THIRD-PARTY-LICENSES.md`.
 
-The locked dependency expressions use the allowed licence identifiers `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `Unicode-3.0`, `Zlib`. The full texts below cover every identifier allowed by
-`scripts/audit/licenses.sh`: MIT, Apache-2.0 with and without the LLVM
-exception, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0 and Zlib.
+The locked dependency expressions use the allowed licence identifiers `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `Unicode-3.0`, `Zlib`.
+
+The full texts below cover every licence identifier used by this locked
+tree, plus BSD-3-Clause and ISC from the audit's allowed set. A locked
+identifier without a reviewed text in `scripts/release/license-texts/`
+makes the generator fail instead of shipping an incomplete bundle.
 
 ## Dependency index
 
@@ -650,6 +653,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 SPDX identifier: `BSD-3-Clause`
 
+This text is included for the audit's allowed set; no crate in
+this locked tree selects it today.
+
 ```text
 Copyright (c) <year> <copyright holder>
 
@@ -682,6 +688,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### ISC License
 
 SPDX identifier: `ISC`
+
+This text is included for the audit's allowed set; no crate in
+this locked tree selects it today.
 
 ```text
 ISC License
@@ -775,9 +784,10 @@ the following restrictions:
 
 ## Copyright notices
 
-These notices are read from the licence files shipped inside each crate's
-source package. A missing notice means the package does not ship a separate
-copyright line; its repository and licence expression are recorded above.
+These are the licence-file paragraphs that carry a copyright notice,
+including notices that follow other text or wrap across lines. A missing
+notice means the package does not ship a separate copyright notice; its
+repository and licence expression are recorded above.
 
 ### `aho-corasick` 1.1.5
 
@@ -834,7 +844,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/anyhow
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `autocfg` 1.5.1
 
@@ -911,6 +921,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/chronotope/chrono
 - Licence files: LICENSE.txt
+- Rust-chrono is dual-licensed under The MIT License [1] and Apache 2.0 License [2]. Copyright (c) 2014--2026, Kang Seonghoon and contributors.
 - Copyright (c) 2014, Kang Seonghoon.
 
 ### `clap` 4.6.7
@@ -1007,15 +1018,14 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/RustCrypto/traits
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2017-2025 RustCrypto Developers
-- Copyright (c) 2017 Artyom Pavlov
+- Copyright (c) 2017-2025 RustCrypto Developers Copyright (c) 2017 Artyom Pavlov
 
 ### `dyn-clone` 1.0.20
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/dyn-clone
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `equivalent` 1.0.3
 
@@ -1050,7 +1060,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: Apache-2.0 OR MIT
 - Repository: https://github.com/smol-rs/fastrand
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `find-msvc-tools` 0.1.15
 
@@ -1078,40 +1088,35 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-lang/futures-rs
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2016 Alex Crichton
-- Copyright (c) 2017 The Tokio Authors
+- Copyright (c) 2016 Alex Crichton Copyright (c) 2017 The Tokio Authors
 
 ### `futures-task` 0.3.34
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-lang/futures-rs
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2016 Alex Crichton
-- Copyright (c) 2017 The Tokio Authors
+- Copyright (c) 2016 Alex Crichton Copyright (c) 2017 The Tokio Authors
 
 ### `futures-util` 0.3.34
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-lang/futures-rs
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2016 Alex Crichton
-- Copyright (c) 2017 The Tokio Authors
+- Copyright (c) 2016 Alex Crichton Copyright (c) 2017 The Tokio Authors
 
 ### `getrandom` 0.3.4
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/getrandom
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2018-2025 The rust-random Project Developers
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright (c) 2018-2025 The rust-random Project Developers Copyright (c) 2014 The Rust Project Developers
 
 ### `getrandom` 0.4.3
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/getrandom
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2018-2026 The rust-random Project Developers
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright (c) 2018-2026 The rust-random Project Developers Copyright (c) 2014 The Rust Project Developers
 
 ### `globset` 0.4.19
 
@@ -1139,7 +1144,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/djc/hashlink
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- This work is derived in part from the `linked-hash-map` crate, Copyright (c) 2015 The Rust Project Developers
 
 ### `heck` 0.5.0
 
@@ -1153,8 +1158,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/KokaKiwi/rust-hex
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2013-2014 The Rust Project Developers.
-- Copyright (c) 2015-2020 The rust-hex Developers
+- Copyright (c) 2013-2014 The Rust Project Developers. Copyright (c) 2015-2020 The rust-hex Developers
 
 ### `hybrid-array` 0.4.15
 
@@ -1198,7 +1202,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/itoa
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `js-sys` 0.3.107
 
@@ -1220,14 +1224,14 @@ copyright line; its repository and licence expression are recorded above.
 - Repository: https://github.com/rusqlite/rusqlite
 - Licence files: LICENSE, sqlcipher/LICENSE
 - Copyright (c) 2014 The rusqlite developers
-- Copyright (c) 2008-2020 Zetetic LLC
+- Copyright (c) 2008-2020 Zetetic LLC All rights reserved.
 
 ### `linux-raw-sys` 0.12.1
 
 - Licence: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - Repository: https://github.com/sunfishcode/linux-raw-sys
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-Apache-2.0_WITH_LLVM-exception, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `log` 0.4.35
 
@@ -1263,7 +1267,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/matklad/once_cell
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `once_cell_polyfill` 1.70.2
 
@@ -1305,7 +1309,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: Apache-2.0 OR MIT
 - Repository: https://github.com/taiki-e/pin-project-lite
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `pkg-config` 0.3.34
 
@@ -1342,7 +1346,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/proc-macro2
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `proptest` 1.11.0
 
@@ -1363,53 +1367,49 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/quote
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `r-efi` 5.3.0
 
 - Licence: MIT OR Apache-2.0 OR LGPL-2.1-or-later
 - Repository: https://github.com/r-efi/r-efi
 - Licence files: none in the crate package
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `r-efi` 6.0.0
 
 - Licence: MIT OR Apache-2.0 OR LGPL-2.1-or-later
 - Repository: https://github.com/r-efi/r-efi
 - Licence files: none in the crate package
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `rand` 0.10.3
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rand
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `rand` 0.8.8
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rand
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `rand` 0.9.5
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rand
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `rand_chacha` 0.9.0
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rand
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `rand_core` 0.10.1
 
@@ -1423,38 +1423,35 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rand
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `rand_core` 0.9.5
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rand
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `rand_xorshift` 0.4.0
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/rust-random/rngs
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2018 Developers of the Rand project
-- Copyright (c) 2014 The Rust Project Developers
+- Copyright 2018 Developers of the Rand project Copyright (c) 2014 The Rust Project Developers
 
 ### `ref-cast` 1.0.27
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/ref-cast
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `ref-cast-impl` 1.0.27
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/ref-cast
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `regex` 1.13.1
 
@@ -1482,7 +1479,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT
 - Repository: not declared
 - Licence files: none in the crate package
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `rusqlite` 0.40.2
 
@@ -1496,14 +1493,14 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - Repository: https://github.com/bytecodealliance/rustix
 - Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-Apache-2.0_WITH_LLVM-exception, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `rustversion` 1.0.23
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/rustversion
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `rusty-fork` 0.3.1
 
@@ -1517,7 +1514,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: Apache-2.0 OR BSL-1.0
 - Repository: https://github.com/dtolnay/ryu
 - Licence files: LICENSE-APACHE, LICENSE-BOOST
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `schemars` 1.2.3
 
@@ -1538,35 +1535,35 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/serde-rs/serde
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `serde_core` 1.0.229
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/serde-rs/serde
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `serde_derive` 1.0.229
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/serde-rs/serde
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `serde_derive_internals` 0.30.0
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/serde-rs/serde
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `serde_json` 1.0.154
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/serde-rs/json
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `serde_spanned` 1.1.3
 
@@ -1581,18 +1578,14 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT
 - Repository: https://github.com/acatton/serde-yaml-ng
 - Licence files: LICENSE
-- Copyright 2024 Antoine Catton
-- Copyright 2016-2024 David Tolnay
+- Copyright 2024 Antoine Catton Copyright 2016-2024 David Tolnay
 
 ### `sha2` 0.11.0
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/RustCrypto/hashes
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright (c) 2016-2026 The RustCrypto Project Developers
-- Copyright (c) 2016 Artyom Pavlov
-- Copyright (c) 2009-2013 Mozilla Foundation
-- Copyright (c) 2006-2009 Graydon Hoare
+- Copyright (c) 2016-2026 The RustCrypto Project Developers Copyright (c) 2016 Artyom Pavlov Copyright (c) 2009-2013 Mozilla Foundation Copyright (c) 2006-2009 Graydon Hoare
 
 ### `shlex` 2.0.1
 
@@ -1621,8 +1614,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/jedisct1/rust-siphash
 - Licence files: COPYING, LICENSE-APACHE, LICENSE-MIT
-- Copyright 2012-2016 The Rust Project Developers.
-- Copyright 2016-2026 Frank Denis.
+- Copyright 2012-2016 The Rust Project Developers. Copyright 2016-2026 Frank Denis.
 
 ### `slab` 0.4.12
 
@@ -1650,23 +1642,21 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT
 - Repository: https://github.com/rapidfuzz/strsim-rs
 - Licence files: LICENSE
-- Copyright (c) 2015 Danny Guo
-- Copyright (c) 2016 Titus Wormer
-- Copyright (c) 2018 Akash Kurdekar
+- Copyright (c) 2015 Danny Guo Copyright (c) 2016 Titus Wormer Copyright (c) 2018 Akash Kurdekar
 
 ### `syn` 2.0.119
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/syn
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `syn` 3.0.9
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/syn
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `tempfile` 3.27.0
 
@@ -1680,14 +1670,14 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/thiserror
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `thiserror-impl` 2.0.21
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/dtolnay/thiserror
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `time` 0.3.45
 
@@ -1762,7 +1752,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/cameron1024/unarray
 - Licence files: LICENSE-APACHE, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `unicode-ident` 1.0.27
 
@@ -1776,7 +1766,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT
 - Repository: https://github.com/dtolnay/unsafe-libyaml
 - Licence files: LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `utf8parse` 0.2.2
 
@@ -1804,7 +1794,7 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - Repository: https://github.com/bytecodealliance/wasi-rs
 - Licence files: none in the crate package
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `wasm-bindgen` 0.2.130
 
@@ -1896,21 +1886,21 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT
 - Repository: https://github.com/winnow-rs/winnow
 - Licence files: LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `winnow` 1.0.5
 
 - Licence: MIT
 - Repository: https://github.com/winnow-rs/winnow
 - Licence files: LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `wit-bindgen` 0.46.0
 
 - Licence: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - Repository: https://github.com/bytecodealliance/wit-bindgen
 - Licence files: LICENSE-APACHE, LICENSE-Apache-2.0_WITH_LLVM-exception, LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `yansi` 1.0.1
 
@@ -1918,7 +1908,7 @@ copyright line; its repository and licence expression are recorded above.
 - Repository: https://github.com/SergioBenitez/yansi
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright 2017 Sergio Benitez
-- Copyright (c) 2017 Sergio Benitez
+- The MIT License (MIT) Copyright (c) 2017 Sergio Benitez
 
 ### `zerocopy` 0.8.63
 
@@ -1941,4 +1931,4 @@ copyright line; its repository and licence expression are recorded above.
 - Licence: MIT
 - Repository: https://github.com/dtolnay/zmij
 - Licence files: LICENSE-MIT
-- Copyright: no separate copyright line in the shipped licence files
+- Copyright: no separate copyright notice in the shipped licence files

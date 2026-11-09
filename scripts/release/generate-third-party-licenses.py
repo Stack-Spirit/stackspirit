@@ -14,8 +14,9 @@ Usage:
     scripts/release/generate-third-party-licenses.py --check
 
 The default writes the repository root ``THIRD-PARTY-LICENSES.md``. ``--check``
-exits 0 when that file already matches a fresh generation and 1 when it is
-stale. It exits 2 when cargo metadata or a source package cannot be read.
+exits 0 when that file already matches a fresh generation, and 1 when it is
+stale or when a source package, licence file or unrecognised copyright notice
+cannot be handled. It exits 2 when cargo metadata cannot be read.
 
 No file outside ``THIRD-PARTY-LICENSES.md`` is written.
 """
@@ -87,16 +88,31 @@ NOTICE_PLACEHOLDERS = (
     "fullname",
 )
 NOTICE_BOILERPLATE_PREFIXES = (
-    "notice",
-    "license",
-    "owner",
-    "holders",
     "and ",
-    "or ",
+    "convention",
+    "holders",
     "in ",
+    "interest",
+    "is ",
+    "law",
+    "license",
+    "notice",
+    "or ",
+    "owner",
+    "protection",
+    "rights",
+    "shall",
+    "statement",
+    "subsisting",
+    "to ",
+    "treaty",
 )
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 ANGLE_EMAIL_RE = re.compile(r"\s*<[^<>]*@[^<>]*>")
+# A copyright notice can follow other text on the line, wrap across lines and
+# use either the word or the sign. The negative lookbehind avoids matching
+# words such as "copyrightable".
+MARKER_RE = re.compile(r"(?<![A-Za-z])(?:Copyright\b(?:\s*©)?|©)")
 
 
 def allowed_text_id(identifier: str) -> bool:
@@ -223,6 +239,52 @@ def strip_email(text: str) -> str:
     return EMAIL_RE.sub("[email omitted]", text)
 
 
+def paragraphs(text: str) -> list[str]:
+    """Return whitespace-normalised paragraphs, joining wrapped notice lines."""
+    result: list[str] = []
+    for block in re.split(r"\n\s*\n", text):
+        joined = " ".join(
+            " ".join(line.strip() for line in block.splitlines()).split()
+        )
+        if joined:
+            result.append(joined)
+    return result
+
+
+def notice_status(candidate: str) -> str:
+    """Classify text starting at a Copyright/© marker.
+
+    ``notice`` means it names a real holder (usually with a year),
+    ``boilerplate`` and ``placeholder`` are licence text or templates, and
+    ``unknown`` makes the generator fail instead of silently dropping a notice.
+    """
+    lower = candidate.lower()
+    if any(token in lower for token in NOTICE_PLACEHOLDERS):
+        return "placeholder"
+    rest = candidate.split(" ", 1)[1].strip() if " " in candidate else ""
+    rest_lower = rest.lower()
+    if rest_lower.startswith(NOTICE_BOILERPLATE_PREFIXES):
+        return "boilerplate"
+    probe = re.sub(r"^(?:\(c\)|©)\s*", "", rest, flags=re.IGNORECASE)
+    first = probe.split()[0] if probe.split() else ""
+    if len(first) > 1 and first.isupper():
+        return "boilerplate"
+    if re.search(r"\b(19|20)\d{2}\b", rest):
+        return "notice"
+    if re.match(r"^(?:\(c\)\s*|©\s*)?[A-Z]", rest):
+        return "notice"
+    return "unknown"
+
+
+def paragraph_notice_status(paragraph: str) -> list[str]:
+    markers = list(MARKER_RE.finditer(paragraph))
+    statuses: list[str] = []
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(paragraph)
+        statuses.append(notice_status(paragraph[marker.start() : end].strip()))
+    return statuses
+
+
 def copyright_notices(paths: list[Path]) -> list[str]:
     notices: list[str] = []
     for path in paths:
@@ -230,32 +292,44 @@ def copyright_notices(paths: list[Path]) -> list[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as error:
             raise SystemExit(f"cannot read licence file {path}: {error}") from error
-        for raw_line in text.splitlines():
-            line = " ".join(raw_line.split())
-            if not line or len(line) > 240:
+        for paragraph in paragraphs(text):
+            statuses = paragraph_notice_status(paragraph)
+            if "unknown" in statuses:
+                raise SystemExit(
+                    f"unrecognised copyright notice in {path}: {paragraph[:200]!r}"
+                )
+            if "notice" not in statuses:
                 continue
-            if line.startswith("COPYRIGHT"):
-                continue
-            if line.startswith("Copyright"):
-                rest = line[len("Copyright") :].strip()
-            elif line.startswith("©"):
-                rest = line[len("©") :].strip()
-            else:
-                continue
-            rest_lower = rest.lower()
-            if rest_lower.startswith(NOTICE_BOILERPLATE_PREFIXES):
-                continue
-            line_lower = line.lower()
-            if any(token in line_lower for token in NOTICE_PLACEHOLDERS):
-                continue
-            if re.search(r"\b(19|20)\d{2}\b", rest) is None and re.match(
-                r"^(?:\(c\)\s*|©\s*)?[A-Z]", rest
-            ) is None:
-                continue
-            line = strip_email(line)
-            if line not in notices:
-                notices.append(line)
+            notice = strip_email(paragraph)
+            if notice not in notices:
+                notices.append(notice)
     return notices
+
+
+def verify_notice_coverage(rows: list[dict], bundle: str) -> list[str]:
+    """Fail when a notice shipped by a crate is absent from the bundle."""
+    problems: list[str] = []
+    for row in rows:
+        for path in licence_files(row["manifest_dir"]):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as error:
+                problems.append(f"{path}: cannot read licence file: {error}")
+                continue
+            for paragraph in paragraphs(text):
+                statuses = paragraph_notice_status(paragraph)
+                if "unknown" in statuses:
+                    problems.append(
+                        f"{path}: unrecognised copyright notice: {paragraph[:160]!r}"
+                    )
+                elif "notice" in statuses:
+                    notice = strip_email(paragraph)
+                    if notice not in bundle:
+                        problems.append(
+                            f"{path}: copyright notice missing from bundle: "
+                            f"{notice[:160]!r}"
+                        )
+    return problems
 
 
 def markdown_cell(value: str) -> str:
@@ -292,9 +366,12 @@ def build_bundle(rows: list[dict]) -> str:
         "",
         "The locked dependency expressions use the allowed licence identifiers "
         + ", ".join(f"`{identifier}`" for identifier in used)
-        + ". The full texts below cover every identifier allowed by",
-        "`scripts/audit/licenses.sh`: MIT, Apache-2.0 with and without the LLVM",
-        "exception, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0 and Zlib.",
+        + ".",
+        "",
+        "The full texts below cover every licence identifier used by this locked",
+        "tree, plus BSD-3-Clause and ISC from the audit's allowed set. A locked",
+        "identifier without a reviewed text in `scripts/release/license-texts/`",
+        "makes the generator fail instead of shipping an incomplete bundle.",
         "",
         "## Dependency index",
         "",
@@ -316,6 +393,18 @@ def build_bundle(rows: list[dict]) -> str:
                 "",
                 f"SPDX identifier: `{identifier}`",
                 "",
+            ]
+        )
+        if identifier not in used:
+            lines.extend(
+                [
+                    "This text is included for the audit's allowed set; no crate in",
+                    "this locked tree selects it today.",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
                 "```text",
                 text,
                 "```",
@@ -327,9 +416,10 @@ def build_bundle(rows: list[dict]) -> str:
         [
             "## Copyright notices",
             "",
-            "These notices are read from the licence files shipped inside each crate's",
-            "source package. A missing notice means the package does not ship a separate",
-            "copyright line; its repository and licence expression are recorded above.",
+            "These are the licence-file paragraphs that carry a copyright notice,",
+            "including notices that follow other text or wrap across lines. A missing",
+            "notice means the package does not ship a separate copyright notice; its",
+            "repository and licence expression are recorded above.",
             "",
         ]
     )
@@ -356,7 +446,7 @@ def build_bundle(rows: list[dict]) -> str:
                 lines.append(f"- {notice}")
         else:
             lines.append(
-                "- Copyright: no separate copyright line in the shipped licence files"
+                "- Copyright: no separate copyright notice in the shipped licence files"
             )
         lines.append("")
 
@@ -375,6 +465,15 @@ def main() -> int:
     metadata = run_metadata()
     rows = dependency_rows(metadata)
     bundle = build_bundle(rows)
+
+    problems = verify_notice_coverage(rows, bundle)
+    if problems:
+        sys.stderr.write("third-party licence bundle is incomplete:\n")
+        for problem in problems[:20]:
+            sys.stderr.write(f"  - {problem}\n")
+        if len(problems) > 20:
+            sys.stderr.write(f"  - ... and {len(problems) - 20} more\n")
+        return 1
 
     if args.check:
         try:

@@ -18,5 +18,7 @@ and `--check` fails when the bundle is stale.
 | `Zlib.txt` | Zlib | `foldhash` 0.2.0 `LICENSE` |
 
 The per-package copyright notices in the generated bundle come from the
-`LICENSE*`, `COPYING*`, `UNLICENSE*` and `NOTICE*` files shipped inside each
-crate's source package, not from these canonical texts.
+`LICENSE*`, `LICENCE*`, `COPYING*`, `COPYRIGHT*`, `UNLICENSE*` and `NOTICE*`
+files shipped inside each crate's source package. The generator keeps the whole
+paragraph that carries a notice, so notices that follow other text or wrap
+across lines are retained verbatim.
