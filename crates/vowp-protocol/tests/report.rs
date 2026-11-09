@@ -164,7 +164,7 @@ fn sample_job() -> Job {
         ],
         loop_: JobLoop::default(),
         branch: Some("job/n04-graph".to_owned()),
-        worktree: Some("/home/dev/vowp-night/wt/n04-graph".to_owned()),
+        worktree: Some("/home/user/project".to_owned()),
         attempts: 0,
         continues: 0,
         hang_restarts: 0,

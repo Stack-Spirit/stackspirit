@@ -476,16 +476,16 @@ Location: `crates/vowp-adapters/tests/fixtures/` and `tests/fakes/`. All fixture
 
 | Fixture | Origin | Content |
 |---|---|---|
-| `claude_ok.jsonl` | **real**: copy of `/home/dev/vowp-night/ref/claude-stream-json-sample.jsonl` (4 lines: init, assistant "ok", rate_limit_event allowed, result) | happy path |
+| `claude_ok.jsonl` | **real**: copy of `/home/user/vowp/ref/claude-stream-json-sample.jsonl` (4 lines: init, assistant "ok", rate_limit_event allowed, result) | happy path |
 | `claude_tool_use.jsonl` | **real**-derived: a sanitised excerpt from a real planner run (init, assistant{thinking(empty)+tool_use}, user{tool_result str}, user{tool_result as array of text blocks}, assistant{text}, result with `num_turns: 4`) with long outputs truncated | tool call/result, both content shapes |
 | `claude_rate_limit_rejected.jsonl` | hand-built from the documented shape (copy of the real `rate_limit_event`, `status:"rejected"`, five_hour window rejected, `resetsAt` 1794164400, exit 1 recorded in a sibling `.meta`) | structured limit |
 | `claude_usage_limit_text.jsonl` | hand-built: a `result` with `is_error:true`, `result:"Claude AI usage limit reached\|1794164400"` | text limit with unix |
 | `claude_weekly_limit.jsonl` | hand-built: `result` text `You've hit your weekly limit · resets Nov 12, 9am (Europe/Oslo)` | clock-time with date |
 | `claude_429.jsonl` | hand-built: `is_error:true`, `api_error_status:429`, `result:"API Error: 429 … rate_limit_error"` | Rate |
 | `claude_auth.jsonl` | hand-built: `is_error:true`, `api_error_status:401`, `result:"Invalid API key · Please run /login"` | Auth |
-| `opencode_ok.jsonl` | **real**: sanitised copy of one short real run from `/home/dev/vowp-night/runs/*.jsonl` (step_start, tool_use completed, step_finish reason tool-calls, text, step_finish reason stop) | happy path + cost |
+| `opencode_ok.jsonl` | **real**: sanitised copy of one short real run from `/home/user/vowp/runs/*.jsonl` (step_start, tool_use completed, step_finish reason tool-calls, text, step_finish reason stop) | happy path + cost |
 | `opencode_tools.jsonl` | **real**-derived: includes one `tool_use` with `state.status:"error"` (`Web search cancelled`) | tool error ≠ run error |
-| `opencode_tool_exit.jsonl` | **real**-derived (sanitised from a `shell` `tool_use` in `/home/dev/vowp-night/runs/*.jsonl`): `state.metadata.metadata.exit:0` and a second line with a non-zero exit | exercises the nested exit pointer; test `opencode_tool_exit_code_from_nested_metadata` asserts `exit_code == Some(0)` / `Some(2)` |
+| `opencode_tool_exit.jsonl` | **real**-derived (sanitised from a `shell` `tool_use` in `/home/user/vowp/runs/*.jsonl`): `state.metadata.metadata.exit:0` and a second line with a non-zero exit | exercises the nested exit pointer; test `opencode_tool_exit_code_from_nested_metadata` asserts `exit_code == Some(0)` / `Some(2)` |
 | `opencode_402.jsonl` | hand-built: `{"type":"error","sessionID":"ses_x","error":{"name":"APIError","statusCode":402,"message":"Insufficient Balance"}}` + non-zero exit | Credits |
 | `opencode_429.jsonl` | hand-built: `error` with `statusCode:429` | Rate |
 | `opencode_auth.jsonl` | hand-built: `error` with `statusCode:401`, `Authentication Fails` | Auth |

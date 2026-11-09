@@ -20,7 +20,7 @@
   ],
   "loop": {"until": "gates", "max_attempts": 3, "on_exhausted": "escalate"},
   "branch": "job/n04-graph",
-  "worktree": "/home/dev/vowp-night/wt/n04-graph",
+  "worktree": "/home/user/project",
   "attempts": 0,
   "continues": 0,
   "hang_restarts": 0,

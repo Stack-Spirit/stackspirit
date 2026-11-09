@@ -418,7 +418,7 @@ pub struct Note { pub text: String }
 ### 5.3 Example log lines
 
 ```json
-{"id":"01KA1V0Z8Q3M9W6E5T2R4N7B1C","session_id":"01KA1V0Z7A0000000000000000","seq":1,"ts":"2026-11-08T19:30:00.000Z","type":"session.created","actor":"system","source":{"harness":"vowp","node":"vps"},"payload":{"title":"n04-graph","cwd":"/home/dev/vowp-night/wt/n04-graph","project":"vowp","job_id":"n04-graph","role":"worker"},"replayable":true}
+{"id":"01KA1V0Z8Q3M9W6E5T2R4N7B1C","session_id":"01KA1V0Z7A0000000000000000","seq":1,"ts":"2026-11-08T19:30:00.000Z","type":"session.created","actor":"system","source":{"harness":"vowp","node":"vps"},"payload":{"title":"n04-graph","cwd":"/home/user/project","project":"vowp","job_id":"n04-graph","role":"worker"},"replayable":true}
 {"id":"01KA1V10C3F7H9J2K4M6N8P0Q2","session_id":"01KA1V0Z7A0000000000000000","seq":6,"ts":"2026-11-08T19:30:12.481Z","type":"tool.call","actor":"assistant","source":{"harness":"opencode","model":"deepseek/deepseek-flash","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly"},"payload":{"call_id":"call_01_2ncr","name":"shell","input":{"command":"cargo test"}},"replayable":true}
 {"id":"01KA1V11D4G8J1K3M5N7P9R0S2","session_id":"01KA1V0Z7A0000000000000000","seq":9,"ts":"2026-11-08T19:41:02.000Z","type":"limit","actor":"system","source":{"harness":"claude-code","model":"claude-sonnet-5-5","node":"local"},"payload":{"kind":"quota","provider":"claude","resets_at":"2026-11-08T22:20:00.000Z","message":"You've hit your limit · resets 11pm (Europe/Oslo)"},"replayable":true}
 ```
@@ -586,7 +586,7 @@ JSON (`vowp job show n04-graph --json`):
  "brief":".vowp/jobs/n04-graph/brief.md","report":".vowp/jobs/n04-graph/report.md",
  "gates":[{"report":{"fields":["status","branch","commits","tests"]}},{"cmd":{"run":"cargo test -p vowp-graph","expect_exit":0}},{"owns_respected":true},{"review":{"by":"verifier"}}],
  "loop":{"until":"gates","max_attempts":3,"on_exhausted":"escalate"},
- "branch":"job/n04-graph","worktree":"/home/dev/vowp-night/wt/n04-graph","attempts":0,"continues":0,"hang_restarts":0,
+ "branch":"job/n04-graph","worktree":"/home/user/project","attempts":0,"continues":0,"hang_restarts":0,
  "parked_reason":null,"note":"","created_by":"planner","last_progress_at":"2026-11-08T20:10:00.000Z",
  "state_changed_at":"2026-11-08T20:01:00.000Z","created_at":"2026-11-08T19:50:00.000Z","updated_at":"2026-11-08T20:10:00.000Z"}
 ```
@@ -1120,7 +1120,7 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
 ```json
 {"id":"01KA1V30E5H8K2M4N6P8Q0R2S4","job_id":"n04-graph","session_id":"01KA1V0Z7A0000000000000000","role":"worker","purpose":"start","profile":"worker","rung":0,
  "executor":"opencode:deepseek/deepseek-flash#max","provider":"deepseek","node":"vps","native_session_id":"ses_e439617b6ffepWG4UNK521b6ly","pid":4242,
- "window":"job-n04-graph","cwd":"/home/dev/vowp-night/wt/n04-graph","started_at":"2026-11-08T20:01:00.000Z","ended_at":"2026-11-08T20:19:30.000Z",
+ "window":"job-n04-graph","cwd":"/home/user/project","started_at":"2026-11-08T20:01:00.000Z","ended_at":"2026-11-08T20:19:30.000Z",
  "exit_code":0,"outcome":"ok","limit_kind":null,"cost":{"usd":0.42,"tokens":{"input":81000,"output":9100,"reasoning":0,"cache_read":240000,"cache_write":0},"source":"receipt"},"detail":""}
 ```
 
@@ -1152,7 +1152,7 @@ Each block is copied to `crates/vowp-protocol/tests/fixtures/<type>.json` and va
 ```json
 {"id":"01KA1V50G7K1N4P6Q8R0S2T4V6","project":"vowp","env":"prod","change_ref":"abc1234","from_commit":"def5678","to_commit":"abc1234","state":"live",
  "guards":[{"name":"clean_tree","passed":true,"detail":""},{"name":"head_equals_remote","passed":true,"detail":"abc1234"}],
- "snapshot_path":"/home/dev/.vowp/banks/prod-20261108.tar","rollback_cmd":"./scripts/rollback.sh /home/dev/.vowp/banks/prod-20261108.tar",
+ "snapshot_path":"/home/user/.vowp/banks/prod-20261108.tar","rollback_cmd":"./scripts/rollback.sh /home/user/.vowp/banks/prod-20261108.tar",
  "probe":{"status":200},"approved_by":"owner","rolled_back_by":null,"note":"","created_at":"2026-11-08T23:12:00.000Z","finished_at":"2026-11-08T23:14:00.000Z"}
 ```
 
