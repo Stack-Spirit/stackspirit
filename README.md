@@ -8,7 +8,7 @@ already use as a small engineering team on your own machines.
 
 | | |
 |---|---|
-| **Who it is for** | Developers and small teams who already drive Claude Code, opencode or another headless agent and want reviewed, gated work to keep moving overnight. |
+| **Who it is for** | Developers and small teams who already drive Claude Code, opencode or another headless agent and want reviewed, gated work to keep moving unattended. |
 | **What it needs** | Rust (to build from source), `git`, `tmux`, and a signed-in harness such as Claude Code or opencode. |
 | **3-command quickstart** | `cargo build --workspace`<br>`cargo install --path .`<br>`vowp init --name my-project` (run in a git repository with a remote) |
 | **Read next** | [Quickstart](docs/guides/quickstart.md) · [hello-vowp example](examples/hello-vowp/README.md) · [Concepts in 60 seconds](#concepts-in-60-seconds) |
@@ -56,8 +56,8 @@ views onto running work. The [concepts overview](docs/concepts/overview.md) has 
 - **Deterministic loops, LLM judgment.** A plain program ticks every 60 seconds and never "decides to
   stop". Models are used for judgment: planning, diagnosing a stall, reviewing a report, writing a
   handoff.
-- **Any model, any machine.** The same job can run on Claude Code on a laptop or on DeepSeek on a VPS;
-  a profile ladder decides the order.
+- **Any model, any machine.** The same job can run on Claude Code on a laptop or another harness on a
+  VPS; a profile ladder decides the order.
 - **Evidence over claims.** A job is done when its gates pass with recorded evidence — commands, exit
   codes, diffs, verifier findings — not when an agent says so.
 - **Guarded, reversible Work → Production.** Promotions snapshot what is live, ship only the intended
@@ -126,7 +126,8 @@ vowp status
 
 See the [quickstart guide](docs/guides/quickstart.md) for the full walkthrough, the
 [hello-vowp example](examples/hello-vowp/README.md) for a runnable three-job graph with fake adapters,
-and the [install guide](docs/guides/install.md) for harness, node and script prerequisites.
+the [install guide](docs/guides/install.md) for harness, node and script prerequisites, and
+[Running VOWP on a VPS](docs/guides/vps.md) for a server deployment.
 
 ## Documentation
 
@@ -147,6 +148,7 @@ Both sections have an index: [concepts](docs/concepts/README.md) and [guides](do
 | [Writing jobs](docs/guides/jobs.md) | Briefs, reports, gates, ownership and the verify/fix loop. |
 | [Operating a node](docs/guides/operating.md) | `up`/`down`, status, logs, loops, backups, reindex, watchdog. |
 | [Sessions](docs/guides/sessions.md) | Chat, switch, capsule, export/import and `session watch`. |
+| [Running on a VPS](docs/guides/vps.md) | Dedicated user, build, harness config, systemd, SSH and firewall. |
 | [Multiple nodes](docs/guides/multi-node.md) | Node registration, `--node`, SSH and cross-node sessions. |
 | [Schedules](docs/guides/schedules.md) | Cron and interval schedules, missed runs, pause/resume. |
 

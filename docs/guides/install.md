@@ -2,9 +2,9 @@
 
 VOWP is a single Rust binary. The 0.1.0 release is built from source in this guide; the release also
 carries prebuilt archives, crates.io/npm packages and a Homebrew formula template prepared by the
-release jobs (see the [roadmap](../roadmap.md)). A Homebrew tap is not published. The repository also
+release process (see the [roadmap](../roadmap.md)). A Homebrew tap is not published. The repository also
 ships a per-user [install script](../../scripts/README.md) that installs the binary, the systemd user
-unit and the cron watchdog.
+unit and the cron watchdog. For a server deployment, see [Running VOWP on a VPS](vps.md).
 
 > **Status: current.** The build commands, `vowp init`, `vowp doctor` and the install script work today;
 > every command referenced on this page is implemented.
@@ -97,13 +97,12 @@ It writes `vowp.toml` with `schedules = []`; `[node] name = "local"`, `max_worke
 `max_verifiers = 2`, `tick_secs = 60`, `cwd_allow = []` and `tz_offset_minutes` set to the machine's
 current UTC offset; `[project] remote = "origin"`, `default_branch = "main"`,
 `lock_files = ["Cargo.lock"]`, `always_allowed = ["Cargo.lock"]` and `push = true`; the four profiles
-(`planner` starts with `claude-code:claude-sonnet-5-5@medium` then
-`opencode:deepseek/deepseek-flash#max`; `keeper`, `worker` and `verifier` use the opencode executor; all
-`on_quota = "next_then_probe_back"`); `[capsule] min_interval_secs = 120`, `max_input_chars = 200000`
-and `tail_turns = 2`; and `[merge] rebase = true`, `check_cmds = []`, `timeout_secs = 2700` and
-`secret_scan = true`. The list here is a key subset: the generated file also contains empty
-`[providers]`, `[harnesses]`, `[env]`, `[gates]` and `[loops]` tables, and
-`[project].check_cmds = []`.
+(the planner starts with a Claude Code rung then an opencode rung; `keeper`, `worker` and `verifier`
+start with the opencode rung; all use `on_quota = "next_then_probe_back"`); `[capsule]
+min_interval_secs = 120`, `max_input_chars = 200000` and `tail_turns = 2`; and `[merge] rebase = true`,
+`check_cmds = []`, `timeout_secs = 2700` and `secret_scan = true`. The list here is a key subset: the
+generated file also contains empty `[providers]`, `[harnesses]`, `[env]`, `[gates]` and `[loops]` tables,
+and `[project].check_cmds = []`.
 
 It also installs the embedded framework files from [`framework/`](../../framework/README.md)
 (`AGENTS.md`, `CLAUDE.md`, four `.claude/skills/vowp-*/SKILL.md` files, `opencode.jsonc`, and the
@@ -156,4 +155,4 @@ Exit code 0 means no `fail`. A missing harness is a `fail`; a missing tmux is a 
 Treat `~/.vowp` as sensitive: session logs can contain prompts, tool output and file contents. Back it
 up like any other work data, and never commit it.
 
-Next: [quickstart](quickstart.md).
+Next: [quickstart](quickstart.md), or [Running VOWP on a VPS](vps.md) for a server deployment.

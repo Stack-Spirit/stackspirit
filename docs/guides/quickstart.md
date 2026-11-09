@@ -217,5 +217,6 @@ replayed by hand.
 
 - [Writing jobs](jobs.md) — briefs, gates, reports and the verify/fix loop.
 - [Operating a node](operating.md) — logs, loops, backups, watchdog.
+- [Running on a VPS](vps.md) — a dedicated user, systemd, SSH and firewall.
 - [Sessions](sessions.md) — switch model or harness mid-job.
 - [Troubleshooting](../troubleshooting.md) — when a job does not move.
