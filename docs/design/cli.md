@@ -41,13 +41,13 @@ vowp [GLOBAL FLAGS] <command> [args]
 
 ### `vowp init [--name <project>] [--force] [--no-framework]`
 In the current git repo: writes `vowp.toml` (a `[node]` table with `tz_offset_minutes` set from the machine's current UTC offset, the `[project]` table, and the four default profiles from architecture.md §5.2 minus schedules), `.vowp/` (jobs/, checkpoints/), installs the framework files
-(`AGENTS.md`, `CLAUDE.md` containing `@AGENTS.md`, `.agents/skills/vowp-{worker,planner,verifier}/SKILL.md`, `opencode.jsonc`, brief/report templates) from the templates **embedded in the binary**,
+(`AGENTS.md`, `CLAUDE.md` containing `@AGENTS.md`, `.claude/skills/vowp-{worker,planner,verifier,keeper}/SKILL.md`, `opencode.jsonc`, brief/report templates) from the templates **embedded in the binary**,
 appends `.vowp/tmp/` to `.gitignore`, creates `~/.vowp` (db, dirs), registers the local node and the project, and creates the loop rows (`loops` table, default intervals). Existing files are never overwritten without `--force` (skipped files are listed).
 Human: `initialised project vowp at /path (8 files written, 2 skipped)`. JSON: `{"project":"vowp","path":"…","written":[…],"skipped":[…]}`. Exit 4 if already initialised and not `--force`.
 
 ### `vowp doctor`
 Checks (each `ok|warn|fail` with detail): `home` writable; `db` opens + `integrity_check` + schema version; `git` version; `tmux` version (warn if absent); harness probes via adapters
-(`claude`, `opencode`, each `Adapter::probe`); `vowp.toml` parses + validates; profile ladders resolve to installed harnesses; providers reachable **only by env-var-name presence** (`DEEPSEEK_API_KEY` set? — never prints the value, never calls the network);
+(`claude`, `opencode`, each `Adapter::probe`); `vowp.toml` parses + validates and every `[[schedules]]` cron/interval/timezone parses with `ScheduleSpec::parse` (an invalid entry fails the `schedules` check with the schedule name and error); profile ladders resolve to installed harnesses; providers reachable **only by env-var-name presence** (`DEEPSEEK_API_KEY` set? — never prints the value, never calls the network);
 `systemd --user` unit and cron watchdog installed (warn only); supervisor running; disk space ≥ 1 GB.
 Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status":"ok","detail":"tmux 3.4"}]}`.
 
@@ -148,7 +148,8 @@ Work→Production (`crates/vowp-core.md` §promote). `<change>` = commit/ref/job
 ## 8. Named tests (crate `vowp-cli`, hermetic: temp `--home`, temp git repos, fake harness scripts, `FakeWindows` / private tmux socket)
 
 `parse_global_flags_and_node`, `exit_code_mapping_table`, `json_error_shape_not_found`, `init_creates_files_and_registers_project`, `init_refuses_overwrite_without_force`,
-`doctor_reports_missing_harness_as_fail_with_fake_path`, `doctor_never_prints_env_values`, `job_add_ls_show_roundtrip_json`, `job_add_rejects_cycle_and_unknown_need`,
+`doctor_reports_missing_harness_as_fail_with_fake_path`, `doctor_never_prints_env_values`,
+`doctor_flags_invalid_cron_schedule`, `doctor_accepts_valid_schedules`, `job_add_ls_show_roundtrip_json`, `job_add_rejects_cycle_and_unknown_need`,
 `job_retry_only_from_failed_stalled_parked`, `job_park_and_cancel_enqueue_request_without_supervisor_apply_directly`, `graph_ascii_and_mermaid_golden`, `graph_export_import_roundtrip`,
 `inbox_answer_unparks_job_on_tick`, `cost_by_job_marks_unknown_not_zero`, `loops_pause_resume_and_unknown_loop_exit_3`, `schedule_add_cron_prints_next_run`, `schedule_add_rejects_bad_cron_exit_2`,
 `session_export_import_roundtrip_via_cli`, `session_tail_pretty_golden`, `session_switch_with_fake_adapters`, `node_ssh_argv_quoting` (builds the ssh argv without executing it; asserts quoting of args with spaces, quotes and `$`),
