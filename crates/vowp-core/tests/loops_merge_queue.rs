@@ -58,13 +58,15 @@ fn merge_queue_conflict_creates_merge_job() {
 
     let mut supervisor = node.supervisor();
     // The oldest merging job is merged first.
-    node.tick_settled(&mut supervisor);
-    let store = node.store();
-    assert_eq!(store.require_job(&first.id).expect("first").state, JobState::Done);
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&first.id).expect("first").state == JobState::Done
+    });
     // Now the second job hits a real rebase conflict.
-    node.tick_settled(&mut supervisor);
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&second.id).expect("second").state == JobState::Fixing
+    });
+    let store = node.store();
     let job = store.require_job(&second.id).expect("second");
-    assert_eq!(job.state, JobState::Fixing);
     let merge_job = store
         .require_job(&vowp_protocol::JobId::parse("second-merge-1").expect("id"))
         .expect("merge job");
@@ -78,11 +80,23 @@ fn merge_queue_conflict_creates_merge_job() {
             .iter()
             .any(|edge| edge.kind == vowp_protocol::EdgeKind::Fixes && edge.dst == second.id)
     );
+    assert!(
+        merge_job.owns.iter().any(|own| own == "src/shared.rs"),
+        "a merge child owns the conflicted file: {:?}",
+        merge_job.owns
+    );
 }
 
 #[test]
 fn merge_queue_cargo_lock_regenerated_not_merged() {
     let node = TestNode::new_real_git();
+    node.commit_file(
+        &node.main_repo.clone(),
+        "Cargo.toml",
+        "[package]\nname = \"locktest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    node.commit_file(&node.main_repo.clone(), "src/lib.rs", "pub fn lock() {}\n");
+    node.git(&node.main_repo.clone(), &["push", "origin", "main"]);
     let first = node.insert_job("lock-a", JobKind::Build, Role::Worker, Some(vec![]));
     node.worktree_with_file(&first, "Cargo.lock", "version = 3\n\"a\" = 1\n");
     node.force_state(&first, JobState::Merging);
@@ -91,8 +105,9 @@ fn merge_queue_cargo_lock_regenerated_not_merged() {
     node.force_state(&second, JobState::Merging);
 
     let mut supervisor = node.supervisor();
-    node.tick_settled(&mut supervisor);
-    node.tick_settled(&mut supervisor);
+    node.tick_until(&mut supervisor, 200, |store| {
+        store.require_job(&second.id).expect("second").state == JobState::Done
+    });
     let store = node.store();
     let job = store.require_job(&second.id).expect("second");
     assert_eq!(job.state, JobState::Done);
@@ -121,7 +136,38 @@ fn merge_queue_cargo_lock_regenerated_not_merged() {
     // The queue takes the main version of a lockfile conflict (a real cargo update
     // would then re-add the branch's dependency set).
     let shown = node.git(&origin, &["show", "main:Cargo.lock"]);
-    assert!(shown.contains("\"a\" = 1"));
+    assert!(shown.contains("locktest"), "cargo regenerated the lockfile: {shown}");
+    let subject = node.git(&origin, &["log", "-1", "--format=%s", "main"]);
+    assert_eq!(subject.trim(), "chore: refresh lockfile (merge queue)");
+}
+
+#[test]
+fn merge_queue_dirty_main_parks_job_manual() {
+    let node = TestNode::new_real_git();
+    let job = merging_job(&node, "dirty-main");
+    std::fs::write(node.main_repo.join("dirty.txt"), "uncommitted\n").expect("dirty file");
+    let mut supervisor = node.supervisor();
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&job.id).expect("job").state == JobState::Parked
+    });
+    let store = node.store();
+    let job = store.require_job(&job.id).expect("job");
+    assert_eq!(job.parked_reason, Some(vowp_protocol::ParkedReason::Manual));
+    let ledger = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::Merge),
+            job_id: Some(job.id.clone()),
+            ..LedgerFilter::default()
+        })
+        .expect("merge ledger");
+    assert!(ledger.iter().any(|entry| entry.detail.get("failure").is_some()));
+    assert!(
+        store
+            .list_inbox(None)
+            .expect("inbox")
+            .iter()
+            .any(|item| item.job_id.as_ref() == Some(&job.id))
+    );
 }
 
 #[test]
@@ -130,13 +176,15 @@ fn merge_queue_check_failure_returns_job_to_fixing() {
         vowp_protocol::HarnessKind::Opencode,
         ScriptAction::ok("fixing checks"),
     ));
+    let adapter_for_checks = adapter.clone();
     let node = TestNode::with_adapter_config(true, adapter, |config| {
         config.merge.check_cmds = vec!["false".to_owned()];
     });
     let job = merging_job(&node, "checks-fail");
     let mut supervisor = node.supervisor();
-    let report = node.tick_settled(&mut supervisor);
-    assert!(report.steps.iter().any(|step| step.name == "merge" && step.ok));
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&job.id).expect("job").state == JobState::Fixing
+    });
     let store = node.store();
     let job = store.require_job(&job.id).expect("job");
     assert_eq!(job.state, JobState::Fixing);
@@ -145,4 +193,11 @@ fn merge_queue_check_failure_returns_job_to_fixing() {
         .require_job(&vowp_protocol::JobId::parse("checks-fail-fix-1").expect("id"))
         .expect("fix job");
     assert_eq!(fix.kind, JobKind::Fix);
+    let prompts = adapter_for_checks.starts();
+    assert!(
+        prompts
+            .iter()
+            .any(|start| { start.prompt.contains("Job checks-fail failed") && start.prompt.contains("false") }),
+        "the fix prompt must carry the failed merge check: {prompts:?}"
+    );
 }

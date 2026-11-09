@@ -153,6 +153,18 @@ pub(crate) fn create_child_job(
         "Fix exactly these problems in the same worktree, re-run the failing commands, commit, and update {report}. Do not widen scope."
     ));
 
+    let mut owns = parent.owns.clone();
+    if kind == JobKind::Merge {
+        for finding in findings {
+            let Some(rest) = finding.strip_prefix("rebase conflict in ") else {
+                continue;
+            };
+            let path = rest.split(';').next().unwrap_or(rest).trim();
+            if !path.is_empty() && !owns.iter().any(|own| own == path) {
+                owns.push(path.to_owned());
+            }
+        }
+    }
     let new = NewJob {
         id: id.clone(),
         title: format!("{kind:?} {}", parent.id),
@@ -160,7 +172,7 @@ pub(crate) fn create_child_job(
         role: parent.role,
         profile: Some(parent.profile.clone()),
         needs: Vec::new(),
-        owns: parent.owns.clone(),
+        owns,
         reads: parent.reads.clone(),
         gates: Some(gates),
         priority: Some(parent.priority),
@@ -171,6 +183,9 @@ pub(crate) fn create_child_job(
     // The child's round is the parent's attempt: the fix prompt, the gates attempt and the
     // child id all use the same number.
     store.set_job_counters(&child.id, Some(parent.attempts.max(1)), None, None)?;
+    if !findings.is_empty() {
+        store.set_job_note(&child.id, &findings.join("\n"))?;
+    }
     store.add_edge(&Edge {
         src: child.id.clone(),
         dst: parent.id.clone(),

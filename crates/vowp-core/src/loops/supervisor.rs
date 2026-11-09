@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use vowp_graph::{
@@ -71,19 +72,60 @@ pub struct TickReport {
     pub merged: Vec<JobId>,
 }
 
+/// Result of one background gate run.
+struct GateTaskResult {
+    job_id: JobId,
+    results: Vec<GateResult>,
+    all_passed: bool,
+}
+
+/// Runs one job's gates on a runner thread with its own store connection.
+fn spawn_gate_task(
+    deps: Deps,
+    project: vowp_protocol::ProjectName,
+    job: Job,
+) -> Result<JoinHandle<Result<GateTaskResult, CoreError>>, CoreError> {
+    Ok(thread::spawn(move || {
+        let store = deps.open_store()?;
+        let repo = super::main_repo(&deps, &store, &project)?;
+        let worktree = job.worktree.as_ref().map(PathBuf::from).unwrap_or_else(|| repo.clone());
+        let ctx = GateCtx {
+            deps: &deps,
+            job: &job,
+            run_id: store.last_run_of_job(&job.id)?.map(|run| run.id),
+            worktree: &worktree,
+            repo: &repo,
+            store: &store,
+            attempt: job.attempts,
+        };
+        let outcome = GateRunner::new(deps.clone()).evaluate_all(&ctx)?;
+        let ledger = Ledger::new(deps.clone());
+        for result in &outcome.results {
+            ledger.record_gate(&store, result)?;
+        }
+        Ok(GateTaskResult {
+            job_id: job.id.clone(),
+            results: outcome.results,
+            all_passed: outcome.all_passed_before_review,
+        })
+    }))
+}
+
 /// The L1 supervisor.
 pub struct Supervisor {
     pub(crate) deps: Deps,
     pub(crate) project: vowp_protocol::ProjectName,
     pub(crate) store: Store,
     pub(crate) runners: RunnerPool,
-    pub(crate) gate_runner: GateRunner,
     pub(crate) ledger: Ledger,
     pub(crate) schedules: ScheduleEngine,
     pub(crate) sessions: SessionService,
     pub(crate) wake: WakeHandle,
     wake_rx: Option<Receiver<()>>,
     handled_runs: HashSet<RunId>,
+    gate_tasks: HashMap<JobId, JoinHandle<Result<GateTaskResult, CoreError>>>,
+    merge_task: Option<JoinHandle<Result<MergeStep, CoreError>>>,
+    verify_retries: HashSet<(JobId, u32)>,
     start_purpose_override: Option<RunPurpose>,
     transitions: Vec<(JobId, JobState, JobState)>,
     dispatched: Vec<JobId>,
@@ -101,7 +143,6 @@ impl Supervisor {
         store.ensure_worker_slots(&deps.node, WorkerKind::Verifier, deps.config.node.max_verifiers)?;
         Ok(Self {
             sessions: SessionService::new(deps.clone()),
-            gate_runner: GateRunner::new(deps.clone()),
             ledger: Ledger::new(deps.clone()),
             schedules: ScheduleEngine::new(deps.clone()),
             runners: RunnerPool::new(),
@@ -111,6 +152,9 @@ impl Supervisor {
             wake,
             wake_rx: Some(wake_rx),
             handled_runs: HashSet::new(),
+            gate_tasks: HashMap::new(),
+            merge_task: None,
+            verify_retries: HashSet::new(),
             start_purpose_override: None,
             transitions: Vec::new(),
             dispatched: Vec::new(),
@@ -203,6 +247,24 @@ impl Supervisor {
             }
         }
         self.runners.cancel_all();
+        // Mark run rows whose threads were interrupted as stalled, as the crate doc requires.
+        let store = self.deps.open_store()?;
+        for run in store.open_runs()? {
+            if run.node != self.deps.node {
+                continue;
+            }
+            let _ = store.finish_run(
+                &run.id,
+                &vowp_store::RunFinish {
+                    outcome: vowp_protocol::RunOutcome::Stalled,
+                    exit_code: run.exit_code,
+                    limit_kind: run.limit_kind,
+                    cost: run.cost.clone(),
+                    native_session_id: run.native_session_id.clone(),
+                    detail: "supervisor stopping".to_owned(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -423,12 +485,16 @@ impl Supervisor {
                     ReportOutcome::NoReport => (JobEvent::RunEndedNoReport, None),
                 }
             }
-            Some(vowp_protocol::RunOutcome::Rate) => (
-                JobEvent::RunRateLimited {
-                    until: now.plus(Duration::from_secs(600)),
-                },
-                None,
-            ),
+            Some(vowp_protocol::RunOutcome::Rate) => {
+                let until = run
+                    .provider
+                    .as_deref()
+                    .and_then(|provider| self.store.limit_for(provider).ok().flatten())
+                    .and_then(|limit| limit.resets_at)
+                    .filter(|until| *until > now)
+                    .unwrap_or_else(|| now.plus(Duration::from_secs(600)));
+                (JobEvent::RunRateLimited { until }, None)
+            }
             Some(vowp_protocol::RunOutcome::Limit)
             | Some(vowp_protocol::RunOutcome::Credits)
             | Some(vowp_protocol::RunOutcome::Auth)
@@ -563,50 +629,74 @@ impl Supervisor {
         Ok(format!("{changed} state change(s)"))
     }
 
-    /// Step 5: evaluate command gates synchronously and feed the result back.
-    fn step_gates(&mut self, now: Timestamp) -> Result<String, CoreError> {
-        let repo = super::main_repo(&self.deps, &self.store, &self.project)?;
+    /// Step 5: spawn gate runners and collect the ones that finished.
+    fn step_gates(&mut self, _now: Timestamp) -> Result<String, CoreError> {
+        let mut applied = 0;
+        let finished = self
+            .gate_tasks
+            .iter()
+            .filter(|(_, handle)| handle.is_finished())
+            .map(|(job, _)| job.clone())
+            .collect::<Vec<_>>();
+        for job_id in finished {
+            let Some(handle) = self.gate_tasks.remove(&job_id) else {
+                continue;
+            };
+            match handle.join() {
+                Ok(Ok(result)) => {
+                    let job = self.store.require_job(&result.job_id)?;
+                    if job.state != JobState::Gating {
+                        continue;
+                    }
+                    if result.all_passed {
+                        self.apply_simple(&job.id, JobEvent::GatesPassed, None)?;
+                    } else {
+                        let findings = result
+                            .results
+                            .iter()
+                            .filter(|gate| !gate.passed)
+                            .map(dispatch::gate_finding)
+                            .collect::<Vec<_>>();
+                        self.apply_with(&job.id, JobEvent::GatesFailed, None, findings, None)?;
+                    }
+                    applied += 1;
+                }
+                Ok(Err(error)) => self.deps.log.log(
+                    Level::Error,
+                    "gates",
+                    &format!("gate runner for {job_id} failed: {error}"),
+                ),
+                Err(_) => self
+                    .deps
+                    .log
+                    .log(Level::Error, "gates", &format!("gate runner for {job_id} panicked")),
+            }
+        }
+
         let jobs = self.store.list_jobs(&JobFilter {
             project: Some(self.project.clone()),
             states: vec![JobState::Gating],
             ..JobFilter::default()
         })?;
-        let mut evaluated = 0;
+        let mut started = 0;
         for job in jobs {
-            let worktree = job.worktree.as_ref().map(PathBuf::from).unwrap_or_else(|| repo.clone());
-            let run_id = self.store.last_run_of_job(&job.id)?.map(|run| run.id);
-            let ctx = GateCtx {
-                deps: &self.deps,
-                job: &job,
-                run_id,
-                worktree: &worktree,
-                repo: &repo,
-                store: &self.store,
-                attempt: job.attempts,
-            };
-            let outcome = self.gate_runner.evaluate_all(&ctx)?;
-            for result in &outcome.results {
-                self.ledger.record_gate(&self.store, result)?;
+            if self.gate_tasks.contains_key(&job.id) {
+                continue;
             }
-            if outcome.all_passed_before_review {
-                self.apply_simple(&job.id, JobEvent::GatesPassed, None)?;
-            } else {
-                let findings = outcome
-                    .results
-                    .iter()
-                    .filter(|result| !result.passed)
-                    .map(dispatch::gate_finding)
-                    .collect::<Vec<_>>();
-                self.apply_with(&job.id, JobEvent::GatesFailed, None, findings, None)?;
-            }
-            evaluated += 1;
-            let _ = now;
+            let handle = spawn_gate_task(self.deps.clone(), self.project.clone(), job.clone())?;
+            self.gate_tasks.insert(job.id.clone(), handle);
+            started += 1;
         }
-        Ok(format!("{evaluated} gate set(s) evaluated"))
+        Ok(format!(
+            "{applied} gate result(s) applied, {started} gate runner(s) started"
+        ))
     }
 
     /// Step 6: ensure one verify job per reviewing attempt and deliver its verdict.
     fn step_verify(&mut self, _now: Timestamp) -> Result<String, CoreError> {
+        if !self.loop_active("l3-verify") {
+            return Ok("l3-verify paused".to_owned());
+        }
         let jobs = self.store.list_jobs(&JobFilter {
             project: Some(self.project.clone()),
             states: vec![JobState::Reviewing],
@@ -632,13 +722,19 @@ impl Supervisor {
                                 "l3",
                                 &format!("verify job {} has no usable verdict: {error}", verify.id),
                             );
-                            self.apply_simple(&original.id, JobEvent::VerifierFailed, None)?;
+                            self.retry_or_park_verify(&original, &error)?;
                         }
                     }
                     handled += 1;
                 }
                 Some(verify) if verify.state == JobState::Failed => {
-                    self.apply_simple(&original.id, JobEvent::VerifierFailed, None)?;
+                    self.apply_with(
+                        &original.id,
+                        JobEvent::VerifierFailed,
+                        None,
+                        Vec::new(),
+                        Some(format!("verifier could not produce a verdict for {}", original.id)),
+                    )?;
                     handled += 1;
                 }
                 Some(_) => {}
@@ -647,10 +743,66 @@ impl Supervisor {
         Ok(format!("{handled} review(s) advanced"))
     }
 
-    /// Step 7: run at most one merge from the queue.
+    /// Retries one verify job with an unusable verdict, then parks the original (T37).
+    pub(crate) fn retry_or_park_verify(&mut self, original: &Job, error: &CoreError) -> Result<(), CoreError> {
+        let key = (original.id.clone(), original.attempts);
+        if self.verify_retries.insert(key) {
+            let evidence = self.store.gate_results_for(&original.id, original.attempts)?;
+            let diff = self.diff_summary(original);
+            let retry = l3_verify::create_verify_retry_job(&self.store, &self.deps, original, &evidence, &diff)?;
+            self.deps.log.log(
+                Level::Warn,
+                "l3",
+                &format!(
+                    "verify job for {} had no usable verdict ({error}); retrying once as {}",
+                    original.id, retry.id
+                ),
+            );
+            self.apply_simple(&retry.id, JobEvent::NeedsSatisfied, None)
+        } else {
+            self.apply_with(
+                &original.id,
+                JobEvent::VerifierFailed,
+                None,
+                Vec::new(),
+                Some(format!("verifier could not produce a verdict for {}", original.id)),
+            )
+            .map(|_| ())
+        }
+    }
+
+    /// Step 7: start at most one merge runner and collect its finished result.
     fn step_merge(&mut self, _now: Timestamp) -> Result<String, CoreError> {
-        let queue = MergeQueue::new(self.deps.clone());
-        match queue.step(&self.store)? {
+        if let Some(handle) = self.merge_task.take() {
+            if !handle.is_finished() {
+                self.merge_task = Some(handle);
+                return Ok("merge runner in progress".to_owned());
+            }
+            return match handle.join() {
+                Ok(Ok(step)) => self.apply_merge_step(step),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(CoreError::Command("merge runner panicked".to_owned())),
+            };
+        }
+        let merging = self.store.list_jobs(&JobFilter {
+            project: Some(self.project.clone()),
+            states: vec![JobState::Merging],
+            ..JobFilter::default()
+        })?;
+        if merging.is_empty() {
+            return Ok("merge queue idle".to_owned());
+        }
+        let deps = self.deps.clone();
+        self.merge_task = Some(thread::spawn(move || {
+            let store = deps.open_store()?;
+            MergeQueue::new(deps.clone()).step(&store)
+        }));
+        Ok("merge runner started".to_owned())
+    }
+
+    /// Applies one finished merge-queue result.
+    fn apply_merge_step(&mut self, step: MergeStep) -> Result<String, CoreError> {
+        match step {
             MergeStep::Idle | MergeStep::InProgress => Ok("merge queue idle".to_owned()),
             MergeStep::Merged(job) => {
                 self.apply_simple(&job, JobEvent::MergeSucceeded, None)?;
@@ -666,14 +818,31 @@ impl Supervisor {
                 Ok(format!("merge conflict in {}", job))
             }
             MergeStep::ChecksFailed { job } => {
-                self.apply_simple(&job, JobEvent::MergeChecksFailed, None)?;
-                Ok(format!("merge checks failed for {}", job))
+                let current = self.store.require_job(&job)?;
+                let results = self.store.gate_results_for(&current.id, current.attempts)?;
+                let mut findings = results
+                    .iter()
+                    .filter(|result| !result.passed)
+                    .map(dispatch::gate_finding)
+                    .collect::<Vec<_>>();
+                if findings.is_empty() {
+                    findings.push(format!("merge checks failed for {}", current.id));
+                }
+                self.apply_with(&current.id, JobEvent::MergeChecksFailed, None, findings, None)?;
+                Ok(format!("merge checks failed for {}", current.id))
+            }
+            MergeStep::Manual { job, detail } => {
+                self.apply_with(&job, JobEvent::HumanPark, None, Vec::new(), Some(detail))?;
+                Ok(format!("merge blocked for {}", job))
             }
         }
     }
 
     /// Step 8: plan and dispatch ready jobs, starting each runner thread.
     fn step_dispatch(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        if !self.loop_active("l2-worker") {
+            return Ok("l2-worker paused".to_owned());
+        }
         let (graph, jobs) = self.graph()?;
         let workers = self.store.list_workers(&self.deps.node)?;
         let free_workers = workers
@@ -753,6 +922,9 @@ impl Supervisor {
 
     /// Step 11: fire due schedules.
     fn step_schedules(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        if !self.loop_active("l9-schedules") {
+            return Ok("l9-schedules paused".to_owned());
+        }
         let due = self.schedules.tick(&self.store, now)?;
         let mut fired = 0;
         for due_run in &due {
@@ -903,8 +1075,11 @@ impl Supervisor {
                 self.open_job_inbox(&job, *kind)?;
             }
             Effect::NotifyParent => self.notify_parent(job_id)?,
-            Effect::WakeKeeper | Effect::WakePlanner => {
+            Effect::WakeKeeper => {
                 self.store.kv_set("wake:keeper", "1")?;
+            }
+            Effect::WakePlanner => {
+                self.store.kv_set("wake:planner", "1")?;
             }
             Effect::DelayRun { purpose: _, until } => {
                 self.store.kv_set(&format!("delay:{job_id}"), &until.as_rfc3339())?;
@@ -999,11 +1174,17 @@ impl Supervisor {
                                 "l3",
                                 &format!("verify job {} has no usable verdict: {error}", child.id),
                             );
-                            self.apply_simple(&parent, JobEvent::VerifierFailed, None)?;
+                            self.retry_or_park_verify(&parent_job, &error)?;
                         }
                     }
                 } else if child.state == JobState::Failed {
-                    self.apply_simple(&parent, JobEvent::VerifierFailed, None)?;
+                    self.apply_with(
+                        &parent,
+                        JobEvent::VerifierFailed,
+                        None,
+                        Vec::new(),
+                        Some(format!("verifier could not produce a verdict for {parent}")),
+                    )?;
                 }
             }
             JobKind::Fix | JobKind::Merge => {
@@ -1078,17 +1259,28 @@ impl Supervisor {
 
         let prompt = match job.kind {
             JobKind::Verify => {
-                let evidence = self.store.gate_results_for(&job.id, job.attempts)?;
-                let diff = self.diff_summary(&job);
-                let original = l3_verify::verify_parent(&self.store, &job)?;
-                let original = self.store.require_job(&original)?;
+                let original_id = l3_verify::verify_parent(&self.store, &job)?;
+                let original = self.store.require_job(&original_id)?;
+                let evidence = self.store.gate_results_for(&original.id, original.attempts)?;
+                let diff = self.diff_summary(&original);
                 let brief = match &original.worktree {
                     Some(worktree) => PathBuf::from(worktree).join(&original.brief),
                     None => PathBuf::from(&original.brief),
                 };
                 l3_verify::verify_prompt(&job, &brief.display().to_string(), &evidence, &diff)
             }
-            JobKind::Fix | JobKind::Merge => super::l2_worker::fix_prompt(&job, &findings),
+            JobKind::Fix | JobKind::Merge => {
+                let findings = if findings.is_empty() {
+                    job.note
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                } else {
+                    findings
+                };
+                super::l2_worker::fix_prompt(&job, &findings)
+            }
             _ => match purpose {
                 RunPurpose::Continue => super::l2_worker::continue_prompt(&job),
                 RunPurpose::Fix => super::l2_worker::fix_prompt(&job, &findings),
@@ -1215,9 +1407,10 @@ impl Supervisor {
             ..JobFilter::default()
         })?;
         let suffix = format!("-verify-{}", original.attempts);
+        let retry_suffix = format!("{suffix}-r1");
         let mut matches = Vec::new();
         for job in jobs {
-            if !job.id.as_str().ends_with(&suffix) {
+            if !job.id.as_str().ends_with(&suffix) && !job.id.as_str().ends_with(&retry_suffix) {
                 continue;
             }
             for edge in self.store.edges_of(&job.id)? {
@@ -1256,8 +1449,17 @@ impl Supervisor {
             .collect()
     }
 
+    /// Returns true when `name` is missing or active (a paused row skips its step).
+    pub(crate) fn loop_active(&self, name: &str) -> bool {
+        self.store
+            .loop_(name)
+            .ok()
+            .flatten()
+            .is_none_or(|loop_| loop_.state == ActiveState::Active)
+    }
+
     /// Returns the L1 bounds used by this tick.
-    pub(crate) fn bounds(&self) -> LoopBounds {
+    fn bounds(&self) -> LoopBounds {
         self.store
             .loop_("l1-supervisor")
             .ok()
@@ -1288,7 +1490,12 @@ impl Supervisor {
             .git
             .diff_names(&repo, super::default_branch(&self.deps), branch)
         {
-            Ok(files) => format!("{} file(s): {}", files.len(), files.join(", ")),
+            Ok(files) => format!(
+                "`git diff {}...{branch}` ({} file(s): {})",
+                super::default_branch(&self.deps),
+                files.len(),
+                files.join(", ")
+            ),
             Err(error) => format!("diff unavailable: {error}"),
         }
     }

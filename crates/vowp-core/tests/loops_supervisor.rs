@@ -46,6 +46,92 @@ fn tick_step_failure_does_not_abort_tick() {
 }
 
 #[test]
+fn tick_does_not_block_on_slow_gate() {
+    let adapter = Arc::new(ScriptAdapter::always(
+        vowp_protocol::HarnessKind::Opencode,
+        ScriptAction::ok("dispatched while gating"),
+    ));
+    let node = TestNode::with_adapter(false, adapter);
+    let gate_job = node.insert_job(
+        "slow-gate",
+        JobKind::Build,
+        vowp_protocol::Role::Worker,
+        Some(vec![Gate::Cmd(vowp_protocol::CmdGate {
+            run: "sleep 1; echo slow-gate-tail >&2; exit 1".to_owned(),
+            ..vowp_protocol::CmdGate::default()
+        })]),
+    );
+    node.force_state(&gate_job, JobState::Gating);
+    let dispatch_job = worker_job(&node, "during-gate");
+    node.store()
+        .patch_job(
+            &dispatch_job.id,
+            &vowp_protocol::JobPatch {
+                owns: Some(vec!["other/**".to_owned()]),
+                ..vowp_protocol::JobPatch::default()
+            },
+        )
+        .expect("patch owns");
+    let mut supervisor = node.supervisor();
+    let report = supervisor.tick().expect("tick");
+    assert!(
+        report.dispatched.contains(&dispatch_job.id),
+        "dispatch must run before the gate finishes: {:?}",
+        report.dispatched
+    );
+    assert_eq!(
+        node.store().require_job(&gate_job.id).expect("gate job").state,
+        JobState::Gating
+    );
+    assert!(node.deps.paths.root().join("heartbeat").is_file());
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&gate_job.id).expect("gate job").state == JobState::Fixing
+    });
+}
+
+#[test]
+fn tick_does_not_block_on_slow_merge() {
+    let node = TestNode::with_adapter_config(
+        true,
+        Arc::new(ScriptAdapter::always(
+            vowp_protocol::HarnessKind::Opencode,
+            ScriptAction::ok("dispatched while merging"),
+        )),
+        |config| {
+            config.merge.check_cmds = vec!["sleep 1; exit 0".to_owned()];
+        },
+    );
+    let merge_job = node.insert_job("slow-merge", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
+    node.worktree_with_file(&merge_job, "src/merge.rs", "pub fn merged() {}\n");
+    node.force_state(&merge_job, JobState::Merging);
+    let dispatch_job = worker_job(&node, "during-merge");
+    node.store()
+        .patch_job(
+            &dispatch_job.id,
+            &vowp_protocol::JobPatch {
+                owns: Some(vec!["other/**".to_owned()]),
+                ..vowp_protocol::JobPatch::default()
+            },
+        )
+        .expect("patch owns");
+    let mut supervisor = node.supervisor();
+    let report = supervisor.tick().expect("tick");
+    assert!(
+        report.dispatched.contains(&dispatch_job.id),
+        "dispatch must run before the merge finishes: {:?}",
+        report.dispatched
+    );
+    assert_eq!(
+        node.store().require_job(&merge_job.id).expect("merge job").state,
+        JobState::Merging
+    );
+    assert!(node.deps.paths.root().join("heartbeat").is_file());
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&merge_job.id).expect("merge job").state == JobState::Done
+    });
+}
+
+#[test]
 fn startup_marks_orphaned_runs_crash_and_continues_job() {
     let node = TestNode::new();
     let job = worker_job(&node, "orphan-job");
@@ -376,7 +462,7 @@ fn verify_job_goes_done_via_gating_never_merged_and_original_receives_verdict() 
     let node = TestNode::with_adapter(true, adapter);
     let original = reviewing_job(&node, "verify-pass");
     let mut supervisor = node.supervisor();
-    node.tick_until(&mut supervisor, 12, |store| {
+    node.tick_until(&mut supervisor, 40, |store| {
         matches!(
             store.require_job(&original.id).expect("original").state,
             JobState::Merging | JobState::Done
@@ -388,14 +474,162 @@ fn verify_job_goes_done_via_gating_never_merged_and_original_receives_verdict() 
         .expect("verify job");
     assert_eq!(verify.state, JobState::Done);
     assert_eq!(verify.kind, JobKind::Verify);
+    let state_rows = store
+        .ledger_since(&vowp_store::LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::State),
+            job_id: Some(verify.id.clone()),
+            ..vowp_store::LedgerFilter::default()
+        })
+        .expect("state rows");
+    assert!(
+        state_rows
+            .iter()
+            .all(|entry| entry.detail.get("to") != Some(&serde_json::Value::String("merging".to_owned()))),
+        "a verify job must never enter merging"
+    );
+    let merge_rows = store
+        .ledger_since(&vowp_store::LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::Merge),
+            job_id: Some(verify.id.clone()),
+            ..vowp_store::LedgerFilter::default()
+        })
+        .expect("merge rows");
+    assert!(merge_rows.is_empty(), "a verify job is never merged");
     let results = store.gate_results_for(&original.id, 0).expect("gate results");
     let review = results
         .iter()
         .find(|result| matches!(result.gate, Gate::Review(_)))
         .expect("review result");
     assert!(review.passed);
-    assert_eq!(original.id, original.id);
-    let _ = original;
+    assert!(matches!(
+        store.require_job(&original.id).expect("original").state,
+        JobState::Merging | JobState::Done
+    ));
+}
+
+#[test]
+fn verify_prompt_contains_original_gate_command_and_tail() {
+    let adapter = Arc::new(ScriptAdapter::new(
+        vowp_protocol::HarnessKind::Opencode,
+        report_script("verify-evidence", Some("pass"), "done"),
+    ));
+    let node = TestNode::with_adapter(true, adapter.clone());
+    let original = reviewing_job(&node, "verify-evidence");
+    node.store()
+        .insert_gate_result(&vowp_protocol::GateResult {
+            id: None,
+            job_id: original.id.clone(),
+            run_id: None,
+            attempt: 0,
+            gate_index: 0,
+            gate: Gate::Cmd(vowp_protocol::CmdGate {
+                run: "cargo test --workspace".to_owned(),
+                ..vowp_protocol::CmdGate::default()
+            }),
+            passed: false,
+            evidence: vowp_protocol::Evidence::Cmd {
+                command: "cargo test --workspace".to_owned(),
+                exit_code: Some(101),
+                timed_out: false,
+                tail: "compiling the workspace\nTAIL-MARKER-42".to_owned(),
+                duration_ms: 10,
+            },
+            output_blob: None,
+            duration_ms: 10,
+            ts: now(),
+        })
+        .expect("gate result");
+    let mut supervisor = node.supervisor();
+    node.tick_until(&mut supervisor, 40, |store| {
+        store
+            .job(&vowp_protocol::JobId::parse(&verify_id("verify-evidence", 0)).expect("id"))
+            .expect("verify")
+            .is_some_and(|job| job.state == JobState::Done)
+    });
+    let starts = adapter.starts();
+    let prompt = starts
+        .iter()
+        .map(|start| start.prompt.as_str())
+        .find(|prompt| prompt.contains("You are the verifier for job"))
+        .expect("verifier prompt");
+    assert!(prompt.contains("cargo test --workspace"), "{prompt}");
+    assert!(prompt.contains("TAIL-MARKER-42"), "{prompt}");
+    assert!(prompt.contains("git diff main...job/verify-evidence"), "{prompt}");
+}
+
+#[test]
+fn verify_no_verdict_is_retried_once_then_accepts_a_valid_report() {
+    let adapter = Arc::new(ScriptAdapter::new(
+        vowp_protocol::HarnessKind::Opencode,
+        Arc::new(|input: &vowp_protocol::StartInput| {
+            if let Some(verify_job) = verify_prompt_job(&input.prompt) {
+                let verdict = if verify_job.ends_with("-r1") {
+                    Some("pass")
+                } else {
+                    None
+                };
+                return ScriptAction::ok("verdict attempt").with_file(
+                    format!(".vowp/jobs/{verify_job}/report.md"),
+                    report_markdown(&verify_job, "job/verify-retry", "done", verdict, &[]),
+                );
+            }
+            ScriptAction::ok("nothing")
+        }),
+    ));
+    let node = TestNode::with_adapter(true, adapter);
+    let original = reviewing_job(&node, "verify-retry");
+    let mut supervisor = node.supervisor();
+    node.tick_until(&mut supervisor, 60, |store| {
+        store.require_job(&original.id).expect("original").state == JobState::Merging
+    });
+    let store = node.store();
+    let retry = store
+        .require_job(&vowp_protocol::JobId::parse(&format!("{}-r1", verify_id("verify-retry", 0))).expect("id"))
+        .expect("retry verify job");
+    assert_eq!(retry.state, JobState::Done);
+    let review = store
+        .gate_results_for(&original.id, 0)
+        .expect("gate results")
+        .into_iter()
+        .find(|result| matches!(result.gate, Gate::Review(_)))
+        .expect("review result");
+    assert!(review.passed);
+    assert_ne!(
+        store.require_job(&original.id).expect("original").state,
+        JobState::Parked
+    );
+}
+
+#[test]
+fn verify_no_verdict_twice_parks_original_with_question() {
+    let adapter = Arc::new(ScriptAdapter::new(
+        vowp_protocol::HarnessKind::Opencode,
+        Arc::new(|input: &vowp_protocol::StartInput| {
+            if let Some(verify_job) = verify_prompt_job(&input.prompt) {
+                return ScriptAction::ok("no verdict").with_file(
+                    format!(".vowp/jobs/{verify_job}/report.md"),
+                    report_markdown(&verify_job, "job/verify-no-verdict", "done", None, &[]),
+                );
+            }
+            ScriptAction::ok("nothing")
+        }),
+    ));
+    let node = TestNode::with_adapter(true, adapter);
+    let original = reviewing_job(&node, "verify-no-verdict");
+    let mut supervisor = node.supervisor();
+    node.tick_until(&mut supervisor, 60, |store| {
+        store.require_job(&original.id).expect("original").state == JobState::Parked
+    });
+    let store = node.store();
+    let job = store.require_job(&original.id).expect("job");
+    assert_eq!(job.parked_reason, Some(ParkedReason::Question));
+    let inbox = store.list_inbox(None).expect("inbox");
+    assert!(inbox.iter().any(|item| {
+        item.job_id.as_ref() == Some(&job.id)
+            && item
+                .body
+                .contains(&format!("verifier could not produce a verdict for {}", job.id))
+    }));
 }
 
 #[test]
@@ -490,6 +724,80 @@ fn failed_verify_job_parks_original_with_question() {
 
 #[test]
 fn paused_loop_is_skipped() {
+    let adapter = Arc::new(ScriptAdapter::always(
+        vowp_protocol::HarnessKind::Opencode,
+        ScriptAction::ok("paused"),
+    ));
+    let node = TestNode::with_adapter(true, adapter);
+    let mut supervisor = node.supervisor();
+    let store = node.store();
+    let dispatch_job = worker_job(&node, "paused-dispatch");
+    let review_job = reviewing_job(&node, "paused-review");
+    let template = vowp_protocol::NewJob {
+        id: vowp_protocol::JobId::parse("sched-job").expect("id"),
+        title: "scheduled".to_owned(),
+        kind: JobKind::Build,
+        role: vowp_protocol::Role::Worker,
+        profile: None,
+        needs: Vec::new(),
+        owns: Vec::new(),
+        reads: Vec::new(),
+        gates: Some(Vec::new()),
+        priority: None,
+        loop_: None,
+        brief_text: None,
+    };
+    store
+        .insert_schedule(&vowp_protocol::Schedule {
+            id: vowp_protocol::ScheduleId::new(),
+            project: Some(node.project.clone()),
+            name: "paused-schedule".to_owned(),
+            spec_kind: vowp_protocol::ScheduleSpecKind::Interval,
+            spec: "every 30m".to_owned(),
+            tz: "UTC".to_owned(),
+            action: vowp_protocol::ScheduleAction::JobTemplate { template },
+            missed_policy: vowp_protocol::MissedPolicy::RunOnce,
+            state: vowp_protocol::ActiveState::Active,
+            last_run_at: None,
+            next_run_at: Some(now()),
+            last_status: String::new(),
+            created_at: now(),
+        })
+        .expect("schedule");
+    for name in ["l2-worker", "l3-verify", "l9-schedules"] {
+        store
+            .set_loop_state(name, vowp_protocol::ActiveState::Paused)
+            .expect("pause loop");
+    }
+    let report = supervisor.tick().expect("paused tick");
+    assert!(report.dispatched.is_empty());
+    assert_ne!(
+        store.require_job(&dispatch_job.id).expect("job").state,
+        JobState::Running
+    );
+    assert!(
+        store
+            .job(&vowp_protocol::JobId::parse(&verify_id("paused-review", 0)).expect("id"))
+            .expect("verify")
+            .is_none(),
+        "paused l3-verify must not create a verify job"
+    );
+    assert_eq!(
+        store.require_job(&review_job.id).expect("review").state,
+        JobState::Reviewing
+    );
+    let scheduled = store
+        .list_jobs(&JobFilter {
+            id_prefix: Some("sched-job".to_owned()),
+            ..JobFilter::default()
+        })
+        .expect("scheduled jobs");
+    assert!(scheduled.is_empty(), "paused l9-schedules must not fire");
+    assert!(report.steps.iter().any(|step| step.name == "heartbeat" && step.ok));
+}
+
+#[test]
+fn global_pause_skips_dispatch() {
     let adapter = Arc::new(ScriptAdapter::always(
         vowp_protocol::HarnessKind::Opencode,
         ScriptAction::ok("paused"),
@@ -590,36 +898,41 @@ fn requests_drained_and_applied() {
 
 #[test]
 fn request_rows_apply_every_kind_end_to_end() {
-    let node = TestNode::new();
+    let adapter = Arc::new(ScriptAdapter::always(
+        vowp_protocol::HarnessKind::Opencode,
+        ScriptAction::ok("slow run").with_delay(Duration::from_secs(3)),
+    ));
+    let node = TestNode::with_adapter(false, adapter);
+    let mut supervisor = node.supervisor();
     let store = node.store();
-    let failed = node.insert_job("req-failed", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
-    node.force_state(&failed, JobState::Failed);
-    let stalled = node.insert_job("req-stalled", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
-    node.force_state(&stalled, JobState::Stalled);
-    let parked = node.insert_job("req-parked", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
     store
-        .set_job_state(
-            &parked.id,
-            JobState::Parked,
-            &vowp_store::StateChange {
-                note: None,
-                parked_reason: Some(ParkedReason::Manual),
-            },
-        )
-        .expect("parked");
-    let cancelled = node.insert_job(
-        "req-cancelled",
-        JobKind::Build,
-        vowp_protocol::Role::Worker,
-        Some(vec![]),
-    );
+        .set_loop_state("l2-worker", vowp_protocol::ActiveState::Paused)
+        .expect("pause l2");
+
+    let retry_failed = worker_job(&node, "req-retry");
+    node.force_state(&retry_failed, JobState::Failed);
+    let restart_stalled = worker_job(&node, "req-restart");
+    node.force_state(&restart_stalled, JobState::Stalled);
+    let resolve_parked = worker_job(&node, "req-resolve");
+    node.force_state(&resolve_parked, JobState::Parked);
+    let cancel_pending = worker_job(&node, "req-cancel");
+    let nudge_stalled = worker_job(&node, "req-nudge");
+    node.force_state(&nudge_stalled, JobState::Stalled);
+    let park_ready = worker_job(&node, "req-park");
+    node.force_state(&park_ready, JobState::Ready);
+    let replan_parked = worker_job(&node, "req-replan");
+    node.force_state(&replan_parked, JobState::Parked);
+    let fail_stalled = worker_job(&node, "req-fail");
+    node.force_state(&fail_stalled, JobState::Stalled);
+    let answer_parked = worker_job(&node, "req-answer");
+    node.force_state(&answer_parked, JobState::Parked);
 
     let inbox_id = vowp_protocol::InboxId::new();
     store
         .insert_inbox(&vowp_protocol::InboxItem {
             id: inbox_id.clone(),
             project: Some(node.project.clone()),
-            job_id: Some(parked.id.clone()),
+            job_id: Some(answer_parked.id.clone()),
             kind: vowp_protocol::InboxKind::Question,
             title: "answer me".to_owned(),
             body: "?".to_owned(),
@@ -634,32 +947,38 @@ fn request_rows_apply_every_kind_end_to_end() {
     store.answer_inbox(&inbox_id, "resolved", "test").expect("answer");
 
     let requests = [
-        Request::RetryJob { job: failed.id.clone() },
-        Request::RestartJob {
-            job: stalled.id.clone(),
+        Request::RetryJob {
+            job: retry_failed.id.clone(),
         },
-        Request::ResolveJob { job: parked.id.clone() },
+        Request::RestartJob {
+            job: restart_stalled.id.clone(),
+        },
+        Request::ResolveJob {
+            job: resolve_parked.id.clone(),
+        },
         Request::CancelJob {
-            job: cancelled.id.clone(),
+            job: cancel_pending.id.clone(),
         },
         Request::NudgeJob {
-            job: stalled.id.clone(),
+            job: nudge_stalled.id.clone(),
         },
         Request::ParkJob {
-            job: failed.id.clone(),
-            reason: "manual".to_owned(),
+            job: park_ready.id.clone(),
+            reason: "needs a human".to_owned(),
         },
-        Request::ReplanJob { job: parked.id.clone() },
+        Request::ReplanJob {
+            job: replan_parked.id.clone(),
+        },
         Request::FailJob {
-            job: stalled.id.clone(),
+            job: fail_stalled.id.clone(),
             reason: "gave up".to_owned(),
         },
         Request::AnswerInbox { id: inbox_id },
         Request::PauseLoop {
-            name: "l2-worker".to_owned(),
+            name: "l7-inbox".to_owned(),
         },
         Request::ResumeLoop {
-            name: "l2-worker".to_owned(),
+            name: "l7-inbox".to_owned(),
         },
         Request::RunLoop {
             name: "l3-verify".to_owned(),
@@ -669,10 +988,64 @@ fn request_rows_apply_every_kind_end_to_end() {
     for request in &requests {
         push(&store, request).expect("push request");
     }
-    let mut supervisor = node.supervisor();
     supervisor.tick().expect("tick");
-    // The first event per job wins; later conflicting events are logged and dropped.
-    assert_ne!(store.require_job(&failed.id).expect("job").state, JobState::Failed);
-    assert_ne!(store.require_job(&stalled.id).expect("job").state, JobState::Stalled);
+
+    assert_eq!(store.require_job(&retry_failed.id).expect("job").state, JobState::Ready);
+    assert_eq!(
+        store.require_job(&restart_stalled.id).expect("job").state,
+        JobState::Running
+    );
+    assert_eq!(
+        store.require_job(&resolve_parked.id).expect("job").state,
+        JobState::Ready
+    );
+    assert_eq!(
+        store.require_job(&cancel_pending.id).expect("job").state,
+        JobState::Cancelled
+    );
+    assert_eq!(
+        store.require_job(&nudge_stalled.id).expect("job").state,
+        JobState::Running
+    );
+    let parked = store.require_job(&park_ready.id).expect("job");
+    assert_eq!(parked.state, JobState::Parked);
+    assert_eq!(parked.parked_reason, Some(ParkedReason::Manual));
+    assert_eq!(parked.note, "needs a human");
+    assert_eq!(
+        store.require_job(&replan_parked.id).expect("job").state,
+        JobState::Replanned
+    );
+    assert_eq!(
+        store.require_job(&fail_stalled.id).expect("job").state,
+        JobState::Failed
+    );
+    assert_eq!(
+        store.require_job(&answer_parked.id).expect("job").state,
+        JobState::Ready
+    );
+    assert_eq!(
+        store.loop_("l7-inbox").expect("loop").expect("row").state,
+        vowp_protocol::ActiveState::Active
+    );
+    assert_eq!(
+        store.loop_("l3-verify").expect("loop").expect("row").next_run_at,
+        Some(now())
+    );
+    let restart_runs = store.runs_of_job(&restart_stalled.id).expect("runs");
+    assert_eq!(restart_runs.last().expect("run").purpose, RunPurpose::Start);
+    let nudge_runs = store.runs_of_job(&nudge_stalled.id).expect("runs");
+    assert_eq!(nudge_runs.last().expect("run").purpose, RunPurpose::Continue);
+    let ledger = store
+        .ledger_since(&vowp_store::LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::State),
+            ..vowp_store::LedgerFilter::default()
+        })
+        .expect("ledger");
+    for why in ["pause_loop", "resume_loop", "run_loop", "wake"] {
+        assert!(
+            ledger.iter().any(|entry| entry.summary.contains(why)),
+            "missing {why} ledger row"
+        );
+    }
     assert!(store.take_requests().expect("queue").is_empty());
 }

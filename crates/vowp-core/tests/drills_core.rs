@@ -108,7 +108,7 @@ fn drill_merge_conflict() {
                 )
         }),
     ));
-    let node = TestNode::with_adapter(true, adapter);
+    let node = TestNode::with_adapter(true, adapter.clone());
     let first = node.insert_job("first", JobKind::Build, Role::Worker, Some(vec![]));
     node.worktree_with_file(&first, "src/shared.rs", "pub fn value() -> u8 { 1 }\n");
     node.force_state(&first, JobState::Merging);
@@ -117,7 +117,7 @@ fn drill_merge_conflict() {
     node.force_state(&second, JobState::Merging);
 
     let mut supervisor = node.supervisor();
-    node.tick_until(&mut supervisor, 30, |store| {
+    node.tick_until(&mut supervisor, 120, |store| {
         store.require_job(&second.id).expect("second").state == JobState::Done
     });
     let store = node.store();
@@ -140,6 +140,13 @@ fn drill_merge_conflict() {
 #[test]
 fn drill_merge_lockfile() {
     let node = TestNode::new_real_git();
+    node.commit_file(
+        &node.main_repo.clone(),
+        "Cargo.toml",
+        "[package]\nname = \"lockdrill\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    node.commit_file(&node.main_repo.clone(), "src/lib.rs", "pub fn lock() {}\n");
+    node.git(&node.main_repo.clone(), &["push", "origin", "main"]);
     let first = node.insert_job("lock-a", JobKind::Build, Role::Worker, Some(vec![]));
     node.worktree_with_file(&first, "Cargo.lock", "version = 3\n\"a\" = 1\n");
     node.force_state(&first, JobState::Merging);
@@ -148,7 +155,7 @@ fn drill_merge_lockfile() {
     node.force_state(&second, JobState::Merging);
 
     let mut supervisor = node.supervisor();
-    node.tick_until(&mut supervisor, 12, |store| {
+    node.tick_until(&mut supervisor, 120, |store| {
         store.require_job(&second.id).expect("second").state == JobState::Done
     });
     let store = node.store();
@@ -173,6 +180,9 @@ fn drill_merge_lockfile() {
         row.detail.get("lockfile_refreshed"),
         Some(&serde_json::Value::Bool(true))
     );
+    let origin = node.tmp.path().join("origin.git");
+    let subject = node.git(&origin, &["log", "-1", "--format=%s", "main"]);
+    assert_eq!(subject.trim(), "chore: refresh lockfile (merge queue)");
 }
 
 #[test]
@@ -205,7 +215,7 @@ fn drill_gate_fail_fix_loop() {
             )
         }),
     ));
-    let node = TestNode::with_adapter(true, adapter);
+    let node = TestNode::with_adapter(true, adapter.clone());
     let job = node.insert_job(
         "gate-job",
         JobKind::Build,
@@ -213,7 +223,7 @@ fn drill_gate_fail_fix_loop() {
         Some(vec![
             Gate::Report(vowp_protocol::ReportGate::default()),
             Gate::Cmd(vowp_protocol::CmdGate {
-                run: "grep -q '^ready$' state.txt".to_owned(),
+                run: "echo gate-output-marker >&2; grep -q '^ready$' state.txt".to_owned(),
                 ..vowp_protocol::CmdGate::default()
             }),
             Gate::Review(vowp_protocol::ReviewGate::default()),
@@ -233,6 +243,15 @@ fn drill_gate_fail_fix_loop() {
         })
         .expect("fix jobs");
     assert_eq!(fixes.len(), 2);
+    let fix_prompts = adapter
+        .starts()
+        .into_iter()
+        .filter(|start| start.prompt.contains("Job gate-job failed"))
+        .collect::<Vec<_>>();
+    assert!(!fix_prompts.is_empty());
+    assert!(fix_prompts.iter().any(|start| {
+        start.prompt.contains("grep -q '^ready$' state.txt") && start.prompt.contains("gate-output-marker")
+    }));
 
     // A job with zero allowed rounds escalates through T18 instead.
     let exhausted = node.insert_job(
@@ -242,7 +261,7 @@ fn drill_gate_fail_fix_loop() {
         Some(vec![
             Gate::Report(vowp_protocol::ReportGate::default()),
             Gate::Cmd(vowp_protocol::CmdGate {
-                run: "grep -q '^ready$' state.txt".to_owned(),
+                run: "echo gate-output-marker >&2; grep -q '^ready$' state.txt".to_owned(),
                 ..vowp_protocol::CmdGate::default()
             }),
         ]),
@@ -332,8 +351,9 @@ fn drill_secret_scan_blocks_push() {
     let before = node.git(&node.tmp.path().join("origin.git"), &["rev-parse", "main"]);
 
     let mut supervisor = node.supervisor();
-    let report = node.tick_settled(&mut supervisor);
-    assert!(report.steps.iter().any(|step| step.name == "merge" && step.ok));
+    node.tick_until(&mut supervisor, 120, |store| {
+        store.require_job(&job.id).expect("job").state == JobState::Fixing
+    });
     let store = node.store();
     let job = store.require_job(&job.id).expect("job");
     assert_eq!(job.state, JobState::Fixing);

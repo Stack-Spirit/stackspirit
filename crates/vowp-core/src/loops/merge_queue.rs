@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use vowp_protocol::{CmdGate, Gate, GateResult, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind};
+use vowp_protocol::{CmdGate, Gate, GateResult, InboxKind, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind};
 use vowp_store::{JobFilter, Store};
 
 use crate::CoreError;
@@ -34,8 +34,15 @@ pub enum MergeStep {
         /// Job returned to `fixing`.
         job: JobId,
     },
-    /// A merge is already running (this implementation is single-threaded per tick).
+    /// Another merge is already running.
     InProgress,
+    /// The main checkout was not clean; the job must be parked manually.
+    Manual {
+        /// Job to park.
+        job: JobId,
+        /// Why the queue refused to touch the checkout.
+        detail: String,
+    },
 }
 
 /// One-project merge queue.
@@ -89,6 +96,7 @@ impl MergeQueue {
         let remote = self.deps.config.project.remote.clone();
         let base = self.deps.config.project.default_branch.clone();
         let base_ref = format!("{remote}/{base}");
+        let trailer = job_trailer(store, job);
         let start = Instant::now();
 
         let mut push_attempts = 0u32;
@@ -103,7 +111,9 @@ impl MergeQueue {
                     RebaseResult::Clean => {}
                     RebaseResult::Conflict { files } => {
                         if files.iter().all(|file| is_lockfile(&self.deps, file)) {
-                            if let Err(step) = self.continue_lockfile_rebase(&worktree, &base_ref, &files, job) {
+                            if let Err(step) =
+                                self.continue_lockfile_rebase(&worktree, &base_ref, &files, job, &trailer)
+                            {
                                 return Ok(step);
                             }
                             lockfile_refreshed = true;
@@ -139,7 +149,26 @@ impl MergeQueue {
             }
 
             if !self.deps.git.status_clean(&repo)? {
-                return Ok(MergeStep::ChecksFailed { job: job.id.clone() });
+                let detail = format!("main checkout {} is not clean", repo.display());
+                self.record_merge_failure(store, job, &detail)?;
+                super::open_inbox(
+                    store,
+                    &self.deps,
+                    super::NewInbox {
+                        project: Some(job.project.clone()),
+                        job_id: Some(job.id.clone()),
+                        kind: InboxKind::Notice,
+                        title: format!("merge blocked: {}", job.id),
+                        body: format!(
+                            "the main checkout is not clean; clean it and resolve the job manually. {detail}"
+                        ),
+                        options: vec!["resolved".to_owned()],
+                    },
+                )?;
+                return Ok(MergeStep::Manual {
+                    job: job.id.clone(),
+                    detail,
+                });
             }
             if self.deps.git.merge_ff_only(&repo, &branch).is_err() {
                 return Ok(MergeStep::ChecksFailed { job: job.id.clone() });
@@ -204,6 +233,7 @@ impl MergeQueue {
         base_ref: &str,
         files: &[String],
         job: &Job,
+        trailer: &str,
     ) -> Result<(), MergeStep> {
         for file in files {
             self.deps
@@ -222,12 +252,12 @@ impl MergeQueue {
                 return Err(MergeStep::ChecksFailed { job: job.id.clone() });
             }
         }
-        let _ = self.refresh_lockfile(worktree);
+        let _ = self.refresh_lockfile(worktree, trailer);
         Ok(())
     }
 
     /// Regenerates `Cargo.lock` with `cargo update -w` when the worktree has a manifest.
-    fn refresh_lockfile(&self, worktree: &Path) -> Result<(), CoreError> {
+    fn refresh_lockfile(&self, worktree: &Path, trailer: &str) -> Result<(), CoreError> {
         if !worktree.join("Cargo.toml").is_file() {
             return Ok(());
         }
@@ -240,11 +270,32 @@ impl MergeQueue {
         })?;
         if !self.deps.git.status_clean(worktree)? {
             self.deps.git.add(worktree, &["Cargo.lock".to_owned()])?;
-            self.deps.git.commit(
-                worktree,
-                "chore: refresh lockfile (merge queue)\n\nAI-Assisted: supervisor via vowp-night",
-            )?;
+            self.deps
+                .git
+                .commit(worktree, &format!("chore: refresh lockfile (merge queue)\n\n{trailer}"))?;
         }
+        Ok(())
+    }
+
+    /// Appends a ledger `merge` row for a refused merge.
+    fn record_merge_failure(&self, store: &Store, job: &Job, detail: &str) -> Result<(), CoreError> {
+        let entry = LedgerEntry {
+            id: None,
+            ts: store.clock().now(),
+            kind: LedgerKind::Merge,
+            project: Some(job.project.clone()),
+            job_id: Some(job.id.clone()),
+            run_id: None,
+            session_id: None,
+            role: None,
+            provider: None,
+            harness: None,
+            model: None,
+            cost: None,
+            summary: format!("merge blocked {}: {detail}", job.id),
+            detail: serde_json::json!({"failure": detail}),
+        };
+        self.ledger.record(store, entry)?;
         Ok(())
     }
 
@@ -289,6 +340,18 @@ impl MergeQueue {
         self.ledger.record(store, entry)?;
         Ok(())
     }
+}
+
+/// Returns the AI trailer for a queue-authored commit, using the job's last executor.
+fn job_trailer(store: &Store, job: &Job) -> String {
+    let executor = store
+        .last_run_of_job(&job.id)
+        .ok()
+        .flatten()
+        .and_then(|run| run.executor)
+        .map(|executor| executor.to_string())
+        .unwrap_or_else(|| "supervisor".to_owned());
+    format!("AI-Assisted: {executor} via vowp-night")
 }
 
 /// Returns true when `path` is one of the project's regenerated lockfiles.

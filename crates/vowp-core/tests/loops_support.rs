@@ -448,6 +448,7 @@ impl TestNode {
             if predicate(&self.store()) {
                 return;
             }
+            std::thread::sleep(Duration::from_millis(20));
         }
         panic!("condition not reached after {attempts} ticks");
     }

@@ -25,7 +25,30 @@ pub(crate) fn create_verify_job(
     evidence: &[GateResult],
     diff_summary: &str,
 ) -> Result<Job, CoreError> {
-    let id = JobId::parse(&format!("{}-verify-{}", original.id, original.attempts))?;
+    create_verify_job_with_suffix(store, deps, original, evidence, diff_summary, "")
+}
+
+/// Creates the single retry of a verify job whose report had no usable verdict (T37).
+pub(crate) fn create_verify_retry_job(
+    store: &Store,
+    deps: &Deps,
+    original: &Job,
+    evidence: &[GateResult],
+    diff_summary: &str,
+) -> Result<Job, CoreError> {
+    create_verify_job_with_suffix(store, deps, original, evidence, diff_summary, "-r1")
+}
+
+/// Creates a verify job with an id suffix (`""` or `"-r1"`).
+fn create_verify_job_with_suffix(
+    store: &Store,
+    deps: &Deps,
+    original: &Job,
+    evidence: &[GateResult],
+    diff_summary: &str,
+    suffix: &str,
+) -> Result<Job, CoreError> {
+    let id = JobId::parse(&format!("{}-verify-{}{suffix}", original.id, original.attempts))?;
     if store.job(&id)?.is_some() {
         // invariant: a retried supervisor tick reuses the existing verify job.
         return Ok(store.require_job(&id)?);
@@ -152,9 +175,8 @@ pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summa
     }
     format!(
         "You are the verifier for job {job_id} of project {project}. The original brief is at {brief_path}.\n\
-         The job worktree is {worktree}; run `git diff {base}...{branch}` to inspect the change.\n\
+         The job worktree is {worktree}. The change under review: {diff}\n\
          Gate evidence for this attempt:\n{evidence}\
-         Diff summary: {diff}\n\
          Judge only against evidence and the brief; run the commands yourself; do not edit files.\n\
          Write your report with front-matter `verdict: pass|fail` and, on fail, `findings:` as a list of concrete, checkable problems (file, command, expected, actual). Report `status: done` when you finished judging.\n\
          Job: {job_id}",
@@ -162,8 +184,6 @@ pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summa
         project = job.project,
         brief_path = brief,
         worktree = job.worktree.as_deref().unwrap_or("."),
-        base = "main",
-        branch = job.branch.as_deref().unwrap_or("job/<unknown>"),
         evidence = lines,
         diff = diff_summary,
     )
@@ -242,7 +262,12 @@ fn summarise_evidence(evidence: &Evidence) -> String {
         }
         Evidence::Pushed { branch, remote, .. } => format!("{remote}/{branch}"),
         Evidence::Review { verdict, findings, .. } => format!("{verdict:?} {findings:?}"),
-        Evidence::Deploy { command, exit_code, .. } => format!("`{command}` exited {exit_code:?}"),
+        Evidence::Deploy {
+            command,
+            exit_code,
+            probe,
+            ..
+        } => format!("`{command}` exited {exit_code:?}; probe: {}", summarise_evidence(probe)),
         Evidence::SecretScan { hits, .. } => format!("{} secret hit(s)", hits.len()),
     }
 }
