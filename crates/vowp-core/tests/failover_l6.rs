@@ -108,6 +108,10 @@ fn auth_parks_with_inbox() {
     Failover::new(node.deps.clone())
         .on_run_outcome(&store, &run, &summary)
         .expect("auth");
+    assert!(
+        vowp_core::loops::l4_planner::event_wake(&store, "planner").expect("wake"),
+        "a limit/failover event is an unseen planner event"
+    );
 
     supervisor.tick().expect("park tick");
     let job = store.require_job(&job.id).expect("job");
@@ -284,4 +288,61 @@ fn credits_park_parks_verify_and_fix_child_jobs_and_leaves_waiting_parents() {
         "a reviewing parent waits for its child and is not itself parked"
     );
     assert_eq!(store.list_inbox(None).expect("inbox").len(), 1);
+}
+
+#[test]
+fn provider_blocked_answer_resolves_only_that_provider() {
+    let node = TestNode::new();
+    let blocked = node.insert_job("blocked-deepseek", JobKind::Build, Role::Worker, Some(vec![]));
+    let other = node.insert_job("blocked-claude", JobKind::Build, Role::Worker, Some(vec![]));
+    let store = node.store();
+    let mut supervisor = node.supervisor();
+    for (job, provider) in [(&blocked, "deepseek"), (&other, "claude")] {
+        store
+            .set_job_state(
+                &job.id,
+                JobState::Parked,
+                &vowp_store::StateChange {
+                    note: Some(format!("provider {provider} is blocked; resolve it")),
+                    parked_reason: Some(ParkedReason::ProviderBlocked),
+                },
+            )
+            .expect("park");
+    }
+    store
+        .set_loop_state("l2-worker", ActiveState::Paused)
+        .expect("pause l2");
+    store
+        .set_loop_state("l4-planner", ActiveState::Paused)
+        .expect("pause planner");
+    let inbox_id = vowp_protocol::InboxId::new();
+    store
+        .insert_inbox(&vowp_protocol::InboxItem {
+            id: inbox_id.clone(),
+            project: Some(node.project.clone()),
+            job_id: None,
+            kind: InboxKind::Question,
+            title: "provider blocked: deepseek".to_owned(),
+            body: "resolve it".to_owned(),
+            options: vec!["resolved".to_owned()],
+            state: vowp_protocol::InboxState::Open,
+            answer: None,
+            answered_by: None,
+            created_at: ts(),
+            answered_at: None,
+        })
+        .expect("inbox");
+    store.answer_inbox(&inbox_id, "resolved", "test").expect("answer");
+    vowp_core::requests::push(
+        &store,
+        &vowp_core::requests::Request::AnswerInbox { id: inbox_id.clone() },
+    )
+    .expect("request");
+    supervisor.tick().expect("answer tick");
+    assert_eq!(store.require_job(&blocked.id).expect("job").state, JobState::Ready);
+    assert_eq!(
+        store.require_job(&other.id).expect("job").state,
+        JobState::Parked,
+        "a notice for deepseek must not resolve a claude job"
+    );
 }

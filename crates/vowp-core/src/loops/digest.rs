@@ -235,7 +235,8 @@ fn append_stalled_tails(
         };
         any = true;
         let _ = writeln!(text, "### {}", job.id);
-        let rows = store.event_rows(&session.id, 0, 60)?;
+        let after = session.last_seq.saturating_sub(60);
+        let rows = store.event_rows(&session.id, after, 60)?;
         if rows.is_empty() {
             text.push_str("(no indexed events)\n");
         }

@@ -446,6 +446,15 @@ impl SessionRunPool {
             .any(|entry| entry.role == role && !is_session_finished(entry))
     }
 
+    /// Returns the sessions whose turn thread is still live.
+    pub fn live_sessions(&self) -> HashSet<SessionId> {
+        self.entries
+            .iter()
+            .filter(|entry| !is_session_finished(entry))
+            .map(|entry| entry.session_id.clone())
+            .collect()
+    }
+
     /// Returns true while `session` still has a tracked turn.
     pub fn session_running(&self, session: &SessionId) -> bool {
         self.entries

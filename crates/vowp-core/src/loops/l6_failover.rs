@@ -107,6 +107,10 @@ impl Failover {
         let Some(provider) = provider_of(run) else {
             return Ok(FailoverAction::None);
         };
+        if summary.limit.is_some() {
+            // A classified limit is not an "unknown" failure; it breaks that streak.
+            store.kv_set(&format!("fail_streak:{provider}"), "0")?;
+        }
         match summary.limit.as_ref().map(|limit| limit.kind) {
             Some(LimitKind::Quota) => self.on_quota(store, run, summary, &provider),
             Some(LimitKind::Credits) => self.on_credits_or_auth(store, run, summary, &provider, true),
@@ -274,8 +278,10 @@ impl Failover {
             .as_secs()
             .saturating_mul(1_u64 << shift)
             .min(RATE_MAX.as_secs());
-        let jitter = self.deps.rng.jitter_secs(base / 5);
-        let computed = now.plus(Duration::from_secs(base.saturating_add(jitter)));
+        let span = base / 5;
+        let draw = self.deps.rng.jitter_secs(span.saturating_mul(2));
+        let offset = if draw == 0 { 0 } else { draw as i64 - span as i64 };
+        let computed = now.plus(Duration::from_secs((base as i64 + offset).max(1) as u64));
         // An adapter-reported reset (already stored by the session layer) is authoritative;
         // otherwise use the deterministic backoff above.
         let until = store
@@ -737,6 +743,8 @@ impl Failover {
     fn mark_provider(&self, store: &Store, provider: &str, kind: &str, probe_back: bool) -> Result<(), CoreError> {
         store.kv_set(&format!("limit:{provider}"), kind)?;
         store.kv_set(&format!("probe_back:{provider}"), if probe_back { "1" } else { "0" })?;
+        // A limit/failover event is an unseen planner event (loops.md §7 due rule a).
+        super::l4_planner::raise_wake(store, "planner")?;
         Ok(())
     }
 

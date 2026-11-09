@@ -4,6 +4,7 @@
 #[path = "failover_support.rs"]
 mod f;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -333,4 +334,147 @@ fn repeat_guard_trips_on_third_identical_action() {
     assert!(ledger.iter().any(|entry| entry.summary.contains("repeat guard")));
     let l1 = store.loop_("l1-supervisor").expect("loop").expect("row");
     assert!(l1.last_status.contains("repeat guard"), "status: {}", l1.last_status);
+}
+
+#[test]
+fn reconcile_leaves_live_session_run_open() {
+    let opencode = Arc::new(ScriptAdapter::new(
+        HarnessKind::Opencode,
+        Arc::new(|input: &vowp_protocol::StartInput| {
+            if is_capsule_prompt(&input.prompt) {
+                return capsule_action("planner handoff");
+            }
+            if is_planner_prompt(&input.prompt) {
+                return ScriptAction::ok("planned").with_delay(Duration::from_secs(5));
+            }
+            ScriptAction::ok("ok")
+        }),
+    ));
+    let node = two_adapter_node(false, opencode, Arc::new(ok_adapter(HarnessKind::ClaudeCode)), |_| {});
+    let store = node.store();
+    store.kv_set("wake:planner", "1").expect("wake");
+    let mut supervisor = node.supervisor();
+    supervisor.tick().expect("first tick");
+    assert!(wait_until(Duration::from_secs(3), || {
+        store
+            .open_runs()
+            .map(|runs| runs.iter().any(|run| run.role == RunRole::Planner))
+            .unwrap_or(false)
+    }));
+    let run_id = store
+        .open_runs()
+        .expect("open")
+        .into_iter()
+        .find(|run| run.role == RunRole::Planner)
+        .expect("planner run")
+        .id;
+    supervisor.tick().expect("tick while the planner is live");
+    assert_eq!(
+        store.require_run(&run_id).expect("run").ended_at,
+        None,
+        "reconcile must not orphan a live planner turn"
+    );
+    node.wait_runs();
+}
+
+#[test]
+fn reconcile_leaves_live_probe_run_open() {
+    let opencode = Arc::new(ScriptAdapter::always(HarnessKind::Opencode, ScriptAction::ok("unused")));
+    let claude = Arc::new(ScriptAdapter::new(
+        HarnessKind::ClaudeCode,
+        Arc::new(|input: &vowp_protocol::StartInput| {
+            if is_probe_prompt(&input.prompt) {
+                return ScriptAction::ok("ok").with_delay(Duration::from_secs(5));
+            }
+            ScriptAction::ok("ok")
+        }),
+    ));
+    let node = two_adapter_node(false, opencode, claude, |config| {
+        set_ladders(
+            config,
+            &["claude-code:claude-sonnet-5-5@medium"],
+            &["opencode:deepseek/deepseek-flash#max"],
+        );
+    });
+    let store = node.store();
+    let mut supervisor = node.supervisor();
+    store
+        .set_loop_state("l4-planner", vowp_protocol::ActiveState::Paused)
+        .expect("pause planner");
+    store
+        .set_loop_state("l5-keeper", vowp_protocol::ActiveState::Paused)
+        .expect("pause keeper");
+    store
+        .upsert_limit(&vowp_protocol::Limit {
+            provider: "claude".to_owned(),
+            harness: Some(HarnessKind::ClaudeCode),
+            kind: vowp_protocol::LimitRowKind::Quota,
+            resets_at: Some(ts().minus(Duration::from_secs(1))),
+            detail: "quota".to_owned(),
+            since: ts(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("limit");
+    store.kv_set("probe_back:claude", "1").expect("probe back");
+    store.kv_set("limit:claude", "quota").expect("provider");
+    supervisor.tick().expect("probe tick");
+    assert!(wait_until(Duration::from_secs(3), || {
+        store
+            .open_runs()
+            .map(|runs| {
+                runs.iter()
+                    .any(|run| run.role == RunRole::Probe && run.provider.as_deref() == Some("claude"))
+            })
+            .unwrap_or(false)
+    }));
+    let run_id = store
+        .open_runs()
+        .expect("open")
+        .into_iter()
+        .find(|run| run.role == RunRole::Probe)
+        .expect("probe run")
+        .id;
+    supervisor.tick().expect("tick while the probe is live");
+    assert_eq!(
+        store.require_run(&run_id).expect("run").ended_at,
+        None,
+        "reconcile must not orphan a live probe"
+    );
+    node.wait_runs();
+}
+
+#[test]
+fn slow_gate_child_brief_stays_in_temp_repo() {
+    let node = TestNode::new();
+    let job = node.insert_job(
+        "slow-gate",
+        JobKind::Build,
+        Role::Worker,
+        Some(vec![Gate::Cmd(vowp_protocol::CmdGate {
+            run: "echo gate-failed >&2; exit 1".to_owned(),
+            ..vowp_protocol::CmdGate::default()
+        })]),
+    );
+    node.force_state(&job, JobState::Gating);
+    let mut supervisor = node.supervisor();
+    node.tick_until(&mut supervisor, 60, |store| {
+        store
+            .job(&vowp_protocol::JobId::parse("slow-gate-fix-1").expect("child id"))
+            .map(|child| child.is_some())
+            .unwrap_or(false)
+    });
+    let brief = node.main_repo.join(".vowp/jobs/slow-gate-fix-1/brief.md");
+    assert!(
+        brief.is_file(),
+        "the child brief is written under the temp project repo: {}",
+        brief.display()
+    );
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !manifest.join(".vowp").exists(),
+        "the source tree must not receive .vowp files"
+    );
 }

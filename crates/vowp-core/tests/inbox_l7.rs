@@ -36,6 +36,9 @@ fn inbox_answer_moves_parked_job_to_ready() {
     store
         .set_loop_state("l2-worker", vowp_protocol::ActiveState::Paused)
         .expect("pause l2");
+    store
+        .set_loop_state("l4-planner", vowp_protocol::ActiveState::Paused)
+        .expect("pause planner");
     store.answer_inbox(&inbox_id, "use yes", "test").expect("answer");
     vowp_core::requests::push(
         &store,
@@ -44,6 +47,10 @@ fn inbox_answer_moves_parked_job_to_ready() {
     .expect("request");
 
     supervisor.tick().expect("tick");
+    assert!(
+        vowp_core::loops::l4_planner::event_wake(&store, "planner").expect("wake"),
+        "a new inbox answer is an unseen planner event"
+    );
     let job = store.require_job(&job.id).expect("job");
     assert_eq!(job.state, JobState::Ready);
     assert!(job.note.contains("owner answer: use yes"), "note: {}", job.note);

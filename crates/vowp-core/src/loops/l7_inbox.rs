@@ -124,6 +124,7 @@ pub fn record_answer(store: &Store, item: &InboxItem) -> Result<AnswerEffect, Co
         let wanted = match reason {
             "credits" => Some(ParkedReason::Credits),
             "auth" => Some(ParkedReason::Auth),
+            "provider_blocked" => Some(ParkedReason::ProviderBlocked),
             _ => None,
         };
         if let Some(wanted) = wanted {
@@ -132,7 +133,7 @@ pub fn record_answer(store: &Store, item: &InboxItem) -> Result<AnswerEffect, Co
                 states: vec![JobState::Parked],
                 ..vowp_store::JobFilter::default()
             })? {
-                if job.parked_reason == Some(wanted) {
+                if job.parked_reason == Some(wanted) && job_on_provider(store, &job, &provider)? {
                     jobs.push(job);
                 }
             }
@@ -172,6 +173,19 @@ pub fn on_answer(store: &Store, id: &InboxId) -> Result<(), CoreError> {
         push(store, &Request::ResolveJob { job })?;
     }
     Ok(())
+}
+
+/// Returns true when a parked job's current rung belongs to `provider`.
+///
+/// A job parked before its first run has no run row; the supervisor's park note names the
+/// provider in that case (`credits exhausted for deepseek`, `provider deepseek is blocked`).
+fn job_on_provider(store: &Store, job: &Job, provider: &str) -> Result<bool, CoreError> {
+    if let Some(run) = store.last_run_of_job(&job.id)?
+        && let Some(run_provider) = super::l6_failover::provider_of(&run)
+    {
+        return Ok(run_provider == provider);
+    }
+    Ok(job.note.contains(provider))
 }
 
 /// Returns `(reason, provider)` encoded in a provider-wide inbox title.

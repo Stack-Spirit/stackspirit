@@ -180,7 +180,7 @@ impl Supervisor {
     /// Startup reconciliation (loops.md §1 step 1 and §11 catch-up).
     pub fn startup(&mut self) -> Result<ReconcileReport, CoreError> {
         self.handled_runs.clear();
-        let active = self.active_run_ids();
+        let active = self.active_run_ids()?;
         let report = reconcile::startup(&self.deps, &self.store, &active)?;
         self.store
             .ensure_worker_slots(&self.deps.node, WorkerKind::Worker, self.deps.config.node.max_workers)?;
@@ -447,13 +447,13 @@ impl Supervisor {
                 self.apply_simple(job_id, JobEvent::Resolved, None)?;
             }
         }
-        self.store.kv_set("wake:planner", "1")?;
+        l4_planner::raise_wake(&self.store, "planner")?;
         Ok(())
     }
 
     /// Step 1: finalise open runs with no live runner thread.
     fn step_reconcile(&mut self, _now: Timestamp) -> Result<String, CoreError> {
-        let active = self.active_run_ids();
+        let active = self.active_run_ids()?;
         let count = reconcile::orphaned_runs(&self.deps, &self.store, &active)?;
         Ok(format!("{count} orphaned run(s)"))
     }
@@ -478,8 +478,12 @@ impl Supervisor {
             // L6 runs on the runner thread before the wake. Wait for its marker on runs
             // whose policy matters, so a credits/auth/quota limit is never raced by the
             // job event (loops.md §1 step 2).
-            let needs_l6 = run.limit_kind.is_some();
-            if needs_l6 && self.store.kv_get(&format!("l6:{}", run.id))?.is_none() {
+            let marker = self.store.kv_get(&format!("l6:{}", run.id))?;
+            if marker.as_deref() == Some("orphan") {
+                // Reconcile finalised this run without a live thread, so L6 never ran.
+                self.apply_l6_for_run(&run)?;
+                self.apply_park_requests()?;
+            } else if run.limit_kind.is_some() && marker.is_none() {
                 let live = self.runners.is_active(&run.id)
                     || run
                         .session_id
@@ -2095,14 +2099,36 @@ impl Supervisor {
         Ok((graph, jobs))
     }
 
-    /// Returns the run ids of live runner threads.
-    pub(crate) fn active_run_ids(&self) -> HashSet<RunId> {
-        self.runners
+    /// Returns the run ids that still have a live owner thread.
+    ///
+    /// Job runs live in `RunnerPool`; planner/keeper turns live in `SessionRunPool` and are
+    /// matched by session id; probe runs live in `step_probes` and are matched by provider.
+    /// Reconciliation must see all three or it finalises a live run as an orphan crash.
+    pub(crate) fn active_run_ids(&self) -> Result<HashSet<RunId>, CoreError> {
+        let mut active: HashSet<RunId> = self
+            .runners
             .jobs()
             .into_iter()
             .filter(|(run, _)| self.runners.is_active(run))
             .map(|(run, _)| run)
-            .collect()
+            .collect();
+        let sessions = self.session_runners.live_sessions();
+        let probes = self.probe_tasks.keys().map(String::as_str).collect::<HashSet<_>>();
+        for run in self.store.open_runs()? {
+            let session_live = run
+                .session_id
+                .as_ref()
+                .is_some_and(|session| sessions.contains(session));
+            let probe_live = run.role == vowp_protocol::RunRole::Probe
+                && run
+                    .provider
+                    .as_deref()
+                    .is_some_and(|provider| probes.contains(provider));
+            if session_live || probe_live {
+                active.insert(run.id);
+            }
+        }
+        Ok(active)
     }
 
     /// Returns true when `name` is missing or active (a paused row skips its step).
