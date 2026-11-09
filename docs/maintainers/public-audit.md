@@ -14,7 +14,7 @@
 |---|---|
 | p01-owned paths | Clean. No secret, private path or token shape in the current versions of the files this job owns. |
 | Current tree | **Not yet publishable.** The scan found 14 real home-path occurrences in 6 files outside p01's `owns` (test fixtures and design docs). `scripts/audit/fix-unowned-private-paths.sh` is the staged owner fix; without it the scan exits 1. |
-| Old history | 10,944 findings, of which 1,793 are real home paths. No real token, key, `.env`, SSH-key or large-blob finding. History is informational because `public-main` is a fresh commit; the old history is never published. |
+| Old history | 11,351 findings: 1,835 real home paths and 5 fake PEM/allowlist-text token matches. No real token, key, `.env`, SSH-key or large-blob finding. History is informational because `public-main` is a fresh commit; the old history is never published. |
 | Licences | Clean: project MIT, `LICENSE` 2026 Syver-August Meyer, all 7 workspace crates MIT, 160 third-party packages within MIT/Apache-2.0/BSD/ISC/Unicode/Zlib. |
 | Publication gate | `scripts/audit/scan.sh --worktree` and `scripts/audit/scan.sh --rev public-main` must both exit 0. The first one is currently red only because of the six unowned files. |
 
@@ -74,20 +74,20 @@ owns them). p01 did not edit or commit them.
 ## Findings: old history (informational)
 
 The old history is not published, so these counts are for the record and for the choice in the next
-section. The final scan took about a minute for 142 commits. `--all` follows every branch in the shared
+section. The final scan took about a minute for 145 commits. `--all` follows every branch in the shared
 repository, so the count grows while other jobs commit; this is a snapshot, not a stable total.
 
 | Category | Findings | Allowlisted | Blocked | Explanation |
 |---|---:|---:|---:|---|
-| IPv4 | 549 | 549 | 0 | Loopback only. |
-| Home paths | 8,693 | 6,900 | 1,793 | 6,900 placeholders; 1,793 real home paths in old design docs and test fixtures. |
-| E-mail | 1,297 | 1,297 | 0 | Reserved example domains only. |
-| Token | 3 | 3 | 0 | A fake `BEGIN RSA PRIVATE KEY` header and the allowlist text; no key material. |
-| Private host | 402 | 402 | 0 | The same two Rust/filename false positives and allowlist text. |
+| IPv4 | 569 | 569 | 0 | Loopback only. |
+| Home paths | 8,965 | 7,130 | 1,835 | 7,130 placeholders; 1,835 real home paths in old design docs and test fixtures. |
+| E-mail | 1,382 | 1,382 | 0 | Reserved example domains only. |
+| Token | 5 | 0 | 5 | Fake PEM headers in historical test fixtures and the audit allowlist's own historical text; no key material. |
+| Private host | 430 | 430 | 0 | The same two Rust/filename false positives and allowlist text. |
 | SSH-key paths | 0 | 0 | 0 | — |
 | `.env` paths | 0 | 0 | 0 | — |
 | Large blobs | 0 | 0 | 0 | No history blob above 1 MiB. |
-| **Total** | **10,944** | **9,151** | **1,793** | All blocked history findings are the old real home paths. |
+| **Total** | **11,351** | **9,511** | **1,840** | The blocked history findings are old real home paths and fake PEM text. |
 
 No real credential, private key, token, `.env` file or large binary was found in history. The history
 would still leak the old home directory and internal worktree names, which is why it is not published.
