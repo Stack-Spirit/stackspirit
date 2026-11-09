@@ -5,9 +5,8 @@ It records what the current tree ships, what is deliberately **not** in v0.1, an
 for v0.2 and v0.3. It promises no dates. The authoritative proof for every v0.1 claim is the linked
 document or the code itself.
 
-The first public release is **v0.1.0**. The tree in this repository currently identifies itself as
-`0.1.0-rc.1`; the release jobs own the version bump, the tag and the published artifacts. This page
-does not duplicate those instructions.
+The first public release is **v0.1.0**. The tree in this repository identifies itself as `0.1.0`; the
+release jobs own the tag and the published artifacts. This page does not duplicate those instructions.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the current behaviour is the code under `crates/`.

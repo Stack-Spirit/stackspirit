@@ -523,7 +523,7 @@ VOWP can't run itself before it exists, so a small, plain **bootstrap supervisor
 | n14 dogfood | build / planner-led | n08 n09 n13 | — | Night switched to `vowp up`; breakages turned into fix jobs |
 | n15 fresh-user | verify | n12 n13 | — | A clean Docker `node:24` container follows the README; passes with fake adapters plus one tiny real DeepSeek job |
 | n16 site | docs | n12 | `site/**` | Static site builds; not deployed |
-| n17 release-prep | release / planner | all | `CHANGELOG.md` | v0.1.0-rc.1 tag (private repo), `npm pack` dry run, morning inbox ready |
+| n17 release-prep | release / planner | all | `CHANGELOG.md` | v0.1.0 tag (private repo), `npm pack` dry run, morning inbox ready |
 
 Every build job automatically gets a verify job, and possibly fix jobs, per L3.
 

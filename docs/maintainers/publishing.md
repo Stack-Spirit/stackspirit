@@ -31,10 +31,10 @@ All crates use the workspace version (`[workspace.package] version` in the root 
 | 6 | `vowp-core` | Sessions, gates, ledger, schedules, loops and promotion | protocol, store, graph, tmux, adapters |
 | 7 | `vowp-cli` | The `vowp` binary and its command library (manifest at the workspace root; source in `crates/vowp-cli/src`) | all six above |
 
-Publish strictly in this order. `vowp-store`, `vowp-graph`, `vowp-tmux` and `vowp-adapters` only need
-`vowp-protocol`, so their relative order is interchangeable, but the script uses the order above so the
-output is deterministic. `vowp-core` cannot resolve until all five of its dependencies are visible in the
-index, and `vowp-cli` cannot resolve until `vowp-core` is visible.
+Publish strictly in this order. `vowp-store`, `vowp-graph` and `vowp-adapters` only need `vowp-protocol`,
+and `vowp-tmux` has no inter-crate dependencies, so the relative order of those four is interchangeable;
+the script uses the order above so the output is deterministic. `vowp-core` cannot resolve until all five
+of its dependencies are visible in the index, and `vowp-cli` cannot resolve until `vowp-core` is visible.
 
 ## Crate name, binary name and the `vowp` meta-crate
 
@@ -101,9 +101,8 @@ crate. The publishable manifest therefore lives in the root `Cargo.toml`, with t
 `crates/vowp-cli/src` and `framework/` inside the package root. The normalized package manifest records
 the `crates/vowp-cli/src` paths; `cargo install vowp-cli` builds the same `vowp` binary.
 
-The `version` integration test is wired up as `scripts/release/version-test.rs` because the release
-job's owned paths do not include `crates/vowp-cli/tests/version.rs`. It performs the same two assertions
-(binary output and the pinned package version).
+The `version` integration test is wired up as `scripts/release/version-test.rs` in the root
+`Cargo.toml`. It checks the binary output and pins the package version so a bump cannot be forgotten.
 
 ## Version bump procedure
 
@@ -117,7 +116,8 @@ The release version is `0.1.0`. To prepare the next version (for example `0.2.0`
    ```
 
 2. Update every inter-crate `version = "0.1.0"` in the dependent crates to the same new version. The
-   root `vowp-cli` package dependencies and the six library manifests are the places to check:
+   root `vowp-cli` package dependencies and the four library manifests that carry inter-crate versions
+   are the places to check (`vowp-protocol` and `vowp-tmux` have none):
 
    ```text
    Cargo.toml                         (the vowp-cli package)

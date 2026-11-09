@@ -127,8 +127,8 @@ path = "crates/vowp-cli/tests/tmux_isolation.rs"
 name = "up"
 path = "crates/vowp-cli/tests/up.rs"
 
-# Same test as crates/vowp-cli/tests/version.rs, kept in an owned path because the
-# release job may not edit that file. It asserts the actual package version (0.1.0).
+# The version test lives under scripts/release/ so it can be updated with the release
+# version. It asserts the actual package version (0.1.0).
 [[test]]
 name = "version"
 path = "scripts/release/version-test.rs"

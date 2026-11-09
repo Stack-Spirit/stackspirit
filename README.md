@@ -10,7 +10,7 @@ already use as a small engineering team on your own machines.
 |---|---|
 | **Who it is for** | Developers and small teams who already drive Claude Code, opencode or another headless agent and want reviewed, gated work to keep moving overnight. |
 | **What it needs** | Rust (to build from source), `git`, `tmux`, and a signed-in harness such as Claude Code or opencode. |
-| **3-command quickstart** | `cargo build --workspace`<br>`cargo install --path crates/vowp-cli`<br>`vowp init --name my-project` (run in a git repository with a remote) |
+| **3-command quickstart** | `cargo build --workspace`<br>`cargo install --path .`<br>`vowp init --name my-project` (run in a git repository with a remote) |
 | **Read next** | [Quickstart](docs/guides/quickstart.md) · [hello-vowp example](examples/hello-vowp/README.md) · [Concepts in 60 seconds](#concepts-in-60-seconds) |
 
 > **Status: current — early release (0.1.0), build from source.** The v0.1 command surface is
@@ -109,7 +109,7 @@ The last command prints the binary version; the first public release is `vowp 0.
 binary on your `PATH`:
 
 ```sh
-cargo install --path crates/vowp-cli
+cargo install --path .
 vowp --version
 ```
 

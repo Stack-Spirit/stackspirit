@@ -120,7 +120,7 @@ Acceptance: `parse_global_flags_and_node`, `exit_code_mapping_table`, `json_erro
 **n14-dogfood** · build / planner-led · ~60 min · n08d, n09b, n13a · — (no owned paths; fix jobs own what they fix). Switches the night from `night.py` to `vowp up` on the same graph; each breakage becomes a fix job. Acceptance: `vowp status` healthy for 30 min with ≥ 1 real job completed through gates, verify and merge.
 **n15-fresh-user** · verify · 60 min · n12a, n12c, n13a · — · A clean container (`node:24` as the plan says, or the build image) follows the README literally: install → `vowp init` → `vowp doctor` → example with fake adapters, plus one tiny real DeepSeek job. Report = list of every deviation.
 **n16-site** · docs · 60 min · n12a · `site/**`. Static build; not deployed.
-**n17-release-prep** · release / planner · 45 min · all · `CHANGELOG.md`. Tag `v0.1.0-rc.1` in the private repo, `cargo package`/npm-wrapper dry run, morning inbox items (public repo flip, npm publish, Vercel deploy, license confirm) written — nothing published.
+**n17-release-prep** · release / planner · 45 min · all · `CHANGELOG.md`. Tag `v0.1.0` in the private repo, `cargo package`/npm-wrapper dry run, morning inbox items (public repo flip, npm publish, Vercel deploy, license confirm) written — nothing published.
 
 ## 3. Dependency table (for `vowp job add --needs`)
 

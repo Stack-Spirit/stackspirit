@@ -56,10 +56,10 @@ cargo build --release --workspace
 
 ## Put `vowp` on your `PATH`
 
-The binary package is `vowp-cli`; the executable is `vowp`.
+The binary package is `vowp-cli`; the executable is `vowp`. Run this from the repository root:
 
 ```sh
-cargo install --path crates/vowp-cli
+cargo install --path .
 vowp --version
 ```
 

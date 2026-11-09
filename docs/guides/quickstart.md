@@ -16,7 +16,7 @@ Follow [install](install.md). For the short version:
 
 ```sh
 cargo build --workspace
-cargo install --path crates/vowp-cli
+cargo install --path .
 vowp --version
 ```
 
