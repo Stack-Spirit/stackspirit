@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tempfile::{TempDir, tempdir};
@@ -48,6 +48,8 @@ pub struct ScriptAction {
     pub commands: Vec<Vec<String>>,
     /// Delay before the run reports its summary (simulates a live run).
     pub delay: Option<Duration>,
+    /// Holds the run open until the test releases it.
+    pub hold: Option<ScriptHold>,
 }
 
 impl ScriptAction {
@@ -89,6 +91,77 @@ impl ScriptAction {
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
         self
+    }
+
+    /// Holds the run open until the test releases `hold`.
+    ///
+    /// The adapter marks the hold as started in [`Adapter::start`], after recording the
+    /// start input, and the run blocks in [`AdapterRun::wait`] until [`ScriptHold::release`].
+    pub fn with_hold(mut self, hold: ScriptHold) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+}
+
+/// A test-controlled gate that holds one scripted run open.
+///
+/// [`ScriptHold::wait_started`] proves the adapter has actually recorded the start, not
+/// merely that a run row is open; wall-clock delays cannot provide that ordering.
+#[derive(Clone, Default)]
+pub struct ScriptHold {
+    started: Arc<(Mutex<bool>, Condvar)>,
+    released: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ScriptHold {
+    /// Creates a hold that is closed until [`ScriptHold::release`] is called.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Waits until the adapter has started the held run, or `timeout` elapses.
+    pub fn wait_started(&self, timeout: Duration) -> bool {
+        Self::wait_flag(&self.started, timeout)
+    }
+
+    /// Releases the held run. The gate stays open for later runs.
+    pub fn release(&self) {
+        let (lock, condvar) = &*self.released;
+        *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        condvar.notify_all();
+    }
+
+    fn mark_started(&self) {
+        let (lock, condvar) = &*self.started;
+        *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        condvar.notify_all();
+    }
+
+    fn wait_released(&self) {
+        let (lock, condvar) = &*self.released;
+        let mut released = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = condvar
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn wait_flag(flag: &Arc<(Mutex<bool>, Condvar)>, timeout: Duration) -> bool {
+        let (lock, condvar) = &**flag;
+        let mut set = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = Instant::now() + timeout;
+        while !*set {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = condvar
+                .wait_timeout(set, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            set = guard;
+        }
+        true
     }
 }
 
@@ -153,6 +226,9 @@ impl Adapter for ScriptAdapter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(input.clone());
         let action = (self.script)(&input);
+        if let Some(hold) = &action.hold {
+            hold.mark_started();
+        }
         for (path, content) in &action.files {
             let path = input.cwd.join(path);
             if let Some(dir) = path.parent() {
@@ -182,6 +258,7 @@ impl Adapter for ScriptAdapter {
             receiver,
             summary: action.summary.unwrap_or_else(ok_summary),
             delay: action.delay,
+            hold: action.hold,
             interrupted: false,
         }))
     }
@@ -191,6 +268,7 @@ struct ScriptedRun {
     receiver: Receiver<HarnessEvent>,
     summary: RunSummary,
     delay: Option<Duration>,
+    hold: Option<ScriptHold>,
     interrupted: bool,
 }
 
@@ -219,6 +297,9 @@ impl AdapterRun for ScriptedRun {
     }
 
     fn wait(&mut self) -> Result<RunSummary, AdapterError> {
+        if let Some(hold) = &self.hold {
+            hold.wait_released();
+        }
         if let Some(delay) = self.delay {
             let deadline = Instant::now() + delay;
             while Instant::now() < deadline {

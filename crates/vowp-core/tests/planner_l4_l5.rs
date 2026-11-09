@@ -22,14 +22,16 @@ fn ok_adapter(kind: HarnessKind) -> ScriptAdapter {
 
 #[test]
 fn planner_one_turn_at_a_time() {
+    let hold = ScriptHold::new();
+    let planner_hold = hold.clone();
     let opencode = Arc::new(ScriptAdapter::new(
         HarnessKind::Opencode,
-        Arc::new(|input: &vowp_protocol::StartInput| {
+        Arc::new(move |input: &vowp_protocol::StartInput| {
             if is_capsule_prompt(&input.prompt) {
                 return capsule_action("planner handoff");
             }
             if is_planner_prompt(&input.prompt) {
-                return ScriptAction::ok("planned").with_delay(Duration::from_secs(2));
+                return ScriptAction::ok("planned").with_hold(planner_hold.clone());
             }
             ScriptAction::ok("ok")
         }),
@@ -45,15 +47,17 @@ fn planner_one_turn_at_a_time() {
     let mut supervisor = node.supervisor();
     supervisor.tick().expect("first tick");
     assert!(
-        wait_until(Duration::from_secs(3), || {
-            store
-                .open_runs()
-                .map(|runs| runs.iter().any(|run| run.role == RunRole::Planner))
-                .unwrap_or(false)
-        }),
-        "the planner run starts"
+        hold.wait_started(Duration::from_secs(10)),
+        "the planner adapter records its start"
     );
-    supervisor.tick().expect("second tick while the planner is live");
+    assert!(
+        store
+            .open_runs()
+            .map(|runs| runs.iter().any(|run| run.role == RunRole::Planner))
+            .unwrap_or(false),
+        "the planner run is still open while the adapter is held"
+    );
+    supervisor.tick().expect("second tick while the planner turn is held");
     let planner_starts = opencode
         .starts()
         .into_iter()
@@ -61,6 +65,7 @@ fn planner_one_turn_at_a_time() {
         .count();
     assert_eq!(planner_starts, 1, "never two planner turns at once");
 
+    hold.release();
     node.wait_runs();
     // The same fixed clock is inside the 5-minute minimum gap: no second turn.
     store.kv_set("wake:planner", "1").expect("wake again");
@@ -95,6 +100,7 @@ fn planner_one_turn_at_a_time() {
         }
     }
     assert!(restarted, "the next unseen event starts a second planner turn");
+    node.wait_runs();
 }
 
 #[test]
@@ -378,14 +384,16 @@ fn repeat_guard_trips_on_third_identical_action() {
 
 #[test]
 fn reconcile_leaves_live_session_run_open() {
+    let hold = ScriptHold::new();
+    let planner_hold = hold.clone();
     let opencode = Arc::new(ScriptAdapter::new(
         HarnessKind::Opencode,
-        Arc::new(|input: &vowp_protocol::StartInput| {
+        Arc::new(move |input: &vowp_protocol::StartInput| {
             if is_capsule_prompt(&input.prompt) {
                 return capsule_action("planner handoff");
             }
             if is_planner_prompt(&input.prompt) {
-                return ScriptAction::ok("planned").with_delay(Duration::from_secs(5));
+                return ScriptAction::ok("planned").with_hold(planner_hold.clone());
             }
             ScriptAction::ok("ok")
         }),
@@ -395,12 +403,10 @@ fn reconcile_leaves_live_session_run_open() {
     store.kv_set("wake:planner", "1").expect("wake");
     let mut supervisor = node.supervisor();
     supervisor.tick().expect("first tick");
-    assert!(wait_until(Duration::from_secs(3), || {
-        store
-            .open_runs()
-            .map(|runs| runs.iter().any(|run| run.role == RunRole::Planner))
-            .unwrap_or(false)
-    }));
+    assert!(
+        hold.wait_started(Duration::from_secs(10)),
+        "the planner adapter records its start"
+    );
     let run_id = store
         .open_runs()
         .expect("open")
@@ -414,17 +420,20 @@ fn reconcile_leaves_live_session_run_open() {
         None,
         "reconcile must not orphan a live planner turn"
     );
+    hold.release();
     node.wait_runs();
 }
 
 #[test]
 fn reconcile_leaves_live_probe_run_open() {
+    let hold = ScriptHold::new();
+    let probe_hold = hold.clone();
     let opencode = Arc::new(ScriptAdapter::always(HarnessKind::Opencode, ScriptAction::ok("unused")));
     let claude = Arc::new(ScriptAdapter::new(
         HarnessKind::ClaudeCode,
-        Arc::new(|input: &vowp_protocol::StartInput| {
+        Arc::new(move |input: &vowp_protocol::StartInput| {
             if is_probe_prompt(&input.prompt) {
-                return ScriptAction::ok("ok").with_delay(Duration::from_secs(5));
+                return ScriptAction::ok("ok").with_hold(probe_hold.clone());
             }
             ScriptAction::ok("ok")
         }),
@@ -461,15 +470,10 @@ fn reconcile_leaves_live_probe_run_open() {
     store.kv_set("probe_back:claude", "1").expect("probe back");
     store.kv_set("limit:claude", "quota").expect("provider");
     supervisor.tick().expect("probe tick");
-    assert!(wait_until(Duration::from_secs(3), || {
-        store
-            .open_runs()
-            .map(|runs| {
-                runs.iter()
-                    .any(|run| run.role == RunRole::Probe && run.provider.as_deref() == Some("claude"))
-            })
-            .unwrap_or(false)
-    }));
+    assert!(
+        hold.wait_started(Duration::from_secs(10)),
+        "the probe adapter records its start"
+    );
     let run_id = store
         .open_runs()
         .expect("open")
@@ -483,6 +487,7 @@ fn reconcile_leaves_live_probe_run_open() {
         None,
         "reconcile must not orphan a live probe"
     );
+    hold.release();
     node.wait_runs();
 }
 
