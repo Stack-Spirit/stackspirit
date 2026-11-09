@@ -13,10 +13,10 @@ contains exactly:
 
 | Asset | Contents |
 |---|---|
-| `vowp-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | `vowp-X.Y.Z-x86_64-unknown-linux-gnu/{vowp,LICENSE,README.md}` |
-| `vowp-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz` | `vowp-X.Y.Z-aarch64-unknown-linux-gnu/{vowp,LICENSE,README.md}` |
-| `vowp-X.Y.Z-x86_64-apple-darwin.tar.gz` | `vowp-X.Y.Z-x86_64-apple-darwin/{vowp,LICENSE,README.md}` |
-| `vowp-X.Y.Z-aarch64-apple-darwin.tar.gz` | `vowp-X.Y.Z-aarch64-apple-darwin/{vowp,LICENSE,README.md}` |
+| `vowp-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | `vowp-X.Y.Z-x86_64-unknown-linux-gnu/{vowp,LICENSE,README.md,THIRD-PARTY-LICENSES.md}` |
+| `vowp-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz` | `vowp-X.Y.Z-aarch64-unknown-linux-gnu/{vowp,LICENSE,README.md,THIRD-PARTY-LICENSES.md}` |
+| `vowp-X.Y.Z-x86_64-apple-darwin.tar.gz` | `vowp-X.Y.Z-x86_64-apple-darwin/{vowp,LICENSE,README.md,THIRD-PARTY-LICENSES.md}` |
+| `vowp-X.Y.Z-aarch64-apple-darwin.tar.gz` | `vowp-X.Y.Z-aarch64-apple-darwin/{vowp,LICENSE,README.md,THIRD-PARTY-LICENSES.md}` |
 | `vowp-X.Y.Z-<target>.tar.gz.sha256` | One per archive, `<hash>  <archive name>` |
 | `SHA256SUMS` | All four archive hashes, same format, one line each |
 
@@ -50,9 +50,11 @@ https://github.com/syver777/vowp/releases/download/vX.Y.Z/SHA256SUMS
    `macos-15-intel` (x86_64 macOS) and `macos-15` (aarch64 macOS). The Linux
    archives are built against Ubuntu 22.04's glibc 2.35. It builds with
    `cargo build --release --locked -p vowp-cli --bin vowp --target <target>`,
-   runs `vowp --version` and compares it with the release version, then creates
-   the archive, the per-archive `.sha256`, and uploads both as a workflow
-   artifact.
+   runs `vowp --version` and compares it with the release version, checks the
+   third-party licence bundle is current, then creates the archive with
+   `scripts/release/package-archive.sh`, the per-archive `.sha256`, and uploads
+   both as a workflow artifact. The archive contains `vowp`, `LICENSE`,
+   `README.md` and `THIRD-PARTY-LICENSES.md`.
 3. **checksums** downloads all four build artifacts, writes `SHA256SUMS`, runs
    `sha256sum --check` against every `.sha256`, and uploads the complete set as
    the `release-assets` artifact.
@@ -75,6 +77,34 @@ from on 2026-11-09 are noted next to each SHA:
 | `actions/upload-artifact` | v4.6.2 |
 | `actions/download-artifact` | v4.3.0 |
 | `softprops/action-gh-release` | v2.6.2 |
+
+## Third-party licence notices
+
+`THIRD-PARTY-LICENSES.md` at the repository root is the notice bundle that ships
+inside every archive. It is generated from the locked dependency tree, not
+maintained by hand:
+
+```sh
+scripts/release/generate-third-party-licenses.py --check
+```
+
+The generator runs `cargo metadata --format-version 1 --locked`, writes the
+dependency index, embeds the reviewed full licence texts from
+`scripts/release/license-texts/`, and lists the copyright notices shipped in
+each crate package. The x86_64 Linux build job runs the same `--check` after
+`cargo fetch --locked`; a stale or missing bundle fails the build before
+packaging. To refresh it after a dependency change:
+
+```sh
+cargo fetch --locked
+scripts/release/generate-third-party-licenses.py
+git diff -- THIRD-PARTY-LICENSES.md
+```
+
+`scripts/release/package-archive.sh` copies the bundle into the staging
+directory and refuses to create an archive when the binary, `LICENSE`,
+`README.md` or `THIRD-PARTY-LICENSES.md` is missing or empty. The rest of the
+Package step (tar layout, `.sha256` file and sorted tar listing) is unchanged.
 
 ## Before tagging
 
@@ -169,7 +199,9 @@ tar -xzf vowp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 ./vowp-0.1.0-x86_64-unknown-linux-gnu/vowp --version
 ```
 
-Expected: `vowp 0.1.0`. On macOS use the matching `apple-darwin` archive.
+Expected: the archive lists `vowp`, `LICENSE`, `README.md` and
+`THIRD-PARTY-LICENSES.md`, and the binary prints `vowp 0.1.0`. On macOS use the
+matching `apple-darwin` archive.
 
 Publish the draft only after those checks pass:
 
@@ -235,10 +267,11 @@ Nothing before the draft is published changes public state.
   ```
 
 - **Tag points at the wrong commit, before publishing:** delete the remote tag,
-  fix `main`, and tag again:
+  delete the local tag, fix `main`, and tag again:
 
   ```sh
   git push origin :refs/tags/v0.1.0
+  git tag -d v0.1.0
   git tag -a v0.1.0 -m "VOWP 0.1.0"
   git push origin v0.1.0
   ```
@@ -274,6 +307,31 @@ docker run --rm -v "$PWD:/mnt" -w /mnt ruby:3-alpine ruby -c packaging/homebrew/
 Every `run:` block in the workflow was extracted and checked with `bash -n`.
 The existing `sh scripts/tests/run.sh` suite still passes, and
 `bash docs/tests/run.sh` passes its link and command checks.
+
+The licence bundle and the packaging path were checked with:
+
+```sh
+cargo fetch --locked
+scripts/release/generate-third-party-licenses.py --check
+scripts/audit/licenses.sh
+scripts/audit/scan.sh --worktree
+tmp=$(mktemp -d)
+printf '#!/bin/sh\necho "vowp 0.1.0"\n' > "$tmp/vowp"
+chmod +x "$tmp/vowp"
+scripts/release/package-archive.sh --version 0.1.0 \
+  --target x86_64-unknown-linux-gnu --binary "$tmp/vowp" --dist "$tmp/dist"
+mkdir "$tmp/extract"
+tar -xzf "$tmp/dist/vowp-0.1.0-x86_64-unknown-linux-gnu.tar.gz" -C "$tmp/extract"
+for file in vowp LICENSE README.md THIRD-PARTY-LICENSES.md; do
+  test -s "$tmp/extract/vowp-0.1.0-x86_64-unknown-linux-gnu/$file"
+done
+(cd "$tmp/dist" && sha256sum -c vowp-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256)
+```
+
+The extracted archive contained non-empty `vowp`, `LICENSE`, `README.md` and
+`THIRD-PARTY-LICENSES.md`; the per-archive checksum verified. The notice index
+matched the 160 packages in `scripts/audit/THIRD-PARTY-LICENSES.md`.
+
 The installer was exercised against a fake release served by
 `python3 -m http.server`, including a good checksum, a tampered checksum, a
 custom `--prefix`, and an unsupported platform. `packaging/homebrew/update.sh`

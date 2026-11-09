@@ -142,24 +142,24 @@ jobs:
               ;;
           esac
 
+      - name: Check third-party licence bundle
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          python3 scripts/release/generate-third-party-licenses.py --check
+          test -s THIRD-PARTY-LICENSES.md
+
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          name="vowp-${VERSION}-${TARGET}"
-          staging="dist/${name}"
-          mkdir -p "$staging"
-          cp "target/${TARGET}/release/vowp" "$staging/vowp"
-          chmod 0755 "$staging/vowp"
-          cp LICENSE README.md "$staging/"
-          tar -C dist -czf "dist/${name}.tar.gz" "$name"
-          rm -rf "$staging"
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
-          else
-            (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
-          fi
-          (cd dist && tar -tzf "${name}.tar.gz" | sort)
+          scripts/release/package-archive.sh \
+            --version "$VERSION" \
+            --target "$TARGET" \
+            --binary "target/${TARGET}/release/vowp" \
+            --dist dist
 
       - name: Upload archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
