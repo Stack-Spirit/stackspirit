@@ -236,6 +236,11 @@ fn bundle_export_import_roundtrip_child_session() {
     assert_eq!(capsule.intent, "Continue the bundle work");
     assert_eq!(row.last_capsule_id, Some(capsule.capsule_id.clone()));
 
+    let lineage = store.list_switches(&child).expect("child lineage");
+    assert_eq!(lineage.len(), 1, "reindex rebuilds the import switch row");
+    assert_eq!(lineage[0].state, vowp_protocol::SwitchState::Completed);
+    assert_eq!(lineage[0].capsule_id, Some(capsule.capsule_id.clone()));
+
     let seed = bundle::imported_seed(&deps, &exported, "next step");
     assert!(seed.contains("Continue the bundle work"));
     assert!(seed.contains("remember the frobnicator"));
