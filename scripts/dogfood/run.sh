@@ -11,7 +11,8 @@
 # Hermetic by construction:
 #   * a fresh temporary directory under ${TMPDIR:-/tmp};
 #   * private HOME, TMPDIR and VOWP home;
-#   * a private tmux server: a `tmux` wrapper on PATH adds `-L <unique-socket>`;
+#   * a private tmux server: a `tmux` wrapper on PATH pins every call to
+#     `-L <unique-socket>` (and keeps an already supplied private `-L`);
 #   * fake `claude` and `opencode` binaries that answer only `--version`, so `doctor`
 #     never probes (and the run never starts) the real harnesses;
 #   * a throwaway git repository with a bare local `origin` (no network);
@@ -121,8 +122,8 @@ cleanup() {
         (cd "$P_REPO" && "$VOWP_BIN" --home "$P_HOME" --project "$P_REPO" down --force) >/dev/null 2>&1 || true
     fi
     # Only the private socket is ever killed; the wrapper guarantees the server name.
-    if [ -n "$P_SOCK" ]; then
-        "$REAL_TMUX" -L "$P_SOCK" kill-server >/dev/null 2>&1 || true
+    if [ -n "$P_SOCK" ] && [ -n "$P_HOME" ]; then
+        TMUX_TMPDIR="$P_HOME/tmux" "$REAL_TMUX" -L "$P_SOCK" kill-server >/dev/null 2>&1 || true
     fi
     if [ "$status" -ne 0 ]; then
         diagnostics
@@ -171,8 +172,12 @@ start_phase() {
     # the private home (defect D1 in docs/dogfood/RESULTS.md: --home is not propagated).
     export VOWP_HOME="$P_HOME"
     export TMPDIR="$phase_root/tmp"
-    export TMUX_TMPDIR="$phase_root/tmux"
+    # The CLI derives its private socket from VOWP_HOME; keep TMUX_TMPDIR in the
+    # same private node home so the wrapper, the CLI and the assertions all see
+    # one server and a missing -L still cannot reach the caller's default server.
+    export TMUX_TMPDIR="$P_HOME/tmux"
     export VOWP_DOGFOOD_TMUX_SOCKET="$P_SOCK"
+    export VOWP_TMUX_SOCKET="$P_SOCK"
     case "$VOWP_DOGFOOD_TMUX_SOCKET" in
         ""|default) fail "[$PHASE] refusing to use the default tmux server" ;;
     esac

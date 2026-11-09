@@ -123,16 +123,25 @@ responsibility.
 - **Timeouts and process groups.** Command gates have timeouts and kill the process group, not just the
   immediate child, so a shell cannot leave an orphan running; harness runs are stopped through the
   adapter's interrupt/stop path.
-- **No real home/network in tests.** The test suite uses temp directories, a private tmux socket, fake
-  harness scripts and recorded fixtures. This keeps CI from touching a developer's state, not just from
-  leaking secrets.
+- **No real home/network in tests.** The test suite uses temp directories, a private tmux socket **and** a
+  private `TMUX_TMPDIR`, fake harness scripts and recorded fixtures. Running `cargo test` is safe with a
+  live tmux server: the tests remove `TMUX`, pass `-L vowp-test-…` and assert the resolved socket is not
+  the default one. This keeps CI from touching a developer's state, not just from leaking secrets.
 
 ## tmux
 
 The window manager is deliberately narrow:
 
+- VOWP uses its **own private tmux server**, not your default server. The socket name is derived from
+  the node home (`vowp-<hash>`) and every command runs with `-L <socket>` and
+  `TMUX_TMPDIR=<node-home>/tmux`. A command with no private socket, or with the literal socket
+  `default`, is refused before tmux is spawned.
+- At `vowp up` the socket and the tmux server pid are recorded in `<node-home>/tmux-server`.
+  `vowp down --kill-windows`, `kill_session` and `kill_window` refuse when the recorded socket or pid
+  does not match the live server, so a server VOWP did not create is never cleaned up.
 - It creates or attaches only the `vowp-<project>` session and tagged windows.
-- It never kills untagged windows, never respawns a pane and never sends keystrokes.
+- It never kills untagged windows, never respawns a pane and never sends keystrokes. There is no
+  `kill-server` command in the product path; only explicit private-socket test guards may stop a server.
 - A job window runs `vowp __window job <id>`, which is a read-only follower of the session
   log. The harness runs headless; the window is not a control channel.
 - `capture-pane` is for display only. Decisions come from the log and the database, never from screen
@@ -140,6 +149,10 @@ The window manager is deliberately narrow:
 
 If tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach <job>` falls
 back to `vowp session tail --follow`.
+
+Contributors and agents must follow the same rule in manual repros: never run a tmux command
+against the default server; use a private `-L <unique>` socket and `TMUX_TMPDIR`, and never
+`-L default`.
 
 ## Multi-node and SSH
 

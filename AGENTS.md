@@ -36,8 +36,11 @@ every harness. A job's brief can add rules; it never removes these.
 - A test must fail if the code is wrong. No tests that only assert `true`, no hard-coded passes, no
   `todo!()`/`unimplemented!()` presented as features (stubs only where a brief explicitly allows them).
 - Tests never touch the real home directory, `~/.vowp`, the user's tmux server, the network, or real
-  `claude`/`opencode` binaries. Use temporary directories, a **private tmux socket** (`tmux -L <unique>`),
-  recorded fixtures, and fake harness scripts.
+  `claude`/`opencode` binaries. Use temporary directories, a **private tmux socket** (`tmux -L <unique>`)
+  **and** a private `TMUX_TMPDIR`, unset `TMUX`/`TMUX_PANE`, recorded fixtures, and fake harness scripts.
+- Never run `tmux kill-server`, `tmux -L default ...`, or any tmux command without a private
+  `-L`/`TMUX_TMPDIR`, in tests, scripts or manual reproductions. A test or script must refuse `default`
+  before spawning tmux.
 
 ## Secrets
 

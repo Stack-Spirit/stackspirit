@@ -1,12 +1,11 @@
 #!/bin/sh
-# scripts/dogfood/fake-harness/tmux — a wrapper that pins every tmux command to a
-# private server socket.
+# scripts/dogfood/fake-harness/tmux — pin every tmux command to a private server.
 #
-# The CLI creates windows with `tmux` from PATH and does not expose a socket flag.
-# Prepending this directory to PATH therefore makes all of those calls run as
-# `tmux -L <private-name> ...`, which is exactly the isolation the dogfood needs.
-# VOWP_DOGFOOD_REAL_TMUX is the absolute path resolved before the wrapper directory
-# was added to PATH; the wrapper can never recurse into itself.
+# The CLI already passes `-L <private-name>` (from VOWP_TMUX_SOCKET) and a private
+# TMUX_TMPDIR. Raw `tmux` calls in run.sh do not, so this wrapper adds the same
+# private socket. It never rewrites an existing -L and refuses `-L default`.
+# VOWP_DOGFOOD_REAL_TMUX is resolved before the wrapper directory was added to
+# PATH; the wrapper can never recurse into itself.
 
 set -eu
 
@@ -21,4 +20,20 @@ if [ -z "${VOWP_DOGFOOD_REAL_TMUX:-}" ]; then
     exit 1
 fi
 
+has_socket=0
+previous=""
+for arg in "$@"; do
+    if [ "$previous" = "-L" ] && [ "$arg" = "default" ]; then
+        printf '%s\n' "fake tmux: refusing the default tmux socket" >&2
+        exit 1
+    fi
+    case "$arg" in
+        -L|-L?*) has_socket=1 ;;
+    esac
+    previous=$arg
+done
+
+if [ "$has_socket" -eq 1 ]; then
+    exec "$VOWP_DOGFOOD_REAL_TMUX" "$@"
+fi
 exec "$VOWP_DOGFOOD_REAL_TMUX" -L "$VOWP_DOGFOOD_TMUX_SOCKET" "$@"

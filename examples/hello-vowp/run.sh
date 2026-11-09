@@ -80,9 +80,15 @@ HOME_DIR="$WORK/home"
 REPO="$WORK/hello-vowp"
 ORIGIN="$WORK/origin.git"
 TIMEOUT=${TIMEOUT:-180}
-TMUX_TMPDIR="$WORK/tmux"
+# The CLI keeps its tmux socket under the node home. Use that same private
+# directory and an explicit private socket; never the caller's default server.
+TMUX_TMPDIR="$HOME_DIR/tmux"
+VOWP_TMUX_SOCKET="vowp-hello-$$"
+case "$VOWP_TMUX_SOCKET" in
+    ""|default) echo "hello-vowp: refusing to use the default tmux server" >&2; exit 2 ;;
+esac
 mkdir -p "$TMUX_TMPDIR"
-export TMUX_TMPDIR
+export TMUX_TMPDIR VOWP_TMUX_SOCKET
 
 cleanup() {
     status=$?
@@ -91,7 +97,7 @@ cleanup() {
         (cd "$REPO" && vowp_cli --home "$HOME_DIR" --project "$REPO" down --force >/dev/null 2>&1) || true
     fi
     if command -v tmux >/dev/null 2>&1; then
-        tmux kill-server >/dev/null 2>&1 || true
+        tmux -L "$VOWP_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
     fi
     if [ "$status" -eq 0 ] && [ "${KEEP:-0}" != "1" ] && [ "$CREATED_WORK" = "1" ]; then
         rm -rf "$WORK"

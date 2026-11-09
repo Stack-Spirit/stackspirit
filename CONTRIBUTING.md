@@ -20,6 +20,24 @@ cargo run -p vowp-cli --bin vowp -- --version
 
 The last command prints `vowp 0.1.0-dev`.
 
+**Running the test suite is safe: tests use a private tmux directory.** Integration tests
+create their own temporary node home with `tmux -L vowp-test-…` and a private
+`TMUX_TMPDIR`; they refuse `default` and never read `TMUX` from your shell. If a test ever
+needs a raw tmux command, use the same two guards (`-L <unique>` and a private
+`TMUX_TMPDIR`) and assert the resolved socket is not the default one.
+
+Rules for every contributor and agent, in tests, scripts and manual reproductions:
+
+- Never run a tmux command against the default server. That includes `tmux kill-server`,
+  `tmux -L default kill-server`, and any command run without `TMUX_TMPDIR` set.
+- Use a unique socket per run (`tmux -L vowp-…`) **and** a private `TMUX_TMPDIR` under a
+  temporary directory. The two layers mean a dropped `-L` still cannot reach your server.
+- Unset `TMUX` and `TMUX_PANE` before starting a test harness or script; a caller inside
+  tmux would otherwise point every client at the caller's server.
+- `vowp` itself keeps its windows on a private socket derived from the node home and
+  records the socket and server pid in `<home>/tmux-server`. `vowp down --kill-windows`
+  refuses a server that does not match that record.
+
 ## Run the CI checks locally
 
 Run these before every commit; they are the same checks [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
@@ -51,8 +69,9 @@ Rules for every job:
 4. Record evidence in the report: the exact commands you ran and their results. Gates re-run them and a
    verifier reads the diff.
 5. Keep tests real and hermetic: no network, no real home directory or `~/.vowp`, no user tmux server, no
-   real harness binaries. Use temporary directories, a private tmux socket (`tmux -L <unique>`), and fake
-   harness scripts.
+   real harness binaries. Use temporary directories, a private tmux socket (`tmux -L <unique>`) **and** a
+   private `TMUX_TMPDIR`, and fake harness scripts. `-L default` and `tmux kill-server` without a private
+   socket are forbidden.
 
 See [`AGENTS.md`](AGENTS.md) for the full rules, including Rust conventions and the secret policy.
 
