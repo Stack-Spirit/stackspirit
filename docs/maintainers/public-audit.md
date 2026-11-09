@@ -13,10 +13,10 @@
 | Area | Result |
 |---|---|
 | p01-owned paths | Clean. No secret, private path or token shape in the current versions of the files this job owns. |
-| Current tree | **Not yet publishable.** The scan found 14 real home-path occurrences in 6 files outside p01's `owns` (test fixtures and design docs). `scripts/audit/fix-unowned-private-paths.sh` is the staged owner fix; without it the scan exits 1. |
+| Current tree | Clean on the merged tree. The six unowned files were fixed after this audit; `scripts/audit/scan.sh --worktree` exits 0 with every finding allowlisted. |
 | Old history | 11,351 findings: 1,835 real home paths and 5 fake PEM/allowlist-text token matches. No real token, key, `.env`, SSH-key or large-blob finding. History is informational because `public-main` is a fresh commit; the old history is never published. |
 | Licences | Clean: project MIT, `LICENSE` 2026 Syver-August Meyer, all 7 workspace crates MIT, 160 third-party packages within MIT/Apache-2.0/BSD/ISC/Unicode/Zlib. |
-| Publication gate | `scripts/audit/scan.sh --worktree` and `scripts/audit/scan.sh --rev public-main` must both exit 0. The first one is currently red only because of the six unowned files. |
+| Publication gate | `scripts/audit/scan.sh --worktree` and `scripts/audit/scan.sh --rev public-main` must both exit 0. The working-tree gate is clean; the public branch is built and scanned separately. |
 
 ## What the scanner checks
 
@@ -56,7 +56,7 @@ fixture.
 | Large blobs (>1 MiB) | 0 | 0 | Largest tracked blob is about 100 KB. |
 | **Total** | **150 findings, 136 allowlisted, 14 blocked** | **150 allowlisted, 0 blocked** | The 14 are the six unowned files below. |
 
-The six files that need the owner's edit (no private value is repeated here):
+The six files that needed the owner's edit (fixed after this audit; no private value is repeated here):
 
 | File | Lines | Fix |
 |---|---:|---|
@@ -67,9 +67,9 @@ The six files that need the owner's edit (no private value is repeated here):
 | `docs/design/adapters.md` | 3 | Same. |
 | `docs/design/types.md` | 4 lines (5 occurrences) | Same. |
 
-`scripts/audit/fix-unowned-private-paths.sh` is dry-run by default and prints the six files. The owner
-runs it with `--execute`, reviews `git diff`, and commits those paths (or creates a follow-up job that
-owns them). p01 did not edit or commit them.
+`scripts/audit/fix-unowned-private-paths.sh` is dry-run by default and prints the six files. The paths
+were fixed by the follow-up code and docs jobs; `scan.sh --worktree` now exits 0. p01 did not edit or
+commit them.
 
 ## Findings: old history (informational)
 
@@ -97,19 +97,14 @@ would still leak the old home directory and internal worktree names, which is wh
 The automated rules cannot judge prose. These items were found by reading and are **not** part of the
 fatal scan:
 
-- `docs/design/plan.md` section 16, "The overnight build", describes internal operations: the owner's
-  Mac and a VPS, a private bootstrap directory, a private tmux session, a deploy-key setup, model costs
-  and a morning handover. It contains no credential, but it is private operational data. Remove section
-  16 or rewrite it as a generic design note before publication. This file is outside p01's `owns`.
-- `docs/dogfood/RESULTS.md` mentions the private `~/vowp-night` directory and the night supervisor; it is
-  unowned and needs an owner decision. `docs/release/0.1.0-rc.1.md` is now a short historical stub that
-  no longer contains that reference.
-- `AGENTS.md`, `CONTRIBUTING.md`, `framework/templates/AGENTS.md`,
-  `framework/skills/vowp-worker/SKILL.md` and `crates/vowp-core/src/loops/merge_queue.rs` use
-  `vowp-night` in the `AI-Assisted:` commit trailer. That is a product/workflow name, not a hostname or
-  credential. The owner should decide whether the public project keeps that name; if not, code, tests and
-  docs must change together.
-- `git grep -nI 'vowp-night' -- .` is the command that lists these references.
+- The build-history pages that described internal operations (`docs/design/plan.md` section 16, "The
+  overnight build", and `docs/dogfood/RESULTS.md`) have been removed. The current design docs describe
+  the product, not the private build environment.
+- `AGENTS.md` uses `vowp-night` in the `AI-Assisted:` commit trailer; `CONTRIBUTING.md`, `framework/`
+  and the merge queue use `VOWP`. That is a product/workflow name, not a hostname or credential. The
+  owner should decide whether the public project keeps the name; if not, code, tests and docs must
+  change together.
+- `git grep -nI 'vowp-night' -- .` lists that name reference and the audit text that searches for it.
 
 ## Commands to repeat
 
@@ -193,15 +188,17 @@ MIT/Apache-2.0 plus Unicode-3.0. No copyleft-only, unknown or missing licence wa
 
 **Attribution is needed for binary distributions**, because MIT, Apache-2.0, BSD, ISC, Unicode and Zlib
 all require notices when their code is redistributed in a binary. It is not needed for the source
-repository itself, where each Cargo package carries its own licence file. p01 owns only
-`scripts/audit/**`, so the generated list is at `scripts/audit/THIRD-PARTY-LICENSES.md`; p06 should copy
-it into each release archive (or the owner can add a root `THIRD-PARTY-LICENSES.md`).
+repository itself, where each Cargo package carries its own licence file. The audit's package table is
+`scripts/audit/THIRD-PARTY-LICENSES.md`; the reviewed bundle that ships in every archive is the root
+`THIRD-PARTY-LICENSES.md`, generated from the same locked metadata by
+`scripts/release/generate-third-party-licenses.py`. `scripts/release/package-archive.sh` refuses to
+package an archive when the bundle, `LICENSE`, `README.md` or the `vowp` binary is missing or empty.
 
 ## Checklist: before you click "Make public"
 
-- [ ] `scripts/audit/scan.sh --worktree` exits 0 (the six unowned files are fixed and committed).
-- [ ] The manual review above is resolved: `docs/design/plan.md` section 16 and the `vowp-night`
-      references are removed or the owner accepts them.
+- [ ] `scripts/audit/scan.sh --worktree` exits 0.
+- [ ] The manual review above is resolved: the owner accepts or renames the remaining `vowp-night`
+      reference.
 - [ ] `scripts/audit/scan.sh --rev public-main` exits 0 after `squash-for-public.sh`.
 - [ ] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and
       `cargo test --workspace` pass on the public tree.

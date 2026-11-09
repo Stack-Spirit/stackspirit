@@ -87,7 +87,7 @@ git commit -m "tests, docs: use the conventional /home/user placeholder"
 ### 1.2 Version audit
 
 Every crate, the npm package and the release docs must say `0.1.0`; historical
-design notes and the old internal candidate may mention earlier versions.
+design notes may mention earlier versions.
 
 ```sh
 cargo metadata --no-deps --format-version 1 |
@@ -114,19 +114,17 @@ Also check the documentation leftovers before building the public branch:
 grep -RIn 'cargo install --path crates/vowp-cli' README.md docs/guides || true
 
 # The dead, non-wired integration test was removed; it must not come back.
-grep -RIn '0\.1\.0-rc' crates/vowp-cli/tests 2>/dev/null || true
+test ! -e crates/vowp-cli/tests/version.rs
 
-# The roadmap's version sentence must say 0.1.0. The two links to the
-# historical docs/release/0.1.0-rc.1.md stub are intentional and allowed.
+# The roadmap's version sentence must say 0.1.0 and link only to live pages.
 grep -n 'identifies itself as' docs/roadmap.md
 ```
 
-Expected: the first two commands print nothing. The third prints the roadmap
-sentence containing `identifies itself as` followed by `0.1.0`; if it says
-`0.1.0-rc.1`, fix the sentence before `public-main`. Do not remove the two historical
-`0.1.0-rc.1` links in `docs/roadmap.md`; they point at the intentionally
-preserved stub. The source-install command is `cargo install --path .` and the
-dead `crates/vowp-cli/tests/version.rs` is gone on current `main`.
+Expected: the first command prints nothing, `test` exits 0, and the last
+command prints the roadmap sentence containing `identifies itself as` followed
+by `0.1.0`. The source-install command is `cargo install --path .`; the dead
+`crates/vowp-cli/tests/version.rs` is gone on current `main`, and the release
+docs contain no pre-release stub or historical candidate links.
 
 ### 1.3 Package and npm dry runs
 
@@ -169,29 +167,28 @@ large files. It cannot judge prose. Review these before publication:
 git grep -nI 'vowp-night' -- .
 ```
 
-The product/workflow name in `AGENTS.md`, `CONTRIBUTING.md`, `framework/` and
-the commit trailer is a naming decision, not a credential. The private
-operational details are different: `docs/design/plan.md` section 16 ("The
-overnight build") and `docs/dogfood/RESULTS.md` mention the private night
-infrastructure and the tmux incident. Remove or rewrite those sections, or
-record an explicit owner acceptance in the launch log. Do not publish private
-hostnames, home directories, costs or session names.
-
-```sh
-sed -n '/## 16\./,/^## 17\./p' docs/design/plan.md
-sed -n '1,60p' docs/dogfood/RESULTS.md
-```
+The remaining hits are the product/workflow name in `AGENTS.md` and the audit
+text that searches for it. That name is a naming decision, not a credential.
+The old build-history pages that described the private night infrastructure and
+the tmux incident are gone; do not reintroduce private hostnames, home
+directories, costs or session names.
 
 ### 1.6 Binary attribution
 
 MIT, Apache-2.0, BSD, ISC, Unicode and Zlib all require notices when their code
-is redistributed in a binary. `scripts/audit/THIRD-PARTY-LICENSES.md` is the
-generated list. The release workflow currently copies only `LICENSE` and
-`README.md` into each archive, so either add the generated file to the archive
-in `.github/workflows/release.yml` or add a reviewed root
-`THIRD-PARTY-LICENSES.md` and include it. Do this before tagging, then update
-the archive-contents sentence in `docs/release/0.1.0.md` if the file list
-changes.
+is redistributed in a binary. The reviewed root `THIRD-PARTY-LICENSES.md` ships
+in every archive alongside `vowp`, `LICENSE` and `README.md`; it is generated
+from the locked dependency tree. Confirm it is current and non-empty before
+tagging:
+
+```sh
+cargo fetch --locked
+python3 scripts/release/generate-third-party-licenses.py --check
+test -s THIRD-PARTY-LICENSES.md
+```
+
+`scripts/release/package-archive.sh` refuses to build an archive when the
+binary, `LICENSE`, `README.md` or `THIRD-PARTY-LICENSES.md` is missing or empty.
 
 **Do not build `public-main` until every item in 1.1–1.6 passes or the owner
 records a decision in the launch log.**
@@ -391,7 +388,7 @@ tar -xzf vowp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 On macOS extract and run the matching `apple-darwin` archive instead. The
 non-native archives cannot run here; the workflow smoke-tested each binary on a
 native runner and the checksums cover all four. Every archive must contain
-`vowp`, `LICENSE` and `README.md`.
+`vowp`, `LICENSE`, `README.md` and `THIRD-PARTY-LICENSES.md`.
 
 Publish the draft only after those checks pass:
 
