@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fresh-user test fixture: a fake Claude Code CLI.
+#
+# The fresh-user container has no signed-in harness and cannot make a model
+# call. `vowp doctor` probes `claude --version`, so this stub answers exactly
+# that and refuses everything else. It never fakes a model turn.
+case "${1:-}" in
+    --version)
+        printf '%s\n' '2.1.0 (Claude Code)'
+        exit 0
+        ;;
+esac
+printf '%s\n' 'fresh-user fixture: fake claude only implements --version' >&2
+exit 1
