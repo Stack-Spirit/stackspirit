@@ -12,9 +12,9 @@ The examples use placeholders:
 
 | Placeholder | Replace with |
 |---|---|
-| `<your-repo>` | The path or clone URL of the git repository VOWP will manage. |
+| `<your-repo>` | The local path to the git repository VOWP will manage. |
 | `<your-project>` | The project name passed to `vowp init`; it also names the tmux session. |
-| `<your-harness>` | A built-in harness: `claude-code` or `opencode`. |
+| `<your-harness>` | A harness the profile ladder can use: `claude-code`, `opencode`, or a generic `cli:<mapping>`. |
 | `<your-model>` | A model identifier that your harness accepts. |
 | `<your-provider>` | The provider key used by limits and cost: `claude` for Claude Code, or the text before `/` for opencode. |
 
@@ -35,9 +35,10 @@ not print a version, stop here and read the [install guide](install.md).
 
 ## 2. Prepare a repository
 
-VOWP manages an existing git repository. Use one with a remote and a default branch. VOWP creates job
-worktrees outside the repository and the merge queue pushes branches, so a repository without a remote
-can run gates but cannot complete the merge path.
+VOWP manages an existing git repository. Clone or open the repository you want VOWP to manage; it
+needs a remote and a default branch. VOWP creates job worktrees outside the repository and the merge
+queue pushes branches, so a repository without a remote can run gates but cannot complete the merge
+path.
 
 ```sh
 cd /path/to/<your-repo>
@@ -59,10 +60,12 @@ skills and `opencode.jsonc`), creates `.vowp/`, registers the local node and pro
 default loops as active. Existing framework files are skipped and listed; an already initialised
 project exits 4 unless you pass `--force`.
 
-The generated files are untracked. Commit them before the first job reaches the merge queue, because
-the queue requires a clean main checkout:
+The generated files are untracked, and `vowp job add` writes briefs while the supervisor writes
+checkpoints under `.vowp/` in the main checkout. Ignore that runtime directory and commit the rest;
+the merge queue requires a clean main checkout:
 
 ```sh
+printf '.vowp/\n' >> .gitignore
 git add -A
 git commit -m "chore: initialise VOWP"
 ```

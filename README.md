@@ -45,12 +45,19 @@ vowp doctor
 vowp up
 ```
 
-`vowp init` writes `vowp.toml` and the framework files; set the profile ladders in `vowp.toml` to the
-harnesses and models your machine can actually run, then commit the generated files with
-`git add -A && git commit -m "chore: initialise VOWP"`. `vowp doctor` must report no `fail` before you
-start. `vowp up` starts the supervisor and opens its tmux windows; `vowp status` and `vowp board` show
-what it is doing, and `vowp down` stops it cleanly. The merge queue requires a clean main checkout,
-which the commit above provides.
+`vowp init` writes `vowp.toml` and the framework files. Set the profile ladders in `vowp.toml` to the
+harnesses and models your machine can actually run, ignore runtime state, and commit:
+
+```sh
+printf '.vowp/\n' >> .gitignore
+git add -A
+git commit -m "chore: initialise VOWP"
+```
+
+The merge queue requires a clean main checkout; ignoring `.vowp/` keeps it clean as `vowp job add`
+writes briefs and the supervisor writes checkpoints there. `vowp doctor` must report no `fail` before
+you start. `vowp up` starts the supervisor and opens its tmux windows; `vowp status` and `vowp board`
+show what it is doing, and `vowp down` stops it cleanly.
 
 Add work with `vowp job add ...` or `vowp plan "..."`, or run the
 [hello-vowp example](examples/hello-vowp/README.md) first: it exercises a three-job graph with fake

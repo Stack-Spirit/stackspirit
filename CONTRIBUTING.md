@@ -45,7 +45,7 @@ These are the checks [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --no-fail-fast
 ```
 
 If you change documentation, also run the offline documentation checks:
