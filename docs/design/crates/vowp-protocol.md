@@ -135,7 +135,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `timestamp_ordering_matches_strings` | proptest: `a<b ⇔ a.as_rfc3339()<b.as_rfc3339()` |
 | `fake_clock_advances` | `FakeClock::at(t)`, `advance(90s)` → `now()==t+90s`; clones share state |
 | `executor_parse_table` | valid: the three examples in types.md §3 + `opencode:anthropic/claude-x#high`; invalid: no colon, `@` on opencode, `#` on claude-code, empty model, unknown harness, `claude-code:m@Hi` → `InvalidExecutor`; each valid one `to_string()` back to input |
-| `executor_provider_and_model_arg` | `provider()` = `claude`/`provider`/`codex`; `model_arg()` = `provider/model-b#max` |
+| `executor_provider_and_model_arg` | `provider()` = `claude` for claude-code, the text before `/` for opencode, the model/entry name for cli; `model_arg()` round-trips the model and optional variant |
 | `executor_serde_is_string` | `serde_json::to_string(&e)` is a JSON string equal to Display; deserialising bad string errors |
 | `profile_validate_rejects_empty_and_duplicates` | empty ladder, duplicate rung → error |
 | `profile_pick_skips_limited_rungs` | 2-rung ladder: claude limited until future → rung 1; limited until past → rung 0; `None` (indefinite) → skipped; both limited → `None` |

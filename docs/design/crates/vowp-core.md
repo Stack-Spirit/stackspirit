@@ -256,7 +256,7 @@ pub struct BoardSnapshot { pub project: ProjectName, pub at: Timestamp, pub jobs
 pub struct BoardRun { pub job: JobId, pub executor: Option<Executor>, pub age_secs: u64, pub last_event_age_secs: Option<u64> }
 impl BoardSnapshot { pub fn collect(store: &Store, cfg: &VowpConfig, now: Timestamp) -> Result<Self, CoreError>; pub fn render_text(&self, color: bool) -> String; }
 pub mod report {
-    pub fn night_report(store: &Store, cfg: &VowpConfig, now: Timestamp) -> Result<String, CoreError>;   // Markdown: built, failed+why, cost by receipts, limit/failover counts, switches, inbox
+    pub fn night_report(store: &Store, cfg: &VowpConfig, now: Timestamp) -> Result<String, CoreError>;   // Markdown summary: finished/failed jobs and why, cost from receipts, limit/failover counts, switches, inbox
     pub fn checkpoint(store: &Store, cfg: &VowpConfig, now: Timestamp) -> Result<String, CoreError>;      // short; written to .vowp/checkpoints/<ts>.md by L4
 }
 ```

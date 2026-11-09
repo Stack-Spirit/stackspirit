@@ -484,7 +484,7 @@ pub struct CapsuleDraft {
 {"version":1,"capsule_id":"cap_01KA1V2B000000000000000000","session_id":"01KA1V0Z7A0000000000000000","created_at":"2026-11-08T19:41:09.000Z","at_seq":142,"trigger":"limit",
  "from":{"executor":"claude-code:model-a@medium","node":"server"},
  "intent":"Add the graph scheduler and its tests.",
- "constraints":["no public actions"],"decisions":[{"what":"fix jobs reuse the job branch","why":"keeps one diff to review","at_seq":88}],
+ "constraints":["keep the diff within the owned paths"],"decisions":[{"what":"fix jobs reuse the job branch","why":"keeps one diff to review","at_seq":88}],
  "state":{"done":["protocol types reviewed"],"in_progress":["graph split"],"blocked":[],"next_steps":["dispatch tests"]},
  "files":[{"path":"docs/design/loops.md","role":"modified","note":"added L6"}],
  "gotchas":["the executor reports reasoning tokens separately"],"open_questions":[],

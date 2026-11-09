@@ -172,13 +172,13 @@ kind: build            # plan | spec | build | test | verify | fix | merge | doc
 role: worker           # planner | keeper | worker | verifier
 profile: worker        # model ladder (section 10)
 needs: [protocol]      # must be done first
-owns: ["crates/graph/**"]            # the only paths this job may change (lock)
-reads: ["crates/protocol/**", "docs/design/**"]
+owns: ["crates/vowp-graph/**"]            # the only paths this job may change (lock)
+reads: ["crates/vowp-protocol/**", "docs/design/**"]
 brief: .vowp/jobs/graph-engine/brief.md
 report: .vowp/jobs/graph-engine/report.md
 gates:
   - report: { fields: [status, branch, commits, tests] }
-  - cmd: { run: "cargo test -p graph", expect_exit: 0 }
+  - cmd: { run: "cargo test -p vowp-graph", expect_exit: 0 }
   - cmd: { run: "cargo clippy --workspace --all-targets -- -D warnings", expect_exit: 0 }
   - owns_respected: true            # diff touches only `owns`
   - review: { by: verifier }        # spawns a verify job
@@ -280,8 +280,8 @@ job: graph-engine
 status: done            # done | partial | blocked
 branch: job/graph-engine
 commits: [abc1234, def5678]
-tests: { command: "cargo test -p graph", passed: 42, failed: 0 }
-files_changed: [crates/graph/src/scheduler.rs, …]
+tests: { command: "cargo test -p vowp-graph", passed: 42, failed: 0 }
+files_changed: [crates/vowp-graph/src/scheduler.rs, …]
 open_items: []
 questions_for_owner: []
 ---
@@ -292,10 +292,10 @@ questions_for_owner: []
 ```yaml
 ---
 job: graph-engine
-owns: ["crates/graph/**"]
+owns: ["crates/vowp-graph/**"]
 must_not_touch: ["everything else"]
 needs_done: [protocol]
-gates: [report, "cargo test -p graph", "cargo clippy --workspace --all-targets -- -D warnings", owns_respected, review]
+gates: [report, "cargo test -p vowp-graph", "cargo clippy --workspace --all-targets -- -D warnings", owns_respected, review]
 done_when: "report has status: done and every gate passes"
 ---
 ```

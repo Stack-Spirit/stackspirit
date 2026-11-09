@@ -317,7 +317,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | Test | Proves |
 |---|---|
 | `opencode_probe_parses_version` | like claude (`2.0.28`) |
-| `opencode_argv_new_and_resume` | `run --format json --auto --model provider/model-b#max [--session ses_…] [--title …] <prompt last>`; stdin is null |
+| `opencode_argv_new_and_resume` | `run --format json --auto --model <executor.model_arg()> [--session ses_…] [--title …] <prompt last>`; stdin is null |
 | `opencode_tool_exit_code_from_nested_metadata` | fixture `opencode_tool_exit.jsonl` (real nested shape `state.metadata.metadata.exit`): `ToolResult.exit_code == Some(0)` and `Some(2)` for the second line |
 | `opencode_variant_sigil_only_when_present` | `#max` absent when `variant: None` |
 | `opencode_long_prompt_goes_through_file` | > 100 000 bytes → file under `<cwd>/.vowp/prompts/`, argv prompt is the pointer text |
@@ -326,7 +326,7 @@ All hermetic: temp dirs, the fake scripts, recorded fixtures. Names are exact.
 | `opencode_tool_error_is_not_run_error` | `state.status:"error"` → `ToolResult{ok:false, output "Web search cancelled"}`, outcome Ok |
 | `opencode_cost_sums_over_steps` | `RunSummary.cost.usd` = sum of `part.cost`, tokens summed incl. cache read, `source: Receipt` |
 | `opencode_no_receipt_is_unknown_cost` | run with no `step_finish` → `Cost::unknown()` (usd None) |
-| `opencode_402_fixture_is_credits` | outcome Credits, `LimitEvent{Credits, provider provider-a}`, exit non-zero |
+| `opencode_402_fixture_is_credits` | outcome Credits, `LimitEvent{Credits, provider <executor provider>}`, exit non-zero |
 | `opencode_429_fixture_is_rate` | Rate + 10 min |
 | `opencode_auth_fixture` | Auth |
 | `opencode_context_fixture` | `LimitEvent{Context}` + `ErrorEvent` |
