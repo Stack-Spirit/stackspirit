@@ -15,11 +15,24 @@ use crate::deps::Deps;
 
 use super::supervisor::ReconcileReport;
 
-/// Finalises open runs that no live runner owns.
-pub(crate) fn orphaned_runs(deps: &Deps, store: &Store, active: &HashSet<RunId>) -> Result<u32, CoreError> {
+/// Finalises open runs from `open` that no live runner owns.
+///
+/// `open` and `active` must come from the same snapshot: a run that appeared after the
+/// snapshot has no owner id yet, and must wait for the next tick instead of being
+/// finalised as an orphan while its runner thread is still starting.
+pub(crate) fn orphaned_runs(
+    deps: &Deps,
+    store: &Store,
+    open: &[Run],
+    active: &HashSet<RunId>,
+) -> Result<u32, CoreError> {
     let mut count = 0;
-    for run in store.open_runs()? {
-        if run.node != deps.node || active.contains(&run.id) {
+    for snapshot in open {
+        // The row may have finished since the snapshot; never signal or finish it again.
+        let Some(run) = store.run(&snapshot.id)? else {
+            continue;
+        };
+        if run.ended_at.is_some() || run.node != deps.node || active.contains(&run.id) {
             continue;
         }
         if let Some(pid) = run.pid
@@ -149,10 +162,15 @@ pub(crate) fn ensure_windows(deps: &Deps) -> Result<u32, CoreError> {
 }
 
 /// Runs startup reconciliation and returns the report counters.
-pub(crate) fn startup(deps: &Deps, store: &Store, active: &HashSet<RunId>) -> Result<ReconcileReport, CoreError> {
+pub(crate) fn startup(
+    deps: &Deps,
+    store: &Store,
+    open: &[Run],
+    active: &HashSet<RunId>,
+) -> Result<ReconcileReport, CoreError> {
     // Step 1 owns orphan classification; the session service's broader recovery runs after it
     // so its own "close every dangling run" pass cannot hide the counter from this report.
-    let orphaned_runs = orphaned_runs(deps, store, active)?;
+    let orphaned_runs = orphaned_runs(deps, store, open, active)?;
     let session_report = crate::session::service::SessionService::new(deps.clone()).recover(store)?;
     ensure_loops(store, deps)?;
     let windows_recreated = ensure_windows(deps).unwrap_or_else(|error| {
@@ -191,4 +209,76 @@ pub(crate) fn startup(deps: &Deps, store: &Store, active: &HashSet<RunId>) -> Re
         schedules_caught_up,
         windows_recreated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use vowp_protocol::{
+        Clock, Cost, Executor, FakeClock, MemoryLog, NodeName, Run, RunId, RunPurpose, RunRole, Timestamp, VowpConfig,
+    };
+    use vowp_store::NodePaths;
+
+    use super::orphaned_runs;
+    use crate::Deps;
+    use crate::SystemGit;
+    use crate::deps::{AdapterRegistry, FixedRng, SystemRunner};
+
+    #[test]
+    fn a_run_that_appears_after_the_snapshot_is_not_an_orphan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = NodePaths::new(tmp.path().join("node"));
+        let clock = Arc::new(FakeClock::at(
+            Timestamp::parse("2026-11-08T18:00:00Z").expect("timestamp"),
+        ));
+        let deps = Deps {
+            paths: paths.clone(),
+            config: Arc::new(VowpConfig::with_defaults_for_tests()),
+            node: NodeName::parse("local").expect("node"),
+            clock: clock.clone(),
+            log: Arc::new(MemoryLog::new()),
+            adapters: Arc::new(AdapterRegistry::new()),
+            windows: Arc::new(vowp_tmux::fake::FakeWindows::new()),
+            git: Arc::new(SystemGit::new(Arc::new(SystemRunner))),
+            cmd: Arc::new(SystemRunner),
+            rng: Arc::new(FixedRng(0)),
+        };
+        let store = deps.open_store().expect("store");
+        let run = Run {
+            id: RunId::new(),
+            job_id: None,
+            session_id: None,
+            role: RunRole::Probe,
+            purpose: RunPurpose::Probe,
+            profile: None,
+            rung: 0,
+            executor: Some(Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("executor")),
+            provider: Some("claude".to_owned()),
+            node: deps.node.clone(),
+            native_session_id: None,
+            pid: None,
+            window: None,
+            cwd: None,
+            started_at: clock.now(),
+            ended_at: None,
+            exit_code: None,
+            outcome: None,
+            limit_kind: None,
+            cost: Cost::unknown(),
+            detail: String::new(),
+        };
+        store.insert_run(&run).expect("insert run");
+
+        // The supervisor took this snapshot just before the probe thread inserted its run row.
+        // A run absent from the snapshot has no owner id yet and must wait for the next tick.
+        let count = orphaned_runs(&deps, &store, &[], &HashSet::new()).expect("reconcile");
+        assert_eq!(count, 0, "the new run must not be finalised as an orphan");
+        assert_eq!(
+            store.require_run(&run.id).expect("run").ended_at,
+            None,
+            "the live probe run row stays open"
+        );
+    }
 }

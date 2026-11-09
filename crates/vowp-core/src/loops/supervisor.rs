@@ -181,8 +181,8 @@ impl Supervisor {
     /// Startup reconciliation (loops.md §1 step 1 and §11 catch-up).
     pub fn startup(&mut self) -> Result<ReconcileReport, CoreError> {
         self.handled_runs.clear();
-        let active = self.active_run_ids()?;
-        let report = reconcile::startup(&self.deps, &self.store, &active)?;
+        let (open, active) = self.open_runs_snapshot()?;
+        let report = reconcile::startup(&self.deps, &self.store, &open, &active)?;
         self.store
             .ensure_worker_slots(&self.deps.node, WorkerKind::Worker, self.deps.config.node.max_workers)?;
         self.store.ensure_worker_slots(
@@ -442,8 +442,8 @@ impl Supervisor {
 
     /// Step 1: finalise open runs with no live runner thread.
     fn step_reconcile(&mut self, _now: Timestamp) -> Result<String, CoreError> {
-        let active = self.active_run_ids()?;
-        let count = reconcile::orphaned_runs(&self.deps, &self.store, &active)?;
+        let (open, active) = self.open_runs_snapshot()?;
+        let count = reconcile::orphaned_runs(&self.deps, &self.store, &open, &active)?;
         Ok(format!("{count} orphaned run(s)"))
     }
 
@@ -2142,12 +2142,16 @@ impl Supervisor {
         Ok((graph, jobs))
     }
 
-    /// Returns the run ids that still have a live owner thread.
+    /// Returns the open runs and the ids that still have a live owner thread.
+    ///
+    /// Both come from one `open_runs` snapshot. Reconciliation must use this same snapshot:
+    /// a run inserted after it has no owner id yet and is not an orphan.
     ///
     /// Job runs live in `RunnerPool`; planner/keeper turns live in `SessionRunPool` and are
     /// matched by session id; probe runs live in `step_probes` and are matched by provider.
     /// Reconciliation must see all three or it finalises a live run as an orphan crash.
-    pub(crate) fn active_run_ids(&self) -> Result<HashSet<RunId>, CoreError> {
+    pub(crate) fn open_runs_snapshot(&self) -> Result<(Vec<Run>, HashSet<RunId>), CoreError> {
+        let open = self.store.open_runs()?;
         let mut active: HashSet<RunId> = self
             .runners
             .jobs()
@@ -2157,7 +2161,7 @@ impl Supervisor {
             .collect();
         let sessions = self.session_runners.live_sessions();
         let probes = self.probe_tasks.keys().map(String::as_str).collect::<HashSet<_>>();
-        for run in self.store.open_runs()? {
+        for run in &open {
             let session_live = run
                 .session_id
                 .as_ref()
@@ -2168,10 +2172,10 @@ impl Supervisor {
                     .as_deref()
                     .is_some_and(|provider| probes.contains(provider));
             if session_live || probe_live {
-                active.insert(run.id);
+                active.insert(run.id.clone());
             }
         }
-        Ok(active)
+        Ok((open, active))
     }
 
     /// Returns true when `name` is missing or active (a paused row skips its step).
