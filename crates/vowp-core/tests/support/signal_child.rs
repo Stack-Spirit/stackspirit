@@ -8,12 +8,38 @@
 //!
 //! [`shell_command`] starts `sh -c` through `env --default-signal` (GNU coreutils) or a
 //! small Perl shim, both of which reset SIGINT/SIGTERM to their default disposition and
-//! unblock them before the shell runs.
+//! unblock them before the shell runs. [`wait_for_markers`] polls the files those
+//! children append to, so a test observes an asynchronous signal acknowledgment
+//! instead of reading once and racing the handler.
 
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// Polls a file written asynchronously by a fake child until every `marker` appears.
+///
+/// Signal handlers run asynchronously, so reading the file once right after the child
+/// is signalled can race under load. Re-read every 20 ms for up to 10 s, then panic
+/// with the file's actual contents so the failure names the missing marker.
+pub fn wait_for_markers(path: &Path, markers: &[&str]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        if markers.iter().all(|marker| contents.contains(marker)) {
+            return contents;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out after 10s waiting for {markers:?} in {}; contents: {contents:?}",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 /// Perl shim used when `env` is not GNU coreutils (for example on macOS).
 ///

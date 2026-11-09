@@ -8,13 +8,14 @@ mod support;
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
+use support::signal_child::{shell_command, wait_for_markers};
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::recovery;
 use vowp_core::session::service::SessionService;
@@ -86,6 +87,15 @@ fn create_session(service: &SessionService, tmp: &TempDir, name: &str) -> Sessio
         .expect("create session")
 }
 
+/// The drain window requested by [`request`]; the signal test's clock advancer mirrors it.
+const DRAIN_SECS: u64 = 5;
+const DRAIN_WINDOW: Duration = Duration::from_secs(DRAIN_SECS);
+
+/// Production's drain graces, mirrored by the signal test's clock advancer.
+const INTERRUPT_GRACE: Duration = Duration::from_secs(3);
+const STOP_GRACE: Duration = Duration::from_secs(3);
+const RUNNER_GRACE: Duration = Duration::from_secs(5);
+
 fn request(session: &SessionId, to: Executor, reason: SwitchReason) -> SwitchRequest {
     SwitchRequest {
         session_id: session.clone(),
@@ -94,7 +104,7 @@ fn request(session: &SessionId, to: Executor, reason: SwitchReason) -> SwitchReq
             node: None,
         },
         reason,
-        drain_secs: 5,
+        drain_secs: DRAIN_SECS,
     }
 }
 
@@ -186,6 +196,67 @@ impl DrainSleeper for AdvancingSleeper {
     }
 }
 
+/// A sleeper for a test whose fake clock is advanced by an advancer thread.
+///
+/// It yields one millisecond per drain poll and reports the two moments the drain's
+/// clock arithmetic cannot otherwise expose:
+///
+/// - the first poll, after which the drain deadline is fixed;
+/// - the first poll at or past drain + interrupt + stop, which can only be the runner
+///   grace, because every earlier wait stops polling once that much fake time has passed.
+struct YieldingSleeper {
+    clock: FakeClock,
+    start: Timestamp,
+    first_poll: Mutex<Option<Sender<()>>>,
+    runner_grace: Mutex<Option<Sender<()>>>,
+}
+
+impl YieldingSleeper {
+    fn new(clock: FakeClock, start: Timestamp, first_poll: Sender<()>, runner_grace: Sender<()>) -> Self {
+        Self {
+            clock,
+            start,
+            first_poll: Mutex::new(Some(first_poll)),
+            runner_grace: Mutex::new(Some(runner_grace)),
+        }
+    }
+}
+
+impl DrainSleeper for YieldingSleeper {
+    fn sleep(&self, _duration: Duration) {
+        if let Some(first_poll) = self.first_poll.lock().expect("first poll lock").take() {
+            let _ = first_poll.send(());
+        }
+        if self.clock.now().since(self.start) >= DRAIN_WINDOW + INTERRUPT_GRACE + STOP_GRACE
+            && let Some(runner_grace) = self.runner_grace.lock().expect("runner grace lock").take()
+        {
+            let _ = runner_grace.send(());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Advances the fake clock through the drain's bounded signal windows.
+///
+/// The caller waits for the drain's first poll before calling this, so the drain
+/// deadline is already fixed at the pre-advance clock. Fake time then moves to the
+/// deadline (SIGINT), waits for the child's `int` acknowledgment before entering the
+/// SIGTERM grace, waits for `term` before entering the SIGKILL grace, and advances the
+/// runner grace only after the sleeper reports the drain's first poll past SIGKILL.
+/// Without the acknowledgments the compressed fake clock can send SIGTERM while the
+/// child's SIGINT trap is still pending, which loses `int`.
+fn advance_drain_clock(clock: FakeClock, signal_path: PathBuf, runner_grace: Receiver<()>) {
+    clock.advance(DRAIN_WINDOW);
+    wait_for_markers(&signal_path, &["int"]);
+    clock.advance(INTERRUPT_GRACE);
+    wait_for_markers(&signal_path, &["term"]);
+    clock.advance(STOP_GRACE);
+    runner_grace
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the drain polls its runner grace after SIGKILL");
+    clock.advance(RUNNER_GRACE);
+}
+
 /// A sleeper that advances the fake clock, but on its first sleep hands off to a test
 /// writer and waits until that writer has appended its terminal event.
 ///
@@ -232,15 +303,17 @@ impl DrainSleeper for HandoffSleeper {
 struct BlockingProcessAdapter {
     kind: HarnessKind,
     signal_path: PathBuf,
+    ready_path: PathBuf,
     release: Arc<Mutex<Option<Sender<()>>>>,
     pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl BlockingProcessAdapter {
-    fn new(kind: HarnessKind, signal_path: PathBuf) -> Self {
+    fn new(kind: HarnessKind, signal_path: PathBuf, ready_path: PathBuf) -> Self {
         Self {
             kind,
             signal_path,
+            ready_path,
             release: Arc::new(Mutex::new(None)),
             pid: Arc::new(Mutex::new(None)),
         }
@@ -280,13 +353,21 @@ impl Adapter for BlockingProcessAdapter {
     }
 
     fn start(&self, _input: StartInput) -> Result<Box<dyn AdapterRun>, AdapterError> {
+        // Publish readiness only after both traps exist. A signal that arrives while
+        // `sh` is still starting up can be handled by the shell before the user traps
+        // are installed, which silently loses the `int` marker. Start the shell through
+        // `shell_command`: a non-interactive shell cannot trap SIGINT if it inherited
+        // SIGINT ignored (for example when a gate runs as a background shell job), so
+        // the disposition is reset before the traps are installed.
         let script = format!(
-            "trap 'echo int >> {path}' INT; trap 'echo term >> {path}' TERM; while :; do sleep 0.01; done",
-            path = self.signal_path.display()
+            "trap 'echo int >> {path}' INT; \
+             trap 'echo term >> {path}' TERM; \
+             echo ready >> {ready}; \
+             while :; do sleep 0.01; done",
+            path = self.signal_path.display(),
+            ready = self.ready_path.display()
         );
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(script)
+        let mut child = shell_command(&script)
             .process_group(0)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -492,7 +573,12 @@ fn drain_is_bounded_when_runner_never_finishes() {
     let tmp = tempdir().expect("tempdir");
     let clock = FakeClock::at(ts());
     let signal_path = tmp.path().join("signals.txt");
-    let source = Arc::new(BlockingProcessAdapter::new(HarnessKind::Opencode, signal_path.clone()));
+    let ready_path = tmp.path().join("ready.txt");
+    let source = Arc::new(BlockingProcessAdapter::new(
+        HarnessKind::Opencode,
+        signal_path.clone(),
+        ready_path.clone(),
+    ));
     let deps = deps(
         &tmp,
         AdapterRegistry::new().with("opencode", source.clone()).with(
@@ -530,8 +616,30 @@ fn drain_is_bounded_when_runner_never_finishes() {
     }
     let active = active.expect("the blocking run is active");
 
-    let sleeper = AdvancingSleeper::new(clock.clone());
+    // The child writes `ready` only after both traps are installed. Wait for it before
+    // the switch can signal the group; SIGINT sent while `sh` is still starting is
+    // lost, and only the later SIGTERM would be recorded.
+    wait_for_markers(&ready_path, &["ready"]);
+
+    // The fake clock is driven from a separate thread, like the production wall clock:
+    // the drain deadline first, then each grace only after the child acknowledged the
+    // previous signal. The sleeper reports its first poll (the drain deadline is fixed)
+    // and its first poll after SIGKILL (the runner grace has started), so fake time
+    // never moves ahead of the phase it is meant to expire.
     let before = clock.now();
+    let (first_poll, drain_started) = channel();
+    let (runner_grace, waiting_for_runner) = channel();
+    let sleeper = YieldingSleeper::new(clock.clone(), before, first_poll, runner_grace);
+    let advancer = {
+        let clock = clock.clone();
+        let signal_path = signal_path.clone();
+        std::thread::spawn(move || {
+            drain_started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the drain takes its first fake-clock poll");
+            advance_drain_clock(clock, signal_path, waiting_for_runner);
+        })
+    };
     let error = run_switch_with_sleeper(
         &deps,
         &request(&session, claude(), SwitchReason::Failover),
@@ -539,6 +647,7 @@ fn drain_is_bounded_when_runner_never_finishes() {
         &sleeper,
     )
     .expect_err("a runner that never finishes must abort the switch");
+    advancer.join().expect("clock advancer");
     let elapsed = clock.now().since(before);
 
     // Release the fake adapter's blocked wait and let the runner clean up its row.
@@ -560,9 +669,13 @@ fn drain_is_bounded_when_runner_never_finishes() {
         "the runner wait stayed bounded, got {elapsed:?}"
     );
 
-    let signals = std::fs::read_to_string(&signal_path).unwrap_or_default();
-    assert!(signals.contains("int"), "drain sent SIGINT first");
-    assert!(signals.contains("term"), "drain sent SIGTERM after the grace");
+    let signals = wait_for_markers(&signal_path, &["int", "term"]);
+    let int_at = signals.find("int").expect("SIGINT marker");
+    let term_at = signals.find("term").expect("SIGTERM marker");
+    assert!(
+        int_at < term_at,
+        "drain sent SIGINT before SIGTERM; contents: {signals:?}"
+    );
 
     let row = store
         .switch(
