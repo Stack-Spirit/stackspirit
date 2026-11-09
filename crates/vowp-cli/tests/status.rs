@@ -49,6 +49,35 @@ fn status_check_exit_1_on_stale_heartbeat() {
     assert!((0..=5).contains(&age), "fresh age {age}");
 }
 
+/// A lock naming a dead pid must not make `status` claim a running supervisor.
+#[test]
+fn status_reports_stopped_for_stale_lock() {
+    let env = common::TestEnv::new();
+    let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn().expect("spawn child");
+    let dead_pid = child.id();
+    assert!(child.wait().expect("reap child").success(), "child exits 0");
+    std::fs::write(
+        env.home_path().join("supervisor.lock"),
+        format!("{dead_pid}\n{}\n", Timestamp::now().as_rfc3339()),
+    )
+    .expect("lock");
+
+    let (code, stdout, stderr) = env.run(&["status"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("supervisor: not running"),
+        "a stale lock must not report a running supervisor:\n{stdout}"
+    );
+
+    let (code, value, stderr) = env.run_json(&["status"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value["supervisor"]["running"], false);
+    assert_eq!(value["supervisor"]["pid"], serde_json::Value::Null);
+
+    let (code, _, stderr) = env.run(&["status", "--check"]);
+    assert_eq!(code, 1, "a stale lock has no live heartbeat; stderr: {stderr}");
+}
+
 #[test]
 fn status_without_check_never_exits_1_and_reports_running_supervisor() {
     let env = common::TestEnv::new();

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use vowp_core::deps::SystemRng;
@@ -228,17 +229,40 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
 /// Returns the live supervisor pid from `<home>/supervisor.lock`, if one holds the lock.
 ///
 /// The lock file contains the pid written by `vowp up`; a stale file (no such process) is
-/// treated as "not running". Linux reports process existence through `/proc/<pid>`.
+/// treated as "not running". Liveness uses `kill -0`, which works on Linux and macOS: exit 0
+/// or `EPERM` means the process exists.
 pub fn supervisor_pid(paths: &NodePaths) -> Option<u32> {
     let text = std::fs::read_to_string(paths.root().join("supervisor.lock")).ok()?;
     let pid: u32 = text.lines().next()?.trim().parse().ok()?;
-    if pid == 0 {
-        return None;
+    (valid_pid(pid) && process_alive(pid)).then_some(pid)
+}
+
+/// Returns whether `pid` names a process this program may safely signal.
+///
+/// On platforms whose `pid_t` is signed 32-bit, `kill` parses large `u32` values as negative
+/// ids. In particular, `u32::MAX` becomes `-1`, which addresses every process the caller may
+/// signal. VOWP therefore refuses pid 0, pid 1 and every value above [`i32::MAX`].
+fn valid_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32
+}
+
+/// Returns whether a process with `pid` exists.
+///
+/// `kill -0` sends no signal: exit 0 means the process exists, and `EPERM` means it exists
+/// but belongs to another user. Invalid ids always count as not alive.
+fn process_alive(pid: u32) -> bool {
+    if !valid_pid(pid) {
+        return false;
     }
-    if Path::new("/proc").is_dir() {
-        Path::new(&format!("/proc/{pid}")).exists().then_some(pid)
-    } else {
-        Some(pid)
+    match Command::new("kill")
+        .env("LC_ALL", "C")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+    {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => String::from_utf8_lossy(&output.stderr).contains("not permitted"),
+        Err(_) => false,
     }
 }
 
@@ -284,4 +308,65 @@ fn reject_unknown_loop_keys(text: &str) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Writes a lock file whose first line is `contents`.
+    fn write_lock(home: &TempDir, contents: &str) {
+        std::fs::write(home.path().join("supervisor.lock"), contents).expect("write supervisor.lock");
+    }
+
+    #[test]
+    fn supervisor_pid_none_for_dead_pid() {
+        let home = tempfile::tempdir().expect("temp home");
+        let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn().expect("spawn child");
+        let pid = child.id();
+        let status = child.wait().expect("reap child");
+        assert!(status.success(), "child exits 0");
+
+        write_lock(&home, &format!("{pid}\n"));
+        assert_eq!(
+            supervisor_pid(&NodePaths::new(home.path())),
+            None,
+            "the reaped pid {pid} must count as not running"
+        );
+    }
+
+    #[test]
+    fn supervisor_pid_some_for_live_pid() {
+        let home = tempfile::tempdir().expect("temp home");
+        let pid = std::process::id();
+        write_lock(&home, &format!("{pid}\n"));
+
+        assert_eq!(supervisor_pid(&NodePaths::new(home.path())), Some(pid));
+    }
+
+    #[test]
+    fn supervisor_pid_none_for_invalid_pid() {
+        let home = tempfile::tempdir().expect("temp home");
+        for pid in [0, 1, u32::MAX] {
+            write_lock(&home, &format!("{pid}\n"));
+            assert_eq!(
+                supervisor_pid(&NodePaths::new(home.path())),
+                None,
+                "pid {pid} must count as not running"
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_pid_none_when_lock_is_missing_or_malformed() {
+        let home = tempfile::tempdir().expect("temp home");
+        let paths = NodePaths::new(home.path());
+        assert_eq!(supervisor_pid(&paths), None, "a missing lock is not running");
+
+        for text in ["", "not-a-pid\n", "-1\n", "4294967296\n"] {
+            write_lock(&home, text);
+            assert_eq!(supervisor_pid(&paths), None, "malformed lock {text:?}");
+        }
+    }
 }
