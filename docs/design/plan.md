@@ -230,7 +230,6 @@ any state ──needs a human / provider blocked──► parked ──resolved�
 | **L6 Failover** | on `limit` events | Provider limit → capsule → the next ladder rung. Probes the limited provider after the reset time (one tiny call, then every 15 min) and switches back with a capsule. | Never silently moves work to a *paid* provider the profile doesn't list. Credits exhausted → park + inbox. |
 | **L7 Human** | continuous | Questions and approvals go to `inbox/` (and optionally a phone notification). Only the asking job waits. | — |
 | **L8 Watchdog** | systemd user service (`Restart=always`, linger on) + 5-min cron check | Keeps L1 alive across crashes and reboots. | — |
-
 | **L9 Schedules** | every tick | Runs due rows of the `schedules` table (cron expressions or intervals): create a job, start a loop, or run a command. Examples: "every 30 min planner heartbeat", "07:00 weekdays morning report", "01:00 dependency-update job", "hourly provider-credit check", "nightly database backup". | Missed runs while the node was down run once, not N times. |
 
 Loops are rows too (`loops` table: kind, interval, bounds, last/next run, state), so `vowp loops` lists them and you can pause or resume any loop. System cron and systemd only keep the supervisor itself alive.
@@ -364,7 +363,7 @@ on_credits_exhausted = "park"     # report the blocker, never switch to another 
 
 ## 11. Framework files the agents follow
 
-Shipped in `framework/templates/` and installed by `vowp init`:
+Shipped under `framework/` (`templates/`, `skills/`, `opencode/`) and installed by `vowp init`:
 
 - **`AGENTS.md`** (harness-neutral). Covers working autonomously until the report exists, owned paths only, never committing secrets (names only), reporting costs, verifying against real artifacts, and staging any refused action rather than working around it.
 - **`CLAUDE.md`** that just imports `AGENTS.md` (`@AGENTS.md`), so both harnesses read the same rules.

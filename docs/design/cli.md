@@ -143,7 +143,7 @@ Work→Production (`crates/vowp-core.md` §promote). `<change>` = commit/ref/job
 3. Execute `ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <ssh_target> vowp <argv…>` with stdin/stdout/stderr inherited; the remote exit code is returned unchanged; ssh failure (exit 255) ⇒ exit 7 with `{"error":{"kind":"remote",…}}` under `--json`.
 4. Arguments are passed as a single remote command string built with POSIX single-quote escaping (`shell_quote`, shared with `vowp-tmux`); no argument is ever interpolated unquoted.
 5. `session import` with `--node n`: the bundle file is streamed over ssh stdin (`vowp session import - …`); `session export --node n` writes the bundle locally from the remote's stdout.
-6. Cross-node `session switch --to … --node vps`: exports a bundle locally, imports on `vps`, runs the switch there, and records a `switch` event with `from_node`/`to_node` on both sides (`sessions.md` §5 and §6).
+6. Cross-node `session switch --to … --node server`: exports a bundle locally, imports on `server`, runs the switch there, and records a `switch` event with `from_node`/`to_node` on both sides (`sessions.md` §5 and §6).
 
 ## 8. Named tests (crate `vowp-cli`, hermetic: temp `--home`, temp git repos, fake harness scripts, `FakeWindows` / private tmux socket)
 
