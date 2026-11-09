@@ -6,7 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/vowp-protocol"
+readme = "README.md"
+keywords = ["vowp", "protocol", "types", "serde", "schema"]
+categories = ["development-tools", "encoding", "config", "data-structures", "artificial-intelligence"]
+include = ["src/**", "README.md", "Cargo.toml"]
 
 [dependencies]
 globset = "0.4.19"
