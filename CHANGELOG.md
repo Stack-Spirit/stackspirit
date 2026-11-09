@@ -16,7 +16,7 @@ Nothing yet.
 First release candidate of VOWP v0.1: a local-first supervisor that runs stock AI coding harnesses (Claude
 Code, opencode and generic CLIs) as a team of job workers, with deterministic loops, evidence-based gates,
 universal sessions that can move between harnesses, and guarded Work → Production promotion. This entry
-describes `main` at commit `0f78c1d` plus this documentation refresh (tested tree: `0f78c1d` + this
+describes `main` at commit `195d517` plus this documentation refresh (tested tree: `195d517` + this
 branch). Nothing has been tagged, published or deployed.
 
 ### Added
@@ -86,18 +86,18 @@ targets and creates a *draft* GitHub release). Neither workflow has run yet.
 ### Known limitations
 
 - **L4–L8 are merged but not spec-complete.** Planner (L4), keeper (L5), automatic limit
-  failover/probe-back (L6), inbox answer files (L7) and the watchdog (L8) merged in n08d (`356e185`,
-  fixed through `0f78c1d`). Known gaps: keeper takeover/hand-back capsules are partial (covering turns
-  are not compacted into a fresh planner capsule); the keeper digest tails the last 60 indexed events,
-  not the pretty log; a failed switch during quota failover does not append its ledger failure; a second
-  rate event does not extend the backoff; and `provider_of_job` can pick the first rung for a job that
-  never ran. The full ranked list is in the release notes' defect table.
-- **Dogfood found six blocking defects; they are not fixed.** n14's default
-  `scripts/dogfood/run.sh` scenario passed 5/5 on `ad163b0`, but `vowp up --home`, the planner/keeper/
-  inbox windows, the SIGKILL crash window, the job brief in the worktree, `down` vs `status --check`/
-  watchdog and `up --no-tmux` remain open (D1–D6 in `docs/dogfood/RESULTS.md`, branch
-  `job/n14-dogfood`). A seventh defect is minor. The job was still in verification when this entry was
-  written.
+  failover/probe-back (L6), inbox answer files (L7) and the watchdog (L8) were introduced in n08d at
+  `356e185`, merged as `ad163b0` and fixed through `0f78c1d`. Known gaps: keeper takeover/hand-back
+  capsules are partial (covering turns are not compacted into a fresh planner capsule); the keeper
+  digest tails the last 60 indexed events, not the pretty log; a failed switch during quota failover
+  does not append its ledger failure; a second rate event does not extend the backoff; and
+  `provider_of_job` can pick the first rung for a job that never ran. The full ranked list is in the
+  release notes' defect table.
+- **Dogfood passed; six blocking defects remain open.** n14 merged as `195d517` (final run on
+  `8f65b81`: both phases, 22.24 s; 5/5 consecutive default runs on `0f78c1d`), and its full evidence is
+  in `docs/dogfood/RESULTS.md`. `vowp up --home`, the planner/keeper/inbox windows, the SIGKILL crash
+  window, the job brief in the worktree, `down` vs `status --check`/watchdog and `up --no-tmux` remain
+  open (D1–D6); a seventh defect (D7) is minor.
 - **Remote-node probe on switch is skipped.** `session switch` to another node does not run
   `vowp --node <n> doctor --json` (sessions.md §5 step 3); only the local adapter registry is probed
   (`TODO` in `crates/vowp-core/src/session/switch.rs`).
