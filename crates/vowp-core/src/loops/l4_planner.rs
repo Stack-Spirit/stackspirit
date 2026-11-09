@@ -37,6 +37,9 @@ pub struct PlannerStatus {
     pub wanted: bool,
     /// Executor chosen when one is available.
     pub choice: Option<SessionChoice>,
+    /// True when the planner is active but none of its ladder rungs is available, so the
+    /// keeper takes the planner duties instead.
+    pub provider_limited: bool,
     /// Digest/since timestamp for this turn.
     pub digest_since: Timestamp,
     /// Rendered planner prompt.
@@ -59,6 +62,19 @@ pub fn planner_status(deps: &Deps, store: &Store, now: Timestamp, running: bool)
     if wanted && !gap_ok(deps, store, now, "planner")? {
         wanted = false;
     }
+    let provider_choice = if paused {
+        None
+    } else {
+        choose(deps, store, "planner", now)?
+    };
+    // Provider availability is independent of whether this turn is due and of `running`:
+    // the planner run that recorded the limit may still be finishing (its run row is
+    // closed but its thread has not been reaped), and the keeper turn woken by that limit
+    // must still carry the planner duties.
+    let provider_limited = !paused && provider_choice.is_none();
+    if provider_limited {
+        wanted = false;
+    }
     let digest = if wanted {
         Digest::build(store, &deps.config, Role::Planner, digest_since, 24_000)?
     } else {
@@ -71,11 +87,8 @@ pub fn planner_status(deps: &Deps, store: &Store, now: Timestamp, running: bool)
     };
     Ok(PlannerStatus {
         wanted,
-        choice: if wanted {
-            choose(deps, store, "planner", now)?
-        } else {
-            None
-        },
+        choice: if wanted { provider_choice } else { None },
+        provider_limited,
         digest_since,
         prompt,
     })

@@ -169,20 +169,19 @@ fn keeper_covers_planner_when_provider_limited_and_hands_back() {
     node.advance(5 * 60);
     store.kv_set("wake:planner", "1").expect("wake");
     store.kv_delete("planner:wake_consumed").expect("consumed");
-    let mut covered = false;
+    let mut covering = None;
     for _ in 0..200 {
         supervisor.tick().expect("covering tick");
         std::thread::sleep(Duration::from_millis(10));
-        if opencode
+        covering = opencode
             .starts()
             .into_iter()
-            .any(|start| is_keeper_prompt(&start.prompt))
-        {
-            covered = true;
+            .find(|start| is_keeper_prompt(&start.prompt) && start.prompt.contains("Planner coverage"));
+        if covering.is_some() {
             break;
         }
     }
-    assert!(covered, "the keeper covers the limited planner");
+    let covering = covering.expect("the keeper covers the limited planner");
     node.wait_runs();
     let keeper_starts = opencode
         .starts()
@@ -190,8 +189,8 @@ fn keeper_covers_planner_when_provider_limited_and_hands_back() {
         .filter(|start| is_keeper_prompt(&start.prompt))
         .collect::<Vec<_>>();
     assert_eq!(keeper_starts.len(), 1, "one covering keeper turn");
-    assert!(keeper_starts[0].prompt.contains("Planner coverage"));
-    assert!(keeper_starts[0].prompt.contains("Planner digest"));
+    assert!(covering.prompt.contains("Planner coverage"));
+    assert!(covering.prompt.contains("Planner digest"));
 
     // The claude probe succeeds; the planner session switches back and plans again.
     back.store(true, Ordering::SeqCst);
@@ -230,6 +229,47 @@ fn keeper_covers_planner_when_provider_limited_and_hands_back() {
         }
     }
     assert!(resumed, "the planner resumes after hand-back");
+}
+
+#[test]
+fn limited_planner_reports_coverage_while_a_turn_finishes() {
+    let node = two_adapter_node(
+        false,
+        Arc::new(ok_adapter(HarnessKind::Opencode)),
+        Arc::new(ok_adapter(HarnessKind::ClaudeCode)),
+        |config| {
+            set_ladders(
+                config,
+                &["claude-code:claude-sonnet-5-5@medium"],
+                &["opencode:deepseek/deepseek-flash#max"],
+            );
+        },
+    );
+    let store = node.store();
+    store
+        .upsert_limit(&vowp_protocol::Limit {
+            provider: "claude".to_owned(),
+            harness: Some(HarnessKind::ClaudeCode),
+            kind: vowp_protocol::LimitRowKind::Quota,
+            resets_at: Some(ts().plus(Duration::from_secs(3600))),
+            detail: "quota".to_owned(),
+            since: ts(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("limit");
+    store.kv_set("wake:planner", "1").expect("wake");
+    let status = vowp_core::loops::l4_planner::planner_status(&node.deps, &store, ts(), true).expect("planner status");
+    assert!(
+        status.provider_limited,
+        "the provider is limited even though the previous planner turn is still finishing"
+    );
+    assert!(
+        !status.wanted,
+        "the planner is not started again while its turn is open"
+    );
 }
 
 #[test]

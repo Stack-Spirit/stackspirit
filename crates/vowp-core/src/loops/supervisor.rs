@@ -1288,7 +1288,10 @@ impl Supervisor {
                 .iter()
                 .any(|run| run.role == vowp_protocol::RunRole::Planner);
         let status = l4_planner::planner_status(&self.deps, &self.store, now, planner_running)?;
-        let covering = status.wanted && status.choice.is_none();
+        // Coverage follows the planner's provider state, not `status.wanted`: a planner run
+        // that just recorded a limit may still be finishing, and the keeper turn woken by
+        // that limit must carry the planner duties (loops.md §7).
+        let covering = status.provider_limited;
         let mut started = 0;
 
         if status.wanted
