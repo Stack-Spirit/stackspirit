@@ -20,7 +20,7 @@ deploy = ["./scripts/deploy-work.sh"]
 
 [env.prod]
 checkout = "~/myapp-prod"                 # fast-forward-only clone of main
-deploy = ["vercel deploy --prod"]
+deploy = ["./scripts/deploy-prod.sh"]
 guards = ["clean_tree", "head_equals_remote", "build", "no_active_jobs:./scripts/guard.sh"]
 approval = "human"                        # human | policy
 serving_bank = "./scripts/bank-serving.sh {target}"   # snapshot what is live BEFORE deploying
@@ -71,12 +71,12 @@ Built-in guards:
 | `head_equals_remote` | The checkout's HEAD equals the remote default branch (fast-forward-only clone). |
 | `build` | The target's build command succeeds. |
 | `no_active_jobs` | No job is currently running in the project, or the named custom script allows it. |
-| `upload_set` | The configured upload-set check passes: the files the deploy would upload match the intended build (for example a `.vercelignore` listing). |
+| `upload_set` | The configured upload-set check passes: the files the deploy would upload match the intended build (for example an include/ignore list). |
 
 A custom guard is a command after the colon (`no_active_jobs:./scripts/guard.sh`). It must execute and
 check a real result; a file-existence check is not a guard. The same anti-pattern ban as gates applies.
-`upload_set` has no built-in check: configure it as `upload_set:<command>`, for example a `.vercelignore`
-comparison. It exists because a local build is not necessarily the deploy build.
+`upload_set` has no built-in check: configure it as `upload_set:<command>`, for example an
+include/ignore-list comparison. It exists because a local build is not necessarily the deploy build.
 
 ## Release states
 
@@ -113,7 +113,7 @@ Three failures motivated the design:
 
 - **Live is not always git.** A manual change, a generated asset or a different branch can be serving.
   Banking the live copy and diffing against it catches that.
-- **A local build is not the deploy build.** Upload-set rules (`.vercelignore`, include lists, generated
+- **A local build is not the deploy build.** Upload-set rules (ignore lists, include lists, generated
   files) can make the deployed artifact differ from the local checkout. The `upload_set` guard, the diff
   and the probe catch it.
 - **A refused deploy must stay refused.** Working around a guard during the night is how a bad deploy
