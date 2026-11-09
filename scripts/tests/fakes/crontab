@@ -1,0 +1,27 @@
+#!/bin/sh
+# Fake `crontab` for scripts/tests/run.sh. Stores the user crontab in
+# $FAKE_CRONTAB_FILE and logs every call in $FAKE_CRONTAB_LOG.
+
+set -eu
+
+printf 'crontab %s\n' "$*" >> "${FAKE_CRONTAB_LOG:?FAKE_CRONTAB_LOG is not set}"
+
+case "${1:-}" in
+    -l)
+        if [ -f "${FAKE_CRONTAB_FILE:?FAKE_CRONTAB_FILE is not set}" ]; then
+            cat "$FAKE_CRONTAB_FILE"
+        else
+            exit 1
+        fi
+        ;;
+    -r)
+        rm -f "${FAKE_CRONTAB_FILE:?FAKE_CRONTAB_FILE is not set}"
+        ;;
+    *)
+        [ "$#" -eq 1 ] || {
+            printf 'fake crontab: expected a file argument\n' >&2
+            exit 2
+        }
+        cp "$1" "${FAKE_CRONTAB_FILE:?FAKE_CRONTAB_FILE is not set}"
+        ;;
+esac
