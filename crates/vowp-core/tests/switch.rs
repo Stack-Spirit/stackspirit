@@ -214,11 +214,16 @@ fn open_run(session: &SessionId, pid: Option<u32>) -> Run {
 struct ProcessAdapter {
     kind: HarnessKind,
     signal_path: PathBuf,
+    ready_path: PathBuf,
 }
 
 impl ProcessAdapter {
-    fn new(kind: HarnessKind, signal_path: PathBuf) -> Self {
-        Self { kind, signal_path }
+    fn new(kind: HarnessKind, signal_path: PathBuf, ready_path: PathBuf) -> Self {
+        Self {
+            kind,
+            signal_path,
+            ready_path,
+        }
     }
 }
 
@@ -241,9 +246,16 @@ impl Adapter for ProcessAdapter {
     }
 
     fn start(&self, _input: StartInput) -> Result<Box<dyn AdapterRun>, AdapterError> {
+        // Publish readiness only after both traps exist. A signal that arrives while
+        // `sh` is still starting up can be ignored or handled by the shell before the
+        // user traps are installed, which would silently lose the `int` marker.
         let script = format!(
-            "trap 'echo int >> {path}' INT; trap 'echo term >> {path}; exit 0' TERM; while :; do sleep 0.01; done",
-            path = self.signal_path.display()
+            "trap 'echo int >> {path}' INT; \
+             trap 'echo term >> {path}; exit 0' TERM; \
+             echo ready >> {ready}; \
+             while :; do sleep 0.01; done",
+            path = self.signal_path.display(),
+            ready = self.ready_path.display()
         );
         let mut child = Command::new("sh")
             .arg("-c")
@@ -787,7 +799,12 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     let tmp = tempdir().expect("tempdir");
     let clock = FakeClock::at(ts());
     let signal_path = tmp.path().join("signals.txt");
-    let source = Arc::new(ProcessAdapter::new(HarnessKind::Opencode, signal_path.clone()));
+    let ready_path = tmp.path().join("ready.txt");
+    let source = Arc::new(ProcessAdapter::new(
+        HarnessKind::Opencode,
+        signal_path.clone(),
+        ready_path.clone(),
+    ));
     let capsule = Arc::new(capsule_adapter("drained handoff"));
     let mut config = config_for(tmp.path());
     config.capsule.executor = Some(claude());
@@ -826,13 +843,23 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     }
     let active_run = active_run.expect("the service run is active");
 
+    // The fake child writes `ready` only after both traps are installed. Wait for it
+    // before the switch can reach its signal phase; otherwise a fast fake clock can
+    // deliver SIGINT while `sh` is still starting, and the marker is lost.
+    wait_for_markers(&ready_path, &["ready"]);
+
     let advanced = clock.clone();
+    let int_path = signal_path.clone();
+    let term_path = signal_path.clone();
     let advancer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         advanced.advance(Duration::from_secs(5));
-        std::thread::sleep(Duration::from_millis(120));
+        // Grant the SIGTERM grace only after the child has recorded SIGINT. Otherwise
+        // two fast advances under load could deliver TERM while the INT trap is still
+        // pending, and the shell could exit before it writes the `int` marker.
+        wait_for_markers(&int_path, &["int"]);
         advanced.advance(Duration::from_secs(3));
-        std::thread::sleep(Duration::from_millis(120));
+        wait_for_markers(&term_path, &["term"]);
         advanced.advance(Duration::from_secs(3));
     });
     let before = clock.now();
@@ -850,8 +877,12 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     assert_eq!(switch.state, SwitchState::Completed);
 
     let signals = wait_for_markers(&signal_path, &["int", "term"]);
-    assert!(signals.contains("int"), "drain sent SIGINT first");
-    assert!(signals.contains("term"), "drain sent SIGTERM after the wait");
+    let int_at = signals.find("int").expect("SIGINT marker");
+    let term_at = signals.find("term").expect("SIGTERM marker");
+    assert!(
+        int_at < term_at,
+        "drain sent SIGINT before SIGTERM; contents: {signals:?}"
+    );
 
     let finished = store.run(&active_run.id).expect("run").expect("run row");
     assert_eq!(finished.outcome, Some(RunOutcome::Killed));
