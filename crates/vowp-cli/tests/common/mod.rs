@@ -59,7 +59,7 @@ impl TestEnv {
                 updated_at: now,
             })
             .expect("project row");
-        let tmux = Tmux::for_home(home.path());
+        let tmux = Tmux::for_home_with_socket(home.path(), None);
         let dir = tmux.socket_dir().expect("private tmux dir").to_path_buf();
         assert_private_tmux(&tmux, &dir);
         assert_eq!(dir.file_name(), Some(std::ffi::OsStr::new("tmux")));
@@ -85,7 +85,7 @@ impl TestEnv {
 
     /// Returns the scoped private tmux manager for this environment.
     pub fn tmux(&self) -> Tmux {
-        let tmux = Tmux::for_home(self.home.path());
+        let tmux = Tmux::for_home_with_socket(self.home.path(), None);
         assert_private_tmux(&tmux, &self.tmux_dir());
         tmux
     }
@@ -172,7 +172,7 @@ impl TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
-        let tmux = Tmux::for_home(self.home.path());
+        let tmux = Tmux::for_home_with_socket(self.home.path(), None);
         let Some(socket) = tmux.socket_name().map(str::to_owned) else {
             return;
         };

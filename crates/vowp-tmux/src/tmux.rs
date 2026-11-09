@@ -115,9 +115,19 @@ impl Tmux {
     /// destructive operations refuse a server whose pid or socket does not
     /// match that record.
     pub fn for_home(home: impl AsRef<Path>) -> Tmux {
+        let socket = std::env::var(SOCKET_ENV).ok();
+        Tmux::for_home_with_socket(home, socket)
+    }
+
+    /// Create the private manager owned by one node home with an optional
+    /// socket-name override.
+    ///
+    /// Tests use this constructor with `None` so an ambient
+    /// `VOWP_TMUX_SOCKET` cannot leak into their expectations. An invalid or
+    /// `default` override is ignored and the home-derived name is used.
+    pub fn for_home_with_socket(home: impl AsRef<Path>, socket: Option<String>) -> Tmux {
         let home = canonical_or_original(home.as_ref());
-        let socket = std::env::var(SOCKET_ENV)
-            .ok()
+        let socket = socket
             .filter(|value| value != "default" && validate_name("socket", value).is_ok())
             .unwrap_or_else(|| socket_name_for_home(&home));
         let tmpdir = home.join("tmux");
@@ -166,7 +176,12 @@ impl Tmux {
         self.tmpdir.as_deref()
     }
 
-    /// Return the full private socket path, when both parts are known.
+    /// Return `<socket_dir>/<socket>` for containment assertions.
+    ///
+    /// This is the private root tmux uses, not the final socket path: tmux
+    /// creates its own `tmux-<uid>` directory under `TMUX_TMPDIR`, so the real
+    /// socket is `<socket_dir>/tmux-<uid>/<socket>`. Use `TMUX_TMPDIR` rather
+    /// than a `-S` built from this value when starting a client.
     pub fn socket_path(&self) -> Option<PathBuf> {
         match (&self.socket, &self.tmpdir) {
             (Some(socket), Some(dir)) => Some(dir.join(socket)),
@@ -254,9 +269,22 @@ impl Tmux {
 
     /// The argv a caller execs or spawns to attach to a session.
     ///
+    /// With a private directory this starts with
+    /// `["env", "-u", "TMUX", "-u", "TMUX_PANE", "TMUX_TMPDIR=<dir>", "tmux", ...]`,
+    /// so the client finds the same private server even when `vowp attach` is
+    /// run from inside the user's tmux session. Without one it is
     /// `["tmux", ("-L", sock)?, "attach-session", "-t", session]`.
     pub fn attach_argv(&self, session: &str) -> Vec<String> {
-        let mut argv = vec![self.binary.clone()];
+        let mut argv = Vec::new();
+        if let Some(dir) = &self.tmpdir {
+            argv.push("env".to_owned());
+            argv.push("-u".to_owned());
+            argv.push("TMUX".to_owned());
+            argv.push("-u".to_owned());
+            argv.push("TMUX_PANE".to_owned());
+            argv.push(format!("TMUX_TMPDIR={}", dir.display()));
+        }
+        argv.push(self.binary.clone());
         if let Some(socket) = &self.socket {
             argv.push("-L".to_owned());
             argv.push(socket.clone());

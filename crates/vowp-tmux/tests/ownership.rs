@@ -33,8 +33,8 @@ fn record_path(home: &Path) -> std::path::PathBuf {
 #[test]
 fn for_home_uses_a_stable_private_socket_and_dir() {
     let home = tempfile::tempdir().expect("home");
-    let first = Tmux::for_home(home.path());
-    let second = Tmux::for_home(home.path());
+    let first = Tmux::for_home_with_socket(home.path(), None);
+    let second = Tmux::for_home_with_socket(home.path(), None);
 
     assert_eq!(first.socket_name(), second.socket_name());
     assert_eq!(first.socket_name(), Some(socket_name_for_home(home.path()).as_str()));
@@ -50,15 +50,22 @@ fn for_home_uses_a_stable_private_socket_and_dir() {
 #[test]
 fn process_scope_is_reused_by_the_attach_constructor() {
     let home = tempfile::tempdir().expect("home");
-    let scoped = Tmux::for_home(home.path());
+    let scoped = Tmux::for_home_with_socket(home.path(), None);
     let attach = Tmux::new(None);
 
     assert_eq!(attach.socket_name(), scoped.socket_name());
     assert_eq!(attach.socket_dir(), scoped.socket_dir());
+    let dir = scoped.socket_dir().expect("private dir");
     let argv = attach.attach_argv("vowp-demo:board");
     assert_eq!(
         argv,
         vec![
+            "env".to_owned(),
+            "-u".to_owned(),
+            "TMUX".to_owned(),
+            "-u".to_owned(),
+            "TMUX_PANE".to_owned(),
+            format!("TMUX_TMPDIR={}", dir.display()),
             "tmux".to_owned(),
             "-L".to_owned(),
             scoped.socket_name().expect("socket").to_owned(),
@@ -71,9 +78,55 @@ fn process_scope_is_reused_by_the_attach_constructor() {
 }
 
 #[test]
+fn attach_argv_executes_with_the_private_tmux_tmpdir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().expect("home");
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
+    let tools = tempfile::tempdir().expect("tools");
+    let log = tools.path().join("tmux.log");
+    let script = tools.path().join("tmux");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"${TMUX-unset}\" \"${TMUX_PANE-unset}\" \"${TMUX_TMPDIR-}\" \"$*\" >> \"$FAKE_TMUX_LOG\"\n",
+    )
+    .expect("write fake tmux");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let argv = tmux.attach_argv("vowp-demo:board");
+    let path = format!(
+        "{}:{}",
+        tools.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env("PATH", path)
+        .env("FAKE_TMUX_LOG", &log)
+        .env("TMUX", "/tmp/tmux-0/default,1,0")
+        .env("TMUX_PANE", "%1")
+        .env_remove("TMUX_TMPDIR")
+        .status()
+        .expect("run attach argv");
+    assert!(status.success(), "attach argv failed: {argv:?}");
+
+    let text = std::fs::read_to_string(&log).expect("fake tmux log");
+    let mut parts = text.trim().splitn(4, '|');
+    let tmux_env = parts.next().unwrap_or_default();
+    let pane_env = parts.next().unwrap_or_default();
+    let tmpdir = parts.next().unwrap_or_default();
+    let args = parts.next().unwrap_or_default();
+    assert_eq!(tmux_env, "unset");
+    assert_eq!(pane_env, "unset");
+    assert_eq!(Path::new(tmpdir), tmux.socket_dir().expect("private dir"));
+    assert!(args.contains("-L vowp-"), "attach argv: {args:?}");
+    assert!(args.contains("attach-session"), "attach argv: {args:?}");
+}
+
+#[test]
 fn ensure_session_records_the_socket_and_server_pid() {
     let home = tempfile::tempdir().expect("home");
-    let tmux = Tmux::for_home(home.path());
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
     if skip_without_tmux(&tmux) {
         return;
     }
@@ -94,7 +147,7 @@ fn ensure_session_records_the_socket_and_server_pid() {
 #[test]
 fn kill_window_refuses_when_the_server_was_not_recorded() {
     let home = tempfile::tempdir().expect("home");
-    let tmux = Tmux::for_home(home.path());
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
     if skip_without_tmux(&tmux) {
         return;
     }
@@ -127,7 +180,7 @@ fn kill_window_refuses_when_the_server_was_not_recorded() {
 #[test]
 fn kill_window_refuses_when_the_recorded_pid_changed() {
     let home = tempfile::tempdir().expect("home");
-    let tmux = Tmux::for_home(home.path());
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
     if skip_without_tmux(&tmux) {
         return;
     }
@@ -154,7 +207,7 @@ fn kill_window_refuses_when_the_recorded_pid_changed() {
 #[test]
 fn kill_window_refuses_when_the_recorded_socket_changed() {
     let home = tempfile::tempdir().expect("home");
-    let tmux = Tmux::for_home(home.path());
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
     if skip_without_tmux(&tmux) {
         return;
     }
@@ -185,7 +238,7 @@ fn kill_window_refuses_when_the_recorded_socket_changed() {
 #[test]
 fn kill_session_refuses_when_the_server_was_not_recorded() {
     let home = tempfile::tempdir().expect("home");
-    let tmux = Tmux::for_home(home.path());
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
     if skip_without_tmux(&tmux) {
         return;
     }
@@ -212,7 +265,7 @@ fn kill_session_refuses_when_the_server_was_not_recorded() {
 #[test]
 fn recorded_server_allows_window_and_session_cleanup() {
     let home = tempfile::tempdir().expect("home");
-    let tmux = Tmux::for_home(home.path());
+    let tmux = Tmux::for_home_with_socket(home.path(), None);
     if skip_without_tmux(&tmux) {
         return;
     }
