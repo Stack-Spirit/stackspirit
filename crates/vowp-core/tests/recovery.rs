@@ -211,6 +211,115 @@ fn recover_started_switch_attached_is_completed() {
         .expect("missing switch event was appended");
     assert_eq!(recorded.switch_id, switch.id);
     assert_eq!(recorded.to.executor, claude());
+
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle, "recovery unfreezes");
+    assert_eq!(current.executor, Some(claude()), "the target is the live executor");
+}
+
+#[test]
+fn recover_switch_with_recorded_event_unfreezes_on_target() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "recorded event");
+    let store = deps.open_store().expect("store");
+    let last_seq = SessionLog::open_read(&deps.paths, &session)
+        .expect("log")
+        .last_seq()
+        .expect("seq");
+    let switch = started_switch(&session, last_seq);
+    store.insert_switch(&switch).expect("switch row");
+    {
+        let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("log");
+        append(
+            &store,
+            &log,
+            HarnessKind::Vowp,
+            EventBody::Switch(vowp_protocol::SwitchEvent {
+                switch_id: switch.id.clone(),
+                from: Some(vowp_protocol::ExecutorRef {
+                    executor: opencode(),
+                    node: Some(node()),
+                }),
+                to: vowp_protocol::ExecutorRef {
+                    executor: claude(),
+                    node: Some(node()),
+                },
+                capsule_id: None,
+                reason: SwitchReason::User,
+            }),
+        );
+        log.sync().expect("sync");
+    }
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Switching, Some(&claude()))
+        .expect("switching");
+
+    let report = recovery::recover(&deps, &store).expect("recover");
+    assert_eq!(report.switches_completed, 1);
+    let row = store.switch(&switch.id).expect("row").expect("switch");
+    assert_eq!(row.state, SwitchState::Completed);
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle);
+    assert_eq!(current.executor, Some(claude()));
+}
+
+#[test]
+fn recover_switch_after_target_detach_is_aborted() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "attached then detached");
+    let store = deps.open_store().expect("store");
+    {
+        let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("log");
+        append(
+            &store,
+            &log,
+            HarnessKind::ClaudeCode,
+            EventBody::SessionExecutor(SessionExecutor {
+                action: AttachAction::Attach,
+                executor: claude(),
+                node: node(),
+                native_session_id: None,
+                run_id: None,
+                reason: None,
+            }),
+        );
+        append(
+            &store,
+            &log,
+            HarnessKind::ClaudeCode,
+            EventBody::SessionExecutor(SessionExecutor {
+                action: AttachAction::Detach,
+                executor: claude(),
+                node: node(),
+                native_session_id: None,
+                run_id: None,
+                reason: Some("crash".to_owned()),
+            }),
+        );
+        log.sync().expect("sync");
+    }
+    let last_seq = SessionLog::open_read(&deps.paths, &session)
+        .expect("log")
+        .last_seq()
+        .expect("seq");
+    let switch = started_switch(&session, last_seq);
+    store.insert_switch(&switch).expect("switch row");
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Switching, Some(&claude()))
+        .expect("switching");
+
+    let report = recovery::recover(&deps, &store).expect("recover");
+    assert_eq!(report.switches_completed, 0);
+    assert_eq!(report.switches_aborted, 1, "the last session.executor is a detach");
+    let row = store.switch(&switch.id).expect("row").expect("switch");
+    assert_eq!(row.state, SwitchState::Aborted);
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle);
+    assert_eq!(current.executor, None, "the last executor event was a detach");
 }
 
 #[test]

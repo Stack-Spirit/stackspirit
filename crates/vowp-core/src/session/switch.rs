@@ -12,11 +12,12 @@ use std::path::Path;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
+use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
     Actor, AttachAction, CancelToken, CapsuleTrigger, CostEvent, ErrorEvent, ErrorKind, EventBody, EventSource,
     Executor, ExecutorRef, HarnessKind, Limit, LimitEvent, LimitRowKind, NodeName, Run, RunId, RunOutcome, RunPurpose,
-    RunRole, Session, SessionExecutor, SessionRole, SessionState, StartInput, Switch, SwitchEvent, SwitchId,
-    SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted, UserMessage,
+    RunRole, Session, SessionExecutor, SessionId, SessionRole, SessionState, StartInput, StopReason, Switch,
+    SwitchEvent, SwitchId, SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted, UserMessage,
 };
 use vowp_store::session_files::{AdapterMapping, add_adapter_mapping};
 use vowp_store::session_log::{AppendedEvent, NewEvent, SessionLog, index_row};
@@ -34,14 +35,20 @@ const EVENT_POLL: Duration = Duration::from_millis(200);
 /// Poll interval while waiting for an active turn to drain.
 const DRAIN_POLL: Duration = Duration::from_millis(20);
 
+/// Wait after SIGINT before the normal stop, per sessions.md §5 step 4.
+const INTERRUPT_WAIT: Duration = Duration::from_secs(3);
+
+/// Wait after SIGTERM before the escalated kill, matching `AdapterRun::stop`.
+const STOP_WAIT: Duration = Duration::from_secs(3);
+
 /// Margin added once when a seeded turn reports a provider limit.
 const LIMIT_MARGIN: Duration = Duration::from_secs(120);
 
 /// How the drain phase ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Drain {
-    /// The active turn ended before the deadline.
-    Finished,
+    /// The active turn ended before the deadline, with its stop reason.
+    Finished(StopReason),
     /// The deadline passed and the active run was stopped.
     Interrupted,
 }
@@ -84,6 +91,9 @@ fn run_switch_inner(
     }
     if session.state == SessionState::Closed {
         return Err(CoreError::Invalid("session is closed; cannot switch".to_owned()));
+    }
+    if next_input.is_some() {
+        check_cwd(deps, &session.cwd)?;
     }
 
     let previous_executor = session.executor.clone();
@@ -135,8 +145,25 @@ fn run_switch_inner(
     }
 
     if is_active(&store, &session)? {
-        drain(deps, &store, &session, req.drain_secs, cancel)?;
-        previous_state = SessionState::Idle;
+        match drain(deps, &store, &session, req.drain_secs, cancel) {
+            Ok(Drain::Finished(StopReason::Limit)) => previous_state = SessionState::Blocked,
+            Ok(Drain::Finished(_) | Drain::Interrupted) => previous_state = SessionState::Idle,
+            Err(CoreError::Cancelled) => {
+                let _ = abort(
+                    deps,
+                    &store,
+                    &switch,
+                    previous_state,
+                    previous_executor.as_ref(),
+                    &session.node,
+                    false,
+                    ErrorKind::Internal,
+                    "switch cancelled during drain",
+                );
+                return Err(CoreError::Cancelled);
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     let capsule = match CapsuleWriter::new(deps.clone()).write(&req.session_id, CapsuleTrigger::Switch) {
@@ -301,11 +328,11 @@ fn drain(
             return Err(CoreError::Cancelled);
         }
         let events = SessionLog::open_read(&deps.paths, &session.id)?.read_all()?;
-        if events
-            .iter()
-            .any(|event| event.seq > start_seq && matches!(event.body(), Ok(EventBody::TurnEnded(_))))
-        {
-            return Ok(Drain::Finished);
+        if let Some(stop_reason) = events.iter().find_map(|event| match event.body() {
+            Ok(EventBody::TurnEnded(payload)) if event.seq > start_seq => Some(payload.stop_reason),
+            _ => None,
+        }) {
+            return Ok(Drain::Finished(stop_reason));
         }
         if deps.clock.now() >= deadline {
             break;
@@ -313,11 +340,25 @@ fn drain(
         std::thread::sleep(DRAIN_POLL);
     }
 
-    for run in store
+    let active: Vec<Run> = store
         .open_runs()?
         .into_iter()
         .filter(|run| run.session_id.as_ref() == Some(&session.id))
-    {
+        .collect();
+    if !active.is_empty() {
+        for run in &active {
+            signal_run(run, Signal::Int)?;
+        }
+        let _ = wait_window(deps, &session.id, start_seq, INTERRUPT_WAIT, cancel)?;
+        for run in &active {
+            signal_run(run, Signal::Term)?;
+        }
+        let _ = wait_window(deps, &session.id, start_seq, STOP_WAIT, cancel)?;
+        for run in &active {
+            signal_run(run, Signal::Kill)?;
+        }
+    }
+    for run in &active {
         store.finish_run(
             &run.id,
             &RunFinish {
@@ -337,9 +378,18 @@ fn drain(
     if !interrupted {
         let turn = events
             .iter()
-            .filter(|event| event.event_type == vowp_protocol::EventType::TurnStarted)
-            .count()
-            .saturating_add(1) as u32;
+            .rev()
+            .find_map(|event| match event.body() {
+                Ok(EventBody::TurnStarted(payload)) => Some(payload.turn),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                events
+                    .iter()
+                    .filter(|event| event.event_type == vowp_protocol::EventType::TurnStarted)
+                    .count()
+                    .saturating_add(1) as u32
+            });
         let log = SessionLog::open(&deps.paths, &session.id, deps.clock.clone())?;
         append_event(
             store,
@@ -347,7 +397,7 @@ fn drain(
             HarnessKind::Vowp,
             EventBody::TurnEnded(TurnEnded {
                 turn,
-                stop_reason: vowp_protocol::StopReason::Interrupted,
+                stop_reason: StopReason::Interrupted,
                 duration_ms: None,
             }),
             Some(deps.node.clone()),
@@ -356,6 +406,71 @@ fn drain(
         log.sync()?;
     }
     Ok(Drain::Interrupted)
+}
+
+/// Signals a run's process group, when the adapter recorded a pid.
+fn signal_run(run: &Run, signal: Signal) -> Result<(), CoreError> {
+    if let Some(pid) = run.pid {
+        signal_group(pid, signal).map_err(|source| CoreError::Io {
+            path: format!("process group {pid}"),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+/// Waits up to `window` for a `turn.ended` after `start_seq`, using the injected clock.
+fn wait_window(
+    deps: &Deps,
+    session: &SessionId,
+    start_seq: u64,
+    window: Duration,
+    cancel: &CancelToken,
+) -> Result<bool, CoreError> {
+    let deadline = deps.clock.now().plus(window);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let events = SessionLog::open_read(&deps.paths, session)?.read_all()?;
+        if events
+            .iter()
+            .any(|event| event.seq > start_seq && matches!(event.body(), Ok(EventBody::TurnEnded(_))))
+        {
+            return Ok(true);
+        }
+        if deps.clock.now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(DRAIN_POLL);
+    }
+}
+
+/// Checks `cwd` against the project path, worktree root and `[node].cwd_allow`.
+fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
+    let path = Path::new(cwd);
+    let mut roots: Vec<&str> = Vec::new();
+    if let Some(project) = &deps.config.project.path {
+        roots.push(project);
+    }
+    if let Some(root) = &deps.config.project.worktree_root {
+        roots.push(root);
+    }
+    roots.extend(deps.config.node.cwd_allow.iter().map(String::as_str));
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for root in roots {
+        let root = Path::new(root);
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if path.starts_with(&root) {
+            return Ok(());
+        }
+    }
+    Err(CoreError::Refused(format!(
+        "working directory {cwd} is outside the allow-list"
+    )))
 }
 
 /// Aborts a switch: error event, state restored, row finished `aborted`.
@@ -432,6 +547,7 @@ fn run_target_turn(
     target: &ExecutorRef,
     prompt: String,
 ) -> Result<SessionState, CoreError> {
+    check_cwd(deps, &session.cwd)?;
     let executor = target.executor.clone();
     let node = target.node.clone().unwrap_or_else(|| deps.node.clone());
     let adapter = deps.adapters.get(&executor).ok_or_else(|| {
@@ -724,7 +840,7 @@ fn run_target_turn(
     }
     let state = if matches!(
         summary.outcome,
-        RunOutcome::Limit | RunOutcome::Credits | RunOutcome::Auth | RunOutcome::Rate | RunOutcome::Context
+        RunOutcome::Limit | RunOutcome::Credits | RunOutcome::Auth
     ) {
         SessionState::Blocked
     } else {
@@ -753,6 +869,8 @@ fn run_target_turn(
     )?;
     if let Some(limit) = &summary.limit {
         record_limit(deps, store, limit, executor.harness)?;
+    } else if summary.outcome == RunOutcome::Ok {
+        store.clear_limit(&executor.provider())?;
     }
     Ok(state)
 }

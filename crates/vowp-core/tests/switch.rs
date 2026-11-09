@@ -1,13 +1,16 @@
-//! Switch protocol tests: happy path, probe failure, drain timeout, seed rejection and
-//! the claude → opencode → claude failover round trip. Hermetic: temp node, fake clock,
-//! fake adapters; no harness process, no real HOME.
+//! Switch protocol tests: happy path, probe failure, drain signals and turn numbering,
+//! seed rejection, drained-limit restoration and the claude → opencode → claude
+//! failover round trip. Hermetic: temp node, fake clock, fake adapters; the only real
+//! process is the drain-signal child, killed by the test.
 //! Spec: `docs/design/sessions.md` §5 and `docs/design/crates/vowp-core.md` §3.
 
 mod support;
 
-use std::path::Path;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
@@ -17,9 +20,9 @@ use vowp_core::session::switch::{run_switch, run_switch_with_input};
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
     Actor, AssistantMessage, AttachAction, CancelToken, Clock, Cost, EventBody, EventEnvelope, EventSource, EventType,
-    Executor, ExecutorRef, FakeClock, HarnessKind, MemoryLog, NodeName, ProbeResult, Run, RunId, RunOutcome,
-    RunPurpose, RunRole, SessionId, SessionRole, StopReason, SwitchReason, SwitchRequest, SwitchState, Timestamp,
-    TurnRequest,
+    Executor, ExecutorRef, FakeClock, HarnessKind, Limit, LimitRowKind, MemoryLog, NodeName, ProbeResult, Run, RunId,
+    RunOutcome, RunPurpose, RunRole, RunSummary, SessionId, SessionRole, StopReason, SwitchReason, SwitchRequest,
+    SwitchState, Timestamp, TurnRequest,
 };
 use vowp_store::NodePaths;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -93,18 +96,22 @@ fn capsule_adapter(intent: &str) -> FakeAdapter {
     )
 }
 
-fn create_session(service: &SessionService, tmp: &TempDir, name: &str) -> SessionId {
+fn create_session_at(service: &SessionService, name: &str, executor: Executor, cwd: PathBuf) -> SessionId {
     service
         .create_session(vowp_protocol::NewSession {
             project: None,
             job_id: None,
             role: SessionRole::Worker,
             title: name.to_owned(),
-            cwd: tmp.path().join("project"),
+            cwd,
             parent: None,
-            executor: Some(opencode()),
+            executor: Some(executor),
         })
         .expect("create session")
+}
+
+fn create_session(service: &SessionService, tmp: &TempDir, name: &str) -> SessionId {
+    create_session_at(service, name, opencode(), tmp.path().join("project"))
 }
 
 fn request(session: &SessionId, to: Executor, reason: SwitchReason) -> SwitchRequest {
@@ -126,13 +133,10 @@ fn read_events(deps: &Deps, session: &SessionId) -> Vec<EventEnvelope> {
         .expect("read log")
 }
 
-fn turn(session: &SessionId, prompt: &str) -> TurnRequest {
+fn turn(session: &SessionId, executor: Executor, prompt: &str) -> TurnRequest {
     TurnRequest {
         session_id: session.clone(),
-        executor: ExecutorRef {
-            executor: opencode(),
-            node: None,
-        },
+        executor: ExecutorRef { executor, node: None },
         purpose: RunPurpose::Start,
         role: RunRole::Worker,
         job_id: None,
@@ -144,7 +148,7 @@ fn turn(session: &SessionId, prompt: &str) -> TurnRequest {
     }
 }
 
-fn open_run(session: &SessionId) -> Run {
+fn open_run(session: &SessionId, pid: Option<u32>) -> Run {
     Run {
         id: RunId::new(),
         job_id: None,
@@ -157,7 +161,7 @@ fn open_run(session: &SessionId) -> Run {
         provider: Some("deepseek".to_owned()),
         node: node(),
         native_session_id: None,
-        pid: None,
+        pid,
         window: None,
         cwd: None,
         started_at: ts(),
@@ -167,6 +171,39 @@ fn open_run(session: &SessionId) -> Run {
         limit_kind: None,
         cost: Cost::unknown(),
         detail: String::new(),
+    }
+}
+
+fn append_event(deps: &Deps, session: &SessionId, body: EventBody) {
+    let store = deps.open_store().expect("store");
+    let log = SessionLog::open(&deps.paths, session, deps.clock.clone()).expect("log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(node()),
+                native_session_id: None,
+            },
+            body,
+            raw: None,
+            ts: None,
+        })
+        .expect("append");
+    store.index_event(&index_row(&appended)).expect("index");
+    log.sync().expect("sync");
+}
+
+fn summary(outcome: RunOutcome) -> RunSummary {
+    RunSummary {
+        exit_code: Some(0),
+        outcome,
+        native_session_id: None,
+        cost: Cost::unknown(),
+        limit: None,
+        result_text: Some("continued".to_owned()),
+        stop_reason: StopReason::EndTurn,
     }
 }
 
@@ -351,35 +388,39 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     let session = create_session(&service, &tmp, "drain timeout");
     let store = deps.open_store().expect("store");
 
-    let run = open_run(&session);
+    // A real process with its own group: the drain must send SIGINT, wait, then SIGTERM.
+    let signal_path = tmp.path().join("signals.txt");
+    let script = format!(
+        "trap 'echo int >> {path}' INT; trap 'echo term >> {path}; exit 0' TERM; while :; do sleep 0.01; done",
+        path = signal_path.display()
+    );
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .process_group(0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("drain child");
+    let run = open_run(&session, Some(child.id()));
     store.insert_run(&run).expect("run row");
     store
         .set_session_state(&session, vowp_protocol::SessionState::Running, Some(&opencode()))
         .expect("running");
-    {
-        let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("log");
-        let appended = log
-            .append(NewEvent {
-                actor: Actor::System,
-                source: EventSource {
-                    harness: HarnessKind::Opencode,
-                    model: None,
-                    node: Some(node()),
-                    native_session_id: None,
-                },
-                body: EventBody::TurnStarted(vowp_protocol::TurnStarted { turn: 1 }),
-                raw: None,
-                ts: None,
-            })
-            .expect("turn started");
-        store.index_event(&index_row(&appended)).expect("index");
-        log.sync().expect("sync");
-    }
+    append_event(
+        &deps,
+        &session,
+        EventBody::TurnStarted(vowp_protocol::TurnStarted { turn: 1 }),
+    );
 
     let advanced = clock.clone();
     let advancer = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(80));
         advanced.advance(Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(150));
+        advanced.advance(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(150));
+        advanced.advance(Duration::from_secs(3));
     });
     let before = clock.now();
     let switch = run_switch(
@@ -393,18 +434,41 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     assert!(elapsed >= Duration::from_secs(5), "the drain waited for the fake 5 s");
     assert_eq!(switch.state, SwitchState::Completed);
 
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut exited = false;
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => {
+                exited = true;
+                break;
+            }
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            None => break,
+        }
+    }
+    if !exited {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    assert!(exited, "drain stop() terminated the harness");
+    let signals = std::fs::read_to_string(&signal_path).unwrap_or_default();
+    assert!(signals.contains("int"), "drain sent SIGINT first");
+    assert!(signals.contains("term"), "drain sent SIGTERM after the wait");
+
     let finished = store.run(&run.id).expect("run").expect("run row");
     assert_eq!(finished.outcome, Some(RunOutcome::Killed));
     assert!(finished.ended_at.is_some());
 
     let events = read_events(&deps, &session);
-    assert!(
-        events.iter().any(|event| matches!(
-            event.body(),
-            Ok(EventBody::TurnEnded(payload)) if payload.stop_reason == StopReason::Interrupted
-        )),
-        "the switch appends the missing interrupted turn.ended"
-    );
+    let ended = events
+        .iter()
+        .find_map(|event| match event.body() {
+            Ok(EventBody::TurnEnded(payload)) => Some(payload),
+            _ => None,
+        })
+        .expect("interrupted turn.ended");
+    assert_eq!(ended.stop_reason, StopReason::Interrupted);
+    assert_eq!(ended.turn, 1, "the synthetic end reuses the active turn number");
     assert_eq!(
         store.require_session(&session).expect("session").executor,
         Some(claude())
@@ -424,7 +488,10 @@ fn switch_seed_rejected_retries_capsule_only_then_aborts() {
     let service = SessionService::new(deps.clone());
     let session = create_session(&service, &tmp, "seed rejection");
     service
-        .run_turn(turn(&session, "TAIL-UNIQUE-42, keep working"), &CancelToken::default())
+        .run_turn(
+            turn(&session, opencode(), "TAIL-UNIQUE-42, keep working"),
+            &CancelToken::default(),
+        )
         .expect("prior turn");
     let store = deps.open_store().expect("store");
 
@@ -474,20 +541,209 @@ fn switch_seed_rejected_retries_capsule_only_then_aborts() {
 }
 
 #[test]
-fn failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content() {
+fn switch_drained_limit_then_capsule_failure_restores_blocked() {
+    let tmp = tempdir().expect("tempdir");
+    let failing_capsule = capsule_adapter("unused").with_start_error("capsule writer unavailable");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new().with("opencode", Arc::new(failing_capsule)).with(
+            "claude-code",
+            Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+        ),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "drained limit");
+    let store = deps.open_store().expect("store");
+    let run = open_run(&session, None);
+    store.insert_run(&run).expect("run row");
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Running, Some(&opencode()))
+        .expect("running");
+    append_event(
+        &deps,
+        &session,
+        EventBody::TurnStarted(vowp_protocol::TurnStarted { turn: 1 }),
+    );
+
+    let writer = {
+        let deps = deps.clone();
+        let session = session.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            append_event(
+                &deps,
+                &session,
+                EventBody::TurnEnded(vowp_protocol::TurnEnded {
+                    turn: 1,
+                    stop_reason: StopReason::Limit,
+                    duration_ms: None,
+                }),
+            );
+        })
+    };
+
+    let error = run_switch(
+        &deps,
+        &request(&session, claude(), SwitchReason::Failover),
+        &CancelToken::default(),
+    )
+    .expect_err("capsule failure aborts after the drained limit");
+    writer.join().expect("writer");
+    assert!(matches!(error, CoreError::SwitchAborted(_)), "got {error:?}");
+
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(
+        current.state,
+        vowp_protocol::SessionState::Blocked,
+        "a drained limit keeps the session blocked when the switch aborts"
+    );
+    assert_eq!(current.executor, Some(opencode()));
+    assert!(
+        !read_events(&deps, &session)
+            .iter()
+            .any(|event| event.event_type == EventType::Switch)
+    );
+}
+
+#[test]
+fn seeded_switch_rate_and_context_do_not_block() {
+    for (name, outcome) in [("rate", RunOutcome::Rate), ("context", RunOutcome::Context)] {
+        let tmp = tempdir().expect("tempdir");
+        let target = FakeAdapter::from_bodies(
+            HarnessKind::ClaudeCode,
+            ts(),
+            vec![EventBody::AssistantMessage(AssistantMessage {
+                text: "continued".to_owned(),
+            })],
+        )
+        .with_summary(summary(outcome));
+        let deps = deps(
+            &tmp,
+            AdapterRegistry::new()
+                .with("opencode", Arc::new(capsule_adapter("non-blocking handoff")))
+                .with("claude-code", Arc::new(target)),
+        );
+        let service = SessionService::new(deps.clone());
+        let session = create_session(&service, &tmp, name);
+        let store = deps.open_store().expect("store");
+
+        let switch = run_switch_with_input(
+            &deps,
+            &request(&session, claude(), SwitchReason::Context),
+            "continue",
+            &CancelToken::default(),
+        )
+        .expect("seeded switch");
+        assert_eq!(switch.state, SwitchState::Completed);
+        let current = store.require_session(&session).expect("session");
+        assert_eq!(
+            current.state,
+            vowp_protocol::SessionState::Idle,
+            "{name} is not a blocked outcome (sessions.md §2)"
+        );
+        assert_eq!(current.executor, Some(claude()));
+    }
+}
+
+#[test]
+fn seeded_switch_ok_turn_clears_the_provider_limit() {
     let tmp = tempdir().expect("tempdir");
     let deps = deps(
         &tmp,
         AdapterRegistry::new()
-            .with("opencode", Arc::new(capsule_adapter("Preserve this handoff")))
+            .with("opencode", Arc::new(capsule_adapter("probe back")))
             .with(
                 "claude-code",
                 Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
             ),
     );
     let service = SessionService::new(deps.clone());
-    let session = create_session(&service, &tmp, "failover roundtrip");
+    let session = create_session(&service, &tmp, "limit clear");
     let store = deps.open_store().expect("store");
+    store
+        .upsert_limit(&Limit {
+            provider: "claude".to_owned(),
+            harness: Some(HarnessKind::ClaudeCode),
+            kind: LimitRowKind::Quota,
+            resets_at: Some(ts().plus(Duration::from_secs(3600))),
+            detail: "quota".to_owned(),
+            since: ts(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("limit row");
+    assert!(store.limit_for("claude").expect("limit").is_some());
+
+    run_switch_with_input(
+        &deps,
+        &request(&session, claude(), SwitchReason::ProbeBack),
+        "continue",
+        &CancelToken::default(),
+    )
+    .expect("seeded switch");
+
+    assert!(
+        store.limit_for("claude").expect("limit").is_none(),
+        "an ok seeded turn clears the provider limit"
+    );
+}
+
+#[test]
+fn seeded_switch_outside_cwd_is_refused() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("cwd handoff")))
+            .with(
+                "claude-code",
+                Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+            ),
+    );
+    let service = SessionService::new(deps.clone());
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let session = create_session_at(&service, "outside cwd", opencode(), outside);
+    let store = deps.open_store().expect("store");
+
+    let error = run_switch_with_input(
+        &deps,
+        &request(&session, claude(), SwitchReason::User),
+        "continue",
+        &CancelToken::default(),
+    )
+    .expect_err("outside cwd refuses the seeded switch");
+    assert!(matches!(error, CoreError::Refused(_)), "got {error:?}");
+    assert!(store.list_switches(&session).expect("switches").is_empty());
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle);
+    assert_eq!(current.executor, Some(opencode()));
+}
+
+#[test]
+fn failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content() {
+    let tmp = tempdir().expect("tempdir");
+    let claude_fake = Arc::new(FakeAdapter::from_bodies(
+        HarnessKind::ClaudeCode,
+        ts(),
+        vec![EventBody::AssistantMessage(AssistantMessage {
+            text: draft_json("Claude source work"),
+        })],
+    ));
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("Preserve this handoff")))
+            .with("claude-code", claude_fake.clone()),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session_at(&service, "failover roundtrip", claude(), tmp.path().join("project"));
+    let store = deps.open_store().expect("store");
+    service
+        .run_turn(turn(&session, claude(), "start on claude"), &CancelToken::default())
+        .expect("source turn");
 
     let first = run_switch(
         &deps,
@@ -511,7 +767,11 @@ fn failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content() {
 
     let lineage = store.list_switches(&session).expect("lineage");
     assert_eq!(lineage.len(), 2);
+    assert_eq!(lineage[0].from_executor, Some(claude()));
+    assert_eq!(lineage[0].to_executor, opencode());
     assert_eq!(lineage[0].reason, SwitchReason::Limit);
+    assert_eq!(lineage[1].from_executor, Some(opencode()));
+    assert_eq!(lineage[1].to_executor, claude());
     assert_eq!(lineage[1].reason, SwitchReason::ProbeBack);
 
     let capsule = store
@@ -524,6 +784,20 @@ fn failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content() {
         opencode(),
         "the second switch summarises the opencode executor"
     );
-    let seed = vowp_core::session::seed::seed_prompt(&capsule, &[], 2, "continue");
-    assert!(seed.contains("Preserve this handoff"));
+
+    // The next turn on the previously used claude harness is seeded from the capsule.
+    service
+        .run_turn(
+            turn(&session, claude(), "continue after roundtrip"),
+            &CancelToken::default(),
+        )
+        .expect("seeded turn after switching back");
+    let starts = claude_fake.starts();
+    let seeded = starts.last().expect("seeded start");
+    assert!(seeded.prompt.contains("Preserve this handoff"));
+    assert!(
+        seeded.prompt.contains("start on claude"),
+        "the last claude turn is part of the plain-text tail"
+    );
+    assert!(seeded.prompt.contains("continue after roundtrip"));
 }
