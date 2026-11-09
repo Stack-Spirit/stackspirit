@@ -51,7 +51,25 @@ vowp_cli() {
     esac
 }
 
-WORK=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/hello-vowp.XXXXXX")}
+WORK=${WORK:-}
+CREATED_WORK=0
+if [ -n "$WORK" ]; then
+    if [ -e "$WORK" ]; then
+        if [ ! -d "$WORK" ]; then
+            echo "hello-vowp: WORK is not a directory: $WORK" >&2
+            exit 2
+        fi
+        if [ -n "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            echo "hello-vowp: WORK must be an empty directory: $WORK" >&2
+            exit 2
+        fi
+    else
+        mkdir -p "$WORK"
+    fi
+else
+    WORK=$(mktemp -d "${TMPDIR:-/tmp}/hello-vowp.XXXXXX")
+    CREATED_WORK=1
+fi
 HOME_DIR="$WORK/home"
 REPO="$WORK/hello-vowp"
 ORIGIN="$WORK/origin.git"
@@ -69,7 +87,7 @@ cleanup() {
     if command -v tmux >/dev/null 2>&1; then
         tmux kill-server >/dev/null 2>&1 || true
     fi
-    if [ "$status" -eq 0 ] && [ "${KEEP:-0}" != "1" ]; then
+    if [ "$status" -eq 0 ] && [ "${KEEP:-0}" != "1" ] && [ "$CREATED_WORK" = "1" ]; then
         rm -rf "$WORK"
     else
         echo "hello-vowp: workdir kept at $WORK" >&2
@@ -153,8 +171,8 @@ vowp_cli --home "$HOME_DIR" --project "$REPO" graph
 PATH="$REPO/.vowp/adapters:$PATH"
 export PATH
 
-# `vowp up` ensures its window layout even with --no-tmux, so give it a private tmux
-# socket directory. The real tmux server is never contacted.
+# The supervisor ensures a window layout even when `vowp up` is called with --no-tmux,
+# so give it a private tmux socket directory. The real tmux server is never contacted.
 echo "hello-vowp: starting the supervisor"
 vowp_cli --home "$HOME_DIR" --project "$REPO" up --detach --no-tmux
 
@@ -207,7 +225,12 @@ grep -qx 'Goodbye from VOWP' "$REPO/src/farewell.txt"
     printf '%s\n' 'Goodbye from VOWP'
 } > "$WORK/expected-message.txt"
 cmp -s "$WORK/expected-message.txt" "$REPO/src/message.txt"
-git --git-dir="$ORIGIN" show main:src/message.txt >/dev/null
+for file in src/greeting.txt src/farewell.txt src/message.txt; do
+    git --git-dir="$ORIGIN" show "main:$file" > "$WORK/origin-$(basename "$file")"
+done
+cmp -s "$WORK/expected-message.txt" "$WORK/origin-message.txt"
+grep -qx 'Hello from VOWP' "$WORK/origin-greeting.txt"
+grep -qx 'Goodbye from VOWP' "$WORK/origin-farewell.txt"
 
 vowp_cli --home "$HOME_DIR" --project "$REPO" status
 vowp_cli --home "$HOME_DIR" --project "$REPO" job ls --all

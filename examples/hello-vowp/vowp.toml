@@ -36,5 +36,6 @@ ladder = ["cli:fake-worker"]
 on_quota = "park"
 
 [harnesses.fake-worker]
-# Resolved relative to the project directory (run.sh starts every command in it).
+# Resolved relative to the process working directory when [project].path is unset;
+# run.sh starts every command from the checkout.
 mapping = ".vowp/adapters/fake-worker.toml"
