@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Check that every `vowp` command shown in the user documentation exists in
-# docs/design/cli.md. The design file is the single source of truth for the
-# v0.1 command surface; this script never keeps its own command list.
+# Check that every `vowp` command shown in the user documentation exists in the
+# real CLI and is either implemented or marked *(planned)*.
+#
+# The command surface is parsed from docs/design/cli.md (the written contract)
+# and cross-checked against V0_1_COMMANDS in crates/vowp-cli/src/cli.rs. The
+# implementation status comes from the CLI dispatch table: a command is current
+# when its handler module is real code, not the explicit NotImplemented stub
+# that n09a created for later jobs. A required-set assertion catch parser drift.
 #
 # Scope: README.md, docs/concepts/**, docs/guides/**, docs/security.md and
 # docs/troubleshooting.md. docs/design/** is the reference, not a consumer.
@@ -44,7 +49,7 @@ known = set()
 
 def add_invocation(text):
     """Add the command path found at the start of a piece of text."""
-    match = re.search(r"\bvowp\s+(--version|--help|[a-z_][a-z0-9_-]*)", text)
+    match = re.match(r"\s*vowp\s+(--version|--help|[a-z_][a-z0-9_-]*)", text)
     if not match:
         return None
     command = match.group(1)
@@ -111,6 +116,77 @@ if missing_in_cli:
 for family in families:
     known.discard(family)
 
+# --- Parse the real CLI's top-level command list and dispatch --------------
+#
+# V0_1_COMMANDS is the clap surface: every command the binary parses. The
+# dispatch table maps each Command variant to its handler module. A module is
+# a stub when it only returns CliError::NotImplemented, which is how n09a
+# reserved commands owned by n09b/n09c. This check therefore distinguishes a
+# command that merely appears in --help from one that actually runs.
+
+cli_rs_path = root / "crates" / "vowp-cli" / "src" / "cli.rs"
+dispatch_path = root / "crates" / "vowp-cli" / "src" / "cmd" / "mod.rs"
+if not cli_rs_path.is_file() or not dispatch_path.is_file():
+    print("FAIL  cannot find the vowp-cli source to check implementation status", file=sys.stderr)
+    sys.exit(1)
+
+cli_rs = cli_rs_path.read_text(encoding="utf-8")
+const_match = re.search(
+    r"pub const V0_1_COMMANDS:.*?=.*?\[(.*?)\];", cli_rs, re.DOTALL
+)
+if not const_match:
+    print("FAIL  cannot parse V0_1_COMMANDS from cli.rs", file=sys.stderr)
+    sys.exit(1)
+real_top = set(re.findall(r'"(__window|[a-z_][a-z0-9_-]*)"', const_match.group(1)))
+real_top.add("--version")
+
+dispatch = dispatch_path.read_text(encoding="utf-8")
+module_for_variant = {}
+for variant, module in re.findall(
+    r"Command::(\w+)(?:\s*\{[^}]*\}|\s*\([^)]*\))?\s*=>\s*([a-z_]+)::run", dispatch
+):
+    module_for_variant[variant] = module
+if not module_for_variant:
+    print("FAIL  cannot parse the CLI dispatch table", file=sys.stderr)
+    sys.exit(1)
+
+
+def variant_for(command):
+    if command == "__window":
+        return "Window"
+    return "".join(part.capitalize() for part in command.split("_"))
+
+
+def module_is_stub(module):
+    path = root / "crates" / "vowp-cli" / "src" / "cmd" / f"{module}.rs"
+    if not path.is_file():
+        return True
+    return "CliError::NotImplemented" in path.read_text(encoding="utf-8")
+
+
+implemented = {"--version"}
+for command in real_top:
+    if command == "--version":
+        continue
+    module = module_for_variant.get(variant_for(command))
+    if not module:
+        # init and doctor run before the project context exists, so they are
+        # handled directly in lib.rs rather than through the dispatch table.
+        module = command.strip("_").replace("-", "_")
+    if module and not module_is_stub(module):
+        implemented.add(command)
+
+unknown_to_binary = sorted(
+    command for command in known if command.split()[0] not in real_top
+)
+if unknown_to_binary:
+    print(
+        "FAIL  docs/design/cli.md names command(s) the binary does not parse: "
+        + ", ".join(unknown_to_binary),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 # --- Scan the documentation ------------------------------------------------
 
 doc_files = [root / "README.md"]
@@ -143,7 +219,7 @@ def parse_command(line):
     if not tokens or tokens[0] != "vowp":
         return None
     i = 1
-    if i < len(tokens) and tokens[i] == "--version":
+    if i < len(tokens) and tokens[i] in ("--version", "-V"):
         return "--version", line
     global_with_value = {"--node", "--project", "--home"}
     while i < len(tokens) and tokens[i].startswith("-"):
@@ -158,18 +234,23 @@ def parse_command(line):
         # A placeholder or output line, not a command invocation.
         return None
     path = command
-    if command in families and i + 1 < len(tokens):
-        sub = tokens[i + 1]
-        if not re.fullmatch(r"[a-z_][a-z0-9_-]*", sub):
+    if command in families:
+        # A bare family name ("vowp job") is a section label, not an
+        # invocation; the CLI requires a subcommand.
+        if i + 1 >= len(tokens):
             return None
-        if not sub.startswith("-"):
-            path = f"{command} {sub}"
+        sub = tokens[i + 1]
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*", sub) or sub.startswith("-"):
+            return None
+        path = f"{command} {sub}"
     return path, line
 
 
 references = []
+page_lines = {}
 for path in doc_files:
     lines = path.read_text(encoding="utf-8").splitlines()
+    page_lines[path] = lines
     in_fence = False
     fence_marker = ""
     for number, line in enumerate(lines, 1):
@@ -194,29 +275,84 @@ for path in doc_files:
                 if parsed:
                     references.append((path, number, parsed[0], parsed[1]))
 
+# A page that shows commands must declare its status: current, planned or
+# mixed. A page declared planned covers all its commands; a mixed page uses
+# *(planned)* locally for the not-yet-implemented ones.
+page_status = {}
+for path in sorted({path for path, _, _, _ in references}):
+    text = path.read_text(encoding="utf-8").lower()
+    match = re.search(r"status:\s*(current|planned|mixed)", text)
+    if match:
+        page_status[path] = match.group(1)
+
+
+def planned_near(path, number):
+    """True when the reference sits in a section/block marked planned."""
+    lines = page_lines[path]
+    index = number - 1
+    if "planned" in lines[index].lower():
+        return True
+    # Walk back to the nearest Markdown heading, but stop at a fence boundary
+    # so a marker in one code block does not cover a later block.
+    in_fence = False
+    fence_marker = ""
+    block_start = 0
+    section_start = 0
+    for i in range(0, index):
+        stripped = lines[i].strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+                block_start = i
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            continue
+        if not in_fence and re.match(r"#{1,6}\s", stripped):
+            section_start = i
+    # Inside a code block the marker may be in the block's leading comment.
+    # In prose, the whole section counts, so a planned note covers its tables
+    # and commands after a code block too.
+    start = max(block_start, section_start) if in_fence else section_start
+    return "planned" in "\n".join(lines[start:index]).lower()
+
+
 failures = []
 for path, number, command, line in references:
+    top = command.split()[0]
     if command not in known:
         rel = path.relative_to(root)
         failures.append(f"{rel}:{number}: `{command}` is not in docs/design/cli.md\n    {line}")
+        continue
+    if top not in real_top:
+        rel = path.relative_to(root)
+        failures.append(f"{rel}:{number}: `{command}` is not in the real CLI\n    {line}")
+        continue
+    if top in implemented:
+        continue
+    if page_status.get(path) == "planned" or planned_near(path, number):
+        continue
+    rel = path.relative_to(root)
+    failures.append(
+        f"{rel}:{number}: `{command}` is not implemented and is not marked "
+        f"*(planned)*"
+        f"\n    {line}"
+    )
 
-# Until the CLI lands, every page that shows a vowp command must say so. When
-# the implementation lands, n12b removes the marks and uses "Status: current"
-# (or equivalent) instead; the checker accepts either declaration.
 for path in sorted({path for path, _, _, _ in references}):
-    text = path.read_text(encoding="utf-8")
-    if "*(planned)*" not in text and "status: current" not in text.lower():
+    if path not in page_status:
         rel = path.relative_to(root)
         failures.append(
-            f"{rel}: shows vowp commands but neither marks them *(planned)* "
-            "nor declares 'Status: current'"
+            f"{rel}: shows vowp commands but has no 'Status: current|planned|mixed'"
         )
 
 if failures:
     for failure in failures:
         print(f"FAIL  {failure}", file=sys.stderr)
     print(
-        f"FAIL  check-commands: {len(failures)} undocumented command reference(s)",
+        f"FAIL  check-commands: {len(failures)} command reference problem(s)",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -224,7 +360,8 @@ if failures:
 distinct = sorted({command for _, _, command, _ in references})
 print(
     f"PASS  check-commands: {len(references)} references, "
-    f"{len(distinct)} distinct commands, all defined in docs/design/cli.md"
+    f"{len(distinct)} distinct commands; {len(implemented)} implemented, "
+    f"all others marked *(planned)*"
 )
 print("      " + ", ".join(distinct))
 PY
