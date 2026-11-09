@@ -33,6 +33,11 @@ The remote user needs access to the project checkout and worktree root. A versio
 blocked, but commands and schema versions are only guaranteed within the same release; upgrade both
 sides together.
 
+Remote commands run in the remote's own VOWP home and SSH working directory. For project-scoped
+commands such as `status`, `job` and `session`, the remote needs its own initialised project
+(`vowp init` in a checkout, or `--project` pointing at one); the laptop's database only supplies the
+SSH target.
+
 ## Register a node
 
 ```sh
@@ -107,9 +112,12 @@ vowp attach
 vowp --node vps job ls
 ```
 
-If `node add` warns that the probe failed, fix SSH or the remote `PATH` first (or use `--strict` to
-make the failure an error); the node row is still written, but `--node` will fail until SSH to that
-target works.
+`vowp --node vps job ls` reads the VPS's own VOWP home and project checkout, not the laptop's graph;
+the VPS needs the initialised checkout described above (or pass `--project` with its path there).
+
+If `node add` warns that the probe failed, fix SSH or the remote `PATH` first. Without `--strict`, the
+warning is non-fatal and the node row is still written, but `--node` will fail until SSH to that target
+works. With `--strict`, the command fails before writing the row.
 
 If the project itself is homed on the VPS, run `vowp up` there and use `vowp --node vps status` from the
 laptop. The laptop still needs its own initialized VOWP home with the `vps` node registered — for example

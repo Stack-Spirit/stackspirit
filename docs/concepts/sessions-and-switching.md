@@ -144,8 +144,8 @@ another executor. The same protocol runs automatically for failover and context 
 |---|---|
 | 1. Freeze | Refuse if already switching; reject new input. |
 | 2. Plan | Insert a `switches` row (`started`) with source, target, reason and last seq. |
-| 3. Probe | `probe()` the target adapter; for a remote node, run `vowp --node <n> doctor --json`. Failure aborts. |
-| 4. Drain | Wait up to 5 seconds for the current turn, then interrupt and stop. The interrupt, stop, runner and log-release waits are bounded too; an expired drain aborts the switch and restores the source. |
+| 3. Probe | Run the target adapter's local `probe()`; failure aborts. v0.1 does not run the remote `vowp --node <n> doctor --json` probe for a switch to another node, so a remote target is attached without proving its harness is available. |
+| 4. Drain | Wait up to 5 seconds for the current turn. On timeout it interrupts and stops the run, then continues the switch. The later waits for the runner to finish and release the log are also bounded; if one of those expires, the switch aborts and restores the source. |
 | 5. Capsule | Write a switch capsule (never debounced). Use the previous one if repair fails. |
 | 6. Detach | Stop the source and append `session.executor{detach}`. |
 | 7. Start | Attach the target; deliver the seed with the next turn or start it idle. |
@@ -212,10 +212,12 @@ for decisions — logs are authoritative. `vowp attach [job]` attaches to the tm
 
 ## Watching an interactive Claude Code session
 
-The optional `vowp session watch` importer (included in v0.1) records an interactive Claude Code
-session into the canonical store without running it. It reads the transcript JSONL under
-`$CLAUDE_CONFIG_DIR` or `~/.claude/projects/…` with read-only opens, maps user/assistant/tool/thinking
-lines to events, stores a byte offset for incremental polling and never writes to Claude's files. A
-truncated or rewritten transcript restarts from zero and skips already-imported entries.
+The optional `vowp session watch` importer (included in v0.1) records interactive Claude Code
+transcripts into canonical sessions without running the harness. `vowp session watch --once` scans the
+transcript JSONL under `$CLAUDE_CONFIG_DIR` or `~/.claude` with read-only opens, maps user/assistant
+text and tool calls to events, and never writes to Claude's files. It stores the processed line count
+in the node database under `watch:<native session id>`; a later scan imports only the new lines and
+skips a transcript that is shorter or unchanged. Continuous following is not available in v0.1:
+without `--once`, a terminal run exits 2 with a message to use `--once`.
 
 Next: [providers and failover](providers-and-failover.md), or the [sessions guide](../guides/sessions.md).

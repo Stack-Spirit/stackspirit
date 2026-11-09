@@ -125,14 +125,17 @@ Common rejections:
 
 ```sh
 vowp session watch --once
-vowp session watch --claude-dir ~/.claude
+vowp session watch --once --claude-dir ~/.claude
 ```
 
-`session watch` is an optional v0.1 importer. It records interactive Claude Code transcripts into
-canonical sessions without running the harness: user text, assistant text, reasoning (display only), tool
-calls and results, and usage without a receipt (`source: unknown`). It reads transcripts read-only,
-stores a byte offset for incremental polling and never writes to Claude's files. A truncated transcript
-restarts from zero and skips entries already imported.
+`session watch` is an optional v0.1 importer. `--once` scans `*.jsonl` files under `--claude-dir`
+(default `$CLAUDE_CONFIG_DIR`, else `~/.claude`). For a transcript with new lines it creates a canonical
+session and records user text, assistant text and tool calls; other line types are skipped. It reads
+transcripts read-only and never writes to Claude's files. The processed line count is stored in the node
+database under `watch:<native session id>`; a later scan imports only lines after that count, and a
+transcript that is shorter or unchanged is skipped rather than restarted. Continuous following is not
+available in v0.1: in a terminal, `vowp session watch` without `--once` exits 2 with a message to use
+`--once`. Run it from cron (or another non-TTY runner) for repeated scans.
 
 ## When to switch
 

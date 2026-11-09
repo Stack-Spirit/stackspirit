@@ -166,7 +166,8 @@ without `--force` is a conflict; stop it or pass `--force` explicitly. The drain
 automatic switches (failover and context pressure) and by a forced manual switch.
 
 **The target probe fails.** The session stays on the source and is still readable. Check that the target
-harness is installed and the executor string parses. For a remote node, run `vowp --node <n> doctor`.
+harness is installed and the executor string parses. v0.1 probes only the local adapter registry; for a
+remote target, run `vowp --node <n> doctor` yourself before switching.
 
 **The capsule is invalid twice.** The previous capsule is kept and an `error` event is appended. A switch
 without any previous capsule aborts. Check the capsule executor's output; do not hand-edit a capsule
@@ -181,6 +182,9 @@ with `vowp session tail <id> --follow`.
 
 **`session watch` exits 1.** The transcript directory is unreadable. Pass `--claude-dir <dir>` and check
 permissions. The importer never writes to Claude's files.
+
+**`session watch` exits 2.** It was run in a terminal without `--once`. Continuous following is not
+available in v0.1; pass `--once` (or run it from cron).
 
 ## Schedules
 
