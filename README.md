@@ -15,10 +15,11 @@ already use as a small engineering team on your own machines.
 
 > **Status: current — early release (0.1.0), build from source.** The v0.1 command surface is
 > implemented and the [documentation checks](docs/tests/README.md) pass. The first public release is
-> **0.1.0**; the supported install path today is building from source with the pinned toolchain. See
-> the [roadmap](docs/roadmap.md) for what is deliberately not in v0.1. For an unattended per-user
-> install with the systemd unit and watchdog, see the [install scripts](scripts/README.md); the
-> design lives in [`docs/design/`](docs/design/README.md).
+> **0.1.0**; the build-from-source commands in this README are the path it verifies, and the release
+> also publishes prebuilt archives and crates.io/npm packages. See the [roadmap](docs/roadmap.md) for
+> what is deliberately not in v0.1. For an unattended per-user install with the systemd unit and
+> watchdog, see the [install scripts](scripts/README.md); the design lives in
+> [`docs/design/`](docs/design/README.md).
 
 Work is modelled as a graph of jobs, deterministic loops keep it moving, every job runs in a tmux window
 you can watch, sessions move between harnesses, models and machines without losing context, and finished

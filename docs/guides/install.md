@@ -1,9 +1,10 @@
 # Install
 
-VOWP is a single Rust binary. The 0.1.0 release is built from source; prebuilt archives and a Homebrew
-formula are not part of this release (see the [roadmap](../roadmap.md)). The repository also ships a
-per-user [install script](../../scripts/README.md) that installs the binary, the systemd user unit and
-the cron watchdog.
+VOWP is a single Rust binary. The 0.1.0 release is built from source in this guide; the release also
+carries prebuilt archives, crates.io/npm packages and a Homebrew formula template prepared by the
+release jobs (see the [roadmap](../roadmap.md)). A Homebrew tap is not published. The repository also
+ships a per-user [install script](../../scripts/README.md) that installs the binary, the systemd user
+unit and the cron watchdog.
 
 > **Status: current.** The build commands, `vowp init`, `vowp doctor` and the install script work today;
 > every command referenced on this page is implemented.
