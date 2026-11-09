@@ -244,6 +244,8 @@ struct SupervisorProcess {
 impl SupervisorProcess {
     /// Spawns the real binary against a temporary home and project.
     fn spawn(home: &Path, repo: &Path) -> Self {
+        let stderr = home.join("supervisor.stderr");
+        let file = std::fs::File::create(&stderr).expect("supervisor stderr file");
         let child = Command::new(env!("CARGO_BIN_EXE_vowp"))
             .arg("--home")
             .arg(home)
@@ -255,7 +257,7 @@ impl SupervisorProcess {
             .env("HOME", home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(file))
             .spawn()
             .expect("spawn vowp up");
         Self { child }
@@ -391,9 +393,11 @@ impl SignalEnv {
         SupervisorProcess::spawn(self.home.path(), self.repo.path())
     }
 
-    /// Returns the supervisor log for failure messages.
+    /// Returns the supervisor log and captured stderr for failure messages.
     fn log(&self) -> String {
-        std::fs::read_to_string(self.home.path().join("logs/supervisor.log")).unwrap_or_default()
+        let log = std::fs::read_to_string(self.home.path().join("logs/supervisor.log")).unwrap_or_default();
+        let stderr = std::fs::read_to_string(self.home.path().join("supervisor.stderr")).unwrap_or_default();
+        format!("{log}\n--- supervisor stderr ---\n{stderr}")
     }
 
     /// Waits until both fake-harness pids are written.
@@ -549,10 +553,36 @@ fn down_writes_stop_file_and_clears_stale_lock() {
     );
     assert!(!lock.exists(), "a stale lock is removed");
 
-    // A later `up` clears the stop file so the supervisor does not stop immediately.
+    // A later `up` clears the stop and stopped files so the supervisor starts fresh.
+    let stopped = env.home_path().join("heartbeat.stopped");
+    std::fs::write(&stopped, format!("{}\n", Timestamp::now().unix_secs())).expect("stopped marker");
     let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(!stop.exists(), "up must clear a stale stop file");
+    assert!(!stopped.exists(), "up must clear a stopped marker");
+}
+
+#[test]
+fn up_removes_lock_when_signal_install_fails() {
+    let env = common::TestEnv::new();
+    let input = vowp_cli::BufferIo::new("");
+    let ctx = vowp_cli::Ctx::build(&env.global(false), &input).expect("command context");
+    let mut io = vowp_cli::BufferIo::new("");
+
+    let error = vowp_cli::cmd::up::run_foreground_with(&ctx, &mut io, |_| {
+        Err(std::io::Error::other("injected signal registration failure"))
+    })
+    .expect_err("a failed signal install must abort the supervisor");
+    assert!(error.to_string().contains("injected"), "{error}");
+    assert!(
+        !env.home_path().join("supervisor.lock").exists(),
+        "the lock written before signal installation must be removed"
+    );
+    assert!(
+        io.stdout().is_empty(),
+        "no running banner is printed: {:?}",
+        io.stdout()
+    );
 }
 
 #[test]
@@ -774,16 +804,20 @@ fn up_sigterm_cancels_supervisor_cleanly() {
         env.log()
     );
 
-    let heartbeat = std::fs::read_to_string(env.home.path().join("heartbeat")).expect("heartbeat after shutdown");
-    let mut lines = heartbeat.lines();
     assert!(
-        lines.next().is_some_and(|line| line.parse::<i64>().is_ok()),
-        "the first heartbeat line stays Unix seconds: {heartbeat:?}"
+        !env.home.path().join("heartbeat").exists(),
+        "a clean shutdown removes the live heartbeat so the watchdog sees it missing"
     );
+    let stopped =
+        std::fs::read_to_string(env.home.path().join("heartbeat.stopped")).expect("heartbeat.stopped after shutdown");
     assert_eq!(
-        lines.next(),
-        Some("stopped"),
-        "a clean shutdown marks the heartbeat stopped: {heartbeat:?}"
+        stopped.lines().count(),
+        1,
+        "the stopped marker is one line: {stopped:?}"
+    );
+    assert!(
+        stopped.trim().parse::<i64>().is_ok(),
+        "the stopped marker holds Unix seconds: {stopped:?}"
     );
     assert!(
         !env.home.path().join("supervisor.lock").exists(),

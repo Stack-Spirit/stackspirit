@@ -2,6 +2,9 @@
 
 mod common;
 
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
 use vowp_protocol::Timestamp;
 
 /// Writes a heartbeat `age_secs` seconds in the past.
@@ -66,6 +69,128 @@ fn status_without_check_never_exits_1_and_reports_running_supervisor() {
     assert_eq!(value["supervisor"]["running"], true);
     assert_eq!(value["supervisor"]["pid"], pid);
     assert_eq!(value["supervisor"]["paused"], false);
+}
+
+/// Polls `predicate` for up to five seconds.
+fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// One spawned `vowp up --foreground`, killed if the test panics.
+struct Foreground {
+    child: Child,
+    stderr: std::path::PathBuf,
+}
+
+impl Foreground {
+    /// Spawns the real binary against one test environment.
+    fn spawn(env: &common::TestEnv) -> Self {
+        let stderr = env.home_path().join("spawned-supervisor.stderr");
+        let file = std::fs::File::create(&stderr).expect("stderr file");
+        let child = Command::new(env!("CARGO_BIN_EXE_vowp"))
+            .arg("--home")
+            .arg(env.home_path())
+            .arg("--project")
+            .arg(env.project_path())
+            .arg("up")
+            .arg("--foreground")
+            .arg("--no-tmux")
+            .env("HOME", env.home_path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(file))
+            .spawn()
+            .expect("spawn vowp up --foreground");
+        Self { child, stderr }
+    }
+
+    /// Returns the supervisor pid.
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Polls for exit up to `timeout`.
+    fn wait_for_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.child.try_wait().expect("poll supervisor") {
+                Some(status) => return Some(status),
+                None if Instant::now() >= deadline => return None,
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
+    /// Returns the captured stderr for failure messages.
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.stderr).unwrap_or_default()
+    }
+}
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn status_reports_stopped_after_sigterm() {
+    let env = common::TestEnv::new();
+    let mut supervisor = Foreground::spawn(&env);
+    assert!(
+        eventually(|| env.home_path().join("heartbeat").is_file()),
+        "the supervisor did not complete a first tick; stderr:\n{}",
+        supervisor.stderr()
+    );
+
+    let killed = Command::new("kill")
+        .arg("-TERM")
+        .arg(supervisor.pid().to_string())
+        .status()
+        .expect("run kill");
+    assert!(killed.success(), "SIGTERM to the supervisor failed");
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .unwrap_or_else(|| panic!("SIGTERM did not stop the supervisor; stderr:\n{}", supervisor.stderr()));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a cancelled supervisor exits cleanly; stderr:\n{}",
+        supervisor.stderr()
+    );
+
+    assert!(
+        !env.home_path().join("heartbeat").exists(),
+        "the live heartbeat is gone after a clean stop"
+    );
+    let stopped = std::fs::read_to_string(env.home_path().join("heartbeat.stopped")).expect("stopped marker");
+    assert_eq!(stopped.lines().count(), 1, "the marker is one line: {stopped:?}");
+    assert!(
+        stopped.trim().parse::<i64>().is_ok(),
+        "the marker holds Unix seconds: {stopped:?}"
+    );
+
+    let (code, stdout, stderr) = env.run(&["status"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("supervisor: stopped"), "{stdout}");
+
+    let (code, value, stderr) = env.run_json(&["status", "--check"]);
+    assert_eq!(
+        code, 1,
+        "a stopped supervisor is stale for the watchdog; stderr: {stderr}"
+    );
+    assert_eq!(value["supervisor"]["running"], false);
+    assert_eq!(value["supervisor"]["pid"], serde_json::Value::Null);
+    assert_eq!(value["supervisor"]["heartbeat_age_secs"], serde_json::Value::Null);
+    assert_eq!(value["supervisor"]["last_tick"], serde_json::Value::Null);
 }
 
 #[test]

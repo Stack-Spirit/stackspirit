@@ -133,6 +133,7 @@ fn run_up(ctx: &Ctx, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliEr
         )));
     }
     signals::clear_stop(paths)?;
+    signals::clear_stopped(paths)?;
 
     if !args.no_tmux {
         let exe = std::env::current_exe()?;
@@ -215,11 +216,29 @@ fn run_once(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 
 /// Runs the supervisor loop in this process until the stop file appears.
 fn run_foreground(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
+    run_foreground_with(ctx, io, signals::SignalWatcher::install)
+}
+
+/// Runs the foreground supervisor with an injectable signal-watcher installer.
+///
+/// Production calls [`run_foreground`], which passes [`signals::SignalWatcher::install`].
+/// Tests use the seam to make installation fail and prove that the lock written before it
+/// is removed again.
+pub fn run_foreground_with<F>(ctx: &Ctx, io: &mut dyn IoStreams, install: F) -> Result<i32, CliError>
+where
+    F: FnOnce(&NodePaths) -> std::io::Result<signals::SignalWatcher>,
+{
     let paths = ctx.paths();
     let pid = std::process::id();
     write_lock(paths, pid, ctx.clock().now())?;
 
-    let watcher = signals::SignalWatcher::install(paths)?;
+    let watcher = match install(paths) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            remove_lock_if_own(paths, pid);
+            return Err(CliError::Io(error));
+        }
+    };
     let mut supervisor = match Supervisor::new(supervisor_deps(ctx), ctx.project().clone()) {
         Ok(supervisor) => supervisor,
         Err(error) => {
@@ -249,8 +268,8 @@ fn run_foreground(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     // Runner cancellation is cooperative: wait for adapter/gate children, escalating once
     // the grace expires, so a clean signal shutdown does not orphan harness processes.
     wait_for_children();
-    // The first line keeps the watchdog's Unix-seconds contract; `stopped` records that
-    // this was a deliberate shutdown rather than a crash.
+    // Remove the live heartbeat and record the deliberate stop separately, so neither
+    // `status --check` nor the watchdog mistakes a fresh timestamp for a live supervisor.
     let _ = signals::mark_stopped(paths, ctx.clock().now());
     remove_lock_if_own(paths, pid);
     result?;
@@ -303,10 +322,13 @@ fn child_pids(parent: u32) -> Vec<u32> {
         let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
             continue;
         };
-        let ppid = status.lines().find_map(|line| {
-            line.strip_prefix("PPid:")
-                .and_then(|value| value.trim().parse::<u32>().ok())
-        });
+        let field = |name: &str| status.lines().find_map(|line| line.strip_prefix(name).map(str::trim));
+        // A zombie child has already exited and only waits to be reaped; it must not hold
+        // the shutdown in the full grace period.
+        if field("State:").is_some_and(|state| state.starts_with('Z')) {
+            continue;
+        }
+        let ppid = field("PPid:").and_then(|value| value.parse::<u32>().ok());
         if ppid == Some(parent) {
             pids.push(pid);
         }
@@ -384,18 +406,35 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut started_pid = None;
+    let mut exited = None;
     while Instant::now() < deadline {
         if let Some(pid) = crate::ctx::supervisor_pid(paths) {
             started_pid = Some(pid);
             break;
         }
+        // A child that exited immediately (bad config, startup panic) must not be
+        // reported as a running supervisor; notice it without waiting for the deadline.
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exited = Some(status);
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => return Err(CliError::Io(error)),
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let pid = match started_pid {
-        Some(pid) => pid,
-        None => {
-            // A child that exited immediately (bad config, startup panic) must not be
-            // reported as a running supervisor.
+    let pid = match (started_pid, exited) {
+        (Some(pid), _) => pid,
+        (None, Some(status)) => {
+            return Err(CliError::Conflict(format!(
+                "supervisor exited during startup ({status}); see {}",
+                log_path.display()
+            )));
+        }
+        (None, None) => {
+            // Re-check once at the deadline so a child that exited just as the wait ended
+            // is still reported as failed startup, not as running.
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(CliError::Conflict(format!(
                     "supervisor exited during startup ({status}); see {}",

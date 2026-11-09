@@ -12,6 +12,7 @@ use vowp_protocol::{Limit, LimitRowKind, Timestamp};
 use vowp_store::NodePaths;
 
 use crate::cli::StatusArgs;
+use crate::signals;
 use crate::{CliError, Ctx, IoStreams};
 
 /// Age after which the heartbeat is stale (`cli.md`: 3 minutes).
@@ -59,9 +60,12 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &StatusArgs) -> Result<i32, 
     let store = ctx.store()?;
     let snapshot = BoardSnapshot::collect(&store, ctx.config(), now)?;
     let (pid, started_at) = read_lock(ctx.paths());
-    let heartbeat = read_heartbeat(ctx.paths());
+    // A clean shutdown removes the heartbeat and leaves a stopped marker. It is not a live
+    // supervisor even if a heartbeat file survived the stop.
+    let stopped = pid.is_none() && signals::stopped(ctx.paths());
+    let heartbeat = if stopped { None } else { read_heartbeat(ctx.paths()) };
     let heartbeat_age_secs = heartbeat.map(|at| now.unix_secs() - at.unix_secs());
-    let stale = heartbeat_age_secs.is_none_or(|age| age > STALE_AFTER_SECS);
+    let stale = stopped || heartbeat_age_secs.is_none_or(|age| age > STALE_AFTER_SECS);
     let paused = store.kv_get("paused")?.as_deref() == Some("1");
 
     if ctx.json() {
@@ -84,7 +88,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &StatusArgs) -> Result<i32, 
         };
         crate::output::print_json(io, &output)?;
     } else {
-        print_human(io, pid, started_at, heartbeat_age_secs, &snapshot)?;
+        print_human(io, pid, started_at, stopped, heartbeat_age_secs, &snapshot)?;
     }
 
     if args.check && stale {
@@ -98,6 +102,7 @@ fn print_human(
     io: &mut dyn IoStreams,
     pid: Option<u32>,
     started_at: Option<Timestamp>,
+    stopped: bool,
     heartbeat_age_secs: Option<i64>,
     snapshot: &BoardSnapshot,
 ) -> Result<(), CliError> {
@@ -119,6 +124,7 @@ fn print_human(
                 )?,
             }
         }
+        None if stopped => writeln!(io.out(), "supervisor: stopped")?,
         None => writeln!(io.out(), "supervisor: not running")?,
     }
     write!(io.out(), "{}", snapshot.render_text(false))?;
@@ -154,20 +160,19 @@ fn read_heartbeat(paths: &NodePaths) -> Option<Timestamp> {
     read_heartbeat_text(&paths.root().join("heartbeat"))
 }
 
-/// Parses a heartbeat file: Unix seconds when possible, else its modification time.
+/// Parses the first line of a heartbeat file as Unix seconds.
+///
+/// A legacy stopped heartbeat (`<seconds>\nstopped`) is not a live timestamp; the file
+/// modification time is never used, because a fresh mtime would hide a stopped or
+/// corrupted heartbeat from `status --check` and the watchdog.
 fn read_heartbeat_text(path: &Path) -> Option<Timestamp> {
-    if let Ok(text) = std::fs::read_to_string(path)
-        && let Ok(secs) = text.trim().parse::<i64>()
-    {
-        return Some(Timestamp::from_unix_secs(secs));
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let first = lines.next()?.trim();
+    if lines.any(|line| line.trim() == "stopped") {
+        return None;
     }
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let millis = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis()
-        .min(i64::MAX as u128) as i64;
-    Some(Timestamp::from_unix_millis(millis))
+    first.parse::<i64>().ok().map(Timestamp::from_unix_secs)
 }
 
 impl From<&Limit> for LimitOutput {

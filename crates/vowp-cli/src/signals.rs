@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use signal_hook::SigId;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
 use vowp_protocol::{CancelToken, Timestamp};
@@ -38,6 +39,15 @@ pub fn heartbeat_file(paths: &NodePaths) -> PathBuf {
     paths.root().join("heartbeat")
 }
 
+/// Returns the path of the stopped marker (`<home>/heartbeat.stopped`).
+///
+/// A clean shutdown removes the live heartbeat and writes this sibling file instead, so
+/// `vowp status` can say `stopped` without leaving a fresh timestamp that the watchdog
+/// would read as a live supervisor.
+pub fn stopped_file(paths: &NodePaths) -> PathBuf {
+    paths.root().join("heartbeat.stopped")
+}
+
 /// Removes a stale stop file, returning whether one existed.
 pub fn clear_stop(paths: &NodePaths) -> std::io::Result<bool> {
     let path = stop_file(paths);
@@ -53,17 +63,70 @@ pub fn stop_requested(paths: &NodePaths) -> bool {
     stop_file(paths).is_file()
 }
 
-/// Rewrites the heartbeat with a trailing `stopped` marker after a clean shutdown.
+/// Records a clean shutdown without corrupting the heartbeat contract.
 ///
-/// The first line remains the Unix timestamp, so the watchdog's `head -n 1` contract
-/// still sees a normal heartbeat. The second line tells an operator and tests that the
-/// supervisor exited on purpose rather than crashing. A later `vowp up` overwrites the
-/// file with numeric heartbeats on its first tick.
+/// The marker at [`stopped_file`] holds the stop time as Unix seconds, one line. The live
+/// heartbeat is removed: the documented file is Unix seconds only, and a fresh timestamp
+/// left behind would make `status --check` and the watchdog treat the stopped supervisor
+/// as alive. A later `vowp up` clears the marker and writes numeric heartbeats again.
 pub fn mark_stopped(paths: &NodePaths, at: Timestamp) -> std::io::Result<()> {
-    let path = heartbeat_file(paths);
     let temp = paths.root().join(".heartbeat.stopped.tmp");
-    std::fs::write(&temp, format!("{}\nstopped\n", at.unix_secs()))?;
-    std::fs::rename(&temp, &path)
+    std::fs::write(&temp, format!("{}\n", at.unix_secs()))?;
+    std::fs::rename(&temp, stopped_file(paths))?;
+    match std::fs::remove_file(heartbeat_file(paths)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Removes the stopped marker, returning whether one existed.
+pub fn clear_stopped(paths: &NodePaths) -> std::io::Result<bool> {
+    let path = stopped_file(paths);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Returns whether a clean shutdown recorded the stopped marker.
+pub fn stopped(paths: &NodePaths) -> bool {
+    stopped_file(paths).is_file()
+}
+
+/// Registers the shutdown actions for SIGTERM and SIGINT.
+///
+/// Actions registered before a failure are removed again, so a failed install leaves no
+/// half-installed signal handling behind.
+fn register_handlers(signalled: &Arc<AtomicBool>) -> std::io::Result<Vec<SigId>> {
+    let mut registered = Vec::new();
+    for (signal, status) in [(SIGTERM, SIGTERM_EXIT), (SIGINT, SIGINT_EXIT)] {
+        match flag::register_conditional_shutdown(signal, status, Arc::clone(signalled)) {
+            Ok(id) => registered.push(id),
+            Err(error) => {
+                unregister_all(&registered);
+                return Err(error);
+            }
+        }
+    }
+    for signal in [SIGTERM, SIGINT] {
+        match flag::register(signal, Arc::clone(signalled)) {
+            Ok(id) => registered.push(id),
+            Err(error) => {
+                unregister_all(&registered);
+                return Err(error);
+            }
+        }
+    }
+    Ok(registered)
+}
+
+/// Removes the signal actions registered by [`register_handlers`].
+fn unregister_all(ids: &[SigId]) {
+    for id in ids {
+        signal_hook::low_level::unregister(*id);
+    }
 }
 
 /// Watches the stop file and SIGTERM/SIGINT, cancelling a [`CancelToken`] on the first
@@ -94,10 +157,7 @@ impl SignalWatcher {
 
         // The conditional-shutdown action must be registered before the flag that arms it:
         // on the first signal it sees `false`, on the second it exits without cleanup.
-        flag::register_conditional_shutdown(SIGTERM, SIGTERM_EXIT, Arc::clone(&signalled))?;
-        flag::register_conditional_shutdown(SIGINT, SIGINT_EXIT, Arc::clone(&signalled))?;
-        flag::register(SIGTERM, Arc::clone(&signalled))?;
-        flag::register(SIGINT, Arc::clone(&signalled))?;
+        let registered = register_handlers(&signalled)?;
 
         let thread_cancel = cancel.clone();
         let thread_signalled = Arc::clone(&signalled);
@@ -111,7 +171,14 @@ impl SignalWatcher {
                 }
                 thread::sleep(POLL_INTERVAL);
             }
-        })?;
+        });
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(error) => {
+                unregister_all(&registered);
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             cancel,
@@ -189,13 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn stopped_heartbeat_keeps_the_timestamp_on_the_first_line() {
+    fn stopped_marker_records_the_stop_time_and_removes_the_heartbeat() {
         let home = tempfile::tempdir().expect("temp home");
         let paths = NodePaths::new(home.path());
+        std::fs::write(heartbeat_file(&paths), "1699999999").expect("tick heartbeat");
         mark_stopped(&paths, Timestamp::from_unix_secs(1_700_000_000)).expect("mark stopped");
-        let text = std::fs::read_to_string(heartbeat_file(&paths)).expect("heartbeat");
-        let mut lines = text.lines();
-        assert_eq!(lines.next(), Some("1700000000"));
-        assert_eq!(lines.next(), Some("stopped"));
+
+        assert!(!heartbeat_file(&paths).exists());
+        let text = std::fs::read_to_string(stopped_file(&paths)).expect("stopped marker");
+        assert_eq!(text, "1700000000\n");
+        assert!(stopped(&paths));
+        assert!(clear_stopped(&paths).expect("clear stopped"));
+        assert!(!stopped(&paths));
+        assert!(!clear_stopped(&paths).expect("clear missing stopped"));
     }
 }
