@@ -188,7 +188,7 @@ Exported by `vowp schema NewJob` and generated from the protocol types in
       ]
     },
     "JobId": {
-      "description": "Job id slug, for example `n04-graph`.",
+      "description": "Job id slug, for example `example-job`.",
       "type": "string"
     },
     "JobKind": {
@@ -368,7 +368,7 @@ Exported by `vowp schema NewJob` and generated from the protocol types in
         },
         {
           "const": "keeper",
-          "description": "Keeps the night healthy.",
+          "description": "Diagnoses stalled or failed jobs.",
           "type": "string"
         },
         {

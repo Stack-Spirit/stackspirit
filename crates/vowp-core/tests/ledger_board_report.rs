@@ -1,4 +1,4 @@
-//! Board snapshot and night-report tests (`n08b`).
+//! Board snapshot and night-report tests.
 //! Spec: `docs/design/crates/vowp-core.md` §5.
 
 mod support;

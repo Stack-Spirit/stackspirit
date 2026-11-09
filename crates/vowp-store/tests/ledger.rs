@@ -1,4 +1,4 @@
-//! Ledger and cost-aggregation repository tests for `vowp-store` (n03b).
+//! Ledger and cost-aggregation repository tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::sync::Arc;

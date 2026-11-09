@@ -11,7 +11,7 @@ use vowp_store::Store;
 use crate::CoreError;
 use crate::deps::Deps;
 
-/// Decides Start versus Resume using the store, per the owner decision for n04a T2.
+/// Decides Start versus Resume using the store.
 ///
 /// `vowp_graph::transition` only sees `job.continues`; a Ready job with a prior run or
 /// session must continue on its stored native session even when the effect says `Start`.

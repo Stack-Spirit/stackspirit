@@ -27,7 +27,7 @@ pub enum CliError {
     /// A remote node operation failed.
     #[error("remote: {0}")]
     Remote(String),
-    /// The command is implemented by a later build job.
+    /// The command is not implemented in this build.
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
     /// A `vowp-core` operation failed.

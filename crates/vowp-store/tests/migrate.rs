@@ -1,4 +1,4 @@
-//! Migration, opening and path-layout tests for `vowp-store` (n03a).
+//! Migration, opening and path-layout tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::path::Path;

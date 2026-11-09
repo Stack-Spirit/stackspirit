@@ -1,7 +1,8 @@
 //! VOWP supervisor core: loops, gates, ledger, schedules, sessions and promotion.
 //!
-//! The foundation modules (`error`, `deps`, `requests`) are owned by n07a; the service
-//! modules are placeholders filled in by later jobs. Spec: `docs/design/crates/vowp-core.md`.
+//! The crate composes the protocol types, the store and the adapter registry into the
+//! supervisor's deterministic loops and the shared services the CLI calls.
+//! Spec: `docs/design/crates/vowp-core.md`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

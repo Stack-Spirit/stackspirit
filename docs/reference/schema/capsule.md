@@ -181,7 +181,7 @@ Exported by `vowp schema Capsule` and generated from the protocol types in
       ]
     },
     "Executor": {
-      "description": "One concrete way to run a model: `harness:model[@effort][#variant]`.\n\nExamples:\n* `claude-code:claude-sonnet-5-5@medium`\n* `opencode:deepseek/deepseek-flash#max`\n* `cli:codex`",
+      "description": "One concrete way to run a model: `harness:model[@effort][#variant]`.\n\nExamples:\n* `claude-code:model-a@medium`\n* `opencode:provider/model-b#max`\n* `cli:codex`",
       "type": "string"
     },
     "ExecutorRef": {

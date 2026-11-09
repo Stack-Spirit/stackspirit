@@ -6,11 +6,6 @@
 //! `reindex`. It knows nothing about job-state legality, loops or harnesses.
 //!
 //! Spec: `docs/design/crates/vowp-store.md`.
-//!
-//! Job split: n03a owns this file, `error`, `paths`, `schema`, `db`, `convert`, `repo_nodes`,
-//! `repo_jobs` and `repo_runs`; n03b owns the session/loop/ledger/misc repositories and n03c
-//! the log, blob and reindex modules. The module declarations for the later jobs are present
-//! from the start so parallel work has disjoint files.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

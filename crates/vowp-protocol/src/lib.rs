@@ -3,8 +3,8 @@
 //! Every wire/data type used by the workspace is defined here, once, with serde and
 //! JSON Schema support. Spec: `docs/design/types.md` and `docs/design/crates/vowp-protocol.md`.
 //!
-//! The foundation modules (`ids`, `time`, `error`, `log`, `cost`, `limit`, `executor`) are
-//! owned by n02a; the remaining modules are placeholders owned by n02b–n02d.
+//! The crate root re-exports every public type, so downstream crates import one set of
+//! definitions from `vowp_protocol`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -31,7 +31,7 @@ pub mod services;
 pub mod session;
 pub mod time;
 
-// Re-exports for modules filled by later protocol jobs; the globs are empty until then.
+// Re-exports so every public type is available at the crate root.
 #[allow(unused_imports)]
 pub use adapter::*;
 #[allow(unused_imports)]
@@ -82,8 +82,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `use vowp_protocol::prelude::*;` brings in the id types, [`Timestamp`], [`Clock`],
 /// [`SystemClock`], [`FakeClock`], [`Executor`], [`ExecutorRef`], [`HarnessKind`],
 /// [`Role`], [`Cost`], [`CostSource`], [`Tokens`], [`LimitKind`], [`ErrorKind`],
-/// [`ProtocolError`], [`Log`] and [`Level`], plus the event/capsule/job/gate types
-/// supplied by the later protocol modules.
+/// [`ProtocolError`], [`Log`] and [`Level`], plus the event, capsule, job and gate types
+/// from the other protocol modules.
 #[allow(unused_imports)]
 pub mod prelude {
     pub use crate::capsule::*;

@@ -31,9 +31,9 @@ testing = []
 unsafe_code = "forbid"
 
 [lints.clippy]
-# `FixtureKind::Cli(Mapping)` in `src/testing.rs` (owned by n06z) holds a mapping by
-# value. `Mapping` follows the crate spec's unboxed field types, so the size difference
-# between that test-helper variant and the unit variants is intentional.
+# `FixtureKind::Cli(Mapping)` in `src/testing.rs` holds a mapping by value. `Mapping`
+# follows the crate spec's unboxed field types, so the size difference between that
+# test-helper variant and the unit variants is intentional.
 large_enum_variant = "allow"
 
 [dev-dependencies]

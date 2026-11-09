@@ -11,7 +11,7 @@ Exported by `vowp schema ReportFrontMatter` and generated from the protocol type
 {
   "$defs": {
     "JobId": {
-      "description": "Job id slug, for example `n04-graph`.",
+      "description": "Job id slug, for example `example-job`.",
       "type": "string"
     },
     "ReportStatus": {

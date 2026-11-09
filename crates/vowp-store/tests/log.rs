@@ -1,4 +1,4 @@
-//! Session log, capsule file and adapters.json tests for `vowp-store` (n03c).
+//! Session log, capsule file and adapters.json tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6 (`log_append_assigns_seq_and_ts`,
 //! `log_rejects_gap_and_duplicate_envelope`, `log_fsync_markers`,
 //! `log_lock_blocks_second_writer`, `log_reader_tail_and_read_from`,

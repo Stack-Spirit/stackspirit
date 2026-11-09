@@ -255,7 +255,7 @@ impl CapsuleId {
 }
 
 slug_id!(
-    /// Job id slug, for example `n04-graph`.
+    /// Job id slug, for example `example-job`.
     JobId
 );
 slug_id!(

@@ -5,8 +5,8 @@
 //! convenience copy. Rendering is deterministic so tests can pin it as a golden string.
 //!
 //! Note: `types.md` spells `jobs_by_state` as `BTreeMap<JobState, u32>`, but `JobState` does
-//! not implement `Ord` in `vowp-protocol` (outside this job's ownership), so the map is keyed
-//! by the canonical snake_case state name.
+//! not implement `Ord` in `vowp-protocol`, so the map is keyed by the canonical snake_case
+//! state name.
 
 use std::collections::BTreeMap;
 

@@ -69,7 +69,7 @@ pub(crate) fn json_from_text<T: DeserializeOwned>(text: &str, what: &str) -> Res
 }
 
 /// Parses an id column.
-#[allow(dead_code)] // used by the repository and log modules owned by n03b/n03c
+#[allow(dead_code)] // used by the repository and log modules
 pub(crate) fn id_from_text<T>(text: &str, what: &str) -> Result<T, StoreError>
 where
     T: FromStr<Err = ProtocolError>,
@@ -93,13 +93,13 @@ pub(crate) fn u32_from_i64(value: i64, what: &str) -> Result<u32, StoreError> {
 }
 
 /// Converts a stored integer to `u64`, reporting the column on overflow.
-#[allow(dead_code)] // used by the repository and log modules owned by n03b/n03c
+#[allow(dead_code)] // used by the repository and log modules
 pub(crate) fn u64_from_i64(value: i64, what: &str) -> Result<u64, StoreError> {
     u64::try_from(value).map_err(|err| corrupt(what, err))
 }
 
 /// Converts a stored integer to `i32`, reporting the column on overflow.
-#[allow(dead_code)] // used by the repository and log modules owned by n03b/n03c
+#[allow(dead_code)] // used by the repository and log modules
 pub(crate) fn i32_from_i64(value: i64, what: &str) -> Result<i32, StoreError> {
     i32::try_from(value).map_err(|err| corrupt(what, err))
 }

@@ -1,8 +1,8 @@
 //! Golden renderings for a four-job graph plus the title/escaping rules.
 //! Spec: `docs/design/crates/vowp-graph.md` §6 and §10.
 //!
-//! The goldens live inline rather than under `tests/fixtures/` because this job owns only
-//! the listed `.rs` test files; the compared bytes are the same either way.
+//! The goldens live inline rather than under `tests/fixtures/`; the compared bytes are the
+//! same either way.
 
 use vowp_graph::{Graph, render_ascii, render_mermaid};
 use vowp_protocol::{Edge, EdgeKind, Job, JobId, JobKind, JobLoop, JobState, ProjectName, Role, Timestamp};

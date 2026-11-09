@@ -199,8 +199,8 @@ fn run_switch_inner(
         // TODO(sessions.md §5 step 3, remote-node probe): a switch whose `to_node` is not
         // this node should run `vowp --node <n> doctor --json` and abort when it is not ok.
         // v0.1 probes only the local AdapterRegistry, so a remote target can currently be
-        // attached without proving its harness is available. This is the one deliberately
-        // skipped deliverable of f-n07c-wire-switch.
+        // attached without proving its harness is available. This probe is deliberately
+        // skipped in v0.1.
         let probe = target.as_ref().map(|adapter| adapter.probe());
         let probe_ok = probe.as_ref().is_some_and(|probe| probe.ok);
         if !probe_ok {

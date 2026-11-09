@@ -15,7 +15,7 @@ use crate::{CoreError, Deps};
 
 /// One command from the CLI to the supervisor.
 ///
-/// The wire form is the `kv` value: `{"kind":"retry_job","payload":{"job":"n04-graph"}}`.
+/// The wire form is the `kv` value: `{"kind":"retry_job","payload":{"job":"example-job"}}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Request {

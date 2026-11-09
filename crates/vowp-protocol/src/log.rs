@@ -33,7 +33,7 @@ impl Level {
 
 /// Sink for supervisor/loop log lines. Implementations must be cheap and never panic.
 pub trait Log: Send + Sync {
-    /// Records one line. `target` names the component (for example `l1` or `job n04-graph`).
+    /// Records one line. `target` names the component (for example `l1` or `job example-job`).
     fn log(&self, level: Level, target: &str, msg: &str);
 }
 
@@ -87,7 +87,7 @@ impl Log for MemoryLog {
 }
 
 /// Formats the canonical log line:
-/// `2026-11-08T19:25:47.123Z INFO l1 job n04-graph: running -> gating`.
+/// `2026-11-08T19:25:47.123Z INFO l1 job example-job: running -> gating`.
 pub fn format_log_line(ts: Timestamp, level: Level, target: &str, msg: &str) -> String {
     format!("{ts} {} {target} {msg}", level.as_str())
 }

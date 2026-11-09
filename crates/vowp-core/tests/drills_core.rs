@@ -1,6 +1,6 @@
 //! Core drills: crash/continue, hang restart, merge conflict/lockfile, gate fix loop,
 //! orphan reconcile and the secret-scan push block.
-//! Spec: `docs/design/loops.md` §13 (n08c rows).
+//! Spec: `docs/design/loops.md` §13.
 
 #[path = "loops_support.rs"]
 mod h;

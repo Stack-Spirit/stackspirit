@@ -1,4 +1,4 @@
-//! Reindex tests for `vowp-store` (n03c).
+//! Reindex tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §4.3 and §6
 //! (`reindex_after_deleting_db_restores_index`, `reindex_preserves_switch_capsule_links`,
 //! `reindex_restores_user_session_role`, `reindex_is_idempotent`,

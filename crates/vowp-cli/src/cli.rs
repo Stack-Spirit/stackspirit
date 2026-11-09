@@ -1,10 +1,10 @@
 //! clap definitions for every v0.1 command.
 //!
-//! Spec: `docs/design/cli.md`. The structs are shared by the command handlers; later CLI
-//! jobs replace the handler modules but keep these argument names stable.
+//! Spec: `docs/design/cli.md`. The structs are shared by the command handlers; their
+//! argument names are stable.
 //!
-//! `Command` contains every command the final v0.1 binary exposes, including the commands
-//! whose handlers are still explicit [`crate::CliError::NotImplemented`] stubs.
+//! `Command` contains every command the v0.1 binary exposes, including commands whose
+//! handlers are still explicit [`crate::CliError::NotImplemented`] stubs.
 
 use std::path::PathBuf;
 
@@ -22,7 +22,7 @@ pub const V0_1_COMMANDS: &[&str] = &[
 #[command(
     name = "vowp",
     version,
-    about = "VOWP: the night-shift job supervisor",
+    about = "VOWP: local-first supervisor for AI coding agents",
     disable_help_subcommand = true
 )]
 pub struct Cli {

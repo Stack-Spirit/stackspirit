@@ -60,7 +60,7 @@ Exported by `vowp schema InboxItem` and generated from the protocol types in
       ]
     },
     "JobId": {
-      "description": "Job id slug, for example `n04-graph`.",
+      "description": "Job id slug, for example `example-job`.",
       "type": "string"
     },
     "ProjectName": {

@@ -62,8 +62,8 @@ impl HarnessKind {
 /// One concrete way to run a model: `harness:model[@effort][#variant]`.
 ///
 /// Examples:
-/// * `claude-code:claude-sonnet-5-5@medium`
-/// * `opencode:deepseek/deepseek-flash#max`
+/// * `claude-code:model-a@medium`
+/// * `opencode:provider/model-b#max`
 /// * `cli:codex`
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
@@ -241,7 +241,7 @@ pub struct ExecutorRef {
 pub enum Role {
     /// Plans the job graph.
     Planner,
-    /// Keeps the night healthy.
+    /// Diagnoses stalled or failed jobs.
     Keeper,
     /// Does job work.
     Worker,

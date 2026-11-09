@@ -45,7 +45,7 @@ pub enum LimitRowKind {
 /// One row of the `limits` table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Limit {
-    /// Limits key: `claude`, `deepseek`, or a CLI harness entry name.
+    /// Limits key: the provider name, or a CLI harness entry name.
     pub provider: String,
     /// Harness that reported the limit, when known.
     pub harness: Option<HarnessKind>,

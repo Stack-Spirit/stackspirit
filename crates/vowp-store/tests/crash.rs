@@ -1,4 +1,4 @@
-//! Torn-tail, corruption and reopen tests for `vowp-store` (n03c).
+//! Torn-tail, corruption and reopen tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §4.1 rules 5–6 and §6
 //! (`log_torn_tail_recovery`, `log_corrupt_middle_is_error_not_repair`,
 //! `log_survives_reopen_proptest`).

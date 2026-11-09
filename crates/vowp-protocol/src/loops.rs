@@ -22,7 +22,7 @@ pub enum LoopKind {
     L3,
     /// L4: plan.
     L4,
-    /// L5: keep the night healthy.
+    /// L5: diagnose stalls and failures.
     L5,
     /// L6: probe limited providers.
     L6,

@@ -1,4 +1,4 @@
-//! Blob store and tool-output spill tests for `vowp-store` (n03c).
+//! Blob store and tool-output spill tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6 (`blob_spill_boundary`,
 //! `blob_put_is_atomic_and_deduped`).
 

@@ -135,7 +135,7 @@ Exported by `vowp schema Limit` and generated from the protocol types in
       "type": "integer"
     },
     "provider": {
-      "description": "Limits key: `claude`, `deepseek`, or a CLI harness entry name.",
+      "description": "Limits key: the provider name, or a CLI harness entry name.",
       "type": "string"
     },
     "resets_at": {

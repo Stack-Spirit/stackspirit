@@ -1,4 +1,4 @@
-//! Run, gate-result and worker-slot repository tests for `vowp-store` (n03a).
+//! Run, gate-result and worker-slot repository tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! L9 schedule catch-up tests used by the n08d failover drill.
+//! L9 schedule catch-up tests used by the failover drill.
 //! Spec: `docs/design/loops.md` §11.
 
 #[path = "failover_support.rs"]

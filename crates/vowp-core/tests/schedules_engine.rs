@@ -1,4 +1,4 @@
-//! Schedule engine tests: ticks, missed-run policies and the three actions (`n08b`).
+//! Schedule engine tests: ticks, missed-run policies and the three actions.
 //! Spec: `docs/design/crates/vowp-core.md` §6 and `docs/design/loops.md` §11.
 
 mod support;

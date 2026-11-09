@@ -78,7 +78,7 @@ pub(crate) struct Applied {
 /// Applies one job event and writes the state row, counters and ledger entry atomically.
 ///
 /// This is the supervisor's copy of `requests::apply_direct`'s job path; both produce the
-/// same ledger `state` detail shape `{"from","to","why"}` (the coordination note of n08c).
+/// same ledger `state` detail shape `{"from","to","why"}`.
 pub(crate) fn apply_event(
     store: &Store,
     job_id: &JobId,

@@ -49,7 +49,7 @@ pub enum RunPurpose {
     Verify,
     /// Plan work.
     Plan,
-    /// Keep the night healthy.
+    /// Diagnose stalled or failed jobs.
     Keep,
     /// Write a capsule.
     Capsule,

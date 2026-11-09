@@ -1,7 +1,7 @@
 //! Shared fake git implementation for `vowp-core` integration tests.
 //!
-//! Built by n07a and copied by later jobs. Every call is recorded and returns a configurable
-//! default, so a loop test can assert the exact git sequence without touching a real repo.
+//! Every call is recorded and returns a configurable default, so a loop test can assert the
+//! exact git sequence without touching a real repo.
 
 #![allow(dead_code)]
 

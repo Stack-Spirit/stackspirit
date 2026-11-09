@@ -44,7 +44,7 @@ for tool in "$CARGO" git python3 curl grep sort sleep; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
-# Publish order: dependencies first. See docs/maintainers/publishing.md.
+# Publish order: dependencies first.
 CRATES=(
   vowp-protocol
   vowp-store

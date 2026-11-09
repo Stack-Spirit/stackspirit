@@ -2,7 +2,7 @@
 # Check that every VOWP crate packages cleanly and that every publish dry run works.
 #
 # This script never publishes anything and never needs a crates.io token. It is the
-# repeatable form of the checks documented in docs/maintainers/publishing.md.
+# repeatable form of the release package checks.
 #
 # Usage:
 #   scripts/release/check-packages.sh [--help]
@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CARGO=${CARGO:-cargo}
 
-# Publish order: dependencies first. See docs/maintainers/publishing.md.
+# Publish order: dependencies first.
 CRATES=(
   vowp-protocol
   vowp-store

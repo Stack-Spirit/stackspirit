@@ -1,8 +1,8 @@
 //! Command dispatch. Spec: `docs/design/crates/vowp-cli.md` §1.
 //!
 //! `init` and `doctor` run before a [`crate::Ctx`] exists; every other command receives one.
-//! Commands owned by later CLI jobs are explicit `NotImplemented` stubs here and are replaced
-//! by their owning jobs.
+//! A command whose handler is not implemented yet is an explicit `NotImplemented` stub here,
+//! never a silent no-op.
 
 use crate::cli::{Command, MaintCommand, PromoteCommand, SessionCommand, UpCommand};
 use crate::{CliError, Ctx, IoStreams};

@@ -391,7 +391,6 @@ vowp/
 ├─ framework/        AGENTS.md, CLAUDE.md, brief/report templates, skills, opencode.jsonc (embedded in the binary)
 ├─ docs/             concepts, quickstarts, guides, reference, design
 ├─ examples/hello-vowp/   a tiny project with a 3-job graph you can run in 5 minutes
-├─ site/             static website (published only through an explicit approved promotion)
 ├─ scripts/          install.sh, systemd unit, cron watchdog
 └─ .github/workflows/ci.yml   fmt, clippy, test on Linux + macOS; release binaries on tags
 ```

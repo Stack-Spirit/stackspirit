@@ -11,7 +11,7 @@ Exported by `vowp schema BriefFrontMatter` and generated from the protocol types
 {
   "$defs": {
     "JobId": {
-      "description": "Job id slug, for example `n04-graph`.",
+      "description": "Job id slug, for example `example-job`.",
       "type": "string"
     }
   },

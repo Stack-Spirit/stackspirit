@@ -1,4 +1,4 @@
-//! Service traits that decouple `vowp-core` modules owned by different jobs.
+//! Service traits that decouple `vowp-core` loops from the services they call.
 //! Spec: `docs/design/types.md` §13 and `docs/design/crates/vowp-core.md`.
 //!
 //! [`SessionOps`] is the boundary between the loops and the real session service: loops call

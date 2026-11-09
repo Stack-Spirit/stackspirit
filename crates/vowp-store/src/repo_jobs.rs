@@ -557,7 +557,7 @@ impl Store {
     ///
     /// Keys are the canonical snake_case state names. `vowp_protocol::JobState` does not
     /// implement `Ord`, so a `BTreeMap<JobState, u32>` cannot be built without changing the
-    /// protocol crate (outside this job's ownership).
+    /// protocol crate.
     pub fn count_jobs_by_state(&self, project: Option<&ProjectName>) -> Result<BTreeMap<String, u32>, StoreError> {
         let mut counts = BTreeMap::new();
         if let Some(project) = project {

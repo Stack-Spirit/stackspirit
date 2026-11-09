@@ -1,4 +1,4 @@
-//! Ledger record, price-table and cost-total tests (`n08b`).
+//! Ledger record, price-table and cost-total tests.
 //! Spec: `docs/design/crates/vowp-core.md` §5.
 
 mod support;

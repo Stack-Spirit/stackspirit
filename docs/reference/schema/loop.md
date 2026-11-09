@@ -137,7 +137,7 @@ Exported by `vowp schema Loop` and generated from the protocol types in
         },
         {
           "const": "L5",
-          "description": "L5: keep the night healthy.",
+          "description": "L5: diagnose stalls and failures.",
           "type": "string"
         },
         {

@@ -2,7 +2,7 @@
 //!
 //! Spec: `docs/design/loops.md` §10. L1 writes `<node>/heartbeat` at the end of every tick;
 //! when it is older than 180 seconds the cron check restarts the supervisor. The constants
-//! here are the text `vowp init` installs (n13).
+//! here are the text `vowp init` installs.
 
 use std::path::Path;
 use std::time::Duration;

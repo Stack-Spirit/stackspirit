@@ -1,5 +1,5 @@
-//! Inbox, limits, releases, kv/request, cascade and backup repository tests for `vowp-store`
-//! (n03b). Spec: `docs/design/crates/vowp-store.md` §6.
+//! Inbox, limits, releases, kv/request, cascade and backup repository tests for
+//! `vowp-store`. Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::sync::Arc;
 use std::time::Duration;

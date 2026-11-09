@@ -8,8 +8,8 @@
 # the next L1 tick.
 #
 # Spec: docs/design/loops.md §10 (L8 — watchdog); heartbeat layout:
-# docs/design/architecture.md §3. This script must match
-# vowp_core::loops::l8::CRON_CHECK_SH once n08d exposes it.
+# docs/design/architecture.md §3. Keep this script in sync with
+# vowp_core::loops::l8::CRON_CHECK_SH.
 
 set -eu
 

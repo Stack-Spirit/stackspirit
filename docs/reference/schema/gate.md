@@ -137,7 +137,7 @@ Exported by `vowp schema Gate` and generated from the protocol types in
         },
         {
           "const": "keeper",
-          "description": "Keeps the night healthy.",
+          "description": "Diagnoses stalled or failed jobs.",
           "type": "string"
         },
         {

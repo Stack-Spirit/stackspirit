@@ -1,4 +1,4 @@
-//! Cron, interval and timezone tests for `ScheduleSpec` (`n08b`).
+//! Cron, interval and timezone tests for `ScheduleSpec`.
 //! Spec: `docs/design/crates/vowp-core.md` §6 and `docs/design/loops.md` §11.
 
 use proptest::prelude::*;

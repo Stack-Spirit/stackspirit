@@ -1,4 +1,4 @@
-//! Shared helpers for the n08d failover/planner/inbox tests.
+//! Shared helpers for the failover/planner/inbox tests.
 //!
 //! Everything reuses the hermetic `loops_support` node: temp directories, a fake clock,
 //! scripted adapters and (when needed) a real git repository under the temp dir.

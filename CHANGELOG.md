@@ -96,8 +96,7 @@ under `.claude/skills/`.
 
 **Docs and example**: concepts, guides, security model, troubleshooting, a
 generated CLI and JSON Schema reference (`docs/reference/`), the design spec
-(`docs/design/`), a docs command/link checker (`docs/tests/`), a static site
-generator (`site/`, unused and not deployed) and the runnable
+(`docs/design/`), a docs command/link checker (`docs/tests/`) and the runnable
 `examples/hello-vowp` fake-adapter demo.
 
 [Unreleased]: https://github.com/syver777/vowp/compare/v0.1.0...HEAD

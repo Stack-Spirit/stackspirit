@@ -1,4 +1,4 @@
-//! Session index, native-session, capsule and switch repository tests for `vowp-store` (n03b).
+//! Session index, native-session, capsule and switch repository tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::sync::Arc;

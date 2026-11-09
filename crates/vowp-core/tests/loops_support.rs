@@ -1,4 +1,4 @@
-//! Shared harness for the n08c loop tests and drills.
+//! Shared harness for the loop tests and drills.
 //!
 //! Everything is hermetic: a temporary node directory, a `FakeClock`, a fake adapter that
 //! replays scripted events and writes scripted files, and (for merge tests) a real git repository
@@ -640,7 +640,7 @@ pub fn create_session(node: &TestNode, job: &Job) -> vowp_protocol::SessionId {
         .expect("create session")
 }
 
-/// Renders a report Markdown file with the n08c front matter.
+/// Renders a report Markdown file with the report front matter.
 pub fn report_markdown(job: &str, branch: &str, status: &str, verdict: Option<&str>, findings: &[&str]) -> String {
     let mut text = format!(
         "---\njob: {job}\nstatus: {status}\nbranch: {branch}\ncommits: []\ntests: \"cargo test: pass\"\nfiles_changed: []\nopen_items: []\nquestions_for_owner: []\n"

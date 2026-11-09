@@ -1,4 +1,4 @@
-//! Loop and schedule repository tests for `vowp-store` (n03b).
+//! Loop and schedule repository tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::sync::Arc;

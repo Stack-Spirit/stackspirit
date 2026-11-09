@@ -3,8 +3,8 @@
 //! The crate is pure: no I/O, no clock reads, no threads. `vowp-core` feeds it rows from the
 //! store and applies the effects it returns. Spec: `docs/design/crates/vowp-graph.md`.
 //!
-//! This job (n04a) builds [`Graph`] and the [`transition`] state machine; the ownership,
-//! dispatch, rendering, YAML and guard modules are placeholders owned by n04b.
+//! The crate exposes [`Graph`], the [`transition`] state machine, dispatch planning,
+//! ownership locks, the ASCII/Mermaid renderers and YAML import/export.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -25,8 +25,7 @@ pub use machine::{
     transition, transition_with,
 };
 
-// Glob re-exports so the placeholder modules of n04b gain a crate-root path without lib.rs
-// being touched again.
+// Glob re-exports so every module API is available at the crate root.
 #[allow(unused_imports)]
 pub use dispatch::*;
 #[allow(unused_imports)]

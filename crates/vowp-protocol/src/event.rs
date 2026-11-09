@@ -40,7 +40,7 @@ pub enum Actor {
 pub enum SessionRole {
     /// Plans the job graph.
     Planner,
-    /// Keeps the night healthy.
+    /// Diagnoses stalled or failed jobs.
     Keeper,
     /// Does job work.
     Worker,

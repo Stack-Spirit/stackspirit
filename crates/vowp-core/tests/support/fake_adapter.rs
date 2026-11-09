@@ -1,8 +1,8 @@
 //! Shared fake adapter for `vowp-core` integration tests.
 //!
-//! Built by n07a and copied by later jobs: it replays a fixed event list through the real
-//! [`Adapter`] trait and records every [`StartInput`], so tests can assert what the session
-//! layer passed to a harness without spawning a process.
+//! It replays a fixed event list through the real [`Adapter`] trait and records every
+//! [`StartInput`], so tests can assert what the session layer passed to a harness without
+//! spawning a process.
 
 #![allow(dead_code)]
 

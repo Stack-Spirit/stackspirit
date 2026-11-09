@@ -1,4 +1,4 @@
-//! Job and edge repository tests for `vowp-store` (n03a).
+//! Job and edge repository tests for `vowp-store`.
 //! Spec: `docs/design/crates/vowp-store.md` §6.
 
 use std::sync::Arc;
