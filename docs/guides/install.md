@@ -94,9 +94,11 @@ brief/report templates), creates `.vowp/jobs`, `.vowp/checkpoints` and `.vowp/te
 `l6-failover`, `l7-inbox`, `l8-watchdog` 300 s and `l9-schedules` 60 s (0 means event-driven).
 
 On a fresh repository, `--no-framework` writes only `vowp.toml` and `.gitignore` (2 files). Existing
-framework files are skipped and listed; a second `init` exits 4 with
-`project already initialised ...; use --force`, and `--force` overwrites the generated files. `vowp up` *(planned)* will also ensure the loop rows on startup, so an
-existing project picks up the current defaults.
+framework files are skipped and listed, with one exception: an existing `CLAUDE.md` keeps its content and
+gains `@AGENTS.md` when that line is missing (the file counts as written); if it already contains the
+line it is skipped. A second `init` exits 4 with `project already initialised ...; use --force`, and
+`--force` overwrites the generated files. `vowp up` *(planned)* will also ensure the loop rows on
+startup, so an existing project picks up the current defaults.
 
 ## Verify the node
 
@@ -125,10 +127,10 @@ Exit code 0 means no `fail`. A missing harness is a `fail`; a missing tmux is a 
 
 | Path | Contents |
 |---|---|
-| `~/.vowp/` | Node state: database, session logs, blobs, runs, logs, backups, inbox copies. |
+| `~/.vowp/` | Node state: database, session logs, blobs, runs, logs, releases.log, backups, inbox copies. |
 | `<repo>/vowp.toml` | Project configuration, committed. |
 | `<repo>/AGENTS.md`, `CLAUDE.md`, `opencode.jsonc` | Framework files installed by `vowp init`, committed. |
-| `<repo>/.vowp/` | Job briefs and reports, checkpoints, optional graph snapshot, release log. |
+| `<repo>/.vowp/` | Job briefs and reports, checkpoints and optional graph snapshot. |
 | `<repo>/../<repo>-wt/<job-id>` | Job worktrees on branch `job/<job-id>`. |
 
 Treat `~/.vowp` as sensitive: session logs can contain prompts, tool output and file contents. Back it

@@ -94,8 +94,9 @@ v0.1.
 
 ## The life of one job
 
-1. **Added.** `vowp job add` validates the id, dependencies and gates, inserts the job and its `needs`
-   edges, and writes the brief. The planner can do the same through the CLI.
+1. **Added.** `vowp job add` validates the id and dependencies, parses the gate list, inserts the job and
+   its `needs` edges, and writes the brief. Custom command gates are validated when they run, not at add
+   time. The planner can do the same through the CLI.
 2. **Ready.** L1 sees that every `needs` job is `done` and moves the job from `pending` to `ready`.
 3. **Dispatched.** When a worker slot is free, the job's owned paths do not overlap another running job,
    and its provider is not limited, L1 creates the worktree `<worktree_root>/<id>` and branch
@@ -134,14 +135,16 @@ pass an explicit temporary directory).
 │    └─ adapters.json          harness-side session ids
 ├─ runs/<runId>.jsonl          raw harness stdout (debug only)
 ├─ logs/supervisor.log         structured loop log
+├─ releases.log                append-only promotion and rollback history
 ├─ backups/                    `vowp backup` *(planned)* output
 └─ inbox/<inboxId>.md          human-readable copy of inbox items
 ```
 
 Inside a project, `vowp init` writes `vowp.toml`, the embedded framework files sourced from
 [`framework/`](../../framework/README.md), and a `.vowp/` directory for job briefs, reports, optional graph
-snapshots, planner checkpoints and the release log. Job worktrees live outside the repository, by default
-in `<repo>/../<repo-name>-wt/<job-id>`.
+snapshots and planner checkpoints. The release log lives in the node home (`~/.vowp/releases.log`), not
+in the repository. Job worktrees live outside the repository, by default in
+`<repo>/../<repo-name>-wt/<job-id>`.
 
 The session log is the authority for conversation content. The corresponding rows in `vowp.db` are an
 index that `vowp reindex` *(planned)* can rebuild. Deleting the database never loses session content;

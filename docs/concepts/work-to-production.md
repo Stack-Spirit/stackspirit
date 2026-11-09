@@ -36,7 +36,7 @@ rollback = "./scripts/rollback.sh"                    # optional explicit comman
 | `approval` | `human` (default) creates an inbox approval item; `policy` allows `--yes` to approve automatically. |
 | `serving_bank` | Command that snapshots the currently live artifact before the deploy. `{target}` is expanded. |
 | `probe` | Command that proves the deployed version is live and correct. |
-| `rollback` | Optional explicit rollback command; otherwise the banked serving copy is redeployed. |
+| `rollback` | Optional explicit rollback command. With `serving_bank` set, omitting it restores the banked snapshot with `tar`; if both are omitted, the release has no rollback command. |
 
 ## The promotion pipeline
 
@@ -53,7 +53,7 @@ rollback = "./scripts/rollback.sh"                    # optional explicit comman
 5. **Deploy.** The environment's `deploy` commands run in its checkout.
 6. **Probe.** The post-deploy probe runs and must pass.
 7. **Record.** The release row stores the from/to commits, guard results, snapshot path, rollback command,
-   probe output and approver, and a line is appended to `.vowp/releases.log`.
+   probe output and approver, and a line is appended to `~/.vowp/releases.log`.
 
 A guard or diff failure exits 5 and records the release as `refused`. A deploy or probe failure records
 `failed` and leaves the rollback available. A release waiting for approval exits 0 and prints the inbox
@@ -100,10 +100,12 @@ automatically with a weakened check.
 ## Rollback
 
 `vowp rollback <release> [--yes]` redeploys the banked serving copy that was captured before the original
-deploy. It creates a new rollback release row and sets the original release's `rolled_back_by` field to
-the new release id, runs the environment's rollback command if one is configured, and appends the same
-release-log line format. Rollback does not re-run the promotion gates: the artifact being restored is the
-one that was live before.
+deploy. This requires a rollback command: configure `serving_bank` (the banked snapshot is restored with
+`tar` when `rollback` is omitted), or configure `rollback` directly. If neither is set, the release has
+no rollback command and `vowp rollback` fails with `has no rollback command`. Rollback creates a new
+release row and sets the original release's `rolled_back_by` field to the new release id, runs the
+rollback command, and appends the same release-log line format. Rollback does not re-run the promotion
+gates: the artifact being restored is the one that was live before.
 
 ## Why this is stricter than "deploy on merge"
 

@@ -28,9 +28,11 @@ the same.
 
 ## Install and build
 
-**`vowp: unknown command` after a build.** Check the spelling against `vowp --help`. A command that has
-not landed yet is still parsed and returns `not implemented: <command>` instead; see the
-[job map](design/job-map.md) for what is still to come.
+**`vowp: unknown command` after a build.** Check the spelling against `vowp --help`. A command that is
+defined but has not landed yet returns `not implemented: <command>` once a project context exists. Before
+`vowp init`, commands that need the project home can first exit 3 with the error "vowp home is not
+initialised"; run `vowp init` to reach the implementation error. See the [job map](design/job-map.md) for
+what is still to come.
 
 **The wrong binary runs.** Two installs on `PATH`:
 
@@ -54,13 +56,13 @@ default. Add that directory to `PATH`, or install with `--root <dir>` and add `<
 | Symptom | Cause and fix |
 |---|---|
 | Exit 4, "already initialised" | A `vowp.toml` already exists. `init` writes nothing in this case; use `--force` only when you intend to replace generated files. |
-| Files listed as skipped | On a first init, `AGENTS.md`, `CLAUDE.md` or `opencode.jsonc` already existed. VOWP does not overwrite them without `--force`; merge the missing lines yourself. |
+| Files listed as skipped | On a first init, `AGENTS.md` or `opencode.jsonc` already existed; VOWP keeps them without `--force`. `CLAUDE.md` is special: VOWP appends `@AGENTS.md` when it is missing, even without `--force`. |
 | `no project: run vowp init` | You are outside a project and more than one project is registered, or none is. `cd` into the repository or pass `--project <name\|path>`. |
 | Wrong project selected | Pass `--project`; the default is the nearest ancestor containing `vowp.toml`, else the only registered project. |
 
 ## `vowp doctor`
 
-The `vowp reindex` and `vowp up` references in this section are *(planned)*.
+**Planned section:** the `vowp reindex` and `vowp up` references here are not implemented yet.
 
 `doctor` exits 0 only when no check is a `fail`. A `warn` is informational.
 
@@ -80,7 +82,7 @@ The `vowp reindex` and `vowp up` references in this section are *(planned)*.
 
 ## Supervisor
 
-The supervisor commands in this section are *(planned)*.
+**Planned section:** the supervisor commands here are not implemented yet.
 
 **`vowp up` exits 4.** A supervisor is already running for this project home. `vowp status` shows the
 pid. Do not start a second one; use `vowp down` or `vowp status --check` to decide whether it is alive.
@@ -105,8 +107,8 @@ a loop problem without leaving a supervisor running.
 Use `vowp job show <id> --runs --gates` first. The job's state, `parked_reason`, `note`, last run
 outcome and gate evidence usually identify the blocker.
 
-The `vowp job` commands in this section are current; `vowp status` *(planned)*, `vowp session`
-*(planned)* and `vowp inbox` *(planned)* are not.
+**Planned section:** the `vowp status`, `vowp session` and `vowp inbox` references below are not
+implemented yet; the `vowp job` commands are current.
 
 | State / symptom | Likely cause | What to do |
 |---|---|---|
@@ -152,7 +154,7 @@ only checks a file exists is rejected by validation for a reason.
 
 ## Providers and limits
 
-The `vowp status` and `vowp inbox` checks below are *(planned)*.
+**Planned section:** the `vowp status` and `vowp inbox` checks below are not implemented yet.
 
 | Limit | Meaning | Action |
 |---|---|---|
@@ -168,7 +170,7 @@ take. An inbox answer unparks only the jobs waiting on that item.
 
 ## Sessions
 
-The `vowp session` commands in this section are *(planned)*; `vowp doctor` is current.
+**Planned section:** the `vowp session` commands here are not implemented yet; `vowp doctor` is current.
 
 **`session switch` exits 6.** The target provider is limited. Pick another rung, or wait for the reset.
 
@@ -195,7 +197,7 @@ permissions. The importer never writes to Claude's files.
 
 ## Schedules
 
-The `vowp schedule` and `vowp loops` commands here are *(planned)*.
+**Planned section:** the `vowp schedule` and `vowp loops` commands here are not implemented yet.
 
 - A bad cron or an interval under 60 seconds exits 2. v0.1 accepts exactly five whitespace-separated
   cron fields; six-field cron with seconds is rejected.
@@ -216,7 +218,7 @@ know; otherwise leave it unknown.
 
 ## Database, backup and reindex
 
-The `vowp reindex` and `vowp backup` commands here are *(planned)*.
+**Planned section:** the `vowp reindex` and `vowp backup` commands here are not implemented yet.
 
 - **Schema too new.** The database was written by a newer binary. Upgrade the binary; if you must go
   back, restore a pre-upgrade backup. VOWP refuses to guess at a newer schema.
@@ -229,7 +231,7 @@ The `vowp reindex` and `vowp backup` commands here are *(planned)*.
 
 ## tmux
 
-The `vowp up`, `vowp attach` and `vowp down` commands here are *(planned)*.
+**Planned section:** the `vowp up`, `vowp attach` and `vowp down` commands here are not implemented yet.
 
 | Symptom | Fix |
 |---|---|

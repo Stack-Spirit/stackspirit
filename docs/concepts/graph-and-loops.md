@@ -92,8 +92,8 @@ The transition table, guards and counter effects are in
 `failed → ready`, `parked → ready` and `stalled → running`; anything else is a conflict. `vowp job park`
 and `vowp job cancel` stop a run and keep the evidence. Keeper commands (`nudge`, `restart`, `replan`,
 `fail`) enqueue a request row that the next tick applies; the CLI never reaches into a running process.
-These commands are implemented today; the supervisor commands (`vowp up`, `vowp status`) that apply
-keeper requests are still *(planned)*.
+These commands are implemented today; the supervisor commands (`vowp up` *(planned)*,
+`vowp status` *(planned)*) that apply keeper requests are still to come.
 
 ## Scheduling rules
 

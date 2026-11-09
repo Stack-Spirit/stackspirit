@@ -45,8 +45,9 @@ On a fresh repository this prints `initialised project my-project at /path (11 f
 It writes `vowp.toml` with the four default profiles and `schedules = []` (so `init` installs no
 schedules), installs the framework files (`AGENTS.md`, `CLAUDE.md`, four skills and `opencode.jsonc`),
 creates `.vowp/`, registers the local node and project, and seeds the nine default loop rows as
-**active**. Existing framework files are skipped and listed; an already initialised project exits 4
-unless you pass `--force`. The exact `vowp.toml` defaults and file list are in the
+**active**. Existing framework files are skipped and listed, except `CLAUDE.md`, which keeps its content
+and gains `@AGENTS.md` when that line is missing; an already initialised project exits 4 unless you pass
+`--force`. The key `vowp.toml` defaults and file list are in the
 [install guide](install.md#prepare-a-project-repository). `vowp up` *(planned)* will also ensure the loop
 rows on startup.
 
@@ -147,6 +148,8 @@ without `--dry-run` to let the planner create jobs through the CLI.
 
 ## 6. Start the supervisor
 
+**Planned section:** the supervisor, status, board and attach commands here are not implemented yet.
+
 ```sh
 # (planned)
 vowp up
@@ -200,6 +203,8 @@ vowp inbox answer <id> "Use the existing title style"
 Answering unparks only the asking job. Everything else keeps running.
 
 ## 8. Stop cleanly
+
+**Planned section:** the stop and restart commands here are not implemented yet.
 
 ```sh
 # (planned)

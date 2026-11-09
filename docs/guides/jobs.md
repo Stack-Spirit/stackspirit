@@ -40,10 +40,12 @@ vowp job add \
 | `--max-attempts n` | Fix rounds before `on_exhausted`; default 3. |
 | `--brief-file <path>` / `--brief -` | Brief body from a file or stdin. Without either, a template brief is written. |
 
-The command validates the id, the dependency graph (unknown needs and cycles are rejected) and the gate
-definitions. It writes the generated front-matter plus your body to `.vowp/jobs/<id>/brief.md`, inserts
-the job and edges, and leaves the job `pending`; on success it prints `added job <id> (pending)`. It
-exits 4 if the id already exists.
+The command validates the id and the dependency graph (unknown needs and cycles are rejected) and
+parses the gate list (named sets and short forms). It does not validate a custom command gate at add
+time: an anti-pattern such as `test -f README.md` is stored and is rejected later, when the gate runs.
+It writes the generated front-matter plus your body to `.vowp/jobs/<id>/brief.md`, inserts the job and
+edges, and leaves the job `pending`; on success it prints `added job <id> (pending)`. It exits 4 if the
+id already exists.
 
 `vowp job update <id>` changes `--title`, `--priority`, `--profile`, `--owns`, `--reads`, `--gates`,
 `--add-needs`, `--remove-needs` or `--note`. A job in `running`, `gating`, `reviewing` or `merging` may
@@ -225,22 +227,24 @@ woken.
 
 ```sh
 vowp job ls
-vowp job show n04-graph --brief --report --runs --gates
+vowp job show n04-graph --runs --gates
+vowp job show n04-graph --brief
+vowp job show n04-graph --report
 vowp graph --mermaid
 vowp graph --export .vowp/graph.yaml
 ```
 
 `vowp job ls` hides terminal `done`, `cancelled` and `replanned` jobs unless you pass `--all`. `job show`
 prints the job and its edges; `--runs` adds recent runs with outcomes and costs, and `--gates` adds gate
-results with evidence tails.
-`graph --export` writes YAML; `graph --import` validates and inserts missing jobs and edges but never
-overwrites an existing job.
+results with evidence tails. `--brief` and `--report` print the file contents and return immediately, so
+they are used on their own rather than combined with `--runs`/`--gates`. `graph --export` writes YAML;
+`graph --import` validates and inserts missing jobs and edges but never overwrites an existing job.
 
 Safe state changes:
 
 | Command | Effect |
 |---|---|
-| `vowp job retry <id>` | `failed → ready`, `parked → ready`, `stalled → running`; other states exit 4. The retry resets the attempt counters. |
+| `vowp job retry <id>` | `failed → ready` (resets `attempts`, `continues` and `hang_restarts`), `parked → ready` or `stalled → running` (both reset only `continues`); other states exit 4. |
 | `vowp job park <id> [--reason t]` | Any non-terminal → `parked(manual)`; stops the run. Resume with `retry`. |
 | `vowp job cancel <id>` | Any non-terminal → `cancelled`; keeps branch and worktree for inspection. Dependents stay `pending` and are flagged `blocked-by-cancelled`. |
 | `vowp job nudge <id>` | Keeper request: ask the stalled run to continue. |

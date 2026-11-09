@@ -4,8 +4,8 @@ A VOWP project is homed on one node. That node runs the supervisor, owns the dat
 worktrees, and decides job state. Other nodes are reachable over SSH; in v0.1 there is no cross-node
 sync, replication or shared database.
 
-> **Status: mixed.** `vowp init` and `vowp doctor` are current. Node registration, `--node` and cross-node
-> sessions are *(planned)* until n09c merges.
+> **Status: mixed.** `vowp init`, `vowp doctor` and the `--node` flag are current. Node registration
+> (`vowp node ...`) and cross-node session commands are *(planned)* until n09c merges.
 
 ## What a node is
 
@@ -52,9 +52,11 @@ The local node is registered by `vowp init`; you normally do not add it by hand.
 ## Run a command remotely
 
 ```sh
-# (planned)
-vowp --node vps status
+# --node is current; job ls is implemented
 vowp --node vps job ls
+
+# (planned) — status and session commands
+vowp --node vps status
 vowp --node vps session ls
 vowp --node vps session tail <id> --follow
 ```
@@ -70,7 +72,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <target> vowp <args…>
 255 from SSH becomes exit 7 (`remote`), including a missing remote `vowp`. If the target is the local
 node, the flag is ignored and the command runs in-process.
 
-Some commands have special streaming rules. These session commands are *(planned)*:
+**Planned section:** the cross-node session commands below are not implemented yet.
 
 - `vowp session import <file> --node vps` streams the bundle over SSH stdin; the remote never needs the
   file path.
@@ -89,6 +91,9 @@ For a one-off move, prefer a session switch or export/import rather than moving 
 not change node during failover in v0.1.
 
 ## Example: laptop and VPS
+
+**Planned section:** node registration, supervisor and attach commands in this example are not
+implemented yet.
 
 ```sh
 # on the laptop, where the project is homed

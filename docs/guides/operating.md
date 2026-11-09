@@ -10,6 +10,8 @@ survives a crash; `vowp up` *(planned)* again reconciles and continues.
 
 ## Start and stop
 
+**Planned section:** the lifecycle commands here are not implemented yet.
+
 ```sh
 # (planned)
 vowp up                          # ensure tmux windows, detach the supervisor
@@ -30,6 +32,8 @@ The supervisor uses a lock file `~/.vowp/supervisor.lock` containing its pid. A 
 killed process is detected and replaced; do not delete the database to "fix" a lock.
 
 ## Status and the board
+
+**Planned section:** the status and board commands here are not implemented yet.
 
 ```sh
 # (planned)
@@ -77,6 +81,8 @@ file contents.
 
 ## Loops
 
+**Planned section:** the loop commands here are not implemented yet.
+
 ```sh
 # (planned)
 vowp loops
@@ -101,6 +107,8 @@ or run a command. Missed runs while the node was down either run once (`run_once
 
 ## Backups and reindex
 
+**Planned section:** the backup and reindex commands here are not implemented yet.
+
 ```sh
 # (planned)
 vowp backup
@@ -119,7 +127,7 @@ of hand-editing `vowp.db`.
 
 ## Watchdog
 
-The `vowp up`/`vowp status` checks in this section are *(planned)*.
+**Planned section:** the `vowp up`/`vowp status` checks here are not implemented yet.
 
 The design uses two layers: a systemd user unit with `Restart=always` (or an equivalent process
 supervisor) and a five-minute cron check that reads `~/.vowp/heartbeat` and restarts the service when it
@@ -132,7 +140,8 @@ restarts the supervisor, which then reconciles.
 
 ## Upgrade the binary
 
-The `vowp down` and `vowp up` steps are *(planned)*; `vowp doctor` is current.
+**Planned section:** the `vowp down` and `vowp up` steps here are not implemented yet; `vowp doctor`
+is current.
 
 1. `vowp down`.
 2. Build or install the new binary over the old one.
@@ -144,6 +153,8 @@ binary is refused (`SchemaTooNew`) rather than guessed at. Back up before an upg
 binary is safe only if the old binary understands the schema, so restore the backup if it does not.
 
 ## Costs
+
+**Planned section:** the cost commands here are not implemented yet.
 
 ```sh
 # (planned)
@@ -158,7 +169,7 @@ harness receipt when available; otherwise a labelled price-table estimate, other
 
 ## Routine checks
 
-The commands below are *(planned)*.
+**Planned section:** the commands below are not implemented yet.
 
 Once a day:
 

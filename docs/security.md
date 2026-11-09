@@ -160,7 +160,7 @@ back to `vowp session tail --follow` *(planned)*.
 - Approval is a human inbox item by default. `--yes` is honoured only for `approval = "policy"`; it
   never bypasses a human approval.
 - Deploy and probe must both pass. A probe failure records `failed` and keeps the rollback available.
-- Every terminal state appends a line to `.vowp/releases.log` with the rollback command.
+- Every terminal state appends a line to `~/.vowp/releases.log` with the rollback command.
 
 ## What VOWP does not protect against
 

@@ -34,16 +34,19 @@ bash docs/tests/check-commands.sh
 
 It does **not** validate flags or arguments. It does distinguish a command that only appears in
 `--help` from one whose handler is still the explicit `NotImplemented` stub: a documented command whose
-top-level handler is a stub must be marked *(planned)* in the page or in the section before it. The
-checker reads `crates/vowp-cli/src/cli.rs` and `crates/vowp-cli/src/cmd/` to make that distinction.
+top-level handler is a stub must be marked *(planned)*. The marker must be on the reference line, in a
+leading `# (planned)` comment inside the same fenced block, or in an explicit
+`**Planned section:**`/`<!-- planned-section -->` declaration for the section. A stray “planned” word
+elsewhere in the prose is not enough. The checker reads `crates/vowp-cli/src/cli.rs` and
+`crates/vowp-cli/src/cmd/` to make that distinction.
 
 ## Status declaration
 
 Every page that shows a `vowp` command must declare `Status: current`, `Status: planned` or
 `Status: mixed`. A planned page covers all its commands; a mixed page must mark each not-yet-implemented
-command or section with the literal marker `*(planned)*`. The checker fails a page with commands but no
-declaration, and fails an unmarked command whose handler is still a stub. When the CLI lands, remove the
-mark and move the page to `current` or `mixed`.
+command with `*(planned)*` or declare its section with `**Planned section:**` (or the HTML comment form).
+The checker fails a page with commands but no declaration, and fails an unmarked command whose handler is
+still a stub. When the CLI lands, remove the mark and move the page to `current` or `mixed`.
 
 ## Adding a command
 

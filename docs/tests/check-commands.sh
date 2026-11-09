@@ -6,7 +6,7 @@
 # and cross-checked against V0_1_COMMANDS in crates/vowp-cli/src/cli.rs. The
 # implementation status comes from the CLI dispatch table: a command is current
 # when its handler module is real code, not the explicit NotImplemented stub
-# that n09a created for later jobs. A required-set assertion catch parser drift.
+# that n09a created for later jobs. A required-set assertion catches parser drift.
 #
 # Scope: README.md, docs/concepts/**, docs/guides/**, docs/security.md and
 # docs/troubleshooting.md. docs/design/** is the reference, not a consumer.
@@ -286,14 +286,27 @@ for path in sorted({path for path, _, _, _ in references}):
         page_status[path] = match.group(1)
 
 
+SECTION_MARKER = re.compile(r"^\s*(?:>\s*)?\*\*planned section[:.]?\*\*", re.IGNORECASE)
+HTML_SECTION_MARKER = "<!-- planned-section -->"
+
+
 def planned_near(path, number):
-    """True when the reference sits in a section/block marked planned."""
+    """True when the reference itself or its explicit section/block marker says planned.
+
+    A stray "(planned)" sentence in the same prose section is not enough. The
+    accepted declarations are the literal *(planned)* on the reference line, a
+    leading `# (planned)` comment inside the same fenced block, or an explicit
+    `**Planned section:**` / `<!-- planned-section -->` line in the section.
+    """
     lines = page_lines[path]
     index = number - 1
-    if "planned" in lines[index].lower():
+    current = lines[index].strip()
+    if (
+        "*(planned)*" in lines[index]
+        or SECTION_MARKER.match(current)
+        or HTML_SECTION_MARKER in current
+    ):
         return True
-    # Walk back to the nearest Markdown heading, but stop at a fence boundary
-    # so a marker in one code block does not cover a later block.
     in_fence = False
     fence_marker = ""
     block_start = 0
@@ -312,11 +325,16 @@ def planned_near(path, number):
             continue
         if not in_fence and re.match(r"#{1,6}\s", stripped):
             section_start = i
-    # Inside a code block the marker may be in the block's leading comment.
-    # In prose, the whole section counts, so a planned note covers its tables
-    # and commands after a code block too.
-    start = max(block_start, section_start) if in_fence else section_start
-    return "planned" in "\n".join(lines[start:index]).lower()
+    if in_fence:
+        for line in lines[block_start:index]:
+            stripped = line.strip()
+            if stripped.startswith("#") and "planned" in stripped.lower():
+                return True
+    for line in lines[section_start:index]:
+        stripped = line.strip()
+        if SECTION_MARKER.match(stripped) or HTML_SECTION_MARKER in stripped:
+            return True
+    return False
 
 
 failures = []
