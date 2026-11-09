@@ -284,7 +284,7 @@ for path in doc_files:
 # the not-yet-implemented ones.
 page_status = {}
 status_re = re.compile(
-    r"^\s*(?:>\s*)?(?:\*\*)?status:\s*(current|planned|mixed)\b", re.IGNORECASE
+    r"^(?:>\s*)?(?:\*\*)?status:\s*(current|planned|mixed)\b", re.IGNORECASE
 )
 for path in sorted({path for path, _, _, _ in references}):
     in_fence = False
@@ -317,8 +317,9 @@ def planned_near(path, number):
 
     A stray "(planned)" sentence in the same prose section is not enough. The
     accepted declarations are the literal *(planned)* on the reference line, a
-    leading `# (planned)` comment inside the same fenced block, or an explicit
-    `**Planned section:**` / `<!-- planned-section -->` line in the section.
+    leading or trailing `# (planned)` comment inside the same fenced block, or an
+    explicit `**Planned section:**` / `<!-- planned-section -->` line in the
+    section.
     """
     lines = page_lines[path]
     index = number - 1
@@ -350,7 +351,15 @@ def planned_near(path, number):
     if in_fence:
         for line in lines[block_start:index]:
             stripped = line.strip()
-            if re.match(r"#\s*\(planned\)\b", stripped, re.IGNORECASE):
+            if re.match(r"#\s*\(planned\)(?!\w)", stripped, re.IGNORECASE):
+                return True
+        for line in lines[index + 1:]:
+            stripped = line.strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                if stripped[:3] == fence_marker:
+                    break
+                continue
+            if re.match(r"#\s*\(planned\)(?!\w)", stripped, re.IGNORECASE):
                 return True
     for line in lines[section_start:index]:
         stripped = line.strip()
