@@ -152,6 +152,37 @@ fn kill_window_refuses_when_the_recorded_pid_changed() {
 }
 
 #[test]
+fn kill_window_refuses_when_the_recorded_socket_changed() {
+    let home = tempfile::tempdir().expect("home");
+    let tmux = Tmux::for_home(home.path());
+    if skip_without_tmux(&tmux) {
+        return;
+    }
+    let guard = Tmux::in_private_dir(
+        tmux.socket_name().expect("socket").to_owned(),
+        tmux.socket_dir().expect("dir"),
+    )
+    .expect("guard");
+    let _cleanup = Cleanup(guard);
+
+    tmux.ensure_session("vowp-other-socket").expect("session");
+    tmux.new_window("vowp-other-socket", "job-a", &sleep_spec())
+        .expect("window");
+    let pid = tmux.server_pid().expect("pid").expect("running server");
+    std::fs::write(
+        record_path(home.path()),
+        format!("socket=vowp-somewhere-else\npid={pid}\n"),
+    )
+    .expect("record");
+
+    assert!(matches!(
+        tmux.kill_window("vowp-other-socket", "job-a"),
+        Err(TmuxError::Refused(_))
+    ));
+    assert!(tmux.window_exists("vowp-other-socket", "job-a").expect("window exists"));
+}
+
+#[test]
 fn kill_session_refuses_when_the_server_was_not_recorded() {
     let home = tempfile::tempdir().expect("home");
     let tmux = Tmux::for_home(home.path());
