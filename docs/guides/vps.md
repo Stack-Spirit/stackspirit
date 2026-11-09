@@ -188,14 +188,14 @@ vowp doctor
 `doctor` prints `ok`, `warn` or `fail` per check and exits 0 only when nothing failed. The checks
 that matter most on a VPS:
 
-| Check | If it fails |
+| Check | If it reports a problem |
 |---|---|
 | `home` | Make the node home (`~/.vowp` by default) writable by `<your-user>`. |
 | `db` | Move an unsupported or corrupt database aside; do not delete a database from a newer binary. |
 | `git` / `tmux` | Install the missing program or fix `PATH`; tmux is a warning, but jobs need it. |
 | `config` | Fix the named key in `vowp.toml`. |
 | `harness:<name>` | Install the harness or set `[harnesses.<name>].binary` to its absolute path. |
-| `providers` | Set the named environment variable in the environment that starts the supervisor. |
+| `providers` | Set the named environment variable in the environment that starts the supervisor. An absent variable is a warning, but the harness may still need it. |
 
 A missing harness is a `fail` because dispatch would fail later. A missing tmux is a `warn`, but a
 dispatched job still needs a window.
@@ -312,8 +312,9 @@ refreshing view; `--once` prints one snapshot.
 ssh -t <your-user>@<your-vps> 'cd /home/<your-user>/src/<your-project> && vowp attach'
 ```
 
-If tmux is unavailable, `vowp attach <job-id>` falls back to `vowp session tail <job-id> --follow`.
-The supervisor log is structured text:
+If tmux is unavailable, `vowp attach <job-id>` tails the job's latest session log. To follow that
+log yourself, find its session id with `vowp session ls --job <job-id>` and run
+`vowp session tail <session-id> --pretty --follow`. The supervisor log is structured text:
 
 ```sh
 tail -n 100 ~/.vowp/logs/supervisor.log

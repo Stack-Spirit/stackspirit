@@ -208,7 +208,8 @@ origin session is never modified, and importing the same bundle twice creates tw
 The windows are **views, never control channels**. VOWP tags its windows and only ever kills tagged
 windows. It never sends keystrokes to a harness TUI, never respawns a pane and never reads screen text
 for decisions — logs are authoritative. `vowp attach [job]` attaches to the tmux session; without tmux,
-`vowp attach <job>` falls back to `vowp session tail --follow`.
+`vowp attach <job-id>` tails the job's latest session log, and `vowp session ls --job <job-id>` prints
+the session id for `vowp session tail <session-id> --pretty --follow`.
 
 ## Watching an interactive Claude Code session
 

@@ -152,8 +152,8 @@ The window manager is deliberately narrow:
 - `capture-pane` is for display only. Decisions come from the log and the database, never from screen
   text.
 
-If tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach <job>` falls
-back to `vowp session tail --follow`.
+If tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach <job-id>` falls back to
+tailing the job's latest session log.
 
 Contributors and agents must follow the same rule in manual repros: never run a tmux command
 against the default server; use a private `-L <unique>` socket and `TMUX_TMPDIR`, and never

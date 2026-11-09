@@ -177,8 +177,9 @@ into the log.
 `bundle too new` means its protocol version is newer than the binary; `checksum mismatch` means it was
 edited or truncated. Nothing is created on rejection. Re-export from the source.
 
-**`attach` falls back to `tail`.** tmux is absent or the window is gone. The session is still readable
-with `vowp session tail <id> --follow`.
+**`attach` falls back to the session log.** tmux is absent or the window is gone.
+`vowp attach <job-id>` tails the job's latest session log. To follow it yourself, find the session
+id with `vowp session ls --job <job-id>` and run `vowp session tail <session-id> --pretty --follow`.
 
 **`session watch` exits 1.** The transcript directory is unreadable. Pass `--claude-dir <dir>` and check
 permissions. The importer never writes to Claude's files.
@@ -222,7 +223,7 @@ know; otherwise leave it unknown.
 |---|---|
 | `tmux: command not found` | Install tmux. `vowp up --no-tmux` skips the initial layout but does not let jobs run without windows. |
 | No `vowp-<project>` session | `vowp up` creates it; check the log for a tmux error. |
-| A job window is gone | The window is a view; the session log is intact. `vowp attach <job>` falls back to the tail. |
+| A job window is gone | The window is a view; the session log is intact. `vowp attach <job-id>` tails the job's latest session log. |
 | Windows from an old project remain | `vowp down --kill-windows` closes only tagged windows for this project. VOWP never kills untagged windows. |
 
 ## Remote nodes
