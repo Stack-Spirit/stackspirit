@@ -175,10 +175,21 @@ pub fn import(
     let target = target_executor(deps, bundle, executor);
     let cwd = resolve_cwd(deps, bundle, cwd);
     let origin = bundle.session.id.clone();
+    // The origin row may name a project/job this node has never seen. The session
+    // index has foreign keys to both tables, so an absent row becomes NULL exactly as
+    // reindex does instead of failing the import with a foreign-key error.
+    let project = match &bundle.session.project {
+        Some(name) if store.project(name)?.is_some() => Some(name.clone()),
+        _ => None,
+    };
+    let job_id = match &bundle.session.job_id {
+        Some(id) if store.job(id)?.is_some() => Some(id.clone()),
+        _ => None,
+    };
 
     let child = SessionService::new(deps.clone()).create_session(NewSession {
-        project: bundle.session.project.clone(),
-        job_id: bundle.session.job_id.clone(),
+        project,
+        job_id,
         role: bundle.session.role.unwrap_or(vowp_protocol::SessionRole::User),
         title: format!("{} (imported)", bundle.session.title),
         cwd,

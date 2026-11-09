@@ -266,6 +266,63 @@ fn recover_switch_with_recorded_event_unfreezes_on_target() {
 }
 
 #[test]
+fn recover_completed_switch_after_limit_is_idle() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "completed after limit");
+    let store = deps.open_store().expect("store");
+    {
+        let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("log");
+        append(
+            &store,
+            &log,
+            HarnessKind::ClaudeCode,
+            EventBody::TurnEnded(TurnEnded {
+                turn: 1,
+                stop_reason: vowp_protocol::StopReason::Limit,
+                duration_ms: None,
+            }),
+        );
+        append(
+            &store,
+            &log,
+            HarnessKind::ClaudeCode,
+            EventBody::SessionExecutor(SessionExecutor {
+                action: AttachAction::Attach,
+                executor: claude(),
+                node: node(),
+                native_session_id: None,
+                run_id: None,
+                reason: None,
+            }),
+        );
+        log.sync().expect("sync");
+    }
+    let last_seq = SessionLog::open_read(&deps.paths, &session)
+        .expect("log")
+        .last_seq()
+        .expect("seq");
+    let switch = started_switch(&session, last_seq);
+    store.insert_switch(&switch).expect("switch row");
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Switching, Some(&claude()))
+        .expect("switching");
+
+    let report = recovery::recover(&deps, &store).expect("recover");
+    assert_eq!(report.switches_completed, 1);
+    let row = store.switch(&switch.id).expect("row").expect("switch");
+    assert_eq!(row.state, SwitchState::Completed);
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(
+        current.state,
+        vowp_protocol::SessionState::Idle,
+        "a completed switch unfreezes on the new executor even after a limit"
+    );
+    assert_eq!(current.executor, Some(claude()));
+}
+
+#[test]
 fn recover_switch_after_target_detach_is_aborted() {
     let tmp = tempdir().expect("tempdir");
     let deps = deps(&tmp);

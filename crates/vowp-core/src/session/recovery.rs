@@ -91,8 +91,13 @@ fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) ->
             log.sync()?;
         }
         store.finish_switch(&switch.id, SwitchState::Completed, None)?;
-        let state = recomputed_state(&events);
-        store.set_session_state(&switch.session_id, state, Some(&switch.to_executor))?;
+        // A completed switch unfreezes to idle on the new executor. The previous
+        // `limit` belongs to the old run; only an abort restores `blocked`.
+        store.set_session_state(
+            &switch.session_id,
+            vowp_protocol::SessionState::Idle,
+            Some(&switch.to_executor),
+        )?;
         Ok(true)
     } else {
         store.finish_switch(&switch.id, SwitchState::Aborted, Some("interrupted by restart"))?;

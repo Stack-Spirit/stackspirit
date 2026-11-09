@@ -14,8 +14,9 @@ use vowp_core::session::bundle::{self, BUNDLE_FORMAT};
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, Deps};
 use vowp_protocol::{
-    Actor, AssistantMessage, EventBody, EventEnvelope, EventSource, EventType, Executor, FakeClock, HarnessKind,
-    MemoryLog, NodeName, SessionId, SessionRole, Timestamp, ToolResult, UserMessage,
+    Actor, AssistantMessage, EventBody, EventEnvelope, EventSource, EventType, Executor, FakeClock, HarnessKind, JobId,
+    JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, SessionId, SessionRole, Timestamp, ToolResult,
+    UserMessage,
 };
 use vowp_store::blobs::BlobStore;
 use vowp_store::session_log::{NewEvent, SessionLog};
@@ -86,10 +87,20 @@ fn deps_with_capsule(tmp: &TempDir, intent: &str) -> Deps {
 }
 
 fn create_session(service: &SessionService, tmp: &TempDir, name: &str) -> SessionId {
+    create_session_with(service, tmp, name, None, None)
+}
+
+fn create_session_with(
+    service: &SessionService,
+    tmp: &TempDir,
+    name: &str,
+    project: Option<ProjectName>,
+    job_id: Option<JobId>,
+) -> SessionId {
     service
         .create_session(vowp_protocol::NewSession {
-            project: None,
-            job_id: None,
+            project,
+            job_id,
             role: SessionRole::Worker,
             title: name.to_owned(),
             cwd: tmp.path().join("project"),
@@ -358,4 +369,79 @@ fn bundle_inlines_small_blobs_only() {
     let blobs = BlobStore::new(deps.paths.blobs_dir(&child));
     assert_eq!(blobs.get(&small_ref.sha256).expect("small blob"), small.as_bytes());
     assert!(!blobs.exists(&large_ref.sha256));
+}
+
+#[test]
+fn bundle_import_drops_missing_project_and_job_rows() {
+    let source_tmp = tempdir().expect("source tempdir");
+    let source_deps = deps_with_capsule(&source_tmp, "cross-node handoff");
+    let source_service = SessionService::new(source_deps.clone());
+    let source_store = source_deps.open_store().expect("source store");
+    let project = ProjectName::parse("probe-project").expect("project name");
+    let job = JobId::parse("n07c-import").expect("job id");
+    source_store
+        .upsert_project(&Project {
+            name: project.clone(),
+            path: source_tmp.path().join("project").to_string_lossy().into_owned(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: ts(),
+            updated_at: ts(),
+        })
+        .expect("project row");
+    source_store
+        .insert_job(
+            &project,
+            &NewJob {
+                id: job.clone(),
+                title: "import me".to_owned(),
+                kind: JobKind::Build,
+                role: Role::Worker,
+                profile: None,
+                needs: Vec::new(),
+                owns: Vec::new(),
+                reads: Vec::new(),
+                gates: None,
+                priority: None,
+                loop_: None,
+                brief_text: None,
+            },
+            "test",
+        )
+        .expect("job row");
+    let session = create_session_with(
+        &source_service,
+        &source_tmp,
+        "cross node",
+        Some(project.clone()),
+        Some(job.clone()),
+    );
+
+    let exported = bundle::export(&source_deps, &session, 10).expect("export");
+    assert_eq!(exported.session.project, Some(project));
+    assert_eq!(exported.session.job_id, Some(job));
+
+    let dest_tmp = tempdir().expect("dest tempdir");
+    let dest_deps = deps(&dest_tmp, AdapterRegistry::new());
+    let dest_store = dest_deps.open_store().expect("dest store");
+    assert!(
+        dest_store
+            .project(&exported.session.project.clone().unwrap())
+            .expect("project")
+            .is_none()
+    );
+    assert!(
+        dest_store
+            .job(&exported.session.job_id.clone().unwrap())
+            .expect("job")
+            .is_none()
+    );
+
+    let child = bundle::import(&dest_deps, &exported, None, None).expect("cross-node import");
+    let row = dest_store.require_session(&child).expect("child row");
+    assert_eq!(row.project, None, "a missing project row becomes NULL");
+    assert_eq!(row.job_id, None, "a missing job row becomes NULL");
+    assert_eq!(row.parent_session_id, Some(session));
+    assert_eq!(row.title, "cross node (imported)");
 }
