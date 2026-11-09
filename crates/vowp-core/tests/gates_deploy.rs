@@ -149,14 +149,22 @@ fn deploy_gate_fails_on_unknown_env() {
     let tmp = tempdir().unwrap();
     let (deps, job, store, wt) = setup(tmp.path(), VowpConfig::with_defaults_for_tests());
     let marker = wt.join("deployed-in-worktree");
+    // The probe is behavioural, so the gate passes validation and evaluation really reaches
+    // environment resolution. If the unknown environment were ignored and the worktree used
+    // instead, both the deploy command and this probe would succeed.
+    let probe = CmdGate {
+        run: "printf 'probe ok\\n'".to_owned(),
+        expect_pattern: Some("probe ok".to_owned()),
+        ..CmdGate::default()
+    };
     let gate = DeployGate {
         run: format!("printf deployed > '{}'", marker.display()),
-        probe: CmdGate {
-            run: "true".to_owned(),
-            ..CmdGate::default()
-        },
+        probe,
         env: Some("missing".to_owned()),
     };
+    Gate::Deploy(gate.clone())
+        .validate()
+        .expect("the behavioural probe must pass gate validation");
     let runner = GateRunner::new(deps.clone());
     let context = ctx(&deps, &job, &store, &wt, &wt);
     let result = runner.evaluate(&context, 0, &Gate::Deploy(gate)).unwrap();

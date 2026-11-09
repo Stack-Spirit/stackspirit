@@ -5,7 +5,7 @@
 use pretty_assertions::assert_eq;
 
 use vowp_protocol::config::{Approval, CapsuleConfig, MergeConfig, NodeConfig, NodeFile, ProjectConfig, VowpConfig};
-use vowp_protocol::{Executor, ProtocolError};
+use vowp_protocol::{CmdGate, Executor, Gate, ProtocolError};
 
 /// A minimal valid project configuration; tests append tables to it.
 const BASE: &str = r#"
@@ -165,6 +165,64 @@ ladder = ["opencode:deepseek/deepseek-flash#max"]
     reject(&format!("{BASE}\n[node]\nmax_workers = 0\n"));
     reject(&format!("{BASE}\n[node]\nmax_verifiers = 0\n"));
     reject(&format!("{BASE}\n[node]\ntick_secs = 0\n"));
+}
+
+#[test]
+fn config_gate_sets_use_shared_gate_validation() {
+    parse(BASE); // the baseline must be valid, or the cases below prove nothing.
+
+    // Rule 5 must be the single `Gate::validate` rule, not a weaker copy. `stat`, `cat`, bare
+    // `true`, `:` and `[ -e ]` were all missed by the old config-only helper.
+    for run in [
+        "test -f Cargo.toml",
+        "test -d src",
+        "[ -e Cargo.toml ]",
+        "ls -la",
+        "stat Cargo.toml",
+        "cat Cargo.toml",
+        "true",
+        ":",
+    ] {
+        let shared = Gate::Cmd(CmdGate {
+            run: run.to_owned(),
+            ..CmdGate::default()
+        })
+        .validate()
+        .expect_err("the shared rule must reject a file-existence-only command");
+        let toml = format!("{BASE}\n[gates]\nbad = [{{ cmd = {{ run = \"{run}\" }} }}]\n");
+        match VowpConfig::from_toml(&toml) {
+            Err(ProtocolError::Config(message)) => assert_eq!(
+                message,
+                format!("gates.bad[0]: {shared}"),
+                "{run:?} must use the shared gate rule"
+            ),
+            other => panic!("{run:?} must be rejected by the shared gate rule, got {other:?}"),
+        }
+    }
+
+    // The shared rule also covers script gates, deploy commands and probes, nonzero exits
+    // without a pattern, and uncompilable patterns.
+    reject(&format!(
+        "{BASE}\n[gates]\nbad = [{{ script = {{ run = \"stat Cargo.toml\" }} }}]\n"
+    ));
+    reject(&format!(
+        "{BASE}\n[gates]\nbad = [{{ deploy = {{ run = \"cat state\", probe = {{ run = \"printf ok\", expect_pattern = \"ok\" }} }} }}]\n"
+    ));
+    reject(&format!(
+        "{BASE}\n[gates]\nbad = [{{ deploy = {{ run = \"printf ok\", probe = {{ run = \"ls -la\" }} }} }}]\n"
+    ));
+    reject(&format!(
+        "{BASE}\n[gates]\nbad = [{{ cmd = {{ run = \"printf needle\", expect_exit = 1 }} }}]\n"
+    ));
+    reject(&format!(
+        "{BASE}\n[gates]\nbad = [{{ cmd = {{ run = \"printf ok\", expect_pattern = \"(\" }} }}]\n"
+    ));
+
+    // A behavioural gate set still parses and validates.
+    let config = parse(&format!(
+        "{BASE}\n[gates]\ngood = [{{ cmd = {{ run = \"printf ok\", expect_pattern = \"ok\" }} }}, {{ deploy = {{ run = \"scripts/deploy.sh\", probe = {{ run = \"curl -fsS localhost/health\", expect_pattern = \"ok\" }} }} }}]\n"
+    ));
+    config.validate().expect("a behavioural gate set is valid");
 }
 
 #[test]

@@ -666,26 +666,12 @@ impl VowpConfig {
         Ok(())
     }
 
-    /// Validates named gate sets (rule 5).
+    /// Validates named gate sets (rule 5) through the shared [`Gate::validate`] rule.
     fn validate_gate_sets(&self) -> Result<(), ProtocolError> {
         for (name, gates) in &self.gates {
             for (index, gate) in gates.iter().enumerate() {
                 gate.validate()
                     .map_err(|err| ProtocolError::Config(format!("gates.{name}[{index}]: {err}")))?;
-                if let Some(run) = gate_command(gate)
-                    && is_file_existence_only(run)
-                {
-                    return Err(ProtocolError::Config(format!(
-                        "gates.{name}[{index}]: anti-pattern: gate must execute and check results"
-                    )));
-                }
-                if let Gate::Deploy(deploy) = gate
-                    && is_file_existence_only(&deploy.probe.run)
-                {
-                    return Err(ProtocolError::Config(format!(
-                        "gates.{name}[{index}]: anti-pattern: gate must execute and check results"
-                    )));
-                }
             }
         }
         Ok(())
@@ -801,23 +787,4 @@ fn valid_tz(tz: &str) -> bool {
         (Ok(hours), Ok(minutes)) => hours <= 23 && minutes <= 59,
         _ => false,
     }
-}
-
-/// Returns the command a gate runs, when it runs one.
-fn gate_command(gate: &Gate) -> Option<&str> {
-    match gate {
-        Gate::Cmd(cmd) | Gate::Script(cmd) => Some(&cmd.run),
-        Gate::Deploy(deploy) => Some(&deploy.run),
-        Gate::Report(_) | Gate::OwnsRespected(_) | Gate::Pushed(_) | Gate::Review(_) | Gate::SecretScan(_) => None,
-    }
-}
-
-/// Returns true for a gate command that only checks whether a file exists.
-fn is_file_existence_only(run: &str) -> bool {
-    let trimmed = run.trim();
-    trimmed == "test -f"
-        || trimmed.starts_with("test -f ")
-        || trimmed.starts_with("[ -f ")
-        || trimmed == "ls"
-        || trimmed.starts_with("ls ")
 }
