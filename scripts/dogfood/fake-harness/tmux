@@ -15,6 +15,17 @@ case "${VOWP_DOGFOOD_TMUX_SOCKET:-}" in
         exit 1
         ;;
 esac
+case "${TMUX_TMPDIR:-}" in
+    ""|/tmp|/tmp/tmux-*|/var/tmp|/var/tmp/tmux-*)
+        printf '%s\n' "fake tmux: refusing an unset or shared TMUX_TMPDIR" >&2
+        exit 1
+        ;;
+esac
+if [ ! -d "$TMUX_TMPDIR" ]; then
+    # tmux silently falls back to the default server if the directory is missing.
+    printf '%s\n' "fake tmux: TMUX_TMPDIR does not exist: $TMUX_TMPDIR" >&2
+    exit 1
+fi
 if [ -z "${VOWP_DOGFOOD_REAL_TMUX:-}" ]; then
     printf '%s\n' "fake tmux: VOWP_DOGFOOD_REAL_TMUX is not set" >&2
     exit 1
@@ -28,6 +39,10 @@ for arg in "$@"; do
         exit 1
     fi
     case "$arg" in
+        -Ldefault|-L=default)
+            printf '%s\n' "fake tmux: refusing the default tmux socket" >&2
+            exit 1
+            ;;
         -L|-L?*) has_socket=1 ;;
     esac
     previous=$arg

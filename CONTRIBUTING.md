@@ -21,10 +21,11 @@ cargo run -p vowp-cli --bin vowp -- --version
 The last command prints `vowp 0.1.0-dev`.
 
 **Running the test suite is safe: tests use a private tmux directory.** Integration tests
-create their own temporary node home with `tmux -L vowp-test-…` and a private
-`TMUX_TMPDIR`; they refuse `default` and never read `TMUX` from your shell. If a test ever
-needs a raw tmux command, use the same two guards (`-L <unique>` and a private
-`TMUX_TMPDIR`) and assert the resolved socket is not the default one.
+create their own temporary node home with a private `-L` socket (`vowp-<hash>` derived from
+the home in CLI tests, `vowp-test-…` in the tmux crate) and a private `TMUX_TMPDIR`; they
+refuse `default` and never read `TMUX` from your shell. If a test ever needs a raw tmux
+command, use the same two guards (`-L <unique>` and a private `TMUX_TMPDIR`) and assert the
+resolved socket is not the default one.
 
 Rules for every contributor and agent, in tests, scripts and manual reproductions:
 
@@ -32,11 +33,15 @@ Rules for every contributor and agent, in tests, scripts and manual reproduction
   `tmux -L default kill-server`, and any command run without `TMUX_TMPDIR` set.
 - Use a unique socket per run (`tmux -L vowp-…`) **and** a private `TMUX_TMPDIR` under a
   temporary directory. The two layers mean a dropped `-L` still cannot reach your server.
-- Unset `TMUX` and `TMUX_PANE` before starting a test harness or script; a caller inside
-  tmux would otherwise point every client at the caller's server.
+- **Create the private `TMUX_TMPDIR` before the first tmux command.** tmux silently falls
+  back to the default server when `TMUX_TMPDIR` names a directory that does not exist.
+  `mkdir -p "$private"` first, then run every client with that same directory.
+- Unset `TMUX` and `TMUX_PANE` before starting a test harness, script or manual client; a
+  caller inside tmux would otherwise point the client at the caller's server.
 - `vowp` itself keeps its windows on a private socket derived from the node home and
   records the socket and server pid in `<home>/tmux-server`. `vowp down --kill-windows`
-  refuses a server that does not match that record.
+  refuses a server that does not match that record. `vowp attach` passes the same
+  `TMUX_TMPDIR` (and unsets `TMUX`/`TMUX_PANE`) to the tmux client it execs.
 
 ## Run the CI checks locally
 

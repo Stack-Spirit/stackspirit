@@ -40,7 +40,8 @@ every harness. A job's brief can add rules; it never removes these.
   **and** a private `TMUX_TMPDIR`, unset `TMUX`/`TMUX_PANE`, recorded fixtures, and fake harness scripts.
 - Never run `tmux kill-server`, `tmux -L default ...`, or any tmux command without a private
   `-L`/`TMUX_TMPDIR`, in tests, scripts or manual reproductions. A test or script must refuse `default`
-  before spawning tmux.
+  before spawning tmux. Create the private `TMUX_TMPDIR` directory first: tmux silently falls back to
+  the default server when the named directory does not exist.
 
 ## Secrets
 
