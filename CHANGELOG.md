@@ -14,16 +14,17 @@ Nothing yet.
 
 ## [0.1.0] - 2026-11-09
 
-The first public release of VOWP. It is an **early release**: the v0.1 command
-surface is implemented and tested, but the supervisor still has the known gaps
-listed below and the interfaces may change before v0.2. The public repository
-starts from this tree as a single commit; the earlier private history and the
-internal `0.1.0-rc.1` candidate were never published.
+The first public release of VOWP: a local-first supervisor for AI coding agents.
+It runs stock Claude Code, opencode and generic CLI harnesses as job workers,
+plans work as a job graph, keeps sessions in an append-only event log, verifies
+work with recorded gate evidence, and ships changes through guarded, reversible
+promotions.
 
-VOWP is a local-first supervisor for AI coding agents. It runs stock Claude
-Code, opencode and generic CLI harnesses as job workers, plans work as a job
-graph, keeps sessions in an append-only event log, verifies work with recorded
-gate evidence, and ships changes through guarded, reversible promotions.
+0.1.0 is an **early release**. The v0.1 command surface is implemented and
+tested, but the interfaces may change before v0.2. Known limitations, with
+workarounds, are in
+[`docs/release/0.1.0.md`](docs/release/0.1.0.md#known-limitations); the features
+deliberately left out are in [`docs/roadmap.md`](docs/roadmap.md).
 
 ### Added
 
@@ -85,9 +86,9 @@ first turn and crash recovery; export/import bundles.
 
 **Install and operations**: `scripts/install.sh` and `scripts/uninstall.sh`
 (both support `--dry-run`), a systemd user unit, a cron-driven heartbeat
-watchdog, and a hermetic test suite for them. The 0.1.0 release adds prebuilt
-Linux and macOS archives, the seven `vowp-*` crates on crates.io and the `vowp`
-npm wrapper.
+watchdog, and a hermetic test suite for them. The 0.1.0 release includes
+prebuilt Linux and macOS archives, the seven `vowp-*` crates on crates.io and
+the `vowp` npm wrapper.
 
 **Framework**: templates, four role skills (`vowp-worker`, `vowp-planner`,
 `vowp-verifier`, `vowp-keeper`) and agent presets installed by `vowp init`
@@ -98,66 +99,6 @@ generated CLI and JSON Schema reference (`docs/reference/`), the design spec
 (`docs/design/`), a docs command/link checker (`docs/tests/`), a static site
 generator (`site/`, unused and not deployed) and the runnable
 `examples/hello-vowp` fake-adapter demo.
-
-**CI and release**: `.github/workflows/ci.yml` (test on Linux and macOS) and
-`release.yml` (a `v*` tag builds four targets, verifies the checksums and
-creates a **draft** GitHub release; publishing the draft is a separate owner
-action). The first public tag `v0.1.0` is the release workflow's first real
-end-to-end run.
-
-### Changed
-
-- Versions are `0.1.0` for the workspace, every crate, the `vowp` npm package
-  and the release tag. `vowp --version` prints `vowp 0.1.0`.
-- The public repository begins with one fresh commit of this tree. It has no
-  earlier tags, branches or private history.
-
-### Known limitations
-
-This is an early release. The honest list, with reproductions and file paths,
-is in [`docs/release/0.1.0.md`](docs/release/0.1.0.md#known-limitations); the
-scope that is deliberately out is in [`docs/roadmap.md`](docs/roadmap.md).
-
-- **Supervisor dogfood defects D1–D7 remain.** The default dogfood scenario
-  passes with fake adapters, but these are open: `up --home` does not pass the
-  home to the tmux windows (D1); the planner, keeper and inbox windows exit
-  when they have nothing to show (D2); a SIGKILL between `Dispatched` and the
-  run row can leave a job `running` (D3); `job add --brief` writes the brief in
-  the main checkout, not the job worktree (D4); a deliberate `down` is still
-  reported as unhealthy by `status --check` and the watchdog (D5);
-  `up --no-tmux` still recreates the layout during supervisor startup (D6);
-  and startup window recreation uses the bare name `vowp` (D7). Use a private
-  `TMUX_TMPDIR` until these are fixed.
-- **L4–L8 have scripted-adapter coverage, not real-harness coverage.** The
-  planner, keeper, failover, inbox and watchdog drills pass against fake
-  adapters; a full real-harness planner/keeper/failover run is still future
-  work. The keeper digest is a bounded view: it summarises the last 60 indexed
-  events of a stalled job's session, not the full pretty log.
-- **Remote-node probe on switch is skipped.** `session switch` to another node
-  does not run `vowp --node <n> doctor --json`; only the local adapter registry
-  is probed (`TODO` in `crates/vowp-core/src/session/switch.rs`).
-- `session watch --once` imports Claude Code transcripts; the CLI importer is
-  shipped and documented. Continuous `--follow` is not available in this build,
-  and the optional `vowp_adapters::claude_code::import_transcript` adapter API
-  is not shipped.
-- The first turn after a `session switch` passes no caller-chosen native
-  session id; a fresh session gets a generated uuid-v4.
-- Interval schedules align to the Unix epoch, not to the schedule's creation
-  time. Time zones are UTC or a fixed offset only; IANA zones are deferred to
-  v0.2.
-- `[env.*]` has no `build` key; the promotion build guard runs
-  `[merge].check_cmds`, else `[project].check_cmds`, and passes with a recorded
-  note if neither is set.
-- `vowp doctor` warns about missing provider API-key variables even when Claude
-  Code uses its own login.
-- Verified locally only on Linux x86_64. The macOS and aarch64 release targets
-  are built and smoke-tested by the release workflow on GitHub runners; the
-  macOS archives are not code-signed or notarized.
-- Not in 0.1.0: Windows, musl/Alpine, an HTTP/SSE API, a web or PWA window, an
-  ACP adapter, cross-node live sync, teams/quotas/hosted relay, IANA time
-  zones, phone notifications, shell completions, a native GUI and a published
-  Homebrew tap. There is no product website; GitHub, the README and `docs/`
-  are the home.
 
 [Unreleased]: https://github.com/syver777/vowp/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/syver777/vowp/releases/tag/v0.1.0
