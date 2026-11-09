@@ -36,9 +36,10 @@ It does **not** validate flags or arguments. It does distinguish a command that 
 `--help` from one whose handler is still the explicit `NotImplemented` stub: a documented command whose
 top-level handler is a stub must be marked *(planned)*. Conversely, a command whose handler is
 implemented must not carry a *(planned)* marker; a stale marker on a live command is a failure. The
-marker must be on the reference line, in a leading or trailing `# (planned)` comment inside the same
-fenced block, or in an explicit `**Planned section:**`/`<!-- planned-section -->` declaration for the
-section. A stray “planned” word elsewhere in the prose is not enough. The checker reads
+marker must be on the reference line, in a `# (planned)` comment inside the same fenced block (on its
+own line or trailing the command, e.g. `vowp up # (planned)`), or in an explicit
+`**Planned section:**`/`<!-- planned-section -->` declaration for the section. A stray “planned” word
+elsewhere in the prose is not enough. The checker reads
 `crates/vowp-cli/src/cli.rs` and `crates/vowp-cli/src/cmd/` to make that distinction.
 
 ## Status declaration

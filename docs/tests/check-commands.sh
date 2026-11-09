@@ -310,6 +310,10 @@ for path in sorted({path for path, _, _, _ in references}):
 
 SECTION_MARKER = re.compile(r"^\s*(?:>\s*)?\*\*planned section[:.]?\*\*", re.IGNORECASE)
 HTML_SECTION_MARKER = "<!-- planned-section -->"
+# A shell-comment marker, whether it is the whole line or trails a command on
+# the same line. The whitespace before '#' keeps executor variants such as
+# 'opencode:deepseek/deepseek-flash#max' out of the match.
+PLANNED_COMMENT = re.compile(r"(?:^|\s)#\s*\(planned\)(?!\w)", re.IGNORECASE)
 
 
 def planned_near(path, number):
@@ -319,13 +323,15 @@ def planned_near(path, number):
     accepted declarations are the literal *(planned)* on the reference line, a
     leading or trailing `# (planned)` comment inside the same fenced block, or an
     explicit `**Planned section:**` / `<!-- planned-section -->` line in the
-    section.
+    section. The comment may be the whole line or trail a command on the same
+    line, e.g. `vowp up # (planned)`.
     """
     lines = page_lines[path]
     index = number - 1
     current = lines[index].strip()
     if (
         "*(planned)*" in lines[index]
+        or PLANNED_COMMENT.search(lines[index])
         or SECTION_MARKER.match(current)
         or HTML_SECTION_MARKER in current
     ):
@@ -350,8 +356,7 @@ def planned_near(path, number):
             section_start = i
     if in_fence:
         for line in lines[block_start:index]:
-            stripped = line.strip()
-            if re.match(r"#\s*\(planned\)(?!\w)", stripped, re.IGNORECASE):
+            if PLANNED_COMMENT.search(line.strip()):
                 return True
         for line in lines[index + 1:]:
             stripped = line.strip()
@@ -359,7 +364,7 @@ def planned_near(path, number):
                 if stripped[:3] == fence_marker:
                     break
                 continue
-            if re.match(r"#\s*\(planned\)(?!\w)", stripped, re.IGNORECASE):
+            if PLANNED_COMMENT.search(stripped):
                 return True
     for line in lines[section_start:index]:
         stripped = line.strip()
