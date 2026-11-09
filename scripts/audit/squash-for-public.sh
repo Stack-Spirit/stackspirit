@@ -49,8 +49,8 @@ after:
   3. cargo clippy --workspace --all-targets -- -D warnings passes;
   4. cargo test --workspace passes;
   5. the staged public tree removes every path in scripts/audit/public-tree.txt,
-     contains every required product path and keeps only allowed top-level
-     entries (scripts/audit/public-tree-check.sh --index);
+     applies the public-tree content scrub, contains every required product
+     path and keeps only allowed top-level entries (scripts/audit/public-tree-check.sh --index);
   6. scripts/audit/public-tree-check.sh --rev public-main passes;
   7. scripts/audit/scan.sh --rev public-main passes.
 
@@ -138,6 +138,9 @@ while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$path" ] || continue
     git rm -r --cached --ignore-unmatch --quiet -- "$path" || fail "git rm --cached $path failed"
 done < "$manifest"
+
+echo "squash: scrubbing public-tree content"
+scripts/audit/public-tree-scrub.sh --index || fail "the public-tree content scrub failed"
 
 echo "squash: checking the staged public tree"
 scripts/audit/public-tree-check.sh --index --manifest "$manifest" || fail "the staged public tree does not match the manifest"

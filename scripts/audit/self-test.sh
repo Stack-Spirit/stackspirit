@@ -202,7 +202,43 @@ git -C "$prepo" commit -qm "remove the disallowed top-level path"
 run_check --index --manifest public-tree-test.txt >/dev/null 2>&1 ||
     fail "the repaired fixture should pass again"
 
-# 6. The real manifest carries the owner's prune list and owner exceptions.
+# 6. The public-tree content scrub rewrites the known build-process paragraph
+#    in the index only, is idempotent, and fails when the paragraph is missing.
+srepo=$tmp/scrub-repo
+mkdir -p "$srepo/scripts/audit" "$srepo/scripts/release"
+cp "$script_dir/public-tree-scrub.sh" "$script_dir/public-tree-scrub.py" "$srepo/scripts/audit/"
+chmod +x "$srepo/scripts/audit/public-tree-scrub.sh"
+cp "$script_dir/../../scripts/release/version-test.rs" "$srepo/scripts/release/version-test.rs"
+git init -q -b main "$srepo"
+git -C "$srepo" config user.name "Public Scrub Test"
+git -C "$srepo" config user.email "$(printf 'scrub@%s' example.invalid)"
+git -C "$srepo" add -A
+git -C "$srepo" commit -qm "scrub fixture"
+original=$(cat "$srepo/scripts/release/version-test.rs")
+(cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1 ||
+    fail "the scrub should pass on the staged fixture"
+if ! (cd "$srepo" && git show :scripts/release/version-test.rs) |
+    grep -q 'asserts the same version that the root package publishes'; then
+    fail "the scrub did not write the product paragraph"
+fi
+if (cd "$srepo" && git show :scripts/release/version-test.rs) |
+    grep -q 'packaging job does not own'; then
+    fail "the scrub left the build-process paragraph in the index"
+fi
+[ "$(cat "$srepo/scripts/release/version-test.rs")" = "$original" ] ||
+    fail "the scrub changed the private working tree"
+(cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1 ||
+    fail "the scrub should be idempotent"
+printf '//! changed\n' > "$srepo/scripts/release/version-test.rs"
+git -C "$srepo" add scripts/release/version-test.rs
+if (cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1; then
+    fail "the scrub should fail when the expected paragraph is missing"
+fi
+git -C "$srepo" checkout HEAD -- scripts/release/version-test.rs
+(cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1 ||
+    fail "the scrub should pass after restoring the fixture"
+
+# 7. The real manifest carries the owner's prune list and owner exceptions.
 for pruned in AGENTS.md docs/dogfood docs/fresh-user docs/maintainers \
     docs/release/0.1.0-rc.1.md scripts/audit scripts/dogfood scripts/fresh-user site; do
     if ! grep -qx "prune $pruned" "$script_dir/public-tree.txt" &&
@@ -215,4 +251,4 @@ grep -qx 'require docs/design/job-map.md' "$script_dir/public-tree.txt" ||
 grep -qx 'require THIRD-PARTY-LICENSES.md' "$script_dir/public-tree.txt" ||
     fail "real manifest does not require THIRD-PARTY-LICENSES.md"
 
-echo "self-test: PASS: scanner rules, masking, allowlist, history and public-tree prune checks work."
+echo "self-test: PASS: scanner rules, masking, allowlist, history, public-tree prune and content-scrub checks work."

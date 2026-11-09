@@ -18,7 +18,7 @@
 #   1  a path violation
 #   2  usage error, not a git repository, or an invalid manifest
 #
-# No network access. POSIX shell plus git and awk.
+# No network access. POSIX shell plus git.
 
 set -u
 
