@@ -116,4 +116,103 @@ if run_scan --history --strict-history >/dev/null 2>&1; then
     fail "history should fail with --strict-history"
 fi
 
-echo "self-test: PASS: all scanner rules, masking, allowlist and history modes work."
+# 5. The public-tree checker rejects pruned and disallowed paths and reports
+#    missing required paths. A separate repository keeps this fixture clean.
+prepo=$tmp/public-repo
+mkdir -p "$prepo/scripts/audit" "$prepo/.github/workflows" "$prepo/docs" "$prepo/scripts"
+cp "$script_dir/public-tree-check.sh" "$script_dir/public-tree.txt" "$prepo/scripts/audit/"
+chmod +x "$prepo/scripts/audit/public-tree-check.sh"
+git init -q -b main "$prepo"
+git -C "$prepo" config user.name "Public Tree Test"
+git -C "$prepo" config user.email "$(printf 'public@%s' example.invalid)"
+cat > "$prepo/public-tree-test.txt" <<'EOF'
+allow .github
+allow docs
+allow README.md
+allow scripts
+allow public-tree-test.txt
+prune AGENTS.md
+prune internal/
+require .github/workflows/ci.yml
+require README.md
+require docs/keep.md
+require scripts/tool.sh
+EOF
+printf 'ci\n' > "$prepo/.github/workflows/ci.yml"
+printf 'readme\n' > "$prepo/README.md"
+printf 'keep\n' > "$prepo/docs/keep.md"
+printf 'tool\n' > "$prepo/scripts/tool.sh"
+git -C "$prepo" add -A
+git -C "$prepo" commit -qm "clean public-tree fixture"
+
+run_check() {
+    (cd "$prepo" && scripts/audit/public-tree-check.sh "$@")
+}
+
+run_check --index --manifest public-tree-test.txt >/dev/null 2>&1 ||
+    fail "clean public-tree fixture should pass --index"
+run_check --worktree --manifest public-tree-test.txt >/dev/null 2>&1 ||
+    fail "clean public-tree fixture should pass --worktree"
+run_check --rev HEAD --manifest public-tree-test.txt >/dev/null 2>&1 ||
+    fail "clean public-tree fixture should pass --rev"
+run_check --index >/dev/null 2>&1 &&
+    fail "the real manifest should not match the small fixture"
+
+mkdir -p "$prepo/internal"
+printf 'internal\n' > "$prepo/AGENTS.md"
+printf 'internal\n' > "$prepo/internal/build.txt"
+git -C "$prepo" add -A
+git -C "$prepo" commit -qm "add pruned paths"
+prune_out=$tmp/prune.txt
+if run_check --index --manifest public-tree-test.txt > "$prune_out" 2>&1; then
+    fail "pruned paths should fail the index check"
+fi
+grep -q 'pruned path present: AGENTS.md' "$prune_out" || fail "AGENTS.md was not reported as pruned"
+grep -q 'pruned path present: internal/build.txt' "$prune_out" || fail "internal/build.txt was not reported as pruned"
+if run_check --rev HEAD --manifest public-tree-test.txt >/dev/null 2>&1; then
+    fail "pruned paths should fail the revision check"
+fi
+
+git -C "$prepo" rm -q AGENTS.md internal/build.txt
+git -C "$prepo" commit -qm "remove pruned paths"
+git -C "$prepo" rm -q docs/keep.md
+git -C "$prepo" commit -qm "drop a required path"
+required_out=$tmp/required.txt
+if run_check --index --manifest public-tree-test.txt > "$required_out" 2>&1; then
+    fail "a missing required path should fail the index check"
+fi
+grep -q 'required path missing: docs/keep.md' "$required_out" || fail "the missing required path was not reported"
+
+mkdir -p "$prepo/docs"
+printf 'keep\n' > "$prepo/docs/keep.md"
+git -C "$prepo" add -A
+git -C "$prepo" commit -qm "restore the required path"
+mkdir -p "$prepo/site"
+printf 'page\n' > "$prepo/site/index.html"
+git -C "$prepo" add -A
+git -C "$prepo" commit -qm "add a disallowed top-level path"
+top_out=$tmp/top-level.txt
+if run_check --index --manifest public-tree-test.txt > "$top_out" 2>&1; then
+    fail "a disallowed top-level path should fail the index check"
+fi
+grep -q 'top-level path not allowed: site/index.html' "$top_out" || fail "the disallowed top-level path was not reported"
+
+git -C "$prepo" rm -r -q site
+git -C "$prepo" commit -qm "remove the disallowed top-level path"
+run_check --index --manifest public-tree-test.txt >/dev/null 2>&1 ||
+    fail "the repaired fixture should pass again"
+
+# 6. The real manifest carries the owner's prune list and owner exceptions.
+for pruned in AGENTS.md docs/dogfood docs/fresh-user docs/maintainers \
+    docs/release/0.1.0-rc.1.md scripts/audit scripts/dogfood scripts/fresh-user site; do
+    if ! grep -qx "prune $pruned" "$script_dir/public-tree.txt" &&
+        ! grep -qx "prune $pruned/" "$script_dir/public-tree.txt"; then
+        fail "real manifest does not prune: $pruned"
+    fi
+done
+grep -qx 'require docs/design/job-map.md' "$script_dir/public-tree.txt" ||
+    fail "real manifest does not require docs/design/job-map.md"
+grep -qx 'require THIRD-PARTY-LICENSES.md' "$script_dir/public-tree.txt" ||
+    fail "real manifest does not require THIRD-PARTY-LICENSES.md"
+
+echo "self-test: PASS: scanner rules, masking, allowlist, history and public-tree prune checks work."

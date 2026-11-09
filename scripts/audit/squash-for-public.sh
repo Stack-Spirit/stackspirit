@@ -1,18 +1,25 @@
 #!/bin/sh
-# Build the public branch: one orphan commit of the current tree.
+# Build the public branch: one orphan commit of the current tree, with the
+# internal build and operations paths pruned.
 #
 # This is the publication path chosen by the owner on 2026-11-09: the current
 # private repository and its history stay private; the public repository starts
 # with a single commit. The script refuses to create the branch if the working
-# tree has findings, if the build is not green, or if `git ls-files` contains a
+# tree has findings, if the build is not green, or if the staged public tree
+# contains a pruned path, is missing a required product path, or has a
 # top-level path outside the publication allow-list.
 #
-# It never pushes, tags, publishes or changes repository visibility. Run it as
-# an owner/orchestrator action, then follow scripts/audit/go-public.md.
+# The staged tree is built in a temporary index. The private checkout, branch
+# and files are left untouched. It never pushes, tags, publishes or changes
+# repository visibility. Run it as an owner/orchestrator action, then follow
+# scripts/audit/go-public.md.
 #
 # Usage:
 #   scripts/audit/squash-for-public.sh
 #   scripts/audit/squash-for-public.sh --force   # replace an existing public-main
+#
+# The prune/allow/require list is scripts/audit/public-tree.txt and the checker
+# is scripts/audit/public-tree-check.sh.
 #
 # The resulting branch is `public-main`, with author and committer
 #   Syver-August <92798051+syver777@users.noreply.github.com>
@@ -28,6 +35,7 @@ branch=public-main
 author_name='Syver-August'
 author_email='92798051+syver777@users.noreply.github.com'
 commit_message='VOWP 0.1.0'
+manifest=$script_dir/public-tree.txt
 force=0
 
 usage() {
@@ -40,10 +48,14 @@ after:
   2. cargo fmt --all -- --check passes;
   3. cargo clippy --workspace --all-targets -- -D warnings passes;
   4. cargo test --workspace passes;
-  5. git ls-files contains only the allowed top-level paths;
-  6. scripts/audit/scan.sh --rev public-main passes.
+  5. the staged public tree removes every path in scripts/audit/public-tree.txt,
+     contains every required product path and keeps only allowed top-level
+     entries (scripts/audit/public-tree-check.sh --index);
+  6. scripts/audit/public-tree-check.sh --rev public-main passes;
+  7. scripts/audit/scan.sh --rev public-main passes.
 
-The script never pushes. It prints the exact commands for the owner.
+The staged tree is built in a temporary index, so the private checkout is not
+changed. The script never pushes. It prints the exact commands for the owner.
   --force   delete and recreate an existing public-main branch
   -h, --help
 EOF
@@ -79,14 +91,20 @@ if [ -n "$(git status --porcelain)" ]; then
     fail "commit or stash every change first; the public commit must be reproducible"
 fi
 
+[ -f "$manifest" ] || fail "public-tree manifest not found: $manifest"
+
+original=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse HEAD)
+
 if git show-ref --verify --quiet "refs/heads/$branch"; then
     if [ "$force" -ne 1 ]; then
         fail "branch $branch already exists; use --force to replace it"
     fi
+    [ "$original" != "$branch" ] || fail "cannot replace $branch while it is checked out"
     git branch -D "$branch" >/dev/null 2>&1 || fail "cannot delete existing $branch (is it checked out in another worktree?)"
 fi
 
-original=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse HEAD)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/vowp-public.XXXXXX") || fail "cannot create a temporary directory"
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 echo "squash: scanning the working tree"
 scripts/audit/scan.sh --worktree || fail "the working tree still has a non-allowlisted finding"
@@ -100,42 +118,31 @@ cargo clippy --workspace --all-targets -- -D warnings || fail "cargo clippy fail
 echo "squash: running the test suite"
 cargo test --workspace || fail "cargo test --workspace failed"
 
-echo "squash: checking top-level paths"
-files_tmp=$(mktemp "${TMPDIR:-/tmp}/vowp-public-files.XXXXXX") || fail "cannot create a temporary file"
-trap 'rm -f "$files_tmp"' EXIT HUP INT TERM
-git ls-files > "$files_tmp" || fail "cannot list tracked files"
-bad_paths=0
-while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    case "$path" in
-        */*)
-            top=${path%%/*}
-            case "$top" in
-                crates|docs|examples|framework|packaging|scripts|site|.github)
-                    ;;
-                *)
-                    echo "squash: not allowed at the top level: $path" >&2
-                    bad_paths=$((bad_paths + 1))
-                    ;;
-            esac
-            ;;
-        *)
-            case "$path" in
-                .editorconfig|.gitignore|AGENTS.md|CHANGELOG.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|Cargo.lock|Cargo.toml|LICENSE|README.md|SECURITY.md|SUPPORT.md|THIRD-PARTY-LICENSES.md|rust-toolchain.toml|rustfmt.toml)
-                    ;;
-                *)
-                    echo "squash: not allowed at the top level: $path" >&2
-                    bad_paths=$((bad_paths + 1))
-                    ;;
-            esac
+echo "squash: staging the public tree in a temporary index"
+GIT_INDEX_FILE=$tmp/index
+export GIT_INDEX_FILE
+git read-tree --empty || fail "git read-tree --empty failed"
+git add -A || fail "git add -A failed"
+
+echo "squash: removing internal paths from the public index"
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        ''|'#'*)
+            continue
             ;;
     esac
-done < "$files_tmp"
-[ "$bad_paths" -eq 0 ] || fail "$bad_paths tracked path(s) are outside the publication allow-list"
+    set -- $line
+    [ "$#" -eq 2 ] || continue
+    [ "$1" = prune ] || continue
+    path=${2%/}
+    [ -n "$path" ] || continue
+    git rm -r --cached --ignore-unmatch --quiet -- "$path" || fail "git rm --cached $path failed"
+done < "$manifest"
 
-echo "squash: creating the orphan branch $branch"
-git checkout --orphan "$branch" || fail "git checkout --orphan $branch failed"
-git add -A || fail "git add -A failed"
+echo "squash: checking the staged public tree"
+scripts/audit/public-tree-check.sh --index --manifest "$manifest" || fail "the staged public tree does not match the manifest"
+
+tree=$(git write-tree) || fail "git write-tree failed"
 
 GIT_AUTHOR_NAME="$author_name"
 GIT_AUTHOR_EMAIL="$author_email"
@@ -143,7 +150,9 @@ GIT_COMMITTER_NAME="$author_name"
 GIT_COMMITTER_EMAIL="$author_email"
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
-git commit -m "$commit_message" || fail "git commit failed"
+commit=$(git commit-tree "$tree" -m "$commit_message") || fail "git commit-tree failed"
+unset GIT_INDEX_FILE
+git update-ref "refs/heads/$branch" "$commit" || fail "git update-ref refs/heads/$branch failed"
 
 commits=$(git rev-list --count "$branch")
 [ "$commits" -eq 1 ] || fail "$branch has $commits commits, expected exactly 1"
@@ -153,10 +162,12 @@ committer=$(git log -1 --format='%cn <%ce>' "$branch")
 [ "$committer" = "$author_name <$author_email>" ] || fail "unexpected committer identity: $committer"
 
 echo "squash: checking the new tree"
+scripts/audit/public-tree-check.sh --rev "$branch" --manifest "$manifest" || fail "$branch does not match the manifest; it was left in place for inspection"
 scripts/audit/scan.sh --rev "$branch" || fail "$branch still has a non-allowlisted finding; it was left in place for inspection"
 
 echo
 echo "squash: $branch is ready: 1 commit, author $identity"
+echo "squash: the working tree and branch were not changed; still on $original"
 echo "squash: next commands (the orchestrator runs them; this script never pushes):"
 echo
 echo "  # 1. Rename the old private repository first, so the new name is free:"
@@ -175,4 +186,3 @@ echo "  git push public v0.1.0"
 echo
 echo "  # 5. Follow the rest of scripts/audit/go-public.md (release, crates, npm)."
 echo
-echo "squash: original checkout was $original; return with: git checkout $original"

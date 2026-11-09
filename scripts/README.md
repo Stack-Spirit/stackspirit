@@ -1,6 +1,7 @@
-# scripts/ — install, watchdog and uninstall
+# scripts/ — install, release, watchdog and uninstall
 
-Per-user operations for a VOWP node. Nothing here needs root.
+Per-user operations for a VOWP node. Nothing here needs root. This index lists
+only the product scripts that ship in the public tree.
 
 | File | Purpose |
 |---|---|
@@ -10,6 +11,10 @@ Per-user operations for a VOWP node. Nothing here needs root.
 | `vowp-watchdog.cron` | Standalone crontab template for the same five-minute check. |
 | `uninstall.sh` | Stops and removes the unit, cron entry and binaries; keeps `~/.vowp` state. Supports `--dry-run` and `--keep-binary`. |
 | `tests/run.sh` | Hermetic tests with fake `systemctl`, `crontab`, `loginctl`, `vowp`, `claude`, `opencode` and `date` on `PATH`. |
+| `release/package-archive.sh` | Builds one release archive and its per-archive `.sha256` for a target. |
+| `release/generate-third-party-licenses.py` | Regenerates `THIRD-PARTY-LICENSES.md` from the locked dependency graph. |
+| `release/check-packages.sh` | Packages every crate and runs the publish dry runs; it never uploads. |
+| `release/publish-crates.sh` | Publishes the crates in dependency order; dry run by default, `--execute` uploads. |
 
 ## Install
 
