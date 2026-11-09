@@ -5,6 +5,8 @@
 //! `{"cmd":{"run":"cargo test","expect_exit":0}}`, `{"owns_respected":true}`,
 //! `{"review":{"by":"verifier"}}`. [`Gate::short`] is the lossy brief front-matter form.
 
+use std::sync::OnceLock;
+
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -87,7 +89,8 @@ impl Default for CmdGate {
 }
 
 impl CmdGate {
-    /// Validates a command gate: non-empty command, compilable pattern, positive timeout.
+    /// Validates a command gate: non-empty command, positive timeout, no file-existence-only
+    /// anti-pattern, a non-empty pattern for a nonzero exit, and a compilable `expect_pattern`.
     fn validate(&self) -> Result<(), ProtocolError> {
         if self.run.trim().is_empty() {
             return Err(ProtocolError::InvalidGate("command gate run is empty".to_owned()));
@@ -97,12 +100,54 @@ impl CmdGate {
                 "command gate timeout must be greater than zero".to_owned(),
             ));
         }
+        reject_file_existence_only(&self.run)?;
+        reject_nonzero_exit_without_pattern(self)?;
         if let Some(pattern) = &self.expect_pattern {
             Regex::new(pattern)
                 .map_err(|err| ProtocolError::InvalidGate(format!("invalid expect_pattern {pattern:?}: {err}")))?;
         }
         Ok(())
     }
+}
+
+/// Returns true for commands that only check whether a path exists, or do nothing.
+fn is_file_existence_only(run: &str) -> bool {
+    static BANNED: OnceLock<Regex> = OnceLock::new();
+    BANNED
+        .get_or_init(|| {
+            // invariant: this literal is a valid regex, exercised by
+            // gate_validate_rejects_file_exists_only_cmd.
+            Regex::new(r"^\s*(?:test\s+-[fed]\b|\[\s+-[fed]\b|ls\b|stat\b|cat\b|true\b|:)")
+                .expect("invariant: anti-pattern regex is valid")
+        })
+        .is_match(run)
+}
+
+/// Rejects a command that only checks whether a path exists, or does nothing.
+fn reject_file_existence_only(run: &str) -> Result<(), ProtocolError> {
+    if is_file_existence_only(run) {
+        return Err(ProtocolError::InvalidGate(format!(
+            "anti-pattern: gate must execute and check results: {run}"
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects a nonzero exit expectation without a non-empty pattern for the output.
+///
+/// An empty pattern matches everything, so it is treated exactly like `None`.
+fn reject_nonzero_exit_without_pattern(cmd: &CmdGate) -> Result<(), ProtocolError> {
+    let has_pattern = cmd
+        .expect_pattern
+        .as_deref()
+        .is_some_and(|pattern| !pattern.trim().is_empty());
+    if cmd.expect_exit != 0 && !has_pattern {
+        return Err(ProtocolError::InvalidGate(format!(
+            "anti-pattern: command gate with expect_exit {} needs a non-empty expect_pattern: {}",
+            cmd.expect_exit, cmd.run
+        )));
+    }
+    Ok(())
 }
 
 /// The `pushed` gate: the job branch exists on `remote`.
@@ -155,11 +200,21 @@ pub struct DeployGate {
 
 impl DeployGate {
     /// Validates the deployment command and its probe.
+    ///
+    /// The probe error carries the gate's environment name so evidence about a bad probe says
+    /// which deployment it belongs to.
     fn validate(&self) -> Result<(), ProtocolError> {
         if self.run.trim().is_empty() {
             return Err(ProtocolError::InvalidGate("deploy gate run is empty".to_owned()));
         }
-        self.probe.validate()
+        reject_file_existence_only(&self.run)?;
+        self.probe.validate().map_err(|err| match err {
+            ProtocolError::InvalidGate(message) => {
+                let env = self.env.as_deref().unwrap_or("default");
+                ProtocolError::InvalidGate(format!("deploy probe (env {env}): {message}"))
+            }
+            other => other,
+        })
     }
 }
 
@@ -259,10 +314,14 @@ impl Gate {
         }
     }
 
-    /// Validates the gate definition.
+    /// Validates the gate definition, including the `loops.md` §4 anti-pattern ban.
     ///
-    /// Command and script gates need a non-empty command, a compilable `expect_pattern` and a
-    /// positive timeout; deploy gates validate their command and probe.
+    /// Command, script and deploy gates may not merely check that a file exists (`test -f`,
+    /// `[ -e ]`, `ls`, `stat`, `cat`, bare `true` or `:`), because that does not show the work
+    /// runs. A command gate that expects a nonzero exit must also assert a non-empty
+    /// `expect_pattern`, so a command that fails for an unrelated reason cannot satisfy it. A
+    /// deploy gate must run a real command and end with a real probe. Protocol-level checks
+    /// (non-empty command, compilable pattern, positive timeout) run first.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::Cmd(gate) | Self::Script(gate) => gate.validate(),

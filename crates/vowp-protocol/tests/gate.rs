@@ -144,6 +144,151 @@ fn gate_validate_rejects_bad_regex_and_empty_run() {
 }
 
 #[test]
+fn gate_validate_rejects_file_exists_only_cmd() {
+    for run in [
+        "test -f Cargo.toml",
+        "test -e Cargo.toml",
+        "test -d src",
+        "[ -f Cargo.toml ]",
+        "[ -e Cargo.toml ]",
+        "ls -la",
+        "stat Cargo.toml",
+        "cat Cargo.toml",
+        "true",
+        ":",
+    ] {
+        let gate = Gate::Cmd(CmdGate {
+            run: run.to_owned(),
+            ..CmdGate::default()
+        });
+        match gate.validate() {
+            Err(ProtocolError::InvalidGate(message)) => {
+                assert!(message.contains("anti-pattern"), "{run:?}: {message}");
+                assert!(message.contains("execute and check results"), "{run:?}: {message}");
+            }
+            other => panic!("{run:?} only checks existence; expected rejection, got {other:?}"),
+        }
+    }
+
+    let script = Gate::Script(CmdGate {
+        run: "test -f Cargo.toml".to_owned(),
+        ..CmdGate::default()
+    });
+    assert!(matches!(script.validate(), Err(ProtocolError::InvalidGate(_))));
+
+    let deploy_run = Gate::Deploy(DeployGate {
+        run: "test -f target/release/vowp".to_owned(),
+        probe: CmdGate {
+            run: "curl -fsS localhost/health".to_owned(),
+            ..CmdGate::default()
+        },
+        env: None,
+    });
+    assert!(matches!(deploy_run.validate(), Err(ProtocolError::InvalidGate(_))));
+
+    let deploy_probe = Gate::Deploy(DeployGate {
+        run: "cargo run -- deploy".to_owned(),
+        probe: CmdGate {
+            run: "test -e target/release/vowp".to_owned(),
+            ..CmdGate::default()
+        },
+        env: None,
+    });
+    assert!(matches!(deploy_probe.validate(), Err(ProtocolError::InvalidGate(_))));
+}
+
+#[test]
+fn gate_validate_rejects_nonzero_exit_without_pattern() {
+    let no_pattern = Gate::Cmd(CmdGate {
+        run: "grep -q 'needle' haystack.txt".to_owned(),
+        expect_exit: 1,
+        ..CmdGate::default()
+    });
+    match no_pattern.validate() {
+        Err(ProtocolError::InvalidGate(message)) => {
+            assert!(message.contains("anti-pattern"), "{message}");
+            assert!(message.contains("expect_pattern"), "{message}");
+        }
+        other => panic!("a nonzero exit without a pattern must be rejected, got {other:?}"),
+    }
+
+    let with_pattern = Gate::Cmd(CmdGate {
+        run: "grep -q 'needle' haystack.txt".to_owned(),
+        expect_exit: 1,
+        expect_pattern: Some("needle".to_owned()),
+        ..CmdGate::default()
+    });
+    assert!(
+        with_pattern.validate().is_ok(),
+        "a negative gate that asserts its pattern is behavioural"
+    );
+}
+
+#[test]
+fn gate_validate_rejects_empty_pattern() {
+    for pattern in ["", "   "] {
+        let gate = Gate::Cmd(CmdGate {
+            run: "grep -q 'needle' haystack.txt".to_owned(),
+            expect_exit: 1,
+            expect_pattern: Some(pattern.to_owned()),
+            ..CmdGate::default()
+        });
+        match gate.validate() {
+            Err(ProtocolError::InvalidGate(message)) => {
+                assert!(message.contains("non-empty expect_pattern"), "{pattern:?}: {message}");
+            }
+            other => panic!("an empty pattern counts as no pattern; expected rejection, got {other:?}"),
+        }
+    }
+
+    let noop_on_success = Gate::Cmd(CmdGate {
+        run: "printf 'ok\\n'".to_owned(),
+        expect_exit: 0,
+        expect_pattern: Some(String::new()),
+        ..CmdGate::default()
+    });
+    assert!(
+        noop_on_success.validate().is_ok(),
+        "an empty pattern is harmless when a zero exit is expected"
+    );
+}
+
+#[test]
+fn gate_validate_accepts_behavioural_cmd() {
+    let gate = Gate::Cmd(CmdGate {
+        run: "cargo test -p vowp-protocol".to_owned(),
+        expect_pattern: Some("test result: ok".to_owned()),
+        ..CmdGate::default()
+    });
+    assert!(gate.validate().is_ok());
+
+    let negative = Gate::Cmd(CmdGate {
+        run: "grep -q 'needle' haystack.txt".to_owned(),
+        expect_exit: 1,
+        expect_pattern: Some("needle".to_owned()),
+        ..CmdGate::default()
+    });
+    assert!(negative.validate().is_ok());
+
+    let script = Gate::Script(CmdGate {
+        run: "scripts/check.sh".to_owned(),
+        expect_pattern: Some("all checks passed".to_owned()),
+        ..CmdGate::default()
+    });
+    assert!(script.validate().is_ok());
+
+    let deploy = Gate::Deploy(DeployGate {
+        run: "scripts/deploy.sh".to_owned(),
+        probe: CmdGate {
+            run: "curl -fsS localhost/health".to_owned(),
+            ..CmdGate::default()
+        },
+        env: Some("prod".to_owned()),
+    });
+    assert!(deploy.validate().is_ok());
+}
+
+#[test]
 fn default_gates_per_kind() {
     let kinds = |kind| default_gates(kind).iter().map(Gate::kind).collect::<Vec<_>>();
 
