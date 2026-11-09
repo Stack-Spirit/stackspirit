@@ -369,21 +369,13 @@ fn resolve_cwd(deps: &Deps, bundle: &Bundle, explicit: Option<&Path>) -> PathBuf
         .unwrap_or_else(|| origin.to_path_buf())
 }
 
-/// Mirrors the session service's allow-list: project, worktree root and `[node].cwd_allow`.
+/// Returns whether `[node].cwd_allow` admits `cwd` (an empty list admits nothing).
 fn allowed_cwd(deps: &Deps, cwd: &Path) -> bool {
-    let mut roots: Vec<&str> = Vec::new();
-    if let Some(project) = &deps.config.project.path {
-        roots.push(project);
-    }
-    if let Some(root) = &deps.config.project.worktree_root {
-        roots.push(root);
-    }
-    roots.extend(deps.config.node.cwd_allow.iter().map(String::as_str));
-    if roots.is_empty() {
-        return true;
+    if deps.config.node.cwd_allow.is_empty() {
+        return false;
     }
     let path = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    roots.iter().any(|root| {
+    deps.config.node.cwd_allow.iter().any(|root| {
         let root = Path::new(root);
         let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         path.starts_with(root)
