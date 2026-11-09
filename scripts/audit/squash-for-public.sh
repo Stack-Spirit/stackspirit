@@ -8,7 +8,7 @@
 # top-level path outside the publication allow-list.
 #
 # It never pushes, tags, publishes or changes repository visibility. Run it as
-# an owner/orchestrator action, then follow docs/maintainers/go-public.md.
+# an owner/orchestrator action, then follow scripts/audit/go-public.md.
 #
 # Usage:
 #   scripts/audit/squash-for-public.sh
@@ -173,6 +173,6 @@ echo "  # 4. Tag the release and push the tag (this starts the draft-release wor
 echo "  git tag -a v0.1.0 -m 'VOWP 0.1.0' $branch"
 echo "  git push public v0.1.0"
 echo
-echo "  # 5. Follow the rest of docs/maintainers/go-public.md (release, crates, npm)."
+echo "  # 5. Follow the rest of scripts/audit/go-public.md (release, crates, npm)."
 echo
 echo "squash: original checkout was $original; return with: git checkout $original"

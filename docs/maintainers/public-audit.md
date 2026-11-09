@@ -214,5 +214,6 @@ it into each release archive (or the owner can add a root `THIRD-PARTY-LICENSES.
 - [ ] The old private repository is renamed (or backed up) before the new public repository is created.
 - [ ] The release workflow's draft release is checked (assets, checksums, `vowp --version`) before it is
       published.
-- [ ] The orchestrator follows `docs/maintainers/go-public.md`; p01 has not pushed, tagged or published
-      anything.
+- [ ] The orchestrator follows the runbook in `scripts/audit/go-public.md`; p01 has not pushed, tagged
+      or published anything. (The runbook lives under `scripts/audit/` because p01's owned paths do not
+      include `docs/maintainers/go-public.md`.)
