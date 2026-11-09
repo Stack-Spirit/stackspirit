@@ -6,10 +6,10 @@ model adapters only, and record every breakage as a fixable defect.
 
 - **Harness:** `scripts/dogfood/run.sh` (fake harness in `scripts/dogfood/fake-harness/`)
 - **Final run:** `bash scripts/dogfood/run.sh` on branch `job/n14-dogfood` rebased on
-  `origin/main` commit `ad163b0` (persist harvested runs across restarts; this history
-  includes n08d planner/keeper/failover at `356e185`).
+  `origin/main` commit `0f78c1d` (fix failover rung pick, switch ledger and retries; this
+  history includes n08d planner/keeper/failover at `356e185`).
 - **Result:** PASS (exit 0). The default command passed **5/5 consecutive runs** on
-  `ad163b0`; warm runs took 21.5–28.5 s (phase 1 6–7 s, phase 2 11–14 s).
+  `0f78c1d`; warm runs took 20.4–25.0 s (phase 1 6–8 s, phase 2 11–15 s).
 - **Environment:** Linux, tmux 3.4, Python 3.12, stable Rust from `rust-toolchain.toml`;
   no network, no real `claude`/`opencode`, no real `HOME`.
 
@@ -75,7 +75,7 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | ledger | each job has ≥3 `state` rows and exactly 1 `merge` row; 3 worker `start` runs |
 | `vowp down --kill-windows` | lock removed, heartbeat removed, stopped marker written, no windows/worktrees |
 | SIGKILL + restart (default window) | 2 crash runs, 2 `RunEndedNoReport` continue rows, 2 `continue` harness turns, all 3 jobs done, 1 merge row each; 5/5 consecutive runs passed |
-| n08d planner/keeper/failover | present on `ad163b0`; the planner runs during the graph are fake no-ops and do not add jobs or commits |
+| n08d planner/keeper/failover | present on `0f78c1d`; the planner runs during the graph are fake no-ops and do not add jobs or commits |
 | loops smoke check (n08d-tolerant) | `l4`–`l9` rows present via `vowp loops list --json` when that subcommand exists, otherwise via `vowp loops --json` |
 | fake verifier config | the `verifier` profile resolves and probes; the fake harness also implements verifier reports (no `review` gate is in this graph, so no verify job was created) |
 
@@ -86,8 +86,8 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | `cargo build -q -p vowp-cli` (rebuild after the rebase) | included in the total below |
 | Phase 1 (init → down) | 6–7 s |
 | Phase 2 (init → SIGKILL → restart → down) | 11–14 s |
-| Total wall time (5 warm stress runs) | 21.49, 22.26, 22.58, 26.72, 28.54 s |
-| Total wall time including the rebuild | 34.13 s on the first run after the rebase |
+| Total wall time (5 warm stress runs) | 20.37, 21.47, 21.51, 22.88, 24.96 s |
+| Total wall time including the rebuild | 31.37 s on the first run after the rebase |
 
 The normal run completes in well under a minute; the default timeouts are 600 s for phase 1
 and 300 s for phase 2.
@@ -215,7 +215,7 @@ Suggested owner: `vowp-core/src/loops/reconcile.rs` (add a running-without-run p
 `vowp-core/src/loops/supervisor.rs` (persist the run row before applying `Dispatched`).
 The default dogfood phase 2 now waits until no job is ready/dispatchable and every
 `running` job has a live open run, and its completion poll tolerates a 5 s dispatch gap; it
-passed 5/5 consecutive runs on `ad163b0`. `CRASH_EARLY=1` remains the loud reproducer for
+passed 5/5 consecutive runs on `0f78c1d`. `CRASH_EARLY=1` remains the loud reproducer for
 this defect.
 
 ### D4 — `vowp job add --brief` content is not copied into the job worktree; workers read a generic fallback
