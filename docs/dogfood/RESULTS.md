@@ -6,10 +6,10 @@ model adapters only, and record every breakage as a fixable defect.
 
 - **Harness:** `scripts/dogfood/run.sh` (fake harness in `scripts/dogfood/fake-harness/`)
 - **Final run:** `bash scripts/dogfood/run.sh` on branch `job/n14-dogfood` rebased on
-  `origin/main` commit `1b14daa` (release: qualify the native-session-id limitation as
-  switch-specific). n08d planner/keeper/failover was **not** in that commit (the n08d
-  branch was still in review); the script was re-run after the rebase and passed.
-- **Result:** PASS (exit 0) in **45 s** wall time including the rebuild (`vowp 0.1.0-rc.1`)
+  `origin/main` commit `ad163b0` (persist harvested runs across restarts; this history
+  includes n08d planner/keeper/failover at `356e185`).
+- **Result:** PASS (exit 0). The default command passed **5/5 consecutive runs** on
+  `ad163b0`; warm runs took 21.5–28.5 s (phase 1 6–7 s, phase 2 11–14 s).
 - **Environment:** Linux, tmux 3.4, Python 3.12, stable Rust from `rust-toolchain.toml`;
   no network, no real `claude`/`opencode`, no real `HOME`.
 
@@ -40,12 +40,16 @@ private socket; `heartbeat` is gone and `heartbeat.stopped` exists; `status --js
 stopped.
 
 **Phase 2** (`dogfood-two`, ids prefixed `crash-`) repeats the graph and kills the
-detached supervisor with `SIGKILL` after every currently `running` job has an in-flight
-run row with a live pid. It restarts `vowp up --detach` and waits again. Assertions: the
-restart records orphaned runs as `crash`, writes `RunEndedNoReport` continue rows, the fake
-harness sees `continue` turns, all three jobs reach `done`, each job has exactly one merge
-ledger row, origin still has exactly three job commits (no duplicated merge), no job is
-stuck `running` without an open run, and the same worktree/tmux/heartbeat cleanup holds.
+detached supervisor with `SIGKILL` only when the dispatch graph is quiescent: no job is
+`ready`, no pending job is dispatchable (all its `needs` are done), and every `running` job
+has an open run row whose pid is alive in `/proc`. It restarts `vowp up --detach` and waits
+again. The completion poll reads `job ls` for per-job state and also polls
+`vowp status --json`/`vowp board --json` every second; a `running` job with no open run is
+tolerated for 5 s (a healthy dispatch gap) and then fails as D3. Assertions: the restart
+records orphaned runs as `crash`, writes `RunEndedNoReport` continue rows, the fake harness
+sees `continue` turns, all three jobs reach `done`, each job has exactly one merge ledger
+row, origin still has exactly three job commits (no duplicated merge), no job is stuck
+`running`, and the same worktree/tmux/heartbeat cleanup holds.
 
 Run it with:
 
@@ -67,10 +71,11 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | `vowp up` / supervisor | detached supervisor pid, fresh heartbeat, board/status running |
 | worker → report gate → cmd gate → owns gate | all three jobs `done` |
 | merge queue | exactly 3 job commits on `origin/main`, local `main` fast-forwarded and clean |
-| board / status | `done: 3`, no running jobs, `slots_busy: 0`, `heartbeat_age_secs: null` after down |
+| board / status | polled every second during the run; `done: 3`, no running jobs, `slots_busy: 0`, `heartbeat_age_secs: null` after down |
 | ledger | each job has ≥3 `state` rows and exactly 1 `merge` row; 3 worker `start` runs |
 | `vowp down --kill-windows` | lock removed, heartbeat removed, stopped marker written, no windows/worktrees |
-| SIGKILL + restart (default window) | 2 crash runs, 2 `RunEndedNoReport` continue rows, 2 `continue` harness turns, all 3 jobs done, 1 merge row each |
+| SIGKILL + restart (default window) | 2 crash runs, 2 `RunEndedNoReport` continue rows, 2 `continue` harness turns, all 3 jobs done, 1 merge row each; 5/5 consecutive runs passed |
+| n08d planner/keeper/failover | present on `ad163b0`; the planner runs during the graph are fake no-ops and do not add jobs or commits |
 | loops smoke check (n08d-tolerant) | `l4`–`l9` rows present via `vowp loops list --json` when that subcommand exists, otherwise via `vowp loops --json` |
 | fake verifier config | the `verifier` profile resolves and probes; the fake harness also implements verifier reports (no `review` gate is in this graph, so no verify job was created) |
 
@@ -79,14 +84,21 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | Step | Time |
 |---|---|
 | `cargo build -q -p vowp-cli` (rebuild after the rebase) | included in the total below |
-| Phase 1 (init → down) | 9 s on both the post-rebase and warm runs |
-| Phase 2 (init → SIGKILL → restart → down) | 11 s |
-| Total wall time (`/usr/bin/time`) | 44.65 s including the rebuild; 23.89 s on the post-commit warm rerun |
+| Phase 1 (init → down) | 6–7 s |
+| Phase 2 (init → SIGKILL → restart → down) | 11–14 s |
+| Total wall time (5 warm stress runs) | 21.49, 22.26, 22.58, 26.72, 28.54 s |
+| Total wall time including the rebuild | 34.13 s on the first run after the rebase |
 
 The normal run completes in well under a minute; the default timeouts are 600 s for phase 1
 and 300 s for phase 2.
 
 ## Defect list
+
+> **Reproduction safety:** every command below must run with a private `HOME` and a private
+> tmux server (`tmux -L <unique>` or a private `TMUX_TMPDIR`, with `TMUX`/`TMUX_PANE`
+> unset). Never run `tmux` without one. The committed harness enforces this with its `-L`
+> wrapper; a manual D1 reproduction that omitted it killed the owner's default server (see
+> the job report's incident note).
 
 Each defect has a reproduction, the observed and expected behaviour, the specification it
 violates, and the module that should own the fix. Nothing in `crates/**` was changed by
@@ -97,15 +109,17 @@ this job.
 **Severity: blocking for v0.1** (tests always pass `--home`; a non-default home cannot run
 `up` at all, and a default home can make the windows attach to the wrong node database).
 
-Reproduction (private `HOME`, no `VOWP_HOME`):
+Reproduction (private `HOME` and `TMUX_TMPDIR`, no `VOWP_HOME`):
 
 ```sh
 WORK=$(mktemp -d)
-HOME="$WORK/empty-home" mkdir -p "$WORK/empty-home"
+export HOME="$WORK/empty-home"
+export TMUX_TMPDIR="$WORK/tmux"
+mkdir -p "$HOME" "$TMUX_TMPDIR"
+unset TMUX TMUX_PANE VOWP_HOME
 git init -q -b main "$WORK/repo"
 cd "$WORK/repo"
 vowp --home "$WORK/vowp-home" init --name d1 --no-framework
-unset VOWP_HOME
 vowp --home "$WORK/vowp-home" up --detach; echo "exit=$?"
 ```
 
@@ -182,8 +196,7 @@ window between the `Dispatched` transition and the run-row insert). Observed aft
 restart:
 
 ```
-crash-alpha: state=running but no open run row
-dogfood: FAIL: [phase2] a job is running with no open run after restart (defect D3)
+dogfood: FAIL: [phase2] crash-beta: state=running but no open run for >5s (defect D3)
 ```
 
 The work directory is kept. The same run's database shows `jobs.state='running'`, a
@@ -200,9 +213,10 @@ continues"); `crates/vowp-core/src/loops/reconcile.rs`, `supervisor.rs` `step_st
 
 Suggested owner: `vowp-core/src/loops/reconcile.rs` (add a running-without-run pass) and/or
 `vowp-core/src/loops/supervisor.rs` (persist the run row before applying `Dispatched`).
-The default dogfood phase 2 waits for a complete in-flight run set before killing; it
-therefore exercises the documented crash/continue path and passes. `CRASH_EARLY=1` is the
-loud reproducer for this defect.
+The default dogfood phase 2 now waits until no job is ready/dispatchable and every
+`running` job has a live open run, and its completion poll tolerates a 5 s dispatch gap; it
+passed 5/5 consecutive runs on `ad163b0`. `CRASH_EARLY=1` remains the loud reproducer for
+this defect.
 
 ### D4 — `vowp job add --brief` content is not copied into the job worktree; workers read a generic fallback
 
@@ -212,13 +226,17 @@ scope; every real job would run the generic one-line brief instead).
 Reproduction:
 
 ```sh
-bash scripts/dogfood/run.sh            # the run prints to stderr/stdout:
-# dogfood: [phase1] note: workers saw the dispatch fallback brief, not the job add brief (defect D4)
+KEEP=1 bash scripts/dogfood/run.sh
+# The first lines print "dogfood: work directory /tmp/vowp-dogfood.XXXXXX".
+WORK=/tmp/vowp-dogfood.XXXXXX          # use the printed path
 grep 'brief=' "$WORK"/phase1/fake.log
 # 2026-… brief=generic alpha
 # 2026-… brief=generic beta
 # 2026-… brief=generic gamma
 ```
+
+A successful run without `KEEP=1` deletes the work directory and does not define `$WORK` in
+the caller's shell, so use `KEEP=1` (or copy the log before cleanup) for this check.
 
 Manual shape:
 
@@ -319,10 +337,18 @@ no-tmux/no-window-manager setting) and `vowp-cli/src/cmd/up.rs` (propagate the f
 an uninstalled build, or with a different `PATH`/`VOWP_HOME`; the normal `up` path uses the
 absolute executable).
 
-Reproduction sketch: build the CLI somewhere not on `PATH`, run `vowp up --no-tmux` with a
-reachable tmux server, then let the supervisor start. `reconcile::ensure_windows` builds
-`["vowp", "__window", …]`; tmux cannot find that command (or finds a different `vowp`), the
-window dies with the session, and the supervisor logs a warn.
+**Code-read defect, not separately reproduced.** The source check is:
+
+```sh
+grep -n 'vec!\["vowp".*__window' crates/vowp-core/src/loops/reconcile.rs
+# 144: let argv = |name: &str| vec!["vowp".to_owned(), "__window".to_owned(), name.to_owned()];
+```
+
+`reconcile::ensure_windows` builds `["vowp", "__window", …]`; a supervisor that needs to
+recreate the layout while running an uninstalled build (or with a different `PATH`) cannot
+find that command, the window dies with the session, and the supervisor logs a warning.
+The normal `up` path uses the absolute executable, so this only affects the startup
+recreation path.
 
 Spec: `docs/design/crates/vowp-tmux.md` §4 and `docs/design/cli.md` §2.
 

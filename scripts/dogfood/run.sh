@@ -447,23 +447,35 @@ assert_tmux_layout() {
 }
 
 poll_states() {
-    # Prints: done_count active_count bad_list state_list
+    # Prints: done_count|active_count|bad_list|state_list|run_detail
+    # run_detail is comma-separated job:state:open_runs for every expected job.
     local ids=$1
     local jobs
     jobs=$(vowp_json job ls --all) || fail "[$PHASE] vowp job ls --all --json failed"
     printf '%s' "$jobs" | python3 -c '
-import json, sys
+import json, sqlite3, sys
 expected = sys.argv[1].split()
+db = sys.argv[2]
 jobs = {job["id"]: job["state"] for job in json.load(sys.stdin)}
 def state_of(job):
     return jobs.get(job) or "missing"
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+try:
+    open_runs = dict(con.execute(
+        "select job_id, count(*) from runs where ended_at is null group by job_id"
+    ).fetchall())
+finally:
+    con.close()
 done = sum(1 for job in expected if state_of(job) == "done")
 active = sum(1 for job in expected if state_of(job) in {"running", "gating", "reviewing", "fixing", "merging"})
 bad = [job + "=" + state_of(job) for job in expected
        if state_of(job) in {"failed", "parked", "stalled", "cancelled"} or job not in jobs]
 state = " ".join(job + "=" + state_of(job) for job in expected)
-print("|".join([str(done), str(active), ";".join(bad), state]))
-' "$ids"
+run_detail = ",".join(
+    job + ":" + state_of(job) + ":" + str(open_runs.get(job, 0)) for job in expected
+)
+print("|".join([str(done), str(active), ";".join(bad), state, run_detail]))
+' "$ids" "$P_DB"
 }
 
 wait_for_jobs_done() {
@@ -472,15 +484,58 @@ wait_for_jobs_done() {
     local count expected
     expected=$(wc -w <<<"$ids")
     local deadline=$(( $(date +%s) + limit ))
-    local done_count=0 active_count=0 bad_list="" state_list=""
+    local done_count=0 active_count=0 bad_list="" state_list="" run_detail=""
+    local poll_count=0
+    local -A STUCK_SINCE=()
     while :; do
-        IFS='|' read -r done_count active_count bad_list state_list < <(poll_states "$ids")
+        IFS='|' read -r done_count active_count bad_list state_list run_detail < <(poll_states "$ids")
         if [ -n "$bad_list" ]; then
             fail "[$PHASE] job entered a terminal bad state: $bad_list"
         fi
+        # A job in `running` with no open run row is the crash gap of D3. A healthy
+        # dispatch can show the same shape for a few milliseconds, so allow five
+        # seconds of continuous stuckness before failing.
+        local now entry job rest state open
+        now=$(date +%s)
+        local -a entries=()
+        IFS=',' read -ra entries <<<"$run_detail"
+        for entry in "${entries[@]}"; do
+            job=${entry%%:*}
+            rest=${entry#*:}
+            state=${rest%%:*}
+            open=${rest##*:}
+            if [ "$state" = "running" ] && [ "$open" -eq 0 ]; then
+                if [ -z "${STUCK_SINCE[$job]:-}" ]; then
+                    STUCK_SINCE[$job]=$now
+                fi
+                if [ $((now - STUCK_SINCE[$job])) -ge 5 ]; then
+                    fail "[$PHASE] $job: state=running but no open run for >5s (defect D3)"
+                fi
+            else
+                unset 'STUCK_SINCE[$job]' 2>/dev/null || true
+            fi
+        done
         if [ "$done_count" -eq "$expected" ] && [ "$active_count" -eq 0 ]; then
             say "[$PHASE] all jobs done: $state_list"
             return 0
+        fi
+        poll_count=$((poll_count + 1))
+        if [ $((poll_count % 5)) -eq 0 ]; then
+            local status_json board_json
+            status_json=$(vowp_json status) || fail "[$PHASE] vowp status --json failed during the run"
+            board_json=$(vowp_json board --once) || fail "[$PHASE] vowp board --json failed during the run"
+            printf '%s' "$status_json" | python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+if "supervisor" not in status or "jobs" not in status:
+    sys.exit(1)
+' || fail "[$PHASE] status --json has the wrong shape"
+            printf '%s' "$board_json" | python3 -c '
+import json, sys
+board = json.load(sys.stdin)
+if "jobs" not in board or "running" not in board:
+    sys.exit(1)
+' || fail "[$PHASE] board --json has the wrong shape"
         fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
             fail "[$PHASE] timed out after ${limit}s waiting for $expected jobs (done=$done_count active=$active_count): $state_list"
@@ -529,15 +584,16 @@ print(sum(1 for job in jobs if job["id"] in expected and job["state"] == "done")
 }
 
 wait_for_crash_window() {
-    # Wait until every job that is currently `running` has an open run row with a
-    # live pid. This is the documented crash/continue path: startup reconcile can
-    # finalise those runs and L2 can start Continue runs. Killing while a running
-    # job still lacks its run row hits a supervisor gap (defect D3).
+    # Kill only when the dispatch graph is quiescent: at least one job is running,
+    # no job is ready or a dispatchable pending job, and every running job has an
+    # open run row whose pid is still alive. Killing while a `ready` job can still
+    # be dispatched leaves it running with no run row (defect D3).
     local ids=$1
     local deadline=$(( $(date +%s) + 60 ))
     while :; do
-        local probe ready detail open_detail
+        local probe ready live_total detail
         probe=$(python3 - "$P_DB" "$ids" <<'PY'
+import os
 import sqlite3
 import sys
 
@@ -548,85 +604,57 @@ try:
     states = dict(con.execute(
         f"select id, state from jobs where id in ({placeholders})", ids
     ).fetchall())
-    open_runs = dict(con.execute(
-        f"select job_id, count(*) from runs where job_id in ({placeholders}) "
-        "and ended_at is null and pid is not null group by job_id",
+    needs = {job: [] for job in ids}
+    for src, dst in con.execute(
+        f"select src, dst from edges where kind='needs' and src in ({placeholders})", ids
+    ).fetchall():
+        needs.setdefault(src, []).append(dst)
+    live = {}
+    for job, pid in con.execute(
+        f"select job_id, pid from runs where job_id in ({placeholders}) "
+        "and ended_at is null and pid is not null",
         ids,
-    ).fetchall())
+    ).fetchall():
+        if pid and os.path.exists(f"/proc/{pid}"):
+            live[job] = live.get(job, 0) + 1
     running = [job for job in ids if states.get(job) == "running"]
+    ready = [job for job in ids if states.get(job) == "ready"]
+    pending_dispatchable = [
+        job for job in ids
+        if states.get(job) == "pending"
+        and all(states.get(need) == "done" for need in needs.get(job, []))
+    ]
+    every_running_live = bool(running) and all(live.get(job, 0) >= 1 for job in running)
+    ok = bool(running) and not ready and not pending_dispatchable and every_running_live
     detail = " ".join(
-        job + "=" + (states.get(job) or "missing") + ":" + str(open_runs.get(job, 0))
+        job + "=" + (states.get(job) or "missing") + ":" + str(live.get(job, 0))
         for job in ids
     )
-    every_has_run = bool(running) and all(open_runs.get(job, 0) >= 1 for job in running)
-    print(("1" if every_has_run else "0") + "|" + detail)
+    detail += " ready=" + (",".join(ready) or "-")
+    detail += " dispatchable=" + (",".join(pending_dispatchable) or "-")
+    print(("1" if ok else "0") + "|" + str(sum(live.values())) + "|" + detail)
 finally:
     con.close()
 PY
 )
         ready=${probe%%|*}
+        probe=${probe#*|}
+        live_total=${probe%%|*}
         detail=${probe#*|}
         if [ "$ready" = "1" ]; then
-            open_detail=$(python3 - "$P_DB" "$ids" <<'PY'
-import sqlite3
-import sys
-
-db, ids = sys.argv[1], sys.argv[2].split()
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-try:
-    placeholders = ",".join("?" for _ in ids)
-    print(con.execute(
-        f"select count(*) from runs where job_id in ({placeholders}) "
-        "and ended_at is null and pid is not null",
-        ids,
-    ).fetchone()[0])
-finally:
-    con.close()
-PY
-)
-            say "[$PHASE] crash window: $open_detail in-flight run(s) with a live pid ($detail)"
+            say "[$PHASE] crash window: $live_total live in-flight run(s), no ready/dispatchable job ($detail)"
             return 0
         fi
         case "$detail" in
             *"=done:"*) fail "[$PHASE] jobs finished before the crash window ($detail)" ;;
         esac
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            fail "[$PHASE] no complete in-flight set appeared within 60s ($detail)"
+            fail "[$PHASE] no quiescent in-flight window appeared within 60s ($detail)"
         fi
         sleep 0.05
     done
 }
 
-assert_no_stuck_running() {
-    # A job in `running` with no open run is stuck: startup reconciliation only
-    # finalises existing run rows, so nothing will start a new turn for it.
-    local ids=$1
-    python3 - "$P_DB" "$ids" <<'PY'
-import sqlite3
-import sys
-
-db, ids = sys.argv[1], sys.argv[2].split()
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-problems = []
-try:
-    for job in ids:
-        row = con.execute("select state from jobs where id=?", (job,)).fetchone()
-        if row is None:
-            problems.append(f"{job}: missing job row")
-            continue
-        state = row[0]
-        open_runs = con.execute(
-            "select count(*) from runs where job_id=? and ended_at is null", (job,)
-        ).fetchone()[0]
-        if state == "running" and open_runs == 0:
-            problems.append(f"{job}: state=running but no open run row")
-finally:
-    con.close()
-if problems:
-    print("; ".join(problems), file=sys.stderr)
-    sys.exit(1)
-PY
-}
 
 stop_supervisor() {
     local deadline=$(( $(date +%s) + 40 ))
@@ -898,9 +926,6 @@ run_phase_two() {
         *) fail "[$PHASE] unexpected restart output: $out" ;;
     esac
     say "[$PHASE] restarted: $out"
-    sleep 5
-    assert_no_stuck_running "crash-alpha crash-beta crash-gamma" \
-        || fail "[$PHASE] a job is running with no open run after restart (defect D3)"
     wait_for_jobs_done "crash-alpha crash-beta crash-gamma" "$CRASH_TIMEOUT"
     say "[$PHASE] graph finished in $((SECONDS - phase_start))s after one crash"
     stop_supervisor
