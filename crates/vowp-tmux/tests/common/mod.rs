@@ -1,12 +1,17 @@
 //! Shared private-tmux harness for integration tests.
 //!
-//! Every test runs against its own `tmux -L vowp-test-<hex>` server, and the
-//! guard kills that server on drop. The default server is never touched.
+//! Every test runs against its own `tmux -L vowp-test-<hex>` server under its
+//! own private `TMUX_TMPDIR`, and the guard kills that server on drop. The
+//! constructor asserts that the resolved socket is private, so a test cannot
+//! silently fall back to the user's default tmux server.
+
+#![allow(dead_code)]
 
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tempfile::TempDir;
 use vowp_tmux::Tmux;
 
 static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -17,19 +22,23 @@ pub struct PrivateTmux {
     pub tmux: Tmux,
     /// The private socket name.
     pub socket: String,
+    /// Private `TMUX_TMPDIR`.
+    pub dir: TempDir,
 }
 
 impl PrivateTmux {
     /// Start a guard for a fresh private socket, or return `None` with a
     /// printed notice when tmux is not installed.
     pub fn new() -> Option<Self> {
+        let dir = tempfile::tempdir().expect("private tmux dir");
         let socket = socket_name();
-        let tmux = Tmux::new(Some(socket.clone()));
+        let tmux = Tmux::in_private_dir(socket.clone(), dir.path()).expect("private tmux socket");
+        assert_private(&tmux, dir.path());
         if !tmux.has_tmux() {
             eprintln!("SKIP: tmux not installed");
             return None;
         }
-        Some(Self { tmux, socket })
+        Some(Self { tmux, socket, dir })
     }
 
     /// Run a raw tmux command against the private server, bypassing the safe
@@ -39,10 +48,27 @@ impl PrivateTmux {
             .arg("-L")
             .arg(&self.socket)
             .args(args)
+            .env("TMUX_TMPDIR", self.dir.path())
             .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .output()
             .expect("run raw tmux")
     }
+}
+
+/// Assert that a manager is bound to a private directory and not to tmux's
+/// `default` server.
+pub fn assert_private(tmux: &Tmux, dir: &std::path::Path) {
+    let socket = tmux.socket_name().expect("private socket name");
+    assert_ne!(socket, "default", "refusing to test against the default tmux server");
+    assert_eq!(tmux.socket_dir(), Some(dir), "unexpected TMUX_TMPDIR");
+    assert_eq!(
+        tmux.socket_path(),
+        Some(dir.join(socket)),
+        "tmux socket path must stay under the private directory"
+    );
+    let path = tmux.socket_path().expect("socket path");
+    assert!(!path.ends_with("default"), "private socket path ends in default");
 }
 
 impl Drop for PrivateTmux {

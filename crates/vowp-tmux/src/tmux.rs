@@ -6,8 +6,10 @@
 //!
 //! Spec: `docs/design/crates/vowp-tmux.md` §3.
 
+use std::cell::RefCell;
+use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -21,15 +23,40 @@ use crate::quote::{validate_name, window_command};
 const TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const WINDOW_FORMAT: &str = "#{window_id}|#{window_index}|#{window_name}|#{@vowp}|#{pane_pid}|#{window_active}";
+/// File under the node home that records which tmux server `vowp up` created.
+const SERVER_RECORD: &str = "tmux-server";
+/// Environment override for scripts and tests that need a fixed private socket name.
+const SOCKET_ENV: &str = "VOWP_TMUX_SOCKET";
+
+#[derive(Debug, Clone)]
+struct Scope {
+    socket: String,
+    tmpdir: PathBuf,
+}
+
+thread_local! {
+    /// The private scope selected by [`Tmux::for_home`] for this process.
+    ///
+    /// `vowp attach` constructs its own [`Tmux`] for the argv it execs; the
+    /// thread-local makes that construction use the same private server as the
+    /// command's [`crate::Tmux`] without changing `attach`'s signature.
+    static CURRENT_SCOPE: RefCell<Option<Scope>> = const { RefCell::new(None) };
+}
 
 /// Real tmux.
 ///
-/// `socket = Some("name")` runs every command as `tmux -L name ...` (tests and
-/// private servers); `None` uses the default server (CLI only).
+/// A [`Tmux`] always addresses a named private socket. `Tmux::new(Some("name"))`
+/// uses `tmux -L name ...`; `Tmux::new(None)` inherits the process scope set by
+/// [`Tmux::for_home`]. Commands that address a server are refused when no
+/// private socket is known, so a missing `-L` can never fall back to the user's
+/// default server.
 #[derive(Debug, Clone)]
 pub struct Tmux {
     socket: Option<String>,
     binary: String,
+    tmpdir: Option<PathBuf>,
+    owner: Option<PathBuf>,
+    explicit_socket: bool,
 }
 
 struct Completed {
@@ -44,21 +71,122 @@ struct RawWindow {
 }
 
 impl Tmux {
-    /// Create a manager for the default tmux server, or for the named private
-    /// socket when `socket` is `Some`.
+    /// Create a manager for a named private socket, or inherit the process
+    /// scope set by [`Tmux::for_home`] when `socket` is `None`.
+    ///
+    /// A manager without a socket (or with the literal socket name `default`)
+    /// refuses every server command, so it can never reach the user's default
+    /// tmux server.
     pub fn new(socket: Option<String>) -> Tmux {
-        Tmux {
-            socket,
-            binary: "tmux".to_owned(),
+        match socket {
+            Some(socket) => Tmux {
+                socket: Some(socket),
+                binary: "tmux".to_owned(),
+                tmpdir: None,
+                owner: None,
+                explicit_socket: true,
+            },
+            None => {
+                let scope = current_scope();
+                Tmux {
+                    socket: scope.as_ref().map(|scope| scope.socket.clone()),
+                    binary: "tmux".to_owned(),
+                    tmpdir: scope.as_ref().map(|scope| scope.tmpdir.clone()),
+                    owner: None,
+                    explicit_socket: false,
+                }
+            }
         }
     }
 
     /// Create a manager with an overridden tmux binary (tests, CI).
     pub fn with_binary(socket: Option<String>, binary: impl Into<String>) -> Tmux {
+        let mut tmux = Tmux::new(socket);
+        tmux.binary = binary.into();
+        tmux
+    }
+
+    /// Create the private manager owned by one node home.
+    ///
+    /// The socket name is derived from the node home (or taken from
+    /// `VOWP_TMUX_SOCKET` when a script needs a fixed name), and every command
+    /// runs with `TMUX_TMPDIR=<home>/tmux` and `-L <socket>`. The first layout
+    /// creation records the socket and server pid under `<home>/tmux-server`;
+    /// destructive operations refuse a server whose pid or socket does not
+    /// match that record.
+    pub fn for_home(home: impl AsRef<Path>) -> Tmux {
+        let home = canonical_or_original(home.as_ref());
+        let socket = std::env::var(SOCKET_ENV)
+            .ok()
+            .filter(|value| value != "default" && validate_name("socket", value).is_ok())
+            .unwrap_or_else(|| socket_name_for_home(&home));
+        let tmpdir = home.join("tmux");
+        let scope = Scope {
+            socket: socket.clone(),
+            tmpdir: tmpdir.clone(),
+        };
+        CURRENT_SCOPE.with(|current| {
+            *current.borrow_mut() = Some(scope);
+        });
         Tmux {
-            socket,
-            binary: binary.into(),
+            socket: Some(socket),
+            binary: "tmux".to_owned(),
+            tmpdir: Some(tmpdir),
+            owner: Some(home),
+            explicit_socket: false,
         }
+    }
+
+    /// Create a manager bound to an explicit private socket directory.
+    ///
+    /// This is the test helper constructor: both `-L <socket>` and
+    /// `TMUX_TMPDIR=<dir>` are always set, and `default` is rejected.
+    pub fn in_private_dir(socket: impl Into<String>, dir: impl Into<PathBuf>) -> Result<Tmux, TmuxError> {
+        let socket = socket.into();
+        validate_name("socket", &socket)?;
+        if socket == "default" {
+            return Err(TmuxError::Refused("refusing the default tmux server"));
+        }
+        Ok(Tmux {
+            socket: Some(socket),
+            binary: "tmux".to_owned(),
+            tmpdir: Some(dir.into()),
+            owner: None,
+            explicit_socket: true,
+        })
+    }
+
+    /// Return the private socket name, when one is configured.
+    pub fn socket_name(&self) -> Option<&str> {
+        self.socket.as_deref()
+    }
+
+    /// Return the private `TMUX_TMPDIR`, when one is configured.
+    pub fn socket_dir(&self) -> Option<&Path> {
+        self.tmpdir.as_deref()
+    }
+
+    /// Return the full private socket path, when both parts are known.
+    pub fn socket_path(&self) -> Option<PathBuf> {
+        match (&self.socket, &self.tmpdir) {
+            (Some(socket), Some(dir)) => Some(dir.join(socket)),
+            _ => None,
+        }
+    }
+
+    /// Return the pid of the tmux server this manager is connected to.
+    ///
+    /// `None` means no server is running on the private socket.
+    pub fn server_pid(&self) -> Result<Option<u32>, TmuxError> {
+        let args = vec!["list-sessions".to_owned(), "-F".to_owned(), "#{pid}".to_owned()];
+        let output = self.execute(&args)?;
+        if !output.status.success() {
+            if output.stderr.contains("no server running") {
+                return Ok(None);
+            }
+            return Err(Self::command_error(&args, &output));
+        }
+        Ok(output.stdout.lines().next().and_then(|line| line.trim().parse().ok()))
     }
 
     /// Whether `tmux -V` runs successfully.
@@ -104,13 +232,15 @@ impl Tmux {
         self.run_checked(&args)
     }
 
-    /// Kill a session, but only when every window in it is tagged and the
-    /// session is in the `vowp-` namespace.
+    /// Kill a session, but only when the server was recorded by `vowp up`,
+    /// every window in it is tagged and the session is in the `vowp-`
+    /// namespace.
     pub fn kill_session(&self, session: &str) -> Result<(), TmuxError> {
         require_vowp_session(session)?;
         if !self.session_exists_raw(session)? {
             return Ok(());
         }
+        self.require_owned_server()?;
         let windows = self.list_windows(session)?;
         if let Some(window) = windows.iter().find(|w| !w.tagged) {
             return Err(TmuxError::NotTagged {
@@ -139,11 +269,17 @@ impl Tmux {
 
     /// Kill the private server owned by a test guard.
     ///
-    /// Returns [`TmuxError::Refused`] when no socket is set, before spawning
-    /// anything, so it can never touch the user's default server.
+    /// Returns [`TmuxError::Refused`] when the caller did not name an explicit
+    /// private socket, before spawning anything, so it can never touch the
+    /// user's default server or a process-scoped socket it does not own.
     pub fn kill_server_for_tests(&self) -> Result<(), TmuxError> {
-        if self.socket.is_none() {
-            return Err(TmuxError::Refused("refusing to kill the default tmux server"));
+        match &self.socket {
+            Some(socket) if self.explicit_socket && socket != "default" => {}
+            _ => {
+                return Err(TmuxError::Refused(
+                    "refusing to kill a tmux server this guard did not create",
+                ));
+            }
         }
         let args = vec!["kill-server".to_owned()];
         match self.execute(&args) {
@@ -160,22 +296,41 @@ impl Tmux {
         Ok(output.status.success())
     }
 
-    fn command(&self, args: &[String]) -> Command {
+    fn command(&self, args: &[String]) -> Result<Command, TmuxError> {
+        let version_only = args.len() == 1 && args[0] == "-V";
+        if !version_only {
+            match self.socket.as_deref() {
+                Some("default") => {
+                    return Err(TmuxError::Refused("refusing the default tmux server"));
+                }
+                None => {
+                    return Err(TmuxError::Refused(
+                        "refusing the default tmux server: no private socket is configured",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
         let mut command = Command::new(&self.binary);
         if let Some(socket) = &self.socket {
             command.arg("-L").arg(socket);
         }
+        if let Some(dir) = &self.tmpdir {
+            fs::create_dir_all(dir)?;
+            command.env("TMUX_TMPDIR", dir);
+        }
         command.args(args);
         command
             .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        command
+        Ok(command)
     }
 
     fn execute(&self, args: &[String]) -> Result<Completed, TmuxError> {
-        let mut child = self.command(args).spawn().map_err(spawn_error)?;
+        let mut child = self.command(args)?.spawn().map_err(spawn_error)?;
         let stdout_reader = child.stdout.take().map(spawn_reader);
         let stderr_reader = child.stderr.take().map(spawn_reader);
         let deadline = Instant::now() + TIMEOUT;
@@ -205,6 +360,66 @@ impl Tmux {
                 }
             }
         }
+    }
+
+    /// Record the private socket and the current server pid under the node home.
+    fn record_server(&self) -> Result<(), TmuxError> {
+        let Some(home) = &self.owner else {
+            return Ok(());
+        };
+        let socket = self.socket.as_deref().ok_or(TmuxError::Refused(
+            "cannot record a tmux server without a private socket",
+        ))?;
+        let pid = self
+            .server_pid()?
+            .ok_or(TmuxError::Refused("cannot record a tmux server that is not running"))?;
+        fs::create_dir_all(home)?;
+        let path = home.join(SERVER_RECORD);
+        let temp = home.join(format!("{SERVER_RECORD}.tmp"));
+        fs::write(&temp, format!("socket={socket}\npid={pid}\n"))?;
+        fs::rename(&temp, &path)?;
+        Ok(())
+    }
+
+    /// Refuse a destructive operation when the server is not the one `vowp up`
+    /// recorded for this node home.
+    fn require_owned_server(&self) -> Result<(), TmuxError> {
+        let Some(home) = &self.owner else {
+            return Ok(());
+        };
+        let path = home.join(SERVER_RECORD);
+        let Ok(text) = fs::read_to_string(&path) else {
+            return Err(TmuxError::Refused(
+                "tmux server was not recorded by vowp up; refusing to clean it up",
+            ));
+        };
+        let mut recorded_socket = None;
+        let mut recorded_pid = None;
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix("socket=") {
+                recorded_socket = Some(value.trim().to_owned());
+            }
+            if let Some(value) = line.strip_prefix("pid=") {
+                recorded_pid = value.trim().parse::<u32>().ok();
+            }
+        }
+        let Some(socket) = self.socket.as_deref() else {
+            return Err(TmuxError::Refused("refusing a tmux server without a private socket"));
+        };
+        if recorded_socket.as_deref() != Some(socket) {
+            return Err(TmuxError::Refused(
+                "tmux server socket does not match the server recorded by vowp up",
+            ));
+        }
+        let current = self
+            .server_pid()?
+            .ok_or(TmuxError::Refused("tmux server is not running"))?;
+        if recorded_pid != Some(current) {
+            return Err(TmuxError::Refused(
+                "tmux server pid does not match the server recorded by vowp up",
+            ));
+        }
+        Ok(())
     }
 
     fn run_checked(&self, args: &[String]) -> Result<String, TmuxError> {
@@ -427,11 +642,11 @@ fn window_args(session: &str, name: &str, cwd: Option<&Path>, command: String) -
 impl WindowManager for Tmux {
     fn ensure_session(&self, session: &str) -> Result<(), TmuxError> {
         require_vowp_session(session)?;
-        if self.session_exists_raw(session)? {
-            return Ok(());
+        if !self.session_exists_raw(session)? {
+            let argv = vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()];
+            self.create_session(session, "scratch", &argv, None)?;
         }
-        let argv = vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()];
-        self.create_session(session, "scratch", &argv, None)
+        self.record_server()
     }
 
     fn new_window(&self, session: &str, name: &str, spec: &WindowSpec) -> Result<(), TmuxError> {
@@ -476,6 +691,7 @@ impl WindowManager for Tmux {
         require_vowp_session(session)?;
         require_window_name(name)?;
         let target = self.window_target(session, name)?;
+        self.require_owned_server()?;
         let args = vec![
             "show-options".to_owned(),
             "-w".to_owned(),
@@ -497,11 +713,14 @@ impl WindowManager for Tmux {
 
     fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>, TmuxError> {
         require_vowp_session(session)?;
-        Ok(self
-            .list_windows_raw(session)?
-            .into_iter()
-            .map(|window| window.info)
-            .collect())
+        let windows = self.list_windows_raw(session)?;
+        if !windows.is_empty() {
+            // `vowp down --kill-windows` lists first and then kills each window;
+            // refusing an unrecorded or replaced server here makes the whole
+            // cleanup fail loudly instead of silently skipping every kill.
+            self.require_owned_server()?;
+        }
+        Ok(windows.into_iter().map(|window| window.info).collect())
     }
 
     fn window_exists(&self, session: &str, name: &str) -> Result<bool, TmuxError> {
@@ -518,7 +737,9 @@ impl WindowManager for Tmux {
         require_vowp_session(&session)?;
         if !self.session_exists_raw(&session)? {
             self.create_session(&session, "board", &spec.board, spec.cwd.as_deref())?;
+            self.record_server()?;
         } else {
+            self.record_server()?;
             if !self.window_exists(&session, "board")? {
                 self.new_window(
                     &session,
@@ -555,4 +776,27 @@ impl WindowManager for Tmux {
         }
         Ok(())
     }
+}
+
+fn current_scope() -> Option<Scope> {
+    CURRENT_SCOPE.with(|current| current.borrow().clone())
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Deterministic private tmux socket name for one node home.
+///
+/// The name is `vowp-` plus a 64-bit FNV-1a hash of the home path. It is safe
+/// for `tmux -L` and stable across `vowp up`, the detached supervisor and a
+/// later `vowp down` running with the same home.
+pub fn socket_name_for_home(home: &Path) -> String {
+    let canonical = canonical_or_original(home);
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in canonical.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("vowp-{hash:016x}")
 }

@@ -20,4 +20,4 @@ pub use error::TmuxError;
 pub use manager::{
     FIXED_WINDOWS, LayoutSpec, WindowInfo, WindowManager, WindowSpec, session_name_for_project, window_name_for_job,
 };
-pub use tmux::Tmux;
+pub use tmux::{Tmux, socket_name_for_home};
