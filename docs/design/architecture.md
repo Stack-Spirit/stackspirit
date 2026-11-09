@@ -164,17 +164,17 @@ always_allowed = ["Cargo.lock"]
 
 # ---- profiles: a role's model ladder; rung 0 is preferred ---------------------------------------------
 [profiles.planner]
-ladder = ["claude-code:claude-sonnet-5-5@medium", "opencode:deepseek/deepseek-flash#max"]
+ladder = ["claude-code:model-a@medium", "opencode:provider/model-b#max"]
 on_quota = "next_then_probe_back"      # on a Claude limit: capsule -> DeepSeek; probe Claude after the reset
 
 [profiles.keeper]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:provider/model-b#max"]
 
 [profiles.worker]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:provider/model-b#max"]
 
 [profiles.verifier]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:provider/model-b#max"]
 
 # ---- providers ---------------------------------------------------------------------------------------
 [providers.deepseek]
@@ -247,7 +247,7 @@ action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 
 # ---- capsule writer and merge queue --------------------------------------------------------------------------------
 [capsule]
-executor = "opencode:deepseek/deepseek-flash#max"
+executor = "opencode:provider/model-b#max"
 min_interval_secs = 120
 tail_turns = 2
 

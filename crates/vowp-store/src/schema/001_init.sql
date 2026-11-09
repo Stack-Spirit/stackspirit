@@ -3,7 +3,7 @@
 -- Conventions
 --   * Timestamps: TEXT, RFC 3339 UTC with milliseconds, e.g. '2026-11-08T19:25:47.123Z'. They sort lexicographically.
 --   * Ids: ULID (26-char Crockford base32, TEXT) for runs, sessions, events, capsules, switches, inbox items,
---     releases and schedules. Jobs use human slugs ('n04-graph'); nodes/projects/loops use names.
+--     releases and schedules. Jobs use human slugs ('example-job'); nodes/projects/loops use names.
 --     Autoincrement INTEGER ids only for append-only high-volume tables (gate_results, ledger).
 --   * Booleans: INTEGER 0/1 with CHECK. Enums: TEXT with CHECK listing the allowed values (kept in sync with the
 --     Rust enums in vowp-protocol; the `schema_matches_enums` test in vowp-store enforces it).
