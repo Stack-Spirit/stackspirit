@@ -40,6 +40,9 @@ const MAX_TAIL: usize = 500;
 /// Blobs at most this many bytes are inlined as base64.
 const INLINE_BLOB_MAX: u64 = 65_536;
 
+/// Sidecar holding the origin bundle until the child's first turn consumes it.
+const IMPORT_SIDECAR: &str = "import.json";
+
 /// One exported session, self-contained enough to continue on another node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Bundle {
@@ -270,20 +273,77 @@ pub fn import(
 
     reindex(&store, &deps.paths, Some(&child))?;
     store.set_session_state(&child, SessionState::Idle, Some(&target.executor))?;
+    write_import_sidecar(deps, &child, bundle)?;
     Ok(child)
 }
 
 /// Returns the prefix for a seed on the imported session.
 ///
 /// Import deliberately keeps the bundle tail out of the child log, so the first turn
-/// on the child uses this text as its seed: capsule plus the exported tail.
-pub fn imported_seed(deps: &Deps, bundle: &Bundle, next_input: &str) -> String {
-    seed_prompt(
-        &bundle.capsule,
-        &bundle.tail,
-        deps.config.capsule.tail_turns,
-        next_input,
-    )
+/// on the child uses this text as its seed: capsule plus the exported tail. The capsule
+/// is rendered under the **child** session id, not the origin id.
+pub fn imported_seed(deps: &Deps, bundle: &Bundle, child: &SessionId, next_input: &str) -> String {
+    let mut capsule = bundle.capsule.clone();
+    capsule.session_id = child.clone();
+    seed_prompt(&capsule, &bundle.tail, deps.config.capsule.tail_turns, next_input)
+}
+
+/// Builds the first-turn seed from the bundle sidecar, when the session has one.
+///
+/// `import` writes the source bundle next to the child log; the first `run_turn`
+/// consumes it and then removes it (sessions.md §6.3 step 5).
+pub(crate) fn pending_import_seed(
+    deps: &Deps,
+    child: &SessionId,
+    next_input: &str,
+) -> Result<Option<String>, CoreError> {
+    let path = import_sidecar_path(deps, child);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CoreError::Io {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    };
+    let bundle: Bundle = serde_json::from_slice(&bytes).map_err(json_error)?;
+    bundle.validate()?;
+    Ok(Some(imported_seed(deps, &bundle, child, next_input)))
+}
+
+/// Removes the bundle sidecar after the child's first turn was framed.
+pub(crate) fn clear_pending_import(deps: &Deps, child: &SessionId) -> Result<(), CoreError> {
+    let path = import_sidecar_path(deps, child);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// Returns `<session dir>/import.json`.
+fn import_sidecar_path(deps: &Deps, child: &SessionId) -> PathBuf {
+    deps.paths.session_dir(child).join(IMPORT_SIDECAR)
+}
+
+/// Writes the validated source bundle beside the child log.
+fn write_import_sidecar(deps: &Deps, child: &SessionId, bundle: &Bundle) -> Result<(), CoreError> {
+    let path = import_sidecar_path(deps, child);
+    let bytes = serde_json::to_vec_pretty(bundle).map_err(json_error)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|source| CoreError::Io {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|source| CoreError::Io {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 /// Returns whether an event belongs in a bundle tail.

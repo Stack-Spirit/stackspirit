@@ -21,10 +21,10 @@ use vowp_core::session::switch::{run_switch, run_switch_with_input};
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Clock,
-    Cost, EventBody, EventEnvelope, EventSource, EventType, Executor, ExecutorRef, FakeClock, HarnessEvent,
-    HarnessKind, Limit, LimitRowKind, MemoryLog, NodeName, ProbeResult, Run, RunId, RunOutcome, RunPurpose, RunRole,
-    RunSummary, SessionId, SessionRole, StartInput, StopReason, SwitchReason, SwitchRequest, SwitchState, Timestamp,
-    TurnRequest,
+    Cost, EventBody, EventEnvelope, EventId, EventIndexRow, EventSource, EventType, Executor, ExecutorRef, FakeClock,
+    HarnessEvent, HarnessKind, Limit, LimitRowKind, MemoryLog, NodeName, ProbeResult, Run, RunId, RunOutcome,
+    RunPurpose, RunRole, RunSummary, SessionId, SessionOps, SessionRole, StartInput, StopReason, SwitchReason,
+    SwitchRequest, SwitchState, Timestamp, TurnRequest,
 };
 use vowp_store::NodePaths;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -289,6 +289,63 @@ impl AdapterRun for ProcessRun {
     }
 }
 
+/// An adapter whose run stream closes immediately and whose `wait()` fails.
+struct WaitErrorAdapter;
+
+impl Adapter for WaitErrorAdapter {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::ClaudeCode
+    }
+
+    fn probe(&self) -> ProbeResult {
+        ProbeResult {
+            ok: true,
+            version: None,
+            path: None,
+            detail: "wait-error fake".to_owned(),
+        }
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
+
+    fn start(&self, _input: StartInput) -> Result<Box<dyn AdapterRun>, AdapterError> {
+        let (_sender, receiver) = channel();
+        Ok(Box::new(WaitErrorRun { receiver }))
+    }
+}
+
+struct WaitErrorRun {
+    receiver: Receiver<HarnessEvent>,
+}
+
+impl AdapterRun for WaitErrorRun {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+
+    fn events(&self) -> &Receiver<HarnessEvent> {
+        &self.receiver
+    }
+
+    fn send(&mut self, _text: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported("wait-error fake has no live input"))
+    }
+
+    fn interrupt(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<RunSummary, AdapterError> {
+        Err(AdapterError::Io(std::io::Error::other("wait failed")))
+    }
+}
+
 fn append_event(deps: &Deps, session: &SessionId, body: EventBody) {
     let store = deps.open_store().expect("store");
     let log = SessionLog::open(&deps.paths, session, deps.clock.clone()).expect("log");
@@ -416,6 +473,222 @@ fn switch_happy_path_events_rows_and_lineage() {
             Ok(EventBody::UserMessage(payload)) if payload.note.as_deref() == Some("handoff")
         )),
         "a pure switch does not start a turn or deliver a seed"
+    );
+}
+
+#[test]
+fn session_ops_switch_uses_run_switch() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("trait handoff")))
+            .with(
+                "claude-code",
+                Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+            ),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "trait switch");
+    let store = deps.open_store().expect("store");
+
+    let ops: &dyn SessionOps = &service;
+    let switch = ops
+        .switch(request(&session, claude(), SwitchReason::User))
+        .expect("switch through SessionOps");
+
+    assert_eq!(switch.state, SwitchState::Completed);
+    assert_eq!(switch.from_executor, Some(opencode()));
+    assert_eq!(switch.to_executor, claude());
+    assert!(switch.capsule_id.is_some());
+    assert!(switch.ended_at.is_some());
+
+    let events = read_events(&deps, &session);
+    assert_eq!(
+        events.iter().map(|event| event.event_type).collect::<Vec<_>>(),
+        vec![
+            EventType::SessionCreated,
+            EventType::Capsule,
+            EventType::SessionExecutor,
+            EventType::SessionExecutor,
+            EventType::Switch,
+        ],
+        "the service path runs the sessions.md §5 happy-path sequence"
+    );
+    assert!(matches!(
+        events[2].body(),
+        Ok(EventBody::SessionExecutor(payload))
+            if payload.action == AttachAction::Detach && payload.executor == opencode()
+    ));
+    assert!(matches!(
+        events[3].body(),
+        Ok(EventBody::SessionExecutor(payload))
+            if payload.action == AttachAction::Attach && payload.executor == claude()
+    ));
+    let recorded = match events[4].body().expect("switch payload") {
+        EventBody::Switch(payload) => payload,
+        other => panic!("expected switch, got {other:?}"),
+    };
+    assert_eq!(recorded.switch_id, switch.id);
+    assert_eq!(recorded.capsule_id, switch.capsule_id);
+
+    let row = store
+        .switch(&switch.id)
+        .expect("switch row")
+        .expect("switch row exists");
+    assert_eq!(row.state, SwitchState::Completed);
+    assert_eq!(row.capsule_id, switch.capsule_id, "the row links the capsule");
+    assert!(row.ended_at.is_some());
+
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle);
+    assert_eq!(current.executor, Some(claude()));
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.body(),
+            Ok(EventBody::UserMessage(payload)) if payload.note.as_deref() == Some("handoff")
+        )),
+        "a pure switch delivers the seed with the next turn"
+    );
+}
+
+#[test]
+fn switch_error_after_capsule_aborts_row() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("late failure handoff")))
+            .with(
+                "claude-code",
+                Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+            ),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "late failure");
+    let store = deps.open_store().expect("store");
+
+    // The capsule event is seq N+1; pre-indexing N+2 makes the later source-detach
+    // append fail in the store after the capsule has been captured.
+    let last_seq = SessionLog::open_read(&deps.paths, &session)
+        .expect("log")
+        .last_seq()
+        .expect("seq");
+    store
+        .index_event(&EventIndexRow {
+            session_id: session.clone(),
+            seq: last_seq + 2,
+            id: EventId::new(),
+            ts: ts(),
+            event_type: EventType::UserMessage,
+            actor: Actor::User,
+            harness: HarnessKind::Opencode,
+            model: None,
+            byte_offset: 0,
+            byte_len: 1,
+            summary: "injected index conflict".to_owned(),
+        })
+        .expect("inject index conflict");
+
+    let error = run_switch(
+        &deps,
+        &request(&session, claude(), SwitchReason::User),
+        &CancelToken::default(),
+    )
+    .expect_err("the post-capsule append fails");
+    assert!(
+        matches!(error, CoreError::Store(vowp_store::StoreError::Conflict(_))),
+        "got {error:?}"
+    );
+
+    let row = store
+        .list_switches(&session)
+        .expect("switches")
+        .into_iter()
+        .next()
+        .expect("switch row");
+    assert_eq!(
+        row.state,
+        SwitchState::Aborted,
+        "a failure after the plan row never leaves it started"
+    );
+    assert!(row.error.as_deref().is_some_and(|error| error.contains("conflict")));
+
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle);
+    assert_eq!(current.executor, Some(opencode()), "the source stays attached");
+    let events = read_events(&deps, &session);
+    assert!(
+        !events.iter().any(|event| event.event_type == EventType::Switch),
+        "an aborted switch records no switch event"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.body(), Ok(EventBody::Error(_)))),
+        "the abort is visible in the log"
+    );
+}
+
+#[test]
+fn switch_target_turn_error_terminates_turn() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("wait error handoff")))
+            .with("claude-code", Arc::new(WaitErrorAdapter)),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "wait error");
+    let store = deps.open_store().expect("store");
+
+    let error = run_switch_with_input(
+        &deps,
+        &request(&session, claude(), SwitchReason::Failover),
+        "continue",
+        &CancelToken::default(),
+    )
+    .expect_err("the target wait fails twice");
+    assert!(matches!(error, CoreError::SwitchAborted(_)), "got {error:?}");
+
+    let events = read_events(&deps, &session);
+    let mut open_turn = None;
+    let mut started = Vec::new();
+    let mut ended = Vec::new();
+    let mut target_detaches = 0;
+    for event in &events {
+        match event.body() {
+            Ok(EventBody::TurnStarted(payload)) => {
+                assert!(open_turn.is_none(), "a new turn started before the previous ended");
+                open_turn = Some(payload.turn);
+                started.push(payload.turn);
+            }
+            Ok(EventBody::TurnEnded(payload)) => {
+                assert_eq!(open_turn.take(), Some(payload.turn), "turn.ended matches the open turn");
+                ended.push(payload.turn);
+            }
+            Ok(EventBody::SessionExecutor(payload))
+                if payload.action == AttachAction::Detach && payload.executor == claude() =>
+            {
+                target_detaches += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(open_turn.is_none(), "no unterminated turn remains");
+    assert_eq!(started, vec![1, 2], "both seeded attempts are numbered");
+    assert_eq!(ended, vec![1, 2], "each failed attempt terminates its turn");
+    assert_eq!(target_detaches, 2, "each failed attempt detaches the target");
+    assert_eq!(
+        store
+            .list_switches(&session)
+            .expect("switches")
+            .into_iter()
+            .next()
+            .expect("row")
+            .state,
+        SwitchState::Aborted
     );
 }
 

@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
     Actor, AttachAction, CancelToken, CapsuleTrigger, CostEvent, ErrorEvent, ErrorKind, EventBody, EventSource,
-    Executor, ExecutorRef, HarnessKind, Limit, LimitEvent, LimitRowKind, NodeName, Run, RunId, RunOutcome, RunPurpose,
-    RunRole, Session, SessionExecutor, SessionId, SessionRole, SessionState, StartInput, StopReason, Switch,
-    SwitchEvent, SwitchId, SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted, UserMessage,
+    Executor, ExecutorRef, HarnessKind, Level, Limit, LimitEvent, LimitRowKind, NodeName, Run, RunId, RunOutcome,
+    RunPurpose, RunRole, Session, SessionExecutor, SessionId, SessionRole, SessionState, StartInput, StopReason,
+    Switch, SwitchEvent, SwitchId, SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted, UserMessage,
 };
 use vowp_store::session_files::{AdapterMapping, add_adapter_mapping};
 use vowp_store::session_log::{AppendedEvent, NewEvent, SessionLog, index_row};
@@ -26,6 +26,7 @@ use vowp_store::{RunFinish, Store};
 use crate::deps::Deps;
 use crate::error::CoreError;
 use crate::session::capsule::CapsuleWriter;
+use crate::session::recovery::last_turn_blocked;
 use crate::session::seed::seed_prompt;
 use crate::session::service::tail_of_complete_turns;
 
@@ -53,8 +54,9 @@ const LIMIT_MARGIN: Duration = Duration::from_secs(120);
 /// How the drain phase ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Drain {
-    /// The active turn ended before the deadline, with its stop reason.
-    Finished(StopReason),
+    /// The active turn ended before the deadline; `blocked` is true when its last
+    /// outcome was a limit, credits or auth failure (sessions.md §2).
+    Finished { blocked: bool },
     /// The deadline passed and the active run was stopped.
     Interrupted,
 }
@@ -129,46 +131,220 @@ fn run_switch_inner(
     };
     store.insert_switch(&switch)?;
 
-    let target = deps.adapters.get(&req.to.executor);
-    let probe = target.as_ref().map(|adapter| adapter.probe());
-    let probe_ok = probe.as_ref().is_some_and(|probe| probe.ok);
-    if !probe_ok {
-        let detail = match probe {
-            Some(probe) => format!("target probe failed: {}", probe.detail),
-            None => "target harness is not installed".to_owned(),
-        };
-        return abort(
-            deps,
-            &store,
-            &switch,
-            previous_state,
-            previous_executor.as_ref(),
-            &session.node,
-            false,
-            ErrorKind::AdapterUnavailable,
-            &detail,
-        );
-    }
+    let result = (|| -> Result<(SessionState, Option<vowp_protocol::CapsuleId>), CoreError> {
+        let target = deps.adapters.get(&req.to.executor);
+        // TODO(sessions.md §5 step 3, remote-node probe): a switch whose `to_node` is not
+        // this node should run `vowp --node <n> doctor --json` and abort when it is not ok.
+        // v0.1 probes only the local AdapterRegistry, so a remote target can currently be
+        // attached without proving its harness is available. This is the one deliberately
+        // skipped deliverable of f-n07c-wire-switch.
+        let probe = target.as_ref().map(|adapter| adapter.probe());
+        let probe_ok = probe.as_ref().is_some_and(|probe| probe.ok);
+        if !probe_ok {
+            let detail = match probe {
+                Some(probe) => format!("target probe failed: {}", probe.detail),
+                None => "target harness is not installed".to_owned(),
+            };
+            return Err(abort(
+                deps,
+                &store,
+                &switch,
+                previous_state,
+                previous_executor.as_ref(),
+                &session.node,
+                false,
+                ErrorKind::AdapterUnavailable,
+                &detail,
+            ));
+        }
 
-    if is_active(&store, &session)? {
-        match drain(deps, &store, &session, req.drain_secs, cancel) {
-            Ok(Drain::Finished(StopReason::Limit)) => previous_state = SessionState::Blocked,
-            Ok(Drain::Finished(_) | Drain::Interrupted) => previous_state = SessionState::Idle,
-            Err(CoreError::Cancelled) => {
-                let _ = abort(
-                    deps,
-                    &store,
-                    &switch,
-                    previous_state,
-                    previous_executor.as_ref(),
-                    &session.node,
-                    false,
-                    ErrorKind::Internal,
-                    "switch cancelled during drain",
-                );
-                return Err(CoreError::Cancelled);
+        if is_active(&store, &session)? {
+            match drain(deps, &store, &session, req.drain_secs, cancel) {
+                Ok(Drain::Finished { blocked }) => {
+                    previous_state = if blocked {
+                        SessionState::Blocked
+                    } else {
+                        SessionState::Idle
+                    };
+                }
+                Ok(Drain::Interrupted) => previous_state = SessionState::Idle,
+                Err(CoreError::Cancelled) => {
+                    let _ = abort(
+                        deps,
+                        &store,
+                        &switch,
+                        previous_state,
+                        previous_executor.as_ref(),
+                        &session.node,
+                        false,
+                        ErrorKind::Internal,
+                        "switch cancelled during drain",
+                    );
+                    return Err(CoreError::Cancelled);
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    let _ = abort(
+                        deps,
+                        &store,
+                        &switch,
+                        previous_state,
+                        previous_executor.as_ref(),
+                        &session.node,
+                        false,
+                        ErrorKind::Internal,
+                        &detail,
+                    );
+                    return Err(error);
+                }
             }
-            Err(error) => {
+        }
+
+        let capsule = match CapsuleWriter::new(deps.clone()).write(&req.session_id, CapsuleTrigger::Switch) {
+            Ok(capsule) => Some(capsule),
+            Err(error) => match store.latest_capsule(&req.session_id)? {
+                Some(previous) => {
+                    let log = SessionLog::open(&deps.paths, &req.session_id, deps.clock.clone())?;
+                    append_event(
+                        &store,
+                        &log,
+                        HarnessKind::Vowp,
+                        EventBody::Note(vowp_protocol::Note {
+                            text: format!("stale capsule used: {error}"),
+                        }),
+                        Some(deps.node.clone()),
+                        None,
+                    )?;
+                    log.sync()?;
+                    Some(previous)
+                }
+                None => {
+                    return Err(abort(
+                        deps,
+                        &store,
+                        &switch,
+                        previous_state,
+                        previous_executor.as_ref(),
+                        &session.node,
+                        false,
+                        ErrorKind::Parse,
+                        &format!("capsule invalid after repair: {error}"),
+                    ));
+                }
+            },
+        };
+        let capsule_id = capsule.as_ref().map(|capsule| capsule.capsule_id.clone());
+
+        let log = SessionLog::open(&deps.paths, &req.session_id, deps.clock.clone())?;
+        if let Some(source) = &previous_executor {
+            append_event(
+                &store,
+                &log,
+                source.harness,
+                EventBody::SessionExecutor(SessionExecutor {
+                    action: AttachAction::Detach,
+                    executor: source.clone(),
+                    node: session.node.clone(),
+                    native_session_id: None,
+                    run_id: None,
+                    reason: Some("switch".to_owned()),
+                }),
+                Some(session.node.clone()),
+                None,
+            )?;
+        }
+        store.set_session_state(&req.session_id, SessionState::Switching, None)?;
+
+        let mut final_state = SessionState::Idle;
+        match next_input {
+            Some(input) => {
+                let capsule = capsule
+                    .as_ref()
+                    .ok_or_else(|| CoreError::CapsuleInvalid("switch has no capsule to seed".to_owned()))?;
+                let events = SessionLog::open_read(&deps.paths, &req.session_id)?.read_all()?;
+                let tail = tail_of_complete_turns(&events, deps.config.capsule.tail_turns);
+                let seeded = seed_prompt(capsule, &tail, deps.config.capsule.tail_turns, input);
+                let capsule_only = seed_prompt(capsule, &[], deps.config.capsule.tail_turns, input);
+                match run_target_turn(deps, &store, &log, &session, &to, seeded) {
+                    Ok(state) => final_state = state,
+                    Err(first) => match run_target_turn(deps, &store, &log, &session, &to, capsule_only) {
+                        Ok(state) => final_state = state,
+                        Err(second) => {
+                            drop(log);
+                            return Err(abort(
+                                deps,
+                                &store,
+                                &switch,
+                                previous_state,
+                                previous_executor.as_ref(),
+                                &session.node,
+                                true,
+                                ErrorKind::AdapterFailed,
+                                &format!("target rejected the seed twice: {first}; {second}"),
+                            ));
+                        }
+                    },
+                }
+            }
+            None => {
+                append_event(
+                    &store,
+                    &log,
+                    req.to.executor.harness,
+                    EventBody::SessionExecutor(SessionExecutor {
+                        action: AttachAction::Attach,
+                        executor: req.to.executor.clone(),
+                        node: to_node.clone(),
+                        native_session_id: None,
+                        run_id: None,
+                        reason: None,
+                    }),
+                    Some(to_node.clone()),
+                    None,
+                )?;
+                store.set_session_state(&req.session_id, SessionState::Switching, Some(&req.to.executor))?;
+            }
+        }
+
+        append_event(
+            &store,
+            &log,
+            req.to.executor.harness,
+            EventBody::Switch(SwitchEvent {
+                switch_id: switch.id.clone(),
+                from: previous_executor.clone().map(|executor| ExecutorRef {
+                    executor,
+                    node: Some(session.node.clone()),
+                }),
+                to,
+                capsule_id: capsule_id.clone(),
+                reason: req.reason,
+            }),
+            Some(to_node),
+            None,
+        )?;
+        log.sync()?;
+        store.finish_switch(&switch.id, SwitchState::Completed, None, capsule_id.as_ref())?;
+        Ok((final_state, capsule_id))
+    })();
+
+    match result {
+        Ok((final_state, capsule_id)) => {
+            store.set_session_state(&req.session_id, final_state, Some(&req.to.executor))?;
+            switch.capsule_id = capsule_id;
+            switch.state = SwitchState::Completed;
+            switch.ended_at = Some(deps.clock.now());
+            Ok(switch)
+        }
+        Err(error) => {
+            // Any failure after the plan row exists must finish it; a row left `started`
+            // would block crash recovery and hide the failure.
+            let still_started = match store.switch(&switch.id) {
+                Ok(Some(row)) => row.state == SwitchState::Started,
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            if still_started {
                 let detail = error.to_string();
                 let _ = abort(
                     deps,
@@ -181,140 +357,10 @@ fn run_switch_inner(
                     ErrorKind::Internal,
                     &detail,
                 );
-                return Err(error);
             }
+            Err(error)
         }
     }
-
-    let capsule = match CapsuleWriter::new(deps.clone()).write(&req.session_id, CapsuleTrigger::Switch) {
-        Ok(capsule) => Some(capsule),
-        Err(error) => match store.latest_capsule(&req.session_id)? {
-            Some(previous) => {
-                let log = SessionLog::open(&deps.paths, &req.session_id, deps.clock.clone())?;
-                append_event(
-                    &store,
-                    &log,
-                    HarnessKind::Vowp,
-                    EventBody::Note(vowp_protocol::Note {
-                        text: format!("stale capsule used: {error}"),
-                    }),
-                    Some(deps.node.clone()),
-                    None,
-                )?;
-                log.sync()?;
-                Some(previous)
-            }
-            None => {
-                return abort(
-                    deps,
-                    &store,
-                    &switch,
-                    previous_state,
-                    previous_executor.as_ref(),
-                    &session.node,
-                    false,
-                    ErrorKind::Parse,
-                    &format!("capsule invalid after repair: {error}"),
-                );
-            }
-        },
-    };
-    switch.capsule_id = capsule.as_ref().map(|capsule| capsule.capsule_id.clone());
-
-    let log = SessionLog::open(&deps.paths, &req.session_id, deps.clock.clone())?;
-    if let Some(source) = &previous_executor {
-        append_event(
-            &store,
-            &log,
-            source.harness,
-            EventBody::SessionExecutor(SessionExecutor {
-                action: AttachAction::Detach,
-                executor: source.clone(),
-                node: session.node.clone(),
-                native_session_id: None,
-                run_id: None,
-                reason: Some("switch".to_owned()),
-            }),
-            Some(session.node.clone()),
-            None,
-        )?;
-    }
-    store.set_session_state(&req.session_id, SessionState::Switching, None)?;
-
-    let mut final_state = SessionState::Idle;
-    match next_input {
-        Some(input) => {
-            let capsule = capsule
-                .as_ref()
-                .ok_or_else(|| CoreError::CapsuleInvalid("switch has no capsule to seed".to_owned()))?;
-            let events = SessionLog::open_read(&deps.paths, &req.session_id)?.read_all()?;
-            let tail = tail_of_complete_turns(&events, deps.config.capsule.tail_turns);
-            let seeded = seed_prompt(capsule, &tail, deps.config.capsule.tail_turns, input);
-            let capsule_only = seed_prompt(capsule, &[], deps.config.capsule.tail_turns, input);
-            match run_target_turn(deps, &store, &log, &session, &to, seeded) {
-                Ok(state) => final_state = state,
-                Err(first) => match run_target_turn(deps, &store, &log, &session, &to, capsule_only) {
-                    Ok(state) => final_state = state,
-                    Err(second) => {
-                        drop(log);
-                        return abort(
-                            deps,
-                            &store,
-                            &switch,
-                            previous_state,
-                            previous_executor.as_ref(),
-                            &session.node,
-                            true,
-                            ErrorKind::AdapterFailed,
-                            &format!("target rejected the seed twice: {first}; {second}"),
-                        );
-                    }
-                },
-            }
-        }
-        None => {
-            append_event(
-                &store,
-                &log,
-                req.to.executor.harness,
-                EventBody::SessionExecutor(SessionExecutor {
-                    action: AttachAction::Attach,
-                    executor: req.to.executor.clone(),
-                    node: to_node.clone(),
-                    native_session_id: None,
-                    run_id: None,
-                    reason: None,
-                }),
-                Some(to_node.clone()),
-                None,
-            )?;
-            store.set_session_state(&req.session_id, SessionState::Switching, Some(&req.to.executor))?;
-        }
-    }
-
-    append_event(
-        &store,
-        &log,
-        req.to.executor.harness,
-        EventBody::Switch(SwitchEvent {
-            switch_id: switch.id.clone(),
-            from: previous_executor.clone().map(|executor| ExecutorRef {
-                executor,
-                node: Some(session.node.clone()),
-            }),
-            to,
-            capsule_id: switch.capsule_id.clone(),
-            reason: req.reason,
-        }),
-        Some(to_node),
-        None,
-    )?;
-    log.sync()?;
-    store.finish_switch(&switch.id, SwitchState::Completed, None)?;
-    store.set_session_state(&req.session_id, final_state, Some(&req.to.executor))?;
-    switch.state = SwitchState::Completed;
-    switch.ended_at = Some(deps.clock.now());
-    Ok(switch)
 }
 
 /// Returns whether the session has a run that has not finished.
@@ -350,11 +396,13 @@ fn drain(
             return Err(CoreError::Cancelled);
         }
         let events = SessionLog::open_read(&deps.paths, &session.id)?.read_all()?;
-        if let Some(stop_reason) = events.iter().find_map(|event| match event.body() {
-            Ok(EventBody::TurnEnded(payload)) if event.seq > start_seq => Some(payload.stop_reason),
-            _ => None,
-        }) {
-            return Ok(Drain::Finished(stop_reason));
+        if events
+            .iter()
+            .any(|event| event.seq > start_seq && matches!(event.body(), Ok(EventBody::TurnEnded(_))))
+        {
+            return Ok(Drain::Finished {
+                blocked: last_turn_blocked(&events),
+            });
         }
         if deps.clock.now() >= deadline {
             break;
@@ -533,6 +581,10 @@ fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
 }
 
 /// Aborts a switch: error event, state restored, row finished `aborted`.
+///
+/// The row and session state are the recovery record, so they are finished even when
+/// the log writer is held or an event append fails. The returned error is always the
+/// one the caller should propagate.
 #[allow(clippy::too_many_arguments)]
 fn abort(
     deps: &Deps,
@@ -544,17 +596,23 @@ fn abort(
     reattach_source: bool,
     kind: ErrorKind,
     detail: &str,
-) -> Result<Switch, CoreError> {
-    // The active runner may still hold the log writer. The switch row and session
-    // state are the recovery record, so restore them even when no event can be
-    // appended; the runner's own turn.ended closes the log side.
+) -> CoreError {
+    // The active runner may still hold the log writer. Append best-effort; the switch
+    // row, state restore and finish below must happen regardless.
     let log = match SessionLog::open(&deps.paths, &switch.session_id, deps.clock.clone()) {
         Ok(log) => Some(log),
         Err(vowp_store::StoreError::Locked { .. }) => None,
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            deps.log.log(
+                Level::Warn,
+                "session switch",
+                &format!("abort could not open the log: {error}"),
+            );
+            None
+        }
     };
     if let Some(log) = &log {
-        append_event(
+        if let Err(error) = append_event(
             store,
             log,
             HarnessKind::Vowp,
@@ -565,13 +623,19 @@ fn abort(
             }),
             Some(deps.node.clone()),
             None,
-        )?;
+        ) {
+            deps.log.log(
+                Level::Warn,
+                "session switch",
+                &format!("abort could not append the error: {error}"),
+            );
+        }
     }
     if reattach_source {
         match previous_executor {
             Some(executor) => {
                 if let Some(log) = &log {
-                    append_event(
+                    if let Err(error) = append_event(
                         store,
                         log,
                         executor.harness,
@@ -585,26 +649,46 @@ fn abort(
                         }),
                         Some(previous_node.clone()),
                         None,
-                    )?;
+                    ) {
+                        deps.log.log(
+                            Level::Warn,
+                            "session switch",
+                            &format!("abort could not append the source re-attach: {error}"),
+                        );
+                    }
                 }
-                store.set_session_state(&switch.session_id, previous_state, Some(executor))?;
+                if let Err(error) = store.set_session_state(&switch.session_id, previous_state, Some(executor)) {
+                    deps.log.log(
+                        Level::Warn,
+                        "session switch",
+                        &format!("abort could not restore state: {error}"),
+                    );
+                }
             }
             None => {
-                store.set_session_state(&switch.session_id, SessionState::Blocked, None)?;
+                if let Err(error) = store.set_session_state(&switch.session_id, SessionState::Blocked, None) {
+                    deps.log.log(
+                        Level::Warn,
+                        "session switch",
+                        &format!("abort could not restore state: {error}"),
+                    );
+                }
             }
         }
-    } else {
-        store.set_session_state(&switch.session_id, previous_state, previous_executor)?;
+    } else if let Err(error) = store.set_session_state(&switch.session_id, previous_state, previous_executor) {
+        deps.log.log(
+            Level::Warn,
+            "session switch",
+            &format!("abort could not restore state: {error}"),
+        );
     }
     if let Some(log) = &log {
-        log.sync()?;
+        let _ = log.sync();
     }
-    store.finish_switch(&switch.id, SwitchState::Aborted, Some(detail))?;
-    let mut aborted = switch.clone();
-    aborted.state = SwitchState::Aborted;
-    aborted.error = Some(detail.to_owned());
-    aborted.ended_at = Some(deps.clock.now());
-    Err(CoreError::SwitchAborted(detail.to_owned()))
+    if let Err(error) = store.finish_switch(&switch.id, SwitchState::Aborted, Some(detail), None) {
+        return error.into();
+    }
+    CoreError::SwitchAborted(detail.to_owned())
 }
 
 /// Runs the first turn after a seeded switch, retrying is the caller's policy.
@@ -795,6 +879,39 @@ fn run_target_turn(
     let summary = match adapter_run.wait() {
         Ok(summary) => summary,
         Err(error) => {
+            // A wait error must still terminate the turn and detach the executor; otherwise
+            // the log keeps an unterminated turn that recovery cannot interpret. When the
+            // adapter had already emitted `turn.ended`, do not duplicate it.
+            if terminal.is_none() {
+                append_event(
+                    store,
+                    log,
+                    executor.harness,
+                    EventBody::TurnEnded(TurnEnded {
+                        turn,
+                        stop_reason: StopReason::Error,
+                        duration_ms: None,
+                    }),
+                    Some(node.clone()),
+                    None,
+                )?;
+            }
+            append_event(
+                store,
+                log,
+                executor.harness,
+                EventBody::SessionExecutor(SessionExecutor {
+                    action: AttachAction::Detach,
+                    executor: executor.clone(),
+                    node: node.clone(),
+                    native_session_id: None,
+                    run_id: Some(run_id.clone()),
+                    reason: Some("crash".to_owned()),
+                }),
+                Some(node.clone()),
+                None,
+            )?;
+            log.sync()?;
             store.finish_run(
                 &run_id,
                 &RunFinish {

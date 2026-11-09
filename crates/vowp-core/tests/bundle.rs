@@ -14,9 +14,9 @@ use vowp_core::session::bundle::{self, BUNDLE_FORMAT};
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, Deps};
 use vowp_protocol::{
-    Actor, AssistantMessage, EventBody, EventEnvelope, EventSource, EventType, Executor, FakeClock, HarnessKind, JobId,
-    JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, SessionId, SessionRole, Timestamp, ToolResult,
-    UserMessage,
+    Actor, AssistantMessage, CancelToken, EventBody, EventEnvelope, EventSource, EventType, Executor, ExecutorRef,
+    FakeClock, HarnessKind, JobId, JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, RunPurpose,
+    RunRole, SessionId, SessionRole, Timestamp, ToolResult, TurnRequest, UserMessage,
 };
 use vowp_store::blobs::BlobStore;
 use vowp_store::session_log::{NewEvent, SessionLog};
@@ -252,10 +252,16 @@ fn bundle_export_import_roundtrip_child_session() {
     assert_eq!(lineage[0].state, vowp_protocol::SwitchState::Completed);
     assert_eq!(lineage[0].capsule_id, Some(capsule.capsule_id.clone()));
 
-    let seed = bundle::imported_seed(&deps, &exported, "next step");
+    let seed = bundle::imported_seed(&deps, &exported, &child, "next step");
     assert!(seed.contains("Continue the bundle work"));
     assert!(seed.contains("remember the frobnicator"));
     assert!(seed.ends_with("next step"));
+    assert!(
+        seed.lines()
+            .next()
+            .is_some_and(|line| line.contains(&format!("session {child}"))),
+        "the seed names the child, not the origin session"
+    );
 
     let origin_after = SessionLog::open_read(&deps.paths, &session)
         .expect("origin log")
@@ -265,6 +271,88 @@ fn bundle_export_import_roundtrip_child_session() {
 
     let second_child = bundle::import(&deps, &exported, None, None).expect("second import");
     assert_ne!(second_child, child, "no dedupe: each import is an independent child");
+}
+
+#[test]
+fn imported_child_first_turn_uses_imported_seed() {
+    let tmp = tempdir().expect("tempdir");
+    let adapter = Arc::new(capsule_adapter("Continue the imported work"));
+    let deps = deps(&tmp, AdapterRegistry::new().with("opencode", adapter.clone()));
+    let service = SessionService::new(deps.clone());
+    let origin = create_session(&service, &tmp, "origin");
+    {
+        let log = SessionLog::open(&deps.paths, &origin, deps.clock.clone()).expect("origin log");
+        append_user(&log, "ORIGIN-TAIL-UNIQUE-7f3");
+        append_assistant(&log, "the origin result");
+        log.sync().expect("sync");
+    }
+
+    let exported = bundle::export(&deps, &origin, 10).expect("export");
+    let child = bundle::import(&deps, &exported, None, None).expect("import");
+    assert_ne!(child, origin);
+
+    service
+        .run_turn(
+            TurnRequest {
+                session_id: child.clone(),
+                executor: ExecutorRef {
+                    executor: opencode(),
+                    node: None,
+                },
+                purpose: RunPurpose::Start,
+                role: RunRole::Worker,
+                job_id: None,
+                prompt: "pick up the import".to_owned(),
+                profile: Some("worker".to_owned()),
+                rung: 0,
+                window: None,
+                timeout: None,
+            },
+            &CancelToken::default(),
+        )
+        .expect("first child turn");
+
+    let starts = adapter.starts();
+    let seeded = starts.last().expect("child start");
+    let first_line = seeded.prompt.lines().next().unwrap_or_default();
+    assert!(
+        first_line.contains(&format!("You are continuing session {child}")),
+        "the seed names the child session: {first_line}"
+    );
+    assert!(
+        !first_line.contains(origin.as_str()),
+        "the origin session id is not the seed's session: {first_line}"
+    );
+    assert!(
+        seeded.prompt.contains("ORIGIN-TAIL-UNIQUE-7f3"),
+        "the bundle tail is rendered as the last turns"
+    );
+    assert!(
+        seeded.prompt.contains("Continue the imported work"),
+        "the capsule markdown is part of the seed"
+    );
+    assert!(
+        seeded.prompt.ends_with("pick up the import"),
+        "the first turn's input is the seed's next message"
+    );
+
+    let events = SessionLog::open_read(&deps.paths, &child)
+        .expect("child log")
+        .read_all()
+        .expect("child events");
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::UserMessage(payload))
+                if payload.note.as_deref() == Some("handoff")
+                    && payload.text.contains("ORIGIN-TAIL-UNIQUE-7f3")
+        )),
+        "the log shows exactly what the child executor saw"
+    );
+    assert!(
+        !deps.paths.session_dir(&child).join("import.json").exists(),
+        "the import sidecar is consumed by the first turn"
+    );
 }
 
 #[test]

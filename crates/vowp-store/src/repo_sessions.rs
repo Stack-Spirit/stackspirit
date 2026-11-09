@@ -607,19 +607,30 @@ impl Store {
 
     /// Finishes a switch as `completed` or `aborted`, stamping `ended_at` from the clock.
     ///
-    /// Any other state is rejected with [`StoreError::InvalidInput`].
-    pub fn finish_switch(&self, id: &SwitchId, state: SwitchState, error: Option<&str>) -> Result<(), StoreError> {
+    /// A capsule supplied for a completed switch is linked on the same row (the column is
+    /// left untouched when `capsule_id` is `None`). Any other state is rejected with
+    /// [`StoreError::InvalidInput`].
+    pub fn finish_switch(
+        &self,
+        id: &SwitchId,
+        state: SwitchState,
+        error: Option<&str>,
+        capsule_id: Option<&CapsuleId>,
+    ) -> Result<(), StoreError> {
         if !matches!(state, SwitchState::Completed | SwitchState::Aborted) {
             return Err(StoreError::InvalidInput(
                 "finish_switch accepts only completed or aborted".to_owned(),
             ));
         }
         let changed = self.conn.execute(
-            "UPDATE switches SET state = ?1, error = ?2, ended_at = ?3 WHERE id = ?4",
+            "UPDATE switches SET state = ?1, error = ?2, ended_at = ?3,
+                capsule_id = COALESCE(?4, capsule_id)
+              WHERE id = ?5",
             params![
                 enum_to_text(&state)?,
                 error,
                 ts_to_text(self.clock().now()),
+                capsule_id.map(CapsuleId::as_str),
                 id.as_str(),
             ],
         )?;

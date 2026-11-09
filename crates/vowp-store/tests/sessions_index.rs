@@ -256,6 +256,53 @@ fn session_index_and_natives() {
 }
 
 #[test]
+fn finish_switch_links_capsule() {
+    let fixture = Fixture::new();
+    let session = fixture.session(SessionState::Idle);
+    fixture.store.upsert_session(&session).expect("insert session");
+    let capsule = capsule(&session, 4, fixture.clock.now());
+    fixture
+        .store
+        .insert_capsule(&capsule, "sessions/capsule.json")
+        .expect("insert capsule");
+
+    let switch = started_switch(&session, fixture.clock.now());
+    fixture.store.insert_switch(&switch).expect("insert switch");
+    let started = fixture.store.switch(&switch.id).expect("started").expect("row");
+    assert_eq!(started.capsule_id, None, "the plan row starts unlinked");
+
+    fixture.clock.advance(Duration::from_secs(1));
+    fixture
+        .store
+        .finish_switch(&switch.id, SwitchState::Completed, None, Some(&capsule.capsule_id))
+        .expect("finish switch");
+    let completed = fixture.store.switch(&switch.id).expect("completed").expect("row");
+    assert_eq!(completed.state, SwitchState::Completed);
+    assert_eq!(
+        completed.capsule_id,
+        Some(capsule.capsule_id.clone()),
+        "the completed switch row links the capsule it used"
+    );
+    assert_eq!(completed.ended_at, Some(fixture.clock.now()));
+
+    let unlinked = started_switch(&session, fixture.clock.now());
+    fixture.store.insert_switch(&unlinked).expect("insert unlinked switch");
+    fixture
+        .store
+        .finish_switch(&unlinked.id, SwitchState::Aborted, Some("probe failed"), None)
+        .expect("abort unlinked switch");
+    assert_eq!(
+        fixture
+            .store
+            .switch(&unlinked.id)
+            .expect("unlinked")
+            .expect("row")
+            .capsule_id,
+        None
+    );
+}
+
+#[test]
 fn capsule_insert_sets_last_capsule() {
     let fixture = Fixture::new();
     let session = fixture.session(SessionState::Idle);
@@ -316,7 +363,7 @@ fn switch_lifecycle_and_open_switches() {
     fixture.clock.advance(Duration::from_secs(5));
     fixture
         .store
-        .finish_switch(&first.id, SwitchState::Completed, None)
+        .finish_switch(&first.id, SwitchState::Completed, None, None)
         .expect("finish switch");
     let finished = fixture.store.switch(&first.id).expect("finished switch").expect("row");
     assert_eq!(finished.state, SwitchState::Completed);
@@ -327,7 +374,7 @@ fn switch_lifecycle_and_open_switches() {
     fixture.store.insert_switch(&second).expect("insert second switch");
     let error = fixture
         .store
-        .finish_switch(&second.id, SwitchState::Started, None)
+        .finish_switch(&second.id, SwitchState::Started, None, None)
         .expect_err("started is not a terminal switch state");
     assert!(
         matches!(error, vowp_store::StoreError::InvalidInput(_)),
@@ -346,7 +393,7 @@ fn switch_lifecycle_and_open_switches() {
 
     fixture
         .store
-        .finish_switch(&second.id, SwitchState::Aborted, Some("target probe failed"))
+        .finish_switch(&second.id, SwitchState::Aborted, Some("target probe failed"), None)
         .expect("abort switch");
     let aborted = fixture.store.switch(&second.id).expect("aborted").expect("row");
     assert_eq!(aborted.state, SwitchState::Aborted);
@@ -356,7 +403,7 @@ fn switch_lifecycle_and_open_switches() {
     let missing = SwitchId::new();
     let error = fixture
         .store
-        .finish_switch(&missing, SwitchState::Completed, None)
+        .finish_switch(&missing, SwitchState::Completed, None, None)
         .expect_err("missing switch");
     assert!(
         matches!(error, vowp_store::StoreError::NotFound { .. }),

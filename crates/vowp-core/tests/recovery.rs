@@ -14,9 +14,9 @@ use vowp_core::session::recovery;
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, Deps};
 use vowp_protocol::{
-    Actor, AttachAction, Cost, EventBody, EventSource, EventType, Executor, FakeClock, HarnessKind, MemoryLog,
-    NodeName, Run, RunId, RunOutcome, RunPurpose, RunRole, SessionExecutor, SessionId, SessionRole, Switch, SwitchId,
-    SwitchReason, SwitchState, Timestamp, TurnEnded,
+    Actor, AttachAction, Cost, EventBody, EventSource, EventType, Executor, FakeClock, HarnessKind, LimitEvent,
+    LimitKind, MemoryLog, NodeName, Run, RunId, RunOutcome, RunPurpose, RunRole, SessionExecutor, SessionId,
+    SessionRole, Switch, SwitchId, SwitchReason, SwitchState, Timestamp, TurnEnded, TurnStarted,
 };
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_store::{NodePaths, Store};
@@ -417,6 +417,71 @@ fn recover_switch_after_limit_recomputes_blocked() {
         vowp_protocol::SessionState::Blocked,
         "the last turn ended with a limit"
     );
+}
+
+#[test]
+fn recovery_blocks_on_credits_and_auth_limit_events() {
+    for (name, kind, status) in [
+        ("credits", LimitKind::Credits, 402_u16),
+        ("auth", LimitKind::Auth, 401_u16),
+    ] {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(&tmp);
+        let service = SessionService::new(deps.clone());
+        let session = create_session(&service, &tmp, name);
+        let store = deps.open_store().expect("store");
+        {
+            let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("log");
+            append(
+                &store,
+                &log,
+                HarnessKind::ClaudeCode,
+                EventBody::TurnStarted(TurnStarted { turn: 1 }),
+            );
+            append(
+                &store,
+                &log,
+                HarnessKind::ClaudeCode,
+                EventBody::Limit(LimitEvent {
+                    kind,
+                    provider: "claude".to_owned(),
+                    resets_at: None,
+                    message: format!("{name} exhausted"),
+                    http_status: Some(status),
+                }),
+            );
+            append(
+                &store,
+                &log,
+                HarnessKind::ClaudeCode,
+                EventBody::TurnEnded(TurnEnded {
+                    turn: 1,
+                    stop_reason: vowp_protocol::StopReason::Error,
+                    duration_ms: None,
+                }),
+            );
+            log.sync().expect("sync");
+        }
+        let last_seq = SessionLog::open_read(&deps.paths, &session)
+            .expect("log")
+            .last_seq()
+            .expect("seq");
+        let switch = started_switch(&session, last_seq);
+        store.insert_switch(&switch).expect("switch row");
+        store
+            .set_session_state(&session, vowp_protocol::SessionState::Switching, Some(&opencode()))
+            .expect("switching");
+
+        let report = service.recover(&store).expect("recover");
+        assert_eq!(report.switches_aborted, 1, "{name}");
+        let current = store.require_session(&session).expect("session");
+        assert_eq!(
+            current.state,
+            vowp_protocol::SessionState::Blocked,
+            "a {name} limit event blocks even though turn.ended says error"
+        );
+        assert_eq!(current.executor, Some(opencode()), "the source stays attached");
+    }
 }
 
 #[test]

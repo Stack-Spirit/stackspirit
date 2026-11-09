@@ -8,7 +8,10 @@
 //! target that was attached and then detached) aborts the row and recomputes the session
 //! state. Exactly one of the two outcomes is chosen per row.
 
-use vowp_protocol::{Actor, AttachAction, EventBody, EventSource, HarnessKind, StopReason, SwitchEvent, SwitchState};
+use vowp_protocol::{
+    Actor, AttachAction, EventBody, EventEnvelope, EventSource, HarnessKind, LimitKind, SessionState, StopReason,
+    SwitchEvent, SwitchState,
+};
 use vowp_store::Store;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 
@@ -46,11 +49,15 @@ pub fn recover(deps: &Deps, store: &Store) -> Result<RecoveryReport, CoreError> 
 /// Resolves one `started` switch; returns true when it was completed.
 fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) -> Result<bool, CoreError> {
     let events = SessionLog::open_read(&deps.paths, &switch.session_id)?.read_all()?;
-    let has_switch_event = events.iter().any(|event| {
-        matches!(
-            event.body(),
-            Ok(EventBody::Switch(payload)) if payload.switch_id == switch.id
-        )
+    let recorded = events.iter().find_map(|event| match event.body() {
+        Ok(EventBody::Switch(payload)) if payload.switch_id == switch.id => Some(payload),
+        _ => None,
+    });
+    let has_switch_event = recorded.is_some();
+    let recorded_capsule = recorded.and_then(|payload| payload.capsule_id.clone());
+    let logged_capsule = events.iter().rev().find_map(|event| match event.body() {
+        Ok(EventBody::Capsule(payload)) => Some(payload.capsule_id.clone()),
+        _ => None,
     });
     let last_executor = events.iter().rev().find_map(|event| match event.body() {
         Ok(EventBody::SessionExecutor(payload)) => Some(payload),
@@ -90,17 +97,17 @@ fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) ->
             store.index_event(&index_row(&appended))?;
             log.sync()?;
         }
-        store.finish_switch(&switch.id, SwitchState::Completed, None)?;
+        let capsule_id = recorded_capsule
+            .clone()
+            .or_else(|| switch.capsule_id.clone())
+            .or(logged_capsule);
+        store.finish_switch(&switch.id, SwitchState::Completed, None, capsule_id.as_ref())?;
         // A completed switch unfreezes to idle on the new executor. The previous
         // `limit` belongs to the old run; only an abort restores `blocked`.
-        store.set_session_state(
-            &switch.session_id,
-            vowp_protocol::SessionState::Idle,
-            Some(&switch.to_executor),
-        )?;
+        store.set_session_state(&switch.session_id, SessionState::Idle, Some(&switch.to_executor))?;
         Ok(true)
     } else {
-        store.finish_switch(&switch.id, SwitchState::Aborted, Some("interrupted by restart"))?;
+        store.finish_switch(&switch.id, SwitchState::Aborted, Some("interrupted by restart"), None)?;
         let state = recomputed_state(&events);
         let executor = match &last_executor {
             Some(payload) => match payload.action {
@@ -114,15 +121,44 @@ fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) ->
     }
 }
 
-/// Returns `blocked` when the last turn ended with a limit, else `idle`.
-fn recomputed_state(events: &[vowp_protocol::EventEnvelope]) -> vowp_protocol::SessionState {
-    let last_stop = events.iter().rev().find_map(|event| match event.body() {
+/// Returns whether the last turn ended in a blocking outcome (sessions.md §2).
+///
+/// A credits or auth failure arrives as a `limit` event followed by
+/// `turn.ended{stop_reason: error}`, so the stop reason alone is not enough.
+pub(crate) fn last_turn_blocked(events: &[EventEnvelope]) -> bool {
+    let start = events
+        .iter()
+        .rposition(|event| matches!(event.body(), Ok(EventBody::TurnStarted(_))))
+        .unwrap_or(0);
+    let turn = &events[start..];
+    let last_stop = turn.iter().rev().find_map(|event| match event.body() {
         Ok(EventBody::TurnEnded(payload)) => Some(payload.stop_reason),
         _ => None,
     });
-    if last_stop == Some(StopReason::Limit) {
-        vowp_protocol::SessionState::Blocked
+    match last_stop {
+        Some(StopReason::Limit) => true,
+        Some(StopReason::Error) | None => turn
+            .iter()
+            .rev()
+            .find_map(|event| match event.body() {
+                Ok(EventBody::Limit(payload)) => Some(blocking_limit(payload.kind)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        Some(_) => false,
+    }
+}
+
+/// Returns whether a limit kind leaves the session `blocked`.
+fn blocking_limit(kind: LimitKind) -> bool {
+    matches!(kind, LimitKind::Quota | LimitKind::Credits | LimitKind::Auth)
+}
+
+/// Returns `blocked` when the last turn ended in a blocking outcome, else `idle`.
+fn recomputed_state(events: &[EventEnvelope]) -> SessionState {
+    if last_turn_blocked(events) {
+        SessionState::Blocked
     } else {
-        vowp_protocol::SessionState::Idle
+        SessionState::Idle
     }
 }
