@@ -10,7 +10,16 @@ repository does not create or push a tap.
 Create a public GitHub repository named `homebrew-vowp` under the same account
 as the main repository (`syver777/homebrew-vowp`). These are owner actions;
 Homebrew is not installed in the build container, so the `brew` commands below
-were not run here. Then, in a local clone of that empty repository:
+were not run here.
+
+Fill the formula for the release first, from a VOWP checkout:
+
+```sh
+packaging/homebrew/update.sh 0.1.0
+```
+
+Then, in a local clone of the empty tap repository, copy the **filled**
+formula:
 
 ```sh
 mkdir -p Formula
@@ -19,6 +28,10 @@ git add Formula/vowp.rb
 git commit -m "vowp 0.1.0"
 git push origin main
 ```
+
+Do not copy `vowp.rb` before `update.sh` has run: it is either the raw
+template with `__VOWP_VERSION__`/`__SHA256_*__` placeholders or the previous
+release's formula, and will not install the current release.
 
 Users then install with:
 
@@ -47,9 +60,10 @@ local file, or to write a copy of the formula instead of editing `vowp.rb`:
 packaging/homebrew/update.sh 0.1.0 /path/to/SHA256SUMS /tmp/vowp.rb
 ```
 
-The script refuses a missing archive, an invalid hash, or a formula that still
-contains a placeholder. It only rewrites the formula; copy it to the tap and
-commit there.
+The script rewrites the version line and the four platform `sha256` lines in
+place, so it works both on the initial template and on a formula that a
+previous release already filled. Copy the filled formula to the tap and commit
+there; do not commit the unfilled template.
 
 ## What the formula does
 

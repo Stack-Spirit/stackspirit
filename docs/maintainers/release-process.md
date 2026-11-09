@@ -218,9 +218,9 @@ A checksum mismatch stops the install and leaves the prefix unchanged.
 
 The formula template is `packaging/homebrew/vowp.rb`; run
 `packaging/homebrew/update.sh <version>` to fill it from the release
-`SHA256SUMS`. The tap repository `homebrew-vowp` is created by the owner, not
-by this repository. The full commands, including `brew tap` and the update
-step, are in
+`SHA256SUMS` before copying it to the tap. The tap repository `homebrew-vowp`
+is created by the owner, not by this repository. The full commands, including
+`brew tap` and the update step, are in
 [`packaging/homebrew/README.md`](../../packaging/homebrew/README.md).
 
 ## Rollback
@@ -253,9 +253,9 @@ Nothing before the draft is published changes public state.
 
   Consumers may already have downloaded assets, so prefer a new patch version
   over replacing published files. A crate or npm version that was already
-  published cannot be unpublished: crates.io allows only a yank, and npm
-  versions are immutable after publish. Revert the Homebrew tap to the previous
-  formula and publish a fixed release.
+  published cannot be treated as removable: crates.io allows only a yank, and
+  npm allows an unpublish only within a limited window. Revert the Homebrew
+  tap to the previous formula and publish a fixed release.
 
 ## Validation performed
 
@@ -277,7 +277,10 @@ The existing `sh scripts/tests/run.sh` suite still passes, and
 The installer was exercised against a fake release served by
 `python3 -m http.server`, including a good checksum, a tampered checksum, a
 custom `--prefix`, and an unsupported platform. `packaging/homebrew/update.sh`
-was run against a fake `SHA256SUMS` and a temporary copy of the formula.
+was run twice on the same temporary formula (0.1.0 and then 0.2.0 with
+different hashes) and against a locally served `SHA256SUMS`, so a second
+release updates the existing formula rather than only the placeholder
+template.
 
 The workflow has still not run on GitHub. The first manual dispatch on the new
 public repository is the remaining end-to-end check; `act` and the macOS

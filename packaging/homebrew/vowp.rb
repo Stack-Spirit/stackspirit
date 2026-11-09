@@ -1,3 +1,7 @@
+# typed: false
+# frozen_string_literal: true
+
+# Formula for the VOWP command-line binary.
 class Vowp < Formula
   desc "Local-first supervisor for AI coding agents"
   homepage "https://github.com/syver777/vowp"

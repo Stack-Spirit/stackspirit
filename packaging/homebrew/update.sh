@@ -73,7 +73,8 @@ if [ -z "$CHECKSUMS" ]; then
     base=${VOWP_RELEASE_BASE_URL:-$DEFAULT_RELEASE_BASE_URL}
     base=${base%/}
     case "$base" in
-        https://*|http://localhost|http://localhost:*|http://localhost/*) ;;
+        https://*) curl_proto='=https' ;;
+        http://localhost|http://localhost:*|http://localhost/*) curl_proto='=http' ;;
         http://*) die "refusing an insecure release URL: $base" ;;
         *) die "invalid release URL: $base" ;;
     esac
@@ -82,10 +83,17 @@ if [ -z "$CHECKSUMS" ]; then
     url="$base/v$VERSION/SHA256SUMS"
     note "downloading $url"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --connect-timeout 10 -o "$TMP_DIR/SHA256SUMS" "$url" \
+        curl -fsSL --retry 2 --connect-timeout 10 --proto "$curl_proto" --proto-redir "$curl_proto" \
+            -o "$TMP_DIR/SHA256SUMS" "$url" \
             || die "download failed: $url"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "$TMP_DIR/SHA256SUMS" "$url" || die "download failed: $url"
+        if [ "$curl_proto" = "=https" ]; then
+            wget --https-only -q -O "$TMP_DIR/SHA256SUMS" "$url" \
+                || die "download failed: $url"
+        else
+            wget -q -O "$TMP_DIR/SHA256SUMS" "$url" \
+                || die "download failed: $url"
+        fi
     else
         die "curl or wget is required to download SHA256SUMS"
     fi
@@ -124,16 +132,61 @@ hash_x86_64_linux=$(checked_hash x86_64-unknown-linux-gnu)
 out=$(mktemp "${TMPDIR:-/tmp}/vowp-formula.XXXXXX") || die "mktemp failed"
 trap 'rm -f "$out"; if [ -n "$TMP_DIR" ]; then rm -rf "$TMP_DIR"; fi' 0 1 2 15
 
-sed \
-    -e "s/__VOWP_VERSION__/$VERSION/g" \
-    -e "s/__SHA256_AARCH64_APPLE_DARWIN__/$hash_aarch64_apple/g" \
-    -e "s/__SHA256_X86_64_APPLE_DARWIN__/$hash_x86_64_apple/g" \
-    -e "s/__SHA256_AARCH64_UNKNOWN_LINUX_GNU__/$hash_aarch64_linux/g" \
-    -e "s/__SHA256_X86_64_UNKNOWN_LINUX_GNU__/$hash_x86_64_linux/g" \
-    "$FORMULA" > "$out"
+# Replace the version and each platform sha256 by reading the surrounding
+# formula, not by requiring placeholders. This works on the initial template
+# and on a formula that a previous run already filled.
+if ! awk \
+    -v version="$VERSION" \
+    -v h_aa="$hash_aarch64_apple" \
+    -v h_xa="$hash_x86_64_apple" \
+    -v h_al="$hash_aarch64_linux" \
+    -v h_xl="$hash_x86_64_linux" '
+    function indent(line) {
+        match(line, /^[[:space:]]*/)
+        return substr(line, 1, RLENGTH)
+    }
+    /^[[:space:]]*version "[^"]*"[[:space:]]*$/ {
+        print indent($0) "version \"" version "\""
+        versions++
+        next
+    }
+    /^[[:space:]]*url ".*aarch64-apple-darwin\.tar\.gz"/ {
+        target = "aa"; print; next
+    }
+    /^[[:space:]]*url ".*x86_64-apple-darwin\.tar\.gz"/ {
+        target = "xa"; print; next
+    }
+    /^[[:space:]]*url ".*aarch64-unknown-linux-gnu\.tar\.gz"/ {
+        target = "al"; print; next
+    }
+    /^[[:space:]]*url ".*x86_64-unknown-linux-gnu\.tar\.gz"/ {
+        target = "xl"; print; next
+    }
+    /^[[:space:]]*sha256 "[^"]*"[[:space:]]*$/ {
+        if (target == "aa") hash = h_aa
+        else if (target == "xa") hash = h_xa
+        else if (target == "al") hash = h_al
+        else if (target == "xl") hash = h_xl
+        else { print; next }
+        print indent($0) "sha256 \"" hash "\""
+        target = ""
+        hashes++
+        next
+    }
+    { print }
+    END {
+        if (versions != 1) exit 3
+        if (hashes != 4) exit 4
+    }
+' "$FORMULA" > "$out"; then
+    die "formula must have one version line and four platform sha256 lines: $FORMULA"
+fi
 
-if grep -q '__VOWP_\|__SHA256_' "$out"; then
+if grep -Eq '__VOWP_|__SHA256_' "$out"; then
     die "formula still contains placeholders after the update"
+fi
+if ! grep -q "^[[:space:]]*version \"$VERSION\"[[:space:]]*$" "$out"; then
+    die "formula does not carry version $VERSION after the update"
 fi
 
 chmod 0644 "$out"

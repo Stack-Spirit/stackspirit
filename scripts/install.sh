@@ -141,6 +141,9 @@ done
 [ "$#" -eq 0 ] || die "unexpected argument: $1"
 [ -n "${HOME:-}" ] || die "HOME is not set"
 [ -z "$BIN_SOURCE" ] || [ "$DOWNLOAD" -eq 0 ] || die "--bin and --download are mutually exclusive"
+if [ -n "$BIN_SOURCE" ] && [ -n "$VERSION" ]; then
+    warn "ignoring --version $VERSION because --bin was given; use --download to fetch a release"
+fi
 
 if [ -z "$BIN_DIR" ]; then
     BIN_DIR=$HOME/.local/bin
@@ -235,11 +238,15 @@ fetch() {
         *) die "invalid release URL: $src" ;;
     esac
     if command -v curl >/dev/null 2>&1; then
-        if ! curl -fsSL --retry 2 --connect-timeout 10 --proto "$curl_proto" -o "$dst" "$src"; then
+        if ! curl -fsSL --retry 2 --connect-timeout 10 --proto "$curl_proto" --proto-redir "$curl_proto" -o "$dst" "$src"; then
             die "download failed: $src"
         fi
     elif command -v wget >/dev/null 2>&1; then
-        if ! wget -q -O "$dst" "$src"; then
+        if [ "$curl_proto" = "=https" ]; then
+            if ! wget --https-only -q -O "$dst" "$src"; then
+                die "download failed: $src"
+            fi
+        elif ! wget -q -O "$dst" "$src"; then
             die "download failed: $src"
         fi
     else
@@ -250,10 +257,10 @@ fetch() {
 resolve_latest_version() {
     latest_url="https://github.com/${GITHUB_REPO}/releases/latest"
     if command -v curl >/dev/null 2>&1; then
-        effective=$(curl -fsSIL --connect-timeout 10 -o /dev/null -w '%{url_effective}' "$latest_url") \
+        effective=$(curl -fsSIL --connect-timeout 10 --proto '=https' --proto-redir '=https' -o /dev/null -w '%{url_effective}' "$latest_url") \
             || die "could not resolve the latest release from $latest_url"
     elif command -v wget >/dev/null 2>&1; then
-        effective=$(wget --max-redirect=0 --spider -S "$latest_url" 2>&1 \
+        effective=$(wget --https-only --max-redirect=0 --spider -S "$latest_url" 2>&1 \
             | awk '/^[[:space:]]*Location:/{print $2}' | tr -d '\r' | tail -n 1)
         [ -n "$effective" ] || die "could not resolve the latest release from $latest_url"
     else
@@ -458,7 +465,11 @@ if [ "$WITH_SERVICE" -eq 1 ]; then
         warn "systemctl not found; the unit is installed but not enabled"
     fi
 else
-    note "systemd user unit left disabled (--no-service)"
+    if [ "$USE_TEMPLATES" -eq 0 ]; then
+        note "systemd user unit left disabled (no default-prefix templates)"
+    else
+        note "systemd user unit left disabled (--no-service)"
+    fi
 fi
 
 if [ "$WITH_LINGER" -eq 1 ]; then
@@ -519,7 +530,11 @@ install_cron() {
 if [ "$WITH_CRON" -eq 1 ]; then
     install_cron
 else
-    note "crontab left unchanged (--no-cron)"
+    if [ "$USE_TEMPLATES" -eq 0 ]; then
+        note "crontab left unchanged (no default-prefix templates)"
+    else
+        note "crontab left unchanged (--no-cron)"
+    fi
 fi
 
 note "next: run 'vowp doctor' and check the systemd and watchdog checks"
