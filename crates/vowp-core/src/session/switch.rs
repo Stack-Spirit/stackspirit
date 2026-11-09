@@ -10,7 +10,7 @@
 
 use std::path::Path;
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
@@ -40,6 +40,12 @@ const INTERRUPT_WAIT: Duration = Duration::from_secs(3);
 
 /// Wait after SIGTERM before the escalated kill, matching `AdapterRun::stop`.
 const STOP_WAIT: Duration = Duration::from_secs(3);
+
+/// Real-time grace for the runner thread to finish its run row after a stop.
+const RUNNER_GRACE: Duration = Duration::from_secs(5);
+
+/// Real-time wait for the runner thread to drop the single-writer session log.
+const LOG_RELEASE_WAIT: Duration = Duration::from_secs(5);
 
 /// Margin added once when a seeded turn reports a provider limit.
 const LIMIT_MARGIN: Duration = Duration::from_secs(120);
@@ -162,7 +168,21 @@ fn run_switch_inner(
                 );
                 return Err(CoreError::Cancelled);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = abort(
+                    deps,
+                    &store,
+                    &switch,
+                    previous_state,
+                    previous_executor.as_ref(),
+                    &session.node,
+                    false,
+                    ErrorKind::Internal,
+                    &detail,
+                );
+                return Err(error);
+            }
         }
     }
 
@@ -310,10 +330,12 @@ fn is_active(store: &Store, session: &Session) -> Result<bool, CoreError> {
 
 /// Waits up to `drain_secs` for the active turn to end, then stops it.
 ///
-/// The adapter handle lives in the runner thread, which is not reachable from here; the
-/// observable contract is the one the spec records in the database: the active run is
-/// finished as `killed` and an interrupted `turn.ended` is appended when the adapter did
-/// not emit one.
+/// A run started by `SessionService::run_turn` owns the session's single-writer log and
+/// the run row. This function signals the run's process group (SIGINT, 3 s, SIGTERM,
+/// 3 s, SIGKILL), waits for the runner thread to finish the row, retries opening the log
+/// until the runner's writer lock is released, and only then appends the synthetic
+/// interrupted `turn.ended` if the adapter did not emit one. It never finishes the run
+/// row itself, so the runner cannot race with "run already ended".
 fn drain(
     deps: &Deps,
     store: &Store,
@@ -345,8 +367,10 @@ fn drain(
         .into_iter()
         .filter(|run| run.session_id.as_ref() == Some(&session.id))
         .collect();
+    let mut active_ids = Vec::with_capacity(active.len());
     if !active.is_empty() {
         for run in &active {
+            active_ids.push(run.id.clone());
             signal_run(run, Signal::Int)?;
         }
         let _ = wait_window(deps, &session.id, start_seq, INTERRUPT_WAIT, cancel)?;
@@ -358,19 +382,22 @@ fn drain(
             signal_run(run, Signal::Kill)?;
         }
     }
-    for run in &active {
-        store.finish_run(
-            &run.id,
-            &RunFinish {
-                outcome: RunOutcome::Killed,
-                exit_code: None,
-                limit_kind: None,
-                cost: vowp_protocol::Cost::unknown(),
-                native_session_id: None,
-                detail: "interrupted by switch drain timeout".to_owned(),
-            },
-        )?;
-    }
+    // The runner thread owns the run row and the session log writer. Let it finish
+    // applying the interrupted turn, then take the writer once it releases the lock;
+    // never finish the run row from here or the runner would see "already ended".
+    let signalable = active.iter().any(|run| run.pid.is_some());
+    let grace = if signalable {
+        RUNNER_GRACE
+    } else {
+        Duration::from_millis(500)
+    };
+    wait_for_runs_finished(store, &active_ids, grace)?;
+    let log_wait = if signalable {
+        LOG_RELEASE_WAIT
+    } else {
+        Duration::from_millis(500)
+    };
+    let log = open_log_when_released(deps, &session.id, log_wait)?;
     let events = SessionLog::open_read(&deps.paths, &session.id)?.read_all()?;
     let interrupted = events
         .iter()
@@ -390,7 +417,6 @@ fn drain(
                     .count()
                     .saturating_add(1) as u32
             });
-        let log = SessionLog::open(&deps.paths, &session.id, deps.clock.clone())?;
         append_event(
             store,
             &log,
@@ -405,7 +431,40 @@ fn drain(
         )?;
         log.sync()?;
     }
+    drop(log);
     Ok(Drain::Interrupted)
+}
+
+/// Waits (real time) for the runner thread to finish the given runs.
+fn wait_for_runs_finished(store: &Store, ids: &[RunId], timeout: Duration) -> Result<(), CoreError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        let open = store.open_runs()?;
+        if !open.iter().any(|run| ids.iter().any(|id| id == &run.id)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(DRAIN_POLL);
+    }
+}
+
+/// Opens the session log, retrying while the runner thread still holds its writer lock.
+fn open_log_when_released(deps: &Deps, session: &SessionId, timeout: Duration) -> Result<SessionLog, CoreError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match SessionLog::open(&deps.paths, session, deps.clock.clone()) {
+            Ok(log) => return Ok(log),
+            Err(vowp_store::StoreError::Locked { .. }) if Instant::now() < deadline => {
+                std::thread::sleep(DRAIN_POLL);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 /// Signals a run's process group, when the adapter recorded a pid.
@@ -486,37 +545,48 @@ fn abort(
     kind: ErrorKind,
     detail: &str,
 ) -> Result<Switch, CoreError> {
-    let log = SessionLog::open(&deps.paths, &switch.session_id, deps.clock.clone())?;
-    append_event(
-        store,
-        &log,
-        HarnessKind::Vowp,
-        EventBody::Error(ErrorEvent {
-            kind,
-            message: vowp_adapters::classify::redact(detail, 300),
-            retryable: false,
-        }),
-        Some(deps.node.clone()),
-        None,
-    )?;
+    // The active runner may still hold the log writer. The switch row and session
+    // state are the recovery record, so restore them even when no event can be
+    // appended; the runner's own turn.ended closes the log side.
+    let log = match SessionLog::open(&deps.paths, &switch.session_id, deps.clock.clone()) {
+        Ok(log) => Some(log),
+        Err(vowp_store::StoreError::Locked { .. }) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(log) = &log {
+        append_event(
+            store,
+            log,
+            HarnessKind::Vowp,
+            EventBody::Error(ErrorEvent {
+                kind,
+                message: vowp_adapters::classify::redact(detail, 300),
+                retryable: false,
+            }),
+            Some(deps.node.clone()),
+            None,
+        )?;
+    }
     if reattach_source {
         match previous_executor {
             Some(executor) => {
-                append_event(
-                    store,
-                    &log,
-                    executor.harness,
-                    EventBody::SessionExecutor(SessionExecutor {
-                        action: AttachAction::Attach,
-                        executor: executor.clone(),
-                        node: previous_node.clone(),
-                        native_session_id: None,
-                        run_id: None,
-                        reason: Some("switch_abort".to_owned()),
-                    }),
-                    Some(previous_node.clone()),
-                    None,
-                )?;
+                if let Some(log) = &log {
+                    append_event(
+                        store,
+                        log,
+                        executor.harness,
+                        EventBody::SessionExecutor(SessionExecutor {
+                            action: AttachAction::Attach,
+                            executor: executor.clone(),
+                            node: previous_node.clone(),
+                            native_session_id: None,
+                            run_id: None,
+                            reason: Some("switch_abort".to_owned()),
+                        }),
+                        Some(previous_node.clone()),
+                        None,
+                    )?;
+                }
                 store.set_session_state(&switch.session_id, previous_state, Some(executor))?;
             }
             None => {
@@ -526,7 +596,9 @@ fn abort(
     } else {
         store.set_session_state(&switch.session_id, previous_state, previous_executor)?;
     }
-    log.sync()?;
+    if let Some(log) = &log {
+        log.sync()?;
+    }
     store.finish_switch(&switch.id, SwitchState::Aborted, Some(detail))?;
     let mut aborted = switch.clone();
     aborted.state = SwitchState::Aborted;

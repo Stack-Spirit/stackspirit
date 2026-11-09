@@ -10,6 +10,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use support::fake_adapter::FakeAdapter;
@@ -19,10 +20,11 @@ use vowp_core::session::service::SessionService;
 use vowp_core::session::switch::{run_switch, run_switch_with_input};
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
-    Actor, AssistantMessage, AttachAction, CancelToken, Clock, Cost, EventBody, EventEnvelope, EventSource, EventType,
-    Executor, ExecutorRef, FakeClock, HarnessKind, Limit, LimitRowKind, MemoryLog, NodeName, ProbeResult, Run, RunId,
-    RunOutcome, RunPurpose, RunRole, RunSummary, SessionId, SessionRole, StopReason, SwitchReason, SwitchRequest,
-    SwitchState, Timestamp, TurnRequest,
+    Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Clock,
+    Cost, EventBody, EventEnvelope, EventSource, EventType, Executor, ExecutorRef, FakeClock, HarnessEvent,
+    HarnessKind, Limit, LimitRowKind, MemoryLog, NodeName, ProbeResult, Run, RunId, RunOutcome, RunPurpose, RunRole,
+    RunSummary, SessionId, SessionRole, StartInput, StopReason, SwitchReason, SwitchRequest, SwitchState, Timestamp,
+    TurnRequest,
 };
 use vowp_store::NodePaths;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -53,11 +55,20 @@ fn config_for(tmp: &Path) -> vowp_protocol::VowpConfig {
 }
 
 fn deps_with_clock(tmp: &TempDir, registry: AdapterRegistry, clock: FakeClock) -> Deps {
+    deps_with_config(tmp, config_for(tmp.path()), registry, clock)
+}
+
+fn deps_with_config(
+    tmp: &TempDir,
+    config: vowp_protocol::VowpConfig,
+    registry: AdapterRegistry,
+    clock: FakeClock,
+) -> Deps {
     let paths = NodePaths::new(tmp.path().join("node"));
     paths.ensure().expect("node paths");
     Deps {
         paths,
-        config: Arc::new(config_for(tmp.path())),
+        config: Arc::new(config),
         node: node(),
         clock: Arc::new(clock),
         log: Arc::new(MemoryLog::new()),
@@ -171,6 +182,110 @@ fn open_run(session: &SessionId, pid: Option<u32>) -> Run {
         limit_kind: None,
         cost: Cost::unknown(),
         detail: String::new(),
+    }
+}
+
+/// An adapter whose run is a real child process in its own process group.
+///
+/// The monitor thread reaps the child and emits `TurnEnded{Interrupted}`, so a real
+/// `SessionService::run_turn` finishes only after the drain's signals reached the group.
+struct ProcessAdapter {
+    kind: HarnessKind,
+    signal_path: PathBuf,
+}
+
+impl ProcessAdapter {
+    fn new(kind: HarnessKind, signal_path: PathBuf) -> Self {
+        Self { kind, signal_path }
+    }
+}
+
+impl Adapter for ProcessAdapter {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    fn probe(&self) -> ProbeResult {
+        ProbeResult {
+            ok: true,
+            version: None,
+            path: Some("sh".to_owned()),
+            detail: "process fake".to_owned(),
+        }
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
+
+    fn start(&self, _input: StartInput) -> Result<Box<dyn AdapterRun>, AdapterError> {
+        let script = format!(
+            "trap 'echo int >> {path}' INT; trap 'echo term >> {path}; exit 0' TERM; while :; do sleep 0.01; done",
+            path = self.signal_path.display()
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(AdapterError::Io)?;
+        let pid = child.id();
+        let (sender, receiver) = channel();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = sender.send(HarnessEvent {
+                ts: None,
+                actor: Actor::System,
+                body: EventBody::TurnEnded(vowp_protocol::TurnEnded {
+                    turn: 1,
+                    stop_reason: StopReason::Interrupted,
+                    duration_ms: None,
+                }),
+                raw: None,
+            });
+        });
+        Ok(Box::new(ProcessRun { pid, receiver }))
+    }
+}
+
+struct ProcessRun {
+    pid: u32,
+    receiver: Receiver<HarnessEvent>,
+}
+
+impl AdapterRun for ProcessRun {
+    fn pid(&self) -> Option<u32> {
+        Some(self.pid)
+    }
+
+    fn events(&self) -> &Receiver<HarnessEvent> {
+        &self.receiver
+    }
+
+    fn send(&mut self, _text: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported("process fake has no live input"))
+    }
+
+    fn interrupt(&mut self) -> Result<(), AdapterError> {
+        vowp_adapters::proc::signal_group(self.pid, vowp_adapters::proc::Signal::Int).map_err(AdapterError::Io)
+    }
+
+    fn stop(&mut self) -> Result<(), AdapterError> {
+        vowp_adapters::proc::signal_group(self.pid, vowp_adapters::proc::Signal::Term).map_err(AdapterError::Io)
+    }
+
+    fn wait(&mut self) -> Result<RunSummary, AdapterError> {
+        Ok(RunSummary {
+            exit_code: None,
+            outcome: RunOutcome::Killed,
+            native_session_id: None,
+            cost: Cost::unknown(),
+            limit: None,
+            result_text: None,
+            stop_reason: StopReason::Interrupted,
+        })
     }
 }
 
@@ -376,50 +491,53 @@ fn switch_target_probe_fails_stays_on_source() {
 fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     let tmp = tempdir().expect("tempdir");
     let clock = FakeClock::at(ts());
-    let target = FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new());
-    let deps = deps_with_clock(
+    let signal_path = tmp.path().join("signals.txt");
+    let source = Arc::new(ProcessAdapter::new(HarnessKind::Opencode, signal_path.clone()));
+    let capsule = Arc::new(capsule_adapter("drained handoff"));
+    let mut config = config_for(tmp.path());
+    config.capsule.executor = Some(claude());
+    let deps = deps_with_config(
         &tmp,
+        config,
         AdapterRegistry::new()
-            .with("opencode", Arc::new(capsule_adapter("drained handoff")))
-            .with("claude-code", Arc::new(target)),
+            .with("opencode", source)
+            .with("claude-code", capsule),
         clock.clone(),
     );
     let service = SessionService::new(deps.clone());
     let session = create_session(&service, &tmp, "drain timeout");
     let store = deps.open_store().expect("store");
 
-    // A real process with its own group: the drain must send SIGINT, wait, then SIGTERM.
-    let signal_path = tmp.path().join("signals.txt");
-    let script = format!(
-        "trap 'echo int >> {path}' INT; trap 'echo term >> {path}; exit 0' TERM; while :; do sleep 0.01; done",
-        path = signal_path.display()
-    );
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(script)
-        .process_group(0)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("drain child");
-    let run = open_run(&session, Some(child.id()));
-    store.insert_run(&run).expect("run row");
-    store
-        .set_session_state(&session, vowp_protocol::SessionState::Running, Some(&opencode()))
-        .expect("running");
-    append_event(
-        &deps,
-        &session,
-        EventBody::TurnStarted(vowp_protocol::TurnStarted { turn: 1 }),
-    );
+    // The real service turn owns the session log writer; the switch must wait for it.
+    let worker_service = service.clone();
+    let worker_session = session.clone();
+    let worker_cancel = CancelToken::default();
+    let worker = std::thread::spawn(move || {
+        worker_service.run_turn(turn(&worker_session, opencode(), "long running turn"), &worker_cancel)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut active_run = None;
+    while Instant::now() < deadline {
+        let open = store.open_runs().expect("open runs");
+        if let Some(run) = open
+            .into_iter()
+            .find(|run| run.session_id.as_ref() == Some(&session) && run.pid.is_some())
+        {
+            active_run = Some(run);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let active_run = active_run.expect("the service run is active");
 
     let advanced = clock.clone();
     let advancer = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(80));
+        std::thread::sleep(Duration::from_millis(100));
         advanced.advance(Duration::from_secs(5));
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(120));
         advanced.advance(Duration::from_secs(3));
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(120));
         advanced.advance(Duration::from_secs(3));
     });
     let before = clock.now();
@@ -428,51 +546,124 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
         &request(&session, claude(), SwitchReason::Failover),
         &CancelToken::default(),
     )
-    .expect("drained switch");
+    .expect("active-run switch completes");
     advancer.join().expect("advancer");
     let elapsed = clock.now().since(before);
     assert!(elapsed >= Duration::from_secs(5), "the drain waited for the fake 5 s");
+    let result = worker.join().expect("worker").expect("run_turn finishes cleanly");
+    assert_eq!(result.summary.outcome, RunOutcome::Killed);
     assert_eq!(switch.state, SwitchState::Completed);
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut exited = false;
-    loop {
-        match child.try_wait().expect("try_wait") {
-            Some(_) => {
-                exited = true;
-                break;
-            }
-            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            None => break,
-        }
-    }
-    if !exited {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    assert!(exited, "drain stop() terminated the harness");
     let signals = std::fs::read_to_string(&signal_path).unwrap_or_default();
     assert!(signals.contains("int"), "drain sent SIGINT first");
     assert!(signals.contains("term"), "drain sent SIGTERM after the wait");
 
-    let finished = store.run(&run.id).expect("run").expect("run row");
+    let finished = store.run(&active_run.id).expect("run").expect("run row");
     assert_eq!(finished.outcome, Some(RunOutcome::Killed));
     assert!(finished.ended_at.is_some());
 
     let events = read_events(&deps, &session);
-    let ended = events
+    let ended: Vec<_> = events
         .iter()
-        .find_map(|event| match event.body() {
+        .filter_map(|event| match event.body() {
             Ok(EventBody::TurnEnded(payload)) => Some(payload),
             _ => None,
         })
-        .expect("interrupted turn.ended");
-    assert_eq!(ended.stop_reason, StopReason::Interrupted);
-    assert_eq!(ended.turn, 1, "the synthetic end reuses the active turn number");
+        .collect();
+    assert_eq!(ended.len(), 1, "the runner's terminal event is not duplicated");
+    assert_eq!(ended[0].stop_reason, StopReason::Interrupted);
+    assert_eq!(ended[0].turn, 1, "the active turn number is preserved");
     assert_eq!(
         store.require_session(&session).expect("session").executor,
         Some(claude())
     );
+}
+
+#[test]
+fn switch_locked_active_log_aborts_cleanly() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps_with_clock(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("unused")))
+            .with(
+                "claude-code",
+                Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+            ),
+        clock.clone(),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "locked log");
+    let store = deps.open_store().expect("store");
+    let run = open_run(&session, None);
+    store.insert_run(&run).expect("run row");
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Running, Some(&opencode()))
+        .expect("running");
+
+    // Simulate a live runner: this writer lock is held for the whole switch attempt.
+    let held = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("held log");
+    let appended = held
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: None,
+                node: Some(node()),
+                native_session_id: None,
+            },
+            body: EventBody::TurnStarted(vowp_protocol::TurnStarted { turn: 1 }),
+            raw: None,
+            ts: None,
+        })
+        .expect("turn started");
+    store.index_event(&index_row(&appended)).expect("index");
+    held.sync().expect("sync");
+
+    let advanced = clock.clone();
+    let advancer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        advanced.advance(Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(60));
+        advanced.advance(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(60));
+        advanced.advance(Duration::from_secs(3));
+    });
+    let error = run_switch(
+        &deps,
+        &request(&session, claude(), SwitchReason::Failover),
+        &CancelToken::default(),
+    )
+    .expect_err("a held log aborts the switch instead of leaving it started");
+    advancer.join().expect("advancer");
+    assert!(
+        matches!(error, CoreError::Store(vowp_store::StoreError::Locked { .. })),
+        "got {error:?}"
+    );
+
+    let row = store
+        .list_switches(&session)
+        .expect("switches")
+        .into_iter()
+        .next()
+        .expect("switch row");
+    assert_eq!(row.state, SwitchState::Aborted, "the row is not left started");
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.state, vowp_protocol::SessionState::Running);
+    assert_eq!(current.executor, Some(opencode()), "the source stays live");
+    let still_open = store.open_runs().expect("open runs");
+    assert!(
+        still_open.iter().any(|open| open.id == run.id),
+        "drain never finishes a run owned by another thread"
+    );
+    assert!(
+        !read_events(&deps, &session)
+            .iter()
+            .any(|event| event.event_type == EventType::Switch),
+        "an aborted switch has no switch event"
+    );
+    drop(held);
 }
 
 #[test]
