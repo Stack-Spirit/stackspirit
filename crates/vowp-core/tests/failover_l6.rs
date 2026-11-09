@@ -9,8 +9,8 @@ use std::time::Duration;
 use f::*;
 use vowp_core::loops::l6_failover::{Failover, FailoverAction};
 use vowp_protocol::{
-    ActiveState, Cost, InboxKind, JobKind, JobState, LimitKind, LimitRowKind, ParkedReason, Role, RunId, RunOutcome,
-    RunRole, RunSummary,
+    ActiveState, Cost, InboxKind, JobKind, JobState, LimitKind, LimitRowKind, ParkedReason, Role, Run, RunId,
+    RunOutcome, RunRole, RunSummary,
 };
 use vowp_store::LedgerFilter;
 
@@ -344,5 +344,82 @@ fn provider_blocked_answer_resolves_only_that_provider() {
         store.require_job(&other.id).expect("job").state,
         JobState::Parked,
         "a notice for deepseek must not resolve a claude job"
+    );
+}
+
+#[test]
+fn fresh_supervisor_does_not_reapply_old_credit_limit() {
+    let node = TestNode::new();
+    let job = node.insert_job("resolved-credit", JobKind::Build, Role::Worker, Some(vec![]));
+    node.force_state(&job, JobState::Ready);
+    let session = create_session(&node, &job);
+    let store = node.store();
+    let run = Run {
+        id: RunId::new(),
+        job_id: Some(job.id.clone()),
+        session_id: Some(session),
+        role: RunRole::Worker,
+        purpose: vowp_protocol::RunPurpose::Start,
+        profile: Some("worker".to_owned()),
+        rung: 0,
+        executor: Some(vowp_protocol::Executor::parse("opencode:deepseek/deepseek-flash").expect("executor")),
+        provider: Some("deepseek".to_owned()),
+        node: node.deps.node.clone(),
+        native_session_id: None,
+        pid: None,
+        window: None,
+        cwd: Some(node.main_repo.to_string_lossy().into_owned()),
+        started_at: ts(),
+        ended_at: None,
+        exit_code: Some(1),
+        outcome: None,
+        limit_kind: None,
+        cost: Cost::unknown(),
+        detail: "insufficient balance".to_owned(),
+    };
+    store.insert_run(&run).expect("run");
+    store
+        .finish_run(
+            &run.id,
+            &vowp_store::RunFinish {
+                outcome: RunOutcome::Credits,
+                exit_code: Some(1),
+                limit_kind: Some(LimitKind::Credits),
+                cost: Cost::unknown(),
+                native_session_id: None,
+                detail: "insufficient balance".to_owned(),
+            },
+        )
+        .expect("finish");
+    // This is the state after `vowp inbox answer <id> resolved`: no limit row, job ready.
+    assert!(store.limit_for("deepseek").expect("limit").is_none());
+
+    for _ in 0..2 {
+        let mut supervisor = node.supervisor();
+        store
+            .set_loop_state("l2-worker", ActiveState::Paused)
+            .expect("pause l2");
+        store
+            .set_loop_state("l4-planner", ActiveState::Paused)
+            .expect("pause planner");
+        store
+            .set_loop_state("l5-keeper", ActiveState::Paused)
+            .expect("pause keeper");
+        supervisor.startup().expect("startup");
+        supervisor.tick().expect("tick");
+        assert_eq!(
+            store.require_job(&job.id).expect("job").state,
+            JobState::Ready,
+            "an old harvested credits run must not re-park the resolved job"
+        );
+        assert!(
+            store.limit_for("deepseek").expect("limit").is_none(),
+            "an old harvested credits run must not recreate the limit row"
+        );
+    }
+    assert_eq!(
+        store.kv_get(&format!("l6:{}", run.id)).expect("marker").as_deref(),
+        Some("harvested"),
+        "the harvested marker survives a supervisor restart"
     );
 }

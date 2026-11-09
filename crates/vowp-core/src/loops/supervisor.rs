@@ -463,31 +463,39 @@ impl Supervisor {
             if run.ended_at.is_none() || self.handled_runs.contains(&run.id) {
                 continue;
             }
+            // The harvested marker is durable: a supervisor restart must not replay an
+            // old limit run and re-park a job the owner already resolved (loops.md §8.3.4).
+            let marker = self.store.kv_get(&format!("l6:{}", run.id))?;
+            if marker.as_deref() == Some("harvested") {
+                continue;
+            }
             // L6 runs on the runner thread before the wake. Wait for its marker on runs
             // whose policy matters, so a credits/auth/quota limit is never raced by the
-            // job event (loops.md §1 step 2).
-            let marker = self.store.kv_get(&format!("l6:{}", run.id))?;
-            if marker.as_deref() == Some("orphan") {
-                // Reconcile finalised this run without a live thread, so L6 never ran.
-                self.apply_l6_for_run(&run)?;
-                self.apply_park_requests()?;
-            } else if run.limit_kind.is_some() && marker.is_none() {
-                let live = self.runners.is_active(&run.id)
-                    || run
-                        .session_id
-                        .as_ref()
-                        .is_some_and(|session| self.session_runners.session_running(session));
-                if live {
-                    // The runner thread is still applying L6; wait for its marker.
-                    continue;
+            // job event (loops.md §1 step 2). Only a still-running job can need that
+            // policy; a ready/parked job has already been harvested or resolved.
+            if job.state == JobState::Running {
+                if marker.as_deref() == Some("orphan") {
+                    // Reconcile finalised this run without a live thread, so L6 never ran.
+                    self.apply_l6_for_run(&run)?;
+                    self.apply_park_requests()?;
+                } else if run.limit_kind.is_some() && marker.is_none() {
+                    let live = self.runners.is_active(&run.id)
+                        || run
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|session| self.session_runners.session_running(session));
+                    if live {
+                        // The runner thread is still applying L6; wait for its marker.
+                        continue;
+                    }
+                    self.apply_l6_for_run(&run)?;
+                    self.apply_park_requests()?;
                 }
-                self.apply_l6_for_run(&run)?;
-                self.apply_park_requests()?;
             }
             self.handled_runs.insert(run.id.clone());
             self.release_worker(&run.id)?;
-            let _ = self.store.kv_delete(&format!("l6:{}", run.id));
             if job.state != JobState::Running {
+                self.mark_run_harvested(&run.id)?;
                 continue;
             }
             if matches!(
@@ -504,10 +512,12 @@ impl Supervisor {
             }
             let current = self.store.require_job(&job.id)?;
             if current.state != JobState::Running {
+                self.mark_run_harvested(&run.id)?;
                 continue;
             }
             let (event, note) = self.event_for_run(&current, &run, now)?;
             let applied = self.apply_with(&current.id, event.clone(), None, Vec::new(), note)?;
+            self.mark_run_harvested(&run.id)?;
             self.deps.log.log(
                 Level::Info,
                 "l1",
@@ -522,6 +532,12 @@ impl Supervisor {
             harvested += 1;
         }
         Ok(format!("{harvested} run(s) harvested"))
+    }
+
+    /// Persists that a finished run has been harvested, so a restart never replays it.
+    fn mark_run_harvested(&self, run: &RunId) -> Result<(), CoreError> {
+        self.store.kv_set(&format!("l6:{run}"), "harvested")?;
+        Ok(())
     }
 
     /// Drains `park:<provider>` requests written by L6 and parks the matching jobs.
