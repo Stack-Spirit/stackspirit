@@ -186,6 +186,46 @@ impl DrainSleeper for AdvancingSleeper {
     }
 }
 
+/// A sleeper that advances the fake clock, but on its first sleep hands off to a test
+/// writer and waits until that writer has appended its terminal event.
+///
+/// The drain loop's deadline is measured on the fake clock, while the writer is a real
+/// thread. Without the handoff a loaded scheduler can delay the writer past all 250 poll
+/// sleeps (5 s of fake time), so the drain falls into its interrupt path even though the
+/// runner only needed a few milliseconds. The handoff ties fake time to the writer: the
+/// event exists before the next poll, and the test proves the drain releases promptly
+/// instead of waiting out `drain_secs`.
+struct HandoffSleeper {
+    clock: FakeClock,
+    release: Mutex<Option<Sender<()>>>,
+    appended: Mutex<Receiver<()>>,
+}
+
+impl HandoffSleeper {
+    fn new(clock: FakeClock, release: Sender<()>, appended: Receiver<()>) -> Self {
+        Self {
+            clock,
+            release: Mutex::new(Some(release)),
+            appended: Mutex::new(appended),
+        }
+    }
+}
+
+impl DrainSleeper for HandoffSleeper {
+    fn sleep(&self, duration: Duration) {
+        self.clock.advance(duration);
+        let release = self.release.lock().expect("release lock").take();
+        if let Some(release) = release {
+            release.send(()).expect("the writer waits for the first drain poll");
+            self.appended
+                .lock()
+                .expect("appended lock")
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the writer appends before the next drain poll");
+        }
+    }
+}
+
 /// A process-backed adapter whose child ignores SIGINT and SIGTERM, and whose `wait()`
 /// blocks until the test releases it. That keeps the run row (and the log writer) alive
 /// while the drain's bounded runner grace expires.
@@ -591,11 +631,15 @@ fn drain_releases_promptly_when_runner_finishes() {
         .set_session_state(&session, vowp_protocol::SessionState::Running, Some(&opencode()))
         .expect("running");
 
+    let (release_writer, wait_release) = channel();
+    let (writer_appended, wait_appended) = channel();
     let writer = {
         let deps = deps.clone();
         let session = session.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(40));
+            wait_release
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the drain releases the writer on its first poll");
             append_event(
                 &deps,
                 &session,
@@ -605,10 +649,13 @@ fn drain_releases_promptly_when_runner_finishes() {
                     duration_ms: None,
                 }),
             );
+            writer_appended
+                .send(())
+                .expect("the sleeper waits for the terminal event");
         })
     };
 
-    let sleeper = AdvancingSleeper::new(clock.clone());
+    let sleeper = HandoffSleeper::new(clock.clone(), release_writer, wait_appended);
     let before = clock.now();
     let switch = run_switch_with_sleeper(
         &deps,
