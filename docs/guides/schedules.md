@@ -2,10 +2,11 @@
 
 A schedule fires an action on a cron expression or a fixed interval: create a job from a template,
 trigger a loop (for example the planner), or run a command. Schedules are rows in the database, so
-`vowp schedule ls` shows their last and next run, and you can pause one without editing `vowp.toml`.
+`vowp schedule ls` *(planned)* shows their last and next run, and you can pause one without editing
+`vowp.toml`.
 
-> **Status: planned.** Schedules (L9) are a v0.1 job still landing. Commands in this page are
-> *(planned)* until the CLI merges.
+> **Status: mixed.** The schedule engine and `vowp doctor` validation are current; the `vowp schedule`
+> commands are *(planned)* until n09c merges. `vowp init` and `vowp job add` are current.
 
 ## Add a schedule
 
@@ -70,11 +71,12 @@ action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 
 Validation follows the same rules: exactly one of `cron` or `every`, a 5-field cron, an interval of at
 least 60 seconds, `tz` as `UTC` or `±HH:MM`, and unique names. The full cron parse runs in `vowp doctor`,
-`vowp schedule add` and at supervisor startup; a string that has five fields but is not a valid
-expression is a configuration error there.
+`vowp schedule add` *(planned)* and at supervisor startup; a string that has five fields but is not a
+valid expression is a configuration error there.
 
-Schedules installed by `vowp init` start paused until you enable them. The planner heartbeat is not a
-schedule; it is L4's own 30-minute heartbeat.
+`vowp init` writes `schedules = []`, so it installs **no** schedules. Entries declared in `vowp.toml` are
+created active when the supervisor loads them; pause one with `vowp schedule pause` *(planned)*. The
+planner heartbeat is not a schedule; it is L4's own 30-minute heartbeat.
 
 ## Missed runs and idempotency
 
@@ -109,13 +111,13 @@ when you want a checkpoint at a fixed time. A loop action marks `l4-planner` due
 validated like `vowp job add`; the generated id is suffixed with the due time so repeated firings do not
 collide.
 
-**Health check.** A command action can run `vowp status --check` every 30 minutes. A non-zero exit is
-recorded in the schedule status and opens one inbox notice per schedule per day.
+**Health check.** A command action can run `vowp status --check` *(planned)* every 30 minutes. A non-zero
+exit is recorded in the schedule status and opens one inbox notice per schedule per day.
 
 ## Relationship to loops
 
 Loops are the supervisor's own periodic work (L1–L9); schedules are user-defined rows handled by L9.
-Pause a loop with `vowp loops pause <name>` when you want to stop that category of work; pause a schedule
-when you want to stop one cron entry. Neither cancels a run that is already in progress.
+Pause a loop with `vowp loops pause <name>` *(planned)* when you want to stop that category of work; pause
+a schedule when you want to stop one cron entry. Neither cancels a run that is already in progress.
 
 Next: [operating a node](operating.md) for the loop table and backups.

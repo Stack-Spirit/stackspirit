@@ -1,8 +1,10 @@
 # Guides
 
 These guides walk through installing, running and operating VOWP. They describe the intended v0.1
-experience; the CLI commands are *(planned)* until the CLI jobs merge, while the build-from-source
-commands work today.
+experience. `vowp init`, `vowp doctor`, the `vowp job` commands, `vowp graph` and the promotion commands
+work today; commands that have not landed yet are marked *(planned)*.
+
+> **Status: mixed.** The build-from-source commands work today as well.
 
 | Guide | Start here if you want to… |
 |---|---|

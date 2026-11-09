@@ -5,8 +5,8 @@ through environment guards, a snapshot of what is actually serving, a diff of th
 human approval by default, a deploy and a post-deploy probe. Every step is recorded, and every successful
 deploy leaves behind the command that can undo it.
 
-> **Status: planned.** Promotion is a v0.1 nice-to-have still landing. Commands in this page are
-> *(planned)* until the CLI merges.
+> **Status: current.** Promotion, rollback and release listing are implemented; the commands on this
+> page run against the code on `main`.
 
 ## Environments
 
@@ -75,8 +75,8 @@ Built-in guards:
 
 A custom guard is a command after the colon (`no_active_jobs:./scripts/guard.sh`). It must execute and
 check a real result; a file-existence check is not a guard. The same anti-pattern ban as gates applies.
-`upload_set` is a probe-style custom check configured for the environment; it exists because a local
-build is not necessarily the deploy build.
+`upload_set` has no built-in check: configure it as `upload_set:<command>`, for example a `.vercelignore`
+comparison. It exists because a local build is not necessarily the deploy build.
 
 ## Release states
 
@@ -120,7 +120,6 @@ Three failures motivated the design:
 ## Commands
 
 ```sh
-# (planned)
 vowp promote <change> --to prod --dry-run
 vowp promote <change> --to prod
 vowp releases --env prod

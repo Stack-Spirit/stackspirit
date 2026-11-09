@@ -4,8 +4,8 @@ A session is a conversation with a stable VOWP id. The harness underneath can ch
 Claude Code, hit a limit, switch to DeepSeek on a VPS, and come back when the quota resets. The log and
 the lineage stay one session.
 
-> **Status: planned.** The session store, adapter and CLI layers are v0.1 jobs still landing. Commands
-> in this page are *(planned)* until the CLI merges.
+> **Status: planned.** The session store and adapters are current, but the `vowp session` and `vowp chat`
+> commands are *(planned)* until n09c merges.
 
 ## List and inspect
 
@@ -74,8 +74,6 @@ Useful flags:
   is `user`.
 - `--node <n>` switches to an executor on another node. The session is exported and imported on the
   target, and both sides record the node transition.
-- `--no-seed-tail` seeds with the capsule only, not the last turns. Use it when the tail contains
-  irrelevant or sensitive material.
 - `--force` allows a switch while a turn is running. Without it, an active turn is a conflict (exit 4).
   The drain phase is used by automatic switches (failover and context pressure) and by a forced manual
   switch.
@@ -92,10 +90,10 @@ vowp session capsule <id>
 vowp session capsule <id> --print
 ```
 
-A capsule is written automatically on switch, limit, context pressure, turn end, job end and export. It is
+A capsule is written automatically on switch, limit, context pressure, job end and export. It is
 debounced to one per session per 120 seconds, except for the switch, manual, export and limit triggers,
 which never debounce. The manual command uses the manual trigger and bypasses the debounce. `--print`
-prints the Markdown seed instead of just the id.
+prints the capsule Markdown instead of just the id.
 
 A capsule carries intent, constraints, decisions, state, files, gotchas, open questions and telemetry.
 It is validated against the protocol schema and repaired once if invalid. If it still fails, the previous
@@ -113,7 +111,7 @@ vowp session import planner.vowp-bundle.json --node vps --cwd /srv/project
 
 `export` writes one JSON file (`format: "vowp-bundle-v1"`, default `./<id>.vowp-bundle.json`) with a
 fresh capsule, the last 20 replayable events (up to 500 with `--tail`), the switch lineage, small blobs
-inlined and a sha256 checksum. Use `-o -` to write to stdout.
+inlined and a sha256 checksum.
 
 `import` validates the format, protocol version and checksum before changing anything, then creates a
 **child** session on the importing node with `parent_session_id` set to the origin. The first turn on the

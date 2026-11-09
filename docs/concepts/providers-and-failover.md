@@ -5,8 +5,8 @@ executors. The first rung whose provider is available runs the work; when a prov
 either moves to the next rung with a capsule or parks the affected jobs and asks the owner. It never
 silently moves work to a paid provider that the profile does not list.
 
-> **Status: planned.** The adapter, profile and failover code is a v0.1 job still landing. Commands in
-> this page are *(planned)* until the CLI merges.
+> **Status: planned.** Adapters and provider classification are current, but the `vowp status`,
+> `vowp session`, `vowp inbox` and `vowp cost` commands are *(planned)* until n09b/n09c merge.
 
 ## Profiles and ladders
 

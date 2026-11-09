@@ -3,8 +3,8 @@
 VOWP is a single Rust binary. In v0.1 you build it from source; prebuilt release archives, an
 `install.sh`, Homebrew and an npm wrapper are planned for the first public release.
 
-> **Status: planned for the CLI.** The build commands below work today. Commands that start with `vowp`
-> are *(planned)* until the CLI jobs merge; the current binary only implements `vowp --version`.
+> **Status: mixed.** The build commands and `vowp init`/`vowp doctor` work today. Commands that have not
+> landed yet are marked *(planned)*.
 
 ## Prerequisites
 
@@ -27,8 +27,8 @@ rustc --version
 
 VOWP does not need a provider key of its own and never reads a harness login. If a harness needs an
 environment variable (for example a provider key), set it in your shell exactly as you already do for
-that harness. `vowp doctor` (planned) reports only whether the **name** is present; it never prints the
-value and never calls the network. See the [security model](../security.md).
+that harness. `vowp doctor` reports only whether the **name** is present; it never prints the value and
+never calls the network. See the [security model](../security.md).
 
 ## Build from source
 
@@ -72,32 +72,52 @@ supervisor on a local repository, an `origin` remote is still required by the me
 The first project command is:
 
 ```sh
-# (planned)
 vowp init --name my-project
 ```
 
-It writes `vowp.toml`, installs the framework files from [`framework/`](../../framework/README.md) into the
-repository, appends `.vowp/tmp/` to `.gitignore`, creates `~/.vowp`, registers the local node and project,
-and seeds the default loop rows. `vowp up` also ensures the loop rows on startup, so an existing project
-picks up the current defaults. Existing files are skipped unless you pass `--force`.
+On a fresh repository it prints `initialised project my-project at /path (11 files written, 0 skipped)`.
+It writes `vowp.toml` with `schedules = []`; `[node] name = "local"`, `max_workers = 4`,
+`max_verifiers = 2`, `tick_secs = 60`, `cwd_allow = []` and `tz_offset_minutes` set to the machine's
+current UTC offset; `[project] remote = "origin"`, `default_branch = "main"`,
+`lock_files = ["Cargo.lock"]`, `always_allowed = ["Cargo.lock"]` and `push = true`; the four profiles
+(`planner` starts with `claude-code:claude-sonnet-5-5@medium` then
+`opencode:deepseek/deepseek-flash#max`; `keeper`, `worker` and `verifier` use the opencode executor; all
+`on_quota = "next_then_probe_back"`); `[capsule] min_interval_secs = 120` and `tail_turns = 2`; and
+`[merge] rebase = true`, `timeout_secs = 2700` and `secret_scan = true`.
+
+It also installs the embedded framework files from [`framework/`](../../framework/README.md)
+(`AGENTS.md`, `CLAUDE.md`, four `.claude/skills/vowp-*/SKILL.md` files, `opencode.jsonc`, and the
+brief/report templates), creates `.vowp/jobs`, `.vowp/checkpoints` and `.vowp/templates`, appends
+`.vowp/tmp/` to `.gitignore`, creates the node home (`vowp.db`, `sessions/`, `logs/`, `runs/`,
+`backups/`, `tmp/`), registers node `local` and the project, and seeds nine **active** loop rows:
+`l1-supervisor` 60 s, `l2-worker`, `l3-verify`, `l4-planner` 1800 s, `l5-keeper` 1200 s,
+`l6-failover`, `l7-inbox`, `l8-watchdog` 300 s and `l9-schedules` 60 s (0 means event-driven).
+
+On a fresh repository, `--no-framework` writes only `vowp.toml` and `.gitignore` (2 files). Existing
+framework files are skipped and listed; a second `init` exits 4 with
+`project already initialised ...; use --force`, and `--force` overwrites the generated files. `vowp up` *(planned)* will also ensure the loop rows on startup, so an
+existing project picks up the current defaults.
 
 ## Verify the node
 
 ```sh
-# (planned)
 vowp doctor
 ```
 
 `doctor` checks, with `ok`, `warn` or `fail` per item:
 
-- the VOWP home is writable and the database opens, passes `integrity_check` and has a supported schema;
-- `git` and `tmux` versions;
-- harness probes for `claude` and `opencode`;
-- `vowp.toml` parses and validates, and every profile ladder resolves to an installed harness;
-- provider environment variable **names** are present or absent (never values, never a network call);
-- the systemd user unit or cron watchdog is installed (warn only);
-- a supervisor is running (warn only);
-- at least 1 GB of free disk space.
+- `home`: the VOWP home is writable;
+- `db`: the database opens, passes `integrity_check` and has a supported schema;
+- `git` and `tmux`: the versions (`tmux` is a warning when absent);
+- `config`: `vowp.toml` parses and validates;
+- `schedules`: every `[[schedules]]` cron, interval and timezone parses;
+- `harness:claude-code` and `harness:opencode`: adapter probes;
+- `profiles`: every profile ladder resolves to an installed harness;
+- `providers`: provider environment variable **names** are `present` or `absent` (never values, never a
+  network call);
+- `systemd` and `watchdog`: the user unit and cron watchdog are installed (warn only);
+- `supervisor`: a supervisor is running (warn only);
+- `disk`: at least 1 GB of free disk space.
 
 Exit code 0 means no `fail`. A missing harness is a `fail`; a missing tmux is a `warn`.
 
@@ -107,7 +127,7 @@ Exit code 0 means no `fail`. A missing harness is a `fail`; a missing tmux is a 
 |---|---|
 | `~/.vowp/` | Node state: database, session logs, blobs, runs, logs, backups, inbox copies. |
 | `<repo>/vowp.toml` | Project configuration, committed. |
-| `<repo>/AGENTS.md`, `CLAUDE.md`, `opencode.jsonc` | Framework files installed by `vowp init` (planned), committed. |
+| `<repo>/AGENTS.md`, `CLAUDE.md`, `opencode.jsonc` | Framework files installed by `vowp init`, committed. |
 | `<repo>/.vowp/` | Job briefs and reports, checkpoints, optional graph snapshot, release log. |
 | `<repo>/../<repo>-wt/<job-id>` | Job worktrees on branch `job/<job-id>`. |
 

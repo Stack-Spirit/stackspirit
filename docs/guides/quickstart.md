@@ -4,9 +4,10 @@ This walkthrough takes one git repository from "nothing installed" to a supervis
 running, then stops it cleanly. It uses one small documentation job so you can watch the full lifecycle
 without changing code.
 
-> **Status: planned.** Every `vowp` command here is *(planned)* until the CLI jobs merge. The
-> build-from-source steps in [install](install.md) work today. The example project
-> `examples/hello-vowp` (planned) will offer a runnable three-job graph with fake adapters.
+> **Status: mixed.** `vowp init`, `vowp doctor`, `vowp job` and `vowp graph` work today. The supervisor,
+> board, attach, plan, inbox and down commands are marked *(planned)*. The build-from-source steps in
+> [install](install.md) work today. The example project `examples/hello-vowp` *(planned)* will offer a
+> runnable three-job graph with fake adapters.
 
 ## 0. Build and install
 
@@ -37,14 +38,17 @@ The working tree should be clean, and the current branch should be the one you w
 ## 2. Initialise the project
 
 ```sh
-# (planned)
 vowp init --name my-project
 ```
 
-This writes `vowp.toml` with the four default profiles, installs the framework files (`AGENTS.md`,
-`CLAUDE.md`, skills and `opencode.jsonc`), creates `.vowp/`, registers the local node and project, and
-seeds the default loop rows. `vowp up` also ensures those rows on startup. Existing files are skipped,
-not overwritten. If the project was already initialised, the command exits 4 unless you pass `--force`.
+On a fresh repository this prints `initialised project my-project at /path (11 files written, 0 skipped)`.
+It writes `vowp.toml` with the four default profiles and `schedules = []` (so `init` installs no
+schedules), installs the framework files (`AGENTS.md`, `CLAUDE.md`, four skills and `opencode.jsonc`),
+creates `.vowp/`, registers the local node and project, and seeds the nine default loop rows as
+**active**. Existing framework files are skipped and listed; an already initialised project exits 4
+unless you pass `--force`. The exact `vowp.toml` defaults and file list are in the
+[install guide](install.md#prepare-a-project-repository). `vowp up` *(planned)* will also ensure the loop
+rows on startup.
 
 Read `vowp.toml` before continuing. In particular:
 
@@ -56,7 +60,6 @@ Read `vowp.toml` before continuing. In particular:
 ## 3. Check the node
 
 ```sh
-# (planned)
 vowp doctor
 ```
 
@@ -65,12 +68,13 @@ Fix every `fail` before starting the supervisor:
 | Check | What to do |
 |---|---|
 | `home` | Make `~/.vowp` writable, or pass `--home <dir>` consistently. |
-| `db` | Move an unsupported or corrupt database aside; `vowp reindex` rebuilds session indexes, not decisions. |
+| `db` | Move an unsupported or corrupt database aside; `vowp reindex` *(planned)* rebuilds session indexes, not decisions. |
 | `git` | Install git and make sure it is on `PATH`. |
-| `tmux` | Install tmux, or accept the warning and run `vowp up --no-tmux`. |
-| `claude` / `opencode` probe | Install the harness, or change the profile ladder to one that is installed. |
+| `tmux` | Install tmux, or accept the warning and run `vowp up --no-tmux` *(planned)*. |
 | `config` | Fix `vowp.toml`; the error names the key path. |
-| `provider env` | Set the named environment variable in the shell that starts the supervisor. The value is never printed. |
+| `schedules` | Fix the named `[[schedules]]` entry; its cron, interval or timezone did not parse. |
+| `harness:claude-code` / `harness:opencode` | Install the harness, or change the profile ladder to one that is installed. |
+| `providers` | Set the named environment variable in the shell that starts the supervisor. The value is never printed. |
 
 A missing harness is a `fail`, not a warning: a profile that cannot resolve would only fail later.
 
@@ -80,7 +84,6 @@ The CLI can create a job directly. The body is the brief; the front-matter (`job
 generated from the arguments.
 
 ```sh
-# (planned)
 vowp job add \
   --id hello-docs \
   --title "Write the hello page" \
@@ -125,13 +128,12 @@ worker still runs the brief's checks even though they are not separate `cmd` gat
 ## 5. Inspect the graph
 
 ```sh
-# (planned)
 vowp graph
-vowp job show hello-docs
+vowp job show hello-docs --gates --runs
 ```
 
 `vowp graph` prints one line per job with its layer, state and dependencies. `vowp job show` prints the
-job, its edges, its gates and (once it has run) its runs and gate evidence.
+job and its edges; `--gates --runs` adds its gates and (once it has run) its runs and gate evidence.
 
 If you would rather let an agent propose the graph first:
 

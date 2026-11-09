@@ -4,8 +4,8 @@ A VOWP project is homed on one node. That node runs the supervisor, owns the dat
 worktrees, and decides job state. Other nodes are reachable over SSH; in v0.1 there is no cross-node
 sync, replication or shared database.
 
-> **Status: planned.** Node registration, `--node` and cross-node sessions are v0.1 jobs still landing.
-> Commands in this page are *(planned)* until the CLI merges.
+> **Status: mixed.** `vowp init` and `vowp doctor` are current. Node registration, `--node` and cross-node
+> sessions are *(planned)* until n09c merges.
 
 ## What a node is
 
@@ -70,7 +70,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <target> vowp <args…>
 255 from SSH becomes exit 7 (`remote`), including a missing remote `vowp`. If the target is the local
 node, the flag is ignored and the command runs in-process.
 
-Some commands have special streaming rules:
+Some commands have special streaming rules. These session commands are *(planned)*:
 
 - `vowp session import <file> --node vps` streams the bundle over SSH stdin; the remote never needs the
   file path.
@@ -91,13 +91,15 @@ not change node during failover in v0.1.
 ## Example: laptop and VPS
 
 ```sh
-# (planned) on the laptop, where the project is homed
+# on the laptop, where the project is homed
 vowp init --name my-project
-vowp node add vps vps.example.com
 vowp doctor
+
+# (planned) — registration and supervisor commands
+vowp node add vps vps.example.com
 vowp up
 
-# watch the local project
+# watch the local project (planned)
 vowp status
 vowp attach n04-graph
 ```

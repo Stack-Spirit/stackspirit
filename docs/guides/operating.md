@@ -2,10 +2,11 @@
 
 A node runs one supervisor per project home. The supervisor is a plain process that ticks every 60
 seconds, reconciles the database and the session logs, and starts or stops work. Everything it knows
-survives a crash; `vowp up` again reconciles and continues.
+survives a crash; `vowp up` *(planned)* again reconciles and continues.
 
-> **Status: planned.** The supervisor and its commands are v0.1 jobs still landing. Commands in this
-> page are *(planned)* until the CLI merges.
+> **Status: mixed.** The supervisor core and `vowp doctor` are current, but the lifecycle commands in
+> this page (`up`, `down`, `status`, `board`, `loops`, `backup`, `reindex`, `cost`) are *(planned)* until
+> n09b/n09c merge.
 
 ## Start and stop
 
@@ -118,6 +119,8 @@ of hand-editing `vowp.db`.
 
 ## Watchdog
 
+The `vowp up`/`vowp status` checks in this section are *(planned)*.
+
 The design uses two layers: a systemd user unit with `Restart=always` (or an equivalent process
 supervisor) and a five-minute cron check that reads `~/.vowp/heartbeat` and restarts the service when it
 is missing or older than 180 seconds. The installer that writes these files is a separate v0.1 job
@@ -129,9 +132,11 @@ restarts the supervisor, which then reconciles.
 
 ## Upgrade the binary
 
+The `vowp down` and `vowp up` steps are *(planned)*; `vowp doctor` is current.
+
 1. `vowp down`.
 2. Build or install the new binary over the old one.
-3. `vowp doctor` (planned) to check the schema version and configuration.
+3. `vowp doctor` to check the schema version and configuration.
 4. `vowp up`.
 
 Database migrations are forward-only and keyed by `PRAGMA user_version`. A database written by a newer
@@ -152,6 +157,8 @@ Rows show runs, USD, tokens, cache reads and the source (`receipt`, `price-table
 harness receipt when available; otherwise a labelled price-table estimate, otherwise unknown.
 
 ## Routine checks
+
+The commands below are *(planned)*.
 
 Once a day:
 

@@ -4,13 +4,12 @@ A job is the unit of work in VOWP. It has a brief (the contract), owned paths (t
 (the checks), a report (the result) and a state in the graph. This guide covers creating a job, writing
 a brief that an agent can follow, choosing gates that prove the work, and reading the result.
 
-> **Status: planned.** The job commands and the supervisor loops are v0.1 jobs still landing.
-> Commands in this page are *(planned)* until the CLI merges.
+> **Status: mixed.** The `vowp job` and `vowp graph` commands are current; the supervisor commands
+> (`vowp up`, `vowp status`) are still *(planned)*.
 
 ## Create a job
 
 ```sh
-# (planned)
 vowp job add \
   --id n04-graph \
   --title "Graph engine: DAG, state machine, scheduler" \
@@ -43,10 +42,12 @@ vowp job add \
 
 The command validates the id, the dependency graph (unknown needs and cycles are rejected) and the gate
 definitions. It writes the generated front-matter plus your body to `.vowp/jobs/<id>/brief.md`, inserts
-the job and edges, and leaves the job `pending`. It exits 4 if the id already exists.
+the job and edges, and leaves the job `pending`; on success it prints `added job <id> (pending)`. It
+exits 4 if the id already exists.
 
-`vowp job update <id>` changes the title, priority, profile, owns, reads, gates, needs or note. A job in
-`running`, `gating`, `reviewing` or `merging` may not change `owns` or `gates`; finish or park it first.
+`vowp job update <id>` changes `--title`, `--priority`, `--profile`, `--owns`, `--reads`, `--gates`,
+`--add-needs`, `--remove-needs` or `--note`. A job in `running`, `gating`, `reviewing` or `merging` may
+not change `owns` or `gates`; finish or park it first.
 
 ## Write a brief
 
@@ -223,7 +224,6 @@ woken.
 ## Inspecting and changing state
 
 ```sh
-# (planned)
 vowp job ls
 vowp job show n04-graph --brief --report --runs --gates
 vowp graph --mermaid
@@ -231,7 +231,8 @@ vowp graph --export .vowp/graph.yaml
 ```
 
 `vowp job ls` hides terminal `done`, `cancelled` and `replanned` jobs unless you pass `--all`. `job show`
-prints the job, edges, recent runs with outcomes and costs, and gate results with evidence tails.
+prints the job and its edges; `--runs` adds recent runs with outcomes and costs, and `--gates` adds gate
+results with evidence tails.
 `graph --export` writes YAML; `graph --import` validates and inserts missing jobs and edges but never
 overwrites an existing job.
 
@@ -239,10 +240,10 @@ Safe state changes:
 
 | Command | Effect |
 |---|---|
-| `vowp job retry <id>` | `failed → ready`, `parked → ready`, `stalled → running`; other states exit 4. `--reset-attempts` also zeroes attempts. |
+| `vowp job retry <id>` | `failed → ready`, `parked → ready`, `stalled → running`; other states exit 4. The retry resets the attempt counters. |
 | `vowp job park <id> [--reason t]` | Any non-terminal → `parked(manual)`; stops the run. Resume with `retry`. |
 | `vowp job cancel <id>` | Any non-terminal → `cancelled`; keeps branch and worktree for inspection. Dependents stay `pending` and are flagged `blocked-by-cancelled`. |
-| `vowp job nudge <id> [--text t]` | Keeper request: continue the stalled run with an extra instruction. |
+| `vowp job nudge <id>` | Keeper request: ask the stalled run to continue. |
 | `vowp job restart <id>` | Keeper request: start a fresh process in the same session. |
 | `vowp job replan <id>` | Hand the work back to the planner (`replanned`). |
 | `vowp job fail <id> --reason t` | Keeper request: fail the job with a reason. |
@@ -258,7 +259,7 @@ requests need a running supervisor to be applied.
 | `owns_respected` fails | The worker edited a path outside `owns`. | Move the change into an owned path or split the job. |
 | The report gate says "missing report" | The worker stopped before writing it, or wrote it in the wrong worktree. | The L2 continue prompt names the exact path; check `.vowp/jobs/<id>/report.md` in the job worktree. |
 | The report gate says "commit not found" | The report lists a sha from before a rebase, or a fabricated sha. | Commit first, then write the report with the real shas. |
-| A job waits in `ready` | No free slot, an overlapping ownership lock, or a limited provider. | Check `vowp status`, `vowp job show`, and the limits section. Do not force a second worker. |
+| A job waits in `ready` | No free slot, an overlapping ownership lock, or a limited provider. | Check `vowp status` *(planned)*, `vowp job show`, and the limits section. Do not force a second worker. |
 | A verifier keeps failing | The findings are vague or the job is too large. | Make the verifier's findings concrete; split the job. |
 | A fix loop repeats | The same command fails without new evidence. | After three identical fingerprints the job is moved to `failed` with a no-progress note and a decision item is opened in the inbox. It does not create a `<id>-decision` job; only `on_exhausted = escalate` does that. Read the gate tails. |
 

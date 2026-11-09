@@ -8,9 +8,10 @@ It is **not** a harness: it does not embed a model, replace Claude Code or openc
 login. It is closer to a build system and foreman for agents. The harnesses stay stock; VOWP supplies the
 graph, the state machine, the evidence and the handoff format.
 
-> **Status: planned.** VOWP v0.1 is under construction. The design is complete in
-> [`docs/design/`](../design/README.md); the implementation is landing crate by crate. Commands shown in
-> these pages are *(planned)* until the CLI jobs merge.
+> **Status: mixed.** VOWP v0.1 is under construction. The design is complete in
+> [`docs/design/`](../design/README.md); the implementation is landing crate by crate. `vowp init`,
+> `vowp doctor`, the `vowp job` commands, `vowp graph` and the promotion commands are current; the
+> remaining commands are marked *(planned)*.
 
 ## Principles
 
@@ -18,7 +19,7 @@ graph, the state machine, the evidence and the handoff format.
    TUI, never sends keystrokes to answer a dialog, and never reads, stores or forwards login tokens.
 2. **The database is the truth for decisions; files are the truth for content.** SQLite holds jobs, edges,
    gates, runs, costs, limits, loops and inbox rows. Briefs, reports, session logs and blobs stay in plain
-   files. Killing every process and restarting `vowp up` reconciles from those two sources.
+   files. Killing every process and restarting `vowp up` *(planned)* reconciles from those two sources.
 3. **Deterministic loops, LLM judgment.** A plain program ticks every 60 seconds and never "decides to
    stop". Models are called only for judgment: planning, diagnosing a stall, reviewing a report, writing a
    handoff.
@@ -59,8 +60,8 @@ graph, the state machine, the evidence and the handoff format.
                  harness child processes
 ```
 
-One `vowp` binary contains everything. `vowp up` is the long-running supervisor; every other invocation
-is a short-lived client of the same SQLite database (WAL mode). A node runs at most one supervisor per
+One `vowp` binary contains everything. `vowp up` *(planned)* is the long-running supervisor; every other
+invocation is a short-lived client of the same SQLite database (WAL mode). A node runs at most one supervisor per
 project home, enforced by a lock file. There is no daemon, no listening socket and no network listener in
 v0.1.
 
@@ -83,7 +84,7 @@ v0.1.
 | **Graph** | Jobs plus edges. A DAG except for bounded `fixes` loop edges. |
 | **Gate** | A machine-checkable condition with recorded evidence. |
 | **Loop** | A repeating process with a tick, an input, actions and bounds (L1–L9). |
-| **Supervisor** | The deterministic program that runs the loops (`vowp up`). |
+| **Supervisor** | The deterministic program that runs the loops (`vowp up` *(planned)*). |
 | **Role** | `planner`, `keeper`, `worker` or `verifier`. |
 | **Slot** | A concurrent worker place, also a tmux window. |
 | **Inbox** | Questions and approvals waiting for a human. |
@@ -133,26 +134,26 @@ pass an explicit temporary directory).
 │    └─ adapters.json          harness-side session ids
 ├─ runs/<runId>.jsonl          raw harness stdout (debug only)
 ├─ logs/supervisor.log         structured loop log
-├─ backups/                    `vowp backup` output
+├─ backups/                    `vowp backup` *(planned)* output
 └─ inbox/<inboxId>.md          human-readable copy of inbox items
 ```
 
-Inside a project, `vowp init` (planned) writes `vowp.toml`, the framework files copied from
+Inside a project, `vowp init` writes `vowp.toml`, the embedded framework files sourced from
 [`framework/`](../../framework/README.md), and a `.vowp/` directory for job briefs, reports, optional graph
 snapshots, planner checkpoints and the release log. Job worktrees live outside the repository, by default
 in `<repo>/../<repo-name>-wt/<job-id>`.
 
 The session log is the authority for conversation content. The corresponding rows in `vowp.db` are an
-index that `vowp reindex` can rebuild. Deleting the database never loses session content; deleting a
-session directory does.
+index that `vowp reindex` *(planned)* can rebuild. Deleting the database never loses session content;
+deleting a session directory does.
 
 ## What v0.1 includes
 
 - The protocol types, SQLite store, graph engine, safe tmux manager, Claude Code/opencode/generic CLI
   adapters, supervisor loops L1–L8, schedules L9, gates, failover, capsule switch, the CLI, framework
   files, docs, an install script, an example project and CI.
-- Work → Production promotion and the optional read-only `vowp session watch` importer are nice-to-haves
-  in the same release.
+- Work → Production promotion and the optional read-only `vowp session watch` *(planned)* importer are
+  nice-to-haves in the same release.
 
 ## What is deliberately deferred
 

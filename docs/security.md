@@ -8,9 +8,9 @@ action needs an explicit human approval by default.
 This page describes the model and what it does **not** protect against. The vulnerability-reporting
 policy is in [`SECURITY.md`](../SECURITY.md).
 
-> **Status: planned.** The gates, supervisor and promotion code that enforce these rules are v0.1 jobs
-> still landing. The rules are binding on the implementation, but they are not yet all executable, and
-> the `vowp` commands on this page are *(planned)* until the CLI merges.
+> **Status: mixed.** Gates, promotion and `vowp doctor` are current. The supervisor and session
+> commands on this page are *(planned)* until n09b/n09c merge, and the remaining rules are binding on
+> the parts of the implementation still landing.
 
 ## Reporting a vulnerability
 
@@ -70,8 +70,8 @@ error messages and commands.
   supervisor or harness, exactly as the harness expects. VOWP does not read the value.
 - `[harnesses.<name>].env_pass` is a list of **names** to forward to a child process. It is not a place
   to put values.
-- `vowp doctor` prints `set`/`unset` for a named variable, never its content, and never makes a network
-  call to test it.
+- `vowp doctor` prints `present`/`absent` for a named variable, never its content, and never makes a
+  network call to test it.
 - `vowp_adapters::classify::redact` removes secret-looking values from limit and run detail strings
   before storage. This is a backstop, not a guarantee that all logs are safe to publish.
 - Reports and inbox answers must not contain secret values. If a task seems to need one, the agent must
@@ -106,9 +106,9 @@ temporary directory and a fake value.
 - limit messages that may include account details before redaction.
 
 Treat `~/.vowp` like a work journal: back it up if you need it, restrict access to your user account,
-and never paste raw logs into a public issue. `vowp backup` copies the database, not the session
-directories; if you need the logs, copy `~/.vowp` while the supervisor is stopped or use a filesystem
-snapshot.
+and never paste raw logs into a public issue. `vowp backup` *(planned)* copies the database, not the
+session directories; if you need the logs, copy `~/.vowp` while the supervisor is stopped or use a
+filesystem snapshot.
 
 VOWP does not encrypt `~/.vowp` in v0.1. Disk encryption and account permissions are your
 responsibility.
@@ -134,13 +134,13 @@ The window manager is deliberately narrow:
 
 - It creates or attaches only the `vowp-<project>` session and tagged windows.
 - It never kills untagged windows, never respawns a pane and never sends keystrokes.
-- A job window runs `vowp __window job <id>`, which is a read-only follower of the session log. The
-  harness runs headless; the window is not a control channel.
+- A job window runs `vowp __window job <id>` *(planned)*, which is a read-only follower of the session
+  log. The harness runs headless; the window is not a control channel.
 - `capture-pane` is for display only. Decisions come from the log and the database, never from screen
   text.
 
-If tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach` falls back to
-`vowp session tail --follow`.
+If tmux is absent, `vowp up --no-tmux` *(planned)* runs without windows. `vowp attach` *(planned)* falls
+back to `vowp session tail --follow` *(planned)*.
 
 ## Multi-node and SSH
 

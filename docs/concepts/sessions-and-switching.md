@@ -4,8 +4,8 @@ A VOWP session is one conversation with a stable id that outlives the harness pr
 Code, opencode, a generic CLI tool or a future adapter can each take a turn; the canonical log records
 what the user, the model and the tools did, and a capsule carries the context across the handoff.
 
-> **Status: planned.** The store, adapters and session layer are v0.1 jobs still landing. Commands in
-> this page are *(planned)* until the CLI merges.
+> **Status: planned.** The store, adapters and session core are current, but the `vowp session` and
+> `vowp chat` commands are *(planned)* until n09c merges.
 
 ## Why a universal session
 
@@ -122,9 +122,9 @@ A capsule is a structured handoff: intent, constraints, decisions, state (done, 
 next steps), files, gotchas, open questions and telemetry. It is JSON validated against the protocol
 schema, stored both as a file and in `vowp.db`.
 
-- **When:** an explicit switch, a provider limit, context pressure, a turn end, a manual request, a job
-  end, or an export. Debounced to one capsule per session per 120 seconds, except for switch, manual,
-  export and limit triggers.
+- **When:** an explicit switch, a provider limit, context pressure, a manual request, a job end, or an
+  export. Debounced to one capsule per session per 120 seconds, except for switch, manual, export and
+  limit triggers. A turn end does not write a capsule by itself.
 - **Who writes it:** the cheapest capable executor on the node, by default the last rung of the `keeper`
   profile. The capsule run gets its own throwaway session so it never pollutes the log it summarises.
 - **Input:** the previous capsule plus replayable events after its `at_seq`. Tool results are dropped

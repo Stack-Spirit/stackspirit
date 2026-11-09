@@ -1,12 +1,13 @@
 # Troubleshooting
 
-Start with the evidence the supervisor already records: `vowp status`, `vowp doctor`, `vowp job show`,
-the session log and `~/.vowp/logs/supervisor.log`. Most "stuck" jobs are waiting on a dependency, a
-slot, an ownership lock, a provider limit or a human answer, and the state plus the note says which.
+Start with the evidence the supervisor already records: `vowp status` *(planned)*, `vowp doctor`,
+`vowp job show`, the session log and `~/.vowp/logs/supervisor.log`. Most "stuck" jobs are waiting on a
+dependency, a slot, an ownership lock, a provider limit or a human answer, and the state plus the note
+says which.
 
-> **Status: planned.** Most commands here are *(planned)* until the CLI jobs merge. Today the binary
-> implements `vowp --version`; an "unknown command" error before then is expected, not a bug. The
-> build-from-source commands work now.
+> **Status: mixed.** `vowp init`, `vowp doctor`, the `vowp job` commands and `vowp graph` are current.
+> Supervisor, session, inbox, schedule, cost, backup and reindex commands are marked *(planned)* until
+> n09b/n09c merge.
 
 ## First: exit codes
 
@@ -27,8 +28,9 @@ the same.
 
 ## Install and build
 
-**`vowp: unknown command` after a build.** Only `vowp --version` exists until the CLI jobs merge. Check
-the [job map](design/job-map.md) or build from a branch that contains the command.
+**`vowp: unknown command` after a build.** Check the spelling against `vowp --help`. A command that has
+not landed yet is still parsed and returns `not implemented: <command>` instead; see the
+[job map](design/job-map.md) for what is still to come.
 
 **The wrong binary runs.** Two installs on `PATH`:
 
@@ -51,12 +53,14 @@ default. Add that directory to `PATH`, or install with `--root <dir>` and add `<
 
 | Symptom | Cause and fix |
 |---|---|
-| Exit 4, "already initialised" | A `vowp.toml` or registration already exists. Use `--force` only when you intend to replace generated files; existing harness files are otherwise skipped. |
-| Files listed as skipped | `AGENTS.md`, `CLAUDE.md` or `opencode.jsonc` already existed. VOWP does not overwrite them without `--force`; merge the missing lines yourself. |
+| Exit 4, "already initialised" | A `vowp.toml` already exists. `init` writes nothing in this case; use `--force` only when you intend to replace generated files. |
+| Files listed as skipped | On a first init, `AGENTS.md`, `CLAUDE.md` or `opencode.jsonc` already existed. VOWP does not overwrite them without `--force`; merge the missing lines yourself. |
 | `no project: run vowp init` | You are outside a project and more than one project is registered, or none is. `cd` into the repository or pass `--project <name\|path>`. |
 | Wrong project selected | Pass `--project`; the default is the nearest ancestor containing `vowp.toml`, else the only registered project. |
 
 ## `vowp doctor`
+
+The `vowp reindex` and `vowp up` references in this section are *(planned)*.
 
 `doctor` exits 0 only when no check is a `fail`. A `warn` is informational.
 
@@ -65,15 +69,18 @@ default. Add that directory to `PATH`, or install with `--root <dir>` and add `<
 | `home` | Make `~/.vowp` writable, or pass the same `--home` to every command. |
 | `db` | If it reports a schema version newer than the binary, upgrade the binary; do not delete the database. If it reports corruption, stop the supervisor, restore a backup, and use `vowp reindex` only for session indexes. |
 | `git` | Install git and ensure it is on `PATH` for non-interactive shells. |
-| `tmux` (warn) | Install tmux, or accept `vowp up --no-tmux` and no live windows. |
-| `claude` / `opencode` probe | Install the harness or fix its binary path in `[harnesses.<name>].binary`. A missing harness is a `fail` because a profile that cannot resolve would fail later. |
+| `tmux` (warn) | Install tmux, or accept `vowp up --no-tmux` *(planned)* and no live windows. |
 | `config` | The error names the key path. Unknown keys are errors (`deny_unknown_fields`); remove or correct the key. |
-| `provider env` | The check prints the variable **name** and `set`/`unset`; it never prints the value and never calls the network. Set it in the shell that starts the supervisor. |
-| `systemd` / `cron` (warn) | The watchdog installer is a separate v0.1 job; a source build does not install a unit yet. |
-| `supervisor` (warn) | Not running. Start it with `vowp up` if you expect one. |
+| `schedules` | A `[[schedules]]` entry did not parse; the check names the schedule and the error. |
+| `harness:claude-code` / `harness:opencode` | Install the harness or fix its binary path in `[harnesses.<name>].binary`. A missing harness is a `fail` because a profile that cannot resolve would fail later. |
+| `providers` | The check prints each variable **name** with `present` or `absent`; it never prints the value and never calls the network. Set it in the shell that starts the supervisor. |
+| `systemd` / `watchdog` (warn) | The watchdog installer is a separate v0.1 job; a source build does not install a unit yet. |
+| `supervisor` (warn) | Not running. Start it with `vowp up` *(planned)* if you expect one. |
 | `disk` | Free at least 1 GB; runs and blobs grow with tool output. |
 
 ## Supervisor
+
+The supervisor commands in this section are *(planned)*.
 
 **`vowp up` exits 4.** A supervisor is already running for this project home. `vowp status` shows the
 pid. Do not start a second one; use `vowp down` or `vowp status --check` to decide whether it is alive.
@@ -98,6 +105,9 @@ a loop problem without leaving a supervisor running.
 Use `vowp job show <id> --runs --gates` first. The job's state, `parked_reason`, `note`, last run
 outcome and gate evidence usually identify the blocker.
 
+The `vowp job` commands in this section are current; `vowp status` *(planned)*, `vowp session`
+*(planned)* and `vowp inbox` *(planned)* are not.
+
 | State / symptom | Likely cause | What to do |
 |---|---|---|
 | `pending` forever | A `needs` job is not `done` (or was cancelled). | `vowp graph` and `vowp job show <id>` show the unmet needs. Cancelled dependencies leave dependents `pending` and flagged `blocked-by-cancelled`; replan or cancel them. |
@@ -109,7 +119,7 @@ outcome and gate evidence usually identify the blocker.
 | `fixing` for a long time | A fix or merge child job is still running, or it failed and the parent is waiting. | `vowp job ls --all` and `vowp job show <child>`. A failed child fails the parent and wakes the keeper. |
 | `reviewing` with a failed verifier | The verifier could not produce a usable verdict twice. | The job is parked with a question; answer it or retry. Make findings concrete so the next verifier can judge. |
 | `merging` stuck | The merge queue is running the repository checks or waiting for the lockfile refresh. | Check the merge budget (2700 s) and `vowp status`. One merge runs at a time per project. |
-| `failed` | Retries exhausted or the keeper failed it. | Read the gate evidence and the last run. `vowp job retry <id>` (optionally `--reset-attempts`) or `vowp job replan <id>`. |
+| `failed` | Retries exhausted or the keeper failed it. | Read the gate evidence and the last run. `vowp job retry <id>` or `vowp job replan <id>`. |
 | `parked` | A question, credits, auth, provider block, exhaustion or a manual park. | Read `parked_reason` and `vowp inbox ls`; answer the item or `vowp job retry <id>` for a manual park. |
 | `cancelled` | A human cancelled it. | The branch and worktree are kept for inspection. Dependents stay `pending`; replan or cancel them. |
 
@@ -142,6 +152,8 @@ only checks a file exists is rejected by validation for a reason.
 
 ## Providers and limits
 
+The `vowp status` and `vowp inbox` checks below are *(planned)*.
+
 | Limit | Meaning | Action |
 |---|---|---|
 | `quota` | A subscription window is exhausted. | VOWP records the reset (+2 min), switches to the next rung with a capsule and probes back. If no rung remains, the job parks with `ProviderBlocked`; answer after the reset. |
@@ -155,6 +167,8 @@ Check `vowp status` for active limits and reset times, and `vowp inbox ls` for t
 take. An inbox answer unparks only the jobs waiting on that item.
 
 ## Sessions
+
+The `vowp session` commands in this section are *(planned)*; `vowp doctor` is current.
 
 **`session switch` exits 6.** The target provider is limited. Pick another rung, or wait for the reset.
 
@@ -181,6 +195,8 @@ permissions. The importer never writes to Claude's files.
 
 ## Schedules
 
+The `vowp schedule` and `vowp loops` commands here are *(planned)*.
+
 - A bad cron or an interval under 60 seconds exits 2. v0.1 accepts exactly five whitespace-separated
   cron fields; six-field cron with seconds is rejected.
 - `tz` is `UTC` or a fixed offset such as `+02:00`; IANA names are v0.2.
@@ -193,12 +209,14 @@ permissions. The importer never writes to Claude's files.
 
 ## Costs
 
-`vowp cost` shows `receipt`, `price-table`, `unknown` or `mixed` per row. An unknown cost is `?` and is
-counted separately; it is never assumed free. If every row is unknown, the harness is not reporting
+`vowp cost` *(planned)* shows `receipt`, `price-table`, `unknown` or `mixed` per row. An unknown cost is
+`?` and is counted separately; it is never assumed free. If every row is unknown, the harness is not reporting
 usage and no `[providers.<p>.prices]` entry exists for the model. Add a price table only for models you
 know; otherwise leave it unknown.
 
 ## Database, backup and reindex
+
+The `vowp reindex` and `vowp backup` commands here are *(planned)*.
 
 - **Schema too new.** The database was written by a newer binary. Upgrade the binary; if you must go
   back, restore a pre-upgrade backup. VOWP refuses to guess at a newer schema.
@@ -210,6 +228,8 @@ know; otherwise leave it unknown.
   not copy session directories; back up `~/.vowp` separately if you need the logs.
 
 ## tmux
+
+The `vowp up`, `vowp attach` and `vowp down` commands here are *(planned)*.
 
 | Symptom | Fix |
 |---|---|
@@ -235,10 +255,12 @@ When you need help, collect:
 ```sh
 # (planned)
 vowp status --json
+vowp inbox ls
+
+# current
 vowp doctor --json
 vowp job show <id> --runs --gates
 vowp graph
-vowp inbox ls
 tail -n 200 ~/.vowp/logs/supervisor.log
 ```
 
