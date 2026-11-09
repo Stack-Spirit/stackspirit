@@ -28,7 +28,8 @@ dogfood server. It killed the owner's tmux sessions, potentially interrupting li
 night-shift panes. The command was meant to clean up a test server; there was no private
 socket in that shell. The night supervisor recreated its `vowp-night` session at 06:12:28
 (board/log plus the current job windows), and no file under `~/vowp-night` was edited by
-me. This is a hard `must_not_touch` breach; the job report records it for the owner.
+me. This is a hard `must_not_touch` breach; the job report records it. The owner answered
+the follow-up question (question #15, answer #16): no night-shift work needs a retry.
 
 The committed harness and docs now make the same mistake impossible:
 
@@ -53,9 +54,9 @@ Residual risk: the `vowp` binary itself still creates `Tmux::new(None)` and does
 propagate `--home` to windows (D1/D6/D7). The harness wrapper is the guard until the CLI
 owns a no-default-server policy.
 
-**Job status:** the technical results above are complete, but the job report is
-`status: blocked` until the owner records an assessment/retry of the night-shift work
-affected by the manual default-socket kill.
+**Job status:** the owner answered the incident question (#15 → #16: no night-shift work
+needs a retry), so the job report is `status: done`; the technical results above are
+complete.
 
 ## What the harness does
 
