@@ -5,8 +5,8 @@
 
 mod common;
 
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -164,6 +164,249 @@ impl AdapterRun for FakeRun {
             result_text: Some("fake run finished".to_owned()),
             stop_reason: StopReason::EndTurn,
         })
+    }
+}
+
+/// Fake harness that exits on SIGINT/SIGTERM and also stops its child.
+const CLEAN_HARNESS: &str = r#"#!/bin/sh
+pid_file="$1"
+child_file="$2"
+trap 'kill "$child" 2>/dev/null; exit 0' INT TERM
+sleep 300 &
+child=$!
+printf '%s\n' "$$" > "$pid_file"
+printf '%s\n' "$child" > "$child_file"
+wait "$child"
+"#;
+
+/// Fake harness that ignores SIGINT/SIGTERM, used to test the second-signal escape.
+const STUBBORN_HARNESS: &str = r#"#!/bin/sh
+trap '' INT TERM
+printf '%s\n' "$$" > "$1"
+sleep 300 &
+printf '%s\n' "$!" > "$2"
+wait
+"#;
+
+/// Reads the first line of `path` as a pid.
+fn read_pid_file(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.lines().next()?.trim().parse().ok()
+}
+
+/// Returns whether `/proc/<pid>` still exists.
+fn process_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Sends `signal` to a pid through `kill`, asserting it succeeded.
+fn kill_signal(pid: u32, signal: &str) {
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -{signal} {pid} failed");
+}
+
+/// Kills a process group and its leader; used to clean up a forced-exit test.
+fn kill_group(pid: u32) {
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Kills recorded child pids when a test ends, including on panic.
+struct ChildCleanup(Vec<u32>);
+
+impl Drop for ChildCleanup {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            kill_group(*pid);
+        }
+    }
+}
+
+/// One spawned `vowp up --foreground` process, killed if the test panics.
+struct SupervisorProcess {
+    child: Child,
+}
+
+impl SupervisorProcess {
+    /// Spawns the real binary against a temporary home and project.
+    fn spawn(home: &Path, repo: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_vowp"))
+            .arg("--home")
+            .arg(home)
+            .arg("--project")
+            .arg(repo)
+            .arg("up")
+            .arg("--foreground")
+            .arg("--no-tmux")
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn vowp up");
+        Self { child }
+    }
+
+    /// Returns the supervisor pid.
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Polls for exit up to `timeout`.
+    fn wait_for_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.child.try_wait().expect("poll supervisor") {
+                Some(status) => return Some(status),
+                None if Instant::now() >= deadline => return None,
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
+    /// Returns whether the process has already exited.
+    fn exited(&mut self) -> bool {
+        self.child.try_wait().expect("poll supervisor").is_some()
+    }
+}
+
+impl Drop for SupervisorProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A temporary node home, git project and fake-signal harness.
+struct SignalEnv {
+    home: tempfile::TempDir,
+    repo: tempfile::TempDir,
+    _worktrees: tempfile::TempDir,
+    _tools: tempfile::TempDir,
+    paths: NodePaths,
+    job_id: vowp_protocol::JobId,
+    pid_file: PathBuf,
+    child_file: PathBuf,
+}
+
+impl SignalEnv {
+    /// Creates the env, installs `script` as the `cli:fake-signal` harness and inserts one
+    /// pending job so the supervisor dispatches a real child process.
+    fn new(script: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("temp home");
+        let repo = git_repo();
+        let worktrees = tempfile::tempdir().expect("temp worktrees");
+        let tools = tempfile::tempdir().expect("fake tools");
+        let script_path = tools.path().join("fake-signal.sh");
+        std::fs::write(&script_path, script).expect("fake harness script");
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let pid_file = tools.path().join("harness.pid");
+        let child_file = tools.path().join("harness-child.pid");
+        let mapping = tools.path().join("mapping.toml");
+        std::fs::write(
+            &mapping,
+            format!(
+                "name = \"fake-signal\"\ncommand = {{ argv = [\"{}\", \"{}\", \"{}\"], prompt_via = \"stdin\" }}\n\n[output]\nformat = \"text\"\n",
+                script_path.display(),
+                pid_file.display(),
+                child_file.display()
+            ),
+        )
+        .expect("mapping");
+
+        let mut config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+        config.node.tick_secs = 1;
+        config.project.path = Some(repo.path().display().to_string());
+        config.project.worktree_root = Some(worktrees.path().display().to_string());
+        config.harnesses.insert(
+            "fake-signal".to_owned(),
+            HarnessConfig {
+                mapping: Some(mapping.display().to_string()),
+                ..HarnessConfig::default()
+            },
+        );
+        config.profiles.get_mut("worker").expect("worker profile").ladder =
+            vec![Executor::parse("cli:fake-signal").expect("executor")];
+        std::fs::write(
+            repo.path().join("vowp.toml"),
+            toml::to_string_pretty(&config).expect("config toml"),
+        )
+        .expect("write config");
+
+        let paths = NodePaths::new(home.path());
+        register_project(&paths, &config, repo.path());
+        let job_id = vowp_protocol::JobId::parse("signal-job").expect("job id");
+        Store::open(&paths)
+            .expect("store")
+            .insert_job(
+                &config.project.name,
+                &NewJob {
+                    id: job_id.clone(),
+                    title: "Signal shutdown job".to_owned(),
+                    kind: JobKind::Build,
+                    role: Role::Worker,
+                    profile: None,
+                    needs: Vec::new(),
+                    owns: Vec::new(),
+                    reads: Vec::new(),
+                    gates: None,
+                    priority: None,
+                    loop_: None,
+                    brief_text: Some("Sleep until cancelled.\n".to_owned()),
+                },
+                "test",
+            )
+            .expect("insert job");
+
+        Self {
+            home,
+            repo,
+            _worktrees: worktrees,
+            _tools: tools,
+            paths,
+            job_id,
+            pid_file,
+            child_file,
+        }
+    }
+
+    /// Spawns the real `vowp up --foreground`.
+    fn spawn(&self) -> SupervisorProcess {
+        SupervisorProcess::spawn(self.home.path(), self.repo.path())
+    }
+
+    /// Returns the supervisor log for failure messages.
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.home.path().join("logs/supervisor.log")).unwrap_or_default()
+    }
+
+    /// Waits until both fake-harness pids are written.
+    fn wait_for_harness(&self) -> (u32, u32) {
+        assert!(
+            eventually(|| read_pid_file(&self.pid_file).is_some() && read_pid_file(&self.child_file).is_some()),
+            "fake harness did not start; log:\n{}",
+            self.log()
+        );
+        (
+            read_pid_file(&self.pid_file).expect("harness pid"),
+            read_pid_file(&self.child_file).expect("harness child pid"),
+        )
     }
 }
 
@@ -509,5 +752,95 @@ fn plan_with_fake_planner_creates_jobs_through_job_add() {
             .iter()
             .any(|session| session.role == Some(vowp_protocol::SessionRole::Planner)),
         "the planner turn owns a planner session: {sessions:?}"
+    );
+}
+
+#[test]
+fn up_sigterm_cancels_supervisor_cleanly() {
+    let env = SignalEnv::new(CLEAN_HARNESS);
+    let mut supervisor = env.spawn();
+    let supervisor_pid = supervisor.pid();
+    let (harness_pid, harness_child) = env.wait_for_harness();
+    let _cleanup = ChildCleanup(vec![harness_pid, harness_child]);
+
+    kill_signal(supervisor_pid, "TERM");
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .expect("SIGTERM must stop the supervisor within 15 s");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a cancelled supervisor exits cleanly; log:\n{}",
+        env.log()
+    );
+
+    let heartbeat = std::fs::read_to_string(env.home.path().join("heartbeat")).expect("heartbeat after shutdown");
+    let mut lines = heartbeat.lines();
+    assert!(
+        lines.next().is_some_and(|line| line.parse::<i64>().is_ok()),
+        "the first heartbeat line stays Unix seconds: {heartbeat:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("stopped"),
+        "a clean shutdown marks the heartbeat stopped: {heartbeat:?}"
+    );
+    assert!(
+        !env.home.path().join("supervisor.lock").exists(),
+        "the supervisor releases its lock"
+    );
+    assert!(
+        eventually(|| !process_alive(harness_pid) && !process_alive(harness_child)),
+        "no fake-harness child survives the shutdown (parent {harness_pid}, child {harness_child}); log:\n{}",
+        env.log()
+    );
+
+    let store = Store::open(&env.paths).expect("store");
+    let run = store
+        .last_run_of_job(&env.job_id)
+        .expect("runs")
+        .expect("the fake harness ran");
+    assert!(
+        run.ended_at.is_some(),
+        "cancellation finalises the open run row: {run:?}"
+    );
+}
+
+#[test]
+fn up_second_signal_forces_exit() {
+    assert_second_signal_exits("TERM", 143);
+    assert_second_signal_exits("INT", 130);
+}
+
+/// Sends `signal` twice to a supervisor whose harness ignores it and checks the exit code.
+fn assert_second_signal_exits(signal: &str, expected: i32) {
+    let env = SignalEnv::new(STUBBORN_HARNESS);
+    let mut supervisor = env.spawn();
+    let supervisor_pid = supervisor.pid();
+    let (harness_pid, harness_child) = env.wait_for_harness();
+    let _cleanup = ChildCleanup(vec![harness_pid, harness_child]);
+    assert!(!supervisor.exited(), "the supervisor is still running before signals");
+
+    kill_signal(supervisor_pid, signal);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !supervisor.exited(),
+        "the first signal starts a clean shutdown, not an immediate exit; log:\n{}",
+        env.log()
+    );
+
+    let second = Instant::now();
+    kill_signal(supervisor_pid, signal);
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(5))
+        .expect("a second signal must force an immediate exit");
+    assert_eq!(
+        status.code(),
+        Some(expected),
+        "the second SIG{signal} exits with 128 + SIG{signal}"
+    );
+    assert!(
+        second.elapsed() < Duration::from_secs(2),
+        "the second signal must not wait for the child grace period"
     );
 }

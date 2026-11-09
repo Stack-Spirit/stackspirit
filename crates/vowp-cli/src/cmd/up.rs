@@ -6,10 +6,8 @@
 //! `--detach` (the default) re-executes the binary with `--foreground`.
 //!
 //! `down` writes `<home>/stop` and waits for the lock to disappear. The foreground
-//! supervisor watches that file and interrupts its runners.
-
-#[path = "../signals.rs"]
-pub mod signals;
+//! supervisor watches that file and SIGTERM/SIGINT, interrupts its runners, waits for
+//! adapter/gate children and marks the heartbeat stopped before it exits.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -26,13 +24,23 @@ use vowp_store::NodePaths;
 use vowp_tmux::{LayoutSpec, WindowManager, session_name_for_project};
 
 use crate::cli::{DownArgs, UpArgs, UpCommand};
+use crate::signals;
 use crate::{CliError, Ctx, IoStreams};
 
 /// How long `down` waits for a cooperative stop before reporting a conflict.
 const DOWN_WAIT: Duration = Duration::from_secs(30);
 
 /// How long `down --force` waits after SIGTERM before giving up.
-const FORCE_WAIT: Duration = Duration::from_secs(5);
+///
+/// Longer than the child cleanup window in a foreground supervisor, so a cooperative
+/// shutdown is not reported as a conflict while it is still stopping adapters.
+const FORCE_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a foreground supervisor waits for its adapter/gate children to exit.
+const CHILD_EXIT_WAIT: Duration = Duration::from_secs(6);
+
+/// Grace after SIGTERM before a direct child is killed with SIGKILL.
+const CHILD_KILL_WAIT: Duration = Duration::from_secs(2);
 
 /// Runs `vowp up` or `vowp down`.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
@@ -211,7 +219,7 @@ fn run_foreground(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     let pid = std::process::id();
     write_lock(paths, pid, ctx.clock().now())?;
 
-    let watcher = signals::SignalWatcher::install(paths);
+    let watcher = signals::SignalWatcher::install(paths)?;
     let mut supervisor = match Supervisor::new(supervisor_deps(ctx), ctx.project().clone()) {
         Ok(supervisor) => supervisor,
         Err(error) => {
@@ -238,12 +246,97 @@ fn run_foreground(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     // A failed startup returns before the stop watcher cancels; release the wake thread.
     watcher.cancel();
     let _ = wake_thread.join();
+    // Runner cancellation is cooperative: wait for adapter/gate children, escalating once
+    // the grace expires, so a clean signal shutdown does not orphan harness processes.
+    wait_for_children();
+    // The first line keeps the watchdog's Unix-seconds contract; `stopped` records that
+    // this was a deliberate shutdown rather than a crash.
+    let _ = signals::mark_stopped(paths, ctx.clock().now());
     remove_lock_if_own(paths, pid);
     result?;
     if !ctx.json() {
         writeln!(io.out(), "supervisor stopped (pid {pid})")?;
     }
     Ok(0)
+}
+
+/// Waits for direct children (adapter and gate processes) to exit after cancellation.
+///
+/// The supervisor's runner threads are cooperative and may still be interrupting a child
+/// when `run` returns. Wait briefly, then signal the remaining process groups so a clean
+/// shutdown never leaves orphaned harnesses behind.
+fn wait_for_children() {
+    let parent = std::process::id();
+    let deadline = Instant::now() + CHILD_EXIT_WAIT;
+    while Instant::now() < deadline {
+        if child_pids(parent).is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    for pid in child_pids(parent) {
+        let _ = signal_child(pid, "TERM");
+    }
+    let deadline = Instant::now() + CHILD_KILL_WAIT;
+    while Instant::now() < deadline {
+        if child_pids(parent).is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for pid in child_pids(parent) {
+        let _ = signal_child(pid, "KILL");
+    }
+}
+
+/// Returns the pids whose parent is `parent`, read from `/proc`.
+fn child_pids(parent: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let ppid = status.lines().find_map(|line| {
+            line.strip_prefix("PPid:")
+                .and_then(|value| value.trim().parse::<u32>().ok())
+        });
+        if ppid == Some(parent) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Sends `signal` to a child's process group, falling back to the pid itself.
+fn signal_child(pid: u32, signal: &str) -> std::io::Result<()> {
+    let group = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if group.success() {
+        return Ok(());
+    }
+    let direct = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if direct.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("kill -{signal} {pid} failed")))
+    }
 }
 
 /// Re-executes this binary with `--foreground` and returns as soon as it owns the lock.
@@ -274,7 +367,7 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log.try_clone()?);
-    let child = match detached.spawn() {
+    let mut child = match detached.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut direct = Command::new(&exe);
@@ -289,7 +382,7 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
         Err(error) => return Err(CliError::Io(error)),
     };
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut started_pid = None;
     while Instant::now() < deadline {
         if let Some(pid) = crate::ctx::supervisor_pid(paths) {
@@ -298,7 +391,20 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let pid = started_pid.unwrap_or(child.id());
+    let pid = match started_pid {
+        Some(pid) => pid,
+        None => {
+            // A child that exited immediately (bad config, startup panic) must not be
+            // reported as a running supervisor.
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(CliError::Conflict(format!(
+                    "supervisor exited during startup ({status}); see {}",
+                    log_path.display()
+                )));
+            }
+            child.id()
+        }
+    };
 
     if ctx.json() {
         crate::output::print_json(

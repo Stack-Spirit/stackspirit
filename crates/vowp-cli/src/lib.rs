@@ -17,6 +17,7 @@ pub mod errors;
 pub mod framework;
 pub mod output;
 pub mod remote;
+pub mod signals;
 
 pub use cli::{Cli, Command, Global};
 pub use ctx::Ctx;
