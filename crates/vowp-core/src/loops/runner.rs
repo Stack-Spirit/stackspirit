@@ -178,11 +178,22 @@ impl RunnerPool {
                     if let Ok(store) = thread_deps.open_store() {
                         if let Ok(run) = store.require_run(&result.run_id) {
                             match Failover::new(thread_deps.clone()).on_run_outcome(&store, &run, &result.summary) {
-                                Ok(action) => thread_deps.log.log(
-                                    Level::Info,
-                                    "l6",
-                                    &format!("failover for run {}: {action:?}", result.run_id),
-                                ),
+                                Ok(action) => {
+                                    thread_deps.log.log(
+                                        Level::Info,
+                                        "l6",
+                                        &format!("failover for run {}: {action:?}", result.run_id),
+                                    );
+                                    // Only a completed policy may stop the next tick from
+                                    // retrying; a failed L6 leaves the marker unset.
+                                    if let Err(error) = store.kv_set(&format!("l6:{}", result.run_id), "done") {
+                                        thread_deps.log.log(
+                                            Level::Error,
+                                            "l6",
+                                            &format!("cannot mark failover for run {} done: {error}", result.run_id),
+                                        );
+                                    }
+                                }
                                 Err(error) => thread_deps.log.log(
                                     Level::Error,
                                     "l6",
@@ -190,7 +201,6 @@ impl RunnerPool {
                                 ),
                             }
                         }
-                        let _ = store.kv_set(&format!("l6:{}", result.run_id), "done");
                     }
                 }
                 Err(error) => {
@@ -402,18 +412,31 @@ impl SessionRunPool {
                         && let Ok(run) = store.require_run(&result.run_id)
                     {
                         match Failover::new(thread_deps.clone()).on_run_outcome(&store, &run, &result.summary) {
-                            Ok(action) => thread_deps.log.log(
-                                Level::Info,
-                                "l6",
-                                &format!("failover for {role:?} turn {}: {action:?}", result.run_id),
-                            ),
+                            Ok(action) => {
+                                thread_deps.log.log(
+                                    Level::Info,
+                                    "l6",
+                                    &format!("failover for {role:?} turn {}: {action:?}", result.run_id),
+                                );
+                                // Only a completed policy may stop the next tick from
+                                // retrying; a failed L6 leaves the marker unset.
+                                if let Err(error) = store.kv_set(&format!("l6:{}", result.run_id), "done") {
+                                    thread_deps.log.log(
+                                        Level::Error,
+                                        "l6",
+                                        &format!(
+                                            "cannot mark failover for {role:?} turn {} done: {error}",
+                                            result.run_id
+                                        ),
+                                    );
+                                }
+                            }
                             Err(error) => thread_deps.log.log(
                                 Level::Error,
                                 "l6",
                                 &format!("failover for {role:?} turn {} failed: {error}", result.run_id),
                             ),
                         }
-                        let _ = store.kv_set(&format!("l6:{}", result.run_id), "done");
                     }
                 }
                 Err(error) => {

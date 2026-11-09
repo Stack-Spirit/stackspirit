@@ -16,8 +16,9 @@ use vowp_graph::{
     StallThresholds, StallVerdict, TransitionBounds, plan_dispatch,
 };
 use vowp_protocol::{
-    ActiveState, CancelToken, GateResult, InboxKind, Job, JobId, JobKind, JobState, Level, LoopBounds, NewSession,
-    ParkedReason, Profile, Run, RunId, RunPurpose, SessionId, SessionRole, Timestamp, Worker, WorkerKind, WorkerState,
+    ActiveState, CancelToken, GateResult, InboxKind, Job, JobId, JobKind, JobState, Level, LimitRowKind, LoopBounds,
+    NewSession, ParkedReason, Profile, Run, RunId, RunPurpose, SessionId, SessionRole, Timestamp, Worker, WorkerKind,
+    WorkerState,
 };
 use vowp_store::{JobFilter, Store};
 
@@ -646,11 +647,46 @@ impl Supervisor {
             .profiles
             .get(&job.profile)
             .ok_or_else(|| CoreError::NotFound(format!("profile {}", job.profile)))?;
+        let now = self.store.clock().now();
+        // loops.md §8.3: a job that never ran is on `Profile::pick`'s current rung.
+        // Credits/auth never advance the ladder, so those rows do not pick a rung.
+        if let Some((_, executor)) = profile.pick(&self.current_rung_limits(now)?, now) {
+            return Ok(executor.provider());
+        }
+        // Every rung is limited: keep the job on the first rung so a park request
+        // for that provider still reaches it.
         profile
             .ladder
             .first()
             .map(|executor| executor.provider())
             .ok_or_else(|| CoreError::Invalid(format!("profile {} has an empty ladder", job.profile)))
+    }
+
+    /// Limits that decide the current rung of a job that never ran.
+    ///
+    /// Quota/rate/unavailable rows and probe-back blocks make a rung unavailable;
+    /// credits/auth are parking reasons and must not advance the ladder (loops.md §8.3).
+    fn current_rung_limits(&self, now: Timestamp) -> Result<HashMap<String, Option<Timestamp>>, CoreError> {
+        let mut limited: HashMap<String, Option<Timestamp>> = self
+            .store
+            .active_limits(now)?
+            .into_iter()
+            .filter(|limit| !matches!(limit.kind, LimitRowKind::Credits | LimitRowKind::Auth))
+            .map(|limit| (limit.provider, limit.resets_at))
+            .collect();
+        for (key, value) in self.store.kv_prefix("probe_back:")? {
+            if value != "1" {
+                continue;
+            }
+            let provider = key.trim_start_matches("probe_back:").to_owned();
+            if self.store.limit_for(&provider)?.is_some() {
+                limited.insert(provider, None);
+            }
+        }
+        for (key, _) in self.store.kv_prefix("probe_pending:")? {
+            limited.insert(key.trim_start_matches("probe_pending:").to_owned(), None);
+        }
+        Ok(limited)
     }
 
     /// Applies L6 for a finished run whose runner thread left no marker (manual rows).

@@ -4,13 +4,14 @@
 #[path = "failover_support.rs"]
 mod f;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use f::*;
 use vowp_core::loops::l6_failover::{Failover, FailoverAction};
 use vowp_protocol::{
-    ActiveState, Cost, InboxKind, JobKind, JobState, LimitKind, LimitRowKind, ParkedReason, Role, Run, RunId,
-    RunOutcome, RunRole, RunSummary,
+    ActiveState, Cost, Executor, HarnessKind, InboxKind, JobKind, JobState, LedgerKind, Limit, LimitKind, LimitRowKind,
+    ParkedReason, Role, Run, RunId, RunOutcome, RunRole, RunSummary,
 };
 use vowp_store::LedgerFilter;
 
@@ -421,5 +422,219 @@ fn fresh_supervisor_does_not_reapply_old_credit_limit() {
         store.kv_get(&format!("l6:{}", run.id)).expect("marker").as_deref(),
         Some("harvested"),
         "the harvested marker survives a supervisor restart"
+    );
+}
+
+#[test]
+fn provider_of_never_run_job_uses_profile_pick() {
+    let node = TestNode::with_adapter_config(
+        false,
+        Arc::new(ScriptAdapter::always(HarnessKind::Opencode, ScriptAction::ok("ok"))),
+        |config| {
+            let claude = Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("claude");
+            let deepseek = Executor::parse("opencode:deepseek/deepseek-flash#max").expect("deepseek");
+            config.profiles.get_mut("worker").expect("worker profile").ladder = vec![claude, deepseek];
+        },
+    );
+    let store = node.store();
+    store
+        .upsert_limit(&Limit {
+            provider: "claude".to_owned(),
+            harness: Some(HarnessKind::ClaudeCode),
+            kind: LimitRowKind::Quota,
+            resets_at: Some(ts().plus(Duration::from_secs(3600))),
+            detail: "quota".to_owned(),
+            since: ts(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("claude quota");
+    let job = node.insert_job("never-ran", JobKind::Build, Role::Worker, Some(vec![]));
+    store.kv_set("park:deepseek", "provider_blocked").expect("park request");
+    let mut supervisor = node.supervisor();
+    for name in ["l2-worker", "l4-planner", "l5-keeper"] {
+        store.set_loop_state(name, ActiveState::Paused).expect("pause loop");
+    }
+    supervisor.tick().expect("park tick");
+
+    let job = store.require_job(&job.id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Parked,
+        "the first rung is limited, so the current rung is the second provider"
+    );
+    assert_eq!(job.parked_reason, Some(ParkedReason::ProviderBlocked));
+    assert!(
+        store.last_run_of_job(&job.id).expect("run").is_none(),
+        "the job never ran"
+    );
+}
+
+#[test]
+fn failed_quota_switch_writes_ledger_switch_failure() {
+    let node = TestNode::with_adapter_config(
+        false,
+        Arc::new(ScriptAdapter::always(HarnessKind::Opencode, ScriptAction::ok("ok"))),
+        |config| {
+            let deepseek = Executor::parse("opencode:deepseek/deepseek-flash#max").expect("deepseek");
+            let claude = Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("claude");
+            config.profiles.get_mut("worker").expect("worker profile").ladder = vec![deepseek, claude];
+        },
+    );
+    let job = node.insert_job("switch-fails", JobKind::Build, Role::Worker, Some(vec![]));
+    let session = create_session(&node, &job);
+    let store = node.store();
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "deepseek",
+        RunRole::Worker,
+        RunOutcome::Limit,
+        Some(LimitKind::Quota),
+    );
+    run.session_id = Some(session.clone());
+    let action = Failover::new(node.deps.clone())
+        .on_run_outcome(&store, &run, &limit_summary(LimitKind::Quota, "deepseek", None))
+        .expect("quota");
+    assert!(
+        matches!(action, FailoverAction::ParkProvider { ref provider } if provider == "deepseek"),
+        "a failed switch parks the provider"
+    );
+    assert_eq!(
+        store.kv_get("park:deepseek").expect("park request").as_deref(),
+        Some("provider_blocked")
+    );
+
+    let ledger = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::Switch),
+            ..LedgerFilter::default()
+        })
+        .expect("ledger");
+    assert_eq!(ledger.len(), 1, "one switch failure row: {ledger:?}");
+    let entry = &ledger[0];
+    assert_eq!(entry.session_id.as_ref(), Some(&session));
+    assert_eq!(entry.provider.as_deref(), Some("claude"), "the target provider");
+    assert!(entry.summary.contains("failed"), "summary: {}", entry.summary);
+    assert_eq!(entry.detail["reason"], "limit");
+    assert_eq!(entry.detail["outcome"], "failed");
+    assert!(
+        entry.detail["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("not installed")),
+        "the failure reason is recorded: {}",
+        entry.detail
+    );
+}
+
+#[test]
+fn second_rate_event_extends_backoff() {
+    let node = TestNode::new();
+    let store = node.store();
+    let failover = Failover::new(node.deps.clone());
+    let run = run_for(
+        &node,
+        None,
+        "deepseek",
+        RunRole::Worker,
+        RunOutcome::Rate,
+        Some(LimitKind::Rate),
+    );
+    let summary = limit_summary(LimitKind::Rate, "deepseek", None);
+    let first = failover.on_run_outcome(&store, &run, &summary).expect("first rate");
+    let first_until = match first {
+        FailoverAction::Backoff { until } => until,
+        other => panic!("expected backoff, got {other:?}"),
+    };
+    assert_eq!(first_until, ts().plus(Duration::from_secs(600)));
+
+    // A second event inside the window applies `now + backoff` (streak 2 -> 1200 s)
+    // instead of reusing the shorter first reset.
+    node.advance(60);
+    let second = failover.on_run_outcome(&store, &run, &summary).expect("second rate");
+    let second_until = match second {
+        FailoverAction::Backoff { until } => until,
+        other => panic!("expected backoff, got {other:?}"),
+    };
+    assert_eq!(second_until, ts().plus(Duration::from_secs(60 + 1200)));
+    assert!(second_until > first_until, "the second event extends the window");
+    let limit = store.limit_for("deepseek").expect("limit").expect("rate row");
+    assert_eq!(limit.resets_at, Some(second_until));
+    assert_eq!(limit.cap_until, Some(second_until));
+
+    // A stored reset further out is never shortened by a later, smaller backoff.
+    let far = ts().plus(Duration::from_secs(3 * 3600));
+    store
+        .upsert_limit(&Limit {
+            provider: "deepseek".to_owned(),
+            harness: Some(HarnessKind::Opencode),
+            kind: LimitRowKind::Rate,
+            resets_at: Some(far),
+            detail: "rate".to_owned(),
+            since: ts(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("far rate row");
+    node.advance(60);
+    let third = failover.on_run_outcome(&store, &run, &summary).expect("third rate");
+    assert_eq!(third, FailoverAction::Backoff { until: far });
+    assert_eq!(
+        store.limit_for("deepseek").expect("limit").expect("rate row").resets_at,
+        Some(far)
+    );
+}
+
+#[test]
+fn l6_marker_not_written_when_failover_errors() {
+    let opencode = Arc::new(ScriptAdapter::new(
+        HarnessKind::Opencode,
+        Arc::new(|input: &vowp_protocol::StartInput| {
+            if is_capsule_prompt(&input.prompt) {
+                return capsule_action("recovered handoff");
+            }
+            if is_worker_prompt(&input.prompt) {
+                return ScriptAction {
+                    summary: Some(limit_summary(LimitKind::Context, "deepseek", None)),
+                    ..ScriptAction::default()
+                };
+            }
+            ScriptAction::ok("ok")
+        }),
+    ));
+    let node = TestNode::with_adapter(false, opencode);
+    let store = node.store();
+    let mut supervisor = node.supervisor();
+    for name in ["l4-planner", "l5-keeper"] {
+        store.set_loop_state(name, ActiveState::Paused).expect("pause loop");
+    }
+    let job = node.insert_job("l6-retry", JobKind::Build, Role::Worker, Some(vec![]));
+    supervisor.tick().expect("dispatch tick");
+    // The context run records a context limit row, which leaves the capsule writer no
+    // keeper rung; the runner thread's L6 call therefore fails.
+    assert!(
+        wait_until(Duration::from_secs(10), || node.log.contains("failover for run")),
+        "the runner thread reports the L6 failure"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let run = store.last_run_of_job(&job.id).expect("run").expect("finished run");
+    assert_eq!(
+        store.kv_get(&format!("l6:{}", run.id)).expect("marker"),
+        None,
+        "a failed L6 must leave the done marker unset"
+    );
+
+    // Clear the transient context limit; the next tick retries L6 and harvests the run.
+    store.clear_limit("deepseek").expect("clear context limit");
+    supervisor.tick().expect("retry tick");
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            store.kv_get(&format!("l6:{}", run.id)).expect("marker").as_deref() == Some("harvested")
+        }),
+        "the retry tick applies L6 and harvests the run"
     );
 }

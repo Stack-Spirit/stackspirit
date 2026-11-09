@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use f::*;
 use vowp_protocol::{
-    ActiveState, HarnessKind, InboxKind, JobKind, JobState, LedgerKind, LimitKind, LimitRowKind, ParkedReason, Role,
-    RunRole, SwitchReason,
+    ActiveState, Executor, HarnessKind, InboxKind, JobKind, JobState, LedgerKind, LimitKind, LimitRowKind, OnQuota,
+    ParkedReason, Profile, Role, RunRole, SwitchReason,
 };
 use vowp_store::LedgerFilter;
 
@@ -197,15 +197,24 @@ fn drill_credits_park() {
             ScriptAction::ok("ok")
         }),
     ));
-    let node = two_adapter_node(
-        false,
-        opencode.clone(),
-        Arc::new(ScriptAdapter::always(
-            HarnessKind::ClaudeCode,
-            ScriptAction::ok("unused"),
-        )),
-        |_| {},
-    );
+    let claude = Arc::new(ScriptAdapter::always(
+        HarnessKind::ClaudeCode,
+        ScriptAction::ok("unused"),
+    ));
+    let node = two_adapter_node(false, opencode.clone(), claude.clone(), |config| {
+        // A second worker provider makes "no run started on another provider" a
+        // job-side claim: credits must park the jobs, never advance the ladder.
+        let deepseek = Executor::parse("opencode:deepseek/deepseek-flash#max").expect("deepseek");
+        let claude = Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("claude");
+        config.profiles.insert(
+            "worker".to_owned(),
+            Profile {
+                ladder: vec![deepseek, claude],
+                on_quota: OnQuota::NextThenProbeBack,
+                node: None,
+            },
+        );
+    });
     let store = node.store();
     let mut supervisor = node.supervisor();
     store
@@ -244,6 +253,15 @@ fn drill_credits_park() {
             .count(),
         0,
         "no run starts on another role/provider after credits"
+    );
+    assert!(
+        opencode.starts().iter().any(|start| is_worker_prompt(&start.prompt)),
+        "the credits run started on the deepseek worker"
+    );
+    assert!(
+        claude.starts().is_empty(),
+        "no run started on the second worker provider: {:?}",
+        claude.starts()
     );
     assert!(
         store

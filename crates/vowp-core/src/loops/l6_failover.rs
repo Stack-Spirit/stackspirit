@@ -200,9 +200,10 @@ impl Failover {
             });
         };
         let service = SessionService::new(self.deps.clone());
+        let to = ExecutorRef { executor, node };
         match service.switch(&SwitchRequest {
             session_id: session.clone(),
-            to: ExecutorRef { executor, node },
+            to: to.clone(),
             reason: SwitchReason::Limit,
             drain_secs: 5,
         }) {
@@ -217,6 +218,9 @@ impl Failover {
                     &format!("cannot switch {session} to rung {rung}: {error}"),
                 );
                 self.request_park(store, provider, "provider_blocked")?;
+                // loops.md §8.4.3: a failed switch still leaves a `switch` ledger
+                // failure behind, in addition to parking the provider.
+                self.record_switch_failure(store, Some(run), session, &to.executor, "limit", &error)?;
                 Ok(FailoverAction::ParkProvider {
                     provider: provider.to_owned(),
                 })
@@ -282,14 +286,14 @@ impl Failover {
         let draw = self.deps.rng.jitter_secs(span.saturating_mul(2));
         let offset = if draw == 0 { 0 } else { draw as i64 - span as i64 };
         let computed = now.plus(Duration::from_secs((base as i64 + offset).max(1) as u64));
-        // An adapter-reported reset (already stored by the session layer) is authoritative;
-        // otherwise use the deterministic backoff above.
-        let until = store
+        // loops.md §8.2: every rate event records `now + backoff`. A second event
+        // inside the existing window may extend it, but never shorten it below the
+        // reset already recorded for that provider.
+        let existing = store
             .limit_for(provider)?
             .filter(|row| row.kind == LimitRowKind::Rate)
-            .and_then(|row| row.resets_at)
-            .filter(|until| *until > now)
-            .unwrap_or(computed);
+            .and_then(|row| row.resets_at);
+        let until = existing.map_or(computed, |existing| computed.max(existing));
         let running = store
             .open_runs()?
             .iter()
@@ -780,6 +784,36 @@ impl Failover {
             cost: None,
             summary: format!("switch {session} to {to} ({reason})"),
             detail: json!({"reason": reason}),
+        })?;
+        Ok(())
+    }
+
+    /// Appends a ledger `switch` failure row (loops.md §8.4.3).
+    fn record_switch_failure(
+        &self,
+        store: &Store,
+        run: Option<&Run>,
+        session: &SessionId,
+        to: &Executor,
+        reason: &str,
+        error: &CoreError,
+    ) -> Result<(), CoreError> {
+        let detail = error.to_string();
+        store.append_ledger(&LedgerEntry {
+            id: None,
+            ts: store.clock().now(),
+            kind: LedgerKind::Switch,
+            project: Some(self.deps.config.project.name.clone()),
+            job_id: run.and_then(|run| run.job_id.clone()),
+            run_id: run.map(|run| run.id.clone()),
+            session_id: Some(session.clone()),
+            role: run.map(|run| run.role),
+            provider: Some(to.provider()),
+            harness: Some(to.harness),
+            model: Some(to.model.clone()),
+            cost: None,
+            summary: format!("switch {session} to {to} failed ({reason}): {detail}"),
+            detail: json!({"reason": reason, "outcome": "failed", "error": detail}),
         })?;
         Ok(())
     }
