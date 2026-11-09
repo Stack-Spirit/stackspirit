@@ -118,6 +118,9 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, args: &InitArgs) -> Result<i
             written.len(),
             skipped.len()
         )?;
+        if !skipped.is_empty() {
+            writeln!(io.out(), "skipped: {}", skipped.join(", "))?;
+        }
     }
     Ok(0)
 }

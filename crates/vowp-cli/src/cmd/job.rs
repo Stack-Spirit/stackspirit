@@ -47,6 +47,17 @@ fn add(ctx: &Ctx, io: &mut dyn IoStreams, args: &JobAddArgs) -> Result<i32, CliE
         Some(role) => parse_role(role)?,
         None => default_role(kind),
     };
+    if args.title.trim().is_empty() {
+        return Err(CliError::Invalid("job title must not be empty".to_owned()));
+    }
+    if let Some(profile) = &args.profile
+        && !ctx.config().profiles.contains_key(profile)
+    {
+        return Err(CliError::Invalid(format!("unknown profile: {profile}")));
+    }
+    if args.max_attempts == Some(0) {
+        return Err(CliError::Invalid("--max-attempts must be at least 1".to_owned()));
+    }
     let needs = parse_job_ids(&args.needs)?;
     for need in &needs {
         if need == &id {
@@ -103,6 +114,16 @@ fn update(ctx: &Ctx, io: &mut dyn IoStreams, args: &JobUpdateArgs) -> Result<i32
     let store = ctx.store()?;
     let id = JobId::parse(&args.id)?;
     let job = store.require_job(&id)?;
+    if let Some(title) = &args.title
+        && title.trim().is_empty()
+    {
+        return Err(CliError::Invalid("job title must not be empty".to_owned()));
+    }
+    if let Some(profile) = &args.profile
+        && !ctx.config().profiles.contains_key(profile)
+    {
+        return Err(CliError::Invalid(format!("unknown profile: {profile}")));
+    }
     let changing_globs = args.owns.is_some() || args.gates.is_some();
     if changing_globs
         && matches!(

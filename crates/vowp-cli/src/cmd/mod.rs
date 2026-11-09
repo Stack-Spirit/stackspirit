@@ -8,6 +8,7 @@ use crate::cli::{Command, MaintCommand, PromoteCommand, SessionCommand, UpComman
 use crate::{CliError, Ctx, IoStreams};
 
 pub mod attach;
+pub mod board;
 pub mod cost;
 pub mod doctor;
 pub mod graph;
@@ -21,6 +22,7 @@ pub mod plan;
 pub mod promote;
 pub mod schedule;
 pub mod session;
+pub mod status;
 pub mod up;
 pub mod window;
 
@@ -32,8 +34,8 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         )),
         Command::Up(args) => up::run(ctx, io, &UpCommand::Up(args)),
         Command::Down(args) => up::run(ctx, io, &UpCommand::Down(args)),
-        Command::Status(args) => up::run(ctx, io, &UpCommand::Status(args)),
-        Command::Board(args) => up::run(ctx, io, &UpCommand::Board(args)),
+        Command::Status(args) => status::run(ctx, io, &args),
+        Command::Board(args) => board::run(ctx, io, &args),
         Command::Plan(args) => plan::run(ctx, io, &args),
         Command::Job { command } => job::run(ctx, io, &command),
         Command::Graph(args) => graph::run(ctx, io, &args),

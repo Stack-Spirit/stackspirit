@@ -876,17 +876,13 @@ pub struct WindowArgs {
     pub id: Option<String>,
 }
 
-/// The up/down/status/board group handed to `cmd::up`.
+/// The up/down group handed to `cmd::up`.
 #[derive(Debug, Clone)]
 pub enum UpCommand {
     /// `vowp up`.
     Up(UpArgs),
     /// `vowp down`.
     Down(DownArgs),
-    /// `vowp status`.
-    Status(StatusArgs),
-    /// `vowp board`.
-    Board(BoardArgs),
 }
 
 /// The reindex/backup/schema/version group handed to `cmd::maint`.

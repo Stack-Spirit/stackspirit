@@ -225,7 +225,18 @@ fn resolve_project(global: &Global, paths: &vowp_store::NodePaths) -> Option<Pat
         return Some(PathBuf::from(project.path));
     }
     let cwd = std::env::current_dir().ok()?;
-    ctx::find_project_root(&cwd)
+    if let Some(root) = ctx::find_project_root(&cwd) {
+        return Some(root);
+    }
+    if !paths.db_path().is_file() {
+        return None;
+    }
+    let store = Store::open(paths).ok()?;
+    let projects = store.list_projects().ok()?;
+    match projects.as_slice() {
+        [project] => Some(PathBuf::from(&project.path)),
+        _ => None,
+    }
 }
 
 /// Parses and validates `vowp.toml` when one exists.

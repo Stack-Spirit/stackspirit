@@ -69,19 +69,44 @@ fn graph_export_import_roundtrip() {
 }
 
 #[test]
-fn graph_mermaid_has_every_edge_kind() {
+fn graph_mermaid_renders_every_edge_kind() {
     let env = common::TestEnv::new();
     env.insert_job("base", "Base", JobKind::Build, &[]);
     env.insert_job("child", "Child", JobKind::Build, &["base"]);
+    env.insert_job("x", "X", JobKind::Build, &[]);
+    env.insert_job("y", "Y", JobKind::Build, &[]);
     let store = env.store();
+    let child = vowp_protocol::JobId::parse("child").expect("slug");
+    let base = vowp_protocol::JobId::parse("base").expect("slug");
+    for kind in [
+        vowp_protocol::EdgeKind::Verifies,
+        vowp_protocol::EdgeKind::Fixes,
+        vowp_protocol::EdgeKind::Escalates,
+    ] {
+        store
+            .add_edge(&vowp_protocol::Edge {
+                src: child.clone(),
+                dst: base.clone(),
+                kind,
+            })
+            .expect("edge");
+    }
     store
         .add_edge(&vowp_protocol::Edge {
-            src: vowp_protocol::JobId::parse("child").expect("slug"),
-            dst: vowp_protocol::JobId::parse("base").expect("slug"),
-            kind: vowp_protocol::EdgeKind::Verifies,
+            src: vowp_protocol::JobId::parse("x").expect("slug"),
+            dst: vowp_protocol::JobId::parse("y").expect("slug"),
+            kind: vowp_protocol::EdgeKind::Blocks,
         })
-        .expect("verifies edge");
+        .expect("blocks edge");
     let (code, stdout, stderr) = env.run(&["graph", "--mermaid"]);
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("child -.->|verifies| base"), "{stdout}");
+    for expected in [
+        "base --> child",
+        "child -.->|verifies| base",
+        "child ==>|fixes| base",
+        "child -.->|escalates| base",
+        "x -->|blocks| y",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected:?} in {stdout}");
+    }
 }
