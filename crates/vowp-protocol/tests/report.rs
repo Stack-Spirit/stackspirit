@@ -13,9 +13,9 @@ fn report_parse_good() {
     let markdown = include_str!("fixtures/report_ok.md");
     let report = Report::parse(markdown).expect("fixture parses");
 
-    assert_eq!(report.front_matter.job.as_str(), "n04-graph");
+    assert_eq!(report.front_matter.job.as_str(), "sample-job");
     assert_eq!(report.front_matter.status, ReportStatus::Done);
-    assert_eq!(report.front_matter.branch, "job/n04-graph");
+    assert_eq!(report.front_matter.branch, "job/sample-job");
     assert_eq!(report.front_matter.commits, vec!["abc1234", "def5678"]);
     assert_eq!(report.front_matter.files_changed, vec!["crates/vowp-graph/src/lib.rs"]);
     match &report.front_matter.tests {
@@ -32,9 +32,9 @@ fn report_parse_good() {
     }
     assert_eq!(
         report.body,
-        "\n# n04-graph — report\n\n`vowp-graph` is implemented and green.\n\n## What was built\n\nThe DAG and the state machine.\n"
+        "\n# sample-job — report\n\n`vowp-graph` is implemented and green.\n\n## What was built\n\nThe DAG and the state machine.\n"
     );
-    assert_eq!(report.raw_front_matter["job"], "n04-graph");
+    assert_eq!(report.raw_front_matter["job"], "sample-job");
 
     let rendered = report.render();
     let reparsed = Report::parse(&rendered).expect("rendered report parses");
@@ -58,13 +58,13 @@ fn report_parse_bad_cases() {
         ("no fence", "# report\n\nNo front matter here.\n"),
         (
             "unterminated fence",
-            "---\njob: n04-graph\nstatus: done\nbranch: job/n04-graph\n",
+            "---\njob: sample-job\nstatus: done\nbranch: job/sample-job\n",
         ),
         ("invalid YAML", "---\njob: [\nstatus: done\n---\nbody\n"),
-        ("missing branch", "---\njob: n04-graph\nstatus: done\n---\nbody\n"),
+        ("missing branch", "---\njob: sample-job\nstatus: done\n---\nbody\n"),
         (
             "invalid status",
-            "---\njob: n04-graph\nstatus: finished\nbranch: job/n04-graph\n---\nbody\n",
+            "---\njob: sample-job\nstatus: finished\nbranch: job/sample-job\n---\nbody\n",
         ),
         ("empty document", ""),
     ];
@@ -94,12 +94,12 @@ fn report_missing_fields() {
     assert_eq!(report.missing_fields(&required), Vec::<String>::new());
 
     let empty_branch =
-        Report::parse("---\njob: n04-graph\nstatus: done\nbranch: \"\"\ncommits: []\ntests: ok\n---\nbody\n")
+        Report::parse("---\njob: sample-job\nstatus: done\nbranch: \"\"\ncommits: []\ntests: ok\n---\nbody\n")
             .expect("empty branch still decodes");
     assert_eq!(empty_branch.missing_fields(&required), vec!["branch".to_owned()]);
 
     let null_tests = Report::parse(
-        "---\njob: n04-graph\nstatus: done\nbranch: job/n04-graph\ncommits: []\ntests: null\n---\nbody\n",
+        "---\njob: sample-job\nstatus: done\nbranch: job/sample-job\ncommits: []\ntests: null\n---\nbody\n",
     )
     .expect("null optional tests still decode");
     assert_eq!(null_tests.missing_fields(&required), vec!["tests".to_owned()]);
@@ -107,14 +107,14 @@ fn report_missing_fields() {
 
 #[test]
 fn brief_roundtrip_and_from_job() {
-    let markdown = include_str!("fixtures/brief_n04_graph.md");
+    let markdown = include_str!("fixtures/brief_example.md");
     let brief = Brief::parse(markdown).expect("fixture parses");
-    assert_eq!(brief.front_matter.job.as_str(), "n04-graph");
+    assert_eq!(brief.front_matter.job.as_str(), "sample-job");
     assert_eq!(brief.front_matter.owns, vec!["crates/vowp-graph/**"]);
     assert_eq!(brief.front_matter.must_not_touch, vec!["everything else"]);
     assert_eq!(
         brief.front_matter.needs_done,
-        vec![JobId::parse("n02a-protocol-foundation").unwrap()]
+        vec![JobId::parse("sample-dependency").unwrap()]
     );
     assert_eq!(
         brief.front_matter.gates,
@@ -124,7 +124,7 @@ fn brief_roundtrip_and_from_job() {
         brief.front_matter.done_when,
         "report has status: done and every gate passes"
     );
-    assert_eq!(brief.body, "# n04-graph\n\nImplement the DAG and the state machine.\n");
+    assert_eq!(brief.body, "# sample-job\n\nImplement the DAG and the state machine.\n");
 
     let rendered = brief.render();
     let reparsed = Brief::parse(&rendered).expect("rendered brief parses");
@@ -138,9 +138,9 @@ fn brief_roundtrip_and_from_job() {
 }
 
 fn sample_job() -> Job {
-    let ts = Timestamp::parse("2026-11-08T19:50:00.000Z").unwrap();
+    let ts = Timestamp::parse("2026-03-10T19:50:00.000Z").unwrap();
     Job {
-        id: JobId::parse("n04-graph").unwrap(),
+        id: JobId::parse("sample-job").unwrap(),
         project: ProjectName::parse("vowp").unwrap(),
         title: "vowp-graph".to_owned(),
         kind: JobKind::Build,
@@ -148,11 +148,11 @@ fn sample_job() -> Job {
         profile: "worker".to_owned(),
         state: JobState::Running,
         priority: 50,
-        needs: vec![JobId::parse("n02a-protocol-foundation").unwrap()],
+        needs: vec![JobId::parse("sample-dependency").unwrap()],
         owns: vec!["crates/vowp-graph/**".to_owned()],
         reads: vec!["docs/design/**".to_owned()],
-        brief: ".vowp/jobs/n04-graph/brief.md".to_owned(),
-        report: ".vowp/jobs/n04-graph/report.md".to_owned(),
+        brief: ".vowp/jobs/sample-job/brief.md".to_owned(),
+        report: ".vowp/jobs/sample-job/report.md".to_owned(),
         gates: vec![
             Gate::Report(ReportGate::default()),
             Gate::Cmd(CmdGate {
@@ -163,7 +163,7 @@ fn sample_job() -> Job {
             Gate::Review(ReviewGate::default()),
         ],
         loop_: JobLoop::default(),
-        branch: Some("job/n04-graph".to_owned()),
+        branch: Some("job/sample-job".to_owned()),
         worktree: Some("/home/user/project".to_owned()),
         attempts: 0,
         continues: 0,

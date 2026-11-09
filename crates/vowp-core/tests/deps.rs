@@ -29,7 +29,7 @@ fn test_deps(root: &Path) -> Deps {
         paths: NodePaths::new(root),
         config: Arc::new(VowpConfig::with_defaults_for_tests()),
         node: NodeName::parse("local").unwrap(),
-        clock: Arc::new(FakeClock::at(Timestamp::parse("2026-11-08T19:00:00Z").unwrap())),
+        clock: Arc::new(FakeClock::at(Timestamp::parse("2026-03-10T19:00:00Z").unwrap())),
         log: Arc::new(MemoryLog::new()),
         adapters: Arc::new(AdapterRegistry::new()),
         windows: Arc::new(FakeWindows::new()),
@@ -226,7 +226,7 @@ fn system_git_roundtrip_in_temp_repo() {
     write(&worktree.join("file.txt"), "two\n");
     git.add(&worktree, &["file.txt".to_owned()]).unwrap();
     let short = git
-        .commit(&worktree, "demo: change file\n\nAI-Assisted: test via vowp-night")
+        .commit(&worktree, "demo: change file\n\nAI-Assisted: test via VOWP")
         .unwrap();
     assert!(short.len() >= 7);
     assert!(git.head_sha(&worktree, "HEAD").unwrap().starts_with(&short));
@@ -325,14 +325,14 @@ fn adapter_registry_lookup_and_fake_injection() {
     let registry = AdapterRegistry::from_config(&config).unwrap();
     assert_eq!(
         registry
-            .get(&Executor::parse("claude-code:claude-sonnet-5-5").unwrap())
+            .get(&Executor::parse("claude-code:example-model").unwrap())
             .unwrap()
             .kind(),
         HarnessKind::ClaudeCode
     );
     assert_eq!(
         registry
-            .get(&Executor::parse("opencode:deepseek/deepseek-flash").unwrap())
+            .get(&Executor::parse("opencode:example/model").unwrap())
             .unwrap()
             .kind(),
         HarnessKind::Opencode
@@ -343,7 +343,7 @@ fn adapter_registry_lookup_and_fake_injection() {
 
     let fake = Arc::new(FakeAdapter::new(HarnessKind::Opencode, Vec::new()));
     let injected = AdapterRegistry::new().with("opencode", fake.clone());
-    let executor = Executor::parse("opencode:deepseek/deepseek-flash").unwrap();
+    let executor = Executor::parse("opencode:example/model").unwrap();
     let adapter = injected.get(&executor).unwrap();
     assert_eq!(adapter.kind(), HarnessKind::Opencode);
     adapter

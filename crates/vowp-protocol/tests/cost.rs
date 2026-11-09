@@ -18,8 +18,8 @@ fn cost_add_source_degradation() {
             input: 2,
             output: 4,
             reasoning: 0,
-            cache_read: 11_873,
-            cache_write: 8_418,
+            cache_read: 6,
+            cache_write: 4,
         },
     );
     receipt.add(&Cost::receipt(0.25, tokens(1)));
@@ -27,7 +27,7 @@ fn cost_add_source_degradation() {
     assert_eq!(receipt.source, CostSource::Receipt);
     assert_eq!(receipt.tokens.input, 3);
     assert_eq!(receipt.tokens.output, 4);
-    assert_eq!(receipt.tokens.cache_read, 11_873);
+    assert_eq!(receipt.tokens.cache_read, 6);
 
     // Receipt plus unknown: the partial USD amount survives, the source degrades.
     let mut partial = Cost::receipt(0.5, tokens(2));
@@ -77,7 +77,7 @@ fn cost_validate_flags_inconsistent() {
     assert!(bad.validate().is_err());
 
     assert!(Cost::unknown().validate().is_ok());
-    assert!(Cost::receipt(0.034_903_3, Tokens::default()).validate().is_ok());
+    assert!(Cost::receipt(0.01, Tokens::default()).validate().is_ok());
     assert!(
         Cost {
             usd: Some(0.1),
@@ -122,8 +122,8 @@ fn tokens_add_and_total() {
 #[test]
 fn limit_serde_matches_types_example() {
     let json = r#"{"provider": "claude", "harness": "claude-code", "kind": "quota",
-        "resets_at": "2026-11-08T22:20:00.000Z", "detail": "five_hour window rejected",
-        "since": "2026-11-08T19:41:02.000Z", "last_probe_at": null, "probe_fail_streak": 0,
+        "resets_at": "2026-03-10T22:20:00.000Z", "detail": "five_hour window rejected",
+        "since": "2026-03-10T19:41:02.000Z", "last_probe_at": null, "probe_fail_streak": 0,
         "concurrency_cap": null, "cap_until": null}"#;
     let limit: Limit = serde_json::from_str(json).unwrap();
     assert_eq!(limit.provider, "claude");
@@ -131,16 +131,16 @@ fn limit_serde_matches_types_example() {
     assert_eq!(limit.kind, LimitRowKind::Quota);
     assert_eq!(
         limit.resets_at,
-        Some(Timestamp::parse("2026-11-08T22:20:00.000Z").unwrap())
+        Some(Timestamp::parse("2026-03-10T22:20:00.000Z").unwrap())
     );
-    assert_eq!(limit.since, Timestamp::parse("2026-11-08T19:41:02.000Z").unwrap());
+    assert_eq!(limit.since, Timestamp::parse("2026-03-10T19:41:02.000Z").unwrap());
     assert_eq!(limit.last_probe_at, None);
     assert_eq!(limit.probe_fail_streak, 0);
 
     let value = serde_json::to_value(&limit).unwrap();
     assert_eq!(value["kind"], "quota");
     assert_eq!(value["harness"], "claude-code");
-    assert_eq!(value["resets_at"], "2026-11-08T22:20:00.000Z");
+    assert_eq!(value["resets_at"], "2026-03-10T22:20:00.000Z");
     assert_eq!(value["last_probe_at"], serde_json::Value::Null);
 
     assert_eq!(serde_json::to_value(LimitRowKind::Unavailable).unwrap(), "unavailable");

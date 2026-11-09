@@ -13,16 +13,16 @@ const BASE: &str = r#"
 name = "vowp"
 
 [profiles.planner]
-ladder = ["claude-code:claude-sonnet-5-5@medium"]
+ladder = ["claude-code:example-model@medium"]
 
 [profiles.keeper]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 
 [profiles.worker]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 
 [profiles.verifier]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 "#;
 
 /// Parses a configuration, panicking with the error on failure.
@@ -49,14 +49,14 @@ fn config_example_parses() {
     assert_eq!(config.profiles["planner"].ladder.len(), 2);
     assert_eq!(
         config.profiles["planner"].ladder[0].to_string(),
-        "claude-code:claude-sonnet-5-5@medium"
+        "claude-code:example-model@medium"
     );
     assert_eq!(
         config.profiles["planner"].ladder[1].to_string(),
-        "opencode:deepseek/deepseek-flash#max"
+        "opencode:example/model#max"
     );
 
-    assert_eq!(config.providers["deepseek"].max_concurrent, 6);
+    assert_eq!(config.providers["example"].max_concurrent, 6);
     assert!(config.providers["claude"].prices.is_empty());
 
     let schedule_names: Vec<&str> = config.schedules.iter().map(|s| s.name.as_str()).collect();
@@ -79,25 +79,25 @@ fn config_rejects_unknown_fields_and_bad_values() {
 [project]
 name = "vowp"
 [profiles.planner]
-ladder = ["claude-code:claude-sonnet-5-5@medium"]
+ladder = ["claude-code:example-model@medium"]
 [profiles.keeper]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 [profiles.worker]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 "#,
     );
-    reject(&BASE.replace("ladder = [\"opencode:deepseek/deepseek-flash#max\"]", "ladder = []"));
+    reject(&BASE.replace("ladder = [\"opencode:example/model#max\"]", "ladder = []"));
     reject(&BASE.replace(
-        "ladder = [\"claude-code:claude-sonnet-5-5@medium\"]",
-        "ladder = [\"claude-code:claude-sonnet-5-5@medium\", \"claude-code:claude-sonnet-5-5@medium\"]",
+        "ladder = [\"claude-code:example-model@medium\"]",
+        "ladder = [\"claude-code:example-model@medium\", \"claude-code:example-model@medium\"]",
     ));
     reject(&BASE.replace(
-        "ladder = [\"claude-code:claude-sonnet-5-5@medium\"]",
+        "ladder = [\"claude-code:example-model@medium\"]",
         "ladder = [\"not-an-executor\"]",
     ));
 
     // Rule 2: a provider referenced by a rung has zero concurrency.
-    reject(&format!("{BASE}\n[providers.deepseek]\nmax_concurrent = 0\n"));
+    reject(&format!("{BASE}\n[providers.example]\nmax_concurrent = 0\n"));
 
     // Rule 3: cron/every exclusivity, cron field count, every pattern and minimum, tz, names.
     reject(&format!(
@@ -268,6 +268,26 @@ fn project_defaults_are_documented_values() {
     assert_eq!(config.capsule, CapsuleConfig::default());
 }
 
+/// Masks the lines that name concrete models or providers, so the fixture can use
+/// provider-neutral examples while the design document keeps its illustrative ones.
+fn without_model_choices(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("ladder =")
+                || trimmed.starts_with("[providers.")
+                || trimmed.starts_with("on_quota =")
+                || trimmed.starts_with("executor =")
+            {
+                "<model choice>".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn example_matches_architecture_md() {
     let docs = include_str!("../../../docs/design/architecture.md");
@@ -284,9 +304,9 @@ fn example_matches_architecture_md() {
         .expect("the toml block must be closed")
         .0;
     assert_eq!(
-        format!("{block}\n"),
-        include_str!("fixtures/vowp.example.toml"),
-        "the fixture must be the canonical §5.2 block byte for byte"
+        without_model_choices(block),
+        without_model_choices(include_str!("fixtures/vowp.example.toml")),
+        "the fixture must match the canonical §5.2 block apart from concrete model choices"
     );
 }
 
@@ -300,9 +320,9 @@ max_workers = 8
 tz_offset_minutes = 120
 
 [profiles.keeper]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 
-[providers.deepseek]
+[providers.example]
 max_concurrent = 6
 
 [harnesses.opencode]
@@ -318,7 +338,7 @@ tail_turns = 4
     assert_eq!(node.node.max_workers, 8);
     assert_eq!(node.node.tz_offset_minutes, 120);
     assert_eq!(node.profiles["keeper"].ladder.len(), 1);
-    assert_eq!(node.providers["deepseek"].max_concurrent, 6);
+    assert_eq!(node.providers["example"].max_concurrent, 6);
     assert_eq!(node.harnesses["opencode"].extra_args, ["--auto"]);
     assert_eq!(node.capsule.tail_turns, 4);
 
@@ -353,14 +373,14 @@ ladder = ["cli:node-planner"]
 [profiles.worker]
 ladder = ["cli:node-worker"]
 
-[providers.deepseek]
+[providers.example]
 max_concurrent = 6
 
 [harnesses.opencode]
 extra_args = ["--node"]
 
 [capsule]
-executor = "opencode:deepseek/deepseek-flash#max"
+executor = "opencode:example/model#max"
 min_interval_secs = 60
 max_input_chars = 1000
 tail_turns = 4
@@ -384,19 +404,19 @@ tail_turns = 4
     // Project entries win; missing entries are filled from the node file.
     assert_eq!(
         merged.profiles["planner"].ladder[0].to_string(),
-        "claude-code:claude-sonnet-5-5@medium"
+        "claude-code:example-model@medium"
     );
     assert_eq!(
         merged.profiles["worker"].ladder[0].to_string(),
-        "opencode:deepseek/deepseek-flash#max"
+        "opencode:example/model#max"
     );
-    assert_eq!(merged.providers["deepseek"].max_concurrent, 6);
+    assert_eq!(merged.providers["example"].max_concurrent, 6);
     assert_eq!(merged.harnesses["opencode"].extra_args, ["--node"]);
 
     // Capsule fields are filled field by field.
     assert_eq!(
         merged.capsule.executor.as_ref().map(Executor::to_string).as_deref(),
-        Some("opencode:deepseek/deepseek-flash#max")
+        Some("opencode:example/model#max")
     );
     assert_eq!(merged.capsule.min_interval_secs, 60);
     assert_eq!(merged.capsule.max_input_chars, 1000);
@@ -409,7 +429,7 @@ fn with_node_defaults_keeps_explicit_capsule_fields() {
     let node = NodeFile::from_toml(
         r#"
 [capsule]
-executor = "opencode:deepseek/deepseek-flash#max"
+executor = "opencode:example/model#max"
 min_interval_secs = 60
 max_input_chars = 1000
 tail_turns = 4
@@ -423,7 +443,7 @@ tail_turns = 4
     assert_eq!(merged.capsule.max_input_chars, 1000);
     assert_eq!(
         merged.capsule.executor.as_ref().map(Executor::to_string).as_deref(),
-        Some("opencode:deepseek/deepseek-flash#max")
+        Some("opencode:example/model#max")
     );
 }
 

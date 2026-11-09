@@ -17,7 +17,7 @@ fn source() -> EventSource {
 }
 
 fn sample_time() -> Timestamp {
-    Timestamp::parse("2026-11-08T19:41:09.000Z").expect("sample timestamp must parse")
+    Timestamp::parse("2026-03-10T19:41:09.000Z").expect("sample timestamp must parse")
 }
 
 fn sample_node(name: &str) -> NodeName {
@@ -32,18 +32,18 @@ fn sample_executor(text: &str) -> Executor {
 fn sample_bodies() -> Vec<EventBody> {
     vec![
         EventBody::SessionCreated(SessionCreated {
-            title: "n04-graph".to_owned(),
+            title: "sample-job".to_owned(),
             cwd: "/home/user/project".to_owned(),
             project: Some(ProjectName::parse("vowp").expect("sample project must parse")),
-            job_id: Some(JobId::parse("n04-graph").expect("sample job must parse")),
+            job_id: Some(JobId::parse("sample-job").expect("sample job must parse")),
             role: Some(SessionRole::Worker),
             parent_session_id: None,
         }),
         EventBody::SessionExecutor(SessionExecutor {
             action: AttachAction::Attach,
-            executor: sample_executor("opencode:deepseek/deepseek-flash#max"),
+            executor: sample_executor("opencode:example/model#max"),
             node: sample_node("vps"),
-            native_session_id: Some("ses_e439617b6ffepWG4UNK521b6ly".to_owned()),
+            native_session_id: Some("ses_example000000000000000".to_owned()),
             run_id: Some(RunId::new()),
             reason: Some("resume".to_owned()),
         }),
@@ -126,11 +126,11 @@ fn sample_bodies() -> Vec<EventBody> {
         EventBody::Switch(SwitchEvent {
             switch_id: SwitchId::new(),
             from: Some(ExecutorRef {
-                executor: sample_executor("claude-code:claude-sonnet-5-5@medium"),
+                executor: sample_executor("claude-code:example-model@medium"),
                 node: Some(sample_node("vps")),
             }),
             to: ExecutorRef {
-                executor: sample_executor("opencode:deepseek/deepseek-flash#max"),
+                executor: sample_executor("opencode:example/model#max"),
                 node: Some(sample_node("local")),
             },
             capsule_id: Some(CapsuleId::new()),
@@ -283,7 +283,7 @@ fn envelope_forward_compat() {
         "id": EventId::new(),
         "session_id": session_id,
         "seq": 12,
-        "ts": "2026-11-08T19:41:09.000Z",
+        "ts": "2026-03-10T19:41:09.000Z",
         "type": "error",
         "actor": "system",
         "source": {"harness": "vowp"},

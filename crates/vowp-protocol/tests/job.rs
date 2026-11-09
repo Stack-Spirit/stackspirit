@@ -39,24 +39,21 @@ fn job_patch_json_roundtrip_with_loop_and_defaults() {
     assert_eq!(decoded, patch);
 
     let with_needs: JobPatch = serde_json::from_value(json!({
-        "add_needs": ["n02a-protocol-foundation"],
-        "remove_needs": ["n03a-store-db"],
+        "add_needs": ["sample-dependency"],
+        "remove_needs": ["other-dependency"],
         "title": "new title"
     }))
     .expect("needs lists decode");
-    assert_eq!(
-        with_needs.add_needs,
-        vec![JobId::parse("n02a-protocol-foundation").unwrap()]
-    );
-    assert_eq!(with_needs.remove_needs, vec![JobId::parse("n03a-store-db").unwrap()]);
+    assert_eq!(with_needs.add_needs, vec![JobId::parse("sample-dependency").unwrap()]);
+    assert_eq!(with_needs.remove_needs, vec![JobId::parse("other-dependency").unwrap()]);
     assert_eq!(with_needs.title.as_deref(), Some("new title"));
 }
 
 #[test]
 fn job_row_serde_roundtrips_fixture() {
-    let raw: Value = serde_json::from_str(include_str!("fixtures/job_n04_graph.json")).expect("fixture is JSON");
+    let raw: Value = serde_json::from_str(include_str!("fixtures/job_example.json")).expect("fixture is JSON");
     let job: Job = serde_json::from_value(raw.clone()).expect("fixture decodes");
-    assert_eq!(job.id.as_str(), "n04-graph");
+    assert_eq!(job.id.as_str(), "sample-job");
     assert_eq!(job.kind, JobKind::Build);
     assert_eq!(job.state, JobState::Running);
     assert_eq!(job.role, Role::Worker);
@@ -119,8 +116,8 @@ fn job_state_predicates_match_the_spec() {
 #[test]
 fn edge_kind_only_fixes_forms_a_loop() {
     let needs = Edge {
-        src: JobId::parse("n04-graph").unwrap(),
-        dst: JobId::parse("n02c-protocol-domain").unwrap(),
+        src: JobId::parse("sample-job").unwrap(),
+        dst: JobId::parse("sample-need").unwrap(),
         kind: EdgeKind::Needs,
     };
     assert!(!needs.kind.is_loop_edge());
@@ -132,7 +129,7 @@ fn edge_kind_only_fixes_forms_a_loop() {
     let encoded = serde_json::to_value(&needs).expect("edge is serialisable");
     assert_eq!(
         encoded,
-        json!({"src": "n04-graph", "dst": "n02c-protocol-domain", "kind": "needs"})
+        json!({"src": "sample-job", "dst": "sample-need", "kind": "needs"})
     );
     let decoded: Edge = serde_json::from_value(encoded).expect("roundtrip");
     assert_eq!(decoded, needs);

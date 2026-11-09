@@ -1,5 +1,5 @@
 //! Classification, reset-time, redaction and HTTP-status tests.
-//! Spec: `docs/design/crates/vowp-adapters.md` §7 (n06z) and `docs/design/adapters.md` §5.
+//! Spec: `docs/design/crates/vowp-adapters.md` §7 and `docs/design/adapters.md` §5.
 
 use std::path::Path;
 
@@ -10,7 +10,7 @@ use vowp_adapters::classify::{
 use vowp_protocol::{LimitKind, Timestamp};
 
 fn now() -> Timestamp {
-    Timestamp::parse("2026-11-08T18:10:00Z").expect("test timestamp is valid")
+    Timestamp::parse("2026-03-10T18:10:00Z").expect("test timestamp is valid")
 }
 
 fn ts(value: &str) -> Timestamp {
@@ -38,10 +38,10 @@ fn rate_limit_info_from_fixture(name: &str) -> serde_json::Value {
 
 #[test]
 fn classify_claude_usage_limit_with_unix_suffix() {
-    let classified = classify_text("claude", "Claude AI usage limit reached|1794164400", None, now(), 0)
+    let classified = classify_text("claude", "Claude AI usage limit reached|1773169200", None, now(), 0)
         .expect("usage limit text classifies");
     assert_eq!(classified.kind, LimitKind::Quota);
-    assert_eq!(classified.resets_at, Some(ts("2026-11-08T19:00:00Z")));
+    assert_eq!(classified.resets_at, Some(ts("2026-03-10T19:00:00Z")));
     assert!(classified.message.contains("claude"));
     assert!(classified.message.len() <= 300);
 }
@@ -57,7 +57,7 @@ fn classify_claude_hit_limit_clock_time_with_tz_offset() {
     )
     .expect("hit-limit text classifies");
     assert_eq!(classified.kind, LimitKind::Quota);
-    assert_eq!(classified.resets_at, Some(ts("2026-11-08T22:00:00Z")));
+    assert_eq!(classified.resets_at, Some(ts("2026-03-10T22:00:00Z")));
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn classify_clock_time_rolls_to_next_day() {
     let classified =
         classify_text("claude", "quota reached, resets 3pm", None, now(), 60).expect("quota text classifies");
     assert_eq!(classified.kind, LimitKind::Quota);
-    assert_eq!(classified.resets_at, Some(ts("2026-11-09T14:00:00Z")));
+    assert_eq!(classified.resets_at, Some(ts("2026-03-11T14:00:00Z")));
 }
 
 #[test]
@@ -73,23 +73,23 @@ fn classify_five_hour_and_weekly_and_minutes() {
     let five_hour = classify_text("claude", "5-hour limit reached ∙ resets 3pm", None, now(), 60)
         .expect("five-hour text classifies");
     assert_eq!(five_hour.kind, LimitKind::Quota);
-    assert_eq!(five_hour.resets_at, Some(ts("2026-11-09T14:00:00Z")));
+    assert_eq!(five_hour.resets_at, Some(ts("2026-03-11T14:00:00Z")));
 
     let weekly = classify_text(
         "claude",
-        "You've hit your weekly limit · resets Nov 12, 9am",
+        "You've hit your weekly limit · resets Mar 15, 9am",
         None,
         now(),
         60,
     )
     .expect("weekly text classifies");
     assert_eq!(weekly.kind, LimitKind::Quota);
-    assert_eq!(weekly.resets_at, Some(ts("2026-11-12T08:00:00Z")));
+    assert_eq!(weekly.resets_at, Some(ts("2026-03-15T08:00:00Z")));
 
     let minutes = classify_text("claude", "Session limit reached ∙ resets 4:30 am", None, now(), 60)
         .expect("minute text classifies");
     assert_eq!(minutes.kind, LimitKind::Quota);
-    assert_eq!(minutes.resets_at, Some(ts("2026-11-09T03:30:00Z")));
+    assert_eq!(minutes.resets_at, Some(ts("2026-03-11T03:30:00Z")));
 }
 
 #[test]
@@ -115,8 +115,8 @@ fn classify_rate_529_429_overloaded() {
 
 #[test]
 fn classify_credits_402_insufficient_balance() {
-    let balance = classify_text("deepseek", "Insufficient Balance", Some(402), now(), 0)
-        .expect("insufficient balance classifies");
+    let balance =
+        classify_text("example", "Insufficient Balance", Some(402), now(), 0).expect("insufficient balance classifies");
     assert_eq!(balance.kind, LimitKind::Credits);
     assert_eq!(balance.resets_at, None);
     assert_eq!(balance.http_status, Some(402));
@@ -208,41 +208,41 @@ fn classify_unrelated_text_is_none() {
 fn reset_from_rate_limit_info_picks_max_rejected_window() {
     let one_rejected = serde_json::json!({
         "status": "rejected",
-        "resetsAt": 1794164400,
+        "resetsAt": 1773169200,
         "rateLimitType": "five_hour",
         "unifiedWindows": [
-            {"type": "five_hour", "status": "rejected", "resetsAt": 1794164400},
-            {"type": "seven_day", "status": "allowed", "resetsAt": 1794168000}
+            {"type": "five_hour", "status": "rejected", "resetsAt": 1773169200},
+            {"type": "seven_day", "status": "allowed", "resetsAt": 1773172800}
         ]
     });
     assert_eq!(
         reset_from_rate_limit_info(&one_rejected),
-        Some(ts("2026-11-08T19:00:00Z"))
+        Some(ts("2026-03-10T19:00:00Z"))
     );
 
     let both_rejected = serde_json::json!({
         "status": "rejected",
-        "resetsAt": 1794164400,
+        "resetsAt": 1773169200,
         "unifiedWindows": [
-            {"type": "five_hour", "status": "rejected", "resetsAt": 1794164400},
-            {"type": "seven_day", "status": "rejected", "resetsAt": 1794171600}
+            {"type": "five_hour", "status": "rejected", "resetsAt": 1773169200},
+            {"type": "seven_day", "status": "rejected", "resetsAt": 1773176400}
         ]
     });
     assert_eq!(
         reset_from_rate_limit_info(&both_rejected),
-        Some(ts("2026-11-08T21:00:00Z"))
+        Some(ts("2026-03-10T21:00:00Z"))
     );
 
-    let top_level_only = serde_json::json!({"status": "rejected", "resetsAt": 1794164400});
+    let top_level_only = serde_json::json!({"status": "rejected", "resetsAt": 1773169200});
     assert_eq!(
         reset_from_rate_limit_info(&top_level_only),
-        Some(ts("2026-11-08T19:00:00Z"))
+        Some(ts("2026-03-10T19:00:00Z"))
     );
 
     let allowed = serde_json::json!({
         "status": "allowed",
-        "resetsAt": 1794164400,
-        "unifiedWindows": [{"type": "five_hour", "status": "allowed", "resetsAt": 1794164400}]
+        "resetsAt": 1773169200,
+        "unifiedWindows": [{"type": "five_hour", "status": "allowed", "resetsAt": 1773169200}]
     });
     assert_eq!(reset_from_rate_limit_info(&allowed), None);
 }
@@ -252,8 +252,8 @@ fn reset_from_rate_limit_info_object_shape_real_fixture() {
     let info = rate_limit_info_from_fixture("claude_rate_limit_rejected.jsonl");
 
     let reset = reset_from_rate_limit_info(&info).expect("rejected rate limit has a reset");
-    assert_eq!(reset.unix_secs(), 1_794_164_400);
-    assert_eq!(reset, ts("2026-11-08T19:00:00Z"));
+    assert_eq!(reset.unix_secs(), 1773169200);
+    assert_eq!(reset, ts("2026-03-10T19:00:00Z"));
 
     // The real stream uses the object map. With the top-level status ignored, the
     // rejected five_hour window itself must supply the reset (the array-only parser
@@ -262,7 +262,7 @@ fn reset_from_rate_limit_info_object_shape_real_fixture() {
     windows_only["status"] = serde_json::json!("allowed");
     assert_eq!(
         reset_from_rate_limit_info(&windows_only),
-        Some(ts("2026-11-08T19:00:00Z"))
+        Some(ts("2026-03-10T19:00:00Z"))
     );
 }
 
@@ -270,38 +270,38 @@ fn reset_from_rate_limit_info_object_shape_real_fixture() {
 fn reset_from_rate_limit_info_array_shape() {
     let info = serde_json::json!({
         "status": "allowed",
-        "resetsAt": 1794560400,
+        "resetsAt": 1773565200,
         "unifiedWindows": [
-            {"type": "five_hour", "status": "allowed", "resetsAt": 1794560400},
-            {"type": "seven_day", "status": "rejected", "resetsAt": 1794164400}
+            {"type": "five_hour", "status": "allowed", "resetsAt": 1773565200},
+            {"type": "seven_day", "status": "rejected", "resetsAt": 1773169200}
         ]
     });
-    assert_eq!(reset_from_rate_limit_info(&info), Some(ts("2026-11-08T19:00:00Z")));
+    assert_eq!(reset_from_rate_limit_info(&info), Some(ts("2026-03-10T19:00:00Z")));
 }
 
 #[test]
 fn reset_picks_latest_rejected_window() {
     let object = serde_json::json!({
         "status": "rejected",
-        "resetsAt": 1794164400,
+        "resetsAt": 1773169200,
         "unifiedWindows": {
-            "five_hour": {"utilization": 1.0, "status": "rejected", "resetsAt": 1794164400},
-            "seven_day": {"utilization": 1.0, "status": "rejected", "resetsAt": 1794171600},
-            "overage": {"utilization": 0.4, "status": "allowed", "resetsAt": 1794560400}
+            "five_hour": {"utilization": 1.0, "status": "rejected", "resetsAt": 1773169200},
+            "seven_day": {"utilization": 1.0, "status": "rejected", "resetsAt": 1773176400},
+            "overage": {"utilization": 0.4, "status": "allowed", "resetsAt": 1773565200}
         }
     });
-    assert_eq!(reset_from_rate_limit_info(&object), Some(ts("2026-11-08T21:00:00Z")));
+    assert_eq!(reset_from_rate_limit_info(&object), Some(ts("2026-03-10T21:00:00Z")));
 
     // The same rule applies to the array shape, independent of window order.
     let array = serde_json::json!({
         "status": "allowed",
         "unifiedWindows": [
-            {"type": "seven_day", "status": "allowed", "resetsAt": 1794560400},
-            {"type": "seven_day", "status": "rejected", "resetsAt": 1794171600},
-            {"type": "five_hour", "status": "rejected", "resetsAt": 1794164400}
+            {"type": "seven_day", "status": "allowed", "resetsAt": 1773565200},
+            {"type": "seven_day", "status": "rejected", "resetsAt": 1773176400},
+            {"type": "five_hour", "status": "rejected", "resetsAt": 1773169200}
         ]
     });
-    assert_eq!(reset_from_rate_limit_info(&array), Some(ts("2026-11-08T21:00:00Z")));
+    assert_eq!(reset_from_rate_limit_info(&array), Some(ts("2026-03-10T21:00:00Z")));
 }
 
 #[test]
@@ -359,8 +359,8 @@ fn extract_http_status_variants() {
 #[test]
 fn parse_reset_time_unix_suffix_is_exact() {
     assert_eq!(
-        parse_reset_time("Claude AI usage limit reached|1794164400", now(), 60),
-        Some(ts("2026-11-08T19:00:00Z"))
+        parse_reset_time("Claude AI usage limit reached|1773169200", now(), 60),
+        Some(ts("2026-03-10T19:00:00Z"))
     );
 }
 
@@ -368,11 +368,11 @@ fn parse_reset_time_unix_suffix_is_exact() {
 fn parse_reset_time_clock_uses_tz_offset() {
     assert_eq!(
         parse_reset_time("resets 11pm (Europe/Oslo)", now(), 60),
-        Some(ts("2026-11-08T22:00:00Z"))
+        Some(ts("2026-03-10T22:00:00Z"))
     );
     assert_eq!(
         parse_reset_time("resets at 11pm", now(), 0),
-        Some(ts("2026-11-08T23:00:00Z"))
+        Some(ts("2026-03-10T23:00:00Z"))
     );
 }
 
@@ -383,8 +383,8 @@ fn parse_reset_time_month_day_and_year_rollover() {
         Some(ts("2026-12-31T22:00:00Z"))
     );
     assert_eq!(
-        parse_reset_time("resets Nov 1, 9am", now(), 60),
-        Some(ts("2027-11-01T08:00:00Z"))
+        parse_reset_time("resets Feb 1, 9am", now(), 60),
+        Some(ts("2027-02-01T08:00:00Z"))
     );
 }
 

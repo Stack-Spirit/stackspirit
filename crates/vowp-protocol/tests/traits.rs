@@ -161,8 +161,8 @@ fn service_cancel_token() {
 
     assert_eq!(ServiceError::Failed("boom".to_owned()).to_string(), "boom");
     assert_eq!(
-        ServiceError::NotFound("job n04".to_owned()).to_string(),
-        "not found: job n04"
+        ServiceError::NotFound("job sample".to_owned()).to_string(),
+        "not found: job sample"
     );
     assert_eq!(ServiceError::Cancelled.to_string(), "cancelled");
 }

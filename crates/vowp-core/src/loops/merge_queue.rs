@@ -351,7 +351,7 @@ fn job_trailer(store: &Store, job: &Job) -> String {
         .and_then(|run| run.executor)
         .map(|executor| executor.to_string())
         .unwrap_or_else(|| "supervisor".to_owned());
-    format!("AI-Assisted: {executor} via vowp-night")
+    format!("AI-Assisted: {executor} via VOWP")
 }
 
 /// Returns true when `path` is one of the project's regenerated lockfiles.

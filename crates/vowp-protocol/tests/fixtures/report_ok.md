@@ -1,7 +1,7 @@
 ---
-job: n04-graph
+job: sample-job
 status: done
-branch: job/n04-graph
+branch: job/sample-job
 commits: [abc1234, def5678]
 tests:
   command: cargo test -p vowp-graph
@@ -13,7 +13,7 @@ open_items: []
 questions_for_owner: []
 ---
 
-# n04-graph — report
+# sample-job — report
 
 `vowp-graph` is implemented and green.
 

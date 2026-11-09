@@ -1,5 +1,5 @@
 //! Acceptance tests for the Claude Code adapter.
-//! Spec: `docs/design/crates/vowp-adapters.md` §7 (n06b) and `docs/design/adapters.md` §2.
+//! Spec: `docs/design/crates/vowp-adapters.md` §7 and `docs/design/adapters.md` §2.
 //!
 //! Every test is hermetic: fixtures under `tests/fixtures`, the fake harness script under
 //! `tests/fakes`, and temp directories only. No real `claude`, network or home directory.
@@ -18,11 +18,11 @@ use vowp_protocol::{
 };
 
 fn executor() -> Executor {
-    Executor::parse("claude-code:claude-sonnet-5-5").expect("test executor is valid")
+    Executor::parse("claude-code:example-model").expect("test executor is valid")
 }
 
 fn now() -> Timestamp {
-    Timestamp::parse("2026-11-08T18:10:00Z").expect("test timestamp is valid")
+    Timestamp::parse("2026-03-10T18:10:00Z").expect("test timestamp is valid")
 }
 
 fn ts(text: &str) -> Timestamp {
@@ -207,7 +207,7 @@ fn claude_argv_new_session() {
         "stream-json".to_owned(),
         "--verbose".to_owned(),
         "--model".to_owned(),
-        "claude-sonnet-5-5".to_owned(),
+        "example-model".to_owned(),
         "--permission-mode".to_owned(),
         "auto".to_owned(),
         "--session-id".to_owned(),
@@ -228,7 +228,7 @@ fn claude_argv_resume_effort_system_note() {
     let mut input = start_input(Path::new("/home/user/project"), "unused prompt");
     input.resume = Some("native-session-123".to_owned());
     input.system_note = Some("system note".to_owned());
-    input.executor = Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("executor");
+    input.executor = Executor::parse("claude-code:example-model@medium").expect("executor");
 
     let argv = build_argv(&config, &input, "claude");
 
@@ -241,7 +241,7 @@ fn claude_argv_resume_effort_system_note() {
             "stream-json",
             "--verbose",
             "--model",
-            "claude-sonnet-5-5",
+            "example-model",
             "--effort",
             "medium",
             "--permission-mode",
@@ -308,15 +308,15 @@ fn claude_ok_fixture_events() {
         EventBody::Cost(cost) => &cost.cost,
         other => panic!("second event is not cost: {other:?}"),
     };
-    assert_eq!(cost.usd, Some(0.0349033));
+    assert_eq!(cost.usd, Some(0.02));
     assert_eq!(
         cost.tokens,
         Tokens {
             input: 2,
             output: 4,
             reasoning: 0,
-            cache_read: 11873,
-            cache_write: 8418,
+            cache_read: 6,
+            cache_write: 4,
         }
     );
     assert_eq!(cost.source, CostSource::Receipt);
@@ -331,7 +331,7 @@ fn claude_ok_fixture_events() {
     assert_eq!(summary.stop_reason, StopReason::EndTurn);
     assert_eq!(
         summary.native_session_id.as_deref(),
-        Some("607b6f5f-88b0-4133-8716-9270d9d52c99")
+        Some("11111111-1111-4111-8111-111111111111")
     );
 }
 
@@ -385,13 +385,13 @@ fn claude_rate_limit_rejected_fixture() {
     let limit = *limits(&events).first().expect("rejected rate event emits a limit");
     assert_eq!(limit.kind, LimitKind::Quota);
     assert_eq!(limit.provider, "claude");
-    assert_eq!(limit.resets_at, Some(ts("2026-11-08T19:00:00Z")));
+    assert_eq!(limit.resets_at, Some(ts("2026-03-10T19:00:00Z")));
     assert!(limit.message.contains("rate_limit_event rejected"));
 
     assert_eq!(summary.outcome, RunOutcome::Limit);
     assert_eq!(
         summary.limit.as_ref().map(|event| event.resets_at),
-        Some(Some(ts("2026-11-08T19:00:00Z")))
+        Some(Some(ts("2026-03-10T19:00:00Z")))
     );
     assert_eq!(summary.stop_reason, StopReason::Limit);
     assert_eq!(summary.exit_code, Some(0));
@@ -403,12 +403,12 @@ fn claude_usage_limit_text_fixture() {
 
     let limit = *limits(&events).first().expect("usage text emits a limit");
     assert_eq!(limit.kind, LimitKind::Quota);
-    assert_eq!(limit.resets_at, Some(ts("2026-11-08T19:00:00Z")));
+    assert_eq!(limit.resets_at, Some(ts("2026-03-10T19:00:00Z")));
     assert_eq!(summary.outcome, RunOutcome::Limit);
     assert_eq!(summary.stop_reason, StopReason::Limit);
     assert_eq!(
         summary.limit.as_ref().map(|event| event.resets_at),
-        Some(Some(ts("2026-11-08T19:00:00Z")))
+        Some(Some(ts("2026-03-10T19:00:00Z")))
     );
 }
 
@@ -418,7 +418,7 @@ fn claude_weekly_limit_fixture() {
 
     let limit = *limits(&events).first().expect("weekly text emits a limit");
     assert_eq!(limit.kind, LimitKind::Quota);
-    assert_eq!(limit.resets_at, Some(ts("2026-11-12T08:00:00Z")));
+    assert_eq!(limit.resets_at, Some(ts("2026-03-15T08:00:00Z")));
     assert_eq!(summary.outcome, RunOutcome::Limit);
 }
 
@@ -460,7 +460,7 @@ fn claude_limit_words_in_assistant_text_are_not_a_limit() {
             "type": "system",
             "subtype": "init",
             "session_id": "77777777-7777-4777-8777-777777777777",
-            "model": "claude-sonnet-5-5"
+            "model": "example-model"
         }))
         .expect("json line"),
         serde_json::to_string(&json!({
@@ -515,7 +515,7 @@ fn claude_subtype_error_max_turns() {
             "type": "system",
             "subtype": "init",
             "session_id": "88888888-8888-4888-8888-888888888888",
-            "model": "claude-sonnet-5-5"
+            "model": "example-model"
         }))
         .expect("json line"),
         serde_json::to_string(&json!({
@@ -591,7 +591,7 @@ fn claude_run_end_to_end_with_fake_script() {
     assert_eq!(summary.outcome, RunOutcome::Ok);
     assert_eq!(
         summary.native_session_id.as_deref(),
-        Some("607b6f5f-88b0-4133-8716-9270d9d52c99")
+        Some("11111111-1111-4111-8111-111111111111")
     );
 }
 
@@ -667,7 +667,7 @@ fn claude_quota_without_reset_uses_hour_fallback() {
 #[test]
 fn claude_noise_line_is_classified() {
     let lines = vec![
-        "Claude AI usage limit reached|1794164400".to_owned(),
+        "Claude AI usage limit reached|1773169200".to_owned(),
         serde_json::to_string(&json!({
             "type": "result",
             "subtype": "error_during_execution",
@@ -683,7 +683,7 @@ fn claude_noise_line_is_classified() {
     assert_eq!(summary.outcome, RunOutcome::Limit);
     assert_eq!(
         summary.limit.as_ref().map(|limit| limit.resets_at),
-        Some(Some(ts("2026-11-08T19:00:00Z")))
+        Some(Some(ts("2026-03-10T19:00:00Z")))
     );
     assert_eq!(limits(&events).first().map(|limit| limit.kind), Some(LimitKind::Quota));
 }
@@ -704,7 +704,7 @@ fn claude_raw_cap_and_redaction() {
             }]
         },
         "session_id": "99999999-9999-4999-8999-999999999999",
-        "timestamp": "2026-11-08T20:00:00.000Z"
+        "timestamp": "2026-03-10T20:00:00.000Z"
     }))
     .expect("json line");
 
@@ -713,7 +713,7 @@ fn claude_raw_cap_and_redaction() {
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert!(matches!(event.body, EventBody::ToolResult(_)));
-    assert_eq!(event.ts, Some(ts("2026-11-08T20:00:00Z")));
+    assert_eq!(event.ts, Some(ts("2026-03-10T20:00:00Z")));
 
     let raw = event.raw.as_ref().expect("tool result keeps raw");
     assert_eq!(raw["truncated"], Value::Bool(true));

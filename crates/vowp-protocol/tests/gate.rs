@@ -328,7 +328,7 @@ fn default_gates_per_kind() {
 fn evidence_serde_tagged() {
     let variants = vec![
         Evidence::Report {
-            front_matter: Some(json!({"job": "n04-graph", "status": "done"})),
+            front_matter: Some(json!({"job": "sample-job", "status": "done"})),
             missing_fields: vec!["tests".to_owned()],
             problems: Vec::new(),
         },
@@ -352,12 +352,12 @@ fn evidence_serde_tagged() {
         },
         Evidence::Pushed {
             remote: "origin".to_owned(),
-            branch: "job/n04-graph".to_owned(),
-            ls_remote: "abc\trefs/heads/job/n04-graph".to_owned(),
+            branch: "job/sample-job".to_owned(),
+            ls_remote: "abc\trefs/heads/job/sample-job".to_owned(),
             local_sha: Some("abc".to_owned()),
         },
         Evidence::Review {
-            verify_job: Some(JobId::parse("n04-verify").unwrap()),
+            verify_job: Some(JobId::parse("sample-verify").unwrap()),
             verdict: Some(vowp_protocol::Verdict::Pass),
             findings: Vec::new(),
         },
@@ -411,7 +411,7 @@ fn evidence_serde_tagged() {
 fn gate_result_roundtrips_fixture_shape() {
     let raw = json!({
         "id": 42,
-        "job_id": "n04-graph",
+        "job_id": "sample-job",
         "run_id": null,
         "attempt": 0,
         "gate_index": 1,
@@ -421,12 +421,12 @@ fn gate_result_roundtrips_fixture_shape() {
                      "tail": "test result: ok. 31 passed", "duration_ms": 41234},
         "output_blob": null,
         "duration_ms": 41234,
-        "ts": "2026-11-08T20:03:00.000Z"
+        "ts": "2026-03-10T20:03:00.000Z"
     });
     let result: GateResult = serde_json::from_value(raw.clone()).expect("gate result decodes");
     assert_eq!(result.gate_index, 1);
     assert!(result.passed);
     assert_eq!(serde_json::to_value(&result).expect("serialisable"), raw);
-    assert_eq!(Timestamp::parse("2026-11-08T20:03:00.000Z").unwrap(), result.ts);
+    assert_eq!(Timestamp::parse("2026-03-10T20:03:00.000Z").unwrap(), result.ts);
     assert_eq!(Role::Verifier, ReviewGate::default().by);
 }

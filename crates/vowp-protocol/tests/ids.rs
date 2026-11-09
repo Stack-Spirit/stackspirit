@@ -58,22 +58,22 @@ fn id_parse_roundtrip_all_types() {
         &capsule_text[..capsule_text.len() - 1]
     )));
 
-    for text in ["n04-graph", "a", "0", "a-b", "n02a-protocol-foundation"] {
+    for text in ["sample-job", "a", "0", "a-b", "sample-dependency"] {
         assert_eq!(JobId::parse(text).unwrap().to_string(), text);
         assert_eq!(NodeName::parse(text).unwrap().to_string(), text);
         assert_eq!(ProjectName::parse(text).unwrap().to_string(), text);
     }
 
-    let job = JobId::parse("n04-graph").unwrap();
+    let job = JobId::parse("sample-job").unwrap();
     assert_eq!(JobId::parse(job.as_str()).unwrap(), job);
-    assert_eq!(JobId::from_str("n04-graph").unwrap(), job);
-    assert_eq!(<JobId as AsRef<str>>::as_ref(&job), "n04-graph");
-    assert_eq!(String::from(job.clone()), "n04-graph");
-    assert_eq!(JobId::try_from(String::from("n04-graph")).unwrap(), job);
+    assert_eq!(JobId::from_str("sample-job").unwrap(), job);
+    assert_eq!(<JobId as AsRef<str>>::as_ref(&job), "sample-job");
+    assert_eq!(String::from(job.clone()), "sample-job");
+    assert_eq!(JobId::try_from(String::from("sample-job")).unwrap(), job);
 
     // Serde round-trips through the bare string and validates on deserialisation.
     let json = serde_json::to_string(&job).unwrap();
-    assert_eq!(json, "\"n04-graph\"");
+    assert_eq!(json, "\"sample-job\"");
     assert_eq!(serde_json::from_str::<JobId>(&json).unwrap(), job);
     assert!(serde_json::from_str::<JobId>("\"A\"").is_err());
 }
@@ -88,7 +88,7 @@ fn slug_ids_reject_bad_input() {
             for input in bad {
                 assert_invalid_id(<$ty>::parse(input));
             }
-            for input in ["a", "n04-graph", "0", "a-b-c", "a--b"] {
+            for input in ["a", "sample-job", "0", "a-b-c", "a--b"] {
                 assert!(<$ty>::parse(input).is_ok(), "rejected valid slug {input:?}");
             }
             let sixty_four = "a".repeat(64);

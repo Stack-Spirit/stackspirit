@@ -1,10 +1,10 @@
 ## Intent
 
-Plan the VOWP night graph and keep the job table consistent.
+Plan the project job graph and keep the job table consistent.
 
 ## Constraints
 
-- no public actions
+- no external actions
 
 ## Decisions
 
@@ -14,15 +14,15 @@ Plan the VOWP night graph and keep the job table consistent.
 
 ### Done
 
-- n00 reviewed
+- review complete
 
 ### In progress
 
-- n04 split
+- plan split
 
 ### Next
 
-- dispatch n05
+- dispatch workers
 
 ## Files
 
@@ -30,4 +30,4 @@ Plan the VOWP night graph and keep the job table consistent.
 
 ## Gotchas
 
-- cargo shim needs a long timeout
+- cargo builds can take several minutes

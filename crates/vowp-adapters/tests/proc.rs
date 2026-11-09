@@ -1,5 +1,5 @@
 //! Process plumbing tests: spawning, reader threads, tees, signals and env filtering.
-//! Spec: `docs/design/crates/vowp-adapters.md` §7 (n06z) and `docs/design/adapters.md` §1.
+//! Spec: `docs/design/crates/vowp-adapters.md` §7 and `docs/design/adapters.md` §1.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

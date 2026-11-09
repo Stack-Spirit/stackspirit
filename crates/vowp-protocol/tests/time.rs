@@ -8,12 +8,12 @@ use vowp_protocol::prelude::*;
 
 #[test]
 fn timestamp_roundtrip_and_ms_truncation() {
-    let parsed = Timestamp::parse("2026-11-08T19:25:47.123456Z").unwrap();
-    assert_eq!(parsed.as_rfc3339(), "2026-11-08T19:25:47.123Z");
+    let parsed = Timestamp::parse("2026-03-10T19:25:47.123456Z").unwrap();
+    assert_eq!(parsed.as_rfc3339(), "2026-03-10T19:25:47.123Z");
 
     // Truncation, not rounding.
-    let parsed = Timestamp::parse("2026-11-08T19:25:47.999999Z").unwrap();
-    assert_eq!(parsed.as_rfc3339(), "2026-11-08T19:25:47.999Z");
+    let parsed = Timestamp::parse("2026-03-10T19:25:47.999999Z").unwrap();
+    assert_eq!(parsed.as_rfc3339(), "2026-03-10T19:25:47.999Z");
 
     let ms = 1_760_000_000_123_i64;
     assert_eq!(Timestamp::from_unix_millis(ms).unix_millis(), ms);
@@ -23,33 +23,33 @@ fn timestamp_roundtrip_and_ms_truncation() {
     let negative = -1_500_i64;
     assert_eq!(Timestamp::from_unix_millis(negative).unix_millis(), negative);
 
-    let ts = Timestamp::parse("2026-11-08T19:25:47.000Z").unwrap();
-    assert_eq!(ts.to_string(), "2026-11-08T19:25:47.000Z");
-    assert_eq!(String::from(ts), "2026-11-08T19:25:47.000Z");
+    let ts = Timestamp::parse("2026-03-10T19:25:47.000Z").unwrap();
+    assert_eq!(ts.to_string(), "2026-03-10T19:25:47.000Z");
+    assert_eq!(String::from(ts), "2026-03-10T19:25:47.000Z");
 
     // Serde uses the canonical string form and validates on the way in.
     let json = serde_json::to_string(&ts).unwrap();
-    assert_eq!(json, "\"2026-11-08T19:25:47.000Z\"");
+    assert_eq!(json, "\"2026-03-10T19:25:47.000Z\"");
     assert_eq!(serde_json::from_str::<Timestamp>(&json).unwrap(), ts);
     assert!(serde_json::from_str::<Timestamp>("\"not a timestamp\"").is_err());
     assert!(Timestamp::parse("2026-13-08T19:25:47Z").is_err());
-    assert!(Timestamp::parse("2026-11-08T19:25:47.1234567890Z").is_err());
+    assert!(Timestamp::parse("2026-03-10T19:25:47.1234567890Z").is_err());
 }
 
 #[test]
 fn timestamp_normalises_offsets() {
-    let with_offset = Timestamp::parse("2026-11-08T21:25:47+02:00").unwrap();
-    let utc = Timestamp::parse("2026-11-08T19:25:47.000Z").unwrap();
+    let with_offset = Timestamp::parse("2026-03-10T21:25:47+02:00").unwrap();
+    let utc = Timestamp::parse("2026-03-10T19:25:47.000Z").unwrap();
     assert_eq!(with_offset, utc);
-    assert_eq!(with_offset.as_rfc3339(), "2026-11-08T19:25:47.000Z");
+    assert_eq!(with_offset.as_rfc3339(), "2026-03-10T19:25:47.000Z");
 
-    let negative_offset = Timestamp::parse("2026-11-08T14:25:47-05:00").unwrap();
+    let negative_offset = Timestamp::parse("2026-03-10T14:25:47-05:00").unwrap();
     assert_eq!(negative_offset, utc);
 }
 
 #[test]
 fn timestamp_plus_minus_keep_millisecond_precision() {
-    let start = Timestamp::parse("2026-11-08T19:25:47.123Z").unwrap();
+    let start = Timestamp::parse("2026-03-10T19:25:47.123Z").unwrap();
 
     for delta in [
         Duration::from_nanos(1),
@@ -58,19 +58,19 @@ fn timestamp_plus_minus_keep_millisecond_precision() {
     ] {
         let later = start.plus(delta);
         assert_eq!(later, start, "sub-millisecond addition changed the instant");
-        assert_eq!(later.as_rfc3339(), "2026-11-08T19:25:47.123Z");
+        assert_eq!(later.as_rfc3339(), "2026-03-10T19:25:47.123Z");
         assert_eq!(later.unix_millis(), start.unix_millis());
 
         // Subtraction floors the truncated instant, matching "truncate, never round".
         let earlier = start.minus(delta);
-        assert_eq!(earlier.as_rfc3339(), "2026-11-08T19:25:47.122Z");
+        assert_eq!(earlier.as_rfc3339(), "2026-03-10T19:25:47.122Z");
         assert_eq!(earlier.unix_millis(), start.unix_millis() - 1);
         assert!(earlier < start);
     }
 
     let one_ms_later = start.plus(Duration::from_millis(1));
     assert!(start < one_ms_later);
-    assert_eq!(one_ms_later.as_rfc3339(), "2026-11-08T19:25:47.124Z");
+    assert_eq!(one_ms_later.as_rfc3339(), "2026-03-10T19:25:47.124Z");
     assert_eq!(one_ms_later.minus(Duration::from_millis(1)), start);
     assert_eq!(
         start.cmp(&one_ms_later),
@@ -125,7 +125,7 @@ proptest! {
 
 #[test]
 fn fake_clock_advances() {
-    let start = Timestamp::parse("2026-11-08T19:25:47.123Z").unwrap();
+    let start = Timestamp::parse("2026-03-10T19:25:47.123Z").unwrap();
     let clock = FakeClock::at(start);
     assert_eq!(clock.now(), start);
 
@@ -145,10 +145,10 @@ fn fake_clock_advances() {
 
 #[test]
 fn log_format_line() {
-    let ts = Timestamp::parse("2026-11-08T19:25:47.123Z").unwrap();
+    let ts = Timestamp::parse("2026-03-10T19:25:47.123Z").unwrap();
     assert_eq!(
-        format_log_line(ts, Level::Info, "l1", "job n04-graph: running -> gating"),
-        "2026-11-08T19:25:47.123Z INFO l1 job n04-graph: running -> gating"
+        format_log_line(ts, Level::Info, "l1", "job sample-job: running -> gating"),
+        "2026-03-10T19:25:47.123Z INFO l1 job sample-job: running -> gating"
     );
     assert_eq!(Level::Debug.as_str(), "DEBUG");
     assert_eq!(Level::Info.as_str(), "INFO");

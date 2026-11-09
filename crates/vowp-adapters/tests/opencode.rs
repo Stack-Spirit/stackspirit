@@ -1,5 +1,5 @@
 //! opencode adapter tests: argv, recorded JSONL fixtures, cost, limits and process controls.
-//! Spec: `docs/design/crates/vowp-adapters.md` §7 (n06a) and `docs/design/adapters.md` §3.
+//! Spec: `docs/design/crates/vowp-adapters.md` §7 and `docs/design/adapters.md` §3.
 //!
 //! Every test is hermetic: fixtures are sanitised recordings, the fake harness is
 //! `tests/fakes/fake-opencode.sh`, and no test reaches a real `opencode` binary or HOME.
@@ -27,7 +27,7 @@ fn fake_opencode() -> PathBuf {
 }
 
 fn now() -> Timestamp {
-    Timestamp::parse("2026-11-08T18:10:00Z").expect("test timestamp is valid")
+    Timestamp::parse("2026-03-10T18:10:00Z").expect("test timestamp is valid")
 }
 
 fn ts(value: &str) -> Timestamp {
@@ -37,7 +37,7 @@ fn ts(value: &str) -> Timestamp {
 fn executor(variant: Option<&str>) -> Executor {
     Executor {
         harness: HarnessKind::Opencode,
-        model: "deepseek/deepseek-flash".to_owned(),
+        model: "example/model".to_owned(),
         effort: None,
         variant: variant.map(str::to_owned),
     }
@@ -191,7 +191,7 @@ fn opencode_probe_parses_version() {
 fn opencode_argv_new_and_resume() {
     let temp = TempDir::new().expect("temp dir");
     let cfg = OpencodeConfig {
-        title: Some("vowp worker n06a".to_owned()),
+        title: Some("vowp worker example".to_owned()),
         extra_args: vec!["--print-logs".to_owned()],
         ..OpencodeConfig::default()
     };
@@ -208,15 +208,15 @@ fn opencode_argv_new_and_resume() {
             "json",
             "--auto",
             "--model",
-            "deepseek/deepseek-flash#max",
+            "example/model#max",
             "--title",
-            "vowp worker n06a",
+            "vowp worker example",
             "--print-logs",
             prompt,
         ]
     );
 
-    let resume_input = input(temp.path(), prompt, Some("ses_e439617b6ffepWG4UNK521b6ly"));
+    let resume_input = input(temp.path(), prompt, Some("ses_example000000000000000"));
     assert_eq!(
         build_argv(&cfg, &resume_input, binary, prompt),
         vec![
@@ -226,11 +226,11 @@ fn opencode_argv_new_and_resume() {
             "json",
             "--auto",
             "--model",
-            "deepseek/deepseek-flash#max",
+            "example/model#max",
             "--session",
-            "ses_e439617b6ffepWG4UNK521b6ly",
+            "ses_example000000000000000",
             "--title",
-            "vowp worker n06a",
+            "vowp worker example",
             "--print-logs",
             prompt,
         ]
@@ -263,7 +263,7 @@ fn opencode_variant_sigil_only_when_present() {
         .position(|argument| argument == "--model")
         .and_then(|index| argv.get(index + 1))
         .expect("model argument present");
-    assert_eq!(model, "deepseek/deepseek-flash");
+    assert_eq!(model, "example/model");
     assert!(!argv.iter().any(|argument| argument.contains('#')));
 
     let variant = input(temp.path(), "prompt", None);
@@ -273,7 +273,7 @@ fn opencode_variant_sigil_only_when_present() {
         .position(|argument| argument == "--model")
         .and_then(|index| argv.get(index + 1))
         .expect("model argument present");
-    assert_eq!(model, "deepseek/deepseek-flash#max");
+    assert_eq!(model, "example/model#max");
 }
 
 #[test]
@@ -329,10 +329,13 @@ fn opencode_ok_fixture_events() {
             .any(|event| matches!(event.body, EventBody::TurnStarted(_) | EventBody::SessionExecutor(_))),
         "adapters never emit framing events"
     );
-    assert_eq!(tool_calls(&parsed.events).len(), 4);
-    assert_eq!(tool_results(&parsed.events).len(), 4);
+    assert_eq!(tool_calls(&parsed.events).len(), 1);
+    let results = tool_results(&parsed.events);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].ok);
+    assert_eq!(results[0].output.as_deref(), Some("hello\n"));
     assert_eq!(assistant_text(&parsed.events).len(), 1);
-    assert_eq!(cost_events(&parsed.events).len(), 3);
+    assert_eq!(cost_events(&parsed.events).len(), 2);
     assert!(limit_events(&parsed.events).is_empty());
     assert!(
         !parsed
@@ -347,7 +350,7 @@ fn opencode_ok_fixture_events() {
 
     assert_eq!(
         parsed.summary.native_session_id.as_deref(),
-        Some("ses_e439617b6ffepWG4UNK521b6ly")
+        Some("ses_example000000000000000")
     );
     assert_eq!(parsed.summary.outcome, RunOutcome::Ok);
     assert_eq!(parsed.summary.stop_reason, StopReason::EndTurn);
@@ -375,8 +378,8 @@ fn opencode_tool_use_line_becomes_two_events_in_order() {
     assert_eq!(call.call_id, "call_00_ok");
     assert_eq!(result.call_id, call.call_id);
     assert_eq!(call.name, "shell");
-    assert_eq!(events[0].ts, Some(Timestamp::from_unix_millis(1_794_167_100_900)));
-    assert_eq!(events[1].ts, Some(Timestamp::from_unix_millis(1_794_167_101_000)));
+    assert_eq!(events[0].ts, Some(Timestamp::from_unix_millis(1773171900900)));
+    assert_eq!(events[1].ts, Some(Timestamp::from_unix_millis(1773171901000)));
     assert_eq!(events[0].actor, Actor::Assistant);
     assert_eq!(events[1].actor, Actor::Tool);
 }
@@ -407,17 +410,17 @@ fn opencode_tool_error_is_not_run_error() {
 fn opencode_cost_sums_over_steps() {
     let parsed = parse_fixture("opencode_ok.jsonl", now());
     let costs = cost_events(&parsed.events);
-    assert_eq!(costs.len(), 3);
+    assert_eq!(costs.len(), 2);
     assert!(costs.iter().all(|cost| cost.cost.source == CostSource::Receipt));
 
-    let expected_usd = 0.000_795_281_999_999_999_9 + 0.000_864_54 + 0.000_782_232;
+    let expected_usd = 0.001 + 0.002;
     let summary = &parsed.summary.cost;
     assert_eq!(summary.source, CostSource::Receipt);
     assert!((summary.usd.expect("receipt has a USD amount") - expected_usd).abs() < 1e-12);
-    assert_eq!(summary.tokens.input, 843 + 854 + 444);
-    assert_eq!(summary.tokens.output, 265 + 234 + 309);
-    assert_eq!(summary.tokens.reasoning, 467 + 603 + 485);
-    assert_eq!(summary.tokens.cache_read, 76_544 + 78_080 + 79_744);
+    assert_eq!(summary.tokens.input, 10 + 20);
+    assert_eq!(summary.tokens.output, 5 + 8);
+    assert_eq!(summary.tokens.reasoning, 2);
+    assert_eq!(summary.tokens.cache_read, 100 + 200);
     assert_eq!(summary.tokens.cache_write, 0);
 
     let event_sum: f64 = costs.iter().filter_map(|cost| cost.cost.usd).sum();
@@ -444,7 +447,7 @@ fn opencode_402_fixture_is_credits() {
     let limits = limit_events(&parsed.events);
     assert_eq!(limits.len(), 1);
     assert_eq!(limits[0].kind, LimitKind::Credits);
-    assert_eq!(limits[0].provider, "deepseek");
+    assert_eq!(limits[0].provider, "example");
     assert_eq!(limits[0].http_status, Some(402));
     assert_eq!(parsed.summary.limit.as_ref(), Some(limits[0]));
 }
@@ -458,8 +461,8 @@ fn opencode_429_fixture_is_rate() {
     let limits = limit_events(&parsed.events);
     assert_eq!(limits.len(), 1);
     assert_eq!(limits[0].kind, LimitKind::Rate);
-    assert_eq!(limits[0].provider, "deepseek");
-    assert_eq!(limits[0].resets_at, Some(ts("2026-11-08T18:20:00Z")));
+    assert_eq!(limits[0].provider, "example");
+    assert_eq!(limits[0].resets_at, Some(ts("2026-03-10T18:20:00Z")));
     assert_eq!(parsed.summary.limit.as_ref(), Some(limits[0]));
 }
 
@@ -507,7 +510,7 @@ fn opencode_error_text_in_assistant_message_is_not_a_limit() {
         parser.feed_line(
             &serde_json::json!({
                 "type": "text",
-                "timestamp": 1_794_167_000_000_i64,
+                "timestamp": 1_773_171_800_000_i64,
                 "sessionID": "ses_textlimit0000000000000",
                 "part": {
                     "id": "prt_text",
@@ -522,7 +525,7 @@ fn opencode_error_text_in_assistant_message_is_not_a_limit() {
         parser.feed_line(
             &serde_json::json!({
                 "type": "step_finish",
-                "timestamp": 1_794_167_001_000_i64,
+                "timestamp": 1_773_171_801_000_i64,
                 "sessionID": "ses_textlimit0000000000000",
                 "part": {
                     "id": "prt_finish",
@@ -587,7 +590,7 @@ fn opencode_end_to_end_with_fake_script() {
     let fixture_path = fixture("opencode_ok.jsonl");
     let adapter = OpencodeAdapter::new(OpencodeConfig {
         binary: Some(fake_opencode().to_string_lossy().into_owned()),
-        title: Some("vowp worker n06a".to_owned()),
+        title: Some("vowp worker example".to_owned()),
         ..OpencodeConfig::default()
     });
     let mut start = input(temp.path(), "run the recorded turn", None);
@@ -599,19 +602,16 @@ fn opencode_end_to_end_with_fake_script() {
     let mut run = adapter.start(start).expect("start fake opencode");
     let summary = run.wait().expect("fake opencode exits");
     assert_eq!(summary.outcome, RunOutcome::Ok);
-    assert_eq!(
-        summary.native_session_id.as_deref(),
-        Some("ses_e439617b6ffepWG4UNK521b6ly")
-    );
+    assert_eq!(summary.native_session_id.as_deref(), Some("ses_example000000000000000"));
 
     let events: Vec<HarnessEvent> = run.events().try_iter().collect();
-    assert_eq!(tool_calls(&events).len(), 4);
-    assert_eq!(cost_events(&events).len(), 3);
+    assert_eq!(tool_calls(&events).len(), 1);
+    assert_eq!(cost_events(&events).len(), 2);
     assert_eq!(turn_endings(&events).len(), 1);
     assert_eq!(turn_endings(&events)[0].stop_reason, StopReason::EndTurn);
     assert_eq!(fs::read_to_string(stdin_out).expect("stdin file"), "");
 
     let messages = assistant_text(&events);
     assert_eq!(messages.len(), 1);
-    assert!(messages[0].starts_with("Healthy pipeline, no intervention needed"));
+    assert_eq!(messages[0], "Example turn complete.");
 }

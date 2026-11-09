@@ -1,5 +1,5 @@
 //! Tests for the generic CLI adapter and its mapping file.
-//! Spec: `docs/design/crates/vowp-adapters.md` §7 (n06c) and `docs/design/adapters.md` §4.
+//! Spec: `docs/design/crates/vowp-adapters.md` §7 and `docs/design/adapters.md` §4.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use vowp_protocol::{
 };
 
 fn now() -> Timestamp {
-    Timestamp::parse("2026-11-08T18:10:00Z").expect("invariant: test timestamp literal is valid")
+    Timestamp::parse("2026-03-10T18:10:00Z").expect("invariant: test timestamp literal is valid")
 }
 
 fn mapping(text: &str) -> Mapping {
@@ -777,13 +777,13 @@ fn cli_limit_regexes_by_precedence() {
     assert_eq!(summary.stop_reason, StopReason::Limit);
     assert_eq!(summary.limit.as_ref(), Some(&limits[0]));
 
-    let (events, summary) = finish_run(parser(map.clone()), Some(1), "usage limit resets at 1794164400");
+    let (events, summary) = finish_run(parser(map.clone()), Some(1), "usage limit resets at 1773169200");
     let limits = limit_events(&events);
     assert_eq!(limits.len(), 1);
     assert_eq!(limits[0].kind, LimitKind::Quota);
     assert_eq!(
         limits[0].resets_at,
-        Some(Timestamp::parse("2026-11-08T19:00:00Z").expect("invariant: timestamp literal is valid"))
+        Some(Timestamp::parse("2026-03-10T19:00:00Z").expect("invariant: timestamp literal is valid"))
     );
     assert_eq!(summary.outcome, RunOutcome::Limit);
     assert_eq!(turn_ended(&events), &StopReason::Limit);

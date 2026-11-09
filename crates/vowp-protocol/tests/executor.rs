@@ -29,8 +29,8 @@ fn assert_invalid_executor(result: Result<Executor, ProtocolError>) {
 #[test]
 fn executor_parse_table() {
     let valid = [
-        "claude-code:claude-sonnet-5-5@medium",
-        "opencode:deepseek/deepseek-flash#max",
+        "claude-code:example-model@medium",
+        "opencode:example/model#max",
         "cli:codex",
         "opencode:anthropic/claude-x#high",
         "vowp:system",
@@ -65,15 +65,15 @@ fn executor_parse_table() {
         assert_invalid_executor(Executor::parse(text));
     }
 
-    let parsed = Executor::parse("claude-code:claude-sonnet-5-5@medium").unwrap();
+    let parsed = Executor::parse("claude-code:example-model@medium").unwrap();
     assert_eq!(parsed.harness, HarnessKind::ClaudeCode);
-    assert_eq!(parsed.model, "claude-sonnet-5-5");
+    assert_eq!(parsed.model, "example-model");
     assert_eq!(parsed.effort.as_deref(), Some("medium"));
     assert_eq!(parsed.variant, None);
 
-    let parsed = Executor::parse("opencode:deepseek/deepseek-flash#max").unwrap();
+    let parsed = Executor::parse("opencode:example/model#max").unwrap();
     assert_eq!(parsed.harness, HarnessKind::Opencode);
-    assert_eq!(parsed.model, "deepseek/deepseek-flash");
+    assert_eq!(parsed.model, "example/model");
     assert_eq!(parsed.effort, None);
     assert_eq!(parsed.variant.as_deref(), Some("max"));
 
@@ -87,7 +87,7 @@ fn executor_parse_table() {
     assert!(bad.validate().is_err());
     let bad = Executor {
         harness: HarnessKind::Opencode,
-        model: "deepseek/deepseek-flash".to_owned(),
+        model: "example/model".to_owned(),
         effort: Some("max".to_owned()),
         variant: None,
     };
@@ -96,13 +96,13 @@ fn executor_parse_table() {
 
 #[test]
 fn executor_provider_and_model_arg() {
-    let claude = Executor::parse("claude-code:claude-sonnet-5-5@medium").unwrap();
+    let claude = Executor::parse("claude-code:example-model@medium").unwrap();
     assert_eq!(claude.provider(), "claude");
-    assert_eq!(claude.model_arg(), "claude-sonnet-5-5");
+    assert_eq!(claude.model_arg(), "example-model");
 
-    let opencode = Executor::parse("opencode:deepseek/deepseek-flash#max").unwrap();
-    assert_eq!(opencode.provider(), "deepseek");
-    assert_eq!(opencode.model_arg(), "deepseek/deepseek-flash#max");
+    let opencode = Executor::parse("opencode:example/model#max").unwrap();
+    assert_eq!(opencode.provider(), "example");
+    assert_eq!(opencode.model_arg(), "example/model#max");
 
     let codex = Executor::parse("cli:codex").unwrap();
     assert_eq!(codex.provider(), "codex");
@@ -122,9 +122,9 @@ fn executor_provider_and_model_arg() {
 
 #[test]
 fn executor_serde_is_string() {
-    let executor = Executor::parse("opencode:deepseek/deepseek-flash#max").unwrap();
+    let executor = Executor::parse("opencode:example/model#max").unwrap();
     let json = serde_json::to_string(&executor).unwrap();
-    assert_eq!(json, "\"opencode:deepseek/deepseek-flash#max\"");
+    assert_eq!(json, "\"opencode:example/model#max\"");
     assert_eq!(serde_json::from_str::<Executor>(&json).unwrap(), executor);
     assert!(serde_json::from_str::<Executor>("\"not-an-executor\"").is_err());
 
@@ -133,15 +133,15 @@ fn executor_serde_is_string() {
         node: Some(NodeName::parse("vps").unwrap()),
     };
     let value = serde_json::to_value(&reference).unwrap();
-    assert_eq!(value["executor"], "opencode:deepseek/deepseek-flash#max");
+    assert_eq!(value["executor"], "opencode:example/model#max");
     assert_eq!(value["node"], "vps");
     assert_eq!(serde_json::from_value::<ExecutorRef>(value).unwrap(), reference);
 
     // Effort and variant are serialised in canonical order.
-    let claude = Executor::parse("claude-code:claude-sonnet-5-5@medium").unwrap();
+    let claude = Executor::parse("claude-code:example-model@medium").unwrap();
     assert_eq!(
         serde_json::to_value(&claude).unwrap(),
-        serde_json::Value::String("claude-code:claude-sonnet-5-5@medium".to_owned())
+        serde_json::Value::String("claude-code:example-model@medium".to_owned())
     );
 }
 
@@ -150,12 +150,9 @@ fn profile_validate_rejects_empty_and_duplicates() {
     assert!(profile(&[]).validate().is_err());
     assert!(profile(&["cli:codex", "cli:codex"]).validate().is_err());
     assert!(
-        profile(&[
-            "claude-code:claude-sonnet-5-5@medium",
-            "opencode:deepseek/deepseek-flash#max"
-        ])
-        .validate()
-        .is_ok()
+        profile(&["claude-code:example-model@medium", "opencode:example/model#max"])
+            .validate()
+            .is_ok()
     );
 
     let mut with_node = profile(&["cli:codex"]);
@@ -171,11 +168,8 @@ fn profile_validate_rejects_empty_and_duplicates() {
 
 #[test]
 fn profile_pick_skips_limited_rungs() {
-    let profile = profile(&[
-        "claude-code:claude-sonnet-5-5@medium",
-        "opencode:deepseek/deepseek-flash#max",
-    ]);
-    let now = Timestamp::parse("2026-11-08T19:00:00.000Z").unwrap();
+    let profile = profile(&["claude-code:example-model@medium", "opencode:example/model#max"]);
+    let now = Timestamp::parse("2026-03-10T19:00:00.000Z").unwrap();
     let future = now.plus(Duration::from_secs(3600));
     let past = now.minus(Duration::from_secs(3600));
 
@@ -194,13 +188,13 @@ fn profile_pick_skips_limited_rungs() {
     limited.insert("claude".to_owned(), None);
     assert_eq!(profile.pick(&limited, now).map(|(i, _)| i), Some(1));
 
-    limited.insert("deepseek".to_owned(), None);
+    limited.insert("example".to_owned(), None);
     assert_eq!(profile.pick(&limited, now), None);
 
-    limited.insert("deepseek".to_owned(), Some(future));
+    limited.insert("example".to_owned(), Some(future));
     assert_eq!(profile.pick(&limited, now), None);
 
-    limited.insert("deepseek".to_owned(), Some(past));
+    limited.insert("example".to_owned(), Some(past));
     assert_eq!(profile.pick(&limited, now).map(|(i, _)| i), Some(1));
 
     let (index, executor) = profile.pick(&limited, now).unwrap();

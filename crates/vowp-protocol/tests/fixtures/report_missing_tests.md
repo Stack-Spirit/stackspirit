@@ -1,11 +1,11 @@
 ---
-job: n04-graph
+job: sample-job
 status: done
-branch: job/n04-graph
+branch: job/sample-job
 commits: []
 files_changed: []
 open_items: []
 questions_for_owner: []
 ---
 
-# n04-graph — report without tests
+# sample-job — report without tests

@@ -17,24 +17,24 @@ always_allowed = ["Cargo.lock"]
 
 # ---- profiles: a role's model ladder; rung 0 is preferred ---------------------------------------------
 [profiles.planner]
-ladder = ["claude-code:claude-sonnet-5-5@medium", "opencode:deepseek/deepseek-flash#max"]
-on_quota = "next_then_probe_back"      # on a Claude limit: capsule -> DeepSeek; probe Claude after the reset
+ladder = ["claude-code:example-model@medium", "opencode:example/model#max"]
+on_quota = "next_then_probe_back"      # on a provider limit: capsule -> the next rung; probe the first after the reset
 
 [profiles.keeper]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 
 [profiles.worker]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 
 [profiles.verifier]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:example/model#max"]
 
 # ---- providers ---------------------------------------------------------------------------------------
-[providers.deepseek]
+[providers.example]
 max_concurrent = 6
 on_credits_exhausted = "park"          # never silently switch to another paid provider
 
-[providers.deepseek.prices."deepseek-flash"]   # only used when a harness reports no cost receipt
+[providers.example.prices."model"]   # only used when a harness reports no cost receipt
 input_per_m = 0.15
 output_per_m = 0.60
 cache_read_per_m = 0.003
@@ -100,7 +100,7 @@ action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 
 # ---- capsule writer and merge queue --------------------------------------------------------------------------------
 [capsule]
-executor = "opencode:deepseek/deepseek-flash#max"
+executor = "opencode:example/model#max"
 min_interval_secs = 120
 tail_turns = 2
 

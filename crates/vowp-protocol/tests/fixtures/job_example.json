@@ -1,5 +1,5 @@
 {
-  "id": "n04-graph",
+  "id": "sample-job",
   "project": "vowp",
   "title": "vowp-graph",
   "kind": "build",
@@ -7,11 +7,11 @@
   "profile": "worker",
   "state": "running",
   "priority": 50,
-  "needs": ["n02a-protocol-foundation"],
+  "needs": ["sample-dependency"],
   "owns": ["crates/vowp-graph/**"],
   "reads": ["docs/design/**"],
-  "brief": ".vowp/jobs/n04-graph/brief.md",
-  "report": ".vowp/jobs/n04-graph/report.md",
+  "brief": ".vowp/jobs/sample-job/brief.md",
+  "report": ".vowp/jobs/sample-job/report.md",
   "gates": [
     {"report": {"fields": ["status", "branch", "commits", "tests"]}},
     {"cmd": {"run": "cargo test -p vowp-graph", "expect_exit": 0}},
@@ -19,7 +19,7 @@
     {"review": {"by": "verifier"}}
   ],
   "loop": {"until": "gates", "max_attempts": 3, "on_exhausted": "escalate"},
-  "branch": "job/n04-graph",
+  "branch": "job/sample-job",
   "worktree": "/home/user/project",
   "attempts": 0,
   "continues": 0,
@@ -27,8 +27,8 @@
   "parked_reason": null,
   "note": "",
   "created_by": "planner",
-  "last_progress_at": "2026-11-08T20:10:00.000Z",
-  "state_changed_at": "2026-11-08T20:01:00.000Z",
-  "created_at": "2026-11-08T19:50:00.000Z",
-  "updated_at": "2026-11-08T20:10:00.000Z"
+  "last_progress_at": "2026-03-10T20:10:00.000Z",
+  "state_changed_at": "2026-03-10T20:01:00.000Z",
+  "created_at": "2026-03-10T19:50:00.000Z",
+  "updated_at": "2026-03-10T20:10:00.000Z"
 }

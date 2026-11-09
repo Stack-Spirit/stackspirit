@@ -31,21 +31,21 @@ where
 fn domain_run_and_worker_rows_serde() {
     let run: Run = roundtrip(json!({
         "id": "01KA1V30E5H8K2M4N6P8Q0R2S4",
-        "job_id": "n04-graph",
+        "job_id": "sample-job",
         "session_id": "01KA1V0Z7A0000000000000000",
         "role": "worker",
         "purpose": "start",
         "profile": "worker",
         "rung": 0,
-        "executor": "opencode:deepseek/deepseek-flash#max",
-        "provider": "deepseek",
+        "executor": "opencode:example/model#max",
+        "provider": "example",
         "node": "vps",
-        "native_session_id": "ses_e439617b6ffepWG4UNK521b6ly",
+        "native_session_id": "ses_example000000000000000",
         "pid": 4242,
-        "window": "job-n04-graph",
+        "window": "job-sample-job",
         "cwd": "/home/user/project",
-        "started_at": "2026-11-08T20:01:00.000Z",
-        "ended_at": "2026-11-08T20:19:30.000Z",
+        "started_at": "2026-03-10T20:01:00.000Z",
+        "ended_at": "2026-03-10T20:19:30.000Z",
         "exit_code": 0,
         "outcome": "ok",
         "limit_kind": null,
@@ -57,7 +57,7 @@ fn domain_run_and_worker_rows_serde() {
     assert_eq!(run.outcome, Some(RunOutcome::Ok));
     assert_eq!(
         run.executor.as_ref().map(Executor::to_string).as_deref(),
-        Some("opencode:deepseek/deepseek-flash#max")
+        Some("opencode:example/model#max")
     );
 
     roundtrip::<Worker>(json!({
@@ -66,9 +66,9 @@ fn domain_run_and_worker_rows_serde() {
         "kind": "worker",
         "state": "busy",
         "run_id": "01KA1V30E5H8K2M4N6P8Q0R2S4",
-        "job_id": "n04-graph",
-        "window": "job-n04-graph",
-        "updated_at": "2026-11-08T20:05:00.000Z"
+        "job_id": "sample-job",
+        "window": "job-sample-job",
+        "updated_at": "2026-03-10T20:05:00.000Z"
     }));
     assert_eq!(WorkerKind::Verifier, WorkerKind::Verifier);
     assert_eq!(WorkerState::Draining, WorkerState::Draining);
@@ -86,12 +86,12 @@ fn domain_session_and_switch_rows_serde() {
         "node": "local",
         "cwd": "/home/user/project",
         "state": "idle",
-        "executor": "claude-code:claude-sonnet-5-5@medium",
+        "executor": "claude-code:example-model@medium",
         "last_seq": 42,
         "last_capsule_id": null,
         "log_bytes": 18311,
-        "created_at": "2026-11-08T19:30:00.000Z",
-        "updated_at": "2026-11-08T19:41:02.000Z"
+        "created_at": "2026-03-10T19:30:00.000Z",
+        "updated_at": "2026-03-10T19:41:02.000Z"
     }));
     assert_eq!(session.role, Some(SessionRole::User));
     assert_eq!(session.state, SessionState::Idle);
@@ -99,16 +99,16 @@ fn domain_session_and_switch_rows_serde() {
     let switch: Switch = roundtrip(json!({
         "id": "01KA1V70J9N3Q6R8S0T2V4W6X8",
         "session_id": "01KA1V0Z7A0000000000000000",
-        "from_executor": "claude-code:claude-sonnet-5-5@medium",
-        "to_executor": "opencode:deepseek/deepseek-flash#max",
+        "from_executor": "claude-code:example-model@medium",
+        "to_executor": "opencode:example/model#max",
         "from_node": "local",
         "to_node": "vps",
         "capsule_id": "cap_01KA1V2B000000000000000000",
         "reason": "limit",
         "state": "completed",
         "error": null,
-        "started_at": "2026-11-08T19:41:03.000Z",
-        "ended_at": "2026-11-08T19:41:08.000Z",
+        "started_at": "2026-03-10T19:41:03.000Z",
+        "ended_at": "2026-03-10T19:41:08.000Z",
         "at_seq": 142
     }));
     assert_eq!(switch.state, SwitchState::Completed);
@@ -120,7 +120,7 @@ fn domain_inbox_loop_schedule_rows_serde() {
     let item: InboxItem = roundtrip(json!({
         "id": "01KA1V40F6J9M3N5P7Q9R1S3T5",
         "project": "vowp",
-        "job_id": "n10a-promote-core",
+        "job_id": "sample-release",
         "kind": "approval",
         "title": "Promote abc1234 to prod?",
         "body": "Guards passed; diff equals the intended change.",
@@ -128,7 +128,7 @@ fn domain_inbox_loop_schedule_rows_serde() {
         "state": "open",
         "answer": null,
         "answered_by": null,
-        "created_at": "2026-11-08T23:10:00.000Z",
+        "created_at": "2026-03-10T23:10:00.000Z",
         "answered_at": null
     }));
     assert_eq!(item.kind, InboxKind::Approval);
@@ -141,11 +141,11 @@ fn domain_inbox_loop_schedule_rows_serde() {
         "interval_secs": 1800,
         "state": "active",
         "bounds": {"same_action_max": 3},
-        "last_run_at": "2026-11-08T22:30:00.000Z",
-        "next_run_at": "2026-11-08T23:00:00.000Z",
+        "last_run_at": "2026-03-10T22:30:00.000Z",
+        "next_run_at": "2026-03-10T23:00:00.000Z",
         "last_status": "ok",
         "fail_streak": 0,
-        "updated_at": "2026-11-08T22:30:01.000Z"
+        "updated_at": "2026-03-10T22:30:01.000Z"
     }));
     assert_eq!(lp.kind, LoopKind::L4);
     assert_eq!(lp.state, ActiveState::Active);
@@ -163,9 +163,9 @@ fn domain_inbox_loop_schedule_rows_serde() {
         "missed_policy": "run_once",
         "state": "active",
         "last_run_at": null,
-        "next_run_at": "2026-11-09T05:00:00.000Z",
+        "next_run_at": "2026-03-11T05:00:00.000Z",
         "last_status": "ok",
-        "created_at": "2026-11-08T19:00:00.000Z"
+        "created_at": "2026-03-10T19:00:00.000Z"
     }));
     assert_eq!(schedule.spec_kind, ScheduleSpecKind::Cron);
     assert_eq!(
@@ -194,16 +194,16 @@ fn domain_inbox_loop_schedule_rows_serde() {
 fn domain_ledger_node_project_release_rows_serde() {
     let entry: LedgerEntry = roundtrip(json!({
         "id": 7,
-        "ts": "2026-11-08T20:05:00.000Z",
+        "ts": "2026-03-10T20:05:00.000Z",
         "kind": "cost",
         "project": "vowp",
-        "job_id": "n04-graph",
+        "job_id": "sample-job",
         "run_id": "01KA1V30E5H8K2M4N6P8Q0R2S4",
         "session_id": null,
         "role": "worker",
-        "provider": "deepseek",
+        "provider": "example",
         "harness": "opencode",
-        "model": "deepseek/deepseek-flash",
+        "model": "example/model",
         "cost": {"usd": 0.42, "tokens": {"input": 81000, "output": 9100, "reasoning": 0, "cache_read": 240000, "cache_write": 0}, "source": "receipt"},
         "summary": "worker run cost",
         "detail": {"rung": 0}
@@ -215,8 +215,8 @@ fn domain_ledger_node_project_release_rows_serde() {
         "ssh_target": "dev@vps",
         "is_local": false,
         "capabilities": {"gpu": false},
-        "last_seen_at": "2026-11-08T20:00:00.000Z",
-        "created_at": "2026-11-08T19:00:00.000Z"
+        "last_seen_at": "2026-03-10T20:00:00.000Z",
+        "created_at": "2026-03-10T19:00:00.000Z"
     }));
     assert_eq!(node.name.as_str(), "vps");
 
@@ -226,8 +226,8 @@ fn domain_ledger_node_project_release_rows_serde() {
         "remote_url": "git@example.com:user/project.git",
         "default_branch": "main",
         "config": {"node": {"name": "local"}},
-        "created_at": "2026-11-08T19:00:00.000Z",
-        "updated_at": "2026-11-08T20:00:00.000Z"
+        "created_at": "2026-03-10T19:00:00.000Z",
+        "updated_at": "2026-03-10T20:00:00.000Z"
     }));
     assert_eq!(project.default_branch, "main");
 
@@ -249,8 +249,8 @@ fn domain_ledger_node_project_release_rows_serde() {
         "approved_by": "owner",
         "rolled_back_by": null,
         "note": "",
-        "created_at": "2026-11-08T23:12:00.000Z",
-        "finished_at": "2026-11-08T23:14:00.000Z"
+        "created_at": "2026-03-10T23:12:00.000Z",
+        "finished_at": "2026-03-10T23:14:00.000Z"
     }));
     assert_eq!(release.state, ReleaseState::Live);
     assert_eq!(release.guards.len(), 2);
@@ -259,12 +259,12 @@ fn domain_ledger_node_project_release_rows_serde() {
 #[test]
 fn domain_edge_and_timestamp_helpers_serde() {
     let edge: Edge = roundtrip(json!({
-        "src": "n04-graph",
-        "dst": "n02c-protocol-domain",
+        "src": "sample-job",
+        "dst": "sample-need",
         "kind": "needs"
     }));
-    assert_eq!(edge.src.as_str(), "n04-graph");
+    assert_eq!(edge.src.as_str(), "sample-job");
 
-    let ts = Timestamp::parse("2026-11-08T20:03:00.000Z").unwrap();
-    assert_eq!(serde_json::to_value(ts).unwrap(), json!("2026-11-08T20:03:00.000Z"));
+    let ts = Timestamp::parse("2026-03-10T20:03:00.000Z").unwrap();
+    assert_eq!(serde_json::to_value(ts).unwrap(), json!("2026-03-10T20:03:00.000Z"));
 }
