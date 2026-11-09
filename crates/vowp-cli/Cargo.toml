@@ -21,12 +21,12 @@ signal-hook = "0.4.6"
 thiserror = "2.0.21"
 time = "0.3.45"
 toml = "1.2.1"
-vowp-adapters = { version = "0.1.0-dev", path = "../vowp-adapters" }
+vowp-adapters = { version = "0.1.0-rc.1", path = "../vowp-adapters" }
 vowp-core = { path = "../vowp-core" }
-vowp-graph = { version = "0.1.0-dev", path = "../vowp-graph" }
+vowp-graph = { version = "0.1.0-rc.1", path = "../vowp-graph" }
 vowp-protocol = { path = "../vowp-protocol" }
-vowp-store = { version = "0.1.0-dev", path = "../vowp-store" }
-vowp-tmux = { version = "0.1.0-dev", path = "../vowp-tmux" }
+vowp-store = { version = "0.1.0-rc.1", path = "../vowp-store" }
+vowp-tmux = { version = "0.1.0-rc.1", path = "../vowp-tmux" }
 
 [lints]
 workspace = true
