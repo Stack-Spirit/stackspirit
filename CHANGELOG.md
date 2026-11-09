@@ -16,7 +16,7 @@ Nothing yet.
 First release candidate of VOWP v0.1: a local-first supervisor that runs stock AI coding harnesses (Claude
 Code, opencode and generic CLIs) as a team of job workers, with deterministic loops, evidence-based gates,
 universal sessions that can move between harnesses, and guarded Work → Production promotion. This entry
-describes `main` at commit `e2a1818` plus the version bump. Nothing has been tagged, published or deployed.
+describes `main` at commit `006925c` plus the version bump (tested tree: `006925c` + this branch). Nothing has been tagged, published or deployed.
 
 ### Added
 
@@ -81,7 +81,7 @@ targets and creates a *draft* GitHub release). Neither workflow has run yet.
 
 ### Known limitations
 
-- **Failover loops (L4–L8) were not on `main` at `e2a1818`.** Planner, keeper, automatic limit
+- **Failover loops (L4–L8) were not on `main` at `006925c`.** Planner, keeper, automatic limit
   failover/probe-back (L6), inbox answer-file handling (L7) and the watchdog loop (L8) are job
   `n08d-loops-planner-failover`, which had a done report but was still in verification when this entry was
   written; the supervisor's probe step is a placeholder (`L6 probes owned by n08d`). Manual
@@ -89,14 +89,9 @@ targets and creates a *draft* GitHub release). Neither workflow has run yet.
 - **Remote-node probe on switch is skipped.** `session switch` to another node does not run
   `vowp --node <n> doctor --json` (sessions.md §5 step 3); only the local adapter registry is probed
   (`TODO` in `crates/vowp-core/src/session/switch.rs`).
-- `switches.capsule_id` stays NULL after a switch (the store has no method to set it); the capsule id is
-  in the returned `Switch`, the `switch` event and the capsule file.
-- After `session import`, the first turn through `SessionService::run_turn` does not include the bundle
-  tail in its seed (`bundle::imported_seed` renders it for direct callers).
 - `session watch`: transcripts are imported on the first scan; `--follow` on a TTY asks for `--once`.
   The Claude Code transcript importer used by the adapter (`claude_code::import_transcript`) is not
   implemented.
-- A fresh Claude Code session uses the harness-generated id (`StartInput.new_native_id` is `None`).
 - Interval schedules align to the Unix epoch, not to the schedule's creation time.
 - Time zones: UTC or a fixed offset only; IANA zones are deferred to v0.2.
 - `[env.*]` has no `build` key; the promotion build guard runs `[merge].check_cmds`, else
