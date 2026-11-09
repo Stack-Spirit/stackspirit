@@ -82,6 +82,11 @@ impl Promoter {
         if let Some(existing) = self.existing_release(store, project, env, change)? {
             match existing.state {
                 ReleaseState::Live => return Ok(existing),
+                ReleaseState::Banked if opts.dry_run => {
+                    // A dry run never deploys, probes or asks for approval, even when a
+                    // previously banked release is waiting for a human answer.
+                    return Ok(existing);
+                }
                 ReleaseState::Banked => {
                     return self.continue_after_bank(store, existing, &env_config, &checkout, &opts);
                 }
@@ -128,6 +133,27 @@ impl Promoter {
         store.update_release(&release)?;
 
         if opts.dry_run {
+            let dry_from = self.deps.git.head_sha(&checkout, "HEAD").ok();
+            match self.unexpected_files(&repo, &checkout, dry_from.as_deref(), &to_commit) {
+                Ok(files) if !files.is_empty() => {
+                    return self.refuse(
+                        store,
+                        release,
+                        format!(
+                            "candidate differs from the serving copy outside the intended change: {}",
+                            files.join(", ")
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    return self.refuse(
+                        store,
+                        release,
+                        format!("could not compare candidate with the serving copy: {err}"),
+                    );
+                }
+            }
             self.record_ledger(store, &release, LedgerKind::Promote)?;
             return Ok(release);
         }

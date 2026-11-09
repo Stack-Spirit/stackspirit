@@ -198,4 +198,32 @@ fn dry_run_runs_guards_only() {
         store.release(&release.id).unwrap().unwrap().state,
         ReleaseState::Guarded
     );
+
+    // The dry run also compares the candidate with the serving checkout: drift is refused
+    // without running the bank, deploy or probe scripts.
+    write(&checkout.join("rogue.txt"), "live drift\n");
+    let drifted = promoter
+        .promote(
+            &store,
+            &project,
+            "prod",
+            &candidate,
+            PromoteOpts {
+                dry_run: true,
+                ..PromoteOpts::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(drifted.state, ReleaseState::Refused);
+    assert!(drifted.note.contains("rogue.txt"), "note: {}", drifted.note);
+    assert!(drifted.snapshot_path.is_none());
+    assert!(drifted.rollback_cmd.is_none());
+    let lines = read(&log);
+    let lines: Vec<&str> = lines.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines, vec!["guard", "guard"], "only guards ran; no bank/deploy/probe");
+    assert!(read(&node.join("releases.log")).contains("refused"));
+    assert!(
+        store.list_inbox(None).unwrap().is_empty(),
+        "dry run never asks for approval"
+    );
 }

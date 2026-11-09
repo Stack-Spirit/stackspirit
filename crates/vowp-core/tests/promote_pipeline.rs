@@ -189,6 +189,62 @@ fn human_approval_creates_inbox_and_waits() {
 }
 
 #[test]
+fn dry_run_of_banked_release_never_deploys_or_asks() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let node = root.join("node");
+    let (repo, checkout, candidate) = candidate_fixture(root);
+    let scripts = scripts(root);
+
+    let mut config = config_for(&repo);
+    let mut env = env_config(&checkout);
+    env.serving_bank = Some(format!("{} {{target}}", scripts.bank.display()));
+    env.deploy = vec![scripts.deploy.display().to_string()];
+    env.probe = Some(scripts.probe.display().to_string());
+    env.rollback = Some(scripts.rollback.display().to_string());
+    config.env.insert("prod".to_owned(), env);
+
+    let store = test_store(&node);
+    let project = insert_project(&store);
+    let promoter = Promoter::new(test_deps(&node, config));
+    let banked = promoter
+        .promote(&store, &project, "prod", &candidate, PromoteOpts::default())
+        .unwrap();
+    assert_eq!(banked.state, ReleaseState::Banked);
+    let item = store.list_inbox(Some(InboxState::Open)).unwrap().pop().unwrap();
+    store.answer_inbox(&item.id, "approve", "alice").unwrap();
+
+    let dry = promoter
+        .promote(
+            &store,
+            &project,
+            "prod",
+            &candidate,
+            PromoteOpts {
+                dry_run: true,
+                ..PromoteOpts::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(dry.state, ReleaseState::Banked);
+    assert_eq!(dry.id, banked.id);
+    assert!(dry.approved_by.is_none(), "a dry run records no approver");
+    assert_eq!(order(root), vec!["bank"], "a dry run never deploys or probes");
+    let inbox = store.list_inbox(None).unwrap();
+    assert_eq!(inbox.len(), 1, "a dry run never creates another approval item");
+    assert_eq!(inbox[0].state, InboxState::Answered);
+
+    // The answered approval is still usable by a real promotion afterwards.
+    let live = promoter
+        .promote(&store, &project, "prod", &candidate, PromoteOpts::default())
+        .unwrap();
+    assert_eq!(live.state, ReleaseState::Live);
+    assert_eq!(live.approved_by.as_deref(), Some("alice"));
+    assert_eq!(order(root), vec!["bank", "deploy", "probe"]);
+}
+
+#[test]
 fn answer_approve_then_promote_goes_live_and_records_rollback_cmd() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
