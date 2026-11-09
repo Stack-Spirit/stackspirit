@@ -18,7 +18,9 @@ exits 0 when that file already matches a fresh generation, and 1 when it is
 stale or when a source package, licence file or unrecognised copyright notice
 cannot be handled. It exits 2 when cargo metadata cannot be read.
 
-No file outside ``THIRD-PARTY-LICENSES.md`` is written.
+The only tracked file it writes is ``THIRD-PARTY-LICENSES.md``. The script
+removes its own ``__pycache__`` directory because the repository's
+script-safety test reads every file under ``scripts/`` as UTF-8 text.
 """
 
 from __future__ import annotations
@@ -27,9 +29,20 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _remove_bytecode_cache() -> None:
+    """Keep binary .pyc files out of scripts/, which the tmux safety test reads."""
+    cache = Path(__file__).resolve().parent / "__pycache__"
+    if cache.is_dir():
+        shutil.rmtree(cache, ignore_errors=True)
+
+
+_remove_bytecode_cache()
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "THIRD-PARTY-LICENSES.md"
