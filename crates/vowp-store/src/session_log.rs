@@ -801,9 +801,21 @@ fn read_lock_pid(path: &Path) -> Option<u32> {
     text.lines().next()?.trim().parse().ok()
 }
 
+/// Returns true when `pid` names a process this program may safely signal.
+///
+/// On platforms whose `pid_t` is signed 32-bit, `kill` parses large `u32` values as negative
+/// ids. In particular, `u32::MAX` becomes `-1`, which addresses every process the caller may
+/// signal. VOWP therefore refuses pid/gid 0, pid 1 and every value above [`i32::MAX`].
+pub fn valid_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32
+}
+
 /// Returns whether a process with `pid` is alive.
+///
+/// Invalid ids always count as not alive. Linux reads `/proc/<pid>`; other platforms use
+/// `kill -0`, which never signals the target.
 fn pid_alive(pid: u32) -> bool {
-    if pid == 0 {
+    if !valid_pid(pid) {
         return false;
     }
     #[cfg(target_os = "linux")]
@@ -815,6 +827,8 @@ fn pid_alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
@@ -844,5 +858,22 @@ mod tests {
         assert!(!serialises_at_most(&raw, RAW_MAX_BYTES));
         let small = serde_json::json!({ "text": "x" });
         assert!(serialises_at_most(&small, RAW_MAX_BYTES));
+    }
+
+    #[test]
+    fn valid_pid_rejects_ids_that_wrap_to_negative_pid_t() {
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            assert!(!valid_pid(pid), "{pid} must not be signalled");
+        }
+        assert!(valid_pid(2));
+        assert!(valid_pid(i32::MAX as u32));
+    }
+
+    #[test]
+    fn pid_alive_rejects_invalid_pids_and_finds_this_process() {
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            assert!(!pid_alive(pid), "{pid} must count as not alive");
+        }
+        assert!(pid_alive(std::process::id()));
     }
 }

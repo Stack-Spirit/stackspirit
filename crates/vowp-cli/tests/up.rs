@@ -193,9 +193,18 @@ fn read_pid_file(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.lines().next()?.trim().parse().ok()
 }
 
-/// Returns whether `/proc/<pid>` still exists.
+/// Returns whether `pid` still names a live process, using `kill -0` on every platform.
 fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    if !vowp_adapters::proc::valid_pid(pid) {
+        return false;
+    }
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Sends `signal` to a pid through `kill`, asserting it succeeded.

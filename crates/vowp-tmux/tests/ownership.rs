@@ -38,7 +38,8 @@ fn for_home_uses_a_stable_private_socket_and_dir() {
 
     assert_eq!(first.socket_name(), second.socket_name());
     assert_eq!(first.socket_name(), Some(socket_name_for_home(home.path()).as_str()));
-    assert_eq!(first.socket_dir(), Some(home.path().join("tmux").as_path()));
+    let expected_dir = std::fs::canonicalize(home.path()).expect("canonical home").join("tmux");
+    assert_eq!(first.socket_dir(), Some(expected_dir.as_path()));
     let socket_dir = first.socket_dir().expect("private dir").to_path_buf();
     assert_eq!(
         first.socket_path(),

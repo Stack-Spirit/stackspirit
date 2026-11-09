@@ -142,17 +142,20 @@ fn wait_until_dead(pid: u32) {
 }
 
 fn own_process_group() -> u32 {
-    let stat = std::fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
-    let close = stat.rfind(')').expect("stat has a closing parenthesis");
-    let rest = &stat[close + 1..];
-    let mut fields = rest.split_whitespace();
-    let _state = fields.next();
-    let _ppid = fields.next();
-    fields
-        .next()
-        .expect("stat has a pgrp field")
+    let pid = std::process::id().to_string();
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid])
+        .output()
+        .expect("run ps");
+    assert!(
+        output.status.success(),
+        "ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
         .parse()
-        .expect("pgrp is numeric")
+        .expect("ps prints a numeric process group")
 }
 
 #[test]
@@ -405,10 +408,10 @@ fn resolve_binary_finds_on_path_and_rejects_non_executable() {
 }
 
 #[test]
-fn signal_group_refuses_pid_0_1_and_own_group() {
-    for pgid in [0, 1] {
+fn signal_group_refuses_invalid_pids_and_own_group() {
+    for pgid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
         let error = signal_group(pgid, Signal::Term).expect_err("must refuse");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "pgid {pgid}");
     }
 
     let own = own_process_group();

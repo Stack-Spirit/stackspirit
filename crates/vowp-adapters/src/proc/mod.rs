@@ -593,15 +593,49 @@ pub fn run_capture(argv: &[String], timeout: Duration) -> Result<(Option<i32>, S
     ))
 }
 
+/// Returns true when `pid` names a process this program may safely signal.
+///
+/// On platforms whose `pid_t` is signed 32-bit, `kill` parses large `u32` values as negative
+/// ids. In particular, `u32::MAX` becomes `-1`, which addresses every process the caller may
+/// signal. VOWP therefore refuses pid/gid 0, pid 1 and every value above [`i32::MAX`].
+pub fn valid_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32
+}
+
+/// Returns whether a process with `pid` exists.
+///
+/// Invalid ids (0, 1 and values above [`i32::MAX`]) always count as not alive. Linux reads
+/// `/proc/<pid>`; other platforms use `kill -0`, which never signals the target.
+pub fn process_alive(pid: u32) -> bool {
+    if !valid_pid(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
 /// Sends `sig` to process group `pgid`.
 ///
-/// Refuses pgid 0, 1 and this process's own group, because a negative pid there would signal
-/// unrelated processes. A group that no longer exists is treated as success.
+/// Refuses invalid pids (see [`valid_pid`]) and this process's own group, because a negative
+/// pid there would signal unrelated processes. A group that no longer exists is treated as
+/// success.
 pub fn signal_group(pgid: u32, sig: Signal) -> io::Result<()> {
-    if pgid <= 1 {
+    if !valid_pid(pgid) {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "refusing to signal pgid 0 or 1",
+            "refusing to signal an invalid process group",
         ));
     }
     if own_process_group() == Some(pgid) {
@@ -628,22 +662,32 @@ pub fn signal_group(pgid: u32, sig: Signal) -> io::Result<()> {
 
 /// Returns this process's group id, from `/proc/self/stat` with a `ps` fallback.
 fn own_process_group() -> Option<u32> {
-    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
-        if let Some(close) = stat.rfind(')') {
-            let rest = stat.get(close + 1..)?;
-            let mut fields = rest.split_whitespace();
-            let _state = fields.next()?;
-            let _ppid = fields.next()?;
-            if let Some(pgrp) = fields.next() {
-                if let Ok(pgid) = pgrp.parse() {
-                    return Some(pgid);
-                }
-            }
-        }
+    #[cfg(target_os = "linux")]
+    if let Some(pgid) = own_process_group_from_proc() {
+        return Some(pgid);
     }
+    own_process_group_from_ps()
+}
 
+/// Reads this process's group id from `/proc/self/stat`.
+#[cfg(target_os = "linux")]
+fn own_process_group_from_proc() -> Option<u32> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let close = stat.rfind(')')?;
+    let rest = stat.get(close + 1..)?;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let _ppid = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+/// Reads this process's group id with `ps`, which works on Linux and macOS.
+fn own_process_group_from_ps() -> Option<u32> {
     let pid = std::process::id().to_string();
     let output = Command::new("ps").args(["-o", "pgid=", "-p", &pid]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
@@ -661,5 +705,29 @@ mod tests {
     #[test]
     fn resolve_binary_rejects_missing_paths() {
         assert!(resolve_binary("/definitely/not/a/vowp-binary").is_none());
+    }
+
+    #[test]
+    fn valid_pid_rejects_ids_that_wrap_to_negative_pid_t() {
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            assert!(!valid_pid(pid), "{pid} must not be signalled");
+        }
+        assert!(valid_pid(2));
+        assert!(valid_pid(i32::MAX as u32));
+    }
+
+    #[test]
+    fn process_alive_rejects_invalid_pids_and_finds_this_process() {
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            assert!(!process_alive(pid), "{pid} must count as not alive");
+        }
+        assert!(process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn ps_fallback_reports_this_process_group() {
+        let pgid = own_process_group_from_ps().expect("ps reports the process group");
+        assert!(valid_pid(pgid), "process group {pgid}");
+        assert_eq!(own_process_group(), Some(pgid));
     }
 }

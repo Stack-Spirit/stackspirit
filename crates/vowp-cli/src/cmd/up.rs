@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use vowp_adapters::proc::{process_alive, valid_pid};
 use vowp_core::Deps;
 use vowp_core::loops::{Supervisor, TickReport};
 use vowp_protocol::{Clock, Level, Log, ProjectName, Timestamp};
@@ -127,7 +128,7 @@ struct TransitionOutput {
 /// Runs `vowp up`.
 fn run_up(ctx: &Ctx, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliError> {
     let paths = ctx.paths();
-    if let Some(pid) = crate::ctx::supervisor_pid(paths) {
+    if let Some(pid) = live_supervisor_pid(paths) {
         return Err(CliError::Conflict(format!(
             "supervisor already running (pid {pid}); `vowp status` shows it"
         )));
@@ -279,6 +280,16 @@ where
     Ok(0)
 }
 
+/// Returns the live supervisor pid from `<home>/supervisor.lock`, if one holds the lock.
+///
+/// The lock may be stale or contain a value that does not fit a signed `pid_t`; both count
+/// as not running and are removed by the next `up` or `down`.
+fn live_supervisor_pid(paths: &NodePaths) -> Option<u32> {
+    let text = std::fs::read_to_string(paths.root().join("supervisor.lock")).ok()?;
+    let pid: u32 = text.lines().next()?.trim().parse().ok()?;
+    process_alive(pid).then_some(pid)
+}
+
 /// Waits for direct children (adapter and gate processes) to exit after cancellation.
 ///
 /// The supervisor's runner threads are cooperative and may still be interrupting a child
@@ -309,8 +320,21 @@ fn wait_for_children() {
     }
 }
 
-/// Returns the pids whose parent is `parent`, read from `/proc`.
+/// Returns the pids whose parent is `parent`.
 fn child_pids(parent: u32) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        child_pids_from_proc(parent)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        child_pids_from_ps(parent)
+    }
+}
+
+/// Returns the direct children of `parent` from `/proc` (Linux).
+#[cfg(target_os = "linux")]
+fn child_pids_from_proc(parent: u32) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -329,7 +353,62 @@ fn child_pids(parent: u32) -> Vec<u32> {
             continue;
         }
         let ppid = field("PPid:").and_then(|value| value.parse::<u32>().ok());
-        if ppid == Some(parent) {
+        if ppid == Some(parent) && valid_pid(pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Returns the direct children of `parent` from `ps` (macOS and other Unixes).
+#[cfg(any(not(target_os = "linux"), test))]
+fn child_pids_from_ps(parent: u32) -> Vec<u32> {
+    let Ok(child) = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,stat="])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    // `ps` lists itself: it is a short-lived child of this process and must not be
+    // mistaken for an adapter or gate that shutdown still has to wait for.
+    let ps_pid = child.id();
+    let Ok(output) = child.wait_with_output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_ps_children(&String::from_utf8_lossy(&output.stdout), parent)
+        .into_iter()
+        .filter(|pid| *pid != ps_pid)
+        .collect()
+}
+
+/// Parses `ps -A -o pid=,ppid=,stat=` output into direct children of `parent`.
+///
+/// Lines must have exactly three whitespace-separated fields. Zombies (`stat` starts with
+/// `Z`) and ids that cannot be signalled safely are skipped.
+#[cfg(any(not(target_os = "linux"), test))]
+fn parse_ps_children(output: &str, parent: u32) -> Vec<u32> {
+    let mut pids = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(state)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        if fields.next().is_some() {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
+            continue;
+        };
+        if state.starts_with('Z') || !valid_pid(pid) {
+            continue;
+        }
+        if ppid == parent {
             pids.push(pid);
         }
     }
@@ -338,6 +417,12 @@ fn child_pids(parent: u32) -> Vec<u32> {
 
 /// Sends `signal` to a child's process group, falling back to the pid itself.
 fn signal_child(pid: u32, signal: &str) -> std::io::Result<()> {
+    if !valid_pid(pid) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to signal invalid pid {pid}"),
+        ));
+    }
     let group = Command::new("kill")
         .arg(format!("-{signal}"))
         .arg("--")
@@ -408,7 +493,7 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     let mut started_pid = None;
     let mut exited = None;
     while Instant::now() < deadline {
-        if let Some(pid) = crate::ctx::supervisor_pid(paths) {
+        if let Some(pid) = live_supervisor_pid(paths) {
             started_pid = Some(pid);
             break;
         }
@@ -466,7 +551,7 @@ fn run_down(ctx: &Ctx, io: &mut dyn IoStreams, args: &DownArgs) -> Result<i32, C
     let stop = signals::stop_file(paths);
     std::fs::write(&stop, ctx.clock().now().unix_secs().to_string())?;
 
-    let Some(pid) = crate::ctx::supervisor_pid(paths) else {
+    let Some(pid) = live_supervisor_pid(paths) else {
         remove_lock(paths);
         if args.kill_windows {
             kill_windows(ctx)?;
@@ -487,19 +572,19 @@ fn run_down(ctx: &Ctx, io: &mut dyn IoStreams, args: &DownArgs) -> Result<i32, C
     };
 
     let deadline = Instant::now() + DOWN_WAIT;
-    while Instant::now() < deadline && crate::ctx::supervisor_pid(paths) == Some(pid) {
+    while Instant::now() < deadline && live_supervisor_pid(paths) == Some(pid) {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    if crate::ctx::supervisor_pid(paths) == Some(pid) {
+    if live_supervisor_pid(paths) == Some(pid) {
         if args.force {
             send_term(pid)?;
             let force_deadline = Instant::now() + FORCE_WAIT;
-            while Instant::now() < force_deadline && crate::ctx::supervisor_pid(paths) == Some(pid) {
+            while Instant::now() < force_deadline && live_supervisor_pid(paths) == Some(pid) {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        if crate::ctx::supervisor_pid(paths) == Some(pid) {
+        if live_supervisor_pid(paths) == Some(pid) {
             return Err(CliError::Conflict(format!(
                 "supervisor (pid {pid}) did not stop; use `vowp down --force`"
             )));
@@ -527,6 +612,9 @@ fn run_down(ctx: &Ctx, io: &mut dyn IoStreams, args: &DownArgs) -> Result<i32, C
 
 /// Sends SIGTERM through `/bin/kill` (no `unsafe`, no libc dependency).
 fn send_term(pid: u32) -> Result<(), CliError> {
+    if !valid_pid(pid) {
+        return Err(CliError::Invalid(format!("refusing to signal invalid pid {pid}")));
+    }
     let status = Command::new("kill")
         .arg("-TERM")
         .arg(pid.to_string())
@@ -622,5 +710,74 @@ impl Log for FileLog {
             return;
         };
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ps_children_skips_zombies_malformed_lines_and_invalid_pids() {
+        let output = "\
+              1     0 Ss
+            100     1 S
+            101   100 S+
+            102   100 Z+
+            103   100 S
+            104   100 S extra
+            105   100
+              0   100 S
+     4294967295   100 S
+     2147483648   100 S
+            106   100 R
+";
+        assert_eq!(parse_ps_children(output, 100), vec![101, 103, 106]);
+    }
+
+    #[test]
+    fn invalid_pids_are_never_signalled() {
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            let error = send_term(pid).expect_err("send_term must refuse");
+            assert!(matches!(error, CliError::Invalid(_)), "pid {pid}: {error}");
+
+            let error = signal_child(pid, "TERM").expect_err("signal_child must refuse");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "pid {pid}");
+        }
+    }
+
+    #[test]
+    fn live_supervisor_pid_rejects_invalid_lock_values_and_finds_this_process() {
+        let home = tempfile::tempdir().expect("temp home");
+        let paths = NodePaths::new(home.path());
+        let lock = paths.root().join("supervisor.lock");
+
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            std::fs::write(&lock, format!("{pid}\n")).expect("lock");
+            assert_eq!(live_supervisor_pid(&paths), None, "pid {pid}");
+        }
+
+        std::fs::write(&lock, format!("{}\n", std::process::id())).expect("lock");
+        assert_eq!(live_supervisor_pid(&paths), Some(std::process::id()));
+    }
+
+    #[test]
+    fn child_pids_finds_a_direct_child() {
+        let mut child = Command::new("sleep").arg("5").spawn().expect("spawn sleep");
+        let parent = std::process::id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let platform = child_pids(parent).contains(&child.id());
+            let ps = child_pids_from_ps(parent).contains(&child.id());
+            if platform && ps {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("direct child {} was not listed", child.id());
     }
 }

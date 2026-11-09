@@ -5,9 +5,8 @@
 //! continue the job.
 
 use std::collections::HashSet;
-use std::path::Path;
 
-use vowp_adapters::proc::{Signal, signal_group};
+use vowp_adapters::proc::{Signal, process_alive, signal_group};
 use vowp_protocol::{ActiveState, Loop, LoopKind, NodeName, Run, RunId, RunOutcome, WorkerState};
 use vowp_store::{RunFinish, Store};
 
@@ -57,11 +56,6 @@ fn finish_crash(store: &Store, run: &Run) -> Result<(), CoreError> {
         Err(vowp_store::StoreError::Conflict(_)) => Ok(()),
         Err(error) => Err(CoreError::Store(error)),
     }
-}
-
-/// Returns true when `/proc/<pid>` exists (the no-unsafe `kill(pid, 0)` equivalent).
-fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// Frees busy worker rows whose run row no longer exists or has ended.

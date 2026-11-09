@@ -40,9 +40,13 @@ fn init_creates_files_and_registers_project() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let canonical_repo = std::fs::canonicalize(repo.path()).expect("canonical repo path");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("init prints JSON");
     assert_eq!(value["project"], "demo");
-    assert_eq!(value["path"].as_str().expect("path"), repo.path().display().to_string());
+    assert_eq!(
+        value["path"].as_str().expect("path"),
+        canonical_repo.display().to_string()
+    );
     let written: Vec<&str> = value["written"]
         .as_array()
         .expect("written array")
@@ -89,7 +93,7 @@ fn init_creates_files_and_registers_project() {
         .project(&vowp_protocol::ProjectName::parse("demo").expect("slug"))
         .expect("project lookup")
         .expect("project row");
-    assert_eq!(project.path, repo.path().display().to_string());
+    assert_eq!(project.path, canonical_repo.display().to_string());
     let node = store.local_node().expect("node lookup").expect("local node");
     assert!(node.is_local);
     let loops = store.list_loops().expect("loops");
