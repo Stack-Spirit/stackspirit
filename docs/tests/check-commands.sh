@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Check that every `vowp` command shown in the user documentation exists in the
-# real CLI and is either implemented or marked *(planned)*.
+# real CLI, and that the documented status matches the implementation: an
+# unimplemented command must be marked *(planned)*, and an implemented command
+# must not be.
 #
 # The command surface is parsed from docs/design/cli.md (the written contract)
 # and cross-checked against V0_1_COMMANDS in crates/vowp-cli/src/cli.rs. The
 # implementation status comes from the CLI dispatch table: a command is current
-# when its handler module is real code, not the explicit NotImplemented stub
-# that n09a created for later jobs. A required-set assertion catches parser drift.
+# when its handler module is real code, not an explicit NotImplemented stub. A
+# required-set assertion catches parser drift.
 #
 # Scope: README.md, docs/concepts/**, docs/guides/**, docs/security.md and
 # docs/troubleshooting.md. docs/design/** is the reference, not a consumer.
@@ -120,9 +122,9 @@ for family in families:
 #
 # V0_1_COMMANDS is the clap surface: every command the binary parses. The
 # dispatch table maps each Command variant to its handler module. A module is
-# a stub when it only returns CliError::NotImplemented, which is how n09a
-# reserved commands owned by n09b/n09c. This check therefore distinguishes a
-# command that merely appears in --help from one that actually runs.
+# a stub when it only returns CliError::NotImplemented. This check therefore
+# distinguishes a command that merely appears in --help from one that actually
+# runs.
 
 cli_rs_path = root / "crates" / "vowp-cli" / "src" / "cli.rs"
 dispatch_path = root / "crates" / "vowp-cli" / "src" / "cmd" / "mod.rs"
@@ -276,14 +278,34 @@ for path in doc_files:
                     references.append((path, number, parsed[0], parsed[1]))
 
 # A page that shows commands must declare its status: current, planned or
-# mixed. A page declared planned covers all its commands; a mixed page uses
-# *(planned)* locally for the not-yet-implemented ones.
+# mixed. The declaration is the leading `Status:` line (optionally blockquoted
+# and bold), not an incidental `status:` in a fenced example. A page declared
+# planned covers all its commands; a mixed page uses *(planned)* locally for
+# the not-yet-implemented ones.
 page_status = {}
+status_re = re.compile(
+    r"^\s*(?:>\s*)?(?:\*\*)?status:\s*(current|planned|mixed)\b", re.IGNORECASE
+)
 for path in sorted({path for path, _, _, _ in references}):
-    text = path.read_text(encoding="utf-8").lower()
-    match = re.search(r"status:\s*(current|planned|mixed)", text)
-    if match:
-        page_status[path] = match.group(1)
+    in_fence = False
+    fence_marker = ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            continue
+        if in_fence:
+            continue
+        match = status_re.match(line)
+        if match:
+            page_status[path] = match.group(1).lower()
+            break
 
 
 SECTION_MARKER = re.compile(r"^\s*(?:>\s*)?\*\*planned section[:.]?\*\*", re.IGNORECASE)
@@ -328,7 +350,7 @@ def planned_near(path, number):
     if in_fence:
         for line in lines[block_start:index]:
             stripped = line.strip()
-            if stripped.startswith("#") and "planned" in stripped.lower():
+            if re.match(r"#\s*\(planned\)\b", stripped, re.IGNORECASE):
                 return True
     for line in lines[section_start:index]:
         stripped = line.strip()
@@ -348,9 +370,17 @@ for path, number, command, line in references:
         rel = path.relative_to(root)
         failures.append(f"{rel}:{number}: `{command}` is not in the real CLI\n    {line}")
         continue
+    marked = page_status.get(path) == "planned" or planned_near(path, number)
     if top in implemented:
+        if marked:
+            rel = path.relative_to(root)
+            failures.append(
+                f"{rel}:{number}: `{command}` is implemented but marked "
+                f"*(planned)*"
+                f"\n    {line}"
+            )
         continue
-    if page_status.get(path) == "planned" or planned_near(path, number):
+    if marked:
         continue
     rel = path.relative_to(root)
     failures.append(
@@ -358,6 +388,21 @@ for path, number, command, line in references:
         f"*(planned)*"
         f"\n    {line}"
     )
+
+# A page-level `mixed` declaration is stale when every command it shows is
+# implemented and no reference carries a planned marker. (A `planned` page is
+# already caught above, once per implemented reference.)
+for path in sorted({path for path, _, _, _ in references}):
+    if page_status.get(path) != "mixed":
+        continue
+    page_refs = [entry for entry in references if entry[0] == path]
+    if all(entry[2].split()[0] in implemented for entry in page_refs) and not any(
+        planned_near(path, entry[1]) for entry in page_refs
+    ):
+        rel = path.relative_to(root)
+        failures.append(
+            f"{rel}: declares Status: mixed but every command shown is implemented"
+        )
 
 for path in sorted({path for path, _, _, _ in references}):
     if path not in page_status:
@@ -376,10 +421,13 @@ if failures:
     sys.exit(1)
 
 distinct = sorted({command for _, _, command, _ in references})
+unimplemented = [
+    command for _, _, command, _ in references if command.split()[0] not in implemented
+]
 print(
     f"PASS  check-commands: {len(references)} references, "
     f"{len(distinct)} distinct commands; {len(implemented)} implemented, "
-    f"all others marked *(planned)*"
+    f"{len(unimplemented)} reference(s) still marked *(planned)*"
 )
 print("      " + ", ".join(distinct))
 PY
