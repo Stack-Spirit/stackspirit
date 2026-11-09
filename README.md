@@ -1,8 +1,5 @@
 # VOWP — Virtual Open Work-to-Production
 
-<!-- Badges: add the GitHub Actions CI badge once the repository is public. Do not add
-     crates.io or npm badges until those packages are actually published. -->
-
 **VOWP is an open-source (MIT), local-first supervisor for AI coding agents.** It runs the harnesses you
 already use as a small engineering team on your own machines.
 
@@ -10,16 +7,14 @@ already use as a small engineering team on your own machines.
 |---|---|
 | **Who it is for** | Developers and small teams who already drive Claude Code, opencode or another headless agent and want reviewed, gated work to keep moving unattended. |
 | **What it needs** | Rust (to build from source), `git`, `tmux`, and a signed-in harness such as Claude Code or opencode. |
-| **3-command quickstart** | `cargo build --workspace`<br>`cargo install --path .`<br>`vowp init --name my-project` (run in a git repository with a remote) |
-| **Read next** | [Quickstart](docs/guides/quickstart.md) · [hello-vowp example](examples/hello-vowp/README.md) · [Concepts in 60 seconds](#concepts-in-60-seconds) |
+| **Install** | `cargo install --path .` from a clone of this repository. |
+| **3-command quickstart** | `vowp init --name <your-project>`<br>`vowp doctor`<br>`vowp up` |
+| **Read next** | [Getting started](docs/guides/quickstart.md) · [hello-vowp example](examples/hello-vowp/README.md) · [Concepts in 60 seconds](#concepts-in-60-seconds) |
 
-> **Status: current — early release (0.1.0), build from source.** The v0.1 command surface is
-> implemented and the [documentation checks](docs/tests/README.md) pass. The first public release is
-> **0.1.0**; the build-from-source commands in this README are the path it verifies, and the release
-> also publishes prebuilt archives and crates.io/npm packages. See the [roadmap](docs/roadmap.md) for
-> what is deliberately not in v0.1. For an unattended per-user install with the systemd unit and
-> watchdog, see the [install scripts](scripts/README.md); the design lives in
-> [`docs/design/`](docs/design/README.md).
+> **Status: current — early release (0.1.0).** The v0.1 command surface is implemented, but this is
+> young software. The [roadmap](docs/roadmap.md) lists what is deliberately not in v0.1, and the
+> [install guide](docs/guides/install.md) covers the release archives, the per-user install script and
+> the systemd unit.
 
 Work is modelled as a graph of jobs, deterministic loops keep it moving, every job runs in a tmux window
 you can watch, sessions move between harnesses, models and machines without losing context, and finished
@@ -28,6 +23,41 @@ work reaches production only through guarded, reversible promotions.
 VOWP does not fork or spoof a harness. It drives the official headless/JSON interfaces, keeps the
 conversation in its own append-only event log, and stores no credentials. Model choices are settings in a
 profile ladder, not assumptions baked into a job.
+
+## Getting started
+
+You need Rust from [`rust-toolchain.toml`](rust-toolchain.toml), `git`, `tmux`, and a harness such as
+Claude Code or opencode, installed and signed in. The
+[install guide](docs/guides/install.md#prerequisites) covers each requirement.
+
+Clone the repository, then install the binary once from the checkout:
+
+```sh
+cargo install --path .
+vowp --version
+```
+
+Then, in a git repository with a remote and a clean working tree, run three commands:
+
+```sh
+vowp init --name <your-project>
+vowp doctor
+vowp up
+```
+
+`vowp init` writes `vowp.toml` and the framework files; set the profile ladders in `vowp.toml` to the
+harnesses and models your machine can actually run, then commit the generated files with
+`git add -A && git commit -m "chore: initialise VOWP"`. `vowp doctor` must report no `fail` before you
+start. `vowp up` starts the supervisor and opens its tmux windows; `vowp status` and `vowp board` show
+what it is doing, and `vowp down` stops it cleanly. The merge queue requires a clean main checkout,
+which the commit above provides.
+
+Add work with `vowp job add ...` or `vowp plan "..."`, or run the
+[hello-vowp example](examples/hello-vowp/README.md) first: it exercises a three-job graph with fake
+adapters and needs no harness or model account. The
+[Getting started guide](docs/guides/quickstart.md) walks through the first job and a clean stop;
+[Install](docs/guides/install.md) covers harness setup and every prerequisite, and
+[Running VOWP on a VPS](docs/guides/vps.md) covers a server deployment.
 
 ## Concepts in 60 seconds
 
@@ -93,42 +123,6 @@ you ──► vowp CLI ──► SQLite + session logs (~/.vowp)
 6. **Promote.** A verified change reaches `work` or `prod` through guards, a serving snapshot, a diff of
    what is actually live, a human approval (by default), deploy and probe — with a recorded rollback.
 
-## Quickstart (from source)
-
-Prerequisites: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml), `git`,
-`tmux` for job and board windows, and a harness such as Claude Code or opencode, installed and signed in.
-Install `tmux` with your operating system's package manager; the
-[install guide](docs/guides/install.md#prerequisites) covers harness setup and every other requirement.
-
-```sh
-cargo build --workspace
-cargo run -p vowp-cli --bin vowp -- --version
-```
-
-The last command prints the binary version; the first public release is `vowp 0.1.0`. To put the
-binary on your `PATH`:
-
-```sh
-cargo install --path .
-vowp --version
-```
-
-The first project flow starts with:
-
-```sh
-vowp init --name hello-vowp
-vowp doctor
-
-# start the supervisor and check it
-vowp up
-vowp status
-```
-
-See the [quickstart guide](docs/guides/quickstart.md) for the full walkthrough, the
-[hello-vowp example](examples/hello-vowp/README.md) for a runnable three-job graph with fake adapters,
-the [install guide](docs/guides/install.md) for harness, node and script prerequisites, and
-[Running VOWP on a VPS](docs/guides/vps.md) for a server deployment.
-
 ## Documentation
 
 Both sections have an index: [concepts](docs/concepts/README.md) and [guides](docs/guides/README.md).
@@ -144,7 +138,7 @@ Both sections have an index: [concepts](docs/concepts/README.md) and [guides](do
 | Guides | What it covers |
 |---|---|
 | [Install](docs/guides/install.md) | Build from source, harness prerequisites, `PATH` install. |
-| [Quickstart](docs/guides/quickstart.md) | Init → doctor → first job → supervisor → inbox → down. |
+| [Getting started](docs/guides/quickstart.md) | Init → doctor → first job → supervisor → inbox → down. |
 | [Writing jobs](docs/guides/jobs.md) | Briefs, reports, gates, ownership and the verify/fix loop. |
 | [Operating a node](docs/guides/operating.md) | `up`/`down`, status, logs, loops, backups, reindex, watchdog. |
 | [Sessions](docs/guides/sessions.md) | Chat, switch, capsule, export/import and `session watch`. |
@@ -152,9 +146,8 @@ Both sections have an index: [concepts](docs/concepts/README.md) and [guides](do
 | [Multiple nodes](docs/guides/multi-node.md) | Node registration, `--node`, SSH and cross-node sessions. |
 | [Schedules](docs/guides/schedules.md) | Cron and interval schedules, missed runs, pause/resume. |
 
-Also: [security model](docs/security.md), [troubleshooting](docs/troubleshooting.md), the
-[design spec](docs/design/README.md), [contributing](CONTRIBUTING.md) and the
-[security policy](SECURITY.md).
+Also: [security model](docs/security.md), [troubleshooting](docs/troubleshooting.md),
+[contributing](CONTRIBUTING.md) and the [security policy](SECURITY.md).
 
 ## Repository layout
 

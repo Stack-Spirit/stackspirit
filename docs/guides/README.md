@@ -1,8 +1,7 @@
 # Guides
 
 These guides walk through installing, running and operating VOWP. They describe the v0.1 experience on
-`main`: every command shown is implemented, including `vowp init`, `vowp doctor`, the `vowp job`
-commands, `vowp graph`, the supervisor commands and promotion.
+`main`: every command shown is implemented.
 
 > **Status: current.** The build-from-source commands and the per-user install script work today. For a
 > runnable three-job graph with fake adapters, see the
@@ -11,7 +10,7 @@ commands, `vowp graph`, the supervisor commands and promotion.
 | Guide | Start here if you want to… |
 |---|---|
 | [Install](install.md) | Build the binary, install it on your `PATH`, prepare harnesses and tmux. |
-| [Quickstart](quickstart.md) | Take one repository from `vowp init` to a running supervisor and back down. |
+| [Getting started](quickstart.md) | Take one repository from `vowp init` to a running supervisor and back down. |
 | [Writing jobs](jobs.md) | Write a brief, choose gates, read a report and understand verify/fix. |
 | [Operating a node](operating.md) | Run the supervisor, read status and logs, pause loops, back up and reindex. |
 | [Sessions](sessions.md) | Chat, switch model or harness, export/import and watch a session. |
@@ -19,5 +18,4 @@ commands, `vowp graph`, the supervisor commands and promotion.
 | [Multiple nodes](multi-node.md) | Register a VPS, use `--node` and move a session across machines. |
 | [Schedules](schedules.md) | Run a job, loop or command on a cron or interval schedule. |
 
-The [concepts](../concepts/README.md) explain the design behind these steps. The
-[design spec](../design/README.md) is the binding reference.
+The [concepts](../concepts/README.md) explain the design behind these steps.
