@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use vowp_core::schedules::ScheduleSpec;
 use vowp_core::{AdapterRegistry, CommandRunner, CommandSpec, SystemRunner};
-use vowp_protocol::{Executor, HarnessKind, VowpConfig};
+use vowp_protocol::{Executor, HarnessKind, ScheduleSpecKind, VowpConfig};
 use vowp_store::Store;
 
 use crate::cli::{DoctorArgs, Global};
@@ -95,6 +96,7 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
 
     let project_root = resolve_project(global, &paths);
     let config = check_config(project_root.as_deref(), &paths, &mut checks);
+    check_schedules(config.as_ref(), &mut checks);
 
     let registry_config = config.clone().unwrap_or_else(VowpConfig::with_defaults_for_tests);
     let registry = AdapterRegistry::from_config(&registry_config);
@@ -259,6 +261,43 @@ fn check_config(project_root: Option<&Path>, paths: &vowp_store::NodePaths, chec
             checks.push("config", CheckStatus::Fail, error.to_string());
             None
         }
+    }
+}
+
+/// Parses every configured schedule with the real cron/interval parser.
+///
+/// `VowpConfig::validate` only checks the structure (five cron fields, interval shape, timezone
+/// shape); this catches expressions such as `61 9 * * *` that it lets through.
+fn check_schedules(config: Option<&VowpConfig>, checks: &mut Checks) {
+    let Some(config) = config else {
+        checks.push("schedules", CheckStatus::Warn, "no config to check");
+        return;
+    };
+    if config.schedules.is_empty() {
+        checks.push("schedules", CheckStatus::Ok, "no schedules configured");
+        return;
+    }
+    let mut problems = Vec::new();
+    for schedule in &config.schedules {
+        let tz = schedule.tz.as_deref().unwrap_or("UTC");
+        let parsed = match (&schedule.cron, &schedule.every) {
+            (Some(cron), None) => ScheduleSpec::parse(ScheduleSpecKind::Cron, cron, tz),
+            (None, Some(every)) => ScheduleSpec::parse(ScheduleSpecKind::Interval, every, tz),
+            _ => {
+                problems.push(format!("{}: exactly one of cron and every is required", schedule.name));
+                continue;
+            }
+        };
+        if let Err(error) = parsed {
+            problems.push(format!("{}: {error}", schedule.name));
+        }
+    }
+    if problems.is_empty() {
+        let count = config.schedules.len();
+        let noun = if count == 1 { "schedule" } else { "schedules" };
+        checks.push("schedules", CheckStatus::Ok, format!("{count} {noun} parse"));
+    } else {
+        checks.push("schedules", CheckStatus::Fail, problems.join("; "));
     }
 }
 
