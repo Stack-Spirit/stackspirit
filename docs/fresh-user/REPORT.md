@@ -18,6 +18,12 @@ to pre-install the `stable` toolchain, so no runtime rustup download happens).
 | Container | `rust:1-slim-bookworm` (Debian 12), rustc/cargo 1.99.1, git 2.39.5, tmux 3.3a |
 | hello-vowp example | 3 jobs `done`; files merged to `origin/main` |
 
+Merge-target check: the same scripts overlaid on an archive of `origin/main`
+(`006925c`) also passed on 2026-11-09: 31 commands, first success 29 s, total
+171 s. The example README's main command moved from line 33 to 34; the
+extractor followed it automatically, which is the anti-drift behaviour this
+test needs.
+
 The container has no secrets and no real harness sign-in. Two fixtures
 (`scripts/fresh-user/fake-bin/claude` and `opencode`) answer only `--version`,
 because `vowp doctor` probes the harnesses and the container cannot sign in to
