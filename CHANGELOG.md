@@ -16,7 +16,8 @@ Nothing yet.
 First release candidate of VOWP v0.1: a local-first supervisor that runs stock AI coding harnesses (Claude
 Code, opencode and generic CLIs) as a team of job workers, with deterministic loops, evidence-based gates,
 universal sessions that can move between harnesses, and guarded Work → Production promotion. This entry
-describes `main` at commit `006925c` plus the version bump (tested tree: `006925c` + this branch). Nothing has been tagged, published or deployed.
+describes `main` at commit `0f78c1d` plus this documentation refresh (tested tree: `0f78c1d` + this
+branch). Nothing has been tagged, published or deployed.
 
 ### Added
 
@@ -32,8 +33,9 @@ describes `main` at commit `006925c` plus the version bump (tested tree: `006925
   interfaces; shared process runner, limit/error classification, secret redaction.
 - `vowp-core`: session service, capsule writer and seeding, session switch with bounded drain and
   recovery, session bundle export/import, gates (command, report, review, deploy, secret-scan), cost
-  ledger, schedules (cron, interval), the L1 supervisor tick, L2 worker prompts, L3 verify and the merge
-  queue, guarded promotion and rollback.
+  ledger, schedules (cron, interval), the L1 supervisor tick (including the single-writer merge-queue
+  step), L2 worker prompts, L3 verify, L4 planner, L5 keeper, L6 automatic limit failover/probe-back,
+  L7 inbox answers, L8 watchdog, guarded promotion and rollback.
 - `vowp-cli`: the `vowp` binary.
 
 **CLI commands** (full `--help` tree: [`docs/reference/cli.md`](docs/reference/cli.md))
@@ -54,9 +56,11 @@ describes `main` at commit `006925c` plus the version bump (tested tree: `006925
 (`opencode run --format json`) and a generic CLI adapter driven by a TOML mapping file.
 
 **Loops** (see [`docs/concepts/graph-and-loops.md`](docs/concepts/graph-and-loops.md)): L1 tick every
-60 s (reconcile, dispatch, gates, merge), L2 worker start/continue/fix, L3 independent verify with a
-bounded fix loop, the single-writer merge queue (rebase, repo-wide checks, secret scan, fast-forward),
-L9 schedules.
+60 s (reconcile, dispatch, gates, and step 7 of the tick — the single-writer merge queue: rebase,
+repo-wide checks, secret scan, fast-forward), L2 worker start/continue/fix, L3 independent verify with a
+bounded fix loop, L4 planner, L5 keeper (covers planning when the planner has no available rung), L6
+automatic limit failover and probe-back, L7 inbox answer files, L8 watchdog and L9 schedules. The merge
+queue is part of the L1 tick, not an L3 step.
 
 **Sessions**: append-only event log per session, handoff capsules, `session switch` between harness,
 model or node with a bounded drain, seeded first turn and crash recovery; export/import bundles.
@@ -81,17 +85,25 @@ targets and creates a *draft* GitHub release). Neither workflow has run yet.
 
 ### Known limitations
 
-- **Failover loops (L4–L8) were not on `main` at `006925c`.** Planner, keeper, automatic limit
-  failover/probe-back (L6), inbox answer-file handling (L7) and the watchdog loop (L8) are job
-  `n08d-loops-planner-failover`, which had a done report but was still in verification when this entry was
-  written; the supervisor's probe step is a placeholder (`L6 probes owned by n08d`). Manual
-  `session switch` is shipped; automatic failover is not on `main` until n08d merges.
+- **L4–L8 are merged but not spec-complete.** Planner (L4), keeper (L5), automatic limit
+  failover/probe-back (L6), inbox answer files (L7) and the watchdog (L8) merged in n08d (`356e185`,
+  fixed through `0f78c1d`). Known gaps: keeper takeover/hand-back capsules are partial (covering turns
+  are not compacted into a fresh planner capsule); the keeper digest tails the last 60 indexed events,
+  not the pretty log; a failed switch during quota failover does not append its ledger failure; a second
+  rate event does not extend the backoff; and `provider_of_job` can pick the first rung for a job that
+  never ran. The full ranked list is in the release notes' defect table.
+- **Dogfood found six blocking defects; they are not fixed.** n14's default
+  `scripts/dogfood/run.sh` scenario passed 5/5 on `ad163b0`, but `vowp up --home`, the planner/keeper/
+  inbox windows, the SIGKILL crash window, the job brief in the worktree, `down` vs `status --check`/
+  watchdog and `up --no-tmux` remain open (D1–D6 in `docs/dogfood/RESULTS.md`, branch
+  `job/n14-dogfood`). A seventh defect is minor. The job was still in verification when this entry was
+  written.
 - **Remote-node probe on switch is skipped.** `session switch` to another node does not run
   `vowp --node <n> doctor --json` (sessions.md §5 step 3); only the local adapter registry is probed
   (`TODO` in `crates/vowp-core/src/session/switch.rs`).
-- `session watch`: transcripts are imported on the first scan; `--follow` on a TTY asks for `--once`.
-  The Claude Code transcript importer used by the adapter (`claude_code::import_transcript`) is not
-  implemented.
+- `session watch --once` imports Claude Code transcripts; continuous `--follow` is not available in
+  this build (a TTY invocation exits 2 asking for `--once`), and the optional adapter transcript
+  importer (`vowp_adapters::claude_code`) is not shipped.
 - The first turn after a `session switch` passes no caller-chosen native session id
   (`new_native_id: None` in `session/switch.rs`); a fresh session gets a generated uuid-v4.
 - Interval schedules align to the Unix epoch, not to the schedule's creation time.
@@ -99,13 +111,17 @@ targets and creates a *draft* GitHub release). Neither workflow has run yet.
 - `[env.*]` has no `build` key; the promotion build guard runs `[merge].check_cmds`, else
   `[project].check_cmds`, and passes with a recorded note if neither is set.
 - `vowp doctor` warns about missing provider API-key variables even when Claude Code uses its own login.
-- Several user docs still carry *(planned)* markers for commands that now work; see "Docs follow-ups" in
+- Docs drift remains on a few pages: the `vowp 0.1.0-dev` version string is still shown in
+  `README.md:80`, `CONTRIBUTING.md:21`, `docs/guides/quickstart.md:23` and `docs/guides/install.md:47`;
+  the design pages still disagree on the skills path and on which command creates loop rows. See "Docs
+  follow-ups" in the release notes.
+- Fresh-user test: PASS (`4a5dfd2`; 31 documented commands, 37 s to first success, 188 s total). Its
+  D1–D8 deviations were documentation-only and are fixed on `main`, except the harness polish listed in
   the release notes.
-- Dogfood (`n14`) and fresh-user (`n15`) runs had not completed when this entry was written; their results
-  are not reflected here.
 - Verified only on Linux x86_64 in a container. The macOS and aarch64 release targets are untested.
 - Nothing is published: no tag, no crates.io release, no npm wrapper (none exists in the repository), no
-  deployed site.
+  deployed site. `cargo publish` is not prepared either: `vowp-core` and `vowp-protocol` have no version
+  key in `crates/vowp-cli/Cargo.toml`, and no `cargo package` dry run was done.
 
 [Unreleased]: https://github.com/syver777/vowp/compare/v0.1.0-rc.1...HEAD
 [0.1.0-rc.1]: https://github.com/syver777/vowp/releases/tag/v0.1.0-rc.1
