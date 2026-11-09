@@ -14,15 +14,16 @@ vowp session ls
 vowp session show <id>
 vowp session show <id> --events 20
 vowp session show <id> --lineage
+vowp session show <id> --capsule
 vowp session tail <id> --pretty
 vowp session tail <id> --follow --from 120
 ```
 
-`session ls` prints `ID TITLE EXECUTOR NODE STATE LAST UPDATED EVENTS`. `session show` prints metadata,
-the executor history, switches and the last capsule; `--events n` prints the last n events; `--lineage`
-shows the switch chain. `session tail` prints JSONL by default or one pretty line per event
-(`HH:MM:SS #seq type summary`). `--follow` polls the log every 200 ms. This is what the `job-<id>` tmux
-window runs, read-only.
+`session ls` prints `ID TITLE EXECUTOR NODE STATE LAST UPDATED EVENTS`. `session show` prints metadata
+and the executor history. `--events <N>` prints the last N events, `--lineage` includes the switch
+lineage, and `--capsule` includes the last capsule. `session tail` prints JSONL by default or one pretty
+line per event (`HH:MM:SS #seq type summary`). `--follow` polls the log every 200 ms. This is what the
+`job-<id>` tmux window runs, read-only.
 
 Session ids are ULIDs accepted by unique prefix of at least six characters. An ambiguous prefix exits 2
 and lists the candidates. Jobs need the full slug.

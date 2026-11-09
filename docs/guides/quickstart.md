@@ -135,7 +135,9 @@ vowp job show hello-docs --gates --runs
 ```
 
 `vowp graph` prints one line per job with its layer, state and dependencies. `vowp job show` prints the
-job and its edges; `--gates --runs` adds its gates and (once it has run) its runs and gate evidence.
+job and its edges; `--runs` adds recorded runs with outcomes and costs, and `--gates` adds the latest gate
+results with evidence. The results list is empty until the job's gates have run; the configured gate
+list lives in the brief.
 
 If you would rather let an agent propose the graph first:
 
@@ -143,8 +145,9 @@ If you would rather let an agent propose the graph first:
 vowp plan "Add a hello page that explains the project" --dry-run
 ```
 
-`--dry-run` prints the planner's proposed YAML and stores nothing. Review it, then run the same command
-without `--dry-run` to let the planner create jobs through the CLI.
+`--dry-run` prints the planner's proposed YAML and creates no jobs. It still records the planner session
+and run. Review the YAML, then run the same command without `--dry-run` to let the planner create jobs
+through the CLI.
 
 ## 6. Start the supervisor
 
