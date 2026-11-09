@@ -1,0 +1,48 @@
+# scripts/audit/allowlist.txt
+#
+# Each non-comment line is: rule|path|matched-value|reason
+#   rule          one of ipv4, home_path, email, token, private_host, ssh_host,
+#                 secret_path, large_blob
+#   path          a repo-relative file path, or * for a value that is safe anywhere
+#   matched-value the exact text the scanner matched (never a secret)
+#   reason        why this finding is safe; must not be empty
+#
+# The scanner rejects a malformed entry or an empty reason. Keep entries
+# narrow: an exact path is better than *. Never add a real secret, a real
+# account name, a private hostname or a real e-mail address here.
+#
+# Loopback is an IPv4 address but names the local machine, not a private host.
+ipv4|*|127.0.0.1|Loopback address, public by definition and used in the security docs.
+
+# Conventional placeholder homes used by tests and documentation. These are
+# not accounts on any machine.
+home_path|*|/home/user|Conventional placeholder path, not a real account.
+home_path|*|/Users/me|Conventional placeholder path, not a real account.
+home_path|*|/home/you|Conventional placeholder path in install documentation.
+
+# Reserved example domains from RFC 2606 / RFC 6761, used only by tests,
+# examples and fake harnesses. They cannot receive mail.
+email|*|git@github.com|Git SSH user@host in a remote URL, not a personal e-mail address.
+email|*|test@example.com|Reserved example domain in tests.
+email|*|test@example.invalid|Reserved .invalid example domain in tests.
+email|*|git@example.com|Placeholder SSH remote URL in a test fixture.
+email|*|hello@example.invalid|Reserved .invalid example domain in an example.
+email|*|fake@example.invalid|Reserved .invalid example domain in a fake harness.
+email|*|fresh@example.invalid|Reserved .invalid example domain in a fresh-user test.
+email|*|dogfood@example.invalid|Reserved .invalid example domain in the dogfood harness.
+
+# False positives from the hostname rule: Rust method names and a test path
+# that end in `.local`, not DNS names.
+private_host|crates/vowp-cli/tests/init.rs|store.local|Rust method `store.local_node()`, not a hostname.
+private_host|crates/vowp-store/tests/migrate.rs|store.local|Rust method `store.local_node()`, not a hostname.
+private_host|crates/vowp-core/tests/gates_secret.rs|env.local|Filename `.env.local` in a secret-path test, not a hostname.
+
+# The allowlist file itself contains the values above as data. These entries
+# keep the scanner quiet about its own control file; they match only that path.
+private_host|scripts/audit/allowlist.txt|store.local|Text of an allowlist entry, not a hostname.
+private_host|scripts/audit/allowlist.txt|env.local|Text of an allowlist entry, not a hostname.
+token|scripts/audit/allowlist.txt|-----BEGIN RSA PRIVATE KEY-----|Text of an allowlist entry for a historical fake key header.
+
+# A fake PEM header in a historical test fixture. The fixture built the string
+# from fragments and was removed from the current tree; it never held a key.
+token|crates/vowp-adapters/tests/classify.rs|-----BEGIN RSA PRIVATE KEY-----|Fake key header in a historical test fixture; no key material, removed from the current tree.
