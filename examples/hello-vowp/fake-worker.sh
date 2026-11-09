@@ -6,6 +6,8 @@
 # a report with the front-matter the `report` gate requires. This is a fake adapter, not
 # a test double that pretends work happened: the gate and merge queue still run for real.
 
+set -eu
+
 if [ "${1:-}" = "--version" ]; then
     printf '%s\n' "fake-worker 1.0"
     exit 0
@@ -61,12 +63,12 @@ sha=$(git rev-parse --short HEAD)
 mkdir -p "$(dirname "$report")"
 cat > "$report" <<EOF
 ---
-job: $job
+job: "$job"
 status: done
-branch: $branch
-commits: [$sha]
+branch: "$branch"
+commits: ["$sha"]
 tests: "the job's cmd gate re-checks $file"
-files_changed: [$file]
+files_changed: ["$file"]
 open_items: []
 questions_for_owner: []
 ---

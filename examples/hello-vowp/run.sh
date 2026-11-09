@@ -81,6 +81,8 @@ trap cleanup EXIT INT TERM
 mkdir -p "$HOME_DIR" "$REPO"
 
 echo "hello-vowp: workdir $WORK"
+echo "hello-vowp: VOWP home $HOME_DIR"
+echo "hello-vowp: project $REPO"
 echo "hello-vowp: creating the demo repository and VOWP home"
 
 git init -q -b main "$REPO"
@@ -162,22 +164,33 @@ job_state() {
         | sed -n 's/.*"state":"\([a-z]*\)".*/\1/p'
 }
 
+show_failure_diagnostics() {
+    vowp_cli --home "$HOME_DIR" --project "$REPO" job ls --all >&2 || true
+    echo "--- supervisor.log tail ---" >&2
+    tail -n 80 "$HOME_DIR/logs/supervisor.log" >&2 || true
+}
+
 deadline=$(( $(date +%s) + TIMEOUT ))
 while :; do
     pending=""
     for id in hello-greeting hello-farewell hello-message; do
-        if [ "$(job_state "$id")" != "done" ]; then
-            pending="$pending $id"
-        fi
+        state=$(job_state "$id")
+        case "$state" in
+            done) ;;
+            stalled|failed|parked|cancelled)
+                echo "hello-vowp: job $id is $state; stopping" >&2
+                show_failure_diagnostics
+                exit 1
+                ;;
+            *) pending="$pending $id" ;;
+        esac
     done
     if [ -z "$pending" ]; then
         break
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "hello-vowp: timed out after ${TIMEOUT}s; still waiting for:$pending" >&2
-        vowp_cli --home "$HOME_DIR" --project "$REPO" job ls --all >&2 || true
-        echo "--- supervisor.log tail ---" >&2
-        tail -n 80 "$HOME_DIR/logs/supervisor.log" >&2 || true
+        show_failure_diagnostics
         exit 1
     fi
     sleep 1
