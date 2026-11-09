@@ -745,6 +745,18 @@ impl Supervisor {
 
     /// Retries one verify job with an unusable verdict, then parks the original (T37).
     pub(crate) fn retry_or_park_verify(&mut self, original: &Job, error: &CoreError) -> Result<(), CoreError> {
+        let retry_id = JobId::parse(&format!("{}-verify-{}-r1", original.id, original.attempts))?;
+        if let Some(retry) = self.store.job(&retry_id)? {
+            // A restart may find the retry already created. A pending retry only needs to be
+            // made ready; a finished retry means the single retry was already spent.
+            if retry.state == JobState::Pending {
+                return self.apply_simple(&retry.id, JobEvent::NeedsSatisfied, None);
+            }
+            if retry.state != JobState::Done {
+                return Ok(());
+            }
+            return self.park_verifier_failed(original);
+        }
         let key = (original.id.clone(), original.attempts);
         if self.verify_retries.insert(key) {
             let evidence = self.store.gate_results_for(&original.id, original.attempts)?;
@@ -758,17 +770,26 @@ impl Supervisor {
                     original.id, retry.id
                 ),
             );
-            self.apply_simple(&retry.id, JobEvent::NeedsSatisfied, None)
+            if retry.state == JobState::Pending {
+                self.apply_simple(&retry.id, JobEvent::NeedsSatisfied, None)
+            } else {
+                Ok(())
+            }
         } else {
-            self.apply_with(
-                &original.id,
-                JobEvent::VerifierFailed,
-                None,
-                Vec::new(),
-                Some(format!("verifier could not produce a verdict for {}", original.id)),
-            )
-            .map(|_| ())
+            self.park_verifier_failed(original)
         }
+    }
+
+    /// Parks the original after its one verify retry was spent (T37).
+    fn park_verifier_failed(&mut self, original: &Job) -> Result<(), CoreError> {
+        self.apply_with(
+            &original.id,
+            JobEvent::VerifierFailed,
+            None,
+            Vec::new(),
+            Some(format!("verifier could not produce a verdict for {}", original.id)),
+        )
+        .map(|_| ())
     }
 
     /// Step 7: start at most one merge runner and collect its finished result.
