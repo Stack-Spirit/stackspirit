@@ -144,6 +144,28 @@ fn read_events(deps: &Deps, session: &SessionId) -> Vec<EventEnvelope> {
         .expect("read log")
 }
 
+/// Poll a file written asynchronously by a fake child until every `marker` appears.
+///
+/// Signal handlers run asynchronously, so reading the file once right after the child
+/// is signalled can race under load. Re-read every 20 ms for up to 10 s, then panic
+/// with the file's actual contents.
+fn wait_for_markers(path: &Path, markers: &[&str]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        if markers.iter().all(|marker| contents.contains(marker)) {
+            return contents;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out after 10s waiting for {markers:?} in {}; contents: {contents:?}",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn turn(session: &SessionId, executor: Executor, prompt: &str) -> TurnRequest {
     TurnRequest {
         session_id: session.clone(),
@@ -827,7 +849,7 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     assert_eq!(result.summary.outcome, RunOutcome::Killed);
     assert_eq!(switch.state, SwitchState::Completed);
 
-    let signals = std::fs::read_to_string(&signal_path).unwrap_or_default();
+    let signals = wait_for_markers(&signal_path, &["int", "term"]);
     assert!(signals.contains("int"), "drain sent SIGINT first");
     assert!(signals.contains("term"), "drain sent SIGTERM after the wait");
 
