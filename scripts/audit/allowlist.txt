@@ -37,12 +37,11 @@ private_host|crates/vowp-cli/tests/init.rs|store.local|Rust method `store.local_
 private_host|crates/vowp-store/tests/migrate.rs|store.local|Rust method `store.local_node()`, not a hostname.
 private_host|crates/vowp-core/tests/gates_secret.rs|env.local|Filename `.env.local` in a secret-path test, not a hostname.
 
-# The allowlist file itself contains the values above as data. These entries
+# The allowlist file itself contains the two values above as data. These entries
 # keep the scanner quiet about its own control file; they match only that path.
 private_host|scripts/audit/allowlist.txt|store.local|Text of an allowlist entry, not a hostname.
 private_host|scripts/audit/allowlist.txt|env.local|Text of an allowlist entry, not a hostname.
-token|scripts/audit/allowlist.txt|-----BEGIN RSA PRIVATE KEY-----|Text of an allowlist entry for a historical fake key header.
 
-# A fake PEM header in a historical test fixture. The fixture built the string
-# from fragments and was removed from the current tree; it never held a key.
-token|crates/vowp-adapters/tests/classify.rs|-----BEGIN RSA PRIVATE KEY-----|Fake key header in a historical test fixture; no key material, removed from the current tree.
+# The only token-shaped finding in the old history is a fake PEM header in a
+# historical test fixture. History is not published, so it stays informational
+# and is deliberately not allowlisted; the current tree has no such string.

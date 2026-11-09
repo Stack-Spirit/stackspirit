@@ -49,12 +49,12 @@ fixture.
 | Real `/home/<user>` / `/Users/<user>` | 14 occurrences in 13 lines, 6 files | 0 | Outside p01 `owns`; staged fix script. |
 | Placeholder home paths | 82 | 96 allowlisted | `/home/user`, `/Users/me`, `/home/you`; the 14 fixed paths join this group. |
 | E-mail addresses | 34 | 34 allowlisted | Reserved test addresses plus the Git SSH `user@host` form. |
-| Token shapes | 2 allowlisted | 2 allowlisted | Text of the allowlist control file, not a secret. |
+| Token shapes | 0 | 0 | No key or token in the current tree. |
 | Private hostnames | 0 real; 12 false positives | 12 allowlisted | Rust/filename identifiers ending in `.local`, plus allowlist text. |
 | SSH-key paths | 0 | 0 | No tracked key files. |
 | `.env` paths | 0 | 0 | `.env` and `.env.*` are ignored; no tracked file. |
 | Large blobs (>1 MiB) | 0 | 0 | Largest tracked blob is about 100 KB. |
-| **Total** | **152 findings, 138 allowlisted, 14 blocked** | **152 allowlisted, 0 blocked** | The 14 are the six unowned files below. |
+| **Total** | **150 findings, 136 allowlisted, 14 blocked** | **150 allowlisted, 0 blocked** | The 14 are the six unowned files below. |
 
 The six files that need the owner's edit (no private value is repeated here):
 
