@@ -10,7 +10,8 @@
 #   VOWP=/path/to/vowp FAKE=1 ./run.sh
 #   KEEP=1 FAKE=1 ./run.sh          # keep the temporary home/repo for inspection
 #
-# Nothing here touches ~/.vowp, the real tmux server, the network, or a real harness.
+# Nothing here touches ~/.vowp, the real tmux server, or a real harness. A first `cargo run`
+# build may fetch crates, just like any other cargo command in this repository.
 
 set -eu
 
@@ -70,6 +71,11 @@ else
     WORK=$(mktemp -d "${TMPDIR:-/tmp}/hello-vowp.XXXXXX")
     CREATED_WORK=1
 fi
+
+# Normalise WORK to an absolute physical path: git remotes, VOWP state and the fake worker's
+# report path all need to keep working after run.sh changes directory, including when the
+# caller passed WORK=relative-dir or a path containing spaces.
+WORK=$(CDPATH= cd -- "$WORK" && pwd -P)
 HOME_DIR="$WORK/home"
 REPO="$WORK/hello-vowp"
 ORIGIN="$WORK/origin.git"

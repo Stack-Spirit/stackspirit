@@ -21,8 +21,9 @@ a content-checking command gate, and is merged into `main` by the merge queue.
 
 - Rust (the toolchain from the repository's `rust-toolchain.toml`) and `git`.
 - `tmux` is **not** needed: the script starts the supervisor with `--no-tmux`. The
-  supervisor still ensures a window layout, so the script points `tmux` at a private socket
-  directory under the temporary work directory and kills that server at the end; it never
+  supervisor may still attempt to recreate a window layout; without a tmux server that
+  attempt warns and is harmless. The script points `tmux` at a private socket directory
+  under the temporary work directory and kills that server at the end, so it never
   contacts the caller's tmux server.
 
 ## Run it
@@ -55,6 +56,9 @@ Useful variables:
 | `KEEP=1` | keep a script-created temporary directory for inspection (ignored when `WORK` is set) |
 | `WORK=/some/dir` | use an explicit work directory; it must be empty (or not exist), is never deleted, and keeps its contents for inspection |
 
+`WORK` may be relative; `run.sh` creates it and then resolves it to an absolute path before
+any git or VOWP command. Spaces in the path are supported.
+
 Example with a kept work directory:
 
 ```sh
@@ -74,6 +78,20 @@ cd /tmp/hello-vowp.XXXX/hello-vowp
 Run from the checkout because the generic `cli` adapter resolves its mapping file relative
 to the process working directory when `vowp.toml` has no `[project].path`.
 
+## Test `run.sh`
+
+From the repository root:
+
+```sh
+bash examples/hello-vowp/tests/test_run.sh
+```
+
+The test runs the example three times in temporary directories: with the default work
+directory, with a relative `WORK=relwork`, and with a `WORK` path containing a space. Each
+run uses `FAKE=1`, a private `HOME` and a private tmux socket, and asserts that all three
+jobs reach `done`. Set `KEEP=1` to keep the test root, or `TIMEOUT=300` to give a slow first
+build more time.
+
 ## Files
 
 | Path | Purpose |
@@ -84,6 +102,7 @@ to the process working directory when `vowp.toml` has no `[project].path`.
 | `fake-worker.sh` | the fake harness: writes the job file, commits it, writes the report |
 | `briefs/*.md` | brief bodies for the three jobs |
 | `project/` | the initial demo repository contents |
+| `tests/test_run.sh` | default, relative and spaced `WORK` scenarios |
 
 The fake worker is deliberately small: it reads the report path from the L2 prompt, writes
 the file named for the job, commits it, and emits a report with `status: done`. The gates

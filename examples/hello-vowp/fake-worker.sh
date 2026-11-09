@@ -15,9 +15,19 @@ fi
 
 prompt=$(cat)
 
-# The L2 prompts name the report path (start: "write your report to …"; continue and
-# fix: "(…/report.md)"). Planner/keeper turns have no job report, so they are a no-op.
-report=$(printf '%s\n' "$prompt" | grep -oE '/[^[:space:]]*\.vowp/jobs/[A-Za-z0-9_-]+/report\.md' | head -n 1)
+# The L2 prompts name the report path (start: "write your report to …"; continue:
+# "(…/report.md)"; fix: "update …/report.md. Do not widen scope."). The path is absolute
+# and may contain spaces, so match each prompt shape up to its end marker instead of
+# extracting a whitespace-delimited token. Planner/keeper turns have no job report, so
+# they are a no-op.
+report=$(
+    printf '%s\n' "$prompt" |
+        sed -n \
+            -e 's|^.*write your report to \(.*/\.vowp/jobs/[A-Za-z0-9_-]*/report\.md\)$|\1|p' \
+            -e 's|^.*writing your report (\(.*/\.vowp/jobs/[A-Za-z0-9_-]*/report\.md\)).*$|\1|p' \
+            -e 's|^.*update \(.*/\.vowp/jobs/[A-Za-z0-9_-]*/report\.md\)\. Do not widen scope\.$|\1|p' |
+        head -n 1
+)
 if [ -z "$report" ]; then
     printf '%s\n' "fake-worker: no job report in this prompt; nothing to do"
     exit 0
