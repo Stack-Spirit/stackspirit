@@ -6,10 +6,11 @@ model adapters only, and record every breakage as a fixable defect.
 
 - **Harness:** `scripts/dogfood/run.sh` (fake harness in `scripts/dogfood/fake-harness/`)
 - **Final run:** `bash scripts/dogfood/run.sh` on branch `job/n14-dogfood` rebased on
-  `origin/main` commit `0f78c1d` (fix failover rung pick, switch ledger and retries; this
-  history includes n08d planner/keeper/failover at `356e185`).
+  `origin/main` commit `8f65b81` (release: fix the quoted home error text; this history
+  includes n08d planner/keeper/failover at `356e185`).
 - **Result:** PASS (exit 0). The default command passed **5/5 consecutive runs** on
-  `0f78c1d`; warm runs took 20.4–25.0 s (phase 1 6–8 s, phase 2 11–15 s).
+  `0f78c1d` (warm 20.4–25.0 s) and the final run on `8f65b81` passed in 22.24 s
+  (phase 1 6 s, phase 2 11 s).
 - **Environment:** Linux, tmux 3.4, Python 3.12, stable Rust from `rust-toolchain.toml`;
   no network, no real `claude`/`opencode`, no real `HOME`.
 
@@ -51,6 +52,10 @@ The committed harness and docs now make the same mistake impossible:
 Residual risk: the `vowp` binary itself still creates `Tmux::new(None)` and does not
 propagate `--home` to windows (D1/D6/D7). The harness wrapper is the guard until the CLI
 owns a no-default-server policy.
+
+**Job status:** the technical results above are complete, but the job report is
+`status: blocked` until the owner records an assessment/retry of the night-shift work
+affected by the manual default-socket kill.
 
 ## What the harness does
 
@@ -114,7 +119,7 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | ledger | each job has ≥3 `state` rows and exactly 1 `merge` row; 3 worker `start` runs |
 | `vowp down --kill-windows` | lock removed, heartbeat removed, stopped marker written, no windows/worktrees |
 | SIGKILL + restart (default window) | 2 crash runs, 2 `RunEndedNoReport` continue rows, 2 `continue` harness turns, all 3 jobs done, 1 merge row each; 5/5 consecutive runs passed |
-| n08d planner/keeper/failover | present on `0f78c1d`; the planner runs during the graph are fake no-ops and do not add jobs or commits |
+| n08d planner/keeper/failover | present on `8f65b81`; the planner runs during the graph are fake no-ops and do not add jobs or commits |
 | loops smoke check (n08d-tolerant) | `l4`–`l9` rows present via `vowp loops list --json` when that subcommand exists, otherwise via `vowp loops --json` |
 | fake verifier config | the `verifier` profile resolves and probes; the fake harness also implements verifier reports (no `review` gate is in this graph, so no verify job was created) |
 
@@ -125,8 +130,8 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | `cargo build -q -p vowp-cli` (rebuild after the rebase) | included in the total below |
 | Phase 1 (init → down) | 6–7 s |
 | Phase 2 (init → SIGKILL → restart → down) | 11–14 s |
-| Total wall time (5 warm stress runs) | 20.37, 21.47, 21.51, 22.88, 24.96 s |
-| Total wall time including the rebuild | 31.37 s on the first run after the rebase |
+| Total wall time (5 warm stress runs on `0f78c1d`) | 20.37, 21.47, 21.51, 22.88, 24.96 s |
+| Final run on `8f65b81` | 22.24 s (incremental rebuild) |
 
 The normal run completes in well under a minute; the default timeouts are 600 s for phase 1
 and 300 s for phase 2.
@@ -254,7 +259,7 @@ Suggested owner: `vowp-core/src/loops/reconcile.rs` (add a running-without-run p
 `vowp-core/src/loops/supervisor.rs` (persist the run row before applying `Dispatched`).
 The default dogfood phase 2 now waits until no job is ready/dispatchable and every
 `running` job has a live open run, and its completion poll tolerates a 5 s dispatch gap; it
-passed 5/5 consecutive runs on `0f78c1d`. `CRASH_EARLY=1` remains the loud reproducer for
+passed 5/5 consecutive runs on `0f78c1d`, and the final run on `8f65b81` also passed. `CRASH_EARLY=1` remains the loud reproducer for
 this defect.
 
 ### D4 — `vowp job add --brief` content is not copied into the job worktree; workers read a generic fallback
