@@ -9,7 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vowp_graph::{
     DispatchCaps, DispatchChoice, Effect, Graph, JobEvent, RepeatGuard, RepeatVerdict, StallInput, StallJudge,
@@ -256,20 +256,8 @@ impl Supervisor {
         let tick = Duration::from_secs(self.deps.config.node.tick_secs.max(1));
         while !cancel.is_cancelled() {
             self.tick()?;
-            let slice = tick.min(Duration::from_secs(1));
-            match self.wake_rx.as_ref() {
-                Some(receiver) => match receiver.recv_timeout(slice) {
-                    Ok(()) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // A CLI `Request::Wake` is a kv row, not a runner wake; end the wait
-                        // early so the next tick drains it (loops.md §1 step 0).
-                        if !self.store.kv_prefix("req:")?.is_empty() {
-                            continue;
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                },
-                None => std::thread::sleep(slice),
+            if !wait_for_next_tick(self.wake_rx.as_ref(), tick, &self.store, cancel)? {
+                break;
             }
         }
         self.runners.cancel_all();
@@ -2268,5 +2256,129 @@ fn request_name(request: &crate::requests::Request) -> &'static str {
         Request::PauseLoop { .. } => "pause_loop",
         Request::ResumeLoop { .. } => "resume_loop",
         Request::Wake => "wake",
+    }
+}
+
+/// Waits until the next tick deadline, an early wake or a queued CLI request.
+///
+/// The wait is sliced into one-second polls so a `req:*` row pushed by the CLI ends the
+/// wait early, but a quiet tick still runs at `[node].tick_secs` (loops.md §1.1), not once
+/// per poll interval. Returns false when the wake channel disconnected.
+fn wait_for_next_tick(
+    receiver: Option<&Receiver<()>>,
+    tick: Duration,
+    store: &Store,
+    cancel: &CancelToken,
+) -> Result<bool, CoreError> {
+    let deadline = Instant::now() + tick;
+    loop {
+        if cancel.is_cancelled() {
+            return Ok(true);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(true);
+        }
+        let slice = remaining.min(Duration::from_secs(1));
+        match receiver {
+            Some(receiver) => match receiver.recv_timeout(slice) {
+                Ok(()) => return Ok(true),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if !store.kv_prefix("req:")?.is_empty() {
+                        return Ok(true);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(false),
+            },
+            None => {
+                std::thread::sleep(slice);
+                if !store.kv_prefix("req:")?.is_empty() {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+    use vowp_protocol::CancelToken;
+    use vowp_store::{NodePaths, Store};
+
+    use super::wait_for_next_tick;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let tmp = tempdir().expect("tempdir");
+        let store = Store::open(&NodePaths::new(tmp.path().join("node"))).expect("store");
+        (tmp, store)
+    }
+
+    #[test]
+    fn tick_wait_does_not_shorten_the_configured_interval() {
+        let (_tmp, store) = store();
+        let (_tx, rx) = channel();
+        let cancel = CancelToken::default();
+        let started = std::time::Instant::now();
+        let keep = wait_for_next_tick(Some(&rx), Duration::from_millis(1300), &store, &cancel).expect("wait");
+        assert!(keep);
+        assert!(
+            started.elapsed() >= Duration::from_millis(1200),
+            "a quiet tick waits for the deadline, not the 1 s poll: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn request_row_ends_the_wait_early() {
+        let (_tmp, store) = store();
+        store.push_request("wake", &serde_json::json!({})).expect("request");
+        let (_tx, rx) = channel();
+        let cancel = CancelToken::default();
+        let started = std::time::Instant::now();
+        assert!(wait_for_next_tick(Some(&rx), Duration::from_secs(30), &store, &cancel).expect("wait"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the queued request ends the wait early: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn channel_wake_ends_the_wait_immediately() {
+        let (_tmp, store) = store();
+        let (tx, rx) = channel();
+        tx.send(()).expect("wake");
+        let cancel = CancelToken::default();
+        let started = std::time::Instant::now();
+        assert!(wait_for_next_tick(Some(&rx), Duration::from_secs(30), &store, &cancel).expect("wait"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cancel_ends_the_wait_before_the_deadline() {
+        let (_tmp, store) = store();
+        let (_tx, rx) = channel();
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        let started = std::time::Instant::now();
+        assert!(wait_for_next_tick(Some(&rx), Duration::from_secs(30), &store, &cancel).expect("wait"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn tick_wait_without_a_receiver_also_waits_for_the_deadline() {
+        let (_tmp, store) = store();
+        let cancel = CancelToken::default();
+        let started = std::time::Instant::now();
+        assert!(wait_for_next_tick(None, Duration::from_millis(1300), &store, &cancel).expect("wait"));
+        assert!(
+            started.elapsed() >= Duration::from_millis(1200),
+            "the no-receiver branch uses the same deadline: {:?}",
+            started.elapsed()
+        );
     }
 }
