@@ -80,6 +80,10 @@ if [ -f "$HEARTBEAT" ]; then
     if [ "${#value}" -gt 12 ]; then
         value=
     fi
+    # Strip leading zeros so POSIX arithmetic never sees 08 as an octal literal.
+    while [ -n "$value" ] && [ "${value#0}" != "$value" ]; do
+        value=${value#0}
+    done
     if [ -n "$value" ]; then
         age=$((now - value))
         if [ "$age" -lt 0 ]; then

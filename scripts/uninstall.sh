@@ -107,11 +107,17 @@ else
 fi
 
 if [ "$service_stopped" -eq 0 ]; then
-    if command -v vowp >/dev/null 2>&1; then
-        if vowp down; then
-            note "asked the running supervisor to stop with 'vowp down'"
+    down_bin=
+    if [ -x "$VOWP_PATH" ]; then
+        down_bin=$VOWP_PATH
+    elif command -v vowp >/dev/null 2>&1; then
+        down_bin=$(command -v vowp)
+    fi
+    if [ -n "$down_bin" ]; then
+        if "$down_bin" --home "$VOWP_HOME" down; then
+            note "asked the running supervisor to stop with '$down_bin --home $VOWP_HOME down'"
         else
-            warn "'vowp down' failed; the supervisor may still be running"
+            warn "'$down_bin down' failed; the supervisor may still be running"
         fi
     else
         warn "vowp not found; stop any running supervisor manually"
@@ -136,12 +142,22 @@ remove_cron() {
     fi
 
     tmp=$(mktemp "${TMPDIR:-/tmp}/vowp-crontab.XXXXXX") || die "mktemp failed"
-    trap 'rm -f "$tmp" "$tmp.filtered"' 0 1 2 15
+    trap 'rm -f "$tmp" "$tmp.filtered" "$tmp.err"' 0 1 2 15
 
-    crontab -l > "$tmp" 2>/dev/null || : > "$tmp"
+    if ! crontab -l > "$tmp" 2> "$tmp.err"; then
+        if grep -qi 'no crontab' "$tmp.err"; then
+            : > "$tmp"
+        else
+            detail=$(head -n 1 "$tmp.err" 2>/dev/null || true)
+            [ -n "$detail" ] || detail="unknown error"
+            warn "could not read the crontab ($detail); leaving it unchanged"
+            rm -f "$tmp" "$tmp.filtered" "$tmp.err"
+            return 0
+        fi
+    fi
     awk -v marker="$CRON_MARKER" '
         $0 == marker { next }
-        index($0, "vowp-watchdog.sh") > 0 { next }
+        $0 ~ /^\*\/5 \* \* \* \* ".*\/vowp-watchdog\.sh" >\/dev\/null 2>&1$/ { next }
         { print }
     ' "$tmp" > "$tmp.filtered"
 
@@ -151,7 +167,7 @@ remove_cron() {
         warn "could not update the crontab; remove the VOWP watchdog entry manually"
     fi
 
-    rm -f "$tmp" "$tmp.filtered"
+    rm -f "$tmp" "$tmp.filtered" "$tmp.err"
 }
 
 remove_cron

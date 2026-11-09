@@ -224,20 +224,20 @@ if [ "$WITH_SERVICE" -eq 1 ]; then
     else
         warn "systemctl not found; the unit is installed but not enabled"
     fi
-
-    if [ "$WITH_LINGER" -eq 1 ]; then
-        if command -v loginctl >/dev/null 2>&1; then
-            if loginctl enable-linger "$(id -un)"; then
-                note "enabled linger for $(id -un)"
-            else
-                warn "loginctl enable-linger failed; the supervisor will only run while you are logged in"
-            fi
-        else
-            warn "loginctl not found; linger was not enabled"
-        fi
-    fi
 else
     note "systemd user unit left disabled (--no-service)"
+fi
+
+if [ "$WITH_LINGER" -eq 1 ]; then
+    if command -v loginctl >/dev/null 2>&1; then
+        if loginctl enable-linger "$(id -un)"; then
+            note "enabled linger for $(id -un)"
+        else
+            warn "loginctl enable-linger failed; the supervisor will only run while you are logged in"
+        fi
+    else
+        warn "loginctl not found; linger was not enabled"
+    fi
 fi
 
 install_cron() {
@@ -248,12 +248,24 @@ install_cron() {
     fi
 
     tmp=$(mktemp "${TMPDIR:-/tmp}/vowp-crontab.XXXXXX") || die "mktemp failed"
-    trap 'rm -f "$tmp" "$tmp.filtered"' 0 1 2 15
+    trap 'rm -f "$tmp" "$tmp.filtered" "$tmp.err"' 0 1 2 15
 
-    crontab -l > "$tmp" 2>/dev/null || : > "$tmp"
+    if ! crontab -l > "$tmp" 2> "$tmp.err"; then
+        if grep -qi 'no crontab' "$tmp.err"; then
+            : > "$tmp"
+        else
+            detail=$(head -n 1 "$tmp.err" 2>/dev/null || true)
+            [ -n "$detail" ] || detail="unknown error"
+            warn "could not read the crontab ($detail); leaving it unchanged"
+            warn "add this entry manually:"
+            printf '  %s\n  %s\n' "$CRON_MARKER" "$(cron_line)" >&2
+            rm -f "$tmp" "$tmp.filtered" "$tmp.err"
+            return 0
+        fi
+    fi
     awk -v marker="$CRON_MARKER" '
         $0 == marker { next }
-        $0 ~ /^\*\/5 .*vowp-watchdog\.sh/ { next }
+        $0 ~ /^\*\/5 \* \* \* \* ".*\/vowp-watchdog\.sh" >\/dev\/null 2>&1$/ { next }
         { print }
     ' "$tmp" > "$tmp.filtered"
     {
@@ -268,7 +280,7 @@ install_cron() {
         printf '  %s\n  %s\n' "$CRON_MARKER" "$(cron_line)" >&2
     fi
 
-    rm -f "$tmp" "$tmp.filtered"
+    rm -f "$tmp" "$tmp.filtered" "$tmp.err"
 }
 
 if [ "$WITH_CRON" -eq 1 ]; then

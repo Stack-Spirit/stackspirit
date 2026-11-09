@@ -9,7 +9,7 @@ Per-user operations for a VOWP node. Nothing here needs root.
 | `vowp-watchdog.sh` | Cron check for `~/.vowp/heartbeat`; restarts the unit when the heartbeat is missing or older than 180 s, falling back to `vowp up --detach`. |
 | `vowp-watchdog.cron` | Standalone crontab template for the same five-minute check. |
 | `uninstall.sh` | Stops and removes the unit, cron entry and binaries; keeps `~/.vowp` state. Supports `--dry-run` and `--keep-binary`. |
-| `tests/run.sh` | Hermetic tests with fake `systemctl`, `crontab`, `loginctl` and `vowp` on `PATH`. |
+| `tests/run.sh` | Hermetic tests with fake `systemctl`, `crontab`, `loginctl`, `vowp`, `claude`, `opencode` and `date` on `PATH`. |
 
 ## Install
 
@@ -34,11 +34,11 @@ The default locations are the ones `vowp doctor` checks:
 | `~/.local/bin/vowp-watchdog.sh` | `watchdog` |
 | `~/.config/systemd/user/vowp.service` | `systemd` |
 
-`install.sh` also installs this crontab block:
+`install.sh` also installs this crontab block, with your absolute home path:
 
 ```cron
 # vowp: 5-minute L8 watchdog check (managed by scripts/install.sh)
-*/5 * * * * "$HOME/.local/bin/vowp-watchdog.sh" >/dev/null 2>&1
+*/5 * * * * "/home/you/.local/bin/vowp-watchdog.sh" >/dev/null 2>&1
 ```
 
 Use `--no-service` or `--no-cron` to skip those steps, and `--linger` to run
@@ -65,8 +65,10 @@ delete that directory yourself if you want to discard the node state.
 sh scripts/tests/run.sh
 ```
 
-The test temporarily sets `HOME`, puts fake `systemctl`, `crontab`, `loginctl`
-and `vowp` scripts on `PATH`, and checks dry-run behaviour, installed paths,
-cron idempotence, watchdog restart/fallback and uninstall. Set
-`VOWP_BIN=/path/to/vowp` to additionally assert that `vowp doctor` reports the
-`systemd` and `watchdog` checks as `ok`. `shellcheck` runs when it is installed.
+The test temporarily sets `HOME` and `XDG_*`, puts fake `systemctl`,
+`crontab`, `loginctl`, `vowp`, `claude`, `opencode` and `date` scripts on
+`PATH`, and checks dry-run behaviour, installed paths, cron idempotence,
+watchdog restart/fallback/boundaries/malformed input, uninstall, and that
+`vowp doctor` probes only the fake harnesses and reports the `systemd` and
+`watchdog` checks as `ok`. Set `VOWP_BIN=/path/to/vowp` to run the doctor
+check from a specific build. `shellcheck` runs when it is installed.
