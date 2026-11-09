@@ -72,6 +72,9 @@ fn node_flag_remote_failure_exit_7() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(bin.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env("PATH", path_value)
         .arg("--home")
         .arg(home.path())
@@ -121,6 +124,9 @@ fn node_flag_forwards_original_args_without_argv0() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(bin.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env("PATH", path_value)
         .env("FAKE_SSH_ARGS", &args_file)
         .arg("--home")
@@ -171,6 +177,9 @@ fn node_flag_redirects_doctor_over_ssh() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(bin.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env("PATH", path_value)
         .env("FAKE_SSH_ARGS", &args_file)
         .arg("--home")
@@ -216,6 +225,9 @@ fn node_flag_returns_remote_exit_code_and_ignores_local_node() {
     let path_value = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
     let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(bin.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env("PATH", path_value)
         .arg("--home")
         .arg(home.path())
@@ -228,6 +240,9 @@ fn node_flag_returns_remote_exit_code_and_ignores_local_node() {
     // project, not by spawning ssh (the fake exits 42).
     let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(bin.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .arg("--home")
         .arg(home.path())
         .args(["--node", "here", "status"])

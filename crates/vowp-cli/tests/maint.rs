@@ -2,8 +2,6 @@
 
 mod common;
 
-use std::process::Command;
-
 use vowp_cli::cli::V0_1_COMMANDS;
 
 #[test]
@@ -142,7 +140,8 @@ fn no_command_returns_not_implemented() {
     // repository so the smoke test can never write into this checkout.
     let init_dir = tempfile::tempdir().expect("temp init dir");
     std::fs::create_dir(init_dir.path().join(".git")).expect("git dir");
-    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(init_dir.path())
         .arg("--home")
         .arg(env.home_path())
@@ -238,7 +237,8 @@ fn node_add_and_rm_probe_with_fake_ssh() {
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let path = format!("{}:/usr/bin:/bin", bin.path().display());
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vowp"))
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
         .env("PATH", path)
         .arg("--home")
         .arg(env.home_path())

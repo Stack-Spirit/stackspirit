@@ -67,7 +67,7 @@ impl Ctx {
 
         let cmd: Arc<dyn vowp_core::CommandRunner> = Arc::new(SystemRunner);
         let git = Arc::new(SystemGit::new(Arc::clone(&cmd)));
-        let windows: Arc<dyn WindowManager> = Arc::new(Tmux::new(None));
+        let windows: Arc<dyn WindowManager> = Arc::new(Tmux::for_home(paths.root()));
         let adapters = Arc::new(AdapterRegistry::from_config(&config)?);
         let deps = Deps {
             paths: paths.clone(),

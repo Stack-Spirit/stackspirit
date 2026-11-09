@@ -255,6 +255,10 @@ impl SupervisorProcess {
             .arg("--foreground")
             .arg("--no-tmux")
             .env("HOME", home)
+            .env("TMUX_TMPDIR", home.join("tmux"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("VOWP_TMUX_SOCKET")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(file))
@@ -608,6 +612,7 @@ fn tmux_layout_created_with_fake_windows() {
 /// Kills the private tmux server when the test ends (also on panic).
 struct TmuxGuard {
     tmux: Tmux,
+    _dir: tempfile::TempDir,
 }
 
 impl Drop for TmuxGuard {
@@ -626,12 +631,16 @@ fn tmux_layout_created_on_private_socket() {
             .map(|duration| duration.subsec_nanos())
             .unwrap_or(0)
     );
-    let tmux = Tmux::new(Some(socket));
+    let dir = tempfile::tempdir().expect("private tmux dir");
+    let tmux = Tmux::in_private_dir(socket, dir.path()).expect("private tmux manager");
     if !tmux.has_tmux() {
         eprintln!("SKIP: tmux not installed");
         return;
     }
-    let guard = TmuxGuard { tmux: tmux.clone() };
+    let guard = TmuxGuard {
+        tmux: tmux.clone(),
+        _dir: dir,
+    };
     let cwd = tempfile::tempdir().expect("temp cwd");
     let program = vec!["sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()];
 

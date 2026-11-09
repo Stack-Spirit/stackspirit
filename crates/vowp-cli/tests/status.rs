@@ -94,7 +94,8 @@ impl Foreground {
     fn spawn(env: &common::TestEnv) -> Self {
         let stderr = env.home_path().join("spawned-supervisor.stderr");
         let file = std::fs::File::create(&stderr).expect("stderr file");
-        let child = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        let child = env
+            .command(env!("CARGO_BIN_EXE_vowp"))
             .arg("--home")
             .arg(env.home_path())
             .arg("--project")
@@ -102,7 +103,6 @@ impl Foreground {
             .arg("up")
             .arg("--foreground")
             .arg("--no-tmux")
-            .env("HOME", env.home_path())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(file))

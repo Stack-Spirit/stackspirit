@@ -6,7 +6,7 @@
 mod common;
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use vowp_protocol::{ScheduleAction, ScheduleConfig};
 
@@ -50,9 +50,8 @@ fn write_schedules(env: &common::TestEnv, schedules: Vec<ScheduleConfig>) {
 
 /// Runs `vowp --json doctor` with `bin` as the whole `PATH` and `HOME` in the temp node home.
 fn run_doctor(env: &common::TestEnv, bin: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vowp"))
+    env.command(env!("CARGO_BIN_EXE_vowp"))
         .current_dir(env.project_path())
-        .env("HOME", env.home_path())
         .env("PATH", bin)
         .env_remove("NO_COLOR")
         .arg("--home")

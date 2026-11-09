@@ -286,7 +286,7 @@ fn remote_node(env: &common::TestEnv) -> RemoteNode {
 /// Runs the real binary with the local home/project and a remote `VOWP_HOME`.
 fn run_cli(env: &common::TestEnv, remote: &RemoteNode, args: &[&str]) -> std::process::Output {
     let path = format!("{}:/usr/bin:/bin", remote.bin.path().display());
-    std::process::Command::new(env!("CARGO_BIN_EXE_vowp"))
+    env.command(env!("CARGO_BIN_EXE_vowp"))
         .env("PATH", path)
         .env("VOWP_HOME", remote.home.path())
         .arg("--home")
@@ -305,7 +305,8 @@ fn output_text(bytes: &[u8]) -> String {
 
 /// Creates a session directly in a home without going through `--node`.
 fn new_session_in(env: &common::TestEnv, home: &std::path::Path, title: &str) -> String {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vowp"))
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
         .env("VOWP_HOME", home)
         .arg("--home")
         .arg(home)
