@@ -12,7 +12,7 @@ survives a crash; `vowp up` again reconciles and continues.
 ```sh
 vowp up                          # ensure tmux windows, detach the supervisor
 vowp up --foreground             # run the loop in this process (what systemd runs)
-vowp up --no-tmux                # no window manager
+vowp up --no-tmux                # skip the initial layout; jobs still use tmux windows
 vowp up --once                   # exactly one tick, then exit
 vowp down                        # stop, wait up to 30 s
 vowp down --kill-windows         # also close this project's tmux windows

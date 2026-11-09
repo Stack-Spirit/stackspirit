@@ -67,7 +67,7 @@ default. Add that directory to `PATH`, or install with `--root <dir>` and add `<
 | `home` | Make `~/.vowp` writable, or pass the same `--home` to every command. |
 | `db` | If it reports a schema version newer than the binary, upgrade the binary; do not delete the database. If it reports corruption, stop the supervisor, restore a backup, and use `vowp reindex` only for session indexes. |
 | `git` | Install git and ensure it is on `PATH` for non-interactive shells. |
-| `tmux` (warn) | Install tmux, or accept `vowp up --no-tmux` and no live windows. |
+| `tmux` (warn) | Install tmux before running jobs. `vowp up --no-tmux` skips only the initial supervisor layout; a dispatched job still needs a window. |
 | `config` | The error names the key path. Unknown keys are errors (`deny_unknown_fields`); remove or correct the key. |
 | `schedules` | A `[[schedules]]` entry did not parse; the check names the schedule and the error. |
 | `harness:claude-code` / `harness:opencode` | Install the harness or fix its binary path in `[harnesses.<name>].binary`. A missing harness is a `fail` because a profile that cannot resolve would fail later. |
@@ -220,7 +220,7 @@ know; otherwise leave it unknown.
 
 | Symptom | Fix |
 |---|---|
-| `tmux: command not found` | Install tmux, or run `vowp up --no-tmux`. |
+| `tmux: command not found` | Install tmux. `vowp up --no-tmux` skips the initial layout but does not let jobs run without windows. |
 | No `vowp-<project>` session | `vowp up` creates it; check the log for a tmux error. |
 | A job window is gone | The window is a view; the session log is intact. `vowp attach <job>` falls back to the tail. |
 | Windows from an old project remain | `vowp down --kill-windows` closes only tagged windows for this project. VOWP never kills untagged windows. |

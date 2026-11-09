@@ -1,9 +1,9 @@
 # Install
 
-VOWP is a single Rust binary. In v0.1 you build it from source; prebuilt release archives, Homebrew
-and an npm wrapper are planned for the first public release. The repository also ships a per-user
-[install script](../../scripts/README.md) that installs the binary, the systemd user unit and the cron
-watchdog.
+VOWP is a single Rust binary. The 0.1.0 release is built from source; prebuilt archives and a Homebrew
+formula are not part of this release (see the [roadmap](../roadmap.md)). The repository also ships a
+per-user [install script](../../scripts/README.md) that installs the binary, the systemd user unit and
+the cron watchdog.
 
 > **Status: current.** The build commands, `vowp init`, `vowp doctor` and the install script work today;
 > every command referenced on this page is implemented.
@@ -15,7 +15,7 @@ watchdog.
 | Linux (x86_64/arm64) or macOS (arm64/x86_64) | The v0.1 platforms. |
 | Rust from [`rust-toolchain.toml`](../../rust-toolchain.toml) | The workspace pins a stable toolchain and edition 2024. With `rustup`, any `cargo` command uses it automatically. |
 | `git` | Worktrees, branches, the merge queue and release checks. |
-| `tmux` | The window manager. The supervisor can run without it (`--no-tmux`), but then there are no live windows. |
+| `tmux` | Job and board windows. `--no-tmux` skips the initial supervisor layout, but a dispatched job still needs a window, so install tmux before running jobs. |
 | A harness such as [Claude Code](https://code.claude.com/docs/en/overview) or [opencode](https://opencode.ai/docs/) | The agent that actually does the work. Install and sign in with the harness's own tooling. |
 
 Check the basics:
@@ -41,10 +41,10 @@ cargo build --workspace
 cargo run -p vowp-cli --bin vowp -- --version
 ```
 
-The last command prints:
+The last command prints the binary version:
 
 ```
-vowp 0.1.0-dev
+vowp 0.1.0
 ```
 
 For a release build:

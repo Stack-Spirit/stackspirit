@@ -1,21 +1,48 @@
 # VOWP — Virtual Open Work-to-Production
 
-VOWP is an open-source (MIT), local-first supervisor for AI coding agents. It runs the harnesses you
-already use — Claude Code, opencode and other stock command-line agents — as a small engineering team on
-your own machines: a laptop, a VPS, or both. Work is planned as a graph of jobs, deterministic loops keep
-it moving, every job runs in a tmux window you can watch, sessions move between harnesses, models and
-machines without losing context, and finished work reaches production only through guarded, reversible
-promotions.
+<!-- Badges: add the GitHub Actions CI badge once the repository is public. Do not add
+     crates.io or npm badges until those packages are actually published. -->
+
+**VOWP is an open-source (MIT), local-first supervisor for AI coding agents.** It runs the harnesses you
+already use as a small engineering team on your own machines.
+
+| | |
+|---|---|
+| **Who it is for** | Developers and small teams who already drive Claude Code, opencode or another headless agent and want reviewed, gated work to keep moving overnight. |
+| **What it needs** | Rust (to build from source), `git`, `tmux`, and a signed-in harness such as Claude Code or opencode. |
+| **3-command quickstart** | `cargo build --workspace`<br>`cargo install --path crates/vowp-cli`<br>`vowp init --name my-project` (run in a git repository with a remote) |
+| **Read next** | [Quickstart](docs/guides/quickstart.md) · [hello-vowp example](examples/hello-vowp/README.md) · [Concepts in 60 seconds](#concepts-in-60-seconds) |
+
+> **Status: current — early release (0.1.0), build from source.** The v0.1 command surface is
+> implemented and the [documentation checks](docs/tests/README.md) pass. The first public release is
+> **0.1.0**; the supported install path today is building from source with the pinned toolchain. See
+> the [roadmap](docs/roadmap.md) for what is deliberately not in v0.1. For an unattended per-user
+> install with the systemd unit and watchdog, see the [install scripts](scripts/README.md); the
+> design lives in [`docs/design/`](docs/design/README.md).
+
+Work is modelled as a graph of jobs, deterministic loops keep it moving, every job runs in a tmux window
+you can watch, sessions move between harnesses, models and machines without losing context, and finished
+work reaches production only through guarded, reversible promotions.
 
 VOWP does not fork or spoof a harness. It drives the official headless/JSON interfaces, keeps the
 conversation in its own append-only event log, and stores no credentials. Model choices are settings in a
 profile ladder, not assumptions baked into a job.
 
-> **Status: current (pre-release).** The v0.1 CLI is complete: every command in the user
-> documentation is implemented. The build-from-source commands below work today. For a runnable
-> project, see the [hello-vowp example](examples/hello-vowp/README.md); for an unattended
-> per-user install with the systemd unit and watchdog, see the
-> [install scripts](scripts/README.md). The design lives in [`docs/design/`](docs/design/README.md).
+## Concepts in 60 seconds
+
+```text
+node (laptop or VPS)
+└─ project               one git repository, one job graph
+   ├─ job graph          jobs + needs/verifies/fixes edges
+   │  └─ job             brief → worktree → gates → report → merge
+   ├─ loops L1–L9        deterministic ticks dispatch, verify, merge and schedule work
+   ├─ sessions           append-only event logs; move between harnesses, models and nodes
+   └─ windows            tmux views: board, supervisor, planner, keeper, job-*, inbox
+```
+
+A **node** owns the SQLite database and session store. A **project** is one repository registered on a
+node. **Jobs** form a graph; **loops** move them; **sessions** keep the conversation; **windows** are
+views onto running work. The [concepts overview](docs/concepts/overview.md) has the full vocabulary.
 
 ## Why VOWP
 
@@ -68,7 +95,7 @@ you ──► vowp CLI ──► SQLite + session logs (~/.vowp)
 ## Quickstart (from source)
 
 Prerequisites: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml), `git`,
-`tmux` for the window manager, and a harness such as Claude Code or opencode, installed and signed in.
+`tmux` for job and board windows, and a harness such as Claude Code or opencode, installed and signed in.
 Install `tmux` with your operating system's package manager; the
 [install guide](docs/guides/install.md#prerequisites) covers harness setup and every other requirement.
 
@@ -77,7 +104,8 @@ cargo build --workspace
 cargo run -p vowp-cli --bin vowp -- --version
 ```
 
-The last command prints `vowp 0.1.0-dev`. To put the binary on your `PATH`:
+The last command prints the binary version; the first public release is `vowp 0.1.0`. To put the
+binary on your `PATH`:
 
 ```sh
 cargo install --path crates/vowp-cli

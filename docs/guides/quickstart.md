@@ -20,7 +20,8 @@ cargo install --path crates/vowp-cli
 vowp --version
 ```
 
-The last command must print `vowp 0.1.0-dev`. If it does not, stop here and read the install guide.
+The last command must print the binary version; the first public release is `vowp 0.1.0`. If it does
+not print a version, stop here and read the install guide.
 
 ## 1. Choose a repository
 
@@ -72,7 +73,7 @@ Fix every `fail` before starting the supervisor:
 | `home` | Make `~/.vowp` writable, or pass `--home <dir>` consistently. |
 | `db` | Move an unsupported or corrupt database aside; `vowp reindex` rebuilds session indexes, not decisions. |
 | `git` | Install git and make sure it is on `PATH`. |
-| `tmux` | Install tmux, or accept the warning and run `vowp up --no-tmux`. |
+| `tmux` | Install tmux before running jobs. `--no-tmux` skips the initial supervisor layout, but a dispatched job still needs a window. |
 | `config` | Fix `vowp.toml`; the error names the key path. |
 | `schedules` | Fix the named `[[schedules]]` entry; its cron, interval or timezone did not parse. |
 | `harness:claude-code` / `harness:opencode` | Install the harness, or change the profile ladder to one that is installed. |
