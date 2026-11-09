@@ -109,15 +109,15 @@ gates: the artifact being restored is the one that was live before.
 
 ## Why this is stricter than "deploy on merge"
 
-Three failures motivated the design:
+The design is stricter for three reasons:
 
 - **Live is not always git.** A manual change, a generated asset or a different branch can be serving.
   Banking the live copy and diffing against it catches that.
 - **A local build is not the deploy build.** Upload-set rules (ignore lists, include lists, generated
   files) can make the deployed artifact differ from the local checkout. The `upload_set` guard, the diff
   and the probe catch it.
-- **A refused deploy must stay refused.** Working around a guard during the night is how a bad deploy
-  becomes a worse morning. VOWP records the refusal and asks the owner.
+- **A refused deploy must stay refused.** Working around a guard during an unattended run is how a bad
+  deploy becomes a worse next day. VOWP records the refusal and asks the owner.
 
 ## Commands
 

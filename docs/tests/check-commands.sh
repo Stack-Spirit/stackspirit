@@ -11,9 +11,8 @@
 # required-set assertion catches parser drift.
 #
 # Scope: README.md, docs/concepts/**, docs/guides/**, docs/security.md,
-# docs/troubleshooting.md, docs/roadmap.md, docs/design/v0.2/** and
-# docs/maintainers/issue-drafts.md. Other docs/design/** pages are the
-# reference, not a consumer.
+# docs/troubleshooting.md, docs/roadmap.md and docs/design/v0.2/**. Other
+# docs/design/** pages are the reference, not a consumer.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -201,7 +200,6 @@ doc_files.extend(
         root / "docs" / "security.md",
         root / "docs" / "troubleshooting.md",
         root / "docs" / "roadmap.md",
-        root / "docs" / "maintainers" / "issue-drafts.md",
     ]
 )
 doc_files.extend(sorted((root / "docs" / "design" / "v0.2").glob("*.md")))
@@ -222,7 +220,7 @@ def parse_command(line):
     if not re.match(r"^vowp(\s|$)", line):
         return None
     # Drop a trailing shell comment. Do not split on '#' without whitespace:
-    # executor variants such as 'opencode:deepseek/deepseek-flash#max' use it.
+    # executor variants such as 'opencode:provider/model#max' use it.
     line = re.sub(r"\s+#\s.*$", "", line).strip()
     try:
         tokens = shlex.split(line, comments=False, posix=True)
@@ -322,7 +320,7 @@ SECTION_MARKER = re.compile(r"^\s*(?:>\s*)?\*\*planned section[:.]?\*\*", re.IGN
 HTML_SECTION_MARKER = "<!-- planned-section -->"
 # A shell-comment marker, whether it is the whole line or trails a command on
 # the same line. The whitespace before '#' keeps executor variants such as
-# 'opencode:deepseek/deepseek-flash#max' out of the match.
+# 'opencode:provider/model#max' out of the match.
 PLANNED_COMMENT = re.compile(r"(?:^|\s)#\s*\(planned\)(?!\w)", re.IGNORECASE)
 
 

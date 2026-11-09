@@ -41,9 +41,9 @@ cron or an interval under 60 seconds exits 2.
 
 ```sh
 vowp schedule ls
-vowp schedule pause nightly-backup
-vowp schedule resume nightly-backup
-vowp schedule rm nightly-backup
+vowp schedule pause daily-backup
+vowp schedule resume daily-backup
+vowp schedule rm daily-backup
 ```
 
 `ls` prints `NAME SPEC ACTION STATE LAST NEXT STATUS`. A paused schedule keeps its row and next-run
@@ -62,7 +62,7 @@ missed = "run_once"
 action = { kind = "loop", loop_name = "l4-planner" }
 
 [[schedules]]
-name = "nightly-backup"
+name = "daily-backup"
 cron = "0 1 * * *"
 action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 ```
@@ -93,11 +93,11 @@ all missed occurrences collapse into the one run.
 
 ## Examples
 
-**Nightly database backup.** A command action keeps the SQLite backup fresh without a shell:
+**Daily database backup.** A command action keeps the SQLite backup fresh without a shell:
 
 ```toml
 [[schedules]]
-name = "nightly-backup"
+name = "daily-backup"
 cron = "0 1 * * *"
 action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 ```

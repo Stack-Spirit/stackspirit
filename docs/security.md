@@ -145,8 +145,8 @@ The window manager is deliberately narrow:
   does not match the live server, so a server VOWP did not create is never cleaned up.
 - It creates or attaches only the `vowp-<project>` session and tagged windows.
 - It never kills untagged windows, never respawns a pane and never sends keystrokes. There is no
-  `kill-server` command in the product path; only explicit private-socket test guards and the dogfood
-  and `hello-vowp` scripts' own private cleanup may stop a server they created.
+  `kill-server` command in the product path; only explicit private-socket test guards and the
+  `hello-vowp` script's own private cleanup may stop a server they created.
 - A job window runs `vowp __window job <id>`, which is a read-only follower of the session
   log. The harness runs headless; the window is not a control channel.
 - `capture-pane` is for display only. Decisions come from the log and the database, never from screen

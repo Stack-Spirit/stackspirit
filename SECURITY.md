@@ -48,9 +48,8 @@ not available yet, wait until the repository is public and use the same link.
 9. **Bounded autonomy.** Continues, restarts, fix rounds and repeated actions are bounded. A provider
    limit parks a job; it does not silently switch to another paid provider.
 10. **Supply chain and releases.** Rust dependencies are pinned by `Cargo.lock`; the release workflow
-    builds archives from a tag with SHA-256 checksums, and the orchestrator runs `vowp --version` on each
-    artifact before publishing. Third-party licence notices are listed in
-    `scripts/audit/THIRD-PARTY-LICENSES.md`.
+    builds archives from a tag with SHA-256 checksums, and the release process runs `vowp --version` on each
+    artifact before publishing.
 
 ## Scope
 

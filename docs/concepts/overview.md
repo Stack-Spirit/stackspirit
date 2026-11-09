@@ -23,7 +23,7 @@ graph, the state machine, the evidence and the handoff format.
    stop". Models are called only for judgment: planning, diagnosing a stall, reviewing a report, writing a
    handoff.
 4. **Any model, any machine.** A model is a setting in a profile ladder, not an assumption. The same job
-   can run on Claude Code on a laptop or DeepSeek on a VPS.
+   can run on Claude Code on a laptop or another harness on a VPS.
 5. **Evidence over claims.** A job is done when its gates pass with recorded evidence — commands, exit
    codes, diffs, verifier findings — not when an agent says so.
 6. **Work → Production is guarded and reversible.** Promotions snapshot what is live, ship only the

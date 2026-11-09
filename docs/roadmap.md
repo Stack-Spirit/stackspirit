@@ -6,7 +6,7 @@ for v0.2 and v0.3. It promises no dates. The authoritative proof for every v0.1 
 document or the code itself.
 
 The first public release is **v0.1.0**. The tree in this repository identifies itself as `0.1.0`; the
-release jobs own the tag and the published artifacts. This page does not duplicate those instructions.
+release process owns the tag and the published artifacts. This page does not duplicate those instructions.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the current behaviour is the code under `crates/`.
@@ -28,11 +28,11 @@ The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 imple
 | Install and operations | Build from source, per-user `install.sh`, systemd user unit, cron watchdog, backup and reindex. | [`docs/guides/install.md`](guides/install.md), [`docs/guides/operating.md`](guides/operating.md), [`scripts/README.md`](../scripts/README.md) |
 | Security model | No stored credentials, stock binaries only, worktree and cwd confinement, and a secret scan before every push. | [`docs/security.md`](security.md) |
 | Runnable example | `examples/hello-vowp` runs a three-job graph against fake adapters without a model account. | [`examples/hello-vowp/README.md`](../examples/hello-vowp/README.md) |
-| Verification | The Cargo test suite, the dogfood harness, the fresh-user container run, and the documentation link/command checks. | [`CHANGELOG.md`](../CHANGELOG.md), [`docs/release/0.1.0-rc.1.md`](release/0.1.0-rc.1.md), [`docs/tests/README.md`](tests/README.md) |
+| Verification | The Cargo test suite and the documentation link and command checks. | [`CHANGELOG.md`](../CHANGELOG.md), [`docs/tests/README.md`](tests/README.md) |
 
 The current tree builds and installs from source; the [install guide](guides/install.md) has the exact
 steps. Prebuilt binaries, crates.io packages and the npm wrapper are release artifacts prepared by the
-release jobs, not features implemented by this roadmap.
+release process, not features implemented by this roadmap.
 
 ## What is deliberately not in v0.1
 
@@ -48,17 +48,14 @@ release jobs, not features implemented by this roadmap.
 - **No IANA time zones.** Schedules and limit resets use UTC or a fixed offset such as `+02:00`.
 - **No phone notifications, shell completions, native GUI or Windows support.** The supported
   platforms are Linux and macOS.
-- **No website.** GitHub, the README and `docs/` are the home; the `site/` directory is an unused
-  generator and is not linked as a product site.
+- **No website.** GitHub, the README and `docs/` are the home.
 
 The detailed list of known limitations and open defects lives in
-[`CHANGELOG.md`](../CHANGELOG.md#known-limitations) and
-[`docs/release/0.1.0-rc.1.md`](release/0.1.0-rc.1.md#open-defects-and-gaps). At the time this page was
-written it includes: `session watch --follow` is unavailable, a cross-node switch skips the remote
-`doctor` probe, interval schedules align to the Unix epoch instead of their creation time, `[env.*]`
-has no `build` key, and `vowp doctor` warns about provider API keys even when a harness uses its own
-login. Those are tracked as small follow-up issues below where they are suitable for a first
-contribution.
+[`CHANGELOG.md`](../CHANGELOG.md#known-limitations). Known limitations include: `session watch --follow`
+is unavailable, a cross-node switch skips the remote `doctor` probe, interval schedules align to the Unix
+epoch instead of their creation time, `[env.*]` has no `build` key, and `vowp doctor` warns about provider
+API keys even when a harness uses its own login. Those are tracked as small follow-up issues below where
+they are suitable for a first contribution.
 
 ## v0.2 — the API, the window and the handoff
 
@@ -112,8 +109,7 @@ These are useful but unscoped. They are not commitments.
 ## Good first issues
 
 These are small, real tasks found by reading the current code. Each entry names the files to touch and
-the behaviour a reviewer can check. The same tasks, with full issue bodies and labels, are in
-[`docs/maintainers/issue-drafts.md`](maintainers/issue-drafts.md).
+the behaviour a reviewer can check. They are also tracked as issues in the repository.
 
 ### 1. Emit JSON from `vowp graph --json`
 
@@ -232,6 +228,6 @@ prints the same document as before; commands that need a project still fail with
 
 ## How to help
 
-Read [`AGENTS.md`](../AGENTS.md) and [`CONTRIBUTING.md`](../CONTRIBUTING.md) first. Every command in
+Read [`CONTRIBUTING.md`](../CONTRIBUTING.md) first. Every command in
 the docs must run, tests must be hermetic, and a change should be one small commit. The v0.2 notes are
 the best place to start a design discussion before writing code.

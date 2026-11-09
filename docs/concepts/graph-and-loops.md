@@ -14,7 +14,7 @@ validated CLI commands, never by hand.
 
 | Field | Meaning |
 |---|---|
-| `id` | Stable slug, e.g. `n04-graph`. Full slug required on the CLI. |
+| `id` | Stable slug, e.g. `example-graph`. Full slug required on the CLI. |
 | `title` | Short human description. |
 | `kind` | `plan`, `spec`, `build`, `test`, `verify`, `fix`, `merge`, `docs`, `research`, `promote`, `release`, `decision`. |
 | `role` | `planner`, `keeper`, `worker` or `verifier`; defaults from the kind. |
@@ -201,8 +201,7 @@ repository-wide checks (`[project].check_cmds`) belong to the merge queue, not t
 | Probe cadence after a failed probe | 15 min |
 | Unknown-failure streak → unavailable for 15 min | 3 runs |
 
-Every number is configurable under `[loops.*]` or `[project]`; the defaults come from production
-experience with the earlier `night.py` supervisor.
+Every number is configurable under `[loops.*]` or `[project]`.
 
 ## Merge queue
 
@@ -229,10 +228,10 @@ by the planner or the person creating the job.
 
 ```markdown
 ---
-job: n04-graph
+job: example-graph
 owns: ["crates/vowp-graph/**"]
 must_not_touch: ["everything else"]
-needs_done: [n02a-protocol-foundation]
+needs_done: [setup-protocol]
 gates: [report, "cargo test -p vowp-graph", owns_respected, review]
 done_when: "report has status: done and every gate passes"
 ---
@@ -246,9 +245,9 @@ A report is the result. The front-matter is machine-checked; the body is for hum
 
 ```markdown
 ---
-job: n04-graph
+job: example-graph
 status: done            # done | partial | blocked
-branch: job/n04-graph
+branch: job/example-graph
 commits: [abc1234]
 tests: { command: "cargo test -p vowp-graph", passed: 31, failed: 0 }
 files_changed: [crates/vowp-graph/src/lib.rs]

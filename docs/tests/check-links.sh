@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Check that every relative Markdown link in the documentation resolves to a
-# file in this repository, and that same-page/cross-page anchors in the pages
-# this job owns point at a real heading.
+# file in this repository, and that same-page/cross-page anchors in the
+# user-facing pages point at a real heading.
 #
 # External URLs are not fetched: a link check must work offline and in CI.
 set -euo pipefail
@@ -26,8 +26,8 @@ readme = root / "README.md"
 if readme.is_file():
     files.insert(0, readme)
 
-# Anchors are enforced only in the pages this documentation job owns. The
-# design spec is read as a reference and may use its own conventions.
+# Anchors are enforced only in the user-facing documentation. The design spec
+# is read as a reference and may use its own conventions.
 owned_anchor_roots = [
     root / "README.md",
     root / "docs" / "concepts",

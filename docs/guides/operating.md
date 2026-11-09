@@ -141,7 +141,7 @@ binary is safe only if the old binary understands the schema, so restore the bac
 ```sh
 vowp cost
 vowp cost --by provider --since 7d
-vowp cost --by job --job n04-graph
+vowp cost --by job --job example-graph
 ```
 
 Rows show runs, USD, tokens, cache reads and the source (`receipt`, `price-table`, `unknown` or

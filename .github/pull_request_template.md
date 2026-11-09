@@ -19,7 +19,7 @@
 - [ ] `cargo test --workspace` passes
 - [ ] No secrets, tokens, `.env` contents, private hostnames or personal paths in the diff, logs or examples
 - [ ] Every test or script that touches tmux uses a unique private socket (`tmux -L <unique>`) **and** a private `TMUX_TMPDIR` created before the first tmux command; nothing uses `default`
-- [ ] Commits are focused, and AI-assisted commits end with the `AI-Assisted: <model> via vowp-night` trailer
+- [ ] Commits are focused, and AI-assisted commits end with the `AI-Assisted: <model> via VOWP` trailer
 - [ ] I have read [`CONTRIBUTING.md`](https://github.com/syver777/vowp/blob/main/CONTRIBUTING.md) and agree to the [`CODE_OF_CONDUCT.md`](https://github.com/syver777/vowp/blob/main/CODE_OF_CONDUCT.md)
 
 ## Notes for the reviewer

@@ -1,6 +1,6 @@
 # Contributing to VOWP
 
-VOWP is built in small, owner-scoped jobs. This page covers setup, the build, the checks CI runs, the
+VOWP is built in small, focused changes. This page covers setup, the build, the checks CI runs, the
 safe way to run the tmux tests, and the workflow every human or AI contributor follows.
 
 ## Set up
@@ -90,8 +90,7 @@ cargo test --workspace
    questions about edge cases; a smaller pull request is easier to review than a broad one.
 4. Push follow-up commits to the same branch. Keep the review conversation about the change, not the
    person.
-5. A maintainer merges the pull request. In this repository the single merge queue rebases the branch
-   and fast-forwards `main`; do not push to `main` directly.
+5. A maintainer merges the pull request after the checks pass; do not push to `main` directly.
 6. Security fixes do not go through a public pull request first. Follow [`SECURITY.md`](SECURITY.md).
 
 Reviewers check, at minimum:
@@ -104,30 +103,18 @@ Reviewers check, at minimum:
   tmux command;
 - commits are focused and carry the trailer described below.
 
-## Job and ownership workflow
+## Scope and evidence
 
-Work is split into jobs. Each job has a brief that lists:
-
-- `owns`: the paths the job may change.
-- `must_not_touch`: paths that are off limits.
-- `gates`: checks that must pass before the work is accepted.
-
-Rules for every job:
-
-1. Work in your own git worktree and branch. Change only the paths under `owns`; read anything, write
-   nothing else. `Cargo.lock` is updated by cargo, never edited by hand.
-2. Commit in your worktree. Never push: the supervisor's merge queue is the only writer of `main`; it
-   rebases the branch, runs the repository-wide checks and pushes.
-3. Work until the report exists. If you need the owner, put the question in the report under
-   `questions_for_owner` and mark the job `blocked`; do not wait in chat.
-4. Record evidence in the report: the exact commands you ran and their results. Gates re-run them and a
-   verifier reads the diff.
-5. Keep tests real and hermetic: no network, no real home directory or `~/.vowp`, no user tmux server, no
-   real harness binaries. Use temporary directories, a private tmux socket (`tmux -L <unique>`) **and** a
-   private `TMUX_TMPDIR`, and fake harness scripts. `-L default` and `tmux kill-server` without a private
-   socket are forbidden.
-
-See [`AGENTS.md`](AGENTS.md) for the full rules, including Rust conventions and the secret policy.
+- Keep a change scoped to the problem: read anything, but edit only the files the change needs.
+- Work on a topic branch and commit in small steps. Never push to `main` directly; a maintainer merges
+  the pull request.
+- Put evidence in the pull request: the exact commands you ran and their results. A reviewer re-runs
+  them.
+- If a decision is needed, say so in the pull request and keep the branch in draft rather than guessing.
+- Keep tests real and hermetic: no network, no real home directory or `~/.vowp`, no user tmux server, no
+  real harness binaries. Use temporary directories, a private tmux socket (`tmux -L <unique>`) **and** a
+  private `TMUX_TMPDIR`, and fake harness scripts. `-L default` and `tmux kill-server` without a private
+  socket are forbidden.
 
 ## Commit messages
 
@@ -143,32 +130,30 @@ inside another tmux session could reach the wrong server. Pass the node's
 private directory and unset TMUX/TMUX_PANE.
 ```
 
-End every commit message with the trailer:
+If a commit is AI-assisted, end its message with the trailer:
 
 ```text
-AI-Assisted: <model> via vowp-night
+AI-Assisted: <model> via VOWP
 ```
 
 For example:
 
 ```text
-AI-Assisted: deepseek/deepseek-flash#max via vowp-night
+AI-Assisted: <provider>/<model> via VOWP
 ```
 
 ## AI contributors
 
 AI-assisted contributions are welcome and held to the same standard as any other change.
 
-- Label every AI-assisted commit with the `AI-Assisted: <model> via vowp-night` trailer, using the real
+- Label every AI-assisted commit with the `AI-Assisted: <model> via VOWP` trailer, using the real
   model identifier. Do not invent a model name or omit the trailer.
 - Do not claim tests, reviews or benchmarks you did not run. Put the exact commands and their results
-  in the pull request or job report.
-- Change only the paths the job owns, and keep the diff limited to the problem.
+  in the pull request.
+- Change only the files the change needs, and keep the diff limited to the problem.
 - Never put a secret, token, `.env` value or private path into a prompt, commit, log or test fixture.
 - A human submitter is responsible for the pull request and should be able to explain the change and
   its verification.
-- Agents working in this repository also follow [`AGENTS.md`](AGENTS.md), including the Rust
-  conventions and the hermetic-test rules.
 
 ## Documentation
 

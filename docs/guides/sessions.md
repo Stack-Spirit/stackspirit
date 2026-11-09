@@ -1,8 +1,8 @@
 # Sessions
 
 A session is a conversation with a stable VOWP id. The harness underneath can change: you can start on
-Claude Code, hit a limit, switch to DeepSeek on a VPS, and come back when the quota resets. The log and
-the lineage stay one session.
+Claude Code, hit a limit, switch to another model on a VPS, and come back when the quota resets. The log
+and the lineage stay one session.
 
 > **Status: current.** The session store, adapters, `vowp session` commands and the `vowp chat` alias
 > are implemented.
@@ -31,7 +31,7 @@ and lists the candidates. Jobs need the full slug.
 ## Create and chat
 
 ```sh
-vowp session new --title "Refactor the parser" --executor opencode:deepseek/deepseek-flash#max
+vowp session new --title "Refactor the parser" --executor opencode:provider/model#max
 vowp chat <id>
 vowp session chat <id>
 ```
@@ -56,8 +56,8 @@ be switched automatically exits 6 with the hint to `/switch`.
 ## Switch
 
 ```sh
-vowp session switch <id> --to opencode:deepseek/deepseek-flash#max
-vowp session switch <id> --to claude-code:claude-sonnet-5-5@medium --reason user
+vowp session switch <id> --to opencode:provider/model#max
+vowp session switch <id> --to claude-code:model@medium --reason user
 vowp session switch <id> --to <executor> --node vps
 ```
 

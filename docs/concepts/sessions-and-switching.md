@@ -34,10 +34,10 @@ Every line is an `EventEnvelope`:
   "id": "01KA1V0Z7A0000000000000000",
   "session_id": "01KA1V0Z7A0000000000000000",
   "seq": 42,
-  "ts": "2026-11-08T19:30:12.345Z",
+  "ts": "2024-01-01T00:00:00.000Z",
   "type": "tool.call",
   "actor": "assistant",
-  "source": {"harness": "opencode", "model": "deepseek/deepseek-flash", "node": "vps", "native_session_id": "ses_…"},
+  "source": {"harness": "opencode", "model": "provider/model", "node": "vps", "native_session_id": "ses_…"},
   "payload": {"name": "shell", "input": {"command": "cargo test"}},
   "raw": {"…": "original harness event, display only"},
   "replayable": true
@@ -95,12 +95,12 @@ harness ":" model [ "@" effort ] [ "#" variant ]
 
 | Example | Harness | Model | Effort / variant |
 |---|---|---|---|
-| `claude-code:claude-sonnet-5-5@medium` | Claude Code | `claude-sonnet-5-5` | effort `medium` |
-| `opencode:deepseek/deepseek-flash#max` | opencode | `deepseek/deepseek-flash` | variant `max` |
+| `claude-code:model@medium` | Claude Code | `model` | effort `medium` |
+| `opencode:provider/model#max` | opencode | `provider/model` | variant `max` |
 | `cli:codex` | generic CLI adapter | mapping entry `codex` | — |
 
 `@` is valid only for Claude Code and `#` only for opencode. The provider key used by limits and cost is
-`claude` for Claude Code, the text before the first `/` for opencode (`deepseek`), and the mapping entry
+`claude` for Claude Code, the text before the first `/` for opencode (`provider`), and the mapping entry
 name for a generic CLI. A profile is an ordered ladder of executors; rung 0 is preferred. See
 [providers and failover](providers-and-failover.md).
 

@@ -13,17 +13,17 @@ silently moves work to a paid provider that the profile does not list.
 ```toml
 # vowp.toml — excerpt; see docs/design/architecture.md §5.2 for the full example
 [profiles.planner]
-ladder = ["claude-code:claude-sonnet-5-5@medium", "opencode:deepseek/deepseek-flash#max"]
-on_quota = "next_then_probe_back"   # move to DeepSeek, probe Claude after the reset
+ladder = ["claude-code:model@medium", "opencode:provider/model#max"]
+on_quota = "next_then_probe_back"   # move to the next rung, probe the first after the reset
 
 [profiles.keeper]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:provider/model#max"]
 
 [profiles.worker]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:provider/model#max"]
 
 [profiles.verifier]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = ["opencode:provider/model#max"]
 ```
 
 The four role names `planner`, `keeper`, `worker` and `verifier` must exist after project and node
@@ -46,7 +46,7 @@ harness ":" model [ "@" effort ] [ "#" variant ]
 - `harness` is `claude-code`, `opencode`, `cli` or (for VOWP's own events) `vowp`.
 - `@effort` is Claude Code only; `#variant` is opencode only. Both on one executor is invalid.
 - The provider key is `claude` for Claude Code, the text before the first `/` for opencode
-  (`opencode:deepseek/deepseek-flash#max` → `deepseek`), and the mapping entry name for a generic CLI.
+  (`opencode:provider/model#max` → `provider`), and the mapping entry name for a generic CLI.
 
 This one string is what you put in a profile, pass to `vowp session switch --to`, or see in
 `vowp session show`.
@@ -66,7 +66,7 @@ acts on the classified event.
 
 A crash or error without a limit signal is not a provider limit. It goes through the normal L2 continue
 path: two automatic continues, then the keeper. Three consecutive crashes or errors from the same
-provider with no limit classification mark that provider `unavailable` for 15 minutes (decision D15).
+provider with no limit classification mark that provider `unavailable` for 15 minutes.
 
 ### Quota failover, step by step
 
@@ -98,22 +98,22 @@ logging in. `vowp inbox answer <id> resolved` removes the limit row and returns 
 ## Provider concurrency and spend
 
 ```toml
-[providers.deepseek]
-max_concurrent = 6
+[providers.provider]
+max_concurrent = 4
 on_credits_exhausted = "park"
 
-[providers.deepseek.prices."deepseek-flash"]   # only used when no receipt exists
-input_per_m = 0.15
-output_per_m = 0.60
-cache_read_per_m = 0.003
-
-[providers.claude]
-max_concurrent = 1                             # the planner shares the owner's subscription
+[providers.subscription]
+max_concurrent = 1                             # keep a subscription-backed provider at one run
 ```
 
-`max_concurrent` caps concurrent runs per provider. A rate limit lowers the effective cap until its
-reset, then restores it. Slots are separate: `[node].max_workers` and `max_verifiers` bound how many
-runs a node starts at once.
+Use your own provider keys as the table names. `max_concurrent` caps concurrent runs per provider. A
+rate limit lowers the effective cap until its reset, then restores it. Slots are separate:
+`[node].max_workers` and `max_verifiers` bound how many runs a node starts at once.
+
+If a harness reports usage but no cost receipt, add a price table under the provider:
+`[providers.<provider>.prices."<model>"]` with `input_per_m` and `output_per_m`, plus
+`cache_read_per_m` and `cache_write_per_m` when the provider charges for cache tokens. Use the
+provider's current prices; without a table the cost stays `unknown`.
 
 ## Cost is reported, not capped
 
@@ -121,7 +121,7 @@ Every run produces a `Cost`:
 
 | Source | Meaning |
 |---|---|
-| `receipt` | The harness reported usage and cost (opencode `step_finish`, Claude stream-json `result`). |
+| `receipt` | The harness reported usage and cost (opencode `step_finish`, Claude Code stream-json `result`). |
 | `price-table` | Estimated from `[providers.<p>.prices]` because the harness reported usage but no cost. |
 | `unknown` | No usable numbers. `usd` is `None`; it is never treated as zero. |
 

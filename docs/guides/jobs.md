@@ -11,18 +11,18 @@ a brief that an agent can follow, choosing gates that prove the work, and readin
 
 ```sh
 vowp job add \
-  --id n04-graph \
+  --id example-graph \
   --title "Graph engine: DAG, state machine, scheduler" \
   --kind build \
   --role worker \
   --profile worker \
-  --needs n02a-protocol-foundation \
+  --needs setup-protocol \
   --owns "crates/vowp-graph/**" \
   --reads "crates/vowp-protocol/**,docs/design/**" \
   --gates rust_build \
   --priority 50 \
   --max-attempts 3 \
-  --brief-file /tmp/n04-brief.md
+  --brief-file /tmp/example-brief.md
 ```
 
 | Flag | Meaning |
@@ -58,10 +58,10 @@ says what to do and what not to do.
 
 ```markdown
 ---
-job: n04-graph
+job: example-graph
 owns: ["crates/vowp-graph/**"]
 must_not_touch: ["everything else"]
-needs_done: [n02a-protocol-foundation]
+needs_done: [setup-protocol]
 gates: [report, "cargo test -p vowp-graph", owns_respected, secret_scan, review]
 done_when: "report has status: done and every gate passes"
 ---
@@ -164,9 +164,9 @@ invalid report is not a partial success.
 
 ```markdown
 ---
-job: n04-graph
+job: example-graph
 status: done
-branch: job/n04-graph
+branch: job/example-graph
 commits: [a1b2c3d, e4f5a6b]
 tests: { command: "cargo test -p vowp-graph", passed: 31, failed: 0 }
 files_changed:
@@ -227,9 +227,9 @@ woken.
 
 ```sh
 vowp job ls
-vowp job show n04-graph --runs --gates
-vowp job show n04-graph --brief
-vowp job show n04-graph --report
+vowp job show example-graph --runs --gates
+vowp job show example-graph --brief
+vowp job show example-graph --report
 vowp graph --mermaid
 vowp graph --export .vowp/graph.yaml
 ```

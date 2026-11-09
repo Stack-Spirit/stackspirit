@@ -1,11 +1,11 @@
 # Documentation tests
 
-Two offline checks guard the user documentation. They are the acceptance tests for the documentation
-job and can run in CI without network access.
+Two offline checks guard the user documentation. They are the documentation acceptance tests and can run
+in CI without network access.
 
 | Script | What it proves |
 |---|---|
-| [`check-links.sh`](check-links.sh) | Every relative Markdown link resolves to a file, and heading anchors in the pages this job owns exist. External URLs are not fetched. |
+| [`check-links.sh`](check-links.sh) | Every relative Markdown link resolves to a file, and heading anchors in the user-facing pages exist. External URLs are not fetched. |
 | [`check-commands.sh`](check-commands.sh) | Every `vowp` command shown in `README.md`, `docs/concepts/**`, `docs/guides/**`, `docs/security.md` or `docs/troubleshooting.md` exists in the real CLI, and the status marks match the implementation: an unimplemented command must be marked *(planned)*, and an implemented command must not be. The command surface comes from [`docs/design/cli.md`](../design/cli.md) and `V0_1_COMMANDS`; implementation status comes from the CLI dispatch table. A required-set assertion catches parser drift. |
 | [`run.sh`](run.sh) | Runs both checks and prints one pass line. |
 
@@ -30,7 +30,7 @@ bash docs/tests/check-commands.sh
 - Global flags before the command, including the value-taking `--node`, `--project` and `--home`.
 - Family subcommands (`job`, `session`, `inbox`, `node`, `schedule`), which are checked as two words.
 - Trailing shell comments. A `#` without preceding whitespace is not a comment, so executor variants
-  such as `opencode:deepseek/deepseek-flash#max` survive intact.
+  such as `opencode:provider/model#max` survive intact.
 
 It does **not** validate flags or arguments. It does distinguish a command that only appears in
 `--help` from one whose handler is still the explicit `NotImplemented` stub: a documented command whose
@@ -57,8 +57,8 @@ is complete, so the pages are `current`; a new stub or a new command marker must
 
 1. Add or update the command in [`docs/design/cli.md`](../design/cli.md) first. That file is the
    contract; the documentation may not invent a command.
-2. Use the command in a page under the owned paths.
+2. Use the command in a user-facing page.
 3. Run `bash docs/tests/run.sh`.
 
-If a command is genuinely new, the design change belongs in a `docs/design/**` job. Do not add it to the
-checker's allow-list: there is no allow-list.
+If a command is genuinely new, the design change belongs in a separate design pull request. Do not add
+it to the checker's allow-list: there is no allow-list.
