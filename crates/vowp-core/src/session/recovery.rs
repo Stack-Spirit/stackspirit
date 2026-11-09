@@ -59,6 +59,12 @@ fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) ->
         Ok(EventBody::Capsule(payload)) => Some(payload.capsule_id.clone()),
         _ => None,
     });
+    // The same recovered id must reach both the store row and a switch event appended by
+    // recovery; a started row usually has `switch.capsule_id = None`.
+    let capsule_id = recorded_capsule
+        .clone()
+        .or_else(|| switch.capsule_id.clone())
+        .or(logged_capsule);
     let last_executor = events.iter().rev().find_map(|event| match event.body() {
         Ok(EventBody::SessionExecutor(payload)) => Some(payload),
         _ => None,
@@ -88,7 +94,7 @@ fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) ->
                         executor: switch.to_executor.clone(),
                         node: Some(switch.to_node.clone()),
                     },
-                    capsule_id: switch.capsule_id.clone(),
+                    capsule_id: capsule_id.clone(),
                     reason: switch.reason,
                 }),
                 raw: None,
@@ -97,10 +103,6 @@ fn recover_switch(deps: &Deps, store: &Store, switch: &vowp_protocol::Switch) ->
             store.index_event(&index_row(&appended))?;
             log.sync()?;
         }
-        let capsule_id = recorded_capsule
-            .clone()
-            .or_else(|| switch.capsule_id.clone())
-            .or(logged_capsule);
         store.finish_switch(&switch.id, SwitchState::Completed, None, capsule_id.as_ref())?;
         // A completed switch unfreezes to idle on the new executor. The previous
         // `limit` belongs to the old run; only an abort restores `blocked`.

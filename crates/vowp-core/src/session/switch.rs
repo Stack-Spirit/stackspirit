@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
-    Actor, AttachAction, CancelToken, CapsuleTrigger, CostEvent, ErrorEvent, ErrorKind, EventBody, EventSource,
+    Actor, AttachAction, CancelToken, CapsuleTrigger, Clock, CostEvent, ErrorEvent, ErrorKind, EventBody, EventSource,
     Executor, ExecutorRef, HarnessKind, Level, Limit, LimitEvent, LimitRowKind, NodeName, Run, RunId, RunOutcome,
     RunPurpose, RunRole, Session, SessionExecutor, SessionId, SessionRole, SessionState, StartInput, StopReason,
     Switch, SwitchEvent, SwitchId, SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted, UserMessage,
@@ -37,19 +37,68 @@ const EVENT_POLL: Duration = Duration::from_millis(200);
 const DRAIN_POLL: Duration = Duration::from_millis(20);
 
 /// Wait after SIGINT before the normal stop, per sessions.md §5 step 4.
-const INTERRUPT_WAIT: Duration = Duration::from_secs(3);
+const INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 
 /// Wait after SIGTERM before the escalated kill, matching `AdapterRun::stop`.
-const STOP_WAIT: Duration = Duration::from_secs(3);
+const STOP_GRACE: Duration = Duration::from_secs(3);
 
-/// Real-time grace for the runner thread to finish its run row after a stop.
+/// Bounded grace for the runner thread to finish its run row after a stop.
 const RUNNER_GRACE: Duration = Duration::from_secs(5);
 
-/// Real-time wait for the runner thread to drop the single-writer session log.
-const LOG_RELEASE_WAIT: Duration = Duration::from_secs(5);
+/// Bounded wait for the runner thread to drop the single-writer session log.
+const LOG_RELEASE_GRACE: Duration = Duration::from_secs(5);
+
+/// Shorter bound for an active run row without a pid: there is no process group to
+/// signal, so only a runner between polls can finish it.
+const UNOWNED_GRACE: Duration = Duration::from_millis(500);
 
 /// Margin added once when a seeded turn reports a provider limit.
 const LIMIT_MARGIN: Duration = Duration::from_secs(120);
+
+/// Sleeps between bounded drain polls.
+///
+/// Production uses [`SystemSleeper`]. Tests inject a sleeper that advances a fake clock,
+/// so clock-derived deadlines expire without wall-clock waits.
+pub trait DrainSleeper: Send + Sync {
+    /// Sleeps for `duration`; a test implementation may only advance a fake clock.
+    fn sleep(&self, duration: Duration);
+}
+
+/// The real drain sleeper: blocks the current thread.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemSleeper;
+
+impl DrainSleeper for SystemSleeper {
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// A deadline measured on the injected clock, with a monotonic backstop.
+///
+/// The clock deadline is the bound callers reason about (and what FakeClock tests
+/// advance). The monotonic deadline is a safety net: a stalled injected clock must never
+/// turn a drain wait into an infinite loop.
+#[derive(Debug, Clone, Copy)]
+struct DrainDeadline {
+    clock_deadline: Timestamp,
+    wall_deadline: Instant,
+}
+
+impl DrainDeadline {
+    /// Starts a deadline `budget` from now on both the injected clock and the monotonic one.
+    fn after(clock: &dyn Clock, budget: Duration) -> Self {
+        Self {
+            clock_deadline: clock.now().plus(budget),
+            wall_deadline: Instant::now() + budget,
+        }
+    }
+
+    /// Returns whether either the injected clock or the monotonic backstop has expired.
+    fn expired(&self, clock: &dyn Clock) -> bool {
+        clock.now() >= self.clock_deadline || Instant::now() >= self.wall_deadline
+    }
+}
 
 /// How the drain phase ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +112,20 @@ enum Drain {
 
 /// Runs the switch protocol for `req`; the target is attached idle.
 pub fn run_switch(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError> {
-    run_switch_inner(deps, req, None, cancel)
+    run_switch_inner(deps, req, None, cancel, &SystemSleeper)
+}
+
+/// Runs the switch protocol with an injected sleeper for the drain waits.
+///
+/// Tests use this with a sleeper that advances a `FakeClock`; production callers use
+/// [`run_switch`], which sleeps on the current thread.
+pub fn run_switch_with_sleeper(
+    deps: &Deps,
+    req: &SwitchRequest,
+    cancel: &CancelToken,
+    sleeper: &dyn DrainSleeper,
+) -> Result<Switch, CoreError> {
+    run_switch_inner(deps, req, None, cancel, sleeper)
 }
 
 /// Runs the switch protocol and starts the first turn on the target with a seed.
@@ -77,7 +139,7 @@ pub fn run_switch_with_input(
     next_input: &str,
     cancel: &CancelToken,
 ) -> Result<Switch, CoreError> {
-    run_switch_inner(deps, req, Some(next_input), cancel)
+    run_switch_inner(deps, req, Some(next_input), cancel, &SystemSleeper)
 }
 
 /// Shared implementation of the pure and seeded switch protocols.
@@ -86,6 +148,7 @@ fn run_switch_inner(
     req: &SwitchRequest,
     next_input: Option<&str>,
     cancel: &CancelToken,
+    sleeper: &dyn DrainSleeper,
 ) -> Result<Switch, CoreError> {
     if cancel.is_cancelled() {
         return Err(CoreError::Cancelled);
@@ -159,7 +222,7 @@ fn run_switch_inner(
         }
 
         if is_active(&store, &session)? {
-            match drain(deps, &store, &session, req.drain_secs, cancel) {
+            match drain(deps, &store, &session, req.drain_secs, cancel, sleeper) {
                 Ok(Drain::Finished { blocked }) => {
                     previous_state = if blocked {
                         SessionState::Blocked
@@ -382,15 +445,21 @@ fn is_active(store: &Store, session: &Session) -> Result<bool, CoreError> {
 /// until the runner's writer lock is released, and only then appends the synthetic
 /// interrupted `turn.ended` if the adapter did not emit one. It never finishes the run
 /// row itself, so the runner cannot race with "run already ended".
+///
+/// Every wait is bounded: the drain deadline is `drain_secs`; after it the interrupt path
+/// gets at most `INTERRUPT_GRACE` (3 s) + `STOP_GRACE` (3 s) + `RUNNER_GRACE` (5 s) +
+/// `LOG_RELEASE_GRACE` (5 s). Each deadline follows the injected clock and has a
+/// monotonic backstop, so even a stalled clock cannot make the switch hang.
 fn drain(
     deps: &Deps,
     store: &Store,
     session: &Session,
     drain_secs: u64,
     cancel: &CancelToken,
+    sleeper: &dyn DrainSleeper,
 ) -> Result<Drain, CoreError> {
     let start_seq = SessionLog::open_read(&deps.paths, &session.id)?.last_seq()?;
-    let deadline = deps.clock.now().plus(Duration::from_secs(drain_secs));
+    let deadline = DrainDeadline::after(deps.clock.as_ref(), Duration::from_secs(drain_secs));
     loop {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -404,10 +473,11 @@ fn drain(
                 blocked: last_turn_blocked(&events),
             });
         }
-        if deps.clock.now() >= deadline {
+        if deadline.expired(deps.clock.as_ref()) {
             break;
         }
-        std::thread::sleep(DRAIN_POLL);
+        // Bound: the drain deadline above (`drain_secs`, default 5 s).
+        sleeper.sleep(DRAIN_POLL);
     }
 
     let active: Vec<Run> = store
@@ -415,37 +485,39 @@ fn drain(
         .into_iter()
         .filter(|run| run.session_id.as_ref() == Some(&session.id))
         .collect();
+    let signalable = active.iter().any(|run| run.pid.is_some());
     let mut active_ids = Vec::with_capacity(active.len());
     if !active.is_empty() {
         for run in &active {
             active_ids.push(run.id.clone());
             signal_run(run, Signal::Int)?;
         }
-        let _ = wait_window(deps, &session.id, start_seq, INTERRUPT_WAIT, cancel)?;
-        for run in &active {
-            signal_run(run, Signal::Term)?;
-        }
-        let _ = wait_window(deps, &session.id, start_seq, STOP_WAIT, cancel)?;
-        for run in &active {
-            signal_run(run, Signal::Kill)?;
+        if signalable {
+            // Bound: INTERRUPT_GRACE (3 s) after SIGINT.
+            let _ = wait_window(deps, &session.id, start_seq, INTERRUPT_GRACE, cancel, sleeper)?;
+            for run in &active {
+                signal_run(run, Signal::Term)?;
+            }
+            // Bound: STOP_GRACE (3 s) after SIGTERM.
+            let _ = wait_window(deps, &session.id, start_seq, STOP_GRACE, cancel, sleeper)?;
+            for run in &active {
+                signal_run(run, Signal::Kill)?;
+            }
+        } else {
+            // No process group to signal: give a runner between polls one short window.
+            // Bound: UNOWNED_GRACE (500 ms).
+            let _ = wait_window(deps, &session.id, start_seq, UNOWNED_GRACE, cancel, sleeper)?;
         }
     }
     // The runner thread owns the run row and the session log writer. Let it finish
     // applying the interrupted turn, then take the writer once it releases the lock;
     // never finish the run row from here or the runner would see "already ended".
-    let signalable = active.iter().any(|run| run.pid.is_some());
-    let grace = if signalable {
-        RUNNER_GRACE
-    } else {
-        Duration::from_millis(500)
-    };
-    wait_for_runs_finished(store, &active_ids, grace)?;
-    let log_wait = if signalable {
-        LOG_RELEASE_WAIT
-    } else {
-        Duration::from_millis(500)
-    };
-    let log = open_log_when_released(deps, &session.id, log_wait)?;
+    // Bound: RUNNER_GRACE (5 s) for a stopped process; UNOWNED_GRACE (500 ms) otherwise.
+    let grace = if signalable { RUNNER_GRACE } else { UNOWNED_GRACE };
+    wait_for_runs_finished(store, &active_ids, grace, deps.clock.as_ref(), sleeper, signalable)?;
+    // Bound: LOG_RELEASE_GRACE (5 s) for a stopped process; UNOWNED_GRACE (500 ms) otherwise.
+    let log_wait = if signalable { LOG_RELEASE_GRACE } else { UNOWNED_GRACE };
+    let log = open_log_when_released(deps, &session.id, log_wait, sleeper, signalable)?;
     let events = SessionLog::open_read(&deps.paths, &session.id)?.read_all()?;
     let interrupted = events
         .iter()
@@ -483,32 +555,66 @@ fn drain(
     Ok(Drain::Interrupted)
 }
 
-/// Waits (real time) for the runner thread to finish the given runs.
-fn wait_for_runs_finished(store: &Store, ids: &[RunId], timeout: Duration) -> Result<(), CoreError> {
+/// Waits for the runner thread to finish the given runs, bounded by `grace`.
+///
+/// `owned` is true when at least one run has a process group we stopped: then a still-open
+/// row means the runner never finished and the switch must fail instead of waiting forever.
+/// Rows without a pid belong to no process we control; their log-release wait decides.
+fn wait_for_runs_finished(
+    store: &Store,
+    ids: &[RunId],
+    grace: Duration,
+    clock: &dyn Clock,
+    sleeper: &dyn DrainSleeper,
+    owned: bool,
+) -> Result<(), CoreError> {
     if ids.is_empty() {
         return Ok(());
     }
-    let deadline = Instant::now() + timeout;
+    let deadline = DrainDeadline::after(clock, grace);
     loop {
         let open = store.open_runs()?;
         if !open.iter().any(|run| ids.iter().any(|id| id == &run.id)) {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        if deadline.expired(clock) {
+            if owned {
+                return Err(CoreError::SwitchAborted(format!(
+                    "drain: runner did not finish {} run row(s) within {grace:?}",
+                    ids.len()
+                )));
+            }
             return Ok(());
         }
-        std::thread::sleep(DRAIN_POLL);
+        // Bound: the `grace` deadline constructed above.
+        sleeper.sleep(DRAIN_POLL);
     }
 }
 
 /// Opens the session log, retrying while the runner thread still holds its writer lock.
-fn open_log_when_released(deps: &Deps, session: &SessionId, timeout: Duration) -> Result<SessionLog, CoreError> {
-    let deadline = Instant::now() + timeout;
+///
+/// The retry loop is bounded by `timeout`. When the stopped run was owned (`owned`), a
+/// still-locked log after the grace is a switch failure; otherwise the lock error is
+/// returned as-is so the caller still aborts the switch row.
+fn open_log_when_released(
+    deps: &Deps,
+    session: &SessionId,
+    timeout: Duration,
+    sleeper: &dyn DrainSleeper,
+    owned: bool,
+) -> Result<SessionLog, CoreError> {
+    let deadline = DrainDeadline::after(deps.clock.as_ref(), timeout);
     loop {
         match SessionLog::open(&deps.paths, session, deps.clock.clone()) {
             Ok(log) => return Ok(log),
-            Err(vowp_store::StoreError::Locked { .. }) if Instant::now() < deadline => {
-                std::thread::sleep(DRAIN_POLL);
+            Err(vowp_store::StoreError::Locked { .. }) if !deadline.expired(deps.clock.as_ref()) => {
+                // Bound: the `timeout` deadline constructed above.
+                sleeper.sleep(DRAIN_POLL);
+            }
+            Err(vowp_store::StoreError::Locked { .. }) if owned => {
+                return Err(CoreError::SwitchAborted(format!(
+                    "drain: session log writer was not released within {timeout:?}"
+                )));
             }
             Err(error) => return Err(error.into()),
         }
@@ -526,15 +632,16 @@ fn signal_run(run: &Run, signal: Signal) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Waits up to `window` for a `turn.ended` after `start_seq`, using the injected clock.
+/// Waits up to `window` for a `turn.ended` after `start_seq`, bounded by the injected clock.
 fn wait_window(
     deps: &Deps,
     session: &SessionId,
     start_seq: u64,
     window: Duration,
     cancel: &CancelToken,
+    sleeper: &dyn DrainSleeper,
 ) -> Result<bool, CoreError> {
-    let deadline = deps.clock.now().plus(window);
+    let deadline = DrainDeadline::after(deps.clock.as_ref(), window);
     loop {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -546,10 +653,11 @@ fn wait_window(
         {
             return Ok(true);
         }
-        if deps.clock.now() >= deadline {
+        if deadline.expired(deps.clock.as_ref()) {
             return Ok(false);
         }
-        std::thread::sleep(DRAIN_POLL);
+        // Bound: the `window` deadline constructed above.
+        sleeper.sleep(DRAIN_POLL);
     }
 }
 
