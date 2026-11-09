@@ -101,9 +101,9 @@ fatal scan:
   Mac and a VPS, a private bootstrap directory, a private tmux session, a deploy-key setup, model costs
   and a morning handover. It contains no credential, but it is private operational data. Remove section
   16 or rewrite it as a generic design note before publication. This file is outside p01's `owns`.
-- `docs/dogfood/RESULTS.md` and `docs/release/0.1.0-rc.1.md` mention the private `~/vowp-night` directory
-  and the night supervisor. p09 owns `docs/release/**` and is rewriting the 0.1.0 notes; `docs/dogfood/`
-  is unowned and needs an owner decision.
+- `docs/dogfood/RESULTS.md` mentions the private `~/vowp-night` directory and the night supervisor; it is
+  unowned and needs an owner decision. `docs/release/0.1.0-rc.1.md` is now a short historical stub that
+  no longer contains that reference.
 - `AGENTS.md`, `CONTRIBUTING.md`, `framework/templates/AGENTS.md`,
   `framework/skills/vowp-worker/SKILL.md` and `crates/vowp-core/src/loops/merge_queue.rs` use
   `vowp-night` in the `AI-Assisted:` commit trailer. That is a product/workflow name, not a hostname or

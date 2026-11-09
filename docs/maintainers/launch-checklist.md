@@ -505,20 +505,24 @@ available; the npm package supports both Linux architectures.
 Set `VOWP_BIN` to the **absolute path** of the release binary you installed:
 `/tmp/cargo/bin/vowp` from 11.1, the npm-installed binary from 11.2, or the
 `vowp` file from a prebuilt archive. The block refuses a missing or
-non-executable path.
+non-executable path. The temporary `HOME` and repositories live in a subshell,
+so step 12 and later run with the original `HOME` and the owner's `gh`
+configuration.
 
 ```sh
 VOWP_BIN=${VOWP_BIN:?set VOWP_BIN to an installed vowp 0.1.0 binary}
-test -x "$VOWP_BIN"
+test -x "$VOWP_BIN" || exit 1
 "$VOWP_BIN" --version
 
-export HOME=$(mktemp -d)
-WORK=$(mktemp -d)
-git init -q -b main "$WORK/repo"
-git init -q --bare "$WORK/origin.git"
-git -C "$WORK/repo" remote add origin "$WORK/origin.git"
-cd "$WORK/repo"
-"$VOWP_BIN" init --name hello-vowp
+(
+  export HOME=$(mktemp -d)
+  WORK=$(mktemp -d)
+  git init -q -b main "$WORK/repo"
+  git init -q --bare "$WORK/origin.git"
+  git -C "$WORK/repo" remote add origin "$WORK/origin.git"
+  cd "$WORK/repo"
+  "$VOWP_BIN" init --name hello-vowp
+)
 ```
 
 `vowp init` must print the project summary. A full `vowp doctor` needs a signed-in
