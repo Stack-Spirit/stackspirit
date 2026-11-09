@@ -145,6 +145,96 @@ fn help_lists_every_v0_1_command() {
 }
 
 #[test]
+fn parse_schedule_add_examples_from_cli_md() {
+    use vowp_cli::cli::{ScheduleActionArg, ScheduleCommand};
+
+    let cli = Cli::try_parse_from([
+        "vowp",
+        "schedule",
+        "add",
+        "0 7 * * 1-5",
+        "loop",
+        "l4-planner",
+        "--name",
+        "morning-report",
+        "--tz",
+        "+02:00",
+        "--missed",
+        "run_once",
+    ])
+    .expect("cli.md loop example parses");
+    match cli.command {
+        Command::Schedule {
+            command: ScheduleCommand::Add(args),
+        } => {
+            assert_eq!(args.spec, "0 7 * * 1-5");
+            match args.action {
+                ScheduleActionArg::Loop(loop_) => {
+                    assert_eq!(loop_.loop_name, "l4-planner");
+                    assert_eq!(loop_.common.name, "morning-report");
+                    assert_eq!(loop_.common.tz.as_deref(), Some("+02:00"));
+                    assert_eq!(loop_.common.missed.as_deref(), Some("run_once"));
+                }
+                other => panic!("expected loop action, got {other:?}"),
+            }
+        }
+        other => panic!("expected schedule add, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "vowp",
+        "schedule",
+        "add",
+        "every 30m",
+        "command",
+        "--name",
+        "hb",
+        "--",
+        "vowp",
+        "status",
+        "--check",
+    ])
+    .expect("cli.md command example parses");
+    match cli.command {
+        Command::Schedule {
+            command: ScheduleCommand::Add(args),
+        } => match args.action {
+            ScheduleActionArg::Command(command) => {
+                assert_eq!(command.common.name, "hb");
+                assert_eq!(command.argv, vec!["vowp", "status", "--check"])
+            }
+            other => panic!("expected command action, got {other:?}"),
+        },
+        other => panic!("expected schedule add, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "vowp",
+        "schedule",
+        "add",
+        "0 1 * * *",
+        "job-template",
+        "--name",
+        "dep-update",
+        "--template-file",
+        "deps.json",
+    ])
+    .expect("cli.md job-template example parses");
+    match cli.command {
+        Command::Schedule {
+            command: ScheduleCommand::Add(args),
+        } => match args.action {
+            ScheduleActionArg::JobTemplate(template) => {
+                assert_eq!(template.common.name, "dep-update");
+                assert_eq!(template.template_file, std::path::Path::new("deps.json"))
+            }
+            other => panic!("expected job-template action, got {other:?}"),
+        },
+        other => panic!("expected schedule add, got {other:?}"),
+    }
+}
+
+#[test]
 fn json_error_shape_not_found() {
     let env = common::TestEnv::new();
     let (code, stdout, stderr) = env.run(&["--json", "job", "show", "n99"]);

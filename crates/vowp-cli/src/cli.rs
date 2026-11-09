@@ -741,6 +741,11 @@ pub struct ScheduleAddArgs {
     /// What the schedule does.
     #[command(subcommand)]
     pub action: ScheduleActionArg,
+}
+
+/// Options shared by every `vowp schedule add` action, accepted after the action keyword.
+#[derive(Debug, Clone, Args)]
+pub struct ScheduleCommonArgs {
     /// Unique schedule name.
     #[arg(long, value_name = "NAME")]
     pub name: String,
@@ -768,11 +773,17 @@ pub enum ScheduleActionArg {
 pub struct ScheduleLoopArgs {
     /// Loop name, for example `l4-planner`.
     pub loop_name: String,
+    /// Name, timezone and missed-run policy.
+    #[command(flatten)]
+    pub common: ScheduleCommonArgs,
 }
 
 /// Arguments for a scheduled command action.
 #[derive(Debug, Clone, Args)]
 pub struct ScheduleCommandArgs {
+    /// Name, timezone and missed-run policy.
+    #[command(flatten)]
+    pub common: ScheduleCommonArgs,
     /// Program and arguments, after `--`.
     #[arg(last = true, num_args = 1.., required = true)]
     pub argv: Vec<String>,
@@ -781,6 +792,9 @@ pub struct ScheduleCommandArgs {
 /// Arguments for a scheduled job-template action.
 #[derive(Debug, Clone, Args)]
 pub struct ScheduleJobTemplateArgs {
+    /// Name, timezone and missed-run policy.
+    #[command(flatten)]
+    pub common: ScheduleCommonArgs,
     /// JSON file containing a `NewJob`.
     #[arg(long, value_name = "FILE")]
     pub template_file: PathBuf,

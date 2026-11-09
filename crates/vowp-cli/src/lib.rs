@@ -158,7 +158,8 @@ pub fn run(args: Vec<String>, io: &mut dyn IoStreams) -> i32 {
         }
     };
     let json = cli.global.json;
-    match execute(cli, &args, io) {
+    let command_args = args.get(1..).unwrap_or(&[]);
+    match execute(cli, command_args, io) {
         Ok(code) => code,
         Err(error) => {
             output::print_error(io, &error, json);
@@ -168,15 +169,21 @@ pub fn run(args: Vec<String>, io: &mut dyn IoStreams) -> i32 {
 }
 
 /// Executes a parsed command, handling local-only commands and the `--node` redirect first.
+///
+/// `original_args` excludes argv[0]: the remote command must be `vowp <args>`, never
+/// `vowp <local-binary-path> <args>`.
 fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result<i32, CliError> {
     let Cli { global, command } = cli;
-    match &command {
-        Command::Init(args) => return cmd::init::run(&global, io, args),
-        Command::Doctor(args) => return cmd::doctor::run(&global, io, args),
-        _ => {}
+    // `init` creates local files and node state; a remote cwd is not defined, so it stays
+    // local even with `--node`. Every other command follows the global redirect.
+    if let Command::Init(args) = &command {
+        return cmd::init::run(&global, io, args);
     }
     if let Some(code) = remote::maybe_run(&global, &command, original_args)? {
         return Ok(code);
+    }
+    if let Command::Doctor(args) = &command {
+        return cmd::doctor::run(&global, io, args);
     }
     let ctx = Ctx::build(&global, io)?;
     cmd::dispatch(&ctx, io, command)

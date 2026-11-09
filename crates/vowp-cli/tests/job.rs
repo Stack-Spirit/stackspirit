@@ -193,6 +193,55 @@ fn job_update_rejects_multi_job_cycle() {
 }
 
 #[test]
+fn job_add_missing_brief_leaves_no_job() {
+    let env = common::TestEnv::new();
+    let missing = env.project_path().join("no-such-brief.md");
+
+    let (code, _, stderr) = env.run(&[
+        "job",
+        "add",
+        "--id",
+        "no-brief-file",
+        "--title",
+        "Missing brief file",
+        "--kind",
+        "build",
+        "--brief-file",
+        missing.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 1, "missing brief file is an io error: {stderr}");
+    let store = env.store();
+    assert!(
+        store
+            .job(&vowp_protocol::JobId::parse("no-brief-file").expect("slug"))
+            .expect("lookup")
+            .is_none(),
+        "a failed add must not leave a job row"
+    );
+
+    let (code, _, stderr) = env.run(&[
+        "job",
+        "add",
+        "--id",
+        "no-brief-value",
+        "--title",
+        "Missing brief value",
+        "--kind",
+        "build",
+        "--brief",
+        missing.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 1, "missing --brief file is an io error: {stderr}");
+    assert!(
+        store
+            .job(&vowp_protocol::JobId::parse("no-brief-value").expect("slug"))
+            .expect("lookup")
+            .is_none(),
+        "a failed add must not leave a job row"
+    );
+}
+
+#[test]
 fn job_keeper_commands_enqueue_request_rows() {
     let env = common::TestEnv::new();
     let job = env.insert_job("stalled-job", "Stalled", vowp_protocol::JobKind::Build, &[]);

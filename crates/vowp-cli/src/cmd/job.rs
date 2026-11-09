@@ -81,9 +81,15 @@ fn add(ctx: &Ctx, io: &mut dyn IoStreams, args: &JobAddArgs) -> Result<i32, CliE
         loop_,
         brief_text: None,
     };
-    let job = store.insert_job(ctx.project(), &new, "cli")?;
     let body = brief_body(args, io)?;
-    write_brief(ctx, &job, &render_brief(&new, &body))?;
+    let brief = render_brief(&new, &body);
+    let job = store.insert_job(ctx.project(), &new, "cli")?;
+    if let Err(error) = write_brief(ctx, &job, &brief) {
+        // The job is still pending, so this rolls the row back when the brief cannot be
+        // written. Validation/read failures happen before the insert and leave nothing.
+        let _ = store.delete_job(&job.id);
+        return Err(error);
+    }
     if ctx.json() {
         print_json(io, &job)?;
     } else {

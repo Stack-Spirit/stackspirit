@@ -96,6 +96,101 @@ fn node_flag_remote_failure_exit_7() {
 }
 
 #[test]
+fn node_flag_forwards_original_args_without_argv0() {
+    let home = tempfile::tempdir().expect("temp home");
+    let paths = NodePaths::new(home.path());
+    let store = Store::open(&paths).expect("store opens");
+    let now = store.clock().now();
+    store
+        .upsert_node(&Node {
+            name: NodeName::parse("vps").expect("slug"),
+            ssh_target: Some("fake.example".to_owned()),
+            is_local: false,
+            capabilities: serde_json::json!({}),
+            last_seen_at: None,
+            created_at: now,
+        })
+        .expect("node row");
+
+    let bin = tempfile::tempdir().expect("fake bin");
+    let ssh = bin.path().join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_SSH_ARGS\"\nexit 0\n").expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path_value = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
+    let args_file = bin.path().join("ssh-args");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .current_dir(bin.path())
+        .env("PATH", path_value)
+        .env("FAKE_SSH_ARGS", &args_file)
+        .arg("--home")
+        .arg(home.path())
+        .args(["--node", "vps", "job", "ls"])
+        .output()
+        .expect("run vowp");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let recorded = std::fs::read_to_string(&args_file).expect("fake ssh recorded its argv");
+    let lines: Vec<&str> = recorded.lines().collect();
+    assert!(lines.contains(&"fake.example"), "{recorded:?}");
+    let remote = lines.last().expect("remote command line");
+    assert_eq!(*remote, format!("vowp '--home' '{}' 'job' 'ls'", home.path().display()));
+    assert!(
+        !recorded.contains(env!("CARGO_BIN_EXE_vowp")),
+        "argv[0] leaked into the remote command: {recorded:?}"
+    );
+}
+
+#[test]
+fn node_flag_redirects_doctor_over_ssh() {
+    let home = tempfile::tempdir().expect("temp home");
+    let paths = NodePaths::new(home.path());
+    let store = Store::open(&paths).expect("store opens");
+    let now = store.clock().now();
+    store
+        .upsert_node(&Node {
+            name: NodeName::parse("vps").expect("slug"),
+            ssh_target: Some("fake.example".to_owned()),
+            is_local: false,
+            capabilities: serde_json::json!({}),
+            last_seen_at: None,
+            created_at: now,
+        })
+        .expect("node row");
+
+    let bin = tempfile::tempdir().expect("fake bin");
+    let ssh = bin.path().join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_SSH_ARGS\"\nexit 0\n").expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path_value = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
+    let args_file = bin.path().join("doctor-ssh-args");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .current_dir(bin.path())
+        .env("PATH", path_value)
+        .env("FAKE_SSH_ARGS", &args_file)
+        .arg("--home")
+        .arg(home.path())
+        .args(["--node", "vps", "doctor"])
+        .output()
+        .expect("run vowp");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("doctor: ok"), "doctor ran locally: {stdout}");
+    let recorded = std::fs::read_to_string(&args_file).expect("fake ssh was not invoked");
+    let remote = recorded.lines().last().expect("remote command line");
+    assert_eq!(*remote, format!("vowp '--home' '{}' 'doctor'", home.path().display()));
+}
+
+#[test]
 fn node_flag_returns_remote_exit_code_and_ignores_local_node() {
     let home = tempfile::tempdir().expect("temp home");
     let paths = NodePaths::new(home.path());
