@@ -25,8 +25,9 @@ fn graph_ascii_and_mermaid_golden() {
 #[test]
 fn graph_export_import_roundtrip() {
     let env = common::TestEnv::new();
-    env.insert_job("first", "First job", JobKind::Build, &[]);
-    env.insert_job("second", "Second job", JobKind::Verify, &["first"]);
+    env.insert_job("z-parent", "Parent job", JobKind::Build, &[]);
+    env.insert_job("b-middle", "Middle job", JobKind::Build, &["z-parent"]);
+    env.insert_job("a-child", "Child job", JobKind::Verify, &["b-middle"]);
     let first_export = env.project_path().join(".vowp/graph-1.yaml");
     let second_export = env.project_path().join(".vowp/graph-2.yaml");
 
@@ -34,10 +35,16 @@ fn graph_export_import_roundtrip() {
     assert_eq!(code, 0, "{stderr}");
     let exported = std::fs::read_to_string(&first_export).expect("export file");
     assert!(exported.contains("version: 1"), "{exported}");
-    assert!(exported.contains("    needs: [first]"), "{exported}");
+    assert!(exported.contains("    needs: [b-middle]"), "{exported}");
+    // Export sorts by id, so both dependents are written before their dependency.
+    let child_at = exported.find("- id: a-child").expect("child job");
+    let middle_at = exported.find("- id: b-middle").expect("middle job");
+    let parent_at = exported.find("- id: z-parent").expect("parent job");
+    assert!(child_at < middle_at, "{exported}");
+    assert!(middle_at < parent_at, "{exported}");
 
     let store = env.store();
-    for id in ["first", "second"] {
+    for id in ["a-child", "b-middle", "z-parent"] {
         store
             .delete_job(&vowp_protocol::JobId::parse(id).expect("slug"))
             .expect("delete pending job");
@@ -51,8 +58,16 @@ fn graph_export_import_roundtrip() {
 
     let (code, value, stderr) = env.run_json(&["graph", "--import", first_export.to_str().expect("path")]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(value["imported"].as_array().expect("imported").len(), 2);
+    assert_eq!(value["imported"].as_array().expect("imported").len(), 3);
     assert_eq!(value["conflicts"].as_array().expect("conflicts").len(), 0);
+
+    let child = store
+        .require_job(&vowp_protocol::JobId::parse("a-child").expect("slug"))
+        .expect("imported child");
+    assert_eq!(
+        child.needs,
+        vec![vowp_protocol::JobId::parse("b-middle").expect("slug")]
+    );
 
     let (code, _, stderr) = env.run(&["graph", "--export", second_export.to_str().expect("path")]);
     assert_eq!(code, 0, "{stderr}");
@@ -65,7 +80,7 @@ fn graph_export_import_roundtrip() {
     let (code, value, _) = env.run_json(&["graph", "--import", first_export.to_str().expect("path")]);
     assert_eq!(code, 4);
     assert_eq!(value["imported"].as_array().expect("imported").len(), 0);
-    assert_eq!(value["conflicts"].as_array().expect("conflicts").len(), 2);
+    assert_eq!(value["conflicts"].as_array().expect("conflicts").len(), 3);
 }
 
 #[test]

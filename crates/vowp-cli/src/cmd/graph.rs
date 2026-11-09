@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 use vowp_graph::{Graph, export_yaml, import_yaml, render_ascii, render_mermaid};
+use vowp_protocol::JobId;
 use vowp_store::JobFilter;
 
 use crate::cli::GraphArgs;
@@ -63,6 +64,9 @@ fn load_graph(ctx: &Ctx, all: bool) -> Result<Graph, CliError> {
 }
 
 /// Validates a YAML file and inserts the missing jobs and edges.
+///
+/// Export sorts jobs by id, so a dependent may appear before the job it needs. Jobs are
+/// therefore inserted in dependency order: an import of any valid exported graph works.
 fn import(ctx: &Ctx, io: &mut dyn IoStreams, path: &std::path::Path, _all: bool) -> Result<i32, CliError> {
     let text = std::fs::read_to_string(path)?;
     let imported = import_yaml(&text)?;
@@ -70,21 +74,46 @@ fn import(ctx: &Ctx, io: &mut dyn IoStreams, path: &std::path::Path, _all: bool)
     let mut inserted = Vec::new();
     let mut conflicts = BTreeSet::new();
 
-    for job in imported.jobs {
-        if store.job(&job.id)?.is_some() {
-            conflicts.insert(job.id.to_string());
-            continue;
-        }
-        let brief = job.brief_text.clone();
-        let stored = store.insert_job(ctx.project(), &job, "cli")?;
-        if let Some(body) = brief {
-            let brief_path = ctx.project_root().join(&stored.brief);
-            if let Some(parent) = brief_path.parent() {
-                std::fs::create_dir_all(parent)?;
+    let mut available: BTreeSet<JobId> = store
+        .list_jobs(&JobFilter {
+            project: Some(ctx.project().clone()),
+            ..JobFilter::default()
+        })?
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    let mut pending = imported.jobs;
+    while !pending.is_empty() {
+        let mut remaining = Vec::new();
+        let mut progress = false;
+        for job in pending {
+            if available.contains(&job.id) {
+                conflicts.insert(job.id.to_string());
+                continue;
             }
-            std::fs::write(&brief_path, body)?;
+            if !job.needs.iter().all(|need| available.contains(need)) {
+                remaining.push(job);
+                continue;
+            }
+            progress = true;
+            let brief = job.brief_text.clone();
+            let stored = store.insert_job(ctx.project(), &job, "cli")?;
+            if let Some(body) = brief {
+                let brief_path = ctx.project_root().join(&stored.brief);
+                if let Some(parent) = brief_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&brief_path, body)?;
+            }
+            available.insert(stored.id.clone());
+            inserted.push(stored.id.to_string());
         }
-        inserted.push(stored.id.to_string());
+        if !progress && !remaining.is_empty() {
+            return Err(CliError::Invalid(
+                "cannot order imported jobs: unresolved dependencies".to_owned(),
+            ));
+        }
+        pending = remaining;
     }
 
     for edge in imported.edges {
