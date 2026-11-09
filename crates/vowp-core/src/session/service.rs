@@ -220,7 +220,7 @@ impl SessionService {
             cwd: Path::new(&session.cwd).to_path_buf(),
             prompt,
             resume: native.clone(),
-            new_native_id: None,
+            new_native_id: native.is_none().then(|| self.fresh_native_id()),
             env: self.start_env(&executor),
             permission_mode: self
                 .harness_config(&executor)
@@ -276,7 +276,7 @@ impl SessionService {
                     limit_kind: None,
                     cost: vowp_protocol::Cost::unknown(),
                     native_session_id: None,
-                    detail: error.to_string(),
+                    detail: vowp_adapters::classify::redact(&error.to_string(), 1500),
                 };
                 let _ = store.finish_run(&run_id, &finish);
                 let _ = store.set_session_state(&req.session_id, SessionState::Idle, Some(&executor));
@@ -388,9 +388,10 @@ impl SessionService {
             )?;
         }
 
+        // sessions.md §2: only limit/credits/auth outcomes block a session.
         let state = if matches!(
             summary.outcome,
-            RunOutcome::Limit | RunOutcome::Credits | RunOutcome::Auth | RunOutcome::Rate | RunOutcome::Context
+            RunOutcome::Limit | RunOutcome::Credits | RunOutcome::Auth
         ) {
             SessionState::Blocked
         } else {
@@ -704,6 +705,37 @@ impl SessionService {
             .iter()
             .filter_map(|name| std::env::var(name).ok().map(|value| (name.clone(), value)))
             .collect()
+    }
+
+    /// Generates the uuid-v4 a fresh harness session is pre-assigned (adapters.md §2.1).
+    ///
+    /// [`Rng`](crate::deps::Rng) exposes bounded jitter only, so two full-width draws fill
+    /// the 128 random bits; the version and RFC 4122 variant bits are set in place.
+    fn fresh_native_id(&self) -> String {
+        let mut bytes = [0_u8; 16];
+        bytes[..8].copy_from_slice(&self.deps.rng.jitter_secs(u64::MAX).to_be_bytes());
+        bytes[8..].copy_from_slice(&self.deps.rng.jitter_secs(u64::MAX).to_be_bytes());
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        )
     }
 
     /// Appends a framing event and indexes it.

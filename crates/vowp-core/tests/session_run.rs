@@ -17,7 +17,7 @@ use vowp_adapters::claude_code::ClaudeParser;
 use vowp_adapters::opencode::OpencodeParser;
 use vowp_adapters::stream::StreamParser;
 use vowp_core::session::service::SessionService;
-use vowp_core::{AdapterRegistry, CoreError, Deps};
+use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng};
 use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Cost,
     CostEvent, EventBody, EventEnvelope, EventType, Executor, ExecutorRef, FakeClock, HarnessEvent, HarnessKind,
@@ -341,6 +341,41 @@ fn run_turn_resumes_native_session_same_harness() {
         })
         .expect("attach");
     assert_eq!(attach.native_session_id.as_deref(), Some("ses_native_1"));
+}
+
+#[test]
+fn fresh_session_gets_new_native_id_from_rng() {
+    let tmp = tempdir().expect("tempdir");
+    let fake = Arc::new(FakeAdapter::new(HarnessKind::Opencode, Vec::new()));
+    let mut deps = deps(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", fake.clone()),
+    );
+    deps.rng = Arc::new(FixedRng(0x0123_4567_89ab_cdef));
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "fresh native id");
+
+    service
+        .run_turn(turn(&session, opencode(), "start fresh"), &CancelToken::default())
+        .expect("run turn");
+
+    let starts = fake.starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].resume, None, "a fresh session has nothing to resume");
+    let native = starts[0]
+        .new_native_id
+        .as_deref()
+        .expect("a fresh session pre-chooses a native id");
+    assert_eq!(
+        native, "01234567-89ab-4def-8123-456789abcdef",
+        "the id is a uuid-v4 built from the injected Rng"
+    );
+    assert_eq!(native.as_bytes()[14], b'4', "uuid version 4");
+    assert!(
+        matches!(native.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+        "RFC 4122 variant"
+    );
 }
 
 #[test]
@@ -797,6 +832,39 @@ fn run_turn_redacts_error_text_in_run_detail_and_event() {
 }
 
 #[test]
+fn run_detail_is_redacted_on_adapter_error() {
+    let tmp = tempdir().expect("tempdir");
+    let secret = format!("{}{}", "sk-", "abcdefghijklmnopqrstuvwxyz");
+    let fake = Arc::new(WaitErrorAdapter::new(format!("wait failed with {secret}")));
+    let deps = deps(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", fake),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "adapter wait error");
+
+    let error = service
+        .run_turn(turn(&session, opencode(), "work"), &CancelToken::default())
+        .expect_err("a wait error surfaces as an adapter error");
+    assert!(matches!(error, CoreError::Adapter(_)));
+
+    let events = read_events(&deps, &session);
+    let run_id = events
+        .iter()
+        .find_map(|event| match event.body() {
+            Ok(EventBody::SessionExecutor(payload)) if payload.action == AttachAction::Attach => payload.run_id.clone(),
+            _ => None,
+        })
+        .expect("attach carries the run id");
+    let store = deps.open_store().expect("store");
+    let run = store.require_run(&run_id).expect("run row");
+    assert_eq!(run.outcome, Some(RunOutcome::Error));
+    assert!(!run.detail.contains(&secret), "run.detail is redacted: {}", run.detail);
+    assert!(run.detail.contains("<redacted>"));
+}
+
+#[test]
 fn session_ops_trait_reports_conflict_as_service_failure() {
     let tmp = tempdir().expect("tempdir");
     let fake = FakeAdapter::new(HarnessKind::Opencode, Vec::new());
@@ -950,6 +1018,76 @@ impl AdapterRun for NativeRun {
             result_text: Some("ok".to_owned()),
             stop_reason: StopReason::EndTurn,
         })
+    }
+}
+
+/// An adapter whose run starts but fails when the caller waits for its summary.
+struct WaitErrorAdapter {
+    message: String,
+}
+
+impl WaitErrorAdapter {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
+impl Adapter for WaitErrorAdapter {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::Opencode
+    }
+
+    fn probe(&self) -> ProbeResult {
+        ProbeResult {
+            ok: true,
+            version: Some("fake".to_owned()),
+            path: None,
+            detail: String::new(),
+        }
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
+
+    fn start(&self, _input: StartInput) -> Result<Box<dyn AdapterRun>, AdapterError> {
+        let (sender, receiver) = channel();
+        drop(sender);
+        Ok(Box::new(WaitErrorRun {
+            receiver,
+            message: self.message.clone(),
+        }))
+    }
+}
+
+struct WaitErrorRun {
+    receiver: Receiver<HarnessEvent>,
+    message: String,
+}
+
+impl AdapterRun for WaitErrorRun {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+
+    fn events(&self) -> &Receiver<HarnessEvent> {
+        &self.receiver
+    }
+
+    fn send(&mut self, _text: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported("no live input"))
+    }
+
+    fn interrupt(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<RunSummary, AdapterError> {
+        Err(AdapterError::Protocol(self.message.clone()))
     }
 }
 
