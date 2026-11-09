@@ -14,24 +14,45 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use vowp_graph::{Effect, JobEvent, TransitionBounds, transition_with};
 use vowp_protocol::{
-    InboxId, InboxItem, InboxKind, InboxState, Job, JobId, JobState, LedgerEntry, LedgerKind, ParkedReason,
-    ProjectName, SessionId, Timestamp,
+    InboxId, Job, JobId, JobState, LedgerEntry, LedgerKind, ParkedReason, ProjectName, SessionId, Timestamp,
 };
 use vowp_store::{SessionFilter, StateChange, Store};
 
 use crate::CoreError;
 use crate::deps::Deps;
 
+pub mod digest;
 pub mod dispatch;
 pub mod l2_worker;
 pub mod l3_verify;
+pub mod l4_planner;
+pub mod l5_keeper;
+pub mod l6_failover;
+pub mod l7_inbox;
+pub mod l8_watchdog;
 pub mod merge_queue;
+pub mod prompts;
 pub mod reconcile;
 pub mod runner;
 pub mod supervisor;
 
-pub use runner::{RunnerPool, WakeHandle};
+pub use runner::{RunnerPool, SessionRunPool, WakeHandle};
 pub use supervisor::{ReconcileReport, StepReport, Supervisor, TickReport};
+
+/// L6 failover helpers (spec: `loops.md` §8).
+pub mod l6 {
+    pub use super::l6_failover::{Failover, FailoverAction, ProbeVerdict, is_limit, provider_of, row_kind_for};
+}
+
+/// L7 inbox helpers (spec: `loops.md` §9).
+pub mod l7 {
+    pub use super::l7_inbox::{AnswerEffect, NewInboxItem, on_answer, open_inbox, record_answer};
+}
+
+/// L8 watchdog helpers (spec: `loops.md` §10).
+pub mod l8 {
+    pub use super::l8_watchdog::{CRON_CHECK_SH, STALE_AFTER_SECS, SYSTEMD_UNIT, heartbeat_age, write_heartbeat};
+}
 
 /// L2 prompt templates (spec: `loops.md` §3).
 pub mod l2 {
@@ -208,65 +229,12 @@ pub(crate) fn record_loop_request(
     Ok(())
 }
 
-/// Transport-neutral inbox item input.
-#[derive(Debug, Clone)]
-pub struct NewInbox {
-    /// Project the item belongs to.
-    pub project: Option<ProjectName>,
-    /// Job that raised it.
-    pub job_id: Option<JobId>,
-    /// Item kind.
-    pub kind: InboxKind,
-    /// Short title, also used for deduplication.
-    pub title: String,
-    /// Full body, clipped to 4000 characters.
-    pub body: String,
-    /// Suggested answers.
-    pub options: Vec<String>,
-}
+/// Transport-neutral inbox item input (the L7 public type).
+pub use l7_inbox::NewInboxItem as NewInbox;
 
 /// Opens one inbox item and writes its Markdown copy under `<node>/inbox/`.
-///
-/// An open item with the same kind and title is returned instead of creating a duplicate.
 pub(crate) fn open_inbox(store: &Store, deps: &Deps, item: NewInbox) -> Result<InboxId, CoreError> {
-    if let Some(existing) = store
-        .list_inbox(Some(InboxState::Open))?
-        .into_iter()
-        .find(|open| open.kind == item.kind && open.title == item.title)
-    {
-        return Ok(existing.id);
-    }
-
-    let id = InboxId::new();
-    let now = store.clock().now();
-    let body = clip_chars(&item.body, 4000);
-    store.insert_inbox(&InboxItem {
-        id: id.clone(),
-        project: item.project.clone(),
-        job_id: item.job_id.clone(),
-        kind: item.kind,
-        title: item.title.clone(),
-        body: body.clone(),
-        options: item.options,
-        state: InboxState::Open,
-        answer: None,
-        answered_by: None,
-        created_at: now,
-        answered_at: None,
-    })?;
-
-    let dir = deps.paths.root().join("inbox");
-    std::fs::create_dir_all(&dir).map_err(|source| CoreError::Io {
-        path: dir.display().to_string(),
-        source,
-    })?;
-    let path = dir.join(format!("{id}.md"));
-    let text = format!("# {}\n\n{}\n", item.title, body);
-    std::fs::write(&path, text).map_err(|source| CoreError::Io {
-        path: path.display().to_string(),
-        source,
-    })?;
-    Ok(id)
+    l7_inbox::open_inbox(store, deps, item)
 }
 
 /// Returns the newest session for `job`, if one exists.
@@ -326,10 +294,25 @@ pub(crate) fn default_branch(deps: &Deps) -> &str {
 }
 
 /// Returns the provider limits that are in force at `now`, keyed by provider.
+///
+/// A quota/rate row whose reset time has passed stays blocking while its probe-back is
+/// still owed: the preferred rung returns only after a successful probe (loops.md §8.5).
 pub(crate) fn limited_map(store: &Store, now: Timestamp) -> Result<BTreeMap<String, Option<Timestamp>>, CoreError> {
     let mut limited = BTreeMap::new();
     for limit in store.active_limits(now)? {
         limited.insert(limit.provider, limit.resets_at);
+    }
+    for (key, value) in store.kv_prefix("probe_back:")? {
+        if value != "1" {
+            continue;
+        }
+        let provider = key.trim_start_matches("probe_back:");
+        if store.limit_for(provider)?.is_some() {
+            limited.insert(provider.to_owned(), None);
+        }
+    }
+    for (key, _) in store.kv_prefix("probe_pending:")? {
+        limited.insert(key.trim_start_matches("probe_pending:").to_owned(), None);
     }
     Ok(limited)
 }

@@ -108,8 +108,9 @@ pub(crate) fn write_brief(deps: &Deps, job: &Job, worktree: &Path) -> Result<(),
 
 /// Creates the fix or merge child job of `parent`.
 ///
-/// The child shares the parent's worktree and branch, owns the same paths and has the
-/// report gate plus the parent's non-review gates (loops.md §2, D5/D17).
+/// The child shares the parent's worktree and branch and owns the same paths. Its own gate is
+/// the report gate; the parent re-runs its command gates after the child returns (T22), per
+/// loops.md §2 and D5/D17.
 pub(crate) fn create_child_job(
     deps: &Deps,
     store: &Store,
@@ -121,11 +122,12 @@ pub(crate) fn create_child_job(
     if let Some(existing) = store.job(&id)? {
         return Ok(existing);
     }
-    let worktree = parent
-        .worktree
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // A forced-gating parent may not have a worktree yet; never write the child brief into
+    // the supervisor's current directory (that would dirty the source tree).
+    let worktree = match &parent.worktree {
+        Some(worktree) => PathBuf::from(worktree),
+        None => super::main_repo(deps, store, &parent.project)?,
+    };
     let report = format!(".vowp/jobs/{id}/report.md");
     // The fix/merge child's own gate is its report; the parent re-runs its full command
     // gates when the child returns (T22). Re-running them on the child too would let one

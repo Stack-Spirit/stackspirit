@@ -12,12 +12,12 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use vowp_graph::{
-    DispatchCaps, DispatchChoice, Effect, Graph, JobEvent, StallInput, StallJudge, StallThresholds, StallVerdict,
-    TransitionBounds, plan_dispatch,
+    DispatchCaps, DispatchChoice, Effect, Graph, JobEvent, RepeatGuard, RepeatVerdict, StallInput, StallJudge,
+    StallThresholds, StallVerdict, TransitionBounds, plan_dispatch,
 };
 use vowp_protocol::{
     ActiveState, CancelToken, GateResult, InboxKind, Job, JobId, JobKind, JobState, Level, LoopBounds, NewSession,
-    ParkedReason, Profile, Run, RunId, RunPurpose, SessionRole, Timestamp, Worker, WorkerKind, WorkerState,
+    ParkedReason, Profile, Run, RunId, RunPurpose, SessionId, SessionRole, Timestamp, Worker, WorkerKind, WorkerState,
 };
 use vowp_store::{JobFilter, Store};
 
@@ -29,9 +29,13 @@ use crate::schedules::ScheduleEngine;
 use crate::session::service::SessionService;
 
 use super::l2_worker::ReportOutcome;
+use super::l4_planner::{self, SessionChoice};
+use super::l5_keeper;
+use super::l6_failover::{Failover, ProbeVerdict};
+use super::l7_inbox::{self, NewInboxItem};
 use super::merge_queue::{MergeQueue, MergeStep};
-use super::runner::{RunnerPool, WakeHandle};
-use super::{Applied, NewInbox, apply_event, dispatch, l3_verify, reconcile};
+use super::runner::{RunnerPool, SessionRunPool, WakeHandle};
+use super::{Applied, apply_event, dispatch, l3_verify, l8_watchdog, reconcile};
 
 /// Counters reported by [`Supervisor::startup`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -126,6 +130,11 @@ pub struct Supervisor {
     gate_tasks: HashMap<JobId, JoinHandle<Result<GateTaskResult, CoreError>>>,
     merge_task: Option<JoinHandle<Result<MergeStep, CoreError>>>,
     verify_retries: HashSet<(JobId, u32)>,
+    session_runners: SessionRunPool,
+    probe_tasks: HashMap<String, JoinHandle<Result<(), CoreError>>>,
+    repeat_guards: HashMap<JobId, RepeatGuard>,
+    repeat_tripped: Option<String>,
+    suppress_job_inbox: bool,
     start_purpose_override: Option<RunPurpose>,
     transitions: Vec<(JobId, JobState, JobState)>,
     dispatched: Vec<JobId>,
@@ -155,6 +164,11 @@ impl Supervisor {
             gate_tasks: HashMap::new(),
             merge_task: None,
             verify_retries: HashSet::new(),
+            session_runners: SessionRunPool::new(),
+            probe_tasks: HashMap::new(),
+            repeat_guards: HashMap::new(),
+            repeat_tripped: None,
+            suppress_job_inbox: false,
             start_purpose_override: None,
             transitions: Vec::new(),
             dispatched: Vec::new(),
@@ -184,6 +198,7 @@ impl Supervisor {
         self.transitions.clear();
         self.dispatched.clear();
         self.merged.clear();
+        self.repeat_tripped = None;
         let paused = self.store.kv_get("paused")?.as_deref() == Some("1");
         let mut steps = Vec::new();
 
@@ -197,21 +212,24 @@ impl Supervisor {
             steps.push(self.step("verify", |this| this.step_verify(now)));
             steps.push(self.step("merge", |this| this.step_merge(now)));
             steps.push(self.step("dispatch", |this| this.step_dispatch(now)));
-            steps.push(self.step("triggers", |_this| {
-                Ok("planner/keeper triggers owned by n08d".to_owned())
-            }));
-            steps.push(self.step("probes", |_this| Ok("L6 probes owned by n08d".to_owned())));
+            steps.push(self.step("triggers", |this| this.step_triggers(now)));
+            steps.push(self.step("probes", |this| this.step_probes(now)));
             steps.push(self.step("schedules", |this| this.step_schedules(now)));
         }
         steps.push(self.step("board", |this| this.step_board(now)));
         steps.push(self.step("heartbeat", |this| this.step_heartbeat(now)));
+        if let Err(error) = self.update_loop_rows(now, &steps) {
+            self.deps
+                .log
+                .log(Level::Error, "l1", &format!("cannot update loop rows: {error}"));
+        }
 
-        let ok = steps.iter().all(|step| step.ok);
+        let ok = steps.iter().all(|step| step.ok) && self.repeat_tripped.is_none();
         let failed: Vec<&str> = steps.iter().filter(|step| !step.ok).map(|step| step.name).collect();
-        let status = if failed.is_empty() {
-            "ok".to_owned()
-        } else {
-            format!("degraded: {}", failed.join(", "))
+        let status = match (&self.repeat_tripped, failed.is_empty()) {
+            (Some(job), _) => format!("repeat guard tripped: {job}"),
+            (None, true) => "ok".to_owned(),
+            (None, false) => format!("degraded: {}", failed.join(", ")),
         };
         let next = now.plus(Duration::from_secs(self.deps.config.node.tick_secs.max(1)));
         if let Err(error) = self
@@ -238,15 +256,24 @@ impl Supervisor {
         let tick = Duration::from_secs(self.deps.config.node.tick_secs.max(1));
         while !cancel.is_cancelled() {
             self.tick()?;
+            let slice = tick.min(Duration::from_secs(1));
             match self.wake_rx.as_ref() {
-                Some(receiver) => match receiver.recv_timeout(tick) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Some(receiver) => match receiver.recv_timeout(slice) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // A CLI `Request::Wake` is a kv row, not a runner wake; end the wait
+                        // early so the next tick drains it (loops.md §1 step 0).
+                        if !self.store.kv_prefix("req:")?.is_empty() {
+                            continue;
+                        }
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 },
-                None => std::thread::sleep(tick),
+                None => std::thread::sleep(slice),
             }
         }
         self.runners.cancel_all();
+        self.session_runners.cancel_all();
         // Mark run rows whose threads were interrupted as stalled, as the crate doc requires.
         let store = self.deps.open_store()?;
         for run in store.open_runs()? {
@@ -403,21 +430,24 @@ impl Supervisor {
         self.apply_with(job, event, None, Vec::new(), note).map(|_| ())
     }
 
-    /// Applies an inbox answer by resolving the parked job it belongs to.
+    /// Applies an inbox answer: writes the answer file/note and resolves every affected job.
     fn apply_inbox_answer(&mut self, id: &vowp_protocol::InboxId) -> Result<(), CoreError> {
         let item = self
             .store
             .inbox_item(id)?
             .ok_or_else(|| CoreError::NotFound(format!("inbox item {id}")))?;
-        if item.state != vowp_protocol::InboxState::Answered {
-            return Err(CoreError::Invalid(format!("inbox item {id} has not been answered")));
+        let effect = l7_inbox::record_answer(&self.store, &item)?;
+        if let Some(provider) = &effect.clear_limit {
+            self.store.clear_limit(provider)?;
         }
-        if let Some(job_id) = item.job_id {
-            let job = self.store.require_job(&job_id)?;
-            if job.state == JobState::Parked {
-                self.apply_simple(&job_id, JobEvent::Resolved, None)?;
+        for job_id in &effect.jobs {
+            if let Ok(job) = self.store.require_job(job_id)
+                && job.state == JobState::Parked
+            {
+                self.apply_simple(job_id, JobEvent::Resolved, None)?;
             }
         }
+        self.store.kv_set("wake:planner", "1")?;
         Ok(())
     }
 
@@ -432,6 +462,8 @@ impl Supervisor {
     fn step_harvest(&mut self, now: Timestamp) -> Result<String, CoreError> {
         let mut harvested = 0;
         self.runners.poll();
+        self.session_runners.poll();
+        self.apply_park_requests()?;
         let jobs = self.store.list_jobs(&JobFilter {
             project: Some(self.project.clone()),
             ..JobFilter::default()
@@ -443,19 +475,53 @@ impl Supervisor {
             if run.ended_at.is_none() || self.handled_runs.contains(&run.id) {
                 continue;
             }
+            // L6 runs on the runner thread before the wake. Wait for its marker on runs
+            // whose policy matters, so a credits/auth/quota limit is never raced by the
+            // job event (loops.md §1 step 2).
+            let needs_l6 = run.limit_kind.is_some();
+            if needs_l6 && self.store.kv_get(&format!("l6:{}", run.id))?.is_none() {
+                let live = self.runners.is_active(&run.id)
+                    || run
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session| self.session_runners.session_running(session));
+                if live {
+                    // The runner thread is still applying L6; wait for its marker.
+                    continue;
+                }
+                self.apply_l6_for_run(&run)?;
+                self.apply_park_requests()?;
+            }
             self.handled_runs.insert(run.id.clone());
             self.release_worker(&run.id)?;
+            let _ = self.store.kv_delete(&format!("l6:{}", run.id));
             if job.state != JobState::Running {
                 continue;
             }
-            let (event, note) = self.event_for_run(&job, &run, now)?;
-            let applied = self.apply_with(&job.id, event.clone(), None, Vec::new(), note)?;
+            if matches!(
+                run.limit_kind,
+                Some(vowp_protocol::LimitKind::Credits) | Some(vowp_protocol::LimitKind::Auth)
+            ) && let Some(provider) = super::l6_failover::provider_of(&run)
+            {
+                let reason = if run.limit_kind == Some(vowp_protocol::LimitKind::Credits) {
+                    ParkedReason::Credits
+                } else {
+                    ParkedReason::Auth
+                };
+                self.park_provider_jobs(&provider, reason)?;
+            }
+            let current = self.store.require_job(&job.id)?;
+            if current.state != JobState::Running {
+                continue;
+            }
+            let (event, note) = self.event_for_run(&current, &run, now)?;
+            let applied = self.apply_with(&current.id, event.clone(), None, Vec::new(), note)?;
             self.deps.log.log(
                 Level::Info,
                 "l1",
                 &format!(
                     "harvest {} run {} -> {} ({})",
-                    job.id,
+                    current.id,
                     run.id,
                     applied.to.as_str(),
                     super::event_name(&event)
@@ -464,6 +530,157 @@ impl Supervisor {
             harvested += 1;
         }
         Ok(format!("{harvested} run(s) harvested"))
+    }
+
+    /// Drains `park:<provider>` requests written by L6 and parks the matching jobs.
+    fn apply_park_requests(&mut self) -> Result<u32, CoreError> {
+        let mut parked = 0;
+        for (key, reason) in self.store.kv_prefix("park:")? {
+            let Some(provider) = key.strip_prefix("park:") else {
+                continue;
+            };
+            self.store.kv_delete(&key)?;
+            let reason = match reason.as_str() {
+                "credits" => ParkedReason::Credits,
+                "auth" => ParkedReason::Auth,
+                _ => ParkedReason::ProviderBlocked,
+            };
+            parked += self.park_provider_jobs(provider, reason)?;
+        }
+        Ok(parked)
+    }
+
+    /// Parks every job whose current rung uses `provider`, one inbox item per provider/kind.
+    fn park_provider_jobs(&mut self, provider: &str, reason: ParkedReason) -> Result<u32, CoreError> {
+        let jobs = self.store.list_jobs(&JobFilter {
+            project: Some(self.project.clone()),
+            ..JobFilter::default()
+        })?;
+        let mut parked = 0;
+        self.suppress_job_inbox = true;
+        let result = (|| -> Result<u32, CoreError> {
+            let mut count = 0;
+            for job in jobs {
+                if !matches!(
+                    job.state,
+                    JobState::Pending | JobState::Ready | JobState::Running | JobState::Stalled
+                ) {
+                    continue;
+                }
+                if self.provider_of_job(&job)? != provider {
+                    continue;
+                }
+                let note = match reason {
+                    ParkedReason::Credits => {
+                        format!("credits exhausted for {provider}; top up and run `vowp inbox answer <id> resolved`")
+                    }
+                    ParkedReason::Auth => format!(
+                        "authentication failed for {provider}; log in again, then `vowp inbox answer <id> resolved`"
+                    ),
+                    _ => format!("provider {provider} is blocked; resolve it and answer `resolved`"),
+                };
+                match self.apply_with(&job.id, JobEvent::Blocked { reason }, None, Vec::new(), Some(note)) {
+                    Ok(_) => count += 1,
+                    Err(error) => self.deps.log.log(
+                        Level::Warn,
+                        "l6",
+                        &format!("cannot park {} for {provider}: {error}", job.id),
+                    ),
+                }
+            }
+            Ok(count)
+        })();
+        self.suppress_job_inbox = false;
+        parked += result?;
+        if parked > 0 {
+            let (title, body) = match reason {
+                ParkedReason::Credits => (
+                    format!("credits exhausted: {provider}"),
+                    format!("credits exhausted for {provider}; top up and run `vowp inbox answer <id> resolved`"),
+                ),
+                ParkedReason::Auth => (
+                    format!("auth required: {provider}"),
+                    format!(
+                        "authentication failed for {provider}; log in again with the harness's own login, then `vowp inbox answer <id> resolved`"
+                    ),
+                ),
+                _ => (
+                    format!("provider blocked: {provider}"),
+                    format!("provider {provider} is blocked; resolve it and answer `resolved`"),
+                ),
+            };
+            l7_inbox::open_inbox(
+                &self.store,
+                &self.deps,
+                NewInboxItem {
+                    project: Some(self.project.clone()),
+                    job_id: None,
+                    kind: InboxKind::Question,
+                    title,
+                    body,
+                    options: vec!["resolved".to_owned()],
+                },
+            )?;
+        }
+        Ok(parked)
+    }
+
+    /// Returns the provider of a job's current rung.
+    fn provider_of_job(&self, job: &Job) -> Result<String, CoreError> {
+        if let Some(run) = self.store.last_run_of_job(&job.id)?
+            && let Some(provider) = super::l6_failover::provider_of(&run)
+        {
+            return Ok(provider);
+        }
+        let profile = self
+            .deps
+            .config
+            .profiles
+            .get(&job.profile)
+            .ok_or_else(|| CoreError::NotFound(format!("profile {}", job.profile)))?;
+        profile
+            .ladder
+            .first()
+            .map(|executor| executor.provider())
+            .ok_or_else(|| CoreError::Invalid(format!("profile {} has an empty ladder", job.profile)))
+    }
+
+    /// Applies L6 for a finished run whose runner thread left no marker (manual rows).
+    fn apply_l6_for_run(&self, run: &Run) -> Result<(), CoreError> {
+        let Some(provider) = super::l6_failover::provider_of(run) else {
+            return Ok(());
+        };
+        let existing = self.store.limit_for(&provider)?;
+        let limit = run.limit_kind.map(|kind| vowp_protocol::LimitEvent {
+            kind,
+            provider: provider.clone(),
+            resets_at: existing.as_ref().and_then(|row| {
+                if row.kind == vowp_protocol::LimitRowKind::Quota {
+                    row.resets_at.map(|at| at.minus(Duration::from_secs(120)))
+                } else {
+                    None
+                }
+            }),
+            message: run.detail.clone(),
+            http_status: None,
+        });
+        let summary = vowp_protocol::RunSummary {
+            exit_code: run.exit_code,
+            outcome: run.outcome.unwrap_or(vowp_protocol::RunOutcome::Error),
+            native_session_id: run.native_session_id.clone(),
+            cost: run.cost.clone(),
+            limit,
+            result_text: None,
+            stop_reason: vowp_protocol::StopReason::EndTurn,
+        };
+        let action = Failover::new(self.deps.clone()).on_run_outcome(&self.store, run, &summary)?;
+        self.deps.log.log(
+            Level::Info,
+            "l6",
+            &format!("failover for harvested run {}: {action:?}", run.id),
+        );
+        self.store.kv_set(&format!("l6:{}", run.id), "harvest")?;
+        Ok(())
     }
 
     /// Chooses the job event for one finished run, plus the note its inbox item carries.
@@ -548,8 +765,16 @@ impl Supervisor {
                     &thresholds,
                 );
                 if matches!(verdict, StallVerdict::Stalled { .. }) {
-                    self.runners.cancel_and_wait(&run.id);
+                    if let Some(session) = &run.session_id {
+                        self.session_runners.cancel_and_wait(session);
+                    }
                     self.handled_runs.insert(run.id.clone());
+                    let role = if run.role == vowp_protocol::RunRole::Planner {
+                        "planner"
+                    } else {
+                        "keeper"
+                    };
+                    l4_planner::mark_turn(&self.store, role, now)?;
                     stalled += 1;
                 }
                 continue;
@@ -591,6 +816,8 @@ impl Supervisor {
                 self.runners.cancel(&run.id);
                 self.handled_runs.insert(run.id.clone());
                 self.apply_simple(&job.id, JobEvent::Stalled { silent }, None)?;
+                // The run was stopped; its busy slot must be free for the next restart.
+                self.release_worker(&run.id)?;
                 stalled += 1;
             }
         }
@@ -605,6 +832,9 @@ impl Supervisor {
             self.apply_simple(&id, JobEvent::NeedsSatisfied, None)?;
             changed += 1;
         }
+        if !self.loop_active("l2-worker") {
+            return Ok(format!("{changed} state change(s); l2-worker paused"));
+        }
         for (key, value) in self.store.kv_prefix("delay:")? {
             let Some(until) = super::parse_ts(&value) else {
                 self.store.kv_delete(&key)?;
@@ -614,19 +844,58 @@ impl Supervisor {
                 continue;
             }
             let job_id = JobId::parse(key.trim_start_matches("delay:"))?;
-            self.store.kv_delete(&key)?;
-            if let Ok(job) = self.store.require_job(&job_id)
-                && job.state == JobState::Running
-                && self
-                    .store
-                    .open_runs()?
-                    .iter()
-                    .all(|run| run.job_id.as_ref() != Some(&job_id))
+            let Ok(job) = self.store.require_job(&job_id) else {
+                self.store.kv_delete(&key)?;
+                continue;
+            };
+            if job.state != JobState::Running {
+                self.store.kv_delete(&key)?;
+                continue;
+            }
+            if self
+                .store
+                .open_runs()?
+                .iter()
+                .any(|run| run.job_id.as_ref() == Some(&job_id))
             {
-                let choice = self.pick_choice(&job)?;
-                let purpose = dispatch::purpose_for_dispatch(&self.store, &job)?;
-                self.start_run(&job, purpose, &choice, Vec::new())?;
-                changed += 1;
+                continue;
+            }
+            let kind = if job.role == vowp_protocol::Role::Verifier {
+                WorkerKind::Verifier
+            } else {
+                WorkerKind::Worker
+            };
+            let has_free_worker = self
+                .store
+                .list_workers(&self.deps.node)?
+                .iter()
+                .any(|worker| worker.kind == kind && worker.state == WorkerState::Idle);
+            if !has_free_worker {
+                // Leave the delay in place; the next tick with a free slot retries it.
+                continue;
+            }
+            let choice = match self.pick_choice(&job) {
+                Ok(choice) => choice,
+                Err(error) => {
+                    self.deps.log.log(
+                        Level::Warn,
+                        "l2",
+                        &format!("delayed continue for {job_id} waits: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let purpose = dispatch::purpose_for_dispatch(&self.store, &job)?;
+            match self.start_run(&job, purpose, &choice, Vec::new()) {
+                Ok(_) => {
+                    self.store.kv_delete(&key)?;
+                    changed += 1;
+                }
+                Err(error) => self.deps.log.log(
+                    Level::Error,
+                    "l2",
+                    &format!("cannot start delayed continue for {job_id}: {error}"),
+                ),
             }
         }
         Ok(format!("{changed} state change(s)"))
@@ -652,15 +921,30 @@ impl Supervisor {
                         continue;
                     }
                     if result.all_passed {
+                        self.repeat_guards.remove(&job.id);
                         self.apply_simple(&job.id, JobEvent::GatesPassed, None)?;
                     } else {
-                        let findings = result
-                            .results
-                            .iter()
-                            .filter(|gate| !gate.passed)
-                            .map(dispatch::gate_finding)
-                            .collect::<Vec<_>>();
-                        self.apply_with(&job.id, JobEvent::GatesFailed, None, findings, None)?;
+                        let max = self.bounds().same_action_max.unwrap_or(3).max(1);
+                        let fingerprint = l5_keeper::gate_fingerprint(&result.results);
+                        let verdict = {
+                            let guard = self
+                                .repeat_guards
+                                .entry(job.id.clone())
+                                .or_insert_with(|| RepeatGuard::new(max));
+                            guard.observe("gate", &fingerprint)
+                        };
+                        if let RepeatVerdict::Tripped { count } = verdict {
+                            let now = self.deps.clock.now();
+                            self.trip_repeat_guard(&job, "gate", count, now)?;
+                        } else {
+                            let findings = result
+                                .results
+                                .iter()
+                                .filter(|gate| !gate.passed)
+                                .map(dispatch::gate_finding)
+                                .collect::<Vec<_>>();
+                            self.apply_with(&job.id, JobEvent::GatesFailed, None, findings, None)?;
+                        }
                     }
                     applied += 1;
                 }
@@ -946,6 +1230,313 @@ impl Supervisor {
         Ok(format!("{dispatched} job(s) dispatched"))
     }
 
+    /// Step 9: start at most one planner turn and one keeper turn.
+    fn step_triggers(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        if !self.store.kv_prefix("probe:active:")?.is_empty() {
+            // Probe-back must finish before a planner/keeper turn can pick the provider
+            // again; the next quiet tick starts the hand-back turn (loops.md §8.5).
+            return Ok("probe in flight; triggers wait".to_owned());
+        }
+        let planner_running = self.session_runners.is_running(vowp_protocol::RunRole::Planner)
+            || self
+                .store
+                .open_runs()?
+                .iter()
+                .any(|run| run.role == vowp_protocol::RunRole::Planner);
+        let status = l4_planner::planner_status(&self.deps, &self.store, now, planner_running)?;
+        let covering = status.wanted && status.choice.is_none();
+        let mut started = 0;
+
+        if status.wanted
+            && self.loop_active("l4-planner")
+            && let Some(choice) = status.choice.clone()
+        {
+            self.start_session(
+                vowp_protocol::RunRole::Planner,
+                RunPurpose::Plan,
+                choice,
+                status.prompt.clone(),
+                "planner",
+            )?;
+            l4_planner::mark_turn(&self.store, "planner", now)?;
+            l4_planner::consume_wake(&self.store, "planner")?;
+            self.record_role_loop("l4-planner", now, "planning")?;
+            started += 1;
+        }
+
+        let keeper_running = self.session_runners.is_running(vowp_protocol::RunRole::Keeper)
+            || self
+                .store
+                .open_runs()?
+                .iter()
+                .any(|run| run.role == vowp_protocol::RunRole::Keeper);
+        if self.loop_active("l5-keeper")
+            && let Some(turn) = l5_keeper::keeper_turn(
+                &self.deps,
+                &self.store,
+                now,
+                covering,
+                status.digest_since,
+                keeper_running,
+            )?
+        {
+            self.start_session(
+                vowp_protocol::RunRole::Keeper,
+                RunPurpose::Keep,
+                turn.choice,
+                turn.prompt,
+                "keeper",
+            )?;
+            l4_planner::mark_turn(&self.store, "keeper", now)?;
+            l4_planner::consume_wake(&self.store, "keeper")?;
+            if covering {
+                l4_planner::consume_wake(&self.store, "planner")?;
+            }
+            self.record_role_loop("l5-keeper", now, if covering { "covering" } else { "keeping" })?;
+            started += 1;
+        }
+        Ok(format!("{started} planner/keeper turn(s) started"))
+    }
+
+    /// Creates/reuses the role session and spawns one session-backed turn.
+    fn start_session(
+        &mut self,
+        role: vowp_protocol::RunRole,
+        purpose: RunPurpose,
+        choice: SessionChoice,
+        prompt: String,
+        window: &str,
+    ) -> Result<(), CoreError> {
+        let session_role = match role {
+            vowp_protocol::RunRole::Planner => SessionRole::Planner,
+            vowp_protocol::RunRole::Keeper => SessionRole::Keeper,
+            _ => SessionRole::Worker,
+        };
+        let profile = if role == vowp_protocol::RunRole::Planner {
+            "planner"
+        } else {
+            "keeper"
+        };
+        let repo = super::main_repo(&self.deps, &self.store, &self.project)?;
+        let session = match self.find_role_session(session_role)? {
+            Some(session) => session,
+            None => self.sessions.create_session(NewSession {
+                project: Some(self.project.clone()),
+                job_id: None,
+                role: session_role,
+                title: format!("{profile} {}", self.project),
+                cwd: repo,
+                parent: None,
+                executor: Some(choice.executor.clone()),
+            })?,
+        };
+        self.session_runners.spawn(
+            self.deps.clone(),
+            session,
+            role,
+            purpose,
+            prompt,
+            choice.executor,
+            choice.node,
+            choice.rung,
+            Some(profile.to_owned()),
+            Some(window.to_owned()),
+            self.wake.clone(),
+        )
+    }
+
+    /// Returns the newest session of `role` for this project.
+    fn find_role_session(&self, role: SessionRole) -> Result<Option<SessionId>, CoreError> {
+        Ok(self
+            .store
+            .list_sessions(&vowp_store::SessionFilter {
+                project: Some(self.project.clone()),
+                ..vowp_store::SessionFilter::default()
+            })?
+            .into_iter()
+            .find(|session| session.role == Some(role))
+            .map(|session| session.id))
+    }
+
+    /// Records a loop row after a planner/keeper turn starts.
+    fn record_role_loop(&self, name: &str, now: Timestamp, status: &str) -> Result<(), CoreError> {
+        let loop_ = self.store.loop_(name)?;
+        let interval = loop_.as_ref().map(|loop_| loop_.interval_secs).unwrap_or(0);
+        let next = (interval > 0).then(|| now.plus(Duration::from_secs(interval)));
+        self.store.record_loop_run(name, now, next, status, true)?;
+        Ok(())
+    }
+
+    /// Step 10: start due L6 probes on their own threads.
+    fn step_probes(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        // Drop locks left by a crashed probe thread when no probe run is open.
+        let open_probe_runs = self
+            .store
+            .open_runs()?
+            .into_iter()
+            .filter(|run| run.role == vowp_protocol::RunRole::Probe)
+            .collect::<Vec<_>>();
+        for (key, _) in self.store.kv_prefix("probe:active:")? {
+            let provider = key.trim_start_matches("probe:active:");
+            if !self.probe_tasks.contains_key(provider)
+                && !open_probe_runs
+                    .iter()
+                    .any(|run| run.provider.as_deref() == Some(provider))
+            {
+                self.store.kv_delete(&key)?;
+            }
+        }
+        let finished = self
+            .probe_tasks
+            .iter()
+            .filter(|(_, handle)| handle.is_finished())
+            .map(|(provider, _)| provider.clone())
+            .collect::<Vec<_>>();
+        let mut applied = 0;
+        for provider in finished {
+            let Some(handle) = self.probe_tasks.remove(&provider) else {
+                continue;
+            };
+            let _ = self.store.kv_delete(&format!("probe:active:{provider}"));
+            match handle.join() {
+                Ok(Ok(())) => applied += 1,
+                Ok(Err(error)) => {
+                    self.deps
+                        .log
+                        .log(Level::Error, "l6", &format!("probe for {provider} failed: {error}"))
+                }
+                Err(_) => self
+                    .deps
+                    .log
+                    .log(Level::Error, "l6", &format!("probe for {provider} panicked")),
+            }
+        }
+        if !self.loop_active("l6-failover") {
+            return Ok(format!("{applied} probe(s) applied; l6-failover paused"));
+        }
+        // A probe that succeeded while a planner/keeper turn was still live defers the
+        // hand-back to the next quiet tick; retry it before starting new probes.
+        let busy = self.store.open_runs()?.iter().any(|run| {
+            matches!(
+                run.role,
+                vowp_protocol::RunRole::Planner | vowp_protocol::RunRole::Keeper
+            )
+        });
+        if !busy {
+            let failover = Failover::new(self.deps.clone());
+            for (key, _) in self.store.kv_prefix("probe_pending:")? {
+                let provider = key.trim_start_matches("probe_pending:").to_owned();
+                if failover.probe_back(&self.store, &provider)? {
+                    self.store.kv_delete(&key)?;
+                }
+            }
+        }
+        let due = Failover::new(self.deps.clone()).probe_due(&self.store, now)?;
+        let mut started = 0;
+        for provider in due {
+            if self.probe_tasks.contains_key(&provider) {
+                continue;
+            }
+            let deps = self.deps.clone();
+            let thread_provider = provider.clone();
+            self.store.kv_set(&format!("probe:active:{provider}"), "1")?;
+            let handle = thread::spawn(move || -> Result<(), CoreError> {
+                let store = deps.open_store()?;
+                let failover = Failover::new(deps.clone());
+                let verdict = failover.run_probe(&store, &thread_provider)?;
+                if verdict == ProbeVerdict::Available {
+                    let complete = failover.probe_back(&store, &thread_provider)?;
+                    if !complete {
+                        store.kv_set(&format!("probe_pending:{thread_provider}"), "1")?;
+                    }
+                } else {
+                    deps.log
+                        .log(Level::Info, "l6", &format!("probe for {thread_provider}: {verdict:?}"));
+                }
+                store.kv_delete(&format!("probe:active:{thread_provider}"))?;
+                Ok(())
+            });
+            self.probe_tasks.insert(provider, handle);
+            started += 1;
+        }
+        Ok(format!("{applied} probe(s) applied, {started} probe(s) started"))
+    }
+
+    /// Applies the repeat guard's third identical failure: fail the job and raise a decision.
+    fn trip_repeat_guard(&mut self, job: &Job, action: &str, count: u32, now: Timestamp) -> Result<(), CoreError> {
+        let note = format!("no progress: {action} x{count}");
+        let from = self.store.set_job_state(
+            &job.id,
+            JobState::Failed,
+            &vowp_store::StateChange {
+                note: Some(note.clone()),
+                parked_reason: None,
+            },
+        )?;
+        self.store.append_ledger(&vowp_protocol::LedgerEntry {
+            id: None,
+            ts: now,
+            kind: vowp_protocol::LedgerKind::State,
+            project: Some(job.project.clone()),
+            job_id: Some(job.id.clone()),
+            run_id: None,
+            session_id: None,
+            role: None,
+            provider: None,
+            harness: None,
+            model: None,
+            cost: None,
+            summary: format!("{}: {} -> failed (repeat guard)", job.id, from.as_str()),
+            detail: serde_json::json!({
+                "from": from.as_str(),
+                "to": "failed",
+                "why": "repeat guard",
+            }),
+        })?;
+        self.transitions.push((job.id.clone(), from, JobState::Failed));
+        self.repeat_guards.remove(&job.id);
+        let decision = dispatch::create_decision_job(&self.deps, &self.store, job)?;
+        self.apply_with(&decision.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
+        let failed = self.store.require_job(&job.id)?;
+        self.open_job_inbox(&failed, InboxKind::Decision)?;
+        self.repeat_tripped = Some(job.id.to_string());
+        if let Some(loop_) = self.store.loop_("l1-supervisor")? {
+            self.store.record_loop_run(
+                "l1-supervisor",
+                now,
+                loop_.next_run_at,
+                &format!("repeat guard: {}", job.id),
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Step 13: refresh last_run/last_status/fail_streak for every unpaused loop row.
+    fn update_loop_rows(&self, now: Timestamp, steps: &[StepReport]) -> Result<(), CoreError> {
+        for loop_ in self.store.list_loops()? {
+            if loop_.name == "l1-supervisor" || loop_.state == ActiveState::Paused {
+                continue;
+            }
+            let step_name = match loop_.name.as_str() {
+                "l2-worker" => "dispatch",
+                "l3-verify" => "verify",
+                "l4-planner" | "l5-keeper" => "triggers",
+                "l6-failover" => "probes",
+                "l7-inbox" => "requests",
+                "l8-watchdog" => "heartbeat",
+                "l9-schedules" => "schedules",
+                _ => continue,
+            };
+            let Some(step) = steps.iter().find(|step| step.name == step_name) else {
+                continue;
+            };
+            self.store
+                .record_loop_run(&loop_.name, now, loop_.next_run_at, &step.detail, step.ok)?;
+        }
+        Ok(())
+    }
+
     /// Step 11: fire due schedules.
     fn step_schedules(&mut self, now: Timestamp) -> Result<String, CoreError> {
         if !self.loop_active("l9-schedules") {
@@ -962,6 +1553,9 @@ impl Supervisor {
                     &format!("cannot fire schedule {}: {error}", due_run.schedule.name),
                 ),
             }
+        }
+        if fired > 0 {
+            l4_planner::raise_wake(&self.store, "planner")?;
         }
         Ok(format!("{fired} schedule(s) fired"))
     }
@@ -996,8 +1590,8 @@ impl Supervisor {
     }
 
     /// Step 13: heartbeat file and supervisor pid.
-    fn step_heartbeat(&mut self, now: Timestamp) -> Result<String, CoreError> {
-        self.atomic_write("heartbeat", &now.unix_secs().to_string())?;
+    fn step_heartbeat(&mut self, _now: Timestamp) -> Result<String, CoreError> {
+        l8_watchdog::write_heartbeat(&self.deps)?;
         self.store.kv_set("supervisor_pid", &std::process::id().to_string())?;
         Ok("heartbeat written".to_owned())
     }
@@ -1013,6 +1607,7 @@ impl Supervisor {
     ) -> Result<Applied, CoreError> {
         let bounds = self.transition_bounds();
         let applied = apply_event(&self.store, job_id, &event, bounds, note, None)?;
+        self.note_planner_event(&event, applied.to)?;
         self.transitions.push((job_id.clone(), applied.from, applied.to));
         let mut findings = findings;
         for effect in applied.effects.clone() {
@@ -1097,19 +1692,52 @@ impl Supervisor {
                 }
             }
             Effect::NotifyInbox { kind } => {
+                if self.suppress_job_inbox {
+                    return Ok(());
+                }
                 let job = self.store.require_job(job_id)?;
                 self.open_job_inbox(&job, *kind)?;
             }
             Effect::NotifyParent => self.notify_parent(job_id)?,
             Effect::WakeKeeper => {
-                self.store.kv_set("wake:keeper", "1")?;
+                l4_planner::raise_wake(&self.store, "keeper")?;
             }
             Effect::WakePlanner => {
-                self.store.kv_set("wake:planner", "1")?;
+                l4_planner::raise_wake(&self.store, "planner")?;
             }
             Effect::DelayRun { purpose: _, until } => {
                 self.store.kv_set(&format!("delay:{job_id}"), &until.as_rfc3339())?;
             }
+        }
+        Ok(())
+    }
+
+    /// Marks the planner due after a job event it should see (done/failed/stalled/parked).
+    fn note_planner_event(&self, event: &JobEvent, to: JobState) -> Result<(), CoreError> {
+        let planner_event = matches!(
+            to,
+            JobState::Done | JobState::Failed | JobState::Stalled | JobState::Parked
+        ) || matches!(
+            event,
+            JobEvent::GatesPassed
+                | JobEvent::GatesFailed
+                | JobEvent::VerifyPassed
+                | JobEvent::VerifyFailed
+                | JobEvent::MergeSucceeded
+                | JobEvent::MergeConflict
+                | JobEvent::MergeChecksFailed
+                | JobEvent::FixDone { .. }
+                | JobEvent::FixFailed
+                | JobEvent::Blocked { .. }
+                | JobEvent::KeeperFail
+                | JobEvent::Retry
+                | JobEvent::RunRateLimited { .. }
+        );
+        if planner_event {
+            l4_planner::raise_wake(&self.store, "planner")?;
+        }
+        if matches!(event, JobEvent::RunRateLimited { .. }) {
+            l4_planner::raise_wake(&self.store, "keeper")?;
         }
         Ok(())
     }
@@ -1172,7 +1800,7 @@ impl Supervisor {
         super::open_inbox(
             &self.store,
             &self.deps,
-            NewInbox {
+            NewInboxItem {
                 project: Some(job.project.clone()),
                 job_id: Some(job.id.clone()),
                 kind,

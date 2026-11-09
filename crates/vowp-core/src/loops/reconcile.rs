@@ -48,7 +48,12 @@ fn finish_crash(store: &Store, run: &Run) -> Result<(), CoreError> {
         detail: "orphaned at supervisor start".to_owned(),
     };
     match store.finish_run(&run.id, &finish) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // An orphan never had a live runner thread to run L6; the marker lets the
+            // harvest step apply the L2 crash path without waiting for it.
+            store.kv_set(&format!("l6:{}", run.id), "orphan")?;
+            Ok(())
+        }
         Err(vowp_store::StoreError::Conflict(_)) => Ok(()),
         Err(error) => Err(CoreError::Store(error)),
     }
@@ -166,16 +171,24 @@ pub(crate) fn startup(deps: &Deps, store: &Store, active: &HashSet<RunId>) -> Re
     });
     let engine = crate::schedules::ScheduleEngine::new(deps.clone());
     engine.sync_from_config(store, &deps.config)?;
-    let due = engine.catch_up(store, deps.clock.now())?;
+    // A paused L9 loop must not fire missed schedules on startup; the per-tick step makes
+    // the same check. The rows stay armed, so resuming the loop lets the next tick apply
+    // the normal missed-run policy.
+    let l9_active = store
+        .loop_("l9-schedules")?
+        .is_none_or(|loop_| loop_.state == ActiveState::Active);
     let mut schedules_caught_up = 0;
-    for due_run in &due {
-        match engine.fire(store, due_run) {
-            Ok(_) => schedules_caught_up += 1,
-            Err(error) => deps.log.log(
-                vowp_protocol::Level::Error,
-                "l9",
-                &format!("cannot fire missed schedule {}: {error}", due_run.schedule.name),
-            ),
+    if l9_active {
+        let due = engine.catch_up(store, deps.clock.now())?;
+        for due_run in &due {
+            match engine.fire(store, due_run) {
+                Ok(_) => schedules_caught_up += 1,
+                Err(error) => deps.log.log(
+                    vowp_protocol::Level::Error,
+                    "l9",
+                    &format!("cannot fire missed schedule {}: {error}", due_run.schedule.name),
+                ),
+            }
         }
     }
     Ok(ReconcileReport {

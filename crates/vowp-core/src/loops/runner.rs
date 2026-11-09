@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use vowp_graph::DispatchChoice;
 use vowp_protocol::{
-    CancelToken, ExecutorRef, Job, JobId, Level, RunId, RunPurpose, RunRole, SessionRole, TurnRequest,
+    CancelToken, Executor, ExecutorRef, Job, JobId, Level, NodeName, RunId, RunPurpose, RunRole, SessionId,
+    SessionRole, TurnRequest,
 };
 
 use crate::CoreError;
@@ -21,6 +22,7 @@ use crate::deps::Deps;
 use crate::session::service::SessionService;
 
 use super::l2;
+use super::l6_failover::Failover;
 
 /// Time L1 is willing to wait for the session service to insert a run row.
 const RUN_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
@@ -171,6 +173,25 @@ impl RunnerPool {
                         "l2",
                         &format!("run {} finished: {:?}", result.run_id, result.summary.outcome),
                     );
+                    // L6 runs before L1 harvests the run; the marker tells the supervisor
+                    // that the limit policy (park/backoff/next rung) is already applied.
+                    if let Ok(store) = thread_deps.open_store() {
+                        if let Ok(run) = store.require_run(&result.run_id) {
+                            match Failover::new(thread_deps.clone()).on_run_outcome(&store, &run, &result.summary) {
+                                Ok(action) => thread_deps.log.log(
+                                    Level::Info,
+                                    "l6",
+                                    &format!("failover for run {}: {action:?}", result.run_id),
+                                ),
+                                Err(error) => thread_deps.log.log(
+                                    Level::Error,
+                                    "l6",
+                                    &format!("failover for run {} failed: {error}", result.run_id),
+                                ),
+                            }
+                        }
+                        let _ = store.kv_set(&format!("l6:{}", result.run_id), "done");
+                    }
                 }
                 Err(error) => {
                     thread_deps.log.log(
@@ -308,4 +329,168 @@ fn wait_for_run(
         }
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// One live planner or keeper turn.
+struct SessionRunEntry {
+    session_id: SessionId,
+    role: RunRole,
+    cancel: CancelToken,
+    join: Option<JoinHandle<()>>,
+    finished: Arc<Mutex<bool>>,
+}
+
+/// Pool of planner/keeper session turns; job runs stay in [`RunnerPool`].
+#[derive(Default)]
+pub struct SessionRunPool {
+    entries: Vec<SessionRunEntry>,
+}
+
+impl SessionRunPool {
+    /// Creates an empty pool.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Spawns one planner or keeper turn on `session`.
+    ///
+    /// The thread runs the turn, feeds the finished run to L6 (limits, failover, unknown
+    /// failures) and wakes L1. A failed turn is logged and retried at the next heartbeat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn(
+        &mut self,
+        deps: Deps,
+        session_id: SessionId,
+        role: RunRole,
+        purpose: RunPurpose,
+        prompt: String,
+        executor: Executor,
+        node: Option<NodeName>,
+        rung: u32,
+        profile: Option<String>,
+        window: Option<String>,
+        wake: WakeHandle,
+    ) -> Result<(), CoreError> {
+        let cancel = CancelToken::default();
+        let finished = Arc::new(Mutex::new(false));
+        let thread_cancel = cancel.clone();
+        let thread_finished = Arc::clone(&finished);
+        let thread_session = session_id.clone();
+        let thread_deps = deps.clone();
+        let join = thread::spawn(move || {
+            let service = SessionService::new(thread_deps.clone());
+            let request = TurnRequest {
+                session_id: thread_session.clone(),
+                executor: ExecutorRef { executor, node },
+                purpose,
+                role,
+                job_id: None,
+                prompt,
+                profile,
+                rung,
+                window,
+                timeout: None,
+            };
+            match service.run_turn(request, &thread_cancel) {
+                Ok(result) => {
+                    thread_deps.log.log(
+                        Level::Info,
+                        "l4",
+                        &format!("{role:?} turn {} finished: {:?}", result.run_id, result.summary.outcome),
+                    );
+                    if let Ok(store) = thread_deps.open_store()
+                        && let Ok(run) = store.require_run(&result.run_id)
+                    {
+                        match Failover::new(thread_deps.clone()).on_run_outcome(&store, &run, &result.summary) {
+                            Ok(action) => thread_deps.log.log(
+                                Level::Info,
+                                "l6",
+                                &format!("failover for {role:?} turn {}: {action:?}", result.run_id),
+                            ),
+                            Err(error) => thread_deps.log.log(
+                                Level::Error,
+                                "l6",
+                                &format!("failover for {role:?} turn {} failed: {error}", result.run_id),
+                            ),
+                        }
+                        let _ = store.kv_set(&format!("l6:{}", result.run_id), "done");
+                    }
+                }
+                Err(error) => {
+                    thread_deps.log.log(
+                        Level::Error,
+                        "l4",
+                        &format!("{role:?} turn on {thread_session} failed to start: {error}"),
+                    );
+                }
+            }
+            if let Ok(mut done) = thread_finished.lock() {
+                *done = true;
+            }
+            wake.wake();
+        });
+        self.entries.push(SessionRunEntry {
+            session_id,
+            role,
+            cancel,
+            join: Some(join),
+            finished,
+        });
+        Ok(())
+    }
+
+    /// Returns true while a turn of `role` is still running.
+    pub fn is_running(&self, role: RunRole) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.role == role && !is_session_finished(entry))
+    }
+
+    /// Returns true while `session` still has a tracked turn.
+    pub fn session_running(&self, session: &SessionId) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| &entry.session_id == session && !is_session_finished(entry))
+    }
+
+    /// Cancels one session's turn and joins its thread.
+    pub fn cancel_and_wait(&mut self, session: &SessionId) {
+        if let Some(index) = self.entries.iter().position(|entry| &entry.session_id == session) {
+            let mut entry = self.entries.remove(index);
+            entry.cancel.cancel();
+            if let Some(join) = entry.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    /// Cancels every tracked turn.
+    pub fn cancel_all(&self) {
+        for entry in &self.entries {
+            entry.cancel.cancel();
+        }
+    }
+
+    /// Reaps finished turns and returns their session ids.
+    pub fn poll(&mut self) -> Vec<SessionId> {
+        let mut finished = Vec::new();
+        let mut remaining = Vec::new();
+        for mut entry in self.entries.drain(..) {
+            if is_session_finished(&entry) {
+                if let Some(join) = entry.join.take() {
+                    let _ = join.join();
+                }
+                finished.push(entry.session_id);
+            } else {
+                remaining.push(entry);
+            }
+        }
+        self.entries = remaining;
+        finished
+    }
+}
+
+/// Returns true when a session turn thread signalled completion.
+fn is_session_finished(entry: &SessionRunEntry) -> bool {
+    entry.finished.lock().map(|done| *done).unwrap_or(true)
 }
