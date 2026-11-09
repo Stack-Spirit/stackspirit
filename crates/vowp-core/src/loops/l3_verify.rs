@@ -105,6 +105,12 @@ fn create_verify_job_with_suffix(
 /// `VerifyFailed`. A report without a usable verdict is [`CoreError::Invalid`]; the caller
 /// treats that as `VerifierFailed` (T37).
 pub fn on_verify_done(store: &Store, verify_job: &Job) -> Result<JobEvent, CoreError> {
+    Ok(on_verify_done_with_findings(store, verify_job)?.0)
+}
+
+/// Like [`on_verify_done`], but also returns the verifier findings so the caller can pass
+/// them into the `CreateFixJob` effect.
+pub fn on_verify_done_with_findings(store: &Store, verify_job: &Job) -> Result<(JobEvent, Vec<String>), CoreError> {
     let original_id = verify_parent(store, verify_job)?;
     let original = store.require_job(&original_id)?;
     let report = read_verify_report(verify_job)?;
@@ -132,10 +138,11 @@ pub fn on_verify_done(store: &Store, verify_job: &Job) -> Result<JobEvent, CoreE
         ts: store.clock().now(),
     };
     store.insert_gate_result(&result)?;
-    Ok(match verdict {
+    let event = match verdict {
         Verdict::Pass => JobEvent::VerifyPassed,
         Verdict::Fail => JobEvent::VerifyFailed,
-    })
+    };
+    Ok((event, findings))
 }
 
 /// Parses a verifier report's verdict and findings.
@@ -239,19 +246,27 @@ fn summarise_evidence(evidence: &Evidence) -> String {
         Evidence::Cmd {
             command,
             exit_code,
+            timed_out,
             tail,
             ..
         }
         | Evidence::Script {
             command,
             exit_code,
+            timed_out,
             tail,
             ..
         } => {
-            format!(
-                "`{command}` exited {exit_code:?}: {}",
-                tail.lines().last().unwrap_or("")
-            )
+            let tail = tail
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("`{command}` exited {exit_code:?} (timed_out={timed_out}):\n{tail}")
         }
         Evidence::OwnsRespected { violations, .. } => {
             if violations.is_empty() {

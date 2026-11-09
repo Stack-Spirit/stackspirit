@@ -493,7 +493,10 @@ impl Supervisor {
                     .and_then(|limit| limit.resets_at)
                     .filter(|until| *until > now)
                     .unwrap_or_else(|| now.plus(Duration::from_secs(600)));
-                (JobEvent::RunRateLimited { until }, None)
+                (
+                    JobEvent::RunRateLimited { until },
+                    Some(format!("rate-limited; retry after {}", until.as_rfc3339())),
+                )
             }
             Some(vowp_protocol::RunOutcome::Limit)
             | Some(vowp_protocol::RunOutcome::Credits)
@@ -714,8 +717,10 @@ impl Supervisor {
                     handled += 1;
                 }
                 Some(verify) if verify.state == JobState::Done => {
-                    match l3_verify::on_verify_done(&self.store, &verify) {
-                        Ok(event) => self.apply_simple(&original.id, event, None)?,
+                    match l3_verify::on_verify_done_with_findings(&self.store, &verify) {
+                        Ok((event, findings)) => {
+                            self.apply_with(&original.id, event, None, findings, None)?;
+                        }
                         Err(error) => {
                             self.deps.log.log(
                                 Level::Warn,
@@ -1187,8 +1192,10 @@ impl Supervisor {
         match child.kind {
             JobKind::Verify => {
                 if child.state == JobState::Done && parent_job.state == JobState::Reviewing {
-                    match l3_verify::on_verify_done(&self.store, &child) {
-                        Ok(event) => self.apply_simple(&parent, event, None)?,
+                    match l3_verify::on_verify_done_with_findings(&self.store, &child) {
+                        Ok((event, findings)) => {
+                            self.apply_with(&parent, event, None, findings, None)?;
+                        }
                         Err(error) => {
                             self.deps.log.log(
                                 Level::Warn,

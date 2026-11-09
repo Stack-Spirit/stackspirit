@@ -40,7 +40,7 @@ pub mod l2 {
 
 /// L3 verify helpers (spec: `loops.md` §5).
 pub mod l3 {
-    pub use super::l3_verify::{on_verify_done, parse_verdict, verify_prompt};
+    pub use super::l3_verify::{on_verify_done, on_verify_done_with_findings, parse_verdict, verify_prompt};
 }
 
 /// One job event that was applied to a row.

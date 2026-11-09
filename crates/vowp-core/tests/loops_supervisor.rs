@@ -190,12 +190,20 @@ fn dispatch_respects_ownership_locks_and_slots() {
         ScriptAction::ok("dispatched"),
     ));
     let node = TestNode::with_adapter_config(false, adapter, |config| {
-        config.node.max_workers = 1;
+        config.node.max_workers = 2;
     });
     let a = node.insert_job("job-a", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
-    let mut b = node.insert_job("job-b", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
-    b.owns = vec!["src/**".to_owned()];
-    // Both jobs own src/**, so only one may hold the lock.
+    let b = node.insert_job("job-b", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
+    let c = node.insert_job("job-c", JobKind::Build, vowp_protocol::Role::Worker, Some(vec![]));
+    node.store()
+        .patch_job(
+            &c.id,
+            &vowp_protocol::JobPatch {
+                owns: Some(vec!["docs/**".to_owned()]),
+                ..vowp_protocol::JobPatch::default()
+            },
+        )
+        .expect("patch owns");
     let mut supervisor = node.supervisor();
     let first = supervisor.tick().expect("tick");
     assert_eq!(first.steps[0].name, "requests");
@@ -206,15 +214,19 @@ fn dispatch_respects_ownership_locks_and_slots() {
             ..JobFilter::default()
         })
         .expect("running");
-    assert_eq!(running.len(), 1, "one worker slot and overlapping owns");
-    assert!(running[0].id == a.id || running[0].id == b.id);
-    let ready = store
-        .list_jobs(&JobFilter {
-            states: vec![JobState::Ready],
-            ..JobFilter::default()
-        })
-        .expect("ready");
-    assert_eq!(ready.len(), 1);
+    assert_eq!(running.len(), 2, "two free slots, but only one src/** holder");
+    let running_ids = running.iter().map(|job| job.id.clone()).collect::<Vec<_>>();
+    assert!(running_ids.contains(&a.id), "job-a acquires the src/** lock first");
+    assert!(running_ids.contains(&c.id), "job-c owns a disjoint path");
+    assert!(
+        !running_ids.contains(&b.id),
+        "job-b overlaps job-a's src/** and must stay ready"
+    );
+    let b_now = store.require_job(&b.id).expect("job-b");
+    assert_eq!(b_now.state, JobState::Ready);
+    assert_eq!(store.runs_of_job(&a.id).expect("a runs").len(), 1);
+    assert_eq!(store.runs_of_job(&c.id).expect("c runs").len(), 1);
+    assert!(store.runs_of_job(&b.id).expect("b runs").is_empty());
 }
 
 #[test]
@@ -326,6 +338,77 @@ fn dispatch_resumes_job_with_prior_run_after_retry() {
         .find(|run| run.started_at >= ts() && run.purpose == RunPurpose::Continue)
         .expect("continue run");
     assert_eq!(resumed.purpose, RunPurpose::Continue);
+}
+
+#[test]
+fn rate_limit_delays_continue_until_resets() {
+    let node = TestNode::new();
+    let job = worker_job(&node, "rate-job");
+    node.force_state(&job, JobState::Running);
+    let session = create_session(&node, &job);
+    let resets_at = now().plus(Duration::from_secs(1800));
+    let store = node.store();
+    store
+        .upsert_limit(&Limit {
+            provider: "deepseek".to_owned(),
+            harness: Some(vowp_protocol::HarnessKind::Opencode),
+            kind: LimitRowKind::Rate,
+            resets_at: Some(resets_at),
+            detail: "rate".to_owned(),
+            since: now(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("limit");
+    let run = Run {
+        id: RunId::new(),
+        job_id: Some(job.id.clone()),
+        session_id: Some(session),
+        role: RunRole::Worker,
+        purpose: RunPurpose::Start,
+        profile: Some("worker".to_owned()),
+        rung: 0,
+        executor: Some(Executor::parse("opencode:deepseek/deepseek-flash").expect("executor")),
+        provider: Some("deepseek".to_owned()),
+        node: node.deps.node.clone(),
+        native_session_id: None,
+        pid: None,
+        window: None,
+        cwd: Some(node.main_repo.to_string_lossy().into_owned()),
+        started_at: now(),
+        ended_at: None,
+        exit_code: None,
+        outcome: None,
+        limit_kind: None,
+        cost: Cost::unknown(),
+        detail: String::new(),
+    };
+    store.insert_run(&run).expect("run");
+    store
+        .finish_run(
+            &run.id,
+            &vowp_store::RunFinish {
+                outcome: RunOutcome::Rate,
+                exit_code: Some(1),
+                limit_kind: Some(vowp_protocol::LimitKind::Rate),
+                cost: Cost::unknown(),
+                native_session_id: None,
+                detail: "429".to_owned(),
+            },
+        )
+        .expect("finish");
+    let mut supervisor = node.supervisor();
+    supervisor.tick().expect("tick");
+    let job = store.require_job(&job.id).expect("job");
+    assert_eq!(job.state, JobState::Running);
+    assert!(job.note.contains("rate-limited; retry after"));
+    assert_eq!(
+        store.kv_get(&format!("delay:{}", job.id)).expect("kv"),
+        Some(resets_at.as_rfc3339())
+    );
+    assert_eq!(store.runs_of_job(&job.id).expect("runs").len(), 1);
 }
 
 #[test]
@@ -531,7 +614,7 @@ fn verify_prompt_contains_original_gate_command_and_tail() {
                 command: "cargo test --workspace".to_owned(),
                 exit_code: Some(101),
                 timed_out: false,
-                tail: "compiling the workspace\nTAIL-MARKER-42".to_owned(),
+                tail: "EARLY-TAIL-LINE\ncompiling the workspace\nTAIL-MARKER-42".to_owned(),
                 duration_ms: 10,
             },
             output_blob: None,
@@ -553,6 +636,7 @@ fn verify_prompt_contains_original_gate_command_and_tail() {
         .find(|prompt| prompt.contains("You are the verifier for job"))
         .expect("verifier prompt");
     assert!(prompt.contains("cargo test --workspace"), "{prompt}");
+    assert!(prompt.contains("EARLY-TAIL-LINE"), "{prompt}");
     assert!(prompt.contains("TAIL-MARKER-42"), "{prompt}");
     assert!(prompt.contains("git diff main...job/verify-evidence"), "{prompt}");
 }
@@ -638,7 +722,7 @@ fn verify_fail_creates_fix_job_same_branch_max_3_then_escalates() {
         vowp_protocol::HarnessKind::Opencode,
         report_script("verify-fail", Some("fail"), "done"),
     ));
-    let node = TestNode::with_adapter(true, adapter);
+    let node = TestNode::with_adapter(true, adapter.clone());
     let original = reviewing_job(&node, "verify-fail");
     let mut supervisor = node.supervisor();
     node.tick_until(&mut supervisor, 60, |store| {
@@ -665,6 +749,18 @@ fn verify_fail_creates_fix_job_same_branch_max_3_then_escalates() {
                 .any(|edge| edge.kind == EdgeKind::Fixes && edge.dst == job.id)
         );
     }
+    let fix_prompts = adapter
+        .starts()
+        .into_iter()
+        .filter(|start| start.prompt.contains("Job verify-fail failed"))
+        .collect::<Vec<_>>();
+    assert!(!fix_prompts.is_empty());
+    assert!(
+        fix_prompts
+            .iter()
+            .all(|start| start.prompt.contains("concrete finding")),
+        "verifier findings must reach every fix prompt: {fix_prompts:?}"
+    );
     let decision = store
         .require_job(&vowp_protocol::JobId::parse("verify-fail-decision").expect("id"))
         .expect("decision job");

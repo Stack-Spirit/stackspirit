@@ -128,6 +128,23 @@ fn drill_merge_conflict() {
         })
         .expect("merge jobs");
     assert_eq!(merge_jobs.len(), 1);
+    assert!(
+        merge_jobs[0].owns.iter().any(|own| own == "src/shared.rs"),
+        "the merge child owns the conflicted file: {:?}",
+        merge_jobs[0].owns
+    );
+    let merge_prompts = adapter
+        .starts()
+        .into_iter()
+        .filter(|start| start.prompt.contains("Job second failed"))
+        .collect::<Vec<_>>();
+    assert!(!merge_prompts.is_empty());
+    assert!(
+        merge_prompts
+            .iter()
+            .any(|start| start.prompt.contains("rebase conflict in src/shared.rs")),
+        "the merge prompt must list the conflicted file: {merge_prompts:?}"
+    );
     let origin = node.tmp.path().join("origin.git");
     let shown = node.git(&origin, &["show", "main:src/shared.rs"]);
     assert!(
