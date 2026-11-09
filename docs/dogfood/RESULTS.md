@@ -71,7 +71,7 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | ledger | each job has ≥3 `state` rows and exactly 1 `merge` row; 3 worker `start` runs |
 | `vowp down --kill-windows` | lock removed, heartbeat removed, stopped marker written, no windows/worktrees |
 | SIGKILL + restart (default window) | 2 crash runs, 2 `RunEndedNoReport` continue rows, 2 `continue` harness turns, all 3 jobs done, 1 merge row each |
-| loops smoke check (n08d-tolerant) | `l4`–`l9` rows present via `vowp loops --json` (falls back to `vowp loops list --json` if that subcommand exists) |
+| loops smoke check (n08d-tolerant) | `l4`–`l9` rows present via `vowp loops list --json` when that subcommand exists, otherwise via `vowp loops --json` |
 | fake verifier config | the `verifier` profile resolves and probes; the fake harness also implements verifier reports (no `review` gate is in this graph, so no verify job was created) |
 
 ## Timings (final run)
@@ -79,9 +79,9 @@ CRASH_EARLY=1 bash scripts/dogfood/run.sh   # fast reproducer for D3, expected t
 | Step | Time |
 |---|---|
 | `cargo build -q -p vowp-cli` (rebuild after the rebase) | included in the total below |
-| Phase 1 (init → down) | 9 s (7 s on the warm rerun) |
+| Phase 1 (init → down) | 9 s on both the post-rebase and warm runs |
 | Phase 2 (init → SIGKILL → restart → down) | 11 s |
-| Total wall time (`/usr/bin/time`) | 44.65 s including the rebuild; 22.83 s on the post-commit warm rerun |
+| Total wall time (`/usr/bin/time`) | 44.65 s including the rebuild; 23.89 s on the post-commit warm rerun |
 
 The normal run completes in well under a minute; the default timeouts are 600 s for phase 1
 and 300 s for phase 2.
