@@ -62,8 +62,8 @@ cargo install --path crates/vowp-cli
 vowp --version
 ```
 
-`cargo install` writes to `~/.cargo/bin` by default. If that directory is not on your `PATH`, add it in
-your shell profile, or pass `--root <dir>` and add `<dir>/bin` instead.
+`cargo install` writes under `$CARGO_HOME/bin` (usually `~/.cargo/bin`) by default. If that directory is
+not on your `PATH`, add it in your shell profile, or pass `--root <dir>` and add `<dir>/bin` instead.
 
 ## Install the systemd unit and watchdog
 

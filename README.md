@@ -67,8 +67,10 @@ you ──► vowp CLI ──► SQLite + session logs (~/.vowp)
 
 ## Quickstart (from source)
 
-Prerequisites: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml), `git`, and
-`tmux` for the window manager. Install `tmux` with your operating system's package manager.
+Prerequisites: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml), `git`,
+`tmux` for the window manager, and a harness such as Claude Code or opencode, installed and signed in.
+Install `tmux` with your operating system's package manager; the
+[install guide](docs/guides/install.md#prerequisites) covers harness setup and every other requirement.
 
 ```sh
 cargo build --workspace
@@ -135,6 +137,8 @@ Also: [security model](docs/security.md), [troubleshooting](docs/troubleshooting
 | `crates/vowp-core` | Sessions, loops, gates, ledger, schedules, promotion. |
 | `crates/vowp-cli` | The `vowp` binary. |
 | `framework/` | Templates, skills and agent presets installed by `vowp init`. |
+| `examples/` | Runnable examples, including the three-job `hello-vowp` graph. |
+| `scripts/` | Per-user install, systemd unit, watchdog, uninstall and their tests. |
 | `docs/design/` | The v0.1 implementation spec. |
 
 ## License
