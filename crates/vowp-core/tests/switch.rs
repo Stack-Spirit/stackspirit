@@ -8,13 +8,14 @@ mod support;
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
+use support::signal_child::shell_command;
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::service::SessionService;
 use vowp_core::session::switch::{run_switch, run_switch_with_input};
@@ -249,6 +250,11 @@ impl Adapter for ProcessAdapter {
         // Publish readiness only after both traps exist. A signal that arrives while
         // `sh` is still starting up can be ignored or handled by the shell before the
         // user traps are installed, which would silently lose the `int` marker.
+        //
+        // Start the shell through `shell_command`: a non-interactive shell cannot trap
+        // SIGINT if it inherited SIGINT ignored, which happens when a gate runs as a
+        // background shell job. Resetting the disposition makes the INT trap real, so
+        // the `int` marker is an acknowledgment that SIGINT was delivered.
         let script = format!(
             "trap 'echo int >> {path}' INT; \
              trap 'echo term >> {path}; exit 0' TERM; \
@@ -257,9 +263,7 @@ impl Adapter for ProcessAdapter {
             path = self.signal_path.display(),
             ready = self.ready_path.display()
         );
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(script)
+        let mut child = shell_command(&script)
             .process_group(0)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -854,9 +858,11 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     let advancer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         advanced.advance(Duration::from_secs(5));
-        // Grant the SIGTERM grace only after the child has recorded SIGINT. Otherwise
-        // two fast advances under load could deliver TERM while the INT trap is still
-        // pending, and the shell could exit before it writes the `int` marker.
+        // The child's `int` marker is the SIGINT acknowledgment. Advance to the SIGTERM
+        // grace only after it exists: advancing first could deliver TERM while the INT
+        // trap is still pending, and the TERM trap's exit would lose `int`. The child
+        // starts with default signal dispositions (see `shell_command`), so this wait
+        // observes a real trap rather than an inherited ignored SIGINT.
         wait_for_markers(&int_path, &["int"]);
         advanced.advance(Duration::from_secs(3));
         wait_for_markers(&term_path, &["term"]);
