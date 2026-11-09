@@ -10,8 +10,10 @@
 # when its handler module is real code, not an explicit NotImplemented stub. A
 # required-set assertion catches parser drift.
 #
-# Scope: README.md, docs/concepts/**, docs/guides/**, docs/security.md and
-# docs/troubleshooting.md. docs/design/** is the reference, not a consumer.
+# Scope: README.md, docs/concepts/**, docs/guides/**, docs/security.md,
+# docs/troubleshooting.md, docs/roadmap.md, docs/design/v0.2/** and
+# docs/maintainers/issue-drafts.md. Other docs/design/** pages are the
+# reference, not a consumer.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -194,7 +196,15 @@ if unknown_to_binary:
 doc_files = [root / "README.md"]
 for directory in ("concepts", "guides"):
     doc_files.extend(sorted((root / "docs" / directory).glob("*.md")))
-doc_files.extend([root / "docs" / "security.md", root / "docs" / "troubleshooting.md"])
+doc_files.extend(
+    [
+        root / "docs" / "security.md",
+        root / "docs" / "troubleshooting.md",
+        root / "docs" / "roadmap.md",
+        root / "docs" / "maintainers" / "issue-drafts.md",
+    ]
+)
+doc_files.extend(sorted((root / "docs" / "design" / "v0.2").glob("*.md")))
 doc_files = [p for p in doc_files if p.is_file()]
 
 

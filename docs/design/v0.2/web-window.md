@@ -1,6 +1,7 @@
 # v0.2 — web / PWA window
 
-Status: design only. v0.1 has no browser UI and no listening socket.
+Status: current for the commands shown; this note is design only. v0.1 has no browser UI and no
+listening socket.
 
 ## Goal
 

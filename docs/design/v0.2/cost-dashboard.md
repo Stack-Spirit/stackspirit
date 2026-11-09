@@ -1,7 +1,7 @@
 # v0.2 — cost dashboard
 
-Status: design only. v0.1 has `vowp cost` and the `cost_today` field on the board; it has no browser
-view and no budget enforcement.
+Status: current for the commands shown; this note is design only. v0.1 has `vowp cost` and the
+`cost_today` field on the board; it has no browser view and no budget enforcement.
 
 ## Goal
 

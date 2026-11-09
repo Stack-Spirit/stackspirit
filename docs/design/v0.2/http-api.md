@@ -1,7 +1,7 @@
 # v0.2 — daemon HTTP + SSE API
 
-Status: design only. Nothing here is implemented in v0.1; the supervisor opens no socket and there is
-no HTTP API to call.
+Status: current for the commands shown; this note is design only. Nothing here is implemented in
+v0.1; the supervisor opens no socket and there is no HTTP API to call.
 
 ## Goal
 
@@ -20,11 +20,19 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   `cost_today_usd`, `inbox_open`, `last_checkpoint`).
 - `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer.
 - `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape.
+- `GET /api/v1/nodes` — **later slice**: node name, SSH target, last seen, version and probe state.
+  The web-window `/nodes` page needs it, but the window's first slice has no nodes page.
+- `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — **later slice**: one capsule for the window's
+  capsule view; the window's first slice has no sessions page.
 - `POST /api/v1/jobs/{id}/retry|park|cancel` — enqueue the existing
   `vowp_core::requests::Request`; do not duplicate the state machine.
 - `POST /api/v1/sessions/{id}/switch` — run the same `SessionOps::switch` path as
   `vowp session switch`. The v0.1 request queue has no switch variant, so this is the one write that
   needs its own daemon-side call and cancellation story.
+
+The node list and the single-capsule route are **later slices**, not part of the first API slice: the
+web-window first slice is a static shell and read-only board page with no sessions page and no nodes
+page, so it does not call them. Do not add placeholder routes for them to the first slice.
 
 A write response returns the affected row or the request id; consumers poll or wait for the next
 event. A browser action must never apply a state transition directly.
@@ -37,14 +45,32 @@ error in v0.1 and should be tolerated as opaque in v0.2. The API sends the envel
 wrapping the payload, so a stored log line and an SSE `data:` value are the same object.
 
 `Job`, `Session`, `Run`, `GateResult`, `Switch`, `Capsule`, `Limit`, `Cost` and `LedgerEntry` are
-served in their `vowp-protocol` JSON form. The only new wire types are:
+served in their `vowp-protocol` JSON form. The new document and transport types are:
 
+- `Health { version, node, project, schema_version, heartbeat }` — the `/api/v1/health` document.
+  `version` is the binary version, `node` and `project` are names, `schema_version` is the integer
+  store schema, and `heartbeat` is the RFC 3339 time of the last supervisor tick or null when none
+  has run.
+- `Board { at, project, jobs, running, slots_busy, slots_total, planner, keeper, limits,
+  cost_today_usd, inbox_open, last_checkpoint }` — the exact `vowp board --json` document. `jobs`
+  maps a canonical state name to a count; `running` is a `BoardRun[]`; `limits` is a `BoardLimit[]`;
+  `planner` and `keeper` are executors or null; `cost_today_usd` is null when today's cost is
+  unknown; `last_checkpoint` is an RFC 3339 time or null.
+- `BoardRun { job, executor, age_secs, last_event_age_secs }` — one running job in `Board.running`.
+  `executor` and `last_event_age_secs` are nullable.
+- `BoardLimit { provider, kind, resets_at }` — the reduced limit row in `Board.limits`; `kind` is
+  the canonical limit class and `resets_at` is an RFC 3339 time or null.
 - `Page<T> { items, next, total }` for lists.
 - `ApiError { error: { kind, message, hint? } }` — the same shape as `vowp --json` errors.
 - An SSE frame with `event: session` / `event: board` / `event: heartbeat` and the JSON data line.
+  This is a `text/event-stream` frame, not a JSON document, so it has no schema of its own: the
+  `data:` line is an `EventEnvelope` for `session`, a `Board` for `board`, and `{ at }` for
+  `heartbeat`.
 
-`vowp schema` remains the source of truth; add the new transport types to `all_schemas()` rather than
-hand-writing JSON examples.
+`vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`
+and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the concrete page
+instantiations the API serves (for example `JobPage`, `SessionPage`, `InboxPage` and `CostPage`)
+alongside their item types, and keep the SSE frame as the one explicit schema exception above.
 
 ## Existing crates it builds on
 
@@ -63,7 +89,7 @@ hand-writing JSON examples.
 
 ## Open questions
 
-1. **Process shape.** Is the daemon a separate `vowp serve` process, or an optional thread inside
+1. **Process shape.** Is the daemon a separate planned `serve` process, or an optional thread inside
    `vowp up`? A separate process keeps the supervisor unchanged but needs a second lock/ownership
    story; an in-supervisor thread reuses the heartbeat and `BoardSnapshot`.
 2. **Scope.** One project per daemon (matching one supervisor per project home), or every project in

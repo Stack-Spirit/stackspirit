@@ -1,16 +1,18 @@
 # v0.2 — cross-node session sync
 
-Status: design only. v0.1 moves a session as an explicit `vowp-bundle-v1` file or a cross-node switch;
-it does not replicate the database or the session directory.
+Status: current for the commands shown; this note is design only. v0.1 moves a session as an explicit
+`vowp-bundle-v1` file or a cross-node switch; it does not replicate the database or the session
+directory.
 
 ## Goal
 
 Move a session between nodes without the user copying a bundle file by hand, while keeping one
 canonical log per session and the existing recovery rules:
 
-- `vowp session pull <node> <session>` fetches a session from a registered node and creates a local
-  child session.
-- `vowp session push <node> <session>` sends a local session to another node for continuation there.
+- A planned `session pull <node> <session>` subcommand fetches a session from a registered node and
+  creates a local child session.
+- A planned `session push <node> <session>` subcommand sends a local session to another node for
+  continuation there.
 - A later slice keeps a session directory in sync incrementally (new log lines and blobs) and reports
   divergence instead of silently merging.
 - Lineage stays visible: the child keeps `parent_session_id`, the switch rows and the source node.
@@ -50,7 +52,7 @@ harness. The daemon API is an optional second transport after [`http-api.md`](ht
 1. **Child vs same id.** The v0.1 import creates a child with a fresh ULID. Should a pull preserve
    the origin id when it is absent locally? Preserving it simplifies lineage but makes duplicate
    detection and `reindex` collisions a new problem.
-2. **Direction.** Is `pull`/`push` enough, or should `vowp session sync <node> <id>` be bidirectional?
+2. **Direction.** Is `pull`/`push` enough, or should a bidirectional `session sync <node> <id>` exist?
    Start with explicit pull and push; never guess a merge.
 3. **Blobs.** Inline only small blobs today. A directory copy needs a size limit, a progress display
    and a clear "blob unavailable" marker for the rest.
@@ -61,7 +63,7 @@ harness. The daemon API is an optional second transport after [`http-api.md`](ht
 
 ## First-issue-sized slice
 
-Add `vowp session pull <node> <session>` (planned command, not in the v0.1 CLI) that calls the remote
+Add the planned `session pull <node> <session>` command (not in the v0.1 CLI) that calls the remote
 export over the existing SSH argv builder, writes the bundle to a temporary file, imports it as a child
 and prints both session ids. Add a test that uses the existing fake-`ssh` harness and a temporary
 remote home; the test must fail if the bundle checksum is not verified or if the child's

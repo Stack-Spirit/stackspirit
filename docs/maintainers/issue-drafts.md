@@ -1,7 +1,10 @@
 # Issue drafts for the first public release
 
-These drafts can be pasted into GitHub Issues after the repository is public. They are ordered by
-difficulty, not priority. Labels assume the repository has at least `good first issue`, `bug`,
+Status: current for the commands shown; this is a maintainer issue-tracker aid, not a design note.
+
+These drafts can be pasted into GitHub Issues after the repository is public. They live under
+`docs/maintainers/` because they are maintainer material, not part of the v0.2 design. They are
+ordered by difficulty, not priority. Labels assume the repository has at least `good first issue`, `bug`,
 `enhancement`, `cli`, `core`, `sessions`, `graph`, `promote`, `tests` and `docs`; adjust them to the
 labels actually created.
 

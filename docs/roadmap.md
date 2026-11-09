@@ -1,8 +1,9 @@
 # Roadmap
 
-Status: planning note for contributors. This page records what the current tree ships, what is
-deliberately **not** in v0.1, and the design order for v0.2 and v0.3. It promises no dates. The
-authoritative proof for every v0.1 claim is the linked document or the code itself.
+Status: current for the command references below; this page is a planning note for contributors.
+It records what the current tree ships, what is deliberately **not** in v0.1, and the design order
+for v0.2 and v0.3. It promises no dates. The authoritative proof for every v0.1 claim is the linked
+document or the code itself.
 
 The first public release is **v0.1.0**. The tree in this repository currently identifies itself as
 `0.1.0-rc.1`; the release jobs own the version bump, the tag and the published artifacts. This page
@@ -69,7 +70,7 @@ schema: `vowp schema` already exports the wire types, and the v0.1 compatibility
 | Item | What it adds | Design note | First slice |
 |---|---|---|---|
 | Daemon HTTP + SSE API | A loopback REST API and an event stream for jobs, sessions, events, board, inbox and cost. | [`design/v0.2/http-api.md`](design/v0.2/http-api.md) | Read-only health/jobs/sessions plus a per-session event tail. |
-| Web / PWA window | Nodes, sessions, a session view with an executor switcher and capsule view, and the board. | [`design/v0.2/web-window.md`](design/v0.2/web-window.md) | Static shell, board page and session list reading the API. |
+| Web / PWA window | Nodes, sessions, a session view with an executor switcher and capsule view, and the board. | [`design/v0.2/web-window.md`](design/v0.2/web-window.md) | Static shell and read-only board page; no sessions page, SSE or writes. |
 | Phone-friendly board | A mobile-first board page that installs as a PWA and shows the same snapshot as `vowp board --json`. | [`design/v0.2/phone-board.md`](design/v0.2/phone-board.md) | Responsive board cards with polling before SSE. |
 | ACP adapter | One adapter for Agent Client Protocol servers, with richer events and a permission flow. | [`design/v0.2/acp-adapter.md`](design/v0.2/acp-adapter.md) | Map ACP updates to canonical events against a fake ACP server. |
 | Cross-node session sync | Move a session between nodes without hand-copying bundle files. | [`design/v0.2/cross-node-sync.md`](design/v0.2/cross-node-sync.md) | `session pull` built on the existing bundle and `--node` transport. |
@@ -113,7 +114,7 @@ These are useful but unscoped. They are not commitments.
 
 These are small, real tasks found by reading the current code. Each entry names the files to touch and
 the behaviour a reviewer can check. The same tasks, with full issue bodies and labels, are in
-[`docs/design/v0.2/issue-drafts.md`](design/v0.2/issue-drafts.md).
+[`docs/maintainers/issue-drafts.md`](maintainers/issue-drafts.md).
 
 ### 1. Emit JSON from `vowp graph --json`
 

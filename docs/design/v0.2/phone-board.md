@@ -1,6 +1,7 @@
 # v0.2 — phone-friendly board
 
-Status: design only. v0.1 has a terminal board (`vowp board`) and no browser UI.
+Status: current for the commands shown; this note is design only. v0.1 has a terminal board
+(`vowp board`) and no browser UI.
 
 ## Goal
 
@@ -29,7 +30,8 @@ the board and inbox endpoints from [`http-api.md`](http-api.md); the data must m
 
 - [`web-window.md`](web-window.md) — app shell, routing and the PWA manifest.
 - `vowp-core::ledger::BoardSnapshot` — the exact fields to show.
-- `vowp_store::Store::list_inbox` and `Store::answer_inbox` — the only write in the first slice.
+- `vowp_store::Store::list_inbox` and `Store::answer_inbox` — `answer_inbox` is the first write once
+  writes are added; the first slice is read-only and does not answer inbox items.
 - `vowp-protocol::InboxItem`, `Job`, `Run`, `Limit`, `Cost`.
 
 ## Design notes

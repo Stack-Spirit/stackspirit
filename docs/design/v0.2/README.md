@@ -1,8 +1,8 @@
 # v0.2 design notes — the API, the window and the handoff
 
-This directory is the design map for v0.2. It is **not** a release schedule and none of it is
-implemented in v0.1. Each note is one screen: goal, non-goals, the existing crates it builds on, open
-questions and a first-issue-sized slice.
+Status: current for the commands shown; this directory is design only. It is **not** a release
+schedule and none of it is implemented in v0.1. Each note is one screen: goal, non-goals, the
+existing crates it builds on, open questions and a first-issue-sized slice.
 
 ## Shared assumptions
 
@@ -37,7 +37,8 @@ questions and a first-issue-sized slice.
 | [`cost-dashboard.md`](cost-dashboard.md) | Cost dashboard. | JSON endpoint plus a table view. |
 
 The maintainer-ready issue bodies and labels for the roadmap's "Good first issues" section are in
-[`issue-drafts.md`](issue-drafts.md). That file is an issue tracker aid, not a v0.2 design note.
+[`../../maintainers/issue-drafts.md`](../../maintainers/issue-drafts.md); that file is an issue
+tracker aid, not a v0.2 design note.
 
 ## Dependency order
 
