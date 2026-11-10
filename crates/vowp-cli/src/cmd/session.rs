@@ -14,9 +14,9 @@ use vowp_core::session::bundle;
 use vowp_core::session::remote::{BeginTurn, IngestGrant, IngestSession, begin_turn};
 use vowp_core::session::service::SessionService;
 use vowp_protocol::{
-    Actor, AttachAction, CancelToken, CapsuleTrigger, EventBody, EventEnvelope, EventSource, Executor, ExecutorRef,
-    HarnessKind, NewSession, NodeName, RunOutcome, RunPurpose, RunRole, Session, SessionId, SessionRole, SessionState,
-    Switch, SwitchEvent, SwitchId, SwitchReason, SwitchState, Timestamp, TurnRequest,
+    Actor, AttachAction, CapsuleTrigger, EventBody, EventEnvelope, EventSource, Executor, ExecutorRef, HarnessKind,
+    NewSession, NodeName, RunPurpose, Session, SessionId, SessionRole, SessionState, Switch, SwitchEvent, SwitchId,
+    SwitchReason, SwitchState, Timestamp,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{SessionFilter, Store};
@@ -870,138 +870,28 @@ fn new_session(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionNewArgs) -> Resu
 /// Runs the interactive chat loop.
 fn chat(ctx: &Ctx, io: &mut dyn IoStreams, args: &ChatArgs) -> Result<i32, CliError> {
     let store = ctx.store()?;
-    let mut session = resolve_session(&store, &args.id)?;
-    if let Some(executor) = &args.executor {
-        let target = Executor::parse(executor)?;
-        switch_to(ctx, &session.id, target, None, SwitchReason::User, false)?;
-        session = store.require_session(&session.id)?;
-    }
-    let mut lines = String::new();
-    loop {
-        lines.clear();
-        let read = io.input().read_line(&mut lines)?;
-        if read == 0 {
-            break;
-        }
-        let line = lines.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('/') {
-            let mut parts = rest.split_whitespace();
-            match parts.next().unwrap_or_default() {
-                "quit" | "q" => break,
-                "switch" => {
-                    let Some(target) = parts.next() else {
-                        writeln!(io.err(), "usage: /switch <harness:model[@effort][#variant]> [--node n]")?;
-                        continue;
-                    };
-                    let target = Executor::parse(target)?;
-                    let node = match (parts.next(), parts.next()) {
-                        (Some("--node"), Some(node)) => Some(vowp_protocol::NodeName::parse(node)?),
-                        (None, None) => None,
-                        _ => {
-                            writeln!(io.err(), "usage: /switch <executor> [--node n]")?;
-                            continue;
-                        }
-                    };
-                    match switch_to(ctx, &session.id, target.clone(), node, SwitchReason::User, true) {
-                        Ok(_) => {
-                            session = store.require_session(&session.id)?;
-                            writeln!(io.out(), "switched to {target}")?;
-                        }
-                        Err(error) => writeln!(io.err(), "vowp: {error}")?,
-                    }
-                }
-                "capsule" => {
-                    let service = SessionService::new(ctx.deps().clone());
-                    let capsule = service.write_capsule(&session.id, CapsuleTrigger::Manual)?;
-                    writeln!(io.out(), "{}", capsule.capsule_id)?;
-                }
-                "export" => {
-                    let Some(path) = parts.next() else {
-                        writeln!(io.err(), "usage: /export <file>")?;
-                        continue;
-                    };
-                    let bundle = bundle::export(ctx.deps(), &session.id, 20)?;
-                    let text = bundle::to_json(&bundle)?;
-                    std::fs::write(path, text)?;
-                    writeln!(io.out(), "{path}")?;
-                }
-                "events" => {
-                    let count = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(10);
-                    let events = SessionLog::open_read(ctx.paths(), &session.id)
-                        .map_err(vowp_core::CoreError::from)?
-                        .read_all()
-                        .map_err(vowp_core::CoreError::from)?;
-                    let start = events.len().saturating_sub(count);
-                    for event in &events[start..] {
-                        writeln!(io.out(), "{}", pretty_event(event, ctx.tz_offset_minutes()))?;
-                    }
-                }
-                other => writeln!(io.err(), "unknown command: /{other}")?,
-            }
-            continue;
-        }
-
-        let executor = session
-            .executor
-            .clone()
-            .or_else(|| {
-                ctx.config()
-                    .profiles
-                    .get("worker")
-                    .and_then(|profile| profile.ladder.first().cloned())
-            })
-            .ok_or_else(|| CliError::Invalid("session has no executor; use /switch".to_owned()))?;
-        let before = SessionLog::open_read(ctx.paths(), &session.id)
-            .map_err(vowp_core::CoreError::from)?
-            .last_seq()
-            .map_err(vowp_core::CoreError::from)?;
-        let service = SessionService::new(ctx.deps().clone());
-        let result = service.run_turn(
-            TurnRequest {
-                session_id: session.id.clone(),
-                executor: ExecutorRef { executor, node: None },
-                purpose: RunPurpose::Start,
-                role: RunRole::Worker,
-                job_id: None,
-                prompt: line.to_owned(),
-                profile: None,
-                rung: 0,
-                window: None,
-                timeout: None,
-            },
-            &CancelToken::default(),
-        )?;
-        let after = SessionLog::open_read(ctx.paths(), &session.id)
-            .map_err(vowp_core::CoreError::from)?
-            .read_from(before, None)
-            .map_err(vowp_core::CoreError::from)?;
-        for event in after {
-            match event.body() {
-                Ok(EventBody::AssistantMessage(payload)) => writeln!(io.out(), "{}", payload.text)?,
-                Ok(EventBody::ToolCall(payload)) => writeln!(io.out(), "· tool: {}", payload.name)?,
-                _ => {}
-            }
-        }
-        if matches!(
-            result.summary.outcome,
-            RunOutcome::Limit | RunOutcome::Credits | RunOutcome::Auth
-        ) {
-            return Err(CliError::Limited(
-                "provider limit reached; use /switch <executor>".to_owned(),
-            ));
-        }
-        session = store.require_session(&session.id)?;
-        if session.state == SessionState::Blocked {
-            return Err(CliError::Limited(
-                "session is blocked by a provider limit; use /switch <executor>".to_owned(),
-            ));
-        }
-        io.out().flush()?;
-    }
-    Ok(0)
+    let session = resolve_session(&store, &args.id)?;
+    let node = args.node.as_deref().map(vowp_protocol::NodeName::parse).transpose()?;
+    let executor = args
+        .executor
+        .as_deref()
+        .map(Executor::parse)
+        .transpose()?
+        .map(|executor| ExecutorRef {
+            executor,
+            node: node.clone(),
+        });
+    crate::chat::run_shared(
+        ctx,
+        io,
+        &crate::chat::ChatOptions {
+            session: session.id,
+            executor,
+            node,
+            follow: args.follow,
+            takeover: args.takeover,
+        },
+    )
 }
 
 /// Switches a session, checking the running-turn guard and target limits first.
@@ -1043,7 +933,7 @@ fn switch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionSwitchArgs) -> Result
 }
 
 /// Runs the core switch protocol after the CLI guards.
-fn switch_to(
+pub(crate) fn switch_to(
     ctx: &Ctx,
     session: &SessionId,
     target: Executor,

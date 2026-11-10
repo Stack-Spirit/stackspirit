@@ -4,7 +4,7 @@
 //! A command whose handler is not implemented yet is an explicit `NotImplemented` stub here,
 //! never a silent no-op.
 
-use crate::cli::{ChatArgs, Command, MaintCommand, PromoteCommand, SessionCommand, UpCommand};
+use crate::cli::{Command, MaintCommand, PromoteCommand, SessionCommand, UpCommand};
 use crate::{CliError, Ctx, IoStreams};
 
 pub mod attach;
@@ -45,26 +45,14 @@ pub(crate) fn not_implemented() -> CliError {
     CliError::NotImplemented("not implemented in this build")
 }
 
-/// Returns whether a chat invocation uses a v0.2 flag C0 does not implement yet.
+/// Returns whether `command` still uses a C0 frozen-flag guard.
 ///
-/// The v0.1 handler is still the chat implementation in this build. F3 replaces it with
-/// the lease/remote handler that consumes these flags.
-fn chat_needs_v0_2_handler(args: &ChatArgs) -> bool {
-    args.node.is_some() || args.follow || args.takeover
-}
-
-/// Returns whether `command` is a chat invocation with a v0.2 flag C0 does not implement.
-///
-/// Checked before the generic `--node` redirect: chat's own `--node` names the executor
-/// node, not a CLI redirect target, so it must not silently run the v0.1 chat loop.
-pub(crate) fn command_needs_v0_2_handler(command: &Command) -> bool {
-    match command {
-        Command::Chat(args) => chat_needs_v0_2_handler(args),
-        Command::Session {
-            command: SessionCommand::Chat(args),
-        } => chat_needs_v0_2_handler(args),
-        _ => false,
-    }
+/// Chat's v0.2 flags are implemented by F3 and are no longer refused here. The remaining
+/// frozen flags (`up --no-migrate`, `loops --all`, `schedule --all`) are handled by their
+/// own handlers; this hook stays so the pre-dispatch check in `lib.rs` keeps a single
+/// documented entry point.
+pub(crate) fn command_needs_v0_2_handler(_command: &Command) -> bool {
+    false
 }
 
 /// Runs one command with a built context.
@@ -81,17 +69,8 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Job { command } => job::run(ctx, io, &command),
         Command::Graph(args) => graph::run(ctx, io, &args),
         Command::Attach(args) => attach::run(ctx, io, &args),
-        Command::Session { command } => match &command {
-            SessionCommand::Chat(args) if chat_needs_v0_2_handler(args) => Err(not_implemented()),
-            _ => session::run(ctx, io, &command),
-        },
-        Command::Chat(args) => {
-            if chat_needs_v0_2_handler(&args) {
-                Err(not_implemented())
-            } else {
-                session::run(ctx, io, &SessionCommand::Chat(args))
-            }
-        }
+        Command::Session { command } => session::run(ctx, io, &command),
+        Command::Chat(args) => session::run(ctx, io, &SessionCommand::Chat(args)),
         Command::Inbox { command } => inbox::run(ctx, io, &command),
         Command::Cost(args) => cost::run(ctx, io, &args),
         Command::Node { command } => node::run(ctx, io, &command),

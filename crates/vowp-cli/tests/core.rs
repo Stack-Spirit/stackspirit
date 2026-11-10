@@ -317,12 +317,10 @@ fn c0_refuses_frozen_flags_whose_handlers_are_not_implemented() {
     let env = common::TestEnv::new();
     let legacy = env.home_path().join("legacy.db");
     let legacy = legacy.to_str().expect("legacy path");
-    let cases: &[&[&str]] = &[
-        &["chat", "s", "--node", "laptop"],
-        &["chat", "s", "--follow"],
-        &["chat", "s", "--takeover"],
-        &["session", "chat", "s", "--follow"],
-    ];
+    // C0's frozen-flag guards are gone: C2 implemented up/loops/schedule and F3
+    // implemented the chat flags (covered by tests/chat.rs). Keep the loop so a future
+    // deferred flag has one obvious place to be asserted again.
+    let cases: &[&[&str]] = &[];
     for args in cases {
         let (code, _stdout, stderr) = env.run(args);
         assert_eq!(code, 1, "{args:?}: {stderr}");
