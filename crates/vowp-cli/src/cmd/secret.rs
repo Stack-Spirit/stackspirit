@@ -130,12 +130,11 @@ pub fn vault_admin(ctx: &Ctx, io: &mut dyn IoStreams, args: &VaultAdminArgs) -> 
     match &args.command {
         VaultAdminCommand::Set(set) => {
             let name = SecretName::parse(&set.name)?;
-            let raw = crate::read_stdin(io)?;
-            let value = strip_one_newline(&raw);
+            let value = crate::read_stdin(io)?;
             if value.is_empty() {
                 return Err(CliError::Invalid("secret value must not be empty".to_owned()));
             }
-            let info = vault::admin_set(ctx.deps(), &name, value)?;
+            let info = vault::admin_set(ctx.deps(), &name, &value)?;
             writeln!(io.out(), "saved {} ends in …{}", info.name, info.last4)?;
             Ok(0)
         }
@@ -284,11 +283,4 @@ impl Drop for EchoGuard {
             let _ = Command::new("stty").arg("echo").status();
         }
     }
-}
-
-/// Removes one trailing line ending read from stdin.
-fn strip_one_newline(text: &str) -> &str {
-    text.strip_suffix("\r\n")
-        .or_else(|| text.strip_suffix('\n'))
-        .unwrap_or(text)
 }

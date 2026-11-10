@@ -124,7 +124,7 @@ fn real_helper_context_does_not_need_the_owner_project() {
         .stdin
         .as_mut()
         .expect("helper stdin")
-        .write_all(b"helper-value-7531")
+        .write_all(b"helper-value-7531\n")
         .expect("helper value");
     let output = child.wait_with_output().expect("helper output");
     assert!(
@@ -135,7 +135,8 @@ fn real_helper_context_does_not_need_the_owner_project() {
     let stored = vault_home.join("secrets/HELPER_KEY");
     assert_eq!(
         fs::read_to_string(&stored).expect("stored helper value"),
-        "helper-value-7531"
+        "helper-value-7531\n",
+        "the hidden helper must store the value byte-exactly"
     );
     assert_eq!(
         fs::metadata(&stored).expect("stored metadata").permissions().mode() & 0o777,
