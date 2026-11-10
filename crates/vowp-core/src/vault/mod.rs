@@ -47,6 +47,32 @@ const DEFAULT_VAULT_HOME: &str = "/home/vowp-vault";
 /// Default installed path of the root-owned vault helper.
 const DEFAULT_HELPER: &str = "/usr/local/lib/vowp/__vault-admin";
 
+/// Minimal valid project config for the hidden helper's private node home.
+///
+/// The helper runs as `vowp-vault`, which cannot normally read the owner's home or project
+/// checkout on a default Linux or macOS install. This config only has to satisfy `Ctx::build`
+/// and `VowpConfig::validate`; it names no provider or secret.
+const HELPER_CONFIG: &str = concat!(
+    "[project]\n",
+    "name = \"vowp-vault-helper\"\n",
+    "\n",
+    "[profiles.planner]\n",
+    "ladder = [\"opencode:deepseek/deepseek-flash\"]\n",
+    "on_quota = \"park\"\n",
+    "\n",
+    "[profiles.keeper]\n",
+    "ladder = [\"opencode:deepseek/deepseek-flash\"]\n",
+    "on_quota = \"park\"\n",
+    "\n",
+    "[profiles.worker]\n",
+    "ladder = [\"opencode:deepseek/deepseek-flash\"]\n",
+    "on_quota = \"park\"\n",
+    "\n",
+    "[profiles.verifier]\n",
+    "ladder = [\"opencode:deepseek/deepseek-flash\"]\n",
+    "on_quota = \"park\"\n",
+);
+
 /// Counter used to make atomic-write temporary names unique inside one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -269,13 +295,13 @@ pub fn admin_remove(deps: &Deps, name: &SecretName) -> Result<bool, CoreError> {
 /// What `vowp secret upgrade` should do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Upgrade {
-    /// Secrets are already stored as the vault user.
+    /// Secrets are already stored as the vault user and the helper can run.
     AlreadyVault,
     /// The vault user was found and the mode file was switched.
     Switched,
     /// The owner must run this one shell command, then re-run `vowp secret upgrade`.
     NeedsCommand(String),
-    /// Passwordless sudo is unavailable, so the vault user cannot be created here.
+    /// The `sudo` program is missing, so the vault user cannot be created here.
     NoSudo(String),
 }
 
@@ -291,11 +317,12 @@ pub fn upgrade(deps: &Deps) -> Result<Upgrade, CoreError> {
 
 /// Completes the upgrade through an explicit layout (also used by the module tests).
 fn upgrade_impl(deps: &Deps, layout: &Layout) -> Result<Upgrade, CoreError> {
-    if mode(deps)? == VaultMode::VaultUser {
-        return Ok(Upgrade::AlreadyVault);
-    }
+    let current = mode(deps)?;
     if vault_user_ready(layout) {
-        migrate_basic_to_vault(deps, layout)?;
+        if current == VaultMode::VaultUser {
+            return Ok(Upgrade::AlreadyVault);
+        }
+        migrate_basic_to_vault(layout)?;
         write_mode(deps, VaultMode::VaultUser)?;
         return Ok(Upgrade::Switched);
     }
@@ -310,7 +337,7 @@ fn upgrade_impl(deps: &Deps, layout: &Layout) -> Result<Upgrade, CoreError> {
 }
 
 /// Copies every basic-mode secret into the vault through the helper, then removes the copy.
-fn migrate_basic_to_vault(deps: &Deps, layout: &Layout) -> Result<u32, CoreError> {
+fn migrate_basic_to_vault(layout: &Layout) -> Result<u32, CoreError> {
     let entries = match fs::read_dir(&layout.basic_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -324,7 +351,7 @@ fn migrate_basic_to_vault(deps: &Deps, layout: &Layout) -> Result<u32, CoreError
         };
         let value = read_value_at(&layout.basic_dir, &name)?
             .ok_or_else(|| CoreError::Invalid(format!("secret {name} disappeared during upgrade")))?;
-        let mut command = helper_command(deps, layout, &["__vault-admin", "set", name.as_str()]);
+        let mut command = helper_command(layout, &["__vault-admin", "set", name.as_str()]);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -480,6 +507,11 @@ impl Layout {
     fn vault_dir(&self) -> PathBuf {
         self.vault_home.join("secrets")
     }
+
+    /// Returns the private node home the hidden helper receives instead of the owner's home.
+    fn helper_home(&self) -> PathBuf {
+        self.vault_home.join("helper")
+    }
 }
 
 /// Stores one secret through an explicit layout (also used by the module tests).
@@ -500,7 +532,7 @@ fn write_secret_impl(deps: &Deps, layout: &Layout, name: &SecretName, value: &st
             write_atomic(&layout.basic_dir.join(name.as_str()), value.as_bytes(), 0o600)?;
         }
         VaultMode::VaultUser => {
-            let mut command = helper_command(deps, layout, &["__vault-admin", "set", name.as_str()]);
+            let mut command = helper_command(layout, &["__vault-admin", "set", name.as_str()]);
             command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
@@ -525,7 +557,7 @@ fn remove_secret_impl(deps: &Deps, layout: &Layout, name: &SecretName) -> Result
     let file_existed = match mode(deps)? {
         VaultMode::Basic => remove_file_if_present(&layout.basic_dir.join(name.as_str()))?,
         VaultMode::VaultUser => {
-            let command = helper_command(deps, layout, &["__vault-admin", "rm", name.as_str()]);
+            let command = helper_command(layout, &["__vault-admin", "rm", name.as_str()]);
             let output = run_helper_capture(command, None, "rm")?;
             String::from_utf8_lossy(&output).trim_start().starts_with("removed")
         }
@@ -541,7 +573,7 @@ fn read_value_impl(deps: &Deps, layout: &Layout, name: &SecretName) -> Result<Op
         VaultMode::VaultUser => match read_value_at(&layout.vault_dir(), name) {
             Ok(value) => Ok(value),
             Err(CoreError::Io { path: _, source }) if source.kind() == std::io::ErrorKind::PermissionDenied => {
-                read_via_helper(deps, layout, name).map_err(|error| {
+                read_via_helper(layout, name).map_err(|error| {
                     deps.log.log(
                         Level::Error,
                         "vault",
@@ -556,8 +588,8 @@ fn read_value_impl(deps: &Deps, layout: &Layout, name: &SecretName) -> Result<Op
 }
 
 /// Reads a vault value through `__vault-exec` running as `vowp-vault`.
-fn read_via_helper(deps: &Deps, layout: &Layout, name: &SecretName) -> Result<Option<String>, CoreError> {
-    let mut command = helper_command(deps, layout, &["__vault-exec", "--env", name.as_str()]);
+fn read_via_helper(layout: &Layout, name: &SecretName) -> Result<Option<String>, CoreError> {
+    let mut command = helper_command(layout, &["__vault-exec", "--env", name.as_str()]);
     command
         .arg("--")
         .arg("/bin/sh")
@@ -659,13 +691,13 @@ fn is_executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-/// Runs the installed helper's harmless version probe as `vowp-vault`.
+/// Runs the installed helper's harmless real operation as `vowp-vault`.
+///
+/// `--version` is handled by clap before `Ctx::build`, so it does not prove that the helper can
+/// run as the vault user. Removing a probe name exercises the same context and vault path as
+/// the real `set`/`rm` operations without writing anything.
 fn run_vault_probe(layout: &Layout) -> bool {
-    let mut command = Command::new(&layout.sudo);
-    command
-        .args(["-n", "-u", "vowp-vault"])
-        .arg(&layout.helper)
-        .arg("--version");
+    let mut command = helper_command(layout, &["__vault-admin", "rm", "VOWP_PROBE"]);
     run_status(&mut command)
 }
 
@@ -696,11 +728,25 @@ fn upgrade_command(layout: &Layout) -> String {
     let helper = shell_quote(&PathBuf::from(DEFAULT_HELPER));
     let source = shell_quote(&layout.helper);
     let home = shell_quote(&layout.vault_home);
+    let helper_home = layout.helper_home();
+    let helper_home_arg = shell_quote(&helper_home);
+    let helper_config = shell_quote(&helper_home.join("vowp.toml"));
+    let helper_db = shell_quote(&helper_home.join("vowp.db"));
+    let helper_config_text = HELPER_CONFIG
+        .lines()
+        .map(shell_quote_text)
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "id -u vowp-vault >/dev/null 2>&1 || sudo useradd --system --home {home} --shell /usr/sbin/nologin vowp-vault \
          && sudo install -d -m 0700 -o vowp-vault -g vowp-vault {vault} \
+         && sudo install -d -m 0700 -o vowp-vault -g vowp-vault {helper_home_arg} \
          && sudo install -d -m 0755 /usr/local/lib/vowp \
          && if [ {source} -ef {helper} ]; then true; else sudo install -m 0755 -o root -g root {source} {helper}; fi \
+         && printf '%s\\n' {helper_config_text} | sudo tee {helper_config} >/dev/null \
+         && sudo install -m 0600 -o vowp-vault -g vowp-vault /dev/null {helper_db} \
+         && sudo chown vowp-vault:vowp-vault {helper_config} {helper_db} \
+         && sudo chmod 0600 {helper_config} {helper_db} \
          && sudo sh -c '{MIGRATE_SCRIPT}' vowp-migrate {basic} {vault} \
          && echo 'vowp ALL=(vowp-vault) NOPASSWD: {helper}' | sudo tee /etc/sudoers.d/vowp-vault >/dev/null \
          && sudo chmod 0440 /etc/sudoers.d/vowp-vault"
@@ -709,14 +755,22 @@ fn upgrade_command(layout: &Layout) -> String {
 
 /// Quotes one path for a POSIX shell.
 fn shell_quote(text: &Path) -> String {
-    format!("'{}'", text.display().to_string().replace('\'', "'\\''"))
+    shell_quote_text(&text.display().to_string())
 }
 
-/// Builds the sudo helper command with the node home and project path as global flags.
+/// Quotes one text argument for a POSIX shell.
+fn shell_quote_text(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Builds the sudo helper command with the helper's private home and project.
 ///
 /// The flags must come before the hidden subcommand and before any `--` argument separator:
 /// `VaultExecArgs.argv` is `last = true`, so anything after `--` belongs to the child command.
-fn helper_command(deps: &Deps, layout: &Layout, args: &[&str]) -> Command {
+/// The helper gets its own minimal node home and project, so it never needs access to the
+/// owner's home or checkout as `vowp-vault`.
+fn helper_command(layout: &Layout, args: &[&str]) -> Command {
+    let helper_home = layout.helper_home();
     let mut command = Command::new(&layout.sudo);
     command
         .arg("-n")
@@ -724,27 +778,11 @@ fn helper_command(deps: &Deps, layout: &Layout, args: &[&str]) -> Command {
         .arg("vowp-vault")
         .arg(&layout.helper)
         .arg("--home")
-        .arg(deps.paths.root());
-    if let Some(project) = project_root(deps) {
-        command.arg("--project").arg(project);
-    }
+        .arg(&helper_home)
+        .arg("--project")
+        .arg(&helper_home);
     command.args(args);
     command
-}
-
-/// Returns the project checkout path, from config or from the registered project row.
-fn project_root(deps: &Deps) -> Option<PathBuf> {
-    if let Some(path) = &deps.config.project.path {
-        return Some(PathBuf::from(path));
-    }
-    Store::open_global(&deps.paths)
-        .ok()
-        .and_then(|store| store.project(&deps.config.project.name).ok().flatten())
-        .map(|project| PathBuf::from(project.path))
-        .or_else(|| {
-            let cwd = std::env::current_dir().ok()?;
-            cwd.join("vowp.toml").is_file().then_some(cwd)
-        })
 }
 
 /// Runs a helper with a value on stdin and rejects a non-zero exit.
@@ -1050,24 +1088,100 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let deps = deps(tmp.path());
         let layout = layout_with(tmp.path());
-        let command = helper_command(&deps, &layout, &["__vault-exec", "--env", "NAME"]);
+        let command = helper_command(&layout, &["__vault-exec", "--env", "NAME"]);
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         let home = args.iter().position(|arg| arg == "--home").expect("--home");
+        let project = args.iter().position(|arg| arg == "--project").expect("--project");
         let subcommand = args.iter().position(|arg| arg == "__vault-exec").expect("subcommand");
         assert!(
             home < subcommand,
             "global flags must precede the hidden subcommand: {args:?}"
         );
-        if project_root(&deps).is_some() {
-            let project = args.iter().position(|arg| arg == "--project").expect("--project");
-            assert!(
-                project < subcommand,
-                "the project flag must precede the subcommand: {args:?}"
-            );
-        }
+        assert!(
+            project < subcommand,
+            "the project flag must precede the subcommand: {args:?}"
+        );
+        let helper_home = layout.helper_home().display().to_string();
+        assert_eq!(args[home + 1], helper_home);
+        assert_eq!(args[project + 1], helper_home);
+        assert!(
+            !args.contains(&deps.paths.root().display().to_string()),
+            "the helper must not receive the owner's home: {args:?}"
+        );
+    }
+
+    #[test]
+    fn helper_config_is_a_valid_project_config() {
+        let config = VowpConfig::from_toml(HELPER_CONFIG).expect("helper config parses");
+        assert_eq!(config.project.name.as_str(), "vowp-vault-helper");
+        assert!(config.profiles.len() >= 4);
+    }
+
+    #[test]
+    fn vault_user_ready_probes_a_real_helper_operation() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with(tmp.path());
+        fake_sudo(&layout);
+
+        assert!(vault_user_ready(&layout));
+        let argv = fs::read_to_string(layout.vault_home.join("argv.log")).expect("argv log");
+        assert!(
+            argv.contains("__vault-admin rm VOWP_PROBE"),
+            "the probe must run a real helper operation: {argv}"
+        );
+        assert!(
+            argv.contains(&layout.helper_home().display().to_string()),
+            "the probe must use the helper's private context: {argv}"
+        );
+    }
+
+    #[test]
+    fn vault_user_ready_rejects_a_helper_that_only_answers_version() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with(tmp.path());
+        fake_sudo(&layout);
+        // The old probe ran `--version`, which clap handles before Ctx::build.
+        fake_tool(
+            tmp.path(),
+            "fake-sudo",
+            "#!/bin/sh\ncase \"$*\" in *--version*) exit 0 ;; *) exit 1 ;; esac\n",
+        );
+
+        assert!(
+            !vault_user_ready(&layout),
+            "a version-only helper must not count as ready"
+        );
+    }
+
+    #[test]
+    fn already_vault_requires_a_ready_helper() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+        fake_sudo(&layout);
+        write_mode(&deps, VaultMode::VaultUser).expect("mode");
+
+        assert_eq!(upgrade_impl(&deps, &layout).expect("upgrade"), Upgrade::AlreadyVault);
+    }
+
+    #[test]
+    fn vault_mode_with_an_unready_helper_prints_the_command() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+        fake_tool(tmp.path(), "fake-sudo", "#!/bin/sh\nexit 1\n");
+        write_mode(&deps, VaultMode::VaultUser).expect("mode");
+
+        let outcome = upgrade_impl(&deps, &layout).expect("upgrade");
+
+        assert!(
+            matches!(outcome, Upgrade::NeedsCommand(_)),
+            "a vault mode with no usable helper must not report ready: {outcome:?}"
+        );
+        assert_eq!(mode(&deps).expect("mode"), VaultMode::VaultUser);
     }
 
     #[test]
@@ -1094,7 +1208,7 @@ mod tests {
         );
         assert_eq!(mode(&deps).expect("mode"), VaultMode::VaultUser);
         assert_eq!(
-            read_via_helper(&deps, &layout, &name).expect("helper read"),
+            read_via_helper(&layout, &name).expect("helper read"),
             Some(value.to_owned())
         );
     }
@@ -1126,14 +1240,28 @@ mod tests {
                        [ \"$arg\" = \"-d\" ] && make_dir=true\n\
                        last=$arg\n\
                        done\n\
-                       if [ \"$make_dir\" = true ] && [ \"$VOWP_TEST_CREATE_VAULT\" = 1 ]; then\n\
+                       if [ \"$make_dir\" = true ]; then\n\
+                       if [ \"$VOWP_TEST_CREATE_VAULT\" = 1 ]; then\n\
                        case \"$last\" in\n\
                        \"$VOWP_TEST_ROOT\"/*) mkdir -p \"$last\" ;;\n\
                        esac\n\
                        fi\n\
+                       else\n\
+                       case \"$last\" in\n\
+                       \"$VOWP_TEST_ROOT\"/*) : > \"$last\" ;;\n\
+                       esac\n\
+                       fi\n\
                        exit 0\n";
         fake_tool(dir, "install", install);
-        fake_tool(dir, "tee", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
+        let tee = "#!/bin/sh\n\
+                   last=\n\
+                   for arg in \"$@\"; do last=$arg; done\n\
+                   case \"$last\" in\n\
+                   \"$VOWP_TEST_ROOT\"/*) cat > \"$last\" ;;\n\
+                   *) cat >/dev/null ;;\n\
+                   esac\n\
+                   exit 0\n";
+        fake_tool(dir, "tee", tee);
         fake_tool(dir, "chown", "#!/bin/sh\nexit 0\n");
         let chmod = "#!/bin/sh\n\
                      case \"$2\" in\n\
@@ -1207,6 +1335,14 @@ mod tests {
             fs::metadata(&moved).expect("metadata").permissions().mode() & 0o777,
             0o600
         );
+        let helper_config = layout.helper_home().join("vowp.toml");
+        let helper_db = layout.helper_home().join("vowp.db");
+        assert_eq!(
+            fs::read_to_string(&helper_config).expect("helper config"),
+            HELPER_CONFIG
+        );
+        assert!(helper_db.is_file(), "the helper node database placeholder exists");
+        VowpConfig::from_toml(&fs::read_to_string(&helper_config).expect("config")).expect("valid helper config");
     }
 
     #[test]
@@ -1215,6 +1351,8 @@ mod tests {
         let layout = layout_with(tmp.path());
         fs::create_dir_all(&layout.basic_dir).expect("basic dir");
         fs::write(layout.basic_dir.join("UPGRADE_KEY"), "basic-upgrade-value-1357").expect("basic value");
+        // Only the vault directory is withheld; the helper context is created normally.
+        fs::create_dir_all(layout.helper_home()).expect("helper home");
         let command = upgrade_command(&layout);
 
         let bin = tmp.path().join("bin");
@@ -1317,7 +1455,7 @@ mod tests {
             Some(value.to_owned())
         );
         assert_eq!(
-            read_via_helper(&deps, &layout, &name).expect("helper read"),
+            read_via_helper(&layout, &name).expect("helper read"),
             Some(value.to_owned())
         );
         assert!(remove_secret_impl(&deps, &layout, &name).expect("remove"));

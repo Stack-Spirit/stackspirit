@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -78,6 +79,68 @@ fn secret_path(deps: &Deps, name: &str) -> PathBuf {
 /// Reads a `SecretInfo` list by name.
 fn names(infos: &[vowp_protocol::SecretInfo]) -> Vec<String> {
     infos.iter().map(|info| info.name.to_string()).collect()
+}
+
+/// Returns the workspace `vowp` binary next to the test executable, when it is built.
+fn workspace_vowp_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let profile_dir = exe.parent()?.parent()?;
+    let candidate = profile_dir.join("vowp");
+    candidate.is_file().then_some(candidate)
+}
+
+#[test]
+fn real_helper_context_does_not_need_the_owner_project() {
+    let Some(vowp) = workspace_vowp_binary() else {
+        eprintln!("skipping real-helper test: the workspace `vowp` binary is not built");
+        return;
+    };
+    let tmp = tempdir().expect("tempdir");
+    let vault_home = tmp.path().join("vault-home");
+    let helper_home = vault_home.join("helper");
+    fs::create_dir_all(&helper_home).expect("helper home");
+    let config = toml::to_string(&VowpConfig::with_defaults_for_tests()).expect("helper config");
+    fs::write(helper_home.join("vowp.toml"), config).expect("helper config file");
+    fs::write(helper_home.join("vowp.db"), "").expect("helper db");
+    let owner_project = tmp.path().join("project");
+    fs::create_dir_all(&owner_project).expect("project dir");
+    let owner_config = owner_project.join("vowp.toml");
+    fs::write(&owner_config, "unreadable to the vault user\n").expect("owner config");
+    fs::set_permissions(&owner_config, fs::Permissions::from_mode(0o000)).expect("owner config mode");
+
+    let mut child = Command::new(&vowp)
+        .arg("--home")
+        .arg(&helper_home)
+        .arg("--project")
+        .arg(&helper_home)
+        .args(["__vault-admin", "set", "HELPER_KEY"])
+        .env("VOWP_VAULT_HOME", &vault_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn helper");
+    child
+        .stdin
+        .as_mut()
+        .expect("helper stdin")
+        .write_all(b"helper-value-7531")
+        .expect("helper value");
+    let output = child.wait_with_output().expect("helper output");
+    assert!(
+        output.status.success(),
+        "the real helper must run without the owner project: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stored = vault_home.join("secrets/HELPER_KEY");
+    assert_eq!(
+        fs::read_to_string(&stored).expect("stored helper value"),
+        "helper-value-7531"
+    );
+    assert_eq!(
+        fs::metadata(&stored).expect("stored metadata").permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
