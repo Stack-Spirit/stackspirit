@@ -430,7 +430,169 @@ fn mirror_reads_api_event_and_backfills_export() {
     let workdir = tmp.path().join("orchestrator");
     std::fs::create_dir_all(&workdir).expect("orchestrator dir");
     write_state(&workdir, &server.url());
-    server.set_events(vec![
+
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let store = deps.open_store().expect("store");
+    let session = create_session(&deps, &tmp);
+    let host = OpencodeHost::default();
+    let host_handle = AppHandle {
+        kind: OrchestratorApp::Opencode,
+        pid: 4242,
+        port: Some(server.port()),
+        started_at: ts(),
+        workdir: workdir.clone(),
+    };
+    let mut cursor = empty_cursor();
+    let first = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("first mirror");
+    assert_eq!(first.events, 3, "user, assistant and cost from the export: {first:?}");
+    assert_eq!(cursor.last_native_id.as_deref(), Some("cost:m2"));
+
+    // The first transcript read starts the persistent listener. Wait until it is connected
+    // before adding events: `/api/event` is subscription-only and does not replay history.
+    server.wait_for_subscriber();
+    for event in first_turn_events() {
+        server.push_event(event);
+    }
+    // Another opencode session shares the global stream; none of its content may enter this
+    // VOWP session.
+    server.push_event(json!({
+        "id": "evt_foreign_user", "created": 1_700_000_001_500_i64,
+        "type": "session.inbox.enqueued",
+        "data": {
+            "inboxID": "foreign_user", "sessionID": "ses_other",
+            "item": {"type": "user", "payload": {"text": "foreign"}}
+        },
+        "durable": {"seq": 100}
+    }));
+    server.push_event(json!({
+        "id": "evt_foreign_usage", "created": 1_700_000_001_600_i64,
+        "type": "session.usage.updated",
+        "data": {"sessionID": "ses_other", "cost": 9.0, "tokens": {"input": 900, "output": 900}}
+    }));
+
+    let live = wait_for_kind(&host, &host_handle, &cursor, TranscriptKind::TurnEnded);
+    assert!(
+        live.iter().any(|entry| entry.kind == TranscriptKind::TurnStarted),
+        "the persistent listener missed the turn start: {live:?}"
+    );
+
+    let second = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("second mirror");
+    assert_eq!(second.events, 2, "only the live turn boundaries are new: {second:?}");
+    assert_eq!(cursor.last_native_id, second.cursor.last_native_id);
+    let events = events_of(&deps, &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::UserMessage)
+            .count(),
+        1,
+        "the overlapping user message was duplicated"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::AssistantMessage)
+            .count(),
+        1,
+        "the overlapping assistant message was duplicated"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::Cost)
+            .count(),
+        1,
+        "the overlapping cost was duplicated"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.body(), Ok(EventBody::UserMessage(message)) if message.text == "foreign")),
+        "another opencode session leaked into this VOWP session"
+    );
+    assert!(
+        server
+            .seen()
+            .iter()
+            .any(|path| path == "/api/experimental/session/ses_fake/export"),
+        "backfill did not read the export: {:?}",
+        server.seen()
+    );
+    assert!(
+        server.seen().iter().any(|path| path == "/api/event"),
+        "the host did not subscribe to /api/event: {:?}",
+        server.seen()
+    );
+    assert!(
+        !server.seen().iter().any(|path| path.contains("/event?after=")),
+        "the mirror used a route opencode 2.0.28 does not have: {:?}",
+        server.seen()
+    );
+
+    // A complete turn happens between two passes while the subscription stays open. The
+    // listener must spool it; a per-pass one-shot read would miss it.
+    server.push_event(json!({
+        "id": "evt_u2", "created": 1_700_000_002_000_i64, "type": "session.inbox.enqueued",
+        "data": {
+            "inboxID": "m4", "sessionID": "ses_fake",
+            "item": {"type": "user", "payload": {"text": "again"}}
+        },
+        "durable": {"seq": 6}
+    }));
+    server.push_event(json!({
+        "id": "evt_t2", "created": 1_700_000_002_100_i64, "type": "session.execution.started",
+        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 7}
+    }));
+    server.push_event(json!({
+        "id": "evt_a2", "created": 1_700_000_002_200_i64, "type": "session.text.ended",
+        "data": {"sessionID": "ses_fake", "assistantMessageID": "m5", "ordinal": 0, "text": "later"},
+        "durable": {"seq": 8}
+    }));
+    server.push_event(json!({
+        "id": "evt_s2", "created": 1_700_000_002_250_i64, "type": "session.step.ended",
+        "data": {
+            "sessionID": "ses_fake", "assistantMessageID": "m5", "cost": 0.0,
+            "tokens": {"input": 1, "output": 1}
+        },
+        "durable": {"seq": 9}
+    }));
+    server.push_event(json!({
+        "id": "evt_usage2", "created": 1_700_000_002_300_i64, "type": "session.usage.updated",
+        "data": {"sessionID": "ses_fake", "cost": 0.25, "tokens": {"input": 4, "output": 5}}
+    }));
+    server.push_event(json!({
+        "id": "evt_e2", "created": 1_700_000_002_400_i64, "type": "session.execution.succeeded",
+        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 10}
+    }));
+
+    let pending = wait_for_text(&host, &host_handle, &cursor, "later");
+    assert!(
+        pending.iter().any(|entry| entry.text.as_deref() == Some("later")),
+        "the event that happened between passes was lost"
+    );
+    let third = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("third mirror");
+    assert!(third.events >= 4, "{third:?}");
+    assert!(
+        events_of(&deps, &session)
+            .iter()
+            .any(|event| matches!(event.body(), Ok(EventBody::AssistantMessage(message)) if message.text == "later")),
+        "the between-pass turn was not written to the session log"
+    );
+    assert_eq!(
+        server
+            .seen()
+            .iter()
+            .filter(|path| path.as_str() == "/api/experimental/session/ses_fake/export")
+            .count(),
+        1,
+        "a later pass backfilled again instead of using its cursor"
+    );
+}
+
+/// Returns the first target-session turn as the real `/api/event` stream emits it.
+fn first_turn_events() -> Vec<Value> {
+    vec![
         json!({
             "id": "evt_u1", "created": 1_700_000_000_000_i64, "type": "session.inbox.enqueued",
             "data": {
@@ -464,128 +626,36 @@ fn mirror_reads_api_event_and_backfills_export() {
             "id": "evt_e1", "created": 1_700_000_001_200_i64, "type": "session.execution.succeeded",
             "data": {"sessionID": "ses_fake"}, "durable": {"seq": 5}
         }),
-    ]);
+    ]
+}
 
-    let clock = FakeClock::at(ts());
-    let deps = deps(&tmp, &clock);
-    let store = deps.open_store().expect("store");
-    let session = create_session(&deps, &tmp);
-    let host = OpencodeHost::default();
-    let host_handle = AppHandle {
-        kind: OrchestratorApp::Opencode,
-        pid: 4242,
-        port: Some(server.port()),
-        started_at: ts(),
-        workdir: workdir.clone(),
-    };
-    let mut cursor = empty_cursor();
-    let first = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("first mirror");
-    // The backfill writes user, assistant and cost; the live pass adds the turn boundaries.
-    // The overlapping user/assistant/cost entries have the same native id and are written once.
-    assert_eq!(first.events, 5, "{:?}", first);
-    assert_eq!(cursor.last_native_id, first.cursor.last_native_id);
-    assert!(cursor.last_native_id.is_some());
-    let events = events_of(&deps, &session);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.event_type == EventType::UserMessage)
-            .count(),
-        1,
-        "the overlapping user message was duplicated"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.event_type == EventType::AssistantMessage)
-            .count(),
-        1,
-        "the overlapping assistant message was duplicated"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.event_type == EventType::Cost)
-            .count(),
-        1,
-        "the overlapping cost was duplicated"
-    );
-    assert!(events.iter().any(|event| event.event_type == EventType::TurnStarted));
-    assert!(events.iter().any(|event| event.event_type == EventType::TurnEnded));
-    assert!(
-        server
-            .seen()
-            .iter()
-            .any(|path| path == "/api/experimental/session/ses_fake/export"),
-        "backfill did not read the export: {:?}",
-        server.seen()
-    );
-    assert!(
-        server
-            .seen()
-            .iter()
-            .any(|path| path.starts_with("/api/session/ses_fake/event")),
-        "live pass did not read the replayable session events: {:?}",
-        server.seen()
-    );
+/// Polls the transcript until an entry of `kind` appears, or panics after two seconds.
+fn wait_for_kind(
+    host: &OpencodeHost,
+    handle: &AppHandle,
+    cursor: &MirrorCursor,
+    kind: TranscriptKind,
+) -> Vec<TranscriptEntry> {
+    for _ in 0..100 {
+        let batch = host.transcript_since(handle, cursor).expect("transcript while waiting");
+        if batch.entries.iter().any(|entry| entry.kind == kind) {
+            return batch.entries;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {kind:?}");
+}
 
-    // The next turn happens entirely between passes. A subscription-only `/api/event`
-    // would lose it; the replayable endpoint must recover it without re-reading export.
-    let mut next = server.events();
-    next.extend([
-        json!({
-            "id": "evt_u2", "created": 1_700_000_002_000_i64, "type": "session.inbox.enqueued",
-            "data": {
-                "inboxID": "m4", "sessionID": "ses_fake",
-                "item": {"type": "user", "payload": {"text": "again"}}
-            },
-            "durable": {"seq": 6}
-        }),
-        json!({
-            "id": "evt_t2", "created": 1_700_000_002_100_i64, "type": "session.execution.started",
-            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 7}
-        }),
-        json!({
-            "id": "evt_a2", "created": 1_700_000_002_200_i64, "type": "session.text.ended",
-            "data": {"sessionID": "ses_fake", "assistantMessageID": "m5", "ordinal": 0, "text": "later"},
-            "durable": {"seq": 8}
-        }),
-        json!({
-            "id": "evt_s2", "created": 1_700_000_002_300_i64, "type": "session.step.ended",
-            "data": {
-                "sessionID": "ses_fake", "assistantMessageID": "m5", "cost": 0.0,
-                "tokens": {"input": 1, "output": 1}
-            },
-            "durable": {"seq": 9}
-        }),
-        json!({
-            "id": "evt_usage2", "created": 1_700_000_002_350_i64, "type": "session.usage.updated",
-            "data": {"sessionID": "ses_fake", "cost": 0.25, "tokens": {"input": 4, "output": 5}}
-        }),
-        json!({
-            "id": "evt_e2", "created": 1_700_000_002_400_i64, "type": "session.execution.succeeded",
-            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 10}
-        }),
-    ]);
-    server.set_events(next);
-    let second = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("second mirror");
-    assert!(second.events >= 5, "{:?}", second);
-    assert!(cursor.last_native_id != first.cursor.last_native_id);
-    assert!(
-        events_of(&deps, &session)
-            .iter()
-            .any(|event| matches!(event.body(), Ok(EventBody::AssistantMessage(message)) if message.text == "later")),
-        "the event that happened between passes was lost"
-    );
-    assert_eq!(
-        server
-            .seen()
-            .iter()
-            .filter(|path| path.as_str() == "/api/experimental/session/ses_fake/export")
-            .count(),
-        1,
-        "the second pass backfilled again instead of using its cursor"
-    );
+/// Polls the transcript until an entry with `text` appears, or panics after two seconds.
+fn wait_for_text(host: &OpencodeHost, handle: &AppHandle, cursor: &MirrorCursor, text: &str) -> Vec<TranscriptEntry> {
+    for _ in 0..100 {
+        let batch = host.transcript_since(handle, cursor).expect("transcript while waiting");
+        if batch.entries.iter().any(|entry| entry.text.as_deref() == Some(text)) {
+            return batch.entries;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {text:?}");
 }
 
 #[test]
@@ -1048,12 +1118,14 @@ fn resume_context_builds_capsule_and_tail() {
 
 /// A loopback opencode fake for the mirror tests.
 ///
-/// `/api/event` is deliberately empty: the real stream is subscription-only and would lose
-/// an event that happened between passes. Only the replayable session endpoint can serve it.
+/// `/api/event` is a real subscription: a connection receives only events added after it
+/// opened, and stays open. That is the v2.0.28 contract; the host must hold the connection
+/// between mirror passes to avoid losing an event.
 struct MiniOpencode {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<Value>>>,
+    subscribers: Arc<Mutex<usize>>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1079,16 +1151,27 @@ impl MiniOpencode {
             }),
         ]));
         let events = Arc::new(Mutex::new(Vec::new()));
+        let subscribers = Arc::new(Mutex::new(0usize));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = {
             let seen = Arc::clone(&seen);
             let messages = Arc::clone(&messages);
             let events = Arc::clone(&events);
+            let subscribers = Arc::clone(&subscribers);
             let shutdown = Arc::clone(&shutdown);
             thread::spawn(move || {
                 while !shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => mini_handle(stream, &seen, &messages, &events),
+                        Ok((stream, _)) => {
+                            let seen = Arc::clone(&seen);
+                            let messages = Arc::clone(&messages);
+                            let events = Arc::clone(&events);
+                            let subscribers = Arc::clone(&subscribers);
+                            let shutdown = Arc::clone(&shutdown);
+                            thread::spawn(move || {
+                                mini_handle(stream, &seen, &messages, &events, &subscribers, &shutdown);
+                            });
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5));
                         }
@@ -1101,6 +1184,7 @@ impl MiniOpencode {
             addr,
             seen,
             events,
+            subscribers,
             shutdown,
             thread: Some(thread),
         }
@@ -1114,12 +1198,20 @@ impl MiniOpencode {
         format!("http://127.0.0.1:{}", self.port())
     }
 
-    fn set_events(&self, events: Vec<Value>) {
-        *self.events.lock().expect("events") = events;
+    /// Adds one event to the live hub; connected subscribers receive it.
+    fn push_event(&self, event: Value) {
+        self.events.lock().expect("events").push(event);
     }
 
-    fn events(&self) -> Vec<Value> {
-        self.events.lock().expect("events").clone()
+    /// Waits until the host listener has subscribed to `/api/event`.
+    fn wait_for_subscriber(&self) {
+        for _ in 0..200 {
+            if *self.subscribers.lock().expect("subscribers") > 0 {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no /api/event subscriber connected");
     }
 
     fn seen(&self) -> Vec<String> {
@@ -1142,6 +1234,8 @@ fn mini_handle(
     seen: &Arc<Mutex<Vec<String>>>,
     messages: &Arc<Mutex<Vec<Value>>>,
     events: &Arc<Mutex<Vec<Value>>>,
+    subscribers: &Arc<Mutex<usize>>,
+    shutdown: &Arc<AtomicBool>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut raw = Vec::new();
@@ -1164,6 +1258,36 @@ fn mini_handle(
         .to_owned();
     seen.lock().expect("seen").push(path.clone());
     let route = path.split('?').next().unwrap_or(&path);
+    if route == "/api/event" {
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+        if stream.write_all(headers.as_bytes()).is_err() {
+            return;
+        }
+        let mut cursor = events.lock().expect("events").len();
+        *subscribers.lock().expect("subscribers") += 1;
+        while !shutdown.load(Ordering::Relaxed) {
+            let pending: Vec<Value> = {
+                let events = events.lock().expect("events");
+                let pending = events[cursor..].to_vec();
+                cursor = events.len();
+                pending
+            };
+            for event in pending {
+                let frame = format!("data: {event}\n\n");
+                if stream.write_all(frame.as_bytes()).is_err() {
+                    *subscribers.lock().expect("subscribers") -= 1;
+                    return;
+                }
+            }
+            if stream.flush().is_err() {
+                *subscribers.lock().expect("subscribers") -= 1;
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        *subscribers.lock().expect("subscribers") -= 1;
+        return;
+    }
     let (status, content_type, body) = match route {
         "/api/session" => (
             200,
@@ -1184,12 +1308,6 @@ fn mini_handle(
             })
             .to_string(),
         ),
-        "/api/session/ses_fake/event" => (
-            200,
-            "application/json",
-            json!({"data": events.lock().expect("events").clone()}).to_string(),
-        ),
-        "/api/event" => (200, "text/event-stream", String::new()),
         _ => (404, "application/json", "{\"error\":\"not found\"}".to_owned()),
     };
     let response = format!(

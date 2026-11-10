@@ -230,10 +230,6 @@ fn handle(
             .to_string();
             respond(&mut stream, 200, "application/json", &body);
         }
-        ("GET", "/api/session/ses_fake/event") => {
-            let body = json!({"data": events.lock().expect("events").clone()}).to_string();
-            respond(&mut stream, 200, "application/json", &body);
-        }
         ("GET", "/api/event") => {
             let mut body = String::new();
             for event in events.lock().expect("events").iter() {
@@ -313,6 +309,18 @@ fn empty_cursor() -> MirrorCursor {
         last_native_id: None,
         updated_at: ts("2026-11-10T10:00:00Z"),
     }
+}
+
+/// Polls `transcript_since` until an entry with `text` appears, or panics after two seconds.
+fn wait_for_text(host: &OpencodeHost, handle: &AppHandle, cursor: &MirrorCursor, text: &str) -> TranscriptBatch {
+    for _ in 0..100 {
+        let batch = host.transcript_since(handle, cursor).expect("transcript while waiting");
+        if batch.entries.iter().any(|entry| entry.text.as_deref() == Some(text)) {
+            return batch;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {text:?}");
 }
 
 fn fake_opencode_script(port: u16, version: &str) -> String {
@@ -481,19 +489,33 @@ fn opencode_v2_service_pair_basic_auth() {
         "created": 1_700_000_002_300_i64,
         "data": {"sessionID": "ses_fake"}, "durable": {"seq": 4}
     }));
-    let cursor = first.cursor.clone();
-    let second = host.transcript_since(&handle, &cursor).expect("live events");
+    fake.push_event(json!({
+        "id": "evt_foreign", "type": "session.inbox.enqueued",
+        "created": 1_700_000_002_400_i64,
+        "data": {
+            "inboxID": "foreign", "sessionID": "ses_other",
+            "item": {"type": "user", "payload": {"text": "foreign"}}
+        },
+        "durable": {"seq": 100}
+    }));
+    let second = wait_for_text(&host, &handle, &first.cursor, "next");
     assert!(
         second.entries.iter().any(|entry| entry.text.as_deref() == Some("next")),
         "live pass missed the assistant message: {:?}",
         second.entries
     );
+    assert!(
+        !second
+            .entries
+            .iter()
+            .any(|entry| entry.text.as_deref() == Some("foreign")),
+        "another session leaked onto this surface: {:?}",
+        second.entries
+    );
     assert!(second.cursor.last_native_id != first.cursor.last_native_id);
     assert!(
-        fake.seen_paths()
-            .iter()
-            .any(|path| path.starts_with("/api/session/ses_fake/event")),
-        "live pass did not read the replayable session events: {:?}",
+        fake.seen_paths().iter().any(|path| path == "/api/event"),
+        "the host did not subscribe to /api/event: {:?}",
         fake.seen_paths()
     );
     assert_eq!(

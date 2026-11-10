@@ -10,18 +10,23 @@
 //! The HTTP client is deliberately small and blocking: opencode is a loopback service and
 //! the workspace already prefers plain threads over an async runtime.
 //!
-//! The live reader consumes the replayable `/api/session/<id>/event` endpoint on every pass
-//! (the `/api/event` stream is subscription-only and loses events between connections), and
-//! falls back to `/api/event` only when the replayable endpoint is unavailable. Assistant
-//! text parts are coalesced by `assistantMessageID`; `session.usage.updated` carries a
-//! cumulative snapshot, so the mirror writes only each update's delta as cost.
+//! The live reader holds one persistent `/api/event` subscription from host start and appends
+//! every frame to a private spool. The 2.0.28 stream is subscription-only and volatile (its
+//! own route description says events during a disconnection are missed), so a per-pass read
+//! would lose events; the spool is replayed to the mirror and filtered to the target session.
+//! Assistant text parts are coalesced by `assistantMessageID`; `session.usage.updated` carries
+//! a cumulative snapshot, so the mirror writes only each update's delta as cost.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -106,9 +111,9 @@ impl OpencodeHost {
 
     /// Reads the newest transcript entries after `cursor`.
     ///
-    /// The first pass backfills from the session export. Every pass then reads the
-    /// replayable per-session event endpoint, so an event that happened between two passes
-    /// is not lost; `/api/event` is only a fallback for older servers.
+    /// The first pass backfills from the session export. Every pass then maps the listener
+    /// spool, so an event that happened between two passes is not lost; the spool is replayed
+    /// in full and the mirror's `native_events` map keeps the pass idempotent.
     fn read_transcript(&self, handle: &AppHandle, cursor: &MirrorCursor) -> Result<TranscriptBatch, CoreError> {
         let layout = Layout::for_workdir(&handle.workdir);
         let Some(state) = read_host_state(&layout)? else {
@@ -126,13 +131,15 @@ impl OpencodeHost {
         if cursor.last_native_id.is_none() {
             entries.extend(self.backfill(&client, &native)?);
         }
-        entries.extend(self.live_events(&client, &native)?);
+        entries.extend(self.live_events(&layout, &native)?);
         for entry in &mut entries {
             if entry.native_session.is_none() {
                 entry.native_session = Some(native.clone());
             }
         }
-        let entries = after_cursor(entries, cursor);
+        // The spool is replayed in full so a turn start that the export does not contain
+        // cannot be skipped by a content-id cursor. `native_events` makes the pass
+        // idempotent; the cursor still records the last entry for persistence.
         let last = entries
             .last()
             .map(|entry| entry.native_id.clone())
@@ -168,35 +175,23 @@ impl OpencodeHost {
         Ok(Vec::new())
     }
 
-    /// Reads the replayable per-session event endpoint, falling back to `/api/event`.
+    /// Reads the target session's events from the listener spool.
     ///
-    /// `after=0` replays the whole session; the mirror's native-id map removes the
-    /// overlap with earlier passes. The live `/api/event` stream is subscription-only, so
-    /// it is used only when the replayable endpoint is not available.
-    fn live_events(&self, client: &HttpClient, native: &str) -> Result<Vec<TranscriptEntry>, CoreError> {
-        if super::native::safe_segment(native) {
-            let path = format!("/api/session/{native}/event?after=0");
-            if let Ok((status, events)) = client.request_events(&path, self.sse_window) {
-                if (200..300).contains(&status) {
-                    if !events.is_empty() {
-                        return Ok(map_events(&events, false));
-                    }
-                    // Some builds treat `after=0` as "now"; the plain endpoint replays all.
-                    let plain = format!("/api/session/{native}/event");
-                    if let Ok((status, events)) = client.request_events(&plain, self.sse_window) {
-                        if (200..300).contains(&status) && !events.is_empty() {
-                            return Ok(map_events(&events, false));
-                        }
-                    }
-                    return Ok(Vec::new());
-                }
-            }
-        }
-        let (status, events) = client.request_events("/api/event", self.sse_window)?;
-        if !(200..300).contains(&status) {
-            return Ok(Vec::new());
-        }
-        Ok(map_events(&events, false))
+    /// The global `/api/event` stream covers every location and is subscription-only (S3
+    /// and the 2.0.28 route description: events during a disconnection are missed). A
+    /// background listener keeps the subscription open from host start and appends every
+    /// event to a private spool, so a pass cannot lose an event that happened between passes.
+    /// The spool is filtered to this app session before mapping, so another session's
+    /// transcript can never be written into this one.
+    fn live_events(&self, layout: &Layout, native: &str) -> Result<Vec<TranscriptEntry>, CoreError> {
+        // A missing service state is not fatal; the spool may already hold events.
+        let _ = ensure_event_listener(layout);
+        let events = read_event_spool(&layout.event_spool)?;
+        let target: Vec<Value> = events
+            .into_iter()
+            .filter(|event| session_of(event).as_deref() == Some(native))
+            .collect();
+        Ok(map_events(&target, false))
     }
 
     /// Builds a client from the service state in `layout`.
@@ -335,6 +330,7 @@ impl AppHost for OpencodeHost {
                 vowp_session: req.session.to_string(),
             };
             write_private_json(&layout.host_json, &state)?;
+            start_event_listener(&layout)?;
             Ok(AppHandle {
                 kind: OrchestratorApp::Opencode,
                 pid,
@@ -353,6 +349,7 @@ impl AppHost for OpencodeHost {
 
     fn stop(&self, handle: &AppHandle) -> Result<(), CoreError> {
         let layout = Layout::for_workdir(&handle.workdir);
+        stop_event_listener(&layout.workdir);
         self.run_service_best_effort(&layout, &["service", "stop"]);
         let state = read_host_state(&layout)?;
         if let Some(state) = &state {
@@ -513,6 +510,7 @@ struct Layout {
     cache: PathBuf,
     service_json: PathBuf,
     service_log: PathBuf,
+    event_spool: PathBuf,
     host_json: PathBuf,
 }
 
@@ -528,6 +526,7 @@ impl Layout {
             cache: root.join("cache"),
             service_json: state.join("opencode").join("service.json"),
             service_log: root.join("service.log"),
+            event_spool: root.join("event-spool.jsonl"),
             host_json: workdir.join("host.json"),
             root,
             state,
@@ -591,6 +590,124 @@ fn read_service_state_or_none(layout: &Layout) -> Result<Option<ServiceState>, C
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(CoreError::Io {
             path: layout.service_json.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// One persistent `/api/event` subscription.
+struct EventListener {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+/// Live listeners keyed by orchestrator workdir. The host object is cheap and stateless;
+/// this registry keeps one subscription per running orchestrator.
+static EVENT_LISTENERS: OnceLock<Mutex<BTreeMap<PathBuf, EventListener>>> = OnceLock::new();
+
+/// Returns the listener registry.
+fn event_listeners() -> &'static Mutex<BTreeMap<PathBuf, EventListener>> {
+    EVENT_LISTENERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Ensures a listener is running for the orchestrator in `layout`.
+fn ensure_event_listener(layout: &Layout) -> Result<(), CoreError> {
+    let running = event_listeners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&layout.workdir);
+    if running {
+        return Ok(());
+    }
+    start_event_listener(layout)
+}
+
+/// Starts the persistent `/api/event` subscription for `layout`.
+fn start_event_listener(layout: &Layout) -> Result<(), CoreError> {
+    let service = read_service_state(layout)?;
+    let url = service
+        .url
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", service.port.unwrap_or_default()));
+    let client = HttpClient::new(&url, &service.password)?;
+    stop_event_listener(&layout.workdir);
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let spool = layout.event_spool.clone();
+    let thread = std::thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let _ = client.subscribe_events("/api/event", &thread_stop, |event| {
+                let _ = append_event_spool(&spool, &event);
+            });
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+    if let Ok(mut listeners) = event_listeners().lock() {
+        listeners.insert(layout.workdir.clone(), EventListener { stop, thread });
+    }
+    Ok(())
+}
+
+/// Stops the listener for `workdir`, if one is running.
+fn stop_event_listener(workdir: &Path) {
+    let listener = event_listeners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(workdir);
+    if let Some(listener) = listener {
+        listener.stop.store(true, Ordering::Relaxed);
+        let _ = listener.thread.join();
+    }
+}
+
+/// Appends one raw event to the private spool, one JSON object per line.
+fn append_event_spool(path: &Path, event: &Value) -> Result<(), CoreError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CoreError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|source| CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    let line = serde_json::to_vec(event).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    file.write_all(&line).map_err(|source| CoreError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    file.write_all(b"\n").map_err(|source| CoreError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    file.flush().map_err(|source| CoreError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// Reads every complete event from the spool; a torn final line is ignored.
+fn read_event_spool(path: &Path) -> Result<Vec<Value>, CoreError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(bytes
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .filter(Value::is_object)
+            .collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(source) => Err(CoreError::Io {
+            path: path.display().to_string(),
             source,
         }),
     }
@@ -692,36 +809,65 @@ impl HttpClient {
         Ok((status, value))
     }
 
-    /// Reads one bounded event response and returns its HTTP status and events.
+    /// Keeps one `/api/event` subscription open and calls `on_event` for each frame.
     ///
-    /// The body may be SSE (`data:` lines, as `/api/event` and the replayable session
-    /// endpoint stream it) or a JSON array/`{"data": [...]}` object.
-    fn request_events(&self, path: &str, window: Duration) -> Result<(u16, Vec<Value>), CoreError> {
+    /// The stream is volatile by contract, so the listener must stay connected between
+    /// mirror passes. A read timeout lets the stop flag be checked without depending on
+    /// the server closing the stream.
+    fn subscribe_events(
+        &self,
+        path: &str,
+        stop: &AtomicBool,
+        mut on_event: impl FnMut(Value),
+    ) -> Result<(), CoreError> {
         let mut stream = TcpStream::connect((self.host.as_str(), self.port)).map_err(|source| CoreError::Io {
             path: format!("{}:{}", self.host, self.port),
             source,
         })?;
         stream
-            .set_read_timeout(Some(Duration::from_millis(150)))
+            .set_read_timeout(Some(Duration::from_millis(250)))
             .map_err(|source| CoreError::Io {
                 path: format!("{}:{}", self.host, self.port),
                 source,
             })?;
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: {}\r\nAccept: text/event-stream, application/json\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
             self.host, self.port, self.auth
         );
         stream.write_all(request.as_bytes()).map_err(|source| CoreError::Io {
             path: format!("{}:{}", self.host, self.port),
             source,
         })?;
-        let deadline = Instant::now() + window;
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 4096];
-        while Instant::now() < deadline {
+
+        let mut decoder = SseDecoder::default();
+        let mut raw = Vec::new();
+        let mut headers_done = false;
+        let mut chunk = [0u8; 8192];
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             match stream.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Ok(read) => {
+                    raw.extend_from_slice(&chunk[..read]);
+                    if !headers_done {
+                        let Some(position) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&raw[..position]);
+                        decoder.chunked = headers.lines().any(|line| {
+                            line.split_once(':').is_some_and(|(name, value)| {
+                                name.trim().eq_ignore_ascii_case("transfer-encoding")
+                                    && value.trim().eq_ignore_ascii_case("chunked")
+                            })
+                        });
+                        raw.drain(..position + 4);
+                        headers_done = true;
+                    }
+                    decoder.feed(&raw, &mut on_event);
+                    raw.clear();
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -735,9 +881,7 @@ impl HttpClient {
                 }
             }
         }
-        let status = response_status(&bytes)?;
-        let body = sse_body(&bytes);
-        Ok((status, parse_event_body(&body)))
+        Ok(())
     }
 }
 
@@ -833,68 +977,71 @@ fn decode_chunked(bytes: &[u8]) -> Vec<u8> {
     output
 }
 
-/// Returns an SSE response body, decoding chunked framing when the server used it.
-fn sse_body(bytes: &[u8]) -> Vec<u8> {
-    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return bytes.to_vec();
-    };
-    let headers = String::from_utf8_lossy(&bytes[..header_end]);
-    let chunked = headers.lines().any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("transfer-encoding") && value.trim().eq_ignore_ascii_case("chunked")
-        })
-    });
-    if chunked {
-        decode_chunked(&bytes[header_end + 4..])
-    } else {
-        bytes[header_end + 4..].to_vec()
+/// Incremental parser for an SSE body, including chunked transfer framing.
+#[derive(Default)]
+struct SseDecoder {
+    chunked: bool,
+    raw: Vec<u8>,
+    line: Vec<u8>,
+    remaining: usize,
+    crlf: usize,
+}
+
+impl SseDecoder {
+    /// Feeds response bytes and emits each complete `data:` JSON object.
+    fn feed(&mut self, bytes: &[u8], on_event: &mut impl FnMut(Value)) {
+        if !self.chunked {
+            self.line.extend_from_slice(bytes);
+            self.drain_lines(on_event);
+            return;
+        }
+        self.raw.extend_from_slice(bytes);
+        loop {
+            if self.remaining > 0 {
+                let take = self.remaining.min(self.raw.len());
+                self.line.extend_from_slice(&self.raw[..take]);
+                self.raw.drain(..take);
+                self.remaining -= take;
+                if self.remaining == 0 {
+                    self.crlf = 2;
+                }
+            } else if self.crlf > 0 {
+                let take = self.crlf.min(self.raw.len());
+                self.raw.drain(..take);
+                self.crlf -= take;
+            } else {
+                let Some(position) = self.raw.windows(2).position(|window| window == b"\r\n") else {
+                    break;
+                };
+                let size_text = String::from_utf8_lossy(&self.raw[..position]);
+                let size = usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
+                    .unwrap_or_default();
+                self.raw.drain(..position + 2);
+                if size == 0 {
+                    break;
+                }
+                self.remaining = size;
+            }
+        }
+        self.drain_lines(on_event);
     }
-}
 
-/// Reads the HTTP status code from a response.
-fn response_status(bytes: &[u8]) -> Result<u16, CoreError> {
-    let header_end = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .unwrap_or(bytes.len());
-    let headers = String::from_utf8_lossy(&bytes[..header_end]);
-    headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| CoreError::Invalid("event response had no HTTP status".to_owned()))
-}
-
-/// Parses an SSE `data:` body or a JSON event list.
-fn parse_event_body(body: &[u8]) -> Vec<Value> {
-    let text = String::from_utf8_lossy(body);
-    let mut events = Vec::new();
-    for line in text.lines() {
-        let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") else {
-            continue;
-        };
-        if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
-            if value.is_object() {
-                events.push(value);
+    /// Emits complete lines that start with `data:`.
+    fn drain_lines(&mut self, on_event: &mut impl FnMut(Value)) {
+        while let Some(position) = self.line.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.line.drain(..=position).collect();
+            let text = String::from_utf8_lossy(&line);
+            let line = text.trim_end_matches(['\r', '\n']);
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
+                if value.is_object() {
+                    on_event(value);
+                }
             }
         }
     }
-    if !events.is_empty() {
-        return events;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(text.trim()) else {
-        return Vec::new();
-    };
-    if let Some(array) = value.as_array() {
-        return array.iter().filter(|item| item.is_object()).cloned().collect();
-    }
-    value
-        .get("data")
-        .or_else(|| value.get("events"))
-        .and_then(Value::as_array)
-        .map(|array| array.iter().filter(|item| item.is_object()).cloned().collect())
-        .unwrap_or_default()
 }
 
 /// Parses `http://host:port[/…]` and refuses anything but loopback.
@@ -939,17 +1086,6 @@ fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     output
-}
-
-/// Filters entries to those after the cursor id; an unknown cursor returns everything.
-fn after_cursor(entries: Vec<TranscriptEntry>, cursor: &MirrorCursor) -> Vec<TranscriptEntry> {
-    let Some(last) = cursor.last_native_id.as_deref() else {
-        return entries;
-    };
-    match entries.iter().position(|entry| entry.native_id == last) {
-        Some(position) => entries.into_iter().skip(position + 1).collect(),
-        None => entries,
-    }
 }
 
 /// Parses an opencode message list or export into transcript entries.
