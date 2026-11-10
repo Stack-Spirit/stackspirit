@@ -3,10 +3,14 @@
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §8.1–§8.2 and §13.6.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use vowp_protocol::{Snapshot, Timestamp};
+use vowp_core::deps::SystemRng;
+use vowp_core::{AdapterRegistry, Deps, SystemGit, SystemRunner};
+use vowp_protocol::{Clock, NodeFile, NullLog, ProjectName, Snapshot, SystemClock, Timestamp, VowpConfig};
 use vowp_store::NodePaths;
+use vowp_tmux::Tmux;
 
 use crate::CliError;
 use crate::cli::Global;
@@ -58,7 +62,7 @@ pub struct RemoteHome {
 }
 
 /// A snapshot read from the control cache.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CachedSnapshot {
     /// The snapshot.
     pub snapshot: Snapshot,
@@ -102,7 +106,8 @@ impl NodeCtx {
             });
         }
         let paths = crate::ctx::node_paths(global)?;
-        let role = if paths.db_path().is_file() {
+        let vowp_home = std::env::var_os("VOWP_HOME").is_some_and(|value| !value.is_empty());
+        let role = if vowp_home || paths.db_path().is_file() {
             NodeRole::Home
         } else {
             NodeRole::Uninitialised
@@ -117,12 +122,14 @@ impl NodeCtx {
 
     /// Returns the node paths, requiring the home role.
     pub fn require_home(&self) -> Result<&NodePaths, CliError> {
-        if self.role == NodeRole::Home {
-            Ok(&self.paths)
-        } else {
-            Err(CliError::Guard(
+        match self.role {
+            NodeRole::Home => Ok(&self.paths),
+            NodeRole::Control => Err(CliError::Guard(
                 "this command needs the home; run it on the machine that holds the node".to_owned(),
-            ))
+            )),
+            NodeRole::Uninitialised => Err(CliError::NotFound(
+                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
+            )),
         }
     }
 
@@ -139,18 +146,116 @@ impl NodeCtx {
     }
 
     /// Writes the control snapshot cache.
-    pub fn cache_snapshot(&self, _snapshot: &Snapshot) -> Result<(), CliError> {
-        Err(CliError::NotImplemented("not implemented in this build"))
+    ///
+    /// A home has no cache: the snapshot it reads is always fresh, so this is a no-op
+    /// there and refuses only on an uninitialised machine.
+    pub fn cache_snapshot(&self, snapshot: &Snapshot) -> Result<(), CliError> {
+        let Some(control) = &self.control else {
+            if self.role == NodeRole::Home {
+                return Ok(());
+            }
+            return Err(CliError::Guard(
+                "no control home is configured; run `vowp control init`".to_owned(),
+            ));
+        };
+        let cached = CachedSnapshot {
+            snapshot: snapshot.clone(),
+            fetched_at: SystemClock.now(),
+            source: "cache".to_owned(),
+        };
+        let text = serde_json::to_string_pretty(&cached)
+            .map_err(|error| CliError::Invalid(format!("snapshot cache: {error}")))?;
+        std::fs::create_dir_all(&control.root)?;
+        let path = control.root.join("snapshot-cache.json");
+        let temp = control.root.join(".snapshot-cache.json.tmp");
+        std::fs::write(&temp, format!("{text}\n"))?;
+        std::fs::rename(&temp, &path)?;
+        Ok(())
     }
 
     /// Reads the control snapshot cache.
     pub fn cached_snapshot(&self) -> Result<Option<CachedSnapshot>, CliError> {
-        Ok(None)
+        let Some(control) = &self.control else {
+            return Ok(None);
+        };
+        let path = control.root.join("snapshot-cache.json");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)?;
+        let mut cached: CachedSnapshot =
+            serde_json::from_str(&text).map_err(|error| CliError::Invalid(format!("{}: {error}", path.display())))?;
+        cached.source = "cache".to_owned();
+        Ok(Some(cached))
     }
 
     /// Routes one command to the home and returns its JSON stdout.
+    ///
+    /// D2 (control home) fills the SSH transport; the frozen signature is kept here so
+    /// the control commands can be written against it without touching this file again.
     pub fn route_json(&self, _args: &[String]) -> Result<String, CliError> {
         Err(CliError::NotImplemented("not implemented in this build"))
+    }
+}
+
+/// Returns the configured control home, when this machine has one.
+pub fn control_home() -> Result<Option<ControlHome>, CliError> {
+    read_control_home()
+}
+
+/// Returns whether this machine is configured as a control machine.
+pub fn is_control_machine() -> Result<bool, CliError> {
+    Ok(read_control_home()?.is_some())
+}
+
+/// Builds the node-level dependencies `vowp up` and `down` need without a project context.
+///
+/// The base config is a valid default; [`NodeSupervisor`](vowp_core::loops::NodeSupervisor)
+/// replaces it with each registered project's own `vowp.toml` before ticking that project.
+pub fn home_deps(paths: &NodePaths) -> Result<Deps, CliError> {
+    let config = home_config(paths)?;
+    let adapters = AdapterRegistry::from_config(&config)?;
+    Ok(build_home_deps(paths, config, Arc::new(adapters)))
+}
+
+/// Builds the node-level dependencies `vowp down` needs.
+///
+/// `down` only needs the clock and tmux; it must still work when a harness mapping
+/// referenced by `config.toml` is broken, so it uses an empty registry.
+pub fn home_shell_deps(paths: &NodePaths) -> Result<Deps, CliError> {
+    let config = home_config(paths)?;
+    Ok(build_home_deps(paths, config, Arc::new(AdapterRegistry::new())))
+}
+
+/// Loads the base node config with `<home>/config.toml` defaults applied.
+fn home_config(paths: &NodePaths) -> Result<VowpConfig, CliError> {
+    let mut config = VowpConfig::with_defaults_for_tests();
+    let node_file_path = paths.root().join("config.toml");
+    if node_file_path.is_file() {
+        let text = std::fs::read_to_string(&node_file_path)?;
+        let node_file = NodeFile::from_toml(&text)?;
+        config = config.with_node_defaults(&node_file);
+    }
+    config.project.name = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+    config.project.path = Some(paths.root().display().to_string());
+    config.validate()?;
+    Ok(config)
+}
+
+/// Assembles [`Deps`] for a node-level command.
+fn build_home_deps(paths: &NodePaths, config: VowpConfig, adapters: Arc<AdapterRegistry>) -> Deps {
+    let command: Arc<dyn vowp_core::CommandRunner> = Arc::new(SystemRunner);
+    Deps {
+        paths: paths.clone(),
+        node: config.node.name.clone(),
+        config: Arc::new(config),
+        clock: Arc::new(SystemClock),
+        log: Arc::new(NullLog),
+        adapters,
+        windows: Arc::new(Tmux::for_home(paths.root())),
+        git: Arc::new(SystemGit::new(Arc::clone(&command))),
+        cmd: command,
+        rng: Arc::new(SystemRng::new()),
     }
 }
 

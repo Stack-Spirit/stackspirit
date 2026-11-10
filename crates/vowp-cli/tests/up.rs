@@ -478,11 +478,15 @@ fn up_once_runs_one_tick_with_fake_adapters() {
         rng: Arc::new(SystemRng::new()),
     };
 
-    let report = vowp_cli::cmd::up::tick_once(&deps, &project).expect("one tick");
+    let report = vowp_cli::cmd::up::tick_once(&deps).expect("one tick");
     for step in &report.steps {
-        assert!(step.ok, "step {} failed: {}", step.name, step.detail);
+        assert!(step.ok, "node step {} failed: {}", step.name, step.detail);
     }
-    assert_eq!(report.dispatched, vec![job.id.clone()]);
+    let project_report = report.projects.get(&project).expect("project ticked");
+    for step in &project_report.steps {
+        assert!(step.ok, "project step {} failed: {}", step.name, step.detail);
+    }
+    assert_eq!(project_report.dispatched, vec![job.id.clone()]);
     assert!(
         paths.root().join("heartbeat").is_file(),
         "tick step 13 writes the heartbeat"
@@ -894,5 +898,316 @@ fn assert_second_signal_exits(signal: &str, expected: i32) {
     assert!(
         second.elapsed() < Duration::from_secs(2),
         "the second signal must not wait for the child grace period"
+    );
+}
+
+/// Writes a valid `vowp.toml` named `name` into `repo` and returns the config.
+fn write_project_config(repo: &Path, name: &str) -> vowp_protocol::VowpConfig {
+    let mut config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+    config.project.name = vowp_protocol::ProjectName::parse(name).expect("project name");
+    config.project.path = Some(repo.display().to_string());
+    std::fs::write(
+        repo.join("vowp.toml"),
+        toml::to_string_pretty(&config).expect("config toml"),
+    )
+    .expect("vowp.toml");
+    config
+}
+
+#[test]
+fn up_once_ticks_every_project_without_a_project_context() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+
+    let (code, _stdout, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
+    assert_eq!(code, 0, "project add failed: {stderr}");
+
+    // The systemd form: only --home, no --project and no vowp.toml in the cwd.
+    let mut io = vowp_cli::BufferIo::new("");
+    let code = vowp_cli::run(
+        vec![
+            "vowp".to_owned(),
+            "--home".to_owned(),
+            env.home_path().display().to_string(),
+            "up".to_owned(),
+            "--once".to_owned(),
+            "--no-tmux".to_owned(),
+        ],
+        &mut io,
+    );
+    assert_eq!(code, 0, "up --once from the home failed: {}", io.stderr());
+    assert!(
+        io.stdout().contains("2 project(s)"),
+        "both projects are ticked: {}",
+        io.stdout()
+    );
+    assert!(env.home_path().join("heartbeat").is_file());
+    assert!(
+        !env.home_path().join("board.json").exists(),
+        "two active projects defer the node board to D1"
+    );
+
+    let mut io = vowp_cli::BufferIo::new("");
+    let code = vowp_cli::run(
+        vec![
+            "vowp".to_owned(),
+            "--json".to_owned(),
+            "--home".to_owned(),
+            env.home_path().display().to_string(),
+            "up".to_owned(),
+            "--once".to_owned(),
+            "--no-tmux".to_owned(),
+        ],
+        &mut io,
+    );
+    assert_eq!(code, 0, "json up --once failed: {}", io.stderr());
+    let value: serde_json::Value = serde_json::from_str(&io.stdout()).expect("json");
+    assert_eq!(value["ok"], true, "{value}");
+}
+
+#[test]
+fn up_refuses_on_a_control_machine() {
+    let home = tempfile::tempdir().expect("home");
+    let control = tempfile::tempdir().expect("control");
+    std::fs::write(
+        control.path().join("control.json"),
+        serde_json::json!({
+            "role": "control",
+            "home": "vowp-home",
+            "ssh_target": "vowp@example.invalid",
+            "remote_home": "/home/vowp/.vowp",
+            "created_at": "2026-11-10T12:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("control.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("up")
+        .arg("--once")
+        .arg("--no-tmux")
+        .env("VOWP_HOME", home.path())
+        .env("VOWP_CONTROL_HOME", control.path())
+        .env("HOME", home.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp up");
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("control machine"), "{stderr}");
+}
+
+#[test]
+fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let second_path = second.path().to_str().expect("path").to_owned();
+
+    let (code, stdout, stderr) = env.run(&["project", "add", &second_path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("registered: second"), "{stdout}");
+    let (code, _, stderr) = env.run(&["project", "add", &second_path]);
+    assert_eq!(code, 0, "add is idempotent: {stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    let (code, value, stderr) = env.run_json(&["project", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    let names: Vec<&str> = value
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, ["second", "test"], "sorted and hiding _node: {value}");
+    assert!(
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .all(|entry| entry["name"] != "_node"),
+        "{value}"
+    );
+
+    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "up creates the reserved _node row: {stderr}");
+    let (code, value, stderr) = env.run_json(&["project", "ls", "--all"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|entry| entry["name"] == "_node"),
+        "--all shows the reserved project after up/init created it: {value}"
+    );
+
+    let (code, value, stderr) = env.run_json(&["project", "weight", "second", "42"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["weight"], 42, "{value}");
+
+    let (code, value, stderr) = env.run_json(&["project", "pause", "second"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["state"], "paused", "{value}");
+    assert_eq!(value["paused_reason"], "owner", "{value}");
+    let (code, value, stderr) = env.run_json(&["project", "resume", "second"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["state"], "active", "{value}");
+    assert_eq!(value["paused_reason"], "", "{value}");
+
+    let (code, value, stderr) = env.run_json(&["project", "archive", "second"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["state"], "archived", "{value}");
+    assert!(value["archived_at"].is_string(), "{value}");
+    let (code, _, stderr) = env.run(&["project", "resume", "second"]);
+    assert_eq!(code, 4, "archived cannot be resumed: {stderr}");
+
+    let (code, _, stderr) = env.run(&["project", "rm", "second"]);
+    assert_eq!(code, 5, "rm needs --yes: {stderr}");
+    let (code, value, stderr) = env.run_json(&["project", "rm", "second", "--yes"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["project"], "second", "{value}");
+    let archived_to = value["archived_to"].as_str().expect("archived path");
+    assert!(Path::new(archived_to).is_dir(), "{archived_to}");
+
+    let (code, value, stderr) = env.run_json(&["project", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .all(|entry| entry["name"] != "second"),
+        "{value}"
+    );
+    let (code, _, stderr) = env.run(&["project", "pause", "_node"]);
+    assert_eq!(code, 2, "the reserved project is refused: {stderr}");
+}
+
+#[test]
+fn loops_and_schedules_list_every_project() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let (code, _, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "up creates the first project's loop rows: {stderr}");
+
+    let (code, value, stderr) = env.run_json(&["loops", "--all"]);
+    assert_eq!(code, 0, "{stderr}");
+    let projects: Vec<&str> = value
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|loop_| loop_["project"].as_str().expect("project"))
+        .collect();
+    assert!(projects.contains(&"test"), "{value}");
+    assert!(projects.contains(&"second"), "{value}");
+
+    let (code, value, stderr) = env.run_json(&["schedule", "--all", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(value.as_array().is_some_and(Vec::is_empty), "{value}");
+}
+
+#[test]
+fn migrate_reports_a_split_or_missing_home_without_writing() {
+    let env = common::TestEnv::new();
+    let (code, _, stderr) = env.run(&["migrate", "--dry-run"]);
+    assert_eq!(code, 2, "a v0.2 home is not a migration source: {stderr}");
+    assert!(stderr.contains("expected 1"), "{stderr}");
+    let (code, _, stderr) = env.run(&["migrate"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("expected 1"), "{stderr}");
+
+    let missing = env.home_path().join("missing-backup.db");
+    let (code, _, stderr) = env.run(&["migrate", "--rollback", missing.to_str().expect("path")]);
+    assert_eq!(code, 3, "a missing rollback backup is not found: {stderr}");
+    assert!(stderr.contains("migration backup"), "{stderr}");
+}
+
+#[test]
+fn up_registers_a_v01_checkout_before_joining_the_node_supervisor() {
+    let env = common::TestEnv::new();
+    let checkout = git_repo();
+    write_project_config(checkout.path(), "auto");
+
+    let mut io = vowp_cli::BufferIo::new("");
+    let code = vowp_cli::run(
+        vec![
+            "vowp".to_owned(),
+            "--home".to_owned(),
+            env.home_path().display().to_string(),
+            "--project".to_owned(),
+            checkout.path().display().to_string(),
+            "up".to_owned(),
+            "--once".to_owned(),
+            "--no-tmux".to_owned(),
+        ],
+        &mut io,
+    );
+    assert_eq!(code, 0, "up in a checkout failed: {}", io.stderr());
+    assert!(
+        io.stdout().contains("2 project(s)"),
+        "the checkout was registered and ticked with the existing project: {}",
+        io.stdout()
+    );
+    let (code, value, stderr) = env.run_json(&["project", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|entry| entry["name"] == "auto"),
+        "the checkout is in the registry: {value}"
+    );
+}
+
+#[test]
+fn init_registers_a_second_project_with_its_own_loops() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("init")
+        .current_dir(second.path())
+        .env("HOME", env.home_path())
+        .env("VOWP_HOME", env.home_path())
+        .env("TMUX_TMPDIR", env.home_path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp init");
+    assert!(
+        output.status.success(),
+        "init in a second checkout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let paths = NodePaths::new(env.home_path());
+    let store = Store::open_with_project(&paths, &vowp_protocol::ProjectName::parse("tmp").expect("name"))
+        .or_else(|_| {
+            let global = Store::open_global(&paths).expect("global");
+            let entry = global
+                .project_by_path(second.path())
+                .expect("lookup")
+                .expect("project registered by init");
+            Store::open_with_project(&paths, &entry.name)
+        })
+        .expect("second project store");
+    assert_eq!(store.list_loops().expect("loops").len(), 9);
+    assert!(
+        !store
+            .list_workers(&vowp_protocol::NodeName::parse("local").expect("node"))
+            .expect("workers")
+            .is_empty()
     );
 }

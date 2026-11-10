@@ -1,9 +1,10 @@
-//! `vowp up` and `vowp down`: tmux layout, supervisor lifecycle and the stop file.
+//! `vowp up` and `vowp down`: tmux layout, the node supervisor lifecycle and the stop file.
 //!
-//! Spec: `docs/design/cli.md` §2, `docs/design/loops.md` §1 steps 12–13 and
-//! `docs/design/crates/vowp-cli.md` §1. `up --once` runs startup plus exactly one
-//! supervisor tick (tests and cron); `--foreground` runs the loop in this process and
-//! `--detach` (the default) re-executes the binary with `--foreground`.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §4 and `docs/design/cli.md` §2.
+//! `up --once` runs startup plus exactly one node tick (tests and cron); `--foreground`
+//! runs the loop in this process and `--detach` (the default) re-executes the binary
+//! with `--foreground`. The supervisor is a [`NodeSupervisor`]: one process ticks every
+//! active project in round-robin order.
 //!
 //! `down` writes `<home>/stop` and waits for the lock to disappear. The foreground
 //! supervisor watches that file and SIGTERM/SIGINT, interrupts its runners, waits for
@@ -11,7 +12,7 @@
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,14 +20,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use vowp_adapters::proc::{process_alive, valid_pid};
 use vowp_core::Deps;
-use vowp_core::loops::{Supervisor, TickReport};
-use vowp_protocol::{Clock, Level, Log, ProjectName, Timestamp};
-use vowp_store::NodePaths;
+use vowp_core::loops::{NodeSupervisor, NodeTickReport};
+use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
+use vowp_store::{NodePaths, Store, StoreError};
 use vowp_tmux::{LayoutSpec, WindowManager, session_name_for_project};
 
-use crate::cli::{DownArgs, UpArgs, UpCommand};
-use crate::signals;
-use crate::{CliError, Ctx, IoStreams};
+use crate::cli::{DownArgs, Global, UpArgs, UpCommand};
+use crate::{CliError, Ctx, IoStreams, signals};
 
 /// How long `down` waits for a cooperative stop before reporting a conflict.
 const DOWN_WAIT: Duration = Duration::from_secs(30);
@@ -43,28 +43,97 @@ const CHILD_EXIT_WAIT: Duration = Duration::from_secs(6);
 /// Grace after SIGTERM before a direct child is killed with SIGKILL.
 const CHILD_KILL_WAIT: Duration = Duration::from_secs(2);
 
-/// Runs `vowp up` or `vowp down`.
+/// Runs `vowp up` or `vowp down` with a project context (the v0.1 entry point).
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
+    let deps = supervisor_deps(ctx);
     match command {
-        UpCommand::Up(args) => run_up(ctx, io, args),
-        UpCommand::Down(args) => run_down(ctx, io, args),
+        UpCommand::Up(args) => run_up(ctx.paths(), &deps, ctx.json(), io, args, None),
+        UpCommand::Down(args) => run_down(ctx.paths(), &deps, ctx.json(), io, args),
     }
 }
 
-/// Runs one supervisor tick with the supplied dependencies.
+/// Runs `vowp up` or `vowp down` without needing a project in the current directory.
+///
+/// This is the systemd path and the path used on a home with several registered
+/// projects. It refuses on a configured control machine, which holds no truth.
+pub fn run_home(global: &Global, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
+    let paths = crate::ctx::node_paths(global)?;
+    if global.home.is_none() && crate::node_ctx::is_control_machine()? {
+        return Err(CliError::Guard(
+            "this is a control machine; the home runs the supervisor".to_owned(),
+        ));
+    }
+    let mut deps = match command {
+        UpCommand::Up(_) => crate::node_ctx::home_deps(&paths)?,
+        UpCommand::Down(_) => crate::node_ctx::home_shell_deps(&paths)?,
+    };
+    deps.log = Arc::new(FileLog::new(
+        paths.logs_dir().join("supervisor.log"),
+        Arc::clone(&deps.clock),
+    ));
+    match command {
+        UpCommand::Up(args) => run_up(&paths, &deps, global.json, io, args, Some(global)),
+        UpCommand::Down(args) => run_down(&paths, &deps, global.json, io, args),
+    }
+}
+
+/// Registers the checkout selected by `--project` or the current directory, if one is
+/// present and not yet in the registry.
+///
+/// This keeps the v0.1 promise that `vowp up` in a checkout with a `vowp.toml` registers
+/// that project before it joins the node supervisor.
+fn register_current_checkout(global: &Global, paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
+    let Some(root) = checkout_to_register(global, paths)? else {
+        return Ok(());
+    };
+    let store = Store::open_global(paths)?;
+    if store.project_by_path(&root)?.is_some() {
+        return Ok(());
+    }
+    crate::cmd::project::register_checkout(paths, deps, &root, None, None)?;
+    Ok(())
+}
+
+/// Returns the checkout path that should be registered, when any.
+fn checkout_to_register(global: &Global, paths: &NodePaths) -> Result<Option<PathBuf>, CliError> {
+    if let Some(value) = &global.project {
+        let candidate = PathBuf::from(value);
+        if candidate.is_dir() {
+            let root = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+            if !root.join("vowp.toml").is_file() {
+                return Err(CliError::NotFound(format!(
+                    "no vowp.toml in {}; run `vowp init` there",
+                    root.display()
+                )));
+            }
+            return Ok(Some(root));
+        }
+        let name = ProjectName::parse(value)?;
+        let store = Store::open_global(paths)?;
+        if store.project(&name)?.is_none() {
+            return Err(CliError::NotFound(format!("project {name}")));
+        }
+        return Ok(None);
+    }
+    let cwd = std::env::current_dir()?;
+    Ok(crate::ctx::find_project_root(&cwd))
+}
+
+/// Runs one node tick with the supplied dependencies.
 ///
 /// This is the seam `up --once` uses and the one the hermetic test drives with fake
 /// adapters, a temporary node home and a temporary git repository.
-pub fn tick_once(deps: &Deps, project: &ProjectName) -> Result<TickReport, CliError> {
-    let mut supervisor = Supervisor::new(deps.clone(), project.clone())?;
+pub fn tick_once(deps: &Deps) -> Result<NodeTickReport, CliError> {
+    let mut supervisor = NodeSupervisor::new(deps.clone())?;
     supervisor.startup()?;
     Ok(supervisor.tick()?)
 }
 
 /// Creates the fixed tmux layout for `project`.
 ///
-/// `program` is the binary each window runs (`vowp`, or an absolute path in the detached
-/// supervisor). Tests pass a harmless placeholder command on a private tmux socket.
+/// `program` is the binary and its global flags (`vowp`, or an absolute path in the
+/// detached supervisor). Tests pass a harmless placeholder command on a private tmux
+/// socket.
 pub fn ensure_project_windows(
     windows: &dyn WindowManager,
     project: &str,
@@ -88,6 +157,34 @@ pub fn ensure_project_windows(
     windows
         .ensure_layout(project, &spec)
         .map_err(|error| CliError::Core(vowp_core::CoreError::Tmux(error)))
+}
+
+/// Creates `vowp-<project>` for every project that is not archived.
+fn ensure_node_windows(paths: &NodePaths, windows: &dyn WindowManager) -> Result<(), CliError> {
+    let store = Store::open_global(paths)?;
+    let exe = std::env::current_exe()?;
+    for entry in store.list_project_entries()? {
+        if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
+            continue;
+        }
+        let program = vec![
+            exe.to_string_lossy().into_owned(),
+            "--home".to_owned(),
+            paths.root().display().to_string(),
+            "--project".to_owned(),
+            entry.path.clone(),
+        ];
+        match ensure_project_windows(windows, entry.name.as_str(), Some(Path::new(&entry.path)), &program) {
+            Ok(()) => {}
+            Err(CliError::Core(vowp_core::CoreError::Tmux(vowp_tmux::TmuxError::NotInstalled))) => {
+                return Err(CliError::Core(vowp_core::CoreError::Tmux(
+                    vowp_tmux::TmuxError::NotInstalled,
+                )));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// What `up --json` prints.
@@ -126,8 +223,14 @@ struct TransitionOutput {
 }
 
 /// Runs `vowp up`.
-fn run_up(ctx: &Ctx, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliError> {
-    let paths = ctx.paths();
+fn run_up(
+    paths: &NodePaths,
+    deps: &Deps,
+    json: bool,
+    io: &mut dyn IoStreams,
+    args: &UpArgs,
+    global: Option<&Global>,
+) -> Result<i32, CliError> {
     if let Some(pid) = live_supervisor_pid(paths) {
         return Err(CliError::Conflict(format!(
             "supervisor already running (pid {pid}); `vowp status` shows it"
@@ -136,15 +239,22 @@ fn run_up(ctx: &Ctx, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliEr
     signals::clear_stop(paths)?;
     signals::clear_stopped(paths)?;
 
+    if let Some(report) = migrate_if_needed(paths, !args.no_migrate)? {
+        if !json {
+            writeln!(
+                io.out(),
+                "migrated v0.1 home to the split layout ({} project(s)); backup: {}",
+                report.projects.len(),
+                report.backup
+            )?;
+        }
+    }
+    if let Some(global) = global {
+        register_current_checkout(global, paths, deps)?;
+    }
+
     if !args.no_tmux {
-        let exe = std::env::current_exe()?;
-        let program = vec![exe.to_string_lossy().into_owned()];
-        match ensure_project_windows(
-            ctx.deps().windows.as_ref(),
-            ctx.project().as_str(),
-            Some(ctx.project_root()),
-            &program,
-        ) {
+        match ensure_node_windows(paths, deps.windows.as_ref()) {
             Ok(()) => {}
             Err(CliError::Core(vowp_core::CoreError::Tmux(vowp_tmux::TmuxError::NotInstalled))) => {
                 writeln!(io.err(), "warning: tmux is not installed; continuing without windows")?;
@@ -154,25 +264,43 @@ fn run_up(ctx: &Ctx, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliEr
     }
 
     if args.once {
-        return run_once(ctx, io);
+        return run_once(paths, deps, json, io);
     }
     if args.foreground {
-        return run_foreground(ctx, io);
+        return run_foreground(paths, deps, json, io);
     }
-    run_detached(ctx, io)
+    run_detached(paths, json, io)
 }
 
-/// Runs `startup()` plus one tick, prints the report and releases the lock.
-fn run_once(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let paths = ctx.paths();
+/// Migrates a v0.1 home before the supervisor opens it.
+///
+/// The store's `open_global` refuses a version-1 file with [`StoreError::MigrationRequired`];
+/// that is the only signal needed. `--no-migrate` turns the refusal into a clear conflict.
+fn migrate_if_needed(paths: &NodePaths, allow: bool) -> Result<Option<vowp_store::MigrationReport>, CliError> {
+    match Store::open_global(paths) {
+        Ok(_) => Ok(None),
+        Err(StoreError::MigrationRequired) if allow => Ok(Some(vowp_store::migrate_v01(paths)?)),
+        Err(StoreError::MigrationRequired) => Err(CliError::Conflict(
+            "the home is still the v0.1 single-file schema; run `vowp migrate` or drop --no-migrate".to_owned(),
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Runs `startup()` plus one node tick, prints the report and releases the lock.
+fn run_once(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     let pid = std::process::id();
-    write_lock(paths, pid, ctx.clock().now())?;
-    let result = tick_once(&supervisor_deps(ctx), ctx.project());
+    write_lock(paths, pid, deps.clock.now())?;
+    let result = tick_once(deps);
     remove_lock_if_own(paths, pid);
     let report = result?;
 
-    let ok = report.steps.iter().all(|step| step.ok);
-    if ctx.json() {
+    let ok = report.steps.iter().all(|step| step.ok)
+        && report
+            .projects
+            .values()
+            .all(|project| project.steps.iter().all(|step| step.ok));
+    if json {
         let output = TickOutput {
             at: report.at.as_rfc3339(),
             ok,
@@ -185,39 +313,57 @@ fn run_once(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
                     detail: step.detail.clone(),
                 })
                 .collect(),
-            dispatched: report.dispatched.iter().map(ToString::to_string).collect(),
+            dispatched: report
+                .projects
+                .values()
+                .flat_map(|project| project.dispatched.iter().map(ToString::to_string))
+                .collect(),
             transitions: report
-                .transitions
-                .iter()
-                .map(|(job, from, to)| TransitionOutput {
-                    job: job.to_string(),
-                    from: from.as_str().to_owned(),
-                    to: to.as_str().to_owned(),
+                .projects
+                .values()
+                .flat_map(|project| {
+                    project.transitions.iter().map(|(job, from, to)| TransitionOutput {
+                        job: job.to_string(),
+                        from: from.as_str().to_owned(),
+                        to: to.as_str().to_owned(),
+                    })
                 })
                 .collect(),
-            merged: report.merged.iter().map(ToString::to_string).collect(),
+            merged: report
+                .projects
+                .values()
+                .flat_map(|project| project.merged.iter().map(ToString::to_string))
+                .collect(),
         };
         crate::output::print_json(io, &output)?;
     } else {
         let completed = report.steps.iter().filter(|step| step.ok).count();
         writeln!(
             io.out(),
-            "tick {}: {}/{} steps ok, {} dispatched",
+            "tick {}: {}/{} steps ok, {} project(s), {} dispatched",
             report.at.as_rfc3339(),
             completed,
             report.steps.len(),
-            report.dispatched.len()
+            report.projects.len(),
+            report
+                .projects
+                .values()
+                .map(|project| project.dispatched.len())
+                .sum::<usize>()
         )?;
         for step in report.steps.iter().filter(|step| !step.ok) {
             writeln!(io.out(), "  degraded {}: {}", step.name, step.detail)?;
+        }
+        for (project, detail) in &report.skipped {
+            writeln!(io.out(), "  skipped {project}: {detail}")?;
         }
     }
     Ok(0)
 }
 
 /// Runs the supervisor loop in this process until the stop file appears.
-fn run_foreground(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    run_foreground_with(ctx, io, signals::SignalWatcher::install)
+fn run_foreground(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) -> Result<i32, CliError> {
+    run_foreground_with_paths(paths, deps, json, io, signals::SignalWatcher::install)
 }
 
 /// Runs the foreground supervisor with an injectable signal-watcher installer.
@@ -229,9 +375,22 @@ pub fn run_foreground_with<F>(ctx: &Ctx, io: &mut dyn IoStreams, install: F) -> 
 where
     F: FnOnce(&NodePaths) -> std::io::Result<signals::SignalWatcher>,
 {
-    let paths = ctx.paths();
+    run_foreground_with_paths(ctx.paths(), &supervisor_deps(ctx), ctx.json(), io, install)
+}
+
+/// The foreground loop over an explicit home, dependencies and JSON flag.
+fn run_foreground_with_paths<F>(
+    paths: &NodePaths,
+    deps: &Deps,
+    json: bool,
+    io: &mut dyn IoStreams,
+    install: F,
+) -> Result<i32, CliError>
+where
+    F: FnOnce(&NodePaths) -> std::io::Result<signals::SignalWatcher>,
+{
     let pid = std::process::id();
-    write_lock(paths, pid, ctx.clock().now())?;
+    write_lock(paths, pid, deps.clock.now())?;
 
     let watcher = match install(paths) {
         Ok(watcher) => watcher,
@@ -240,17 +399,17 @@ where
             return Err(CliError::Io(error));
         }
     };
-    let mut supervisor = match Supervisor::new(supervisor_deps(ctx), ctx.project().clone()) {
+    let mut supervisor = match NodeSupervisor::new(deps.clone()) {
         Ok(supervisor) => supervisor,
         Err(error) => {
             remove_lock_if_own(paths, pid);
             return Err(error.into());
         }
     };
-    if !ctx.json() {
+    if !json {
         writeln!(io.out(), "supervisor running (pid {pid}); stop it with `vowp down`")?;
     }
-    // `Supervisor::run` waits up to `tick_secs` between ticks; a cancellation alone
+    // The supervisor waits up to `tick_secs` between ticks; a cancellation alone
     // would keep `vowp down` waiting for that whole interval. Wake it as soon as the
     // stop watcher cancels so shutdown is prompt.
     let cancel = watcher.cancel_token();
@@ -271,10 +430,10 @@ where
     wait_for_children();
     // Remove the live heartbeat and record the deliberate stop separately, so neither
     // `status --check` nor the watchdog mistakes a fresh timestamp for a live supervisor.
-    let _ = signals::mark_stopped(paths, ctx.clock().now());
+    let _ = signals::mark_stopped(paths, deps.clock.now());
     remove_lock_if_own(paths, pid);
     result?;
-    if !ctx.json() {
+    if !json {
         writeln!(io.out(), "supervisor stopped (pid {pid})")?;
     }
     Ok(0)
@@ -447,8 +606,7 @@ fn signal_child(pid: u32, signal: &str) -> std::io::Result<()> {
 }
 
 /// Re-executes this binary with `--foreground` and returns as soon as it owns the lock.
-fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let paths = ctx.paths();
+fn run_detached(paths: &NodePaths, json: bool, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     std::fs::create_dir_all(paths.logs_dir())?;
     let log_path = paths.logs_dir().join("supervisor.log");
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
@@ -458,8 +616,6 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
         command
             .arg("--home")
             .arg(paths.root())
-            .arg("--project")
-            .arg(ctx.project_root())
             .arg("up")
             .arg("--foreground")
             .arg("--no-tmux");
@@ -530,7 +686,7 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
         }
     };
 
-    if ctx.json() {
+    if json {
         crate::output::print_json(
             io,
             &UpOutput {
@@ -546,17 +702,22 @@ fn run_detached(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 }
 
 /// Runs `vowp down`.
-fn run_down(ctx: &Ctx, io: &mut dyn IoStreams, args: &DownArgs) -> Result<i32, CliError> {
-    let paths = ctx.paths();
+fn run_down(
+    paths: &NodePaths,
+    deps: &Deps,
+    json: bool,
+    io: &mut dyn IoStreams,
+    args: &DownArgs,
+) -> Result<i32, CliError> {
     let stop = signals::stop_file(paths);
-    std::fs::write(&stop, ctx.clock().now().unix_secs().to_string())?;
+    std::fs::write(&stop, deps.clock.now().unix_secs().to_string())?;
 
     let Some(pid) = live_supervisor_pid(paths) else {
         remove_lock(paths);
         if args.kill_windows {
-            kill_windows(ctx)?;
+            kill_windows(paths, deps)?;
         }
-        if ctx.json() {
+        if json {
             crate::output::print_json(
                 io,
                 &UpOutput {
@@ -593,9 +754,9 @@ fn run_down(ctx: &Ctx, io: &mut dyn IoStreams, args: &DownArgs) -> Result<i32, C
 
     remove_lock(paths);
     if args.kill_windows {
-        kill_windows(ctx)?;
+        kill_windows(paths, deps)?;
     }
-    if ctx.json() {
+    if json {
         crate::output::print_json(
             io,
             &UpOutput {
@@ -627,16 +788,28 @@ fn send_term(pid: u32) -> Result<(), CliError> {
     }
 }
 
-/// Kills every tagged window in the project's session.
-fn kill_windows(ctx: &Ctx) -> Result<(), CliError> {
-    let session = session_name_for_project(ctx.project().as_str());
-    let windows = match ctx.deps().windows.list_windows(&session) {
+/// Kills every tagged window in every project session.
+fn kill_windows(paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
+    let store = Store::open_global(paths)?;
+    for entry in store.list_project_entries()? {
+        if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
+            continue;
+        }
+        kill_project_windows(deps, &entry.name)?;
+    }
+    Ok(())
+}
+
+/// Kills the tagged windows of one project session.
+fn kill_project_windows(deps: &Deps, project: &ProjectName) -> Result<(), CliError> {
+    let session = session_name_for_project(project.as_str());
+    let windows = match deps.windows.list_windows(&session) {
         Ok(windows) => windows,
         Err(vowp_tmux::TmuxError::NotInstalled) => return Ok(()),
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     };
     for window in windows {
-        let _ = ctx.deps().windows.kill_window(&session, &window.name);
+        let _ = deps.windows.kill_window(&session, &window.name);
     }
     Ok(())
 }
@@ -682,13 +855,13 @@ fn supervisor_deps(ctx: &Ctx) -> Deps {
 ///
 /// Lines are `<rfc3339> <LEVEL> <target> <message>`, matching `conventions.md` §4.
 struct FileLog {
-    path: std::path::PathBuf,
+    path: PathBuf,
     clock: Arc<dyn Clock>,
 }
 
 impl FileLog {
     /// Creates a sink for `path`; the directory is created by [`vowp_store::NodePaths`].
-    fn new(path: std::path::PathBuf, clock: Arc<dyn Clock>) -> Self {
+    fn new(path: PathBuf, clock: Arc<dyn Clock>) -> Self {
         Self { path, clock }
     }
 }

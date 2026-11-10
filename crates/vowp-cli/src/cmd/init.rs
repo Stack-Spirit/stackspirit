@@ -77,6 +77,22 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, args: &InitArgs) -> Result<i
     let paths = crate::ctx::node_paths(global)?;
     let store = Store::open(&paths)?;
     let now = store.clock().now();
+    // The reserved `_node` project owns project-less session runs and node-wide history.
+    // It is created here so a fresh home always has the row and its database.
+    let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+    if store.project(&node_project)?.is_none() {
+        store.upsert_project(&Project {
+            name: node_project.clone(),
+            path: paths.root().display().to_string(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })?;
+    } else {
+        Store::create_project_db(&paths, &node_project)?;
+    }
     store.upsert_node(&Node {
         name: config.node.name.clone(),
         ssh_target: None,
@@ -95,9 +111,26 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, args: &InitArgs) -> Result<i
         created_at: now,
         updated_at: now,
     })?;
+    // A home with several projects is fleet-only until the caller says which project it
+    // means. Open the registered project explicitly for its loop rows and worker slots.
+    drop(store);
+    Store::create_project_db(&paths, &config.project.name)?;
+    let store = Store::open_with_project(&paths, &config.project.name)?;
     for loop_ in default_loops(&config.project.name, now) {
         store.upsert_loop(&loop_)?;
     }
+    // The node supervisor ticks every registered project, so a slot row must exist before
+    // the first dispatch, not only when a single-project `Supervisor::new` runs.
+    store.ensure_worker_slots(
+        &config.node.name,
+        vowp_protocol::WorkerKind::Worker,
+        config.node.max_workers,
+    )?;
+    store.ensure_worker_slots(
+        &config.node.name,
+        vowp_protocol::WorkerKind::Verifier,
+        config.node.max_verifiers,
+    )?;
 
     if global.json {
         crate::output::print_json(

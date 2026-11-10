@@ -37,7 +37,37 @@ pub mod runner;
 pub mod supervisor;
 
 pub use runner::{RunnerPool, SessionRunPool, WakeHandle};
-pub use supervisor::{ReconcileReport, StepReport, Supervisor, TickReport};
+pub use supervisor::{
+    NodeReconcileReport, NodeSupervisor, NodeTickReport, ProjectSupervisor, ReconcileReport, StepReport, Supervisor,
+    TickReport,
+};
+
+/// Prepares a newly registered project: loop rows and worker slots.
+///
+/// `deps.config.project.name` must be the registered project. The store binding follows
+/// the per-project rule in the v0.2 spec (§3.8), so a handle bound to another project is
+/// never used for these writes.
+pub fn prepare_project(deps: &Deps, project: &ProjectName) -> Result<(), CoreError> {
+    if &deps.config.project.name != project {
+        return Err(CoreError::Invalid(format!(
+            "deps project {} does not match {project}",
+            deps.config.project.name
+        )));
+    }
+    let store = deps.open_store()?;
+    reconcile::ensure_loops(&store, deps)?;
+    store.ensure_worker_slots(
+        &deps.node,
+        vowp_protocol::WorkerKind::Worker,
+        deps.config.node.max_workers,
+    )?;
+    store.ensure_worker_slots(
+        &deps.node,
+        vowp_protocol::WorkerKind::Verifier,
+        deps.config.node.max_verifiers,
+    )?;
+    Ok(())
+}
 
 /// L6 failover helpers (spec: `loops.md` §8).
 pub mod l6 {
