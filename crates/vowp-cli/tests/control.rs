@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
+use vowp_cli::node_ctx::ControlConfig;
 use vowp_protocol::{
-    CapacitySnapshot, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SupervisorSnapshot, Timestamp,
+    CapacitySnapshot, FleetStatus, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SupervisorSnapshot, Timestamp,
 };
 
 /// A temporary machine: home directory, control directory and fake `bin`.
@@ -97,6 +98,7 @@ impl Machine {
             supervisor: SupervisorSnapshot {
                 running: true,
                 pid: Some(4242),
+                last_tick: Some(Timestamp::now()),
                 tick_secs: 60,
                 ..SupervisorSnapshot::default()
             },
@@ -430,9 +432,10 @@ fn control_status_prints_cache_metadata_without_ssh() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("control status JSON");
     assert_eq!(value["config"]["home"], "vowp-home");
     assert_eq!(value["config"]["remote_home"], "/home/fake/.vowp");
-    assert_eq!(value["cache"]["source"], "remote");
+    assert_eq!(value["cache"]["source"], "cache");
     assert_eq!(value["cache"]["stale"], false);
     assert!(value["cache"]["fetched_at"].as_str().is_some());
+    assert_eq!(value["cache"]["snapshot"]["home"], "vowp-home");
     assert!(recorded(&machine).is_empty(), "control status must not use SSH");
 
     let output = machine.run(&["control", "status"]);
@@ -444,6 +447,128 @@ fn control_status_prints_cache_metadata_without_ssh() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("as of"), "{stdout}");
     assert!(stdout.contains("vowp-home"), "{stdout}");
+}
+
+#[test]
+fn control_status_json_uses_spec_types() {
+    let machine = Machine::new();
+    machine.seed_control();
+    machine.write_cache();
+    machine.write_fake_ssh("printf 'ssh was invoked\\n' >> \"$FAKE_SSH_ARGS\"\nexit 0\n");
+
+    let output = machine.run(&["--json", "control", "status"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("control status JSON");
+
+    let config: ControlConfig =
+        serde_json::from_value(value["config"].clone()).expect("config is a ControlConfig document");
+    assert_eq!(config.role, "control");
+    assert_eq!(config.home, "vowp-home");
+    assert_eq!(config.remote_home, "/home/fake/.vowp");
+    assert_eq!(config.ssh_target, "fake.example");
+
+    let cache: FleetStatus = serde_json::from_value(value["cache"].clone()).expect("cache is a FleetStatus document");
+    assert_eq!(cache.source, "cache");
+    assert!(!cache.stale, "the fixture cache is fresh");
+    assert_eq!(cache.snapshot.home.as_str(), "vowp-home");
+    assert_eq!(cache.snapshot.supervisor.pid, Some(4242));
+    assert!(recorded(&machine).is_empty(), "control status must not use SSH");
+
+    // Before the first refresh there is no FleetStatus; the config document still works.
+    std::fs::remove_file(machine.control.path().join("snapshot.json")).expect("remove snapshot");
+    std::fs::remove_file(machine.control.path().join("snapshot.meta.json")).expect("remove meta");
+    let output = machine.run(&["--json", "control", "status"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("control status JSON");
+    let config: ControlConfig =
+        serde_json::from_value(value["config"].clone()).expect("config is a ControlConfig document");
+    assert_eq!(config.home, "vowp-home");
+    assert_eq!(value["cache"], serde_json::Value::Null);
+}
+
+#[test]
+fn control_status_check_fails_on_stale_cached_heartbeat() {
+    let machine = Machine::new();
+    machine.seed_control();
+    machine.write_cache();
+    machine.write_fake_ssh("exit 255\n");
+
+    // A fresh cache with a fresh heartbeat passes the watchdog even when the home is down.
+    let output = machine.run(&["status", "--check"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a fresh cached heartbeat must pass; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("as of"), "cache fallback needs an as-of time: {stdout}");
+    assert!(
+        stdout.contains("fresh"),
+        "the human line must say the cache is fresh: {stdout}"
+    );
+
+    let output = machine.run(&["--json", "status", "--check"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(value["source"], "cache");
+    assert_eq!(value["stale"], false);
+
+    // A freshly fetched cache whose heartbeat is six minutes old is stale for the watchdog.
+    let path = machine.control.path().join("snapshot.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("snapshot cache")).expect("snapshot JSON");
+    value["supervisor"]["last_tick"] = json!(Timestamp::now().minus(Duration::from_secs(600)).as_rfc3339());
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("snapshot json")).expect("write snapshot");
+
+    let output = machine.run(&["status", "--check"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a stale cached heartbeat must exit 1; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("as of"), "{stdout}");
+    assert!(
+        stdout.contains("stale"),
+        "the human line must say the cache is stale: {stdout}"
+    );
+
+    let output = machine.run(&["--json", "status", "--check"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(value["source"], "cache");
+    assert_eq!(value["stale"], true);
+    assert_eq!(value["home"], "vowp-home");
+
+    // Without --check the same stale cache renders with exit 0 (v0.1 behaviour).
+    let output = machine.run(&["status"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "status without --check always exits 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("stale"));
 }
 
 #[test]

@@ -4,13 +4,18 @@
 //! `~/.vowp-control/control.json` (0600), the spool, the node registry mirror and the
 //! tunnel table. `control status` prints the config and the snapshot cache metadata
 //! without requiring SSH.
+//!
+//! JSON: `control init` prints one [`ControlConfig`]; `control status` prints
+//! `{"config": ControlConfig, "cache": FleetStatus | null}`. The members are the exact
+//! spec types from §8.1 and §5.5; the wrapper keeps the config (§8.1 says `control status`
+//! prints it) next to the cache document.
 
 use std::path::Path;
 use std::process::Command;
 
 use clap::{Args, Subcommand};
 use serde_json::json;
-use vowp_protocol::{Node, NodeName, Timestamp};
+use vowp_protocol::{FleetStatus, Node, NodeName, Timestamp};
 
 use crate::node_ctx::{ControlConfig, NodeRole};
 use crate::output;
@@ -174,13 +179,13 @@ fn run_status(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 
     if ctx.json() {
         let cache_json = match &cache {
-            Some(cached) => json!({
-                "fetched_at": cached.fetched_at.as_rfc3339(),
-                "source": cached.source,
-                "stale": stale,
-                "home": cached.snapshot.home,
-                "generated_at": cached.snapshot.generated_at.as_rfc3339(),
-            }),
+            Some(cached) => serde_json::to_value(FleetStatus {
+                snapshot: cached.snapshot.clone(),
+                source: "cache".to_owned(),
+                fetched_at: cached.fetched_at,
+                stale,
+            })
+            .map_err(vowp_protocol::ProtocolError::from)?,
             None => serde_json::Value::Null,
         };
         output::print_json(io, &json!({ "config": config, "cache": cache_json }))?;
@@ -194,9 +199,9 @@ fn run_status(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
             let as_of = output::local_time(cached.fetched_at, Timestamp::now());
             writeln!(
                 io.out(),
-                "cache: as of {as_of} ({}{})",
+                "cache: as of {as_of} ({}, {})",
                 cached.source,
-                if stale { ", stale" } else { "" }
+                if stale { "stale" } else { "fresh" }
             )?;
         }
         None => writeln!(io.out(), "cache: empty")?,

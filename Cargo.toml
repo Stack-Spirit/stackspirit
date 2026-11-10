@@ -60,6 +60,10 @@ name = "board"
 path = "crates/vowp-cli/tests/board.rs"
 
 [[test]]
+name = "control"
+path = "crates/vowp-cli/tests/control.rs"
+
+[[test]]
 name = "core"
 path = "crates/vowp-cli/tests/core.rs"
 

@@ -205,7 +205,7 @@ fn print_queue(io: &mut dyn IoStreams, rows: &[FleetQueueRow]) -> Result<(), Cli
 
 /// Runs `fleet inbox`.
 fn inbox(ctx: &Ctx, io: &mut dyn IoStreams, args: &FleetInboxArgs) -> Result<i32, CliError> {
-    let store = ctx.store()?;
+    let store = ctx.fleet_store()?;
     let mut items = fleet::collect_inbox(&store, args.all)?;
     if let Some(project) = &args.project
         && let Some(project) = project_filter(project)?
@@ -287,6 +287,9 @@ fn capacity(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 }
 
 /// Reads a fresh snapshot, or recomputes one from the databases.
+///
+/// The global store is enough: the read model opens each registered project database in
+/// turn, so `fleet status` works on a home with several projects and no `--project`.
 fn load_snapshot(ctx: &Ctx, refresh: bool, cached: bool, now: Timestamp) -> Result<(Snapshot, String, bool), CliError> {
     let tick_secs = ctx.config().node.tick_secs;
     if cached {
@@ -295,7 +298,7 @@ fn load_snapshot(ctx: &Ctx, refresh: bool, cached: bool, now: Timestamp) -> Resu
         return Ok((snapshot, "cache".to_owned(), stale));
     }
     if refresh {
-        let store = ctx.store()?;
+        let store = ctx.fleet_store()?;
         fleet::write_snapshot(ctx.deps(), &store, now)?;
         let snapshot = fleet::read_snapshot(ctx.paths())?;
         return Ok((snapshot, "local".to_owned(), false));
@@ -308,7 +311,7 @@ fn load_snapshot(ctx: &Ctx, refresh: bool, cached: bool, now: Timestamp) -> Resu
         Err(CoreError::NotFound(_)) => {}
         Err(error) => return Err(error.into()),
     }
-    let store = ctx.store()?;
+    let store = ctx.fleet_store()?;
     let snapshot = fleet::build_snapshot(ctx.deps(), &store, now)?;
     Ok((snapshot, "local".to_owned(), false))
 }

@@ -191,16 +191,44 @@ impl Ctx {
         self.deps.clock.as_ref()
     }
 
-    /// Opens a fresh store connection.
+    /// Returns whether a project was selected for this command.
     ///
-    /// Only a home holds a database. A control machine and an uninitialised machine
-    /// return a `NotFound` instead of creating a database in the wrong directory.
+    /// A home with zero or several projects and no `--project` gets a fleet context where
+    /// this is false; project-scoped handlers must then ask for a project instead of
+    /// writing to whichever database happens to be open.
+    pub fn project_selected(&self) -> bool {
+        self.project_selected
+    }
+
+    /// Opens a fresh project store connection.
+    ///
+    /// Only a home with a selected project holds project-scoped data. A control machine, an
+    /// uninitialised machine and a fleet context return an error instead of opening the
+    /// wrong database. Fleet read-model commands use [`Ctx::fleet_store`] instead.
     pub fn store(&self) -> Result<Store, CliError> {
         match self.role {
             NodeRole::Home if self.project_selected => Ok(self.deps.open_store()?),
             NodeRole::Home => Err(CliError::Invalid(
                 "no project selected; pass --project <name> or run `vowp init`".to_owned(),
             )),
+            NodeRole::Control => Err(CliError::NotFound(
+                "this is a control machine; the home holds the database".to_owned(),
+            )),
+            NodeRole::Uninitialised => Err(CliError::NotFound(
+                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
+            )),
+        }
+    }
+
+    /// Opens the global store used by the fleet read model.
+    ///
+    /// `status`, `board` and `fleet ...` accept every project (spec §4.5, §5.5 and §8.2), so
+    /// they must work on a home with zero or several projects and without `--project`. The
+    /// core read model opens each project database itself; this handle is never bound to a
+    /// single project and must not be used for project writes.
+    pub fn fleet_store(&self) -> Result<Store, CliError> {
+        match self.role {
+            NodeRole::Home => Ok(Store::open_global(&self.paths)?),
             NodeRole::Control => Err(CliError::NotFound(
                 "this is a control machine; the home holds the database".to_owned(),
             )),

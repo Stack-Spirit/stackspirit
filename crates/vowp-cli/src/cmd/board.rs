@@ -58,12 +58,15 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &BoardArgs) -> Result<i32, C
 
 /// Prints one board frame in the human or JSON shape.
 ///
-/// One project keeps the v0.1 board and its golden output; several projects get the fleet
-/// board with a project column so every project is visible.
+/// One project keeps the v0.1 board and its golden output; several projects (or a fleet
+/// context with no project selected) get the fleet board with a project column so every
+/// project is visible. The fleet board reads the global store; only the v0.1 frame needs a
+/// bound project.
 pub(crate) fn render(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<(), CliError> {
-    let store = ctx.store()?;
-    if fleet::project_names(&store)?.len() > 1 {
-        let board = FleetBoard::collect(ctx.deps(), &store, ctx.clock().now())?;
+    let now = ctx.clock().now();
+    let fleet_store = ctx.fleet_store()?;
+    if fleet::project_names(&fleet_store)?.len() != 1 || !ctx.project_selected() {
+        let board = FleetBoard::collect(ctx.deps(), &fleet_store, now)?;
         if ctx.json() {
             crate::output::print_json(io, &board)?;
         } else {
@@ -71,7 +74,8 @@ pub(crate) fn render(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<(), CliError> 
         }
         return Ok(());
     }
-    let snapshot = BoardSnapshot::collect(&store, ctx.config(), ctx.clock().now())?;
+    let store = ctx.store()?;
+    let snapshot = BoardSnapshot::collect(&store, ctx.config(), now)?;
     if ctx.json() {
         crate::output::print_json(io, &json_view(&snapshot))?;
     } else {

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use vowp_protocol::{
-    InboxId, InboxItem, InboxKind, InboxState, JobId, JobKind, NewJob, Project, ProjectName, Role, Timestamp,
-    VowpConfig,
+    InboxId, InboxItem, InboxKind, InboxState, JobId, JobKind, JobState, NewJob, NodeName, Project, ProjectName, Role,
+    Session, SessionId, SessionRole, SessionState, Timestamp, VowpConfig,
 };
 use vowp_store::{NodePaths, StateChange, Store};
 
@@ -314,6 +314,71 @@ fn insert_job(env: &common::TestEnv, project: &ProjectName, id: &str) {
         .expect("insert job");
 }
 
+/// Moves a job in a named project to `running`.
+fn set_running(env: &common::TestEnv, project: &ProjectName, id: &str) {
+    let paths = NodePaths::new(env.home_path());
+    let store = Store::open_with_project(&paths, project).expect("project store");
+    store
+        .set_job_state(
+            &JobId::parse(id).expect("job id"),
+            JobState::Running,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("running job");
+}
+
+/// Inserts one session row attributed to a named project.
+fn insert_session(env: &common::TestEnv, project: &ProjectName, title: &str) {
+    let paths = NodePaths::new(env.home_path());
+    let store = Store::open_global(&paths).expect("global store");
+    let now = store.clock().now();
+    store
+        .upsert_session(&Session {
+            id: SessionId::new(),
+            project: Some(project.clone()),
+            job_id: None,
+            role: Some(SessionRole::Worker),
+            title: title.to_owned(),
+            parent_session_id: None,
+            node: NodeName::parse("local").expect("node"),
+            cwd: "/srv/vowp".to_owned(),
+            state: SessionState::Running,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now.minus(Duration::from_secs(30)),
+            updated_at: now.minus(Duration::from_secs(5)),
+        })
+        .expect("session row");
+}
+
+/// Runs one command with `--home` but without `--project`, like a bare fleet invocation.
+fn run_bare(env: &common::TestEnv, args: &[&str]) -> (i32, String, String) {
+    let mut full = vec![
+        "vowp".to_owned(),
+        "--home".to_owned(),
+        env.home_path().display().to_string(),
+    ];
+    full.extend(args.iter().map(|value| (*value).to_owned()));
+    let mut io = vowp_cli::BufferIo::new("");
+    let code = vowp_cli::run(full, &mut io);
+    (code, io.stdout(), io.stderr())
+}
+
+/// Runs one bare command with `--json` and parses its stdout document.
+fn run_bare_json(env: &common::TestEnv, args: &[&str]) -> (i32, serde_json::Value, String) {
+    let mut full = vec!["--json"];
+    full.extend(args.iter().copied());
+    let (code, stdout, stderr) = run_bare(env, &full);
+    let value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout is not JSON ({error}): {stdout:?}; stderr: {stderr:?}"));
+    (code, value, stderr)
+}
+
 /// Returns the snapshot path for a test home.
 fn snapshot_path(env: &common::TestEnv) -> std::path::PathBuf {
     env.home_path().join("snapshot.json")
@@ -362,6 +427,124 @@ fn status_shows_every_project() {
     assert_eq!(projects.len(), 2, "{value}");
     assert!(projects.iter().any(|project| project["name"] == "beta"));
     drop(dir);
+}
+
+/// The convergence test both parent verifiers asked for: one home, two projects, and bare
+/// `status`, `board` and `fleet ...` invocations without `--project`.
+#[test]
+fn two_project_home_routes_status_board_and_fleet() {
+    let env = common::TestEnv::new();
+    let (beta_dir, beta_config) = add_project(&env, "beta");
+    let alpha = env.config.project.name.clone();
+    let beta = beta_config.project.name.clone();
+
+    insert_job(&env, &alpha, "a01-alpha-run");
+    insert_job(&env, &alpha, "a02-alpha-pending");
+    insert_job(&env, &beta, "b01-beta-run");
+    insert_job(&env, &beta, "b02-beta-pending");
+    set_running(&env, &alpha, "a01-alpha-run");
+    set_running(&env, &beta, "b01-beta-run");
+    insert_session(&env, &alpha, "alpha session");
+    insert_session(&env, &beta, "beta session");
+
+    let (code, value, stderr) = run_bare_json(&env, &["status"]);
+    assert_eq!(code, 0, "bare status must work on a two-project home; stderr: {stderr}");
+    assert_eq!(value["home"], "local");
+    let projects = value["projects"].as_array().expect("projects");
+    assert_eq!(projects.len(), 2, "{value}");
+    assert!(projects.iter().any(|project| project["name"] == "test"));
+    assert!(projects.iter().any(|project| project["name"] == "beta"));
+    assert_eq!(
+        value["jobs"]["running"], 2,
+        "the v0.1 keys aggregate both projects: {value}"
+    );
+    assert_eq!(value["jobs"]["pending"], 2, "{value}");
+    assert_eq!(value["slots"]["busy"], 2, "{value}");
+    assert_eq!(value["slots"]["total"], 6, "{value}");
+    assert_eq!(value["inbox_open"], 0, "{value}");
+
+    let (code, stdout, stderr) = run_bare(&env, &["status"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for needle in ["home: local", "test", "beta", "test/a01-alpha-run", "beta/b01-beta-run"] {
+        assert!(stdout.contains(needle), "status is missing {needle:?}:\n{stdout}");
+    }
+
+    let (code, stdout, stderr) = run_bare(&env, &["board", "--once"]);
+    assert_eq!(code, 0, "bare board must work on a two-project home; stderr: {stderr}");
+    assert!(stdout.contains("projects: 2"), "{stdout}");
+    assert!(
+        stdout.contains("a01-alpha-run"),
+        "alpha's running job is shown:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("b01-beta-run"),
+        "beta's running job is shown:\n{stdout}"
+    );
+
+    let (code, value, stderr) = run_bare_json(&env, &["fleet", "status", "--refresh"]);
+    assert_eq!(code, 0, "bare fleet status --refresh must work; stderr: {stderr}");
+    assert_eq!(value["source"], "local");
+    assert_eq!(value["stale"], false);
+    let snapshot = &value["snapshot"];
+    assert_eq!(snapshot["home"], "local");
+    let cards = snapshot["projects"].as_array().expect("project cards");
+    assert_eq!(cards.len(), 2, "{value}");
+    let alpha_card = cards
+        .iter()
+        .find(|card| card["name"] == "test")
+        .unwrap_or_else(|| panic!("missing alpha card: {value}"));
+    let beta_card = cards
+        .iter()
+        .find(|card| card["name"] == "beta")
+        .unwrap_or_else(|| panic!("missing beta card: {value}"));
+    assert_eq!(alpha_card["jobs_by_state"]["running"], 1, "{value}");
+    assert_eq!(alpha_card["jobs_by_state"]["pending"], 1, "{value}");
+    assert_eq!(beta_card["jobs_by_state"]["running"], 1, "{value}");
+    assert_eq!(beta_card["jobs_by_state"]["pending"], 1, "{value}");
+    assert_eq!(alpha_card["running"][0]["job"], "a01-alpha-run");
+    assert_eq!(beta_card["running"][0]["job"], "b01-beta-run");
+    assert!(
+        alpha_card["running"]
+            .as_array()
+            .expect("running")
+            .iter()
+            .all(|run| run["job"] != "b01-beta-run"),
+        "beta's run leaked into alpha: {value}"
+    );
+
+    let sessions = snapshot["sessions"].as_array().expect("session cards");
+    let alpha_session = sessions
+        .iter()
+        .find(|session| session["title"] == "alpha session")
+        .unwrap_or_else(|| panic!("missing alpha session: {value}"));
+    let beta_session = sessions
+        .iter()
+        .find(|session| session["title"] == "beta session")
+        .unwrap_or_else(|| panic!("missing beta session: {value}"));
+    assert_eq!(alpha_session["project"], "test");
+    assert_eq!(beta_session["project"], "beta");
+
+    let (code, value, stderr) = run_bare_json(&env, &["fleet", "queue"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let rows = value.as_array().expect("queue rows");
+    assert!(
+        rows.iter()
+            .any(|row| row["project"] == "test" && row["job"] == "a02-alpha-pending"),
+        "alpha's queued job is routed to alpha: {value}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row["project"] == "beta" && row["job"] == "b02-beta-pending"),
+        "beta's queued job is routed to beta: {value}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["project"] == "test" && row["job"] == "b02-beta-pending"),
+        "beta's queued job leaked into alpha: {value}"
+    );
+    assert!(snapshot_path(&env).is_file(), "--refresh wrote the snapshot");
+    drop(beta_dir);
 }
 
 #[test]

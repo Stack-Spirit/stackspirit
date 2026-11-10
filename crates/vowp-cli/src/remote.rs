@@ -8,7 +8,9 @@
 //! On a control machine every command that needs the home is routed here, before
 //! [`crate::Ctx::build`] would look for a local database. `fleet status` refreshes the
 //! snapshot cache from the home's `snapshot.json`; `status` and `fleet status` serve the
-//! cache with an "as of" time when the home is unreachable. Writes never use the cache.
+//! cache with an "as of" time when the home is unreachable. `status --check` keeps the
+//! v0.1 watchdog contract: a cached snapshot whose heartbeat is stale exits 1. Writes
+//! never use the cache.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -268,9 +270,11 @@ pub fn run_remote(target: &str, args: &[String], interactive: bool) -> Result<i3
 
 /// Routes `status` or `fleet status`, with the snapshot cache as the offline fallback.
 ///
-/// A successful call refreshes the cache from the home's `snapshot.json` best-effort.
-/// When ssh itself fails (255) and the command did not ask for a refresh, the last cached
-/// snapshot is printed with its "as of" time. A write never reaches this function.
+/// Only a successful `fleet status` refreshes the cache from the home's `snapshot.json`;
+/// `status` is a pass-through and adds no second ssh call. When ssh itself fails (255) and
+/// the command did not ask for a refresh, the last cached snapshot is printed with its
+/// "as of" time. `status --check` returns 1 when that cache has no fresh heartbeat, so the
+/// watchdog contract survives an unreachable home. A write never reaches this function.
 fn route_status(
     global: &Global,
     control: &ControlHome,
@@ -280,6 +284,7 @@ fn route_status(
 ) -> Result<i32, CliError> {
     let fleet_status = matches!(control_action(command), ControlAction::Route(RouteKind::FleetStatus));
     let refresh = fleet_status && fleet_status_refresh(command);
+    let check = status_check(command);
     let kind = if fleet_status {
         RouteKind::FleetStatus
     } else {
@@ -303,12 +308,28 @@ fn route_status(
         }
         Err(CliError::Remote(message)) if !refresh => match cached_snapshot(&control.root)? {
             Some(cached) => {
-                print_cached_value(kind, &cached, global.json, &message)?;
-                Ok(0)
+                let now = Timestamp::now();
+                let stale = cached_is_stale_at(&cached, now);
+                print_cached_value(kind, &cached, global.json, &message, stale)?;
+                // A stale heartbeat is the v0.1 watchdog's failure signal, even when the
+                // only available document came from the cache.
+                if check && heartbeat_is_stale(&cached.snapshot, now) {
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
             }
             None => Err(CliError::Remote(message)),
         },
         Err(error) => Err(error),
+    }
+}
+
+/// Returns the `--check` flag of `status`.
+fn status_check(command: &CliCommand) -> bool {
+    match command {
+        CliCommand::Status(args) => args.check,
+        _ => false,
     }
 }
 
@@ -342,14 +363,20 @@ fn print_cached(control: &ControlHome, kind: RouteKind, json: bool) -> Result<i3
             control.root.join("snapshot.json").display()
         )));
     };
-    print_cached_value(kind, &cached, json, "")?;
+    let stale = cached_is_stale_at(&cached, Timestamp::now());
+    print_cached_value(kind, &cached, json, "", stale)?;
     Ok(0)
 }
 
 /// Prints `status` or `fleet status` from a cached snapshot.
-fn print_cached_value(kind: RouteKind, cached: &CachedSnapshot, json: bool, detail: &str) -> Result<(), CliError> {
+fn print_cached_value(
+    kind: RouteKind,
+    cached: &CachedSnapshot,
+    json: bool,
+    detail: &str,
+    stale: bool,
+) -> Result<(), CliError> {
     let now = Timestamp::now();
-    let stale = snapshot_is_stale(&cached.snapshot, cached.fetched_at, now);
     if json {
         let text = match kind {
             RouteKind::FleetStatus => {
@@ -373,9 +400,9 @@ fn print_cached_value(kind: RouteKind, cached: &CachedSnapshot, json: bool, deta
 
     let as_of = output::local_time(cached.fetched_at, now);
     let mut text = format!(
-        "home: {} (cache, as of {as_of}{})\n",
+        "home: {} (cache, as of {as_of}, {})\n",
         cached.snapshot.home,
-        if stale { ", stale" } else { "" }
+        if stale { "stale" } else { "fresh" }
     );
     if !detail.is_empty() {
         text.push_str(&format!("connection: {detail}\n"));
@@ -468,7 +495,21 @@ fn render_snapshot_summary(snapshot: &Snapshot) -> String {
     text
 }
 
-/// Returns whether a cached snapshot is older than three supervisor ticks.
+/// Returns whether a cached snapshot is stale.
+///
+/// A cache is stale when the fetch is older than three supervisor ticks, or when the
+/// heartbeat recorded inside it is older than the v0.1 three-minute watchdog limit. The
+/// second check matters when a fresh fetch carried an already stalled heartbeat.
+fn cached_is_stale_at(cached: &CachedSnapshot, now: Timestamp) -> bool {
+    snapshot_is_stale(&cached.snapshot, cached.fetched_at, now) || heartbeat_is_stale(&cached.snapshot, now)
+}
+
+/// Returns whether a cached snapshot is stale, measured at the current time.
+pub(crate) fn cached_is_stale(cached: &CachedSnapshot) -> bool {
+    cached_is_stale_at(cached, Timestamp::now())
+}
+
+/// Returns whether a snapshot is older than three supervisor ticks.
 fn snapshot_is_stale(snapshot: &Snapshot, fetched_at: Timestamp, now: Timestamp) -> bool {
     let tick = if snapshot.supervisor.tick_secs == 0 {
         60
@@ -479,9 +520,14 @@ fn snapshot_is_stale(snapshot: &Snapshot, fetched_at: Timestamp, now: Timestamp)
     now.unix_secs().saturating_sub(fetched_at.unix_secs()) > limit
 }
 
-/// Returns whether a cached snapshot is older than three supervisor ticks.
-pub(crate) fn cached_is_stale(cached: &CachedSnapshot) -> bool {
-    snapshot_is_stale(&cached.snapshot, cached.fetched_at, Timestamp::now())
+/// Returns whether the supervisor heartbeat in `snapshot` is stale.
+///
+/// This is the v0.1 watchdog contract from `cli.md` §2: a missing heartbeat or one older
+/// than [`crate::cmd::status::STALE_AFTER_SECS`] means `status --check` exits 1.
+fn heartbeat_is_stale(snapshot: &Snapshot, now: Timestamp) -> bool {
+    snapshot.supervisor.last_tick.is_none_or(|last_tick| {
+        now.unix_secs().saturating_sub(last_tick.unix_secs()) > crate::cmd::status::STALE_AFTER_SECS
+    })
 }
 
 /// Fetches `snapshot.json` from the home and writes the local cache.
