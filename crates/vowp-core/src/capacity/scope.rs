@@ -21,10 +21,10 @@ use crate::CoreError;
 use crate::deps::{CommandOutput, CommandSpec, Deps};
 
 /// The default peak used when neither cgroup nor `/proc` measurement is available.
-pub const DEFAULT_PEAK_RSS_BYTES: u64 = 1_500_000_000;
+pub const DEFAULT_PEAK_RSS_BYTES: u64 = vowp_adapters::proc::DEFAULT_PEAK_RSS_BYTES;
 
 /// The default CPU estimate used when no measurement is available.
-pub const DEFAULT_MEAN_CPU_CORES: f64 = 1.0;
+pub const DEFAULT_MEAN_CPU_CORES: f64 = vowp_adapters::proc::DEFAULT_MEAN_CPU_CORES;
 
 /// Clock ticks per second assumed by Linux `/proc/<pid>/stat` (USER_HZ).
 const CLOCK_TICKS: f64 = 100.0;
@@ -54,6 +54,35 @@ pub struct ScopeSample {
     pub max_cpu_cores: f64,
     /// Whether the kernel OOM killer ended the run.
     pub oom_killed: bool,
+}
+
+/// Returns the compiled default sample used when no measurement was read.
+pub(crate) fn default_scope_sample() -> ScopeSample {
+    ScopeSample {
+        peak_rss_bytes: DEFAULT_PEAK_RSS_BYTES,
+        anon_peak_bytes: None,
+        file_peak_bytes: None,
+        kernel_peak_bytes: None,
+        cpu_usec: 0,
+        mean_cpu_cores: DEFAULT_MEAN_CPU_CORES,
+        max_cpu_cores: DEFAULT_MEAN_CPU_CORES,
+        oom_killed: false,
+    }
+}
+
+/// Replaces an empty measurement with the compiled `source=default` row.
+pub(crate) fn effective_sample(sample: ScopeSample, source: UsageSource) -> (ScopeSample, UsageSource) {
+    let empty = sample.peak_rss_bytes == 0
+        && sample.cpu_usec == 0
+        && sample.anon_peak_bytes.is_none()
+        && sample.file_peak_bytes.is_none()
+        && sample.kernel_peak_bytes.is_none()
+        && !sample.oom_killed;
+    if empty {
+        (default_scope_sample(), UsageSource::Default)
+    } else {
+        (sample, source)
+    }
 }
 
 /// The filesystem reads the sampler and scope need.
@@ -243,8 +272,7 @@ impl RunScope {
 
     /// Stops measuring and writes the `run_usage` row.
     pub fn finish(mut self, store: &Store, build_mode: BuildMode) -> Result<RunUsage, CoreError> {
-        let sample = self.sample()?;
-        let source = self.source();
+        let (sample, source) = effective_sample(self.sample()?, self.source());
         self.stop();
         let ended_at = self.deps.clock.now();
         let run = if store.bound_project().is_some() {

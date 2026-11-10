@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::tempdir;
-use vowp_adapters::proc::{RunHandle, SpawnSpec, child_env};
+use vowp_adapters::proc::{ProcUsage, RunHandle, SpawnSpec, child_env};
 use vowp_adapters::stream::StreamParser;
 use vowp_core::capacity::sampler::sample_with;
 use vowp_core::capacity::{self, FakeProcFs, RunScope, scope};
@@ -339,6 +339,24 @@ fn build_mode_cold_warm_split() {
 }
 
 #[test]
+fn scope_without_proc_writes_the_default_source() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let store = test_store(&root);
+    let project = insert_project(&store);
+    let job = insert_job(&store, &project, "default-scope");
+    let run_id = RunId::new();
+    insert_run(&store, &job, &run_id, &NodeName::parse("local").unwrap());
+    let deps = test_deps(&root);
+    let scope = RunScope::begin_with(&deps, Arc::new(FakeProcFs::default()), &run_id, 999_999);
+    let usage = scope.finish(&store, BuildMode::Unknown).unwrap();
+    assert_eq!(usage.source, UsageSource::Default);
+    assert_eq!(usage.peak_rss_bytes, scope::DEFAULT_PEAK_RSS_BYTES);
+    assert_eq!(usage.mean_cpu_cores, scope::DEFAULT_MEAN_CPU_CORES);
+    assert_eq!(usage.cpu_usec, 0);
+}
+
+#[test]
 fn oom_kill_marks_run_usage() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("node");
@@ -398,6 +416,43 @@ fn scope_begin_measures_a_real_child() {
 }
 
 #[test]
+fn adapter_default_sidecar_is_imported() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let store = test_store(&root);
+    let project = insert_project(&store);
+    let job = insert_job(&store, &project, "default-adapter");
+    let deps = test_deps(&root);
+    let run_id = RunId::new();
+    insert_run(&store, &job, &run_id, &deps.node);
+    std::fs::create_dir_all(deps.paths.runs_dir()).unwrap();
+    let sidecar = deps.paths.run_raw_path(&run_id).with_extension("usage.json");
+    let record = ProcUsage {
+        run_id: run_id.as_str().to_owned(),
+        started_at: now(),
+        ended_at: now().plus(Duration::from_secs(1)),
+        duration_ms: 1_000,
+        peak_rss_bytes: scope::DEFAULT_PEAK_RSS_BYTES,
+        anon_peak_bytes: None,
+        file_peak_bytes: None,
+        kernel_peak_bytes: None,
+        cpu_usec: 0,
+        mean_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
+        max_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
+        build_mode: BuildMode::Unknown,
+        source: UsageSource::Default,
+        oom_killed: false,
+        exit_code: Some(0),
+    };
+    std::fs::write(&sidecar, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(capacity::usage::import_sidecars(&deps, &store).unwrap(), 1);
+    let usage = store.run_usage(&run_id).unwrap().expect("default run_usage");
+    assert_eq!(usage.source, UsageSource::Default);
+    assert_eq!(usage.peak_rss_bytes, scope::DEFAULT_PEAK_RSS_BYTES);
+    assert_eq!(usage.mean_cpu_cores, scope::DEFAULT_MEAN_CPU_CORES);
+}
+
+#[test]
 fn run_usage_written_for_adapter_and_gate() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("node");
@@ -408,31 +463,36 @@ fn run_usage_written_for_adapter_and_gate() {
     std::fs::create_dir_all(&worktree).unwrap();
     let deps = test_deps(&root);
 
-    #[cfg(target_os = "linux")]
-    {
-        let run_id = RunId::new();
-        insert_run(&store, &job, &run_id, &deps.node);
-        let raw = deps.paths.run_raw_path(&run_id);
-        std::fs::create_dir_all(deps.paths.runs_dir()).unwrap();
-        let spec = SpawnSpec {
-            argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 0.15".to_owned()],
-            cwd: worktree.clone(),
-            env: child_env(&[]),
-            stdin: None,
-            tee_stdout: Some(raw.clone()),
-            tee_stderr: None,
-            timeout: None,
-        };
-        let mut handle = RunHandle::spawn(spec, Box::new(StubParser)).unwrap();
-        handle.wait().unwrap();
-        let sidecar = raw.with_extension("usage.json");
-        assert!(sidecar.is_file(), "adapter sidecar missing at {}", sidecar.display());
-        assert!(capacity::usage::import_sidecars(&deps, &store).unwrap() >= 1);
-        let usage = store.run_usage(&run_id).unwrap().expect("adapter run_usage");
-        assert!(usage.peak_rss_bytes > 0);
-        assert_eq!(usage.source, UsageSource::ProcTree);
-        assert!(!sidecar.exists());
+    let run_id = RunId::new();
+    insert_run(&store, &job, &run_id, &deps.node);
+    let raw = deps.paths.run_raw_path(&run_id);
+    std::fs::create_dir_all(deps.paths.runs_dir()).unwrap();
+    let spec = SpawnSpec {
+        argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 0.15".to_owned()],
+        cwd: worktree.clone(),
+        env: child_env(&[]),
+        stdin: None,
+        tee_stdout: Some(raw.clone()),
+        tee_stderr: None,
+        timeout: None,
+    };
+    let mut handle = RunHandle::spawn(spec, Box::new(StubParser)).unwrap();
+    handle.wait().unwrap();
+    let sidecar = raw.with_extension("usage.json");
+    assert!(sidecar.is_file(), "adapter sidecar missing at {}", sidecar.display());
+    assert!(capacity::usage::import_sidecars(&deps, &store).unwrap() >= 1);
+    let usage = store.run_usage(&run_id).unwrap().expect("adapter run_usage");
+    assert!(usage.peak_rss_bytes > 0);
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(usage.source, UsageSource::Default);
+    if vowp_adapters::proc::cgroup_scopes_available() {
+        assert_eq!(
+            usage.source,
+            UsageSource::Cgroup,
+            "adapter did not use the preferred cgroup scope: {usage:?}"
+        );
     }
+    assert!(!sidecar.exists());
 
     let runner = GateRunner::new(deps.clone());
     let context = GateCtx {
@@ -520,6 +580,31 @@ fn estimates_use_exact_group_then_pool_then_default() {
     assert_eq!(default.source, vowp_protocol::EstimateSource::Default);
     assert_eq!(default.ram_p90_bytes, scope::DEFAULT_PEAK_RSS_BYTES);
     assert_eq!(default.cpu_p90_cores, scope::DEFAULT_MEAN_CPU_CORES);
+}
+
+#[test]
+fn estimates_pool_across_harnesses() {
+    let tmp = tempdir().unwrap();
+    let store = test_store(&tmp.path().join("node"));
+    let project = insert_project(&store);
+    for index in 0..5 {
+        store
+            .upsert_run_usage(&usage_row(
+                &project,
+                JobKind::Build,
+                "opencode-model",
+                200 + index * 100,
+                index,
+            ))
+            .unwrap();
+    }
+    capacity::recompute(&store, now()).unwrap();
+    let mut request = admit_request(&project, "claude-model");
+    request.harness = Some(HarnessKind::ClaudeCode);
+    let pooled = capacity::estimate_for(&store, &request).unwrap();
+    assert_eq!(pooled.source, vowp_protocol::EstimateSource::Pooled);
+    assert_eq!(pooled.samples, 5);
+    assert_eq!(pooled.ram_p90_bytes, 600);
 }
 
 #[test]

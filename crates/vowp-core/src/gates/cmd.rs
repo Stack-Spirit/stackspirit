@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use regex::Regex;
-use vowp_protocol::{CmdGate, Evidence, Job, ProjectName, RunId, RunRole, RunUsage, UsageSource};
+use vowp_protocol::{CmdGate, Evidence, Job, ProjectName, RunId, RunRole, RunUsage};
 use vowp_store::Store;
 use vowp_store::blobs::BlobStore;
 
@@ -129,16 +129,7 @@ fn record_gate_usage(
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX);
-    let sample = scoped.sample.clone().unwrap_or(scope::ScopeSample {
-        peak_rss_bytes: scope::DEFAULT_PEAK_RSS_BYTES,
-        anon_peak_bytes: None,
-        file_peak_bytes: None,
-        kernel_peak_bytes: None,
-        cpu_usec: 0,
-        mean_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
-        max_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
-        oom_killed: false,
-    });
+    let (sample, source) = scope::effective_sample(scoped.sample.clone().unwrap_or_default(), scoped.source);
     let build_mode = scope::infer_build_mode(cwd);
     let usage = RunUsage {
         run_id: RunId::new(),
@@ -161,11 +152,7 @@ fn record_gate_usage(
         mean_cpu_cores: sample.mean_cpu_cores,
         max_cpu_cores: sample.max_cpu_cores,
         build_mode,
-        source: if scoped.source == UsageSource::Default && sample.peak_rss_bytes == scope::DEFAULT_PEAK_RSS_BYTES {
-            UsageSource::Default
-        } else {
-            scoped.source
-        },
+        source,
         oom_killed: sample.oom_killed,
         exit_code: scoped.output.exit_code,
     };

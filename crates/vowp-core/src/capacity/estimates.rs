@@ -57,7 +57,10 @@ pub fn estimate_for(store: &Store, req: &AdmitRequest) -> Result<UsageEstimate, 
         &UsageQuery {
             project: None,
             job_kind: Some(req.kind),
-            harness: req.harness,
+            // Deliberately unfiltered: the same-project and same-kind pools may contain
+            // another harness (including `harness = None` gate rows). `estimate_for_build`
+            // applies the exact -> harness -> project -> kind order itself.
+            harness: None,
             model: None,
             build_mode: None,
             since: None,
