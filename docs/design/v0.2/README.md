@@ -69,8 +69,10 @@ B1 spec (this directory)
 I1 setup ── I1b setup verify
 ```
 
-C0 freezes every interface; C1 can run in parallel because the store split stays inside
-`vowp-store`. The critical path is B1 → C0/C1 → F1 → F2 → F5/F6 → F4 → I1b → K1 → T1 → J1 → J2.
+C0 freezes every interface; C1 can run in parallel because the store split is inside
+`vowp-store` plus the one-line `Deps::open_store` binding in `vowp-core/src/deps.rs` and the
+reserved `_node` literal in `vowp-protocol/src/ids.rs` (both C1-owned in the spec §14.1). The
+critical path is B1 → C0/C1 → F1 → F2 → F5/F6 → F4 → I1b → K1 → T1 → J1 → J2.
 
 ## Out of scope for v0.2
 

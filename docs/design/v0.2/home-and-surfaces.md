@@ -41,9 +41,11 @@ owner infrastructure, no build history and no secret values.
 ### 1.2 Out of scope (v0.2)
 
 - More than one home, replication, leader election, multi-VPS scheduling.
-- Any listening HTTP/SSE API, web window or phone browser board; those notes moved to
-  [`../v0.3/`](../v0.3/README.md). The ACP adapter and cost dashboard stay in `v0.2/` as deferred
-  design notes (not v0.2 delivery).
+- Any **public** listening HTTP/SSE API, web window or phone browser board; those notes moved to
+  [`../v0.3/`](../v0.3/README.md). Loopback-only listeners are not public surfaces: the
+  `opencode serve` app server joined through an SSH tunnel (§7.5) and the one-time `127.0.0.1`
+  secret paste page (§9.2) are in v0.2. The ACP adapter and cost dashboard stay in `v0.2/` as
+  deferred design notes (not v0.2 delivery).
 - Multi-user accounts, quotas, roles or audit.
 - Windows support, a native desktop app, or a VOWP-specific chat app.
 - A second session or job state machine. v0.1's log, capsule, switch and request queue are reused.
@@ -938,8 +940,9 @@ impl Store {
     /// fleet reads use this handle for global writes and open each project in turn.
     pub fn open_global(paths: &NodePaths) -> Result<Store, StoreError>;
     /// Opens the global DB. If exactly one non-reserved project is registered (ignoring `_node`),
-    /// attaches that project's DB too; with zero or several projects the handle is fleet-only and
-    /// project methods return NoProject. `_node` alone does not count as a project for this rule.
+    /// attaches that project's DB too, creating it if the file is absent (the v0.1 fixture path);
+    /// with zero or several projects the handle is fleet-only and project methods return
+    /// NoProject. `_node` alone does not count as a project for this rule.
     pub fn open(paths: &NodePaths) -> Result<Store, StoreError>;
     /// Opens the global DB and attaches exactly `project`. The project must be registered and its
     /// DB file must exist (created by [`Store::create_project_db`], `project add` or the migration).
@@ -983,16 +986,35 @@ pub struct CrossDbReconcile {
 }
 ```
 
-`open_memory` creates the global schema and starts unbound. `upsert_project` auto-binds the handle
-when it is unbound and the registry now contains exactly one **non-reserved** project and that
-project is the one just inserted, or when the registry contains only `_node` and `_node` was just
-inserted; an `open_global` or `open_read_only` handle never auto-binds. `init`/`setup` register the
-real project(s) before `_node`, so `_node` never steals the binding. This keeps `vowp init` and the
-v0.1 store tests source-compatible: they register one project and immediately insert jobs, while
-`_node` does not make the registry look multi-project. The auto-bound project's DB is a lazily
-attached in-memory DB for `open_memory`, or `projects/<name>/project.db` for a file store. Inserting a second project on a bound handle does not
-re-attach; a project-scoped call for that second project returns `WrongProject`. Tests that need two
-projects use two stores (or a temporary file), never two project DBs on one connection.
+`open_memory` creates the global schema and starts unbound. `upsert_project` is the one registry
+writer that also guarantees the project DB exists: for a file-backed store it calls
+`create_project_db` (idempotent) for a newly inserted row, and for `open_memory` it attaches a lazy
+in-memory project DB. This is what keeps the v0.1 fixtures green: they do `Store::open` +
+`upsert_project` and immediately insert jobs (`vowp-store/tests/{jobs,runs}`, `misc.rs` except its
+one multi-project FK test, `vowp-core/tests/gates_support.rs`, `vowp-cli/tests/common/mod.rs`).
+The registry row and its DB appear together; `vowp project add` does the same call and then opens
+the project.
+
+Binding rules (all enforced by `upsert_project` and the constructors; an `open_global` or
+`open_read_only` handle never auto-binds):
+
+- an **unbound** handle binds the one **non-reserved** project when that project is inserted and
+  the registry contains no other non-reserved project;
+- an unbound handle binds `_node` when `_node` is inserted and no non-reserved project exists;
+- a handle bound to the reserved **`_node`** project re-binds to the first non-reserved project
+  inserted through `upsert_project`. This is the v0.1 `bundle.rs` path: a fresh `Deps` binds
+  `_node`, then the test registers `probe-project` and inserts its job. It applies only to
+  `_node`; a real project handle never re-attaches;
+- inserting a second real project on a handle bound to a real project does not re-attach; a
+  project-scoped call for that second project returns `WrongProject`. Tests that need two real
+  projects use two stores (or a temporary file), never two project DBs on one connection.
+
+`Store::open` applies the same choice: with exactly one non-reserved project it attaches (and
+creates the DB if the file is absent); with zero or several it is a fleet-only handle. `Store`
+retains the node root for a file-backed handle (`None` for `open_memory`) so `upsert_project` can
+create `projects/<name>/project.db`. The reserved `_node` literal is accepted by
+`ProjectName::parse` (and only that literal; see §14.1); `project add`/`init` still refuse it as a
+user project.
 
 Routing for the renamed tables (binding for C1):
 
@@ -1071,23 +1093,54 @@ The v0.1 `Deps` struct does not change and its existing struct literals in tests
 
 ```rust
 impl Deps {
-    /// Opens the global DB plus the project named by `config.project.name`.
+    /// Opens the store bound to this `Deps`'s project.
     ///
-    /// Fresh-home/test compatibility: when the registry has no real project (only `_node` or
-    /// nothing), this returns `Store::open_global` and the v0.1
-    /// `deps_open_store_creates_the_node_database` test only checks that `vowp.db` exists and
-    /// reports schema 1. Once any project is registered, the project DB must exist and is opened;
-    /// a missing one is an error that `vowp project add` repairs.
+    /// Resolution (binding for C1), in order:
+    /// 1. `config.project.name` is registered -> bind it;
+    /// 2. exactly one non-reserved project is registered -> bind it (the v0.1 single-project
+    ///    tests and `bundle.rs` after it registers `probe-project`);
+    /// 3. no non-reserved project -> ensure the reserved `_node` row and DB, bind `_node`
+    ///    (fresh homes and the project-less v0.1 core tests);
+    /// 4. several non-reserved projects and the config project is absent -> `NoProject`;
+    ///    never guess.
+    ///
+    /// The injected clock is applied to both opened handles. This is what
+    /// `deps_open_store_uses_injected_clock` asserts; without it the store stamps rows with
+    /// `SystemClock`.
     pub fn open_store(&self) -> Result<Store, CoreError> {
-        let global = Store::open_global(&self.paths)?;
-        let no_real_project = global
-            .list_project_entries()?
-            .iter()
-            .all(|p| p.name.as_str() == "_node");
-        if no_real_project {
-            return Ok(global);
-        }
-        Ok(Store::open_with_project(&self.paths, &self.config.project.name)?)
+        let global = Store::open_global(&self.paths)?.with_clock(self.clock.clone());
+        let projects = global.list_projects()?;
+        let real = projects.iter().filter(|p| p.name.as_str() != "_node").count();
+        let name = if projects.iter().any(|p| p.name == self.config.project.name) {
+            self.config.project.name.clone()
+        } else if real == 1 {
+            projects
+                .iter()
+                .find(|p| p.name.as_str() != "_node")
+                .map(|p| p.name.clone())
+                .ok_or(StoreError::NoProject)?
+        } else if real == 0 {
+            let node = ProjectName::parse("_node")?;
+            if !projects.iter().any(|p| p.name == node) {
+                // `upsert_project` creates projects/_node/project.db (idempotent).
+                global.upsert_project(&Project {
+                    name: node.clone(),
+                    path: self.paths.root().display().to_string(),
+                    remote_url: None,
+                    default_branch: "main".to_owned(),
+                    config: serde_json::json!({}),
+                    created_at: self.clock.now(),
+                    updated_at: self.clock.now(),
+                })?;
+            } else {
+                Store::create_project_db(&self.paths, &node)?;
+            }
+            node
+        } else {
+            return Err(CoreError::Store(StoreError::NoProject));
+        };
+        drop(global);
+        Ok(Store::open_with_project(&self.paths, &name)?.with_clock(self.clock.clone()))
     }
 }
 ```
@@ -1102,22 +1155,37 @@ Consequences (binding):
 - `Ctx::store()` in the CLI uses `Store::open_with_project(paths, &self.project)`; fleet commands
   open the global handle explicitly.
 - `vowp reindex` after `vowp.db` is deleted uses the same fresh-home fallback: it opens the new
-  global DB, rebuilds `sessions`/`session_events` from `sessions/*/log.jsonl`, and needs no project
-  DB. The v0.1 `reindex_after_db_delete_via_cli` test keeps passing.
+  global DB (the fallback may create the empty `_node` DB), rebuilds `sessions`/`session_events`
+  from `sessions/*/log.jsonl`, and does not require the deleted project DB. The v0.1
+  `reindex_after_db_delete_via_cli` test keeps passing.
 - `vowp init` and `vowp project add` register the project, call
   `Store::create_project_db(paths, new_project)`, then open
   `Store::open_with_project(paths, new_project)` for the loop rows, worker slots and DB checks. A
   handle bound to project A never writes project B.
 - A project-less orchestrator session uses `_node` for its run rows (below); its session, capsule
   and surface rows are global, so no project card is involved.
-- `crates/vowp-core/src/deps.rs` is not in C0's original owned list, but this two-line change is a
-  required interface freeze. C0 must be given that file (or C2 makes the same change in its first
-  commit); the spec records it so the supervisor can extend the card's `owns` rather than discover
-  it during C2.
+- `crates/vowp-core/src/deps.rs` is **C1-owned** for this body. The signature is unchanged, so C0
+  leaves the file untouched and compiles against the v0.1 `Store::open`; C1 changes the one line
+  together with the new `Store` constructors in the same merge. This is the only `vowp-core` file
+  C1 edits, and it is recorded in §14.1. C0 does not edit it (the §13.3 card listed it under C0;
+  §14.1 supersedes that list).
+
+The v0.1 core tests below call project-scoped methods on a fresh temporary home and are the
+compatibility gate for this binding. None of them is edited; C1 runs all of them before merging:
+
+| Test | What it does | Why it passes |
+|---|---|---|
+| `vowp-core/tests/deps.rs::deps_open_store_creates_the_node_database` | opens a `Deps` over an empty home | fallback 3 creates `_node`; `vowp.db` exists and `schema_version()` is 1 |
+| `vowp-core/tests/deps.rs::deps_open_store_uses_injected_clock` | `push_request("wake")` after `open_store` | both `open_global` and `open_with_project` get `.with_clock(self.clock.clone())`; the wake row is a node key |
+| `vowp-core/tests/session_run.rs` | project-less sessions, `run_turn` -> `insert_run` | fallback 3 binds `_node`; the run row is written there |
+| `vowp-core/tests/capsule.rs` | project-less capsule sessions | fallback 3 binds `_node`; capsules/ledger rows are written there |
+| `vowp-core/tests/switch_drain.rs` | `deps.open_store()` -> `insert_run` | fallback 3 binds `_node` |
+| `vowp-core/tests/bundle.rs` | fresh home, `upsert_project(probe-project)`, `insert_job` | `open_store` binds `_node`; `upsert_project` creates `probe-project`'s DB and re-binds the `_node` handle; the later `open_store` calls see exactly one non-reserved project and bind `probe-project` |
 
 This is the fix for the one place where the plan's "the split stays inside `vowp-store`" claim does
 not survive the multi-project correction: the store can only attach one project, so the **caller**
-must say which one, and `config.project.name` is the project the caller already resolved.
+must say which one, and `config.project.name` is the project the caller already resolved. C1 carries
+the one caller line; no feature job touches `Deps` or the store binding.
 
 **Reserved `_node` project.** `init`/`setup` create one hidden registry row `_node` with
 `~/.vowp/projects/_node/project.db`. It owns the `runs`/`ledger` rows of project-less sessions (an
@@ -1130,6 +1198,11 @@ so the same `Deps`/store code path works. Concretely, the session service uses
 rows, or a `Deps` clone whose `config.project.name` is `_node`; no other code special-cases it.
 `_node` is not a project card in the snapshot (§5.3); its runs appear in `capacity` and the
 orchestrator/session cards.
+
+`ProjectName::parse` accepts exactly the reserved literal `_node`; every other name still follows
+the slug rule (lowercase letters, digits and inner `-`). This is a one-line exception in
+`vowp-protocol/src/ids.rs`, C1-owned in §14.1, because the store, migration and session service
+must parse the reserved name; `project add`/`init` still reject `_node` as a user project.
 
 One explicit exception to `deps.open_store()`: `SessionService::run_turn` and `write_capsule` read
 the session row first and, when `sessions.project IS NULL`, open `Store::open_with_project(paths,
@@ -1424,6 +1497,9 @@ public command `vowp up` uses `NodeSupervisor`; unit tests of one project keep u
 
 - `vowp-home` session, windows: `board` (node board, all projects), `capacity`
   (`vowp __window capacity`), `orchestrator` (the default orchestrator session, if any).
+  `cmd/window.rs` accepts the `capacity` kind in C0 as a NotImplemented stub (exit 1); E2 owns the
+  renderer that prints the `capacity show` body and redraws on a TTY. This is in §14.1 because the
+  v0.1 command file otherwise rejects every kind except board/supervisor/planner/keeper/inbox/job.
 - `vowp-<project>` session per active project, windows `board supervisor planner keeper inbox`
   exactly as v0.1. Job windows remain `job-<id>`.
 - All tmux calls use the private server/socket rules of `vowp-tmux`; tests use `FakeWindows` or a
@@ -3036,7 +3112,8 @@ exits **1** with `not implemented in this build` only in C0; no final build ship
 existing `no_command_returns_not_implemented` test is extended). `CliError::NotImplemented` is
 already mapped to `ErrorKind::Internal`/exit 1 by `crates/vowp-cli/src/errors.rs`, and
 `crates/vowp-cli/tests/core.rs` asserts that; this spec follows the code, so C0 needs neither
-`errors.rs` nor that test in its owns.
+`errors.rs` nor a change to the exit-mapping assertion. C0 does own `tests/core.rs` for the
+command-list expectation in §13.5.
 
 ### 12.1 New top-level commands
 
@@ -3054,8 +3131,8 @@ already mapped to `ErrorKind::Internal`/exit 1 by `crates/vowp-cli/src/errors.rs
 | `migrate` | `[--dry-run] [--rollback <backup>] [--yes]` | `MigrationReport` |
 | `mcp` | `--session <id> --surface <id> --token-file <path>` | stdio MCP, no `--json` |
 
-Hidden commands (not in `--help`): `__exec`, `__vault-exec`, `__window capacity`,
-`session turn-begin`, `session ingest`, `session lease`, `session takeover`.
+Hidden commands (not in `--help`): `__exec`, `__vault-exec`, `__vault-admin`,
+`__window capacity`, `session turn-begin`, `session ingest`, `session lease`, `session takeover`.
 
 ### 12.2 Existing commands that change
 
@@ -3512,17 +3589,56 @@ keeps v0.1 behaviour exactly.
 every flag is declared. C0 adds, in the same commit as the stubs:
 
 - the new top-level commands `project`, `fleet`, `capacity`, `secret`, `gc`, `tunnel`, `setup`,
-  `control`, `orchestrator`, `migrate`, `exec` (hidden `__exec`) and `mcp`;
-- the hidden `__vault-exec` and `__vault-admin` variants (handlers in `cmd/secret.rs`, G1); they
-  are not help-listed and are not in `V0_2_COMMANDS`;
+  `control`, `orchestrator`, `migrate`, `mcp`, and the hidden `__exec`, `__vault-exec`,
+  `__vault-admin` (handlers in `cmd/{exec,secret}.rs`; G1/F1 fill them);
 - the hidden `SessionCommand` variants `TurnBegin` and `Ingest` (handlers in `cmd/session.rs`, F1)
   and `Lease` and `Takeover` (handlers in the new `cmd/lease.rs`, F2);
 - the new/changed flags on existing commands: `ChatArgs` (`--executor/--node/--follow/--takeover`),
   `BackupArgs` (`--to/--offsite/--encrypt/--restore/--to-home`), `SchemaArgs` (`snapshot`),
-  `LoopsArgs` (`--all`), `ScheduleArgs` (`--all`), `InitArgs`/`DoctorArgs` (project/doctor checks);
+  `LoopsArgs` (`--all`), `ScheduleArgs` (`--all`), `InitArgs`/`DoctorArgs` (project/doctor checks),
+  and `WindowArgs` (the `capacity` kind);
 - a new `cmd/schema.rs` and its dispatch, moving the `schema` command out of `cmd/maint.rs`, so
   D1's `vowp schema snapshot` has an owned file (H2 keeps `backup`/`reindex` in `maint.rs`);
 - `vowp-protocol/src/schema.rs` to C0's owns for `all_schemas()`.
+
+`V0_2_COMMANDS` is the exact list of new **top-level** clap names, hidden ones included because
+`Cli::command().get_subcommands()` enumerates hidden subcommands (the v0.1 `__window` already proves
+this). `chat` is not in it because `chat` already exists in `V0_1_COMMANDS`; `__window capacity` is
+a new kind of the existing `__window`, not a new top-level name:
+
+```rust
+// cli.rs, next to V0_1_COMMANDS
+pub const V0_2_COMMANDS: &[&str] = &[
+    "project", "fleet", "capacity", "secret", "gc", "tunnel", "setup", "control",
+    "orchestrator", "migrate", "mcp", "__exec", "__vault-exec", "__vault-admin",
+];
+```
+
+`crates/vowp-cli/tests/core.rs::help_lists_every_v0_1_command` currently asserts that the set of
+clap subcommands equals `V0_1_COMMANDS`. C0 owns that test for this one change and makes the
+expectation `V0_1_COMMANDS ∪ V0_2_COMMANDS`; the help-text loop skips names starting with `__`
+(instead of only `__window`):
+
+```rust
+let mut expected: Vec<String> = V0_1_COMMANDS
+    .iter()
+    .chain(V0_2_COMMANDS.iter())
+    .map(|name| (*name).to_owned())
+    .collect();
+// ... compare sorted expected with sorted `Cli::command().get_subcommands()` ...
+for command in V0_1_COMMANDS
+    .iter()
+    .chain(V0_2_COMMANDS.iter())
+    .filter(|name| !name.starts_with("__"))
+{
+    assert!(help.contains(command), "help does not mention {command}:\n{help}");
+}
+```
+
+The test keeps its name `help_lists_every_v0_1_command` (renaming is optional); the cross-cutting
+`help_lists_every_command` in §15 is this same assertion after the final wave. No other test
+enumerates the whole command list: `vowp-cli/tests/maint.rs` iterates only the v0.1 dry-invocation
+list and is unaffected.
 
 The command files:
 
@@ -3543,12 +3659,29 @@ cmd/lease.rs        LeaseArgs/TakeoverArgs (hidden)                    (C0 stub;
 cmd/schema.rs       SchemaArgs { command }                             (C0 stub; D1)
 ```
 
-`cmd/session.rs` stays F1/F3-owned; C0 only declares `TurnBegin`/`Ingest` in `cli.rs`. F1 adds the
-handlers before F3 edits the same file in its wave. Every handler returns
-`CliError::NotImplemented("...")` and **exit 1** in C0 (the current `errors.rs` mapping; no unowned
-file edit); `vowp --help` lists the new top-level commands and `V0_2_COMMANDS` is added next to
-`V0_1_COMMANDS` for the help test (without `chat`, which is already v0.1). No feature job re-adds a
-command; it fills the existing file.
+`cmd/session.rs` is **C0-owned for the dispatch and reason stubs**, then F1/F3 own the handlers.
+The file's `SessionCommand::run` match is exhaustive over the enum, so adding the four variants
+without touching it cannot compile. C0 adds exactly these dispatch arms (plus the `reason_name` arm
+below):
+
+```rust
+SessionCommand::TurnBegin(_) | SessionCommand::Ingest(_) => {
+    Err(CliError::NotImplemented("session turn-begin/ingest".to_owned()))
+}
+SessionCommand::Lease(args) => crate::cmd::lease::lease(ctx, io, args),
+SessionCommand::Takeover(args) => crate::cmd::lease::takeover(ctx, io, args),
+```
+
+`cmd/lease.rs` is C0's stub with `pub fn lease(..)` and `pub fn takeover(..)`, both returning
+`NotImplemented`; F2 fills them without touching `cmd/session.rs`. F1 replaces the
+`TurnBegin`/`Ingest` arm with the handlers; F3 then edits the rest of the file in its wave. C0 also
+adds the missing `SwitchReason::Takeover => "takeover"` arm to the private `reason_name` match
+(`cmd/session.rs:421-430`), which has no wildcard. `parse_reason` is a string match and needs no
+change; `takeover` is not a user-supplied `session switch --reason`.
+
+Every new handler returns `CliError::NotImplemented("...")` and **exit 1** in C0 (the current
+`errors.rs` mapping; no unowned file edit). No feature job re-adds a command; it fills the existing
+file.
 
 ### 13.6 CLI support types
 
@@ -3595,8 +3728,10 @@ in `vowp-core` and tests. C0 owns both the `event.rs` edit and
 compiler points at without crossing its `owns`. The new arms are behaviour-preserving
 (`Orchestrator` behaves like `User` for session selection; `Takeover` maps to the existing takeover
 switch path and is rejected by `session switch` unless the surface holds the lease). Known
-exhaustive site: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator` to the
-`Worker | User` arm).
+exhaustive sites: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator` to the
+`Worker | User` arm) and `vowp-cli/src/cmd/session.rs::reason_name` (add
+`SwitchReason::Takeover => "takeover"`). Both files are in C0's §14.1 owns for exactly these arms;
+F1/F3 then fill the session handlers.
 
 ---
 
@@ -3604,7 +3739,7 @@ exhaustive site: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator`
 
 | Job | Creates/fills |
 |---|---|
-| C0 | `cli.rs`, `cmd/mod.rs`, `cmd/schema.rs` (new), `vowp-protocol/src/schema.rs`, `vowp-core/src/deps.rs` (the `open_store` line), `vowp-protocol/src/event.rs` (the two enum variants), and the new stub files listed in §13.5 |
+| C0 | `cli.rs`, `cmd/mod.rs`, `cmd/schema.rs` (new), `cmd/session.rs` (dispatch/reason stubs only), `cmd/window.rs` (the `capacity` arm/stub), `vowp-protocol/src/schema.rs`, `vowp-protocol/src/event.rs` (the two enum variants), `vowp-cli/tests/core.rs` (the V0_2 expectation), and the new stub files listed in §13.5. `vowp-core/src/deps.rs` moved to C1 (§14.1). |
 | C2 | `loops/supervisor.rs` (`NodeSupervisor`), `loops/mod.rs`, `loops/reconcile.rs`, `cmd/up.rs`, `cmd/project.rs`, `cmd/migrate.rs`, `cmd/init.rs`, `cmd/loops.rs`, `cmd/schedule.rs`, `node_ctx.rs`, `scripts/vowp.service`, `framework/templates/scripts/vowp.service`, tests `loops_supervisor.rs`, `node_supervisor.rs`, `up.rs` |
 | F1 | `session/{service,switch,remote}.rs`, `cmd/{exec,session}.rs`, `ssh_stream.rs`, tests `session_run.rs`, `switch.rs`, `remote_exec.rs`, `session.rs` |
 | E1 | `capacity/{sampler,usage,estimates,scope}.rs`, `repo_capacity.rs`, `vowp-adapters/src/proc/mod.rs`, `gates/cmd.rs`, `capacity_measure.rs` |
@@ -3627,7 +3762,11 @@ exhaustive site: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator`
 
 The v0.2 card `owns` lists were written before the interfaces below were frozen. The supervisor must
 extend them (this spec cannot edit the private plan) before the named jobs start; a job must never
-edit one of these paths silently.
+edit one of these paths silently. **Where this table differs from the §13.3 card `owns`, this table
+supersedes the card wording.** In particular `cmd/session.rs`, `cmd/window.rs` and
+`vowp-cli/tests/core.rs` are C0 paths here although the card does not list them, and
+`vowp-core/src/deps.rs` is C1's although the card lists it under C0; without those changes C0
+cannot compile or pass the workspace tests, and C1 cannot make `Deps::open_store` split-aware.
 
 | Path | Owner | Why |
 |---|---|---|
@@ -3637,17 +3776,22 @@ edit one of these paths silently.
 | `crates/vowp-protocol/src/schema.rs` | C0 | `all_schemas()` must include `Snapshot` and the new types. |
 | `crates/vowp-protocol/src/ops.rs` | C0 | `FleetStatus`, `FleetQueueRow`, `Tunnel`, `MigrationReport`, `MigrationCount`; one module home for the control-plane DTOs. |
 | `crates/vowp-protocol/src/event.rs` | C0 | `SessionRole::Orchestrator` and `SwitchReason::Takeover` are defined here, not in `session.rs`. |
-| `crates/vowp-core/src/deps.rs` | C0 | The `open_store()` project binding in §3.8; no `Deps` field change. |
+| `crates/vowp-cli/src/cmd/session.rs` | C0 (dispatch/reason stubs), then F1/F3 | `SessionCommand::run` is an exhaustive match over the enum: C0 adds the four arms from §13.5 (TurnBegin/Ingest return NotImplemented; Lease/Takeover call the `cmd/lease.rs` stubs) and the missing `SwitchReason::Takeover => "takeover"` arm in `reason_name`. F1 fills TurnBegin/Ingest, F2 fills `cmd/lease.rs`, F3 fills the rest. Without this C0 cannot compile. |
+| `crates/vowp-cli/src/cmd/window.rs` | C0 (arm/stub), then E2 | `vowp __window capacity` is required by §4.4/§12.5 but the v0.1 match rejects every kind except board/supervisor/planner/keeper/inbox/job. C0 adds `"capacity"` as an accepted kind returning NotImplemented; E2 replaces it with the `capacity show` renderer. |
+| `crates/vowp-cli/tests/core.rs` | C0 | `help_lists_every_v0_1_command` enumerates every clap subcommand and compares it to `V0_1_COMMANDS`; C0 extends the expectation to `V0_1_COMMANDS ∪ V0_2_COMMANDS` (§13.5) and filters hidden names from the help-text loop. Without this the 14 new top-level names make the test fail. |
+| `crates/vowp-core/src/deps.rs` | C1 | The `open_store()` binding in §3.8. The signature does not change; the body needs C1's `Store` constructors and the `_node` fallback. C0 leaves the v0.1 `Store::open(...).with_clock(...)` line untouched so C0 compiles before C1 merges. |
+| `crates/vowp-protocol/src/ids.rs` | C1 | `ProjectName::parse` accepts exactly the reserved literal `_node`; every other leading underscore stays invalid. Needed by the `_node` DB and the migration; `project add`/`init` still refuse `_node`. |
 | `crates/vowp-core/src/session/switch.rs` | C0 | The exhaustive `SessionRole::Orchestrator` match arm required by the additive enum; without it the workspace cannot compile after C0. |
 | `crates/vowp-cli/src/cmd/init.rs` | C2 | `init` creates the project DB and `_node`, and registers the project. |
 | `crates/vowp-cli/src/cmd/loops.rs` | C2 | Loop rows are per project; `--all` and the project selection. |
 | `crates/vowp-cli/src/cmd/schedule.rs` | C2 | Schedules are per project; `--all` and the project selection. |
 | `crates/vowp-cli/src/cmd/doctor.rs` | D1 | Projects, snapshot and schema checks; G1 supplies `vault::mode`, no doctor edit. |
-| `crates/vowp-cli/src/cmd/lease.rs` | F2 (new) | `session lease` and `session takeover` handlers; keeps F1/F3's `cmd/session.rs` untouched. |
+| `crates/vowp-cli/src/cmd/lease.rs` | C0 stub, then F2 | `session lease` and `session takeover` handlers (`lease(..)`, `takeover(..)`); the C0 dispatch arms in `cmd/session.rs` call these stubs, so F2 fills only this file. |
 | `crates/vowp-cli/src/cmd/maint.rs` | H2 | Keeps `backup`/`reindex`; the `schema` handler moves to D1's new file. |
 
-`crates/vowp-cli/src/errors.rs` and `crates/vowp-cli/tests/core.rs` are **not** extended: C0 stubs
-exit 1 through the existing `NotImplemented` mapping, which the test already asserts.
+`crates/vowp-cli/src/errors.rs` is **not** extended: C0 stubs exit 1 through the existing
+`NotImplemented` mapping, which `tests/core.rs` already asserts. `tests/core.rs` itself is
+C0-owned only for the command-list expectation above; no other test edit is needed.
 
 ---
 
@@ -3670,7 +3814,21 @@ is not allowed.
 `crash_between_global_and_project_write_is_repaired`, `cost_ledger_replay_does_not_duplicate`,
 `cross_db_reconcile_is_idempotent`, `request_queue_is_project_scoped`,
 `schema_version_compat_shim_reports_project_one`, `global_schema_version_reports_two`,
-`schema_versions_are_global_2_project_1`.
+`schema_versions_are_global_2_project_1`, `upsert_project_creates_the_project_db`,
+`fresh_home_deps_open_store_binds_node_project`, `node_bound_handle_rebinds_once_to_first_real_project`,
+`real_bound_handle_never_rebinds`. The v0.1 compatibility gate is the six test files/tests in §3.8,
+run unmodified: `cargo test -p vowp-core --test deps --test session_run --test capsule --test
+switch_drain --test bundle`. `crates/vowp-store/tests/misc.rs::fk_cascade_project_delete` is
+rewritten by C1 (it tests a cross-project `ON DELETE CASCADE` that no longer exists) as
+`project_delete_keeps_other_projects_rows`. `misc.rs::backup_produces_openable_copy` is updated to
+the split backup unit (the legacy `--to *.db` form is a global-only copy by §10.3, so it asserts the
+global rows there and the job/ledger rows in the copied project DB). No other store test assumes
+one DB for two projects. The store-test fixtures that write project-scoped rows without a project
+row in v0.1 (`vowp-store/tests/loops.rs`, `vowp-store/tests/ledger.rs`) add the `upsert_project`
+line that the other fixtures already have; C1 owns those test files. No `vowp-core` or
+`vowp-cli` test outside the §3.8 table needs an edit: their fixtures either `upsert_project`
+(`TestEnv`, `gates_support`, `promote_support`, the scheduler fixture) or rely on the `_node`
+fallback.
 
 **C2 node supervisor**
 `one_supervisor_runs_two_projects_round_robin`, `deps_open_store_uses_the_project_config`,
@@ -3784,7 +3942,7 @@ is not allowed.
 `setup_verify_orchestrator_answers_chat`.
 
 **Cross-cutting**
-`help_lists_every_v02_command`, `no_v02_command_returns_not_implemented`,
+`help_lists_every_command` (the extended `help_lists_every_v0_1_command`), `no_v02_command_returns_not_implemented`,
 `json_flag_outputs_valid_json_for_every_new_listing_command`, `macos_ci_has_no_linux_only_code`,
 `private_tree_scrub_finds_no_home_paths_or_hostnames`.
 
@@ -3853,7 +4011,9 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
 16. **Reserved `_node` project.** The plan allows project-less orchestrator sessions and says `runs`
     live in project DBs. Those two rules need a home for a project-less run, so v0.2 reserves the
     hidden `_node` project and DB. It is not a user project, is hidden from `project ls`/snapshot
-    cards, and cannot be removed. The alternative (a duplicate `node_runs` table) is worse.
+    cards, and cannot be removed. `ProjectName::parse` accepts exactly this literal (a one-line
+    exception in `vowp-protocol/src/ids.rs`); `project add`/`init` still refuse it. The alternative
+    (a duplicate `node_runs` table) is worse.
 17. **Session content backup is mandatory.** The plan's `vowp backup` sentence mentions the DBs and
     capsules; this spec adds `sessions/<id>/log.jsonl`, blobs and adapters because a DB-only restore
     loses every conversation. This is a clarification, not a new feature.
