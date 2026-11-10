@@ -20,13 +20,7 @@ use vowp_store::{SessionFilter, StateChange, Store};
 
 /// The project-registry view used by the node supervisor and `vowp project`.
 ///
-/// The split schema has `projects.state`, `weight`, `paused_reason` and `archived_at`
-/// columns. C1 left the repository file empty for the feature jobs, and this job's owned
-/// paths do not include the store crate, so the same view is kept in the project's
-/// `config_json` under a reserved key. Every reader (project commands, the node supervisor,
-/// `project ls`) goes through this module, so the behaviour is consistent. Removing a
-/// project marks the row; the row itself remains for the session text that names it.
-/// The project registry, backed by the real `main.projects` columns.
+/// The registry is backed by the real `main.projects` columns.
 ///
 /// These helpers are thin views over [`vowp_store::Store`]'s `ProjectEntry` API
 /// (`project_entry`, `list_project_entries`, `project_by_path`, `set_project_state`,
