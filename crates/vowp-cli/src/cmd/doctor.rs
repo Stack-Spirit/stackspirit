@@ -298,8 +298,19 @@ fn check_projects(paths: &vowp_store::NodePaths, checks: &mut Checks) {
     }
 }
 
-/// Reports whether the derived snapshot exists and parses.
+/// Reports whether the derived snapshot exists and parses, and whether `tmp/` is writable.
+///
+/// The snapshot writer stages `tmp/snapshot.json.tmp`, fsyncs it and renames it into place;
+/// a writable home root is not enough when `tmp/` is missing or read-only.
 fn check_snapshot(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    let tmp = paths.tmp_dir();
+    match probe_directory(&tmp) {
+        Ok(()) => {}
+        Err(detail) => {
+            checks.push("snapshot", CheckStatus::Fail, format!("{}: {detail}", tmp.display()));
+            return;
+        }
+    }
     if !paths.root().join("snapshot.json").is_file() {
         checks.push(
             "snapshot",
@@ -322,6 +333,17 @@ fn check_snapshot(paths: &vowp_store::NodePaths, checks: &mut Checks) {
         ),
         Err(error) => checks.push("snapshot", CheckStatus::Fail, error.to_string()),
     }
+}
+
+/// Writes and removes one probe file in `dir`, reporting why it cannot.
+fn probe_directory(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err("missing or not a directory; run `vowp init`".to_owned());
+    }
+    let probe = dir.join(format!(".doctor-tmp-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"probe").map_err(|error| format!("not writable: {error}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// Runs a `--version` style command and records its first line.

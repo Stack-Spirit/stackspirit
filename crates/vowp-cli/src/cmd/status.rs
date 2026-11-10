@@ -153,7 +153,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &StatusArgs) -> Result<i32, 
         };
         crate::output::print_json(io, &output)?;
     } else {
-        print_human(io, &supervisor, ctx.config(), board.as_ref(), &fleet)?;
+        print_human(io, &supervisor, paused, ctx.config(), board.as_ref(), &fleet)?;
     }
 
     if args.check && stale {
@@ -199,11 +199,13 @@ fn fleet_inbox_open(snapshot: &Snapshot) -> u32 {
 fn print_human(
     io: &mut dyn IoStreams,
     supervisor: &SupervisorState,
+    paused: bool,
     config: &VowpConfig,
     board: Option<&BoardSnapshot>,
     fleet: &Snapshot,
 ) -> Result<(), CliError> {
     let now = fleet.generated_at;
+    let paused = if paused { ", paused" } else { "" };
     match supervisor.pid {
         Some(pid) => {
             let uptime = supervisor
@@ -213,12 +215,12 @@ fn print_human(
             match supervisor.heartbeat_age_secs {
                 Some(age) => writeln!(
                     io.out(),
-                    "supervisor: running (pid {pid}, up {uptime}, last tick {} ago)",
+                    "supervisor: running (pid {pid}, up {uptime}, last tick {} ago{paused})",
                     format_duration(age.max(0).unsigned_abs())
                 )?,
                 None => writeln!(
                     io.out(),
-                    "supervisor: running (pid {pid}, up {uptime}, no heartbeat yet)"
+                    "supervisor: running (pid {pid}, up {uptime}, no heartbeat yet{paused})"
                 )?,
             }
         }

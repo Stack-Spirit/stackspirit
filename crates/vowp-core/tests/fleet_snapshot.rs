@@ -13,8 +13,8 @@ use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemRunner};
 use vowp_protocol::{
     ActiveState, Clock, Cost, Evidence, Executor, FakeClock, Gate, GateResult, HarnessKind, InboxItem, InboxKind,
     InboxState, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind, Loop, LoopKind, NewJob, Node, NodeName,
-    ParkedReason, Project, ProjectName, ReportGate, Role, Run, RunId, RunPurpose, RunRole, SNAPSHOT_FORMAT,
-    SNAPSHOT_VERSION, Session, SessionId, SessionRole, SessionState, Snapshot, Timestamp, Tokens,
+    ParkedReason, Project, ProjectName, ProjectState, ReportGate, Role, Run, RunId, RunPurpose, RunRole,
+    SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Session, SessionId, SessionRole, SessionState, Snapshot, Timestamp, Tokens,
 };
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -104,13 +104,17 @@ impl Fixture {
     }
 
     fn job(&self, project: &ProjectName, id: &str, priority: i32) -> Job {
+        self.job_with_title(project, id, &format!("job {id}"), priority)
+    }
+
+    fn job_with_title(&self, project: &ProjectName, id: &str, title: &str, priority: i32) -> Job {
         let store = self.store_for(project);
         store
             .insert_job(
                 project,
                 &NewJob {
                     id: JobId::parse(id).expect("job id"),
-                    title: format!("job {id}"),
+                    title: title.to_owned(),
                     kind: JobKind::Build,
                     role: Role::Worker,
                     profile: None,
@@ -162,24 +166,205 @@ fn snapshot_json_validates_against_exported_schema() {
     assert_eq!(value["version"], SNAPSHOT_VERSION);
 
     let schema = vowp_protocol::schema::schema_for_name("Snapshot").expect("Snapshot schema");
-    let properties = schema["properties"].as_object().expect("properties");
-    let object = value.as_object().expect("snapshot object");
-    for key in object.keys() {
-        assert!(
-            properties.contains_key(key),
-            "snapshot key {key:?} is absent from the exported schema"
-        );
-    }
-    for required in schema["required"].as_array().expect("required list") {
-        let name = required.as_str().expect("required name");
-        assert!(object.contains_key(name), "snapshot is missing required {name:?}");
-    }
     assert!(
         schema["$defs"].get("ProjectSnapshot").is_some(),
         "exported Snapshot schema must define ProjectSnapshot: {schema}"
     );
+    validate_schema(&value, &schema).expect("the snapshot validates against the exported schema");
+
+    // The checker must reject a type mismatch, otherwise a schema drift could pass silently.
+    let mut wrong_scalar = value.clone();
+    wrong_scalar["sequence"] = serde_json::json!("not-an-integer");
+    let error = validate_schema(&wrong_scalar, &schema).expect_err("a string sequence must fail");
+    assert!(error.contains("sequence"), "the error names the field: {error}");
+
+    let mut wrong_nested = value.clone();
+    wrong_nested["supervisor"]["running"] = serde_json::json!("yes");
+    let error = validate_schema(&wrong_nested, &schema).expect_err("a string running flag must fail");
+    assert!(error.contains("running"), "the error names the nested field: {error}");
+
     let decoded: Snapshot = serde_json::from_value(value).expect("schema-valid document decodes");
     assert_eq!(decoded, snapshot);
+}
+
+/// Validates `value` against a schemars-generated JSON Schema document.
+///
+/// This is deliberately a small checker for the keywords schemars emits: `$ref`, `type`,
+/// `enum`/`const`, `anyOf`/`oneOf`/`allOf`, object `properties`/`required`/
+/// `additionalProperties`, array `items`/`prefixItems`, and numeric `minimum`/`maximum`.
+/// It is test-only and does not add a runtime dependency.
+fn validate_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Result<(), String> {
+    validate_at(value, schema, schema, "$")
+}
+
+/// Validates one value at one schema node, resolving `$ref` against the document root.
+fn validate_at(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    root: &serde_json::Value,
+    path: &str,
+) -> Result<(), String> {
+    let object = match schema {
+        serde_json::Value::Bool(true) => return Ok(()),
+        serde_json::Value::Bool(false) => return Err(format!("{path}: schema rejects every value")),
+        serde_json::Value::Object(object) => object,
+        other => return Err(format!("{path}: unsupported schema node {other}")),
+    };
+
+    if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+        let target = resolve_ref(root, reference)?;
+        return validate_at(value, target, root, path);
+    }
+
+    if let Some(constant) = object.get("const")
+        && value != constant
+    {
+        return Err(format!("{path}: expected constant {constant}, got {value}"));
+    }
+
+    if let Some(options) = object.get("enum").and_then(serde_json::Value::as_array)
+        && !options.iter().any(|option| option == value)
+    {
+        return Err(format!("{path}: {value} is not one of {options:?}"));
+    }
+
+    if let Some(expected) = object.get("type") {
+        let matches = match expected {
+            serde_json::Value::String(name) => json_type_matches(value, name),
+            serde_json::Value::Array(names) => names
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|name| json_type_matches(value, name)),
+            other => return Err(format!("{path}: unsupported schema type {other}")),
+        };
+        if !matches {
+            return Err(format!("{path}: expected type {expected}, got {value}"));
+        }
+    }
+
+    if let Some(options) = object.get("allOf").and_then(serde_json::Value::as_array) {
+        for subschema in options {
+            validate_at(value, subschema, root, path)?;
+        }
+    }
+    if let Some(options) = object.get("anyOf").and_then(serde_json::Value::as_array) {
+        let first_error = options
+            .iter()
+            .find_map(|subschema| validate_at(value, subschema, root, path).err())
+            .unwrap_or_else(|| format!("{path}: value {value} matches none of the anyOf branches"));
+        if !options
+            .iter()
+            .any(|subschema| validate_at(value, subschema, root, path).is_ok())
+        {
+            return Err(first_error);
+        }
+    }
+    if let Some(options) = object.get("oneOf").and_then(serde_json::Value::as_array) {
+        let matches = options
+            .iter()
+            .filter(|subschema| validate_at(value, subschema, root, path).is_ok())
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "{path}: expected exactly one oneOf branch to match, {matches} did"
+            ));
+        }
+    }
+
+    if let serde_json::Value::Object(map) = value {
+        if let Some(required) = object.get("required").and_then(serde_json::Value::as_array) {
+            for name in required {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| format!("{path}: required entry is not a string: {name}"))?;
+                if !map.contains_key(name) {
+                    return Err(format!("{path}: required property {name:?} is missing"));
+                }
+            }
+        }
+        let properties = object.get("properties").and_then(serde_json::Value::as_object);
+        if let Some(properties) = properties {
+            for (name, subschema) in properties {
+                if let Some(field) = map.get(name) {
+                    validate_at(field, subschema, root, &format!("{path}.{name}"))?;
+                }
+            }
+        }
+        match object.get("additionalProperties") {
+            Some(serde_json::Value::Bool(false)) => {
+                for name in map.keys() {
+                    if !properties.is_some_and(|properties| properties.contains_key(name)) {
+                        return Err(format!("{path}: unknown property {name:?}"));
+                    }
+                }
+            }
+            Some(subschema @ (serde_json::Value::Bool(true) | serde_json::Value::Object(_))) => {
+                for (name, field) in map {
+                    if !properties.is_some_and(|properties| properties.contains_key(name)) {
+                        validate_at(field, subschema, root, &format!("{path}.{name}"))?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let serde_json::Value::Array(items) = value {
+        let prefix = object.get("prefixItems").and_then(serde_json::Value::as_array);
+        if let Some(prefix) = prefix {
+            for (index, (item, subschema)) in items.iter().zip(prefix).enumerate() {
+                validate_at(item, subschema, root, &format!("{path}[{index}]"))?;
+            }
+        }
+        if let Some(items_schema) = object.get("items") {
+            let start = prefix.map(Vec::len).unwrap_or(0);
+            for (index, item) in items.iter().enumerate().skip(start) {
+                validate_at(item, items_schema, root, &format!("{path}[{index}]"))?;
+            }
+        }
+    }
+
+    if let Some(minimum) = object.get("minimum").and_then(serde_json::Value::as_f64)
+        && let Some(number) = value.as_f64()
+        && number < minimum
+    {
+        return Err(format!("{path}: {number} is below minimum {minimum}"));
+    }
+    if let Some(maximum) = object.get("maximum").and_then(serde_json::Value::as_f64)
+        && let Some(number) = value.as_f64()
+        && number > maximum
+    {
+        return Err(format!("{path}: {number} is above maximum {maximum}"));
+    }
+
+    Ok(())
+}
+
+/// Returns whether a JSON value has the named JSON-Schema primitive type.
+fn json_type_matches(value: &serde_json::Value, name: &str) -> bool {
+    match name {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
+/// Resolves one local `$ref` (`#/$defs/Name`) against the schema root.
+fn resolve_ref<'a>(root: &'a serde_json::Value, reference: &str) -> Result<&'a serde_json::Value, String> {
+    let pointer = reference.strip_prefix('#').unwrap_or(reference);
+    if pointer.is_empty() {
+        return Ok(root);
+    }
+    if !pointer.starts_with('/') {
+        return Err(format!("unsupported non-local schema reference {reference:?}"));
+    }
+    root.pointer(pointer)
+        .ok_or_else(|| format!("unresolved schema reference {reference:?}"))
 }
 
 #[test]
@@ -454,6 +639,248 @@ fn snapshot_cards_cover_every_project_and_state() {
     assert_eq!(
         snapshot.sessions[0].active_surface, None,
         "no lease is live in this fixture"
+    );
+}
+
+#[test]
+fn project_cards_read_registry_state_weight_and_pause_reason() {
+    let fixture = Fixture::new();
+    fixture
+        .store
+        .set_project_state(&fixture.alpha, ProjectState::Paused, "owner")
+        .expect("pause alpha");
+    fixture
+        .store
+        .set_project_weight(&fixture.alpha, 7)
+        .expect("alpha weight");
+    fixture
+        .store
+        .set_project_state(&fixture.beta, ProjectState::Archived, "")
+        .expect("archive beta");
+    fixture
+        .store
+        .set_project_weight(&fixture.beta, 23)
+        .expect("beta weight");
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    assert_eq!(alpha.state, ProjectState::Paused);
+    assert_eq!(alpha.weight, 7);
+    assert_eq!(alpha.paused_reason, "owner");
+
+    let beta = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.beta)
+        .expect("beta card");
+    assert_eq!(beta.state, ProjectState::Archived);
+    assert_eq!(beta.weight, 23, "a non-default weight reaches the snapshot");
+    assert_eq!(beta.paused_reason, "");
+
+    let alpha_entry = fixture
+        .store
+        .project_entry(&fixture.alpha)
+        .expect("alpha entry")
+        .expect("alpha row");
+    assert_eq!(alpha_entry.state, ProjectState::Paused);
+    assert_eq!(alpha_entry.weight, 7);
+    assert_eq!(alpha_entry.paused_reason, "owner");
+    assert_eq!(alpha_entry.archived_at, None);
+
+    let beta_entry = fixture
+        .store
+        .project_entry(&fixture.beta)
+        .expect("beta entry")
+        .expect("beta row");
+    assert_eq!(beta_entry.state, ProjectState::Archived);
+    assert_eq!(beta_entry.weight, 23);
+    assert!(beta_entry.archived_at.is_some(), "archiving stamps archived_at");
+
+    let by_path = fixture
+        .store
+        .project_by_path(std::path::Path::new(&beta_entry.path))
+        .expect("lookup by path")
+        .expect("beta by path");
+    assert_eq!(by_path.name, fixture.beta);
+    let entries = fixture.store.list_project_entries().expect("list entries");
+    assert_eq!(entries.len(), 2, "both registry rows are listed");
+}
+
+#[test]
+fn capacity_card_uses_the_spec_defaults_until_a_sampler_lands() {
+    let fixture = Fixture::new();
+    let snapshot = fixture.snapshot();
+    let capacity = &snapshot.capacity;
+    assert!(capacity.measured.is_none(), "no measurement is fabricated");
+    assert_eq!(capacity.reserve_ram_bytes, 1_073_741_824, "the spec's 1 GiB reserve");
+    assert_eq!(capacity.min_disk_bytes, 5_368_709_120, "the spec's 5 GiB minimum disk");
+    assert!(!capacity.brake.active, "the default brake is inactive");
+    assert!(
+        capacity.brake.reasons.is_empty() && capacity.brake.since.is_none(),
+        "an inactive brake carries no reasons: {:?}",
+        capacity.brake
+    );
+}
+
+#[test]
+fn last_merge_skips_a_newer_merge_refusal() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let merged = fixture.job(&fixture.alpha, "m01-merged", 50);
+    let refused = fixture.job(&fixture.alpha, "m02-refused", 50);
+    let store = fixture.store_for(&fixture.alpha);
+    let merged_at = now.minus(Duration::from_secs(120));
+    store
+        .append_ledger(&LedgerEntry {
+            id: None,
+            ts: merged_at,
+            kind: LedgerKind::Merge,
+            project: Some(fixture.alpha.clone()),
+            job_id: Some(merged.id.clone()),
+            run_id: None,
+            session_id: None,
+            role: None,
+            provider: None,
+            harness: None,
+            model: None,
+            cost: None,
+            summary: "merged m01-merged".to_owned(),
+            detail: serde_json::json!({
+                "main_after": "def5678",
+                "branch": "job/m01-merged",
+            }),
+        })
+        .expect("real merge row");
+    store
+        .append_ledger(&LedgerEntry {
+            id: None,
+            ts: now.minus(Duration::from_secs(30)),
+            kind: LedgerKind::Merge,
+            project: Some(fixture.alpha.clone()),
+            job_id: Some(refused.id.clone()),
+            run_id: None,
+            session_id: None,
+            role: None,
+            provider: None,
+            harness: None,
+            model: None,
+            cost: None,
+            summary: "merge refused".to_owned(),
+            detail: serde_json::json!({
+                "failure": "main advanced during the merge",
+                "branch": "job/m02-refused",
+            }),
+        })
+        .expect("refusal row");
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    let merge = alpha.last_merge.as_ref().expect("a real merge is reported");
+    assert_eq!(merge.job, merged.id, "the refusal is not the last merge");
+    assert_eq!(merge.commit, "def5678");
+    assert_eq!(merge.branch, "job/m01-merged");
+    assert_eq!(merge.at, merged_at);
+}
+
+#[test]
+fn snapshot_keeps_full_titles_and_questions_but_caps_body_detail() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let long_title = format!("title {}", "t".repeat(240));
+    let long_question = format!("question {}", "q".repeat(240));
+    let long_session = format!("session {}", "s".repeat(240));
+    assert!(long_title.chars().count() > 200);
+
+    let ready = fixture.job_with_title(&fixture.alpha, "t01-ready", &long_title, 50);
+    fixture.set_state(
+        &fixture.alpha,
+        &ready,
+        JobState::Ready,
+        StateChange {
+            note: None,
+            parked_reason: None,
+        },
+    );
+    let failed = fixture.job(&fixture.alpha, "t02-failed", 10);
+    let body = format!("body {}", "b".repeat(240));
+    fixture.set_state(
+        &fixture.alpha,
+        &failed,
+        JobState::Failed,
+        StateChange {
+            note: Some(body),
+            parked_reason: None,
+        },
+    );
+
+    let alpha_store = fixture.store_for(&fixture.alpha);
+    alpha_store
+        .insert_inbox(&InboxItem {
+            id: vowp_protocol::InboxId::new(),
+            project: Some(fixture.alpha.clone()),
+            job_id: None,
+            kind: InboxKind::Question,
+            title: long_question.clone(),
+            body: "question body".to_owned(),
+            options: Vec::new(),
+            state: InboxState::Open,
+            answer: None,
+            answered_by: None,
+            created_at: now.minus(Duration::from_secs(10)),
+            answered_at: None,
+        })
+        .expect("long question");
+    fixture
+        .store
+        .upsert_session(&Session {
+            id: SessionId::new(),
+            project: Some(fixture.alpha.clone()),
+            job_id: None,
+            role: Some(SessionRole::Worker),
+            title: long_session.clone(),
+            parent_session_id: None,
+            node: NodeName::parse("local").expect("node"),
+            cwd: "/srv/vowp".to_owned(),
+            state: SessionState::Idle,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now.minus(Duration::from_secs(60)),
+            updated_at: now.minus(Duration::from_secs(5)),
+        })
+        .expect("long session title");
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    let queued = alpha.queue.iter().find(|job| job.job == ready.id).expect("ready job");
+    assert_eq!(queued.title, long_title, "a title is not truncated to 200 chars");
+    let blocked = alpha
+        .blocked
+        .iter()
+        .find(|job| job.job == failed.id)
+        .expect("failed job");
+    assert_eq!(
+        blocked.detail.chars().count(),
+        200,
+        "body/detail text keeps the 200-character cap"
+    );
+    assert_eq!(snapshot.inbox[0].title, long_question, "a question keeps its full text");
+    assert_eq!(
+        snapshot.sessions[0].title, long_session,
+        "a session title keeps its full text"
     );
 }
 

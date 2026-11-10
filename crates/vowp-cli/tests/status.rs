@@ -105,6 +105,33 @@ fn status_without_check_never_exits_1_and_reports_running_supervisor() {
     assert_eq!(value["supervisor"]["paused"], false);
 }
 
+#[test]
+fn status_human_line_reports_a_paused_running_supervisor() {
+    let env = common::TestEnv::new();
+    env.store().kv_set("paused", "1").expect("pause marker");
+    let pid = std::process::id();
+    std::fs::write(
+        env.home_path().join("supervisor.lock"),
+        format!("{pid}\n{}\n", Timestamp::now().as_rfc3339()),
+    )
+    .expect("lock");
+
+    let (code, stdout, stderr) = env.run(&["status"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("supervisor:"))
+        .expect("supervisor line");
+    assert!(line.contains("running"), "{line}");
+    assert!(line.contains("paused"), "a paused running supervisor says so: {line}");
+
+    let (code, value, stderr) = env.run_json(&["status"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value["supervisor"]["running"], true);
+    assert_eq!(value["supervisor"]["paused"], true);
+    assert_eq!(value["supervisor"]["pid"], pid);
+}
+
 /// Polls `predicate` for up to five seconds.
 fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);

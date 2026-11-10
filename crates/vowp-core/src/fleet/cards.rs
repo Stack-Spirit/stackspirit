@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use vowp_protocol::{
     BlockedJobCard, Evidence, GateFailureCard, GateKind, InboxItem, InboxState, Job, JobState, LedgerKind, MergeCard,
-    Project, ProjectName, ProjectSnapshot, ProjectState, QueueJobCard, RunningJobCard, Timestamp,
+    ProjectEntry, ProjectName, ProjectSnapshot, ProjectState, QueueJobCard, RunningJobCard, Timestamp,
 };
 use vowp_store::{CostGroup, CostQuery, JobFilter, LedgerFilter, Store};
 
@@ -31,11 +31,13 @@ pub(crate) struct ProjectRead {
 /// Builds one project's snapshot card from a bound store.
 ///
 /// `deps` supplies the node name and the redactor; `store` must be bound to `project`.
+/// `project` is the registry entry, so state, weight and pause reason come from the real
+/// registry row rather than a schema default.
 pub(crate) fn project_read(
     deps: &Deps,
     redactor: &Redactor,
     store: &Store,
-    project: &Project,
+    project: &ProjectEntry,
     now: Timestamp,
 ) -> Result<ProjectRead, CoreError> {
     let jobs_by_state = store.count_jobs_by_state(Some(&project.name))?;
@@ -115,7 +117,7 @@ pub(crate) fn project_read(
         .into_iter()
         .map(|job| QueueJobCard {
             job: job.id.clone(),
-            title: summarize(redactor, &job.title),
+            title: full_title(redactor, &job.title),
             kind: job.kind,
             role: job.role,
             priority: job.priority,
@@ -154,7 +156,7 @@ pub(crate) fn project_read(
     gate_failures.sort_by_key(|failure| std::cmp::Reverse(failure.at));
     gate_failures.truncate(10);
 
-    let last_merge = last_merge(store, project, &jobs, redactor)?;
+    let last_merge = last_merge(store, &project.name, &jobs, redactor)?;
     let cost_today_usd = cost_today(store, &project.name, now)?;
     let inbox = store.list_inbox(Some(InboxState::Open))?;
     let fail_streak = store
@@ -166,12 +168,9 @@ pub(crate) fn project_read(
         card: ProjectSnapshot {
             name: project.name.clone(),
             path: project.path.clone(),
-            // The registry's state/weight columns do not have a public Store accessor yet
-            // (repo_projects.rs is filled by the project-registry jobs). Until it lands a
-            // card describes a registered project with the schema defaults: active, weight 1.
-            state: ProjectState::Active,
-            weight: 1,
-            paused_reason: String::new(),
+            state: project.state,
+            weight: project.weight,
+            paused_reason: project.paused_reason.clone(),
             jobs_by_state,
             running,
             blocked,
@@ -188,13 +187,14 @@ pub(crate) fn project_read(
 /// Builds the card for a project whose database could not be read.
 ///
 /// One broken project must never stop the rest of the fleet, so the card is marked paused
-/// with the error as its reason and every derived list stays empty.
-pub(crate) fn broken_card(project: &Project, error: &CoreError) -> ProjectSnapshot {
+/// with the error as its reason and every derived list stays empty. The registry weight is
+/// kept as recorded, so the card still describes the right project.
+pub(crate) fn broken_card(project: &ProjectEntry, error: &CoreError) -> ProjectSnapshot {
     ProjectSnapshot {
         name: project.name.clone(),
         path: project.path.clone(),
         state: ProjectState::Paused,
-        weight: 1,
+        weight: project.weight,
         paused_reason: format!("broken: {error}"),
         jobs_by_state: BTreeMap::new(),
         running: Vec::new(),
@@ -239,9 +239,12 @@ fn waiting_reason(redactor: &Redactor, job: &Job) -> Option<String> {
 }
 
 /// Reads the newest successful merge row for a project.
+///
+/// Merge refusal rows are recorded under the same ledger kind with `detail.failure` and no
+/// commit; they are skipped so the card names a real merge, never a refused attempt.
 fn last_merge(
     store: &Store,
-    project: &Project,
+    project: &ProjectName,
     jobs: &[Job],
     redactor: &Redactor,
 ) -> Result<Option<MergeCard>, CoreError> {
@@ -251,7 +254,16 @@ fn last_merge(
     })?;
     let entry = rows
         .into_iter()
-        .filter(|entry| entry.project.as_ref() == Some(&project.name))
+        .filter(|entry| entry.project.as_ref() == Some(project))
+        .filter(|entry| {
+            let commit = entry
+                .detail
+                .get("main_after")
+                .or_else(|| entry.detail.get("commit"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            entry.detail.get("failure").is_none() || commit
+        })
         .max_by_key(|entry| entry.ts);
     let Some(entry) = entry else {
         return Ok(None);
@@ -314,7 +326,14 @@ fn start_of_day(now: Timestamp) -> Timestamp {
     Timestamp::from_unix_secs(secs - secs.rem_euclid(86_400))
 }
 
-/// Redacts and truncates one free-text field to the snapshot's 200-character cap.
+/// Redacts one title or question, keeping the full text.
+///
+/// The snapshot's 200-character cap applies to bodies and detail lines, not to titles.
+fn full_title(redactor: &Redactor, text: &str) -> String {
+    redactor.redact(text)
+}
+
+/// Redacts and truncates one free-text body or detail line to the snapshot's 200-character cap.
 fn summarize(redactor: &Redactor, text: &str) -> String {
     redactor.redact(text).chars().take(200).collect()
 }

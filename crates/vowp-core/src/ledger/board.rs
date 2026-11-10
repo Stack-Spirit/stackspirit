@@ -237,6 +237,8 @@ impl FleetBoard {
 
     /// Renders the multi-project board.
     ///
+    /// Each project gets its own section with the project name as the heading; this is the
+    /// spec's "project column" (§12.2 wording) without restructuring the v0.1 line shape.
     /// With `color`, the header is bold; without it the output contains no ANSI escapes.
     pub fn render_text(&self, color: bool) -> String {
         let mut out = String::new();

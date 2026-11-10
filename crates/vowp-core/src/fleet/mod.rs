@@ -26,6 +26,9 @@ use crate::CoreError;
 use crate::deps::Deps;
 use crate::vault::Redactor;
 
+/// One gibibyte, the unit of the spec's capacity defaults.
+const GIB: u64 = 1024 * 1024 * 1024;
+
 /// Builds the derived snapshot from the node's state.
 ///
 /// Every registered project becomes a card, including archived ones; the reserved `_node`
@@ -38,7 +41,7 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
     };
     let global = global_owned.as_ref().unwrap_or(store);
     let redactor = Redactor::load(deps)?;
-    let projects = global.list_projects()?;
+    let projects = global.list_project_entries()?;
 
     let mut cards = Vec::new();
     let mut project_inbox = Vec::new();
@@ -87,7 +90,7 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
             project: item.project.clone(),
             job_id: item.job_id.clone(),
             kind: item.kind,
-            title: summarize(&redactor, &item.title),
+            title: full_title(&redactor, &item.title),
             created_at: item.created_at,
             age_secs: now.since(item.created_at).as_secs(),
         })
@@ -112,9 +115,9 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
         },
         advised_target: target.advised_workers,
         target,
-        brake: Default::default(),
-        reserve_ram_bytes: 0,
-        min_disk_bytes: 0,
+        brake: crate::capacity::evaluate(store, now)?,
+        reserve_ram_bytes: GIB,
+        min_disk_bytes: 5 * GIB,
     };
 
     Ok(Snapshot {
@@ -375,7 +378,7 @@ fn session_cards(store: &Store, now: Timestamp, redactor: &Redactor) -> Result<V
             project: session.project,
             job_id: session.job_id,
             role: session.role,
-            title: summarize(redactor, &session.title),
+            title: full_title(redactor, &session.title),
             state: session.state,
             executor: session.executor.as_ref().map(ToString::to_string),
             node: session.node,
@@ -420,7 +423,9 @@ fn merge_inbox(items: Vec<InboxItem>) -> Vec<InboxItem> {
     items
 }
 
-/// Redacts and truncates one free-text field to the snapshot's 200-character cap.
-fn summarize(redactor: &Redactor, text: &str) -> String {
-    redactor.redact(text).chars().take(200).collect()
+/// Redacts one title or question, keeping the full text.
+///
+/// The 200-character body cap does not apply to titles and questions.
+fn full_title(redactor: &Redactor, text: &str) -> String {
+    redactor.redact(text)
 }
