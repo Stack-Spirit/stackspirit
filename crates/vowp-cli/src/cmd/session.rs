@@ -25,6 +25,7 @@ use crate::cli::{
     ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionExportArgs, SessionImportArgs, SessionLsArgs,
     SessionNewArgs, SessionShowArgs, SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
 };
+use crate::node_ctx::NodeRole;
 use crate::output::{Table, local_time_at, print_json};
 use crate::{CliError, Ctx, IoStreams};
 
@@ -59,6 +60,22 @@ pub fn maybe_run_remote(
     io: &mut dyn IoStreams,
     command: &crate::cli::Command,
 ) -> Result<Option<i32>, CliError> {
+    // `chat --node` names the executor node, but the global `--node` flag accepts the same
+    // spelling. Clap stores it in `global.node`; treat it as chat's executor node instead
+    // of forwarding the whole command over ssh. A control machine keeps the generic route.
+    if let Some(args) = chat_args(command)
+        && let Some(node) = &global.node
+    {
+        let mut local = global.clone();
+        local.node = None;
+        let ctx = Ctx::build(&local, io)?;
+        if ctx.role() == NodeRole::Home {
+            let node = NodeName::parse(node)?;
+            return Ok(Some(run_chat_args(&ctx, io, args, Some(node))?));
+        }
+        return Ok(None);
+    }
+
     let crate::cli::Command::Session { command } = command else {
         return Ok(None);
     };
@@ -869,9 +886,22 @@ fn new_session(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionNewArgs) -> Resu
 
 /// Runs the interactive chat loop.
 fn chat(ctx: &Ctx, io: &mut dyn IoStreams, args: &ChatArgs) -> Result<i32, CliError> {
+    run_chat_args(ctx, io, args, None)
+}
+
+/// Runs the chat handler with an executor-node override from the global `--node` flag.
+fn run_chat_args(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    args: &ChatArgs,
+    node_override: Option<vowp_protocol::NodeName>,
+) -> Result<i32, CliError> {
     let store = ctx.store()?;
     let session = resolve_session(&store, &args.id)?;
-    let node = args.node.as_deref().map(vowp_protocol::NodeName::parse).transpose()?;
+    let node = match node_override {
+        Some(node) => Some(node),
+        None => args.node.as_deref().map(vowp_protocol::NodeName::parse).transpose()?,
+    };
     let executor = args
         .executor
         .as_deref()
@@ -892,6 +922,17 @@ fn chat(ctx: &Ctx, io: &mut dyn IoStreams, args: &ChatArgs) -> Result<i32, CliEr
             takeover: args.takeover,
         },
     )
+}
+
+/// Returns the chat arguments of either chat spelling.
+fn chat_args(command: &crate::cli::Command) -> Option<&ChatArgs> {
+    match command {
+        crate::cli::Command::Chat(args) => Some(args),
+        crate::cli::Command::Session {
+            command: SessionCommand::Chat(args),
+        } => Some(args),
+        _ => None,
+    }
 }
 
 /// Switches a session, checking the running-turn guard and target limits first.

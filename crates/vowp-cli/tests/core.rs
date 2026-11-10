@@ -313,21 +313,11 @@ fn ctx_build_requires_init() {
 }
 
 #[test]
-fn c0_refuses_frozen_flags_whose_handlers_are_not_implemented() {
+fn legacy_single_file_backup_still_works() {
     let env = common::TestEnv::new();
     let legacy = env.home_path().join("legacy.db");
     let legacy = legacy.to_str().expect("legacy path");
-    // C0's frozen-flag guards are gone: C2 implemented up/loops/schedule and F3
-    // implemented the chat flags (covered by tests/chat.rs). Keep the loop so a future
-    // deferred flag has one obvious place to be asserted again.
-    let cases: &[&[&str]] = &[];
-    for args in cases {
-        let (code, _stdout, stderr) = env.run(args);
-        assert_eq!(code, 1, "{args:?}: {stderr}");
-        assert!(stderr.contains("not implemented in this build"), "{args:?}: {stderr}");
-    }
 
-    // The legacy single-file form still works.
     let (code, _stdout, stderr) = env.run(&["backup", "--to", legacy]);
     assert_eq!(code, 0, "legacy .db backup failed: {stderr}");
     assert!(

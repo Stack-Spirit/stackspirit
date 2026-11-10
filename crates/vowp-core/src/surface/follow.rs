@@ -20,6 +20,9 @@ pub const FOLLOW_POLL: Duration = Duration::from_millis(200);
 /// How many events one poll asks the index for.
 const FOLLOW_BATCH: u32 = 256;
 
+/// Display width of one follower line, matching the chat surface's narrow-terminal rule.
+const FOLLOW_WIDTH: usize = 80;
+
 /// Prints new events after `after_seq` until cancelled and returns the last sequence read.
 ///
 /// The index is the single source of order: an event is printed only after the home has
@@ -33,9 +36,9 @@ pub fn follow(store: &Store, session: &SessionId, after_seq: u64, cancel: &Cance
 
 /// Follows a session into an explicit writer and returns the last sequence printed.
 ///
-/// Each line is `#<seq> <event-type>  <summary>`: no colour, no table and no terminal
-/// width assumptions. The loop stops on cancellation or when the session index cannot be
-/// read. A cancelled token returns the last sequence already printed, not an error.
+/// Each line is `#<seq> <event-type>  <summary>`, clipped to 80 characters: no colour and
+/// no table. The loop stops on cancellation or when the session index cannot be read. A
+/// cancelled token returns the last sequence already printed, not an error.
 pub fn follow_to(
     store: &Store,
     session: &SessionId,
@@ -50,11 +53,12 @@ pub fn follow_to(
     loop {
         let rows = store.event_rows(session, last, FOLLOW_BATCH)?;
         for row in &rows {
-            writeln!(out, "#{} {}  {}", row.seq, row.event_type.as_str(), row.summary).map_err(|source| {
-                CoreError::Io {
-                    path: format!("follow {session}"),
-                    source,
-                }
+            let prefix = format!("#{} {}  ", row.seq, row.event_type.as_str());
+            let room = FOLLOW_WIDTH.saturating_sub(prefix.chars().count());
+            let summary = clip_chars(&row.summary, room);
+            writeln!(out, "{prefix}{summary}").map_err(|source| CoreError::Io {
+                path: format!("follow {session}"),
+                source,
             })?;
             last = last.max(row.seq);
         }
@@ -69,4 +73,17 @@ pub fn follow_to(
         }
         std::thread::sleep(FOLLOW_POLL);
     }
+}
+
+/// Clips `text` to at most `width` characters, adding an ellipsis when it must shorten.
+fn clip_chars(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut clipped: String = text.chars().take(width.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
 }

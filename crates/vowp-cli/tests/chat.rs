@@ -9,13 +9,18 @@ mod common;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use vowp_cli::chat::ChatOptions;
 use vowp_cli::{BufferIo, Ctx};
-use vowp_protocol::{EventBody, Executor, HarnessKind, SessionId};
+use vowp_core::surface::follow::follow_to;
+use vowp_protocol::{
+    Actor, CancelToken, EventBody, EventSource, Executor, HarnessKind, NodeName, Note, SessionId, SystemClock,
+};
 use vowp_store::NodePaths;
-use vowp_store::session_log::SessionLog;
+use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 
 /// Writes a fake opencode binary that replies with `reply` and stops normally.
 fn fake_opencode(env: &common::TestEnv, reply: &str) -> PathBuf {
@@ -95,8 +100,8 @@ fn create(env: &common::TestEnv) -> String {
     stdout.trim().to_owned()
 }
 
-/// Runs the real `vowp chat` binary with `input` on stdin.
-fn run_chat(env: &common::TestEnv, args: &[&str], input: &str) -> (i32, String, String) {
+/// Starts the real `vowp chat` binary with a writable stdin pipe.
+fn spawn_chat(env: &common::TestEnv, args: &[&str]) -> Child {
     let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
     command
         .arg("--home")
@@ -107,7 +112,31 @@ fn run_chat(env: &common::TestEnv, args: &[&str], input: &str) -> (i32, String, 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn vowp chat");
+    command.spawn().expect("spawn vowp chat")
+}
+
+/// Sends one line to a running chat child.
+fn send_chat(child: &mut Child, text: &str) {
+    let stdin = child.stdin.as_mut().expect("chat stdin");
+    stdin.write_all(text.as_bytes()).expect("write chat input");
+    stdin.flush().expect("flush chat input");
+}
+
+/// Waits for a condition, polling briefly.
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    condition()
+}
+
+/// Runs the real `vowp chat` binary with `input` on stdin.
+fn run_chat(env: &common::TestEnv, args: &[&str], input: &str) -> (i32, String, String) {
+    let mut child = spawn_chat(env, args);
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(input.as_bytes()).expect("write chat input");
     }
@@ -117,6 +146,17 @@ fn run_chat(env: &common::TestEnv, args: &[&str], input: &str) -> (i32, String, 
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// Waits until `holder` owns the lease of `id`.
+fn wait_for_lease(env: &common::TestEnv, id: &str, holder: &str) -> bool {
+    let session = SessionId::parse(id).expect("session id");
+    wait_until(Duration::from_secs(5), || {
+        env.store()
+            .lease(&session)
+            .expect("lease query")
+            .is_some_and(|lease| lease.holder == holder)
+    })
 }
 
 /// Reads one session's canonical events.
@@ -256,6 +296,175 @@ fn chat_follow_mode_is_read_only() {
     assert!(
         env.store().lease(&session).expect("lease query").is_none(),
         "follow mode must not take the lease"
+    );
+}
+
+#[test]
+fn chat_follow_prints_new_events_at_narrow_width() {
+    let env = common::TestEnv::new();
+    configure(&env, "hello");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let store = env.store();
+    let before = store.require_session(&session).expect("session").last_seq;
+    let paths = NodePaths::new(env.home_path());
+    let log = SessionLog::open(&paths, &session, Arc::new(SystemClock)).expect("writer");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(NodeName::parse("local").expect("node")),
+                native_session_id: None,
+            },
+            body: EventBody::Note(Note {
+                text: "follow output event ".repeat(20),
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append note");
+    store.index_event(&index_row(&appended)).expect("index event");
+    log.sync().expect("sync log");
+
+    let cancel = CancelToken::default();
+    cancel.cancel();
+    let mut out = Vec::new();
+    let last = follow_to(&store, &session, before, &cancel, &mut out).expect("follow");
+    assert_eq!(last, appended.envelope.seq);
+    let text = String::from_utf8(out).expect("utf8");
+    assert!(text.contains("follow output event"), "{text}");
+    for line in text.lines() {
+        assert!(
+            line.chars().count() <= 80,
+            "follower line is wider than 80 columns: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn chat_follow_command_releases_the_lease() {
+    let env = common::TestEnv::new();
+    configure(&env, "hello");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let mut child = spawn_chat(&env, &["chat", &id]);
+    assert!(wait_for_lease(&env, &id, "local"), "chat did not take the lease");
+
+    send_chat(&mut child, "/follow\n");
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            env.store().lease(&session).expect("lease query").is_none()
+        }),
+        "/follow kept the lease"
+    );
+    send_chat(&mut child, "hello\n/quit\n");
+    let output = child.wait_with_output().expect("wait for chat");
+    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("This surface is read-only (follow mode)."),
+        "follow mode must refuse writes: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Taken over by local"),
+        "a released lease must not look like a self-takeover: {stderr}"
+    );
+}
+
+#[test]
+fn chat_switch_after_takeover_is_read_only() {
+    let env = common::TestEnv::new();
+    configure(&env, &capsule_reply());
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let mut child = spawn_chat(&env, &["chat", &id]);
+    assert!(wait_for_lease(&env, &id, "local"), "chat did not take the lease");
+
+    let (code, _stdout, stderr) = env.run(&[
+        "session", "takeover", &id, "--kind", "chat", "--holder", "phone", "--node", "local",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let after_takeover = env.store().list_switches(&session).expect("switches").len();
+
+    send_chat(
+        &mut child,
+        "/switch opencode:deepseek/deepseek-flash#max --node local\n/quit\n",
+    );
+    let output = child.wait_with_output().expect("wait for chat");
+    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Taken over by phone at "), "{stderr}");
+    assert!(stderr.contains("read-only"), "{stderr}");
+    assert!(!stdout.contains("switched to"), "old surface switched: {stdout}");
+
+    let switches = env.store().list_switches(&session).expect("switches");
+    assert_eq!(
+        switches.len(),
+        after_takeover,
+        "a revoked surface wrote another switch: {switches:?}"
+    );
+    assert!(
+        !switches
+            .iter()
+            .any(|switch| switch.reason == vowp_protocol::SwitchReason::User),
+        "a revoked surface wrote a user switch: {switches:?}"
+    );
+}
+
+#[test]
+fn chat_switch_to_other_node_is_refused() {
+    let env = common::TestEnv::new();
+    configure(&env, "hello");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+
+    let (code, stdout, stderr) = run_chat(
+        &env,
+        &["chat", &id],
+        "/switch opencode:deepseek/deepseek-flash#max --node other\n/quit\n",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("executor node other is not this surface (local)"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("switched to"), "{stdout}");
+    assert!(
+        env.store().list_switches(&session).expect("switches").is_empty(),
+        "a refused node must not record a switch"
+    );
+}
+
+#[test]
+fn chat_executor_node_is_refused_before_switching() {
+    let env = common::TestEnv::new();
+    configure(&env, "hello");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+
+    let (code, _stdout, stderr) = run_chat(
+        &env,
+        &[
+            "chat",
+            &id,
+            "--executor",
+            "opencode:deepseek/deepseek-flash#max",
+            "--node",
+            "other",
+        ],
+        "/quit\n",
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("executor node other is not this surface (local)"),
+        "{stderr}"
+    );
+    assert!(
+        env.store().list_switches(&session).expect("switches").is_empty(),
+        "the refused top-level node recorded a switch"
     );
 }
 

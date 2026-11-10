@@ -67,6 +67,9 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
     }
     let store = ctx.store()?;
     let mut session = store.require_session(&opts.session)?;
+    if !opts.follow {
+        ensure_executor_node(ctx, opts.node.as_ref())?;
+    }
 
     if opts.follow {
         return follow_mode(ctx, io, &store, &session, session.last_seq);
@@ -74,6 +77,9 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
 
     let surface = chat_surface(ctx);
     let (mut guard, previous) = acquire(ctx, io, &store, &session, &surface, opts.takeover)?;
+    // The attach note moved the log on, so every display started from here must use the
+    // refreshed row rather than the pre-lease snapshot.
+    session = store.require_session(&session.id)?;
     match &previous {
         Some(lease) if lease.holder != surface.holder => {
             writeln!(io.out(), "took session {} over from {}", session.id, lease.holder)?;
@@ -83,6 +89,17 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
     }
 
     if let Some(target) = &opts.executor {
+        ensure_executor_node(ctx, target.node.as_ref().or(opts.node.as_ref()))?;
+        if let Err(error) = check_lease_with(&store, &session.id, Some(guard.token())) {
+            let _ = error;
+            let current = store.require_session(&session.id)?;
+            writeln!(
+                io.err(),
+                "{}",
+                read_only_notice(&store, &current, ctx.tz_offset_minutes())?
+            )?;
+            return follow_mode(ctx, io, &store, &current, current.last_seq);
+        }
         let switched = crate::cmd::session::switch_to(
             ctx,
             &session.id,
@@ -113,23 +130,25 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
         }
 
         if let Err(error) = check_lease_with(&store, &session.id, Some(guard.token())) {
+            let _ = error;
             writeln!(
                 io.err(),
                 "{}",
                 read_only_notice(&store, &session, ctx.tz_offset_minutes())?
             )?;
-            let _ = error;
-            return follow_mode(ctx, io, &store, &session, session.last_seq);
+            let current = store.require_session(&session.id)?;
+            return follow_mode(ctx, io, &store, &current, current.last_seq);
         }
         match run_turn(ctx, io, &store, &session, &guard, line, opts.node.as_ref()) {
             Ok(TurnStatus::Ok) => {}
             Ok(TurnStatus::Revoked) => {
+                let current = store.require_session(&session.id)?;
                 writeln!(
                     io.err(),
                     "{}",
-                    read_only_notice(&store, &session, ctx.tz_offset_minutes())?
+                    read_only_notice(&store, &current, ctx.tz_offset_minutes())?
                 )?;
-                return follow_mode(ctx, io, &store, &session, session.last_seq);
+                return follow_mode(ctx, io, &store, &current, current.last_seq);
             }
             Err(error) => return Err(error),
         }
@@ -150,6 +169,22 @@ enum TurnStatus {
     Ok,
     /// The home revoked the lease while the turn ran.
     Revoked,
+}
+
+/// Returns the executor node and refuses a node that is not this surface.
+///
+/// The chat process runs the harness on its own machine. Recording a switch to another
+/// node and then executing here would silently ignore the owner's `--node`, so the
+/// mismatch is rejected before any switch or turn is written.
+fn ensure_executor_node(ctx: &Ctx, node: Option<&NodeName>) -> Result<NodeName, CliError> {
+    let surface = ctx.config().node.name.clone();
+    match node {
+        Some(node) if node != &surface => Err(CliError::Invalid(format!(
+            "executor node {node} is not this surface ({surface}); run chat on {node} or omit --node"
+        ))),
+        Some(node) => Ok(node.clone()),
+        None => Ok(surface),
+    }
 }
 
 /// Builds the transient surface row for this terminal.
@@ -246,6 +281,16 @@ fn slash_command(
             Ok(true)
         }
         "switch" => {
+            if let Err(error) = check_lease_with(store, &session.id, Some(guard.token())) {
+                let _ = error;
+                let current = store.require_session(&session.id)?;
+                writeln!(
+                    io.err(),
+                    "{}",
+                    read_only_notice(store, &current, ctx.tz_offset_minutes())?
+                )?;
+                return follow_mode(ctx, io, store, &current, current.last_seq).map(|_| false);
+            }
             let Some(target) = parts.next() else {
                 writeln!(io.err(), "usage: /switch <executor> [--node n]")?;
                 return Ok(true);
@@ -259,6 +304,10 @@ fn slash_command(
                     return Ok(true);
                 }
             };
+            if let Err(error) = ensure_executor_node(ctx, node.as_ref()) {
+                writeln!(io.err(), "vowp: {error}")?;
+                return Ok(true);
+            }
             match crate::cmd::session::switch_to(
                 ctx,
                 &session.id,
@@ -299,13 +348,16 @@ fn slash_command(
             Ok(true)
         }
         "follow" => {
+            let token = guard.token().to_owned();
+            store.release_lease(&session.id, &token)?;
             writeln!(
                 io.out(),
                 "following session {} read-only; press Ctrl-C to stop",
                 session.id
             )?;
-            let _ = store.lease(&session.id)?;
-            follow_mode(ctx, io, store, session, session.last_seq).map(|_| false)
+            let current = store.require_session(&session.id)?;
+            *session = current.clone();
+            follow_mode(ctx, io, store, &current, current.last_seq).map(|_| false)
         }
         "capsule" => {
             check_lease_with(store, &session.id, Some(guard.token()))?;
@@ -324,38 +376,44 @@ fn slash_command(
 
 /// Prints one short status block, no table and no colour.
 fn print_status(ctx: &Ctx, io: &mut dyn IoStreams, store: &Store, session: &Session) -> Result<(), CliError> {
-    writeln!(io.out(), "session: {} ({})", session.id, session.title)?;
-    writeln!(
+    write_wrapped(io.out(), &format!("session: {} ({})", session.id, session.title))?;
+    write_wrapped(
         io.out(),
-        "state: {}  executor: {}  node: {}",
-        state_name(session.state),
-        session
-            .executor
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "-".to_owned()),
-        session.node
+        &format!(
+            "state: {}  executor: {}  node: {}",
+            state_name(session.state),
+            session
+                .executor
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "-".to_owned()),
+            session.node
+        ),
     )?;
-    writeln!(
+    write_wrapped(
         io.out(),
-        "events: {}  capsule: {}",
-        session.last_seq,
-        session
-            .last_capsule_id
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "-".to_owned())
+        &format!(
+            "events: {}  capsule: {}",
+            session.last_seq,
+            session
+                .last_capsule_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "-".to_owned())
+        ),
     )?;
     match store.lease(&session.id)? {
-        Some(lease) => writeln!(
+        Some(lease) => write_wrapped(
             io.out(),
-            "lease: {} ({}) on {} since {}",
-            lease.holder,
-            surface_kind_name(lease.surface_kind),
-            lease.node,
-            clock_time(lease.acquired_at, ctx.tz_offset_minutes())
+            &format!(
+                "lease: {} ({}) on {} since {}",
+                lease.holder,
+                surface_kind_name(lease.surface_kind),
+                lease.node,
+                clock_time(lease.acquired_at, ctx.tz_offset_minutes())
+            ),
         )?,
-        None => writeln!(io.out(), "lease: free")?,
+        None => write_wrapped(io.out(), "lease: free")?,
     }
     Ok(())
 }
@@ -371,15 +429,7 @@ fn run_turn(
     node: Option<&NodeName>,
 ) -> Result<TurnStatus, CliError> {
     let surface_node = ctx.config().node.name.clone();
-    let executor_node = match node {
-        Some(node) if node != &surface_node => {
-            return Err(CliError::Invalid(format!(
-                "executor node {node} is not this surface ({surface_node}); run chat on {node} or omit --node"
-            )));
-        }
-        Some(node) => node.clone(),
-        None => surface_node.clone(),
-    };
+    let executor_node = ensure_executor_node(ctx, node)?;
     let executor = session
         .executor
         .clone()
@@ -390,7 +440,7 @@ fn run_turn(
                 .and_then(|profile| profile.ladder.first().cloned())
         })
         .ok_or_else(|| CliError::Invalid("session has no executor; use /switch".to_owned()))?;
-    let purpose = if session.last_seq == 0 {
+    let purpose = if first_turn(ctx, session)? {
         RunPurpose::Start
     } else {
         RunPurpose::Continue
@@ -449,6 +499,17 @@ fn run_turn(
         ));
     }
     Ok(TurnStatus::Ok)
+}
+
+/// Returns whether this session has not started a turn yet.
+fn first_turn(ctx: &Ctx, session: &Session) -> Result<bool, CliError> {
+    let Ok(log) = SessionLog::open_read(ctx.paths(), &session.id) else {
+        return Ok(session.last_seq <= 1);
+    };
+    let events = log.read_all().map_err(vowp_core::CoreError::from)?;
+    Ok(!events
+        .iter()
+        .any(|event| event.event_type == vowp_protocol::EventType::TurnStarted))
 }
 
 /// Writes the grant document as a private file for `__exec`.
@@ -527,11 +588,11 @@ fn print_new_events(
     for event in events {
         match event.body() {
             Ok(EventBody::AssistantMessage(payload)) => write_wrapped(io.out(), &payload.text)?,
-            Ok(EventBody::ToolCall(payload)) => writeln!(io.out(), "· tool: {}", payload.name)?,
-            Ok(EventBody::Error(payload)) => writeln!(io.out(), "! {}", payload.message)?,
-            Ok(EventBody::Note(payload)) => writeln!(io.out(), "— {}", payload.text)?,
+            Ok(EventBody::ToolCall(payload)) => write_wrapped(io.out(), &format!("· tool: {}", payload.name))?,
+            Ok(EventBody::Error(payload)) => write_wrapped(io.out(), &format!("! {}", payload.message))?,
+            Ok(EventBody::Note(payload)) => write_wrapped(io.out(), &format!("— {}", payload.text))?,
             Ok(_) => {}
-            Err(_) => writeln!(io.out(), "#{} {}", event.seq, event.event_type.as_str())?,
+            Err(_) => write_wrapped(io.out(), &format!("#{} {}", event.seq, event.event_type.as_str()))?,
         }
     }
     Ok(())
