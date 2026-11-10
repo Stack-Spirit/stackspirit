@@ -135,6 +135,7 @@ pub fn backup(deps: &Deps, store: &Store, opts: &BackupOptions) -> Result<Backup
     }
 
     let now = deps.clock.now();
+    let uses_default_destination = directory.is_none();
     let destination = match directory {
         Some(path) => path,
         None => deps.paths.backups_dir().join(compact_timestamp(now)),
@@ -158,7 +159,7 @@ pub fn backup(deps: &Deps, store: &Store, opts: &BackupOptions) -> Result<Backup
     }
     report.directory = destination.display().to_string();
 
-    if opts.to.is_none() {
+    if uses_default_destination {
         rotate_backups(&deps.paths.backups_dir(), &destination)?;
     }
 
@@ -476,7 +477,16 @@ fn copy_sessions(
     skipped: &mut Vec<String>,
 ) -> Result<(), CoreError> {
     let sessions = deps.paths.sessions_dir();
-    if !sessions.is_dir() {
+    let metadata = match fs::symlink_metadata(&sessions) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(&sessions, error)),
+    };
+    if metadata.file_type().is_symlink() {
+        skipped.push(format!("{}: symlink not followed", sessions.display()));
+        return Ok(());
+    }
+    if !metadata.is_dir() {
         return Ok(());
     }
     let mut entries: Vec<PathBuf> = fs::read_dir(&sessions)
@@ -509,7 +519,16 @@ fn copy_sessions(
         }
         for (name, kind) in [("blobs", "session-blob"), ("capsules", "session-capsule")] {
             let directory = session.join(name);
-            if directory.is_dir() {
+            let metadata = match fs::symlink_metadata(&directory) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error(&directory, error)),
+            };
+            if metadata.file_type().is_symlink() {
+                skipped.push(format!("{}: symlink not followed", directory.display()));
+                continue;
+            }
+            if metadata.is_dir() {
                 let target = backup_sessions.join(relative_posix(&sessions, &directory)?);
                 copy_tree(&directory, &target, destination, kind, files, skipped)?;
             }
@@ -527,6 +546,14 @@ fn copy_tree(
     files: &mut Vec<ContentFile>,
     skipped: &mut Vec<String>,
 ) -> Result<(), CoreError> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
+    if metadata.file_type().is_symlink() {
+        skipped.push(format!("{}: symlink not followed", source.display()));
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
     let mut entries: Vec<PathBuf> = fs::read_dir(source)
         .map_err(|error| io_error(source, error))?
         .filter_map(Result::ok)

@@ -1335,3 +1335,134 @@ fn backup_project_database_while_writer_checkpoints() {
     let jobs = restored.list_jobs(&JobFilter::default()).expect("jobs");
     assert!(jobs.len() >= 500, "restored only {} jobs", jobs.len());
 }
+
+#[test]
+fn backup_skips_symlinked_blobs_and_capsules_roots() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = BackupFixture::new();
+    let session = SessionId::new();
+    let session_dir = fixture.env.home_path().join("sessions").join(session.as_str());
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(session_dir.join("log.jsonl"), "{\"seq\":1}\n").expect("log");
+
+    let secret_blobs = fixture.env.home_path().join("secret-blobs");
+    std::fs::create_dir_all(&secret_blobs).expect("secret blobs");
+    std::fs::write(secret_blobs.join("token"), "blob-secret").expect("blob secret");
+    symlink(&secret_blobs, session_dir.join("blobs")).expect("blobs symlink");
+
+    let secret_capsules = fixture.env.home_path().join("secret-capsules");
+    std::fs::create_dir_all(&secret_capsules).expect("secret capsules");
+    std::fs::write(secret_capsules.join("token"), "capsule-secret").expect("capsule secret");
+    symlink(&secret_capsules, session_dir.join("capsules")).expect("capsules symlink");
+
+    let destination = fixture.env.home_path().join("nested-symlink-backup");
+    let report = fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+    let backup_session = destination.join("sessions").join(session.as_str());
+    assert!(!backup_session.join("blobs").exists());
+    assert!(!backup_session.join("capsules").exists());
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.contains("blobs") && entry.contains("symlink not followed")),
+        "{:?}",
+        report.skipped
+    );
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.contains("capsules") && entry.contains("symlink not followed")),
+        "{:?}",
+        report.skipped
+    );
+
+    let restore_home = tempfile::tempdir().expect("restore home");
+    fixture
+        .run_restore(&fixture.store(), &destination, restore_home.path(), false)
+        .expect("restore");
+    assert!(
+        !restore_home
+            .path()
+            .join("sessions")
+            .join(session.as_str())
+            .join("blobs")
+            .join("token")
+            .exists(),
+        "no secret may be restored"
+    );
+}
+
+#[test]
+fn backup_skips_symlinked_sessions_root() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = BackupFixture::new();
+    let session = SessionId::new();
+    let outside = fixture.env.home_path().join("outside-sessions");
+    std::fs::create_dir_all(outside.join(session.as_str())).expect("outside session dir");
+    std::fs::write(outside.join(session.as_str()).join("log.jsonl"), "{\"seq\":1}\n").expect("outside log");
+    let sessions = fixture.env.home_path().join("sessions");
+    std::fs::remove_dir_all(&sessions).expect("remove sessions dir");
+    symlink(&outside, &sessions).expect("sessions symlink");
+
+    let destination = fixture.env.home_path().join("root-symlink-backup");
+    let report = fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+    assert!(!destination.join("sessions").exists());
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.contains("sessions") && entry.contains("symlink not followed")),
+        "{:?}",
+        report.skipped
+    );
+}
+
+#[test]
+fn backup_to_offsite_rotates_default_backups() {
+    let fixture = BackupFixture::new();
+    let store = fixture.store();
+    let start = timestamp("2026-01-01T02:00:00Z");
+    for day in 0..20 {
+        fixture.clock.set(start.plus(Duration::from_secs(day * 24 * 60 * 60)));
+        let report = fixture
+            .run_backup(
+                &store,
+                BackupOptions {
+                    to: Some("rsync://backup.example/rotated".to_owned()),
+                    ..BackupOptions::default()
+                },
+            )
+            .expect("offsite backup");
+        assert_eq!(report.offsite.as_deref(), Some("rsync://backup.example/rotated"));
+    }
+
+    let names = backup_directories(&fixture.env.home_path().join("backups"));
+    assert_eq!(names.len(), 9, "{names:?}");
+    for day in [
+        "20260104", "20260111", "20260114", "20260115", "20260116", "20260117", "20260118", "20260119", "20260120",
+    ] {
+        assert!(
+            names.iter().any(|name| name.starts_with(day)),
+            "missing {day} in {names:?}"
+        );
+    }
+}
