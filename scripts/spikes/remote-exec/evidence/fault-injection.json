@@ -1,0 +1,64 @@
+{
+  "ack_rtt": {
+    "count": 200,
+    "max_ms": 13.892,
+    "mean_ms": 2.883,
+    "min_ms": 0.211,
+    "p50_ms": 2.05,
+    "p90_ms": 5.064,
+    "p95_ms": 7.514,
+    "p99_ms": 13.292
+  },
+  "connect": {
+    "count": 4,
+    "max_ms": 246.196,
+    "mean_ms": 199.982,
+    "min_ms": 133.502,
+    "p50_ms": 187.362,
+    "p90_ms": 246.196,
+    "p95_ms": 246.196,
+    "p99_ms": 246.196
+  },
+  "cuts": [
+    {
+      "ack_seen": true,
+      "bytes": null,
+      "conn": 0,
+      "id": "evt-000035",
+      "line": 37,
+      "mode": "ack_lost"
+    },
+    {
+      "ack_seen": false,
+      "bytes": 111,
+      "conn": 1,
+      "id": null,
+      "line": 41,
+      "mode": "mid_line"
+    },
+    {
+      "ack_seen": true,
+      "bytes": null,
+      "conn": 2,
+      "id": "evt-000090",
+      "line": 23,
+      "mode": "ack_lost"
+    }
+  ],
+  "duplicate_acks": 6,
+  "duration_ms": 1652.93,
+  "events": 200,
+  "home_last_seq": 200,
+  "reconnects": 3,
+  "resent": 12,
+  "scenario": "200 events, window 4, cuts at connection 0 line 37 (ack_lost), connection 1 line 41 (mid_line), connection 2 line 23 (ack_lost)",
+  "sends": 212,
+  "status": "ok",
+  "verify": {
+    "errors": [],
+    "events": 200,
+    "home_records": 200,
+    "last_seq": 200,
+    "ok": true
+  }
+}

@@ -1,0 +1,15 @@
+test_client_crash_resumes_from_spool (test_remote_exec.SpikeTest.test_client_crash_resumes_from_spool) ... ok
+test_ingest_assigns_contiguous_seq_and_dedupes_by_id (test_remote_exec.SpikeTest.test_ingest_assigns_contiguous_seq_and_dedupes_by_id) ... ok
+test_ingest_rejects_a_lease_that_is_not_active (test_remote_exec.SpikeTest.test_ingest_rejects_a_lease_that_is_not_active) ... ok
+test_ingest_rejects_reused_id_with_different_content (test_remote_exec.SpikeTest.test_ingest_rejects_reused_id_with_different_content) ... ok
+test_ingest_truncates_a_torn_final_line_before_appending (test_remote_exec.SpikeTest.test_ingest_truncates_a_torn_final_line_before_appending) ... ok
+test_large_events_survive_a_cut (test_remote_exec.SpikeTest.test_large_events_survive_a_cut) ... ok
+test_lease_revoked_notice_reaches_the_client_within_2s (test_remote_exec.SpikeTest.test_lease_revoked_notice_reaches_the_client_within_2s) ... ok
+test_scan_home_log_rejects_a_gap (test_remote_exec.SpikeTest.test_scan_home_log_rejects_a_gap) ... ok
+test_stream_survives_three_ssh_cuts (test_remote_exec.SpikeTest.test_stream_survives_three_ssh_cuts) ... ok
+test_verify_rejects_a_log_with_a_gap (test_remote_exec.SpikeTest.test_verify_rejects_a_log_with_a_gap) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 4.300s
+
+OK

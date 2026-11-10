@@ -1,0 +1,31 @@
+{
+  "first": {
+    "acks": 57,
+    "duplicate_acks": 0,
+    "duration_ms": 261.944,
+    "events": 120,
+    "reconnects": 0,
+    "resent": 0,
+    "sends": 58,
+    "status": "reconnect-limit"
+  },
+  "first_exit": 75,
+  "resume": {
+    "acks": 120,
+    "duplicate_acks": 1,
+    "duration_ms": 279.409,
+    "events": 120,
+    "reconnects": 0,
+    "resent": 0,
+    "sends": 63,
+    "status": "ok"
+  },
+  "scenario": "120 events, window 1; client killed by the 0-reconnect budget at connection 0 line 60 (ack_lost); a new process resumes from the spool and acks it",
+  "verify": {
+    "errors": [],
+    "events": 120,
+    "home_records": 120,
+    "last_seq": 120,
+    "ok": true
+  }
+}
