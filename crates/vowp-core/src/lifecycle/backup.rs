@@ -100,6 +100,16 @@ pub fn backup(deps: &Deps, store: &Store, opts: &BackupOptions) -> Result<Backup
             "backup cannot be combined with --restore/--to-home; use the restore form".to_owned(),
         ));
     }
+    if opts.force {
+        return Err(CoreError::Invalid("--force is only valid with --restore".to_owned()));
+    }
+    if let Some(recipient) = opts.encrypt.as_deref()
+        && recipient.trim().is_empty()
+    {
+        return Err(CoreError::Invalid(
+            "--encrypt needs a non-empty age recipient".to_owned(),
+        ));
+    }
 
     let mut offsite = opts.offsite.clone();
     let mut directory = None;
@@ -534,7 +544,12 @@ fn copy_sessions(
     let backup_sessions = destination.join("sessions");
     entries.sort();
     for session in entries {
-        if !session.is_dir() {
+        let metadata = fs::symlink_metadata(&session).map_err(|error| io_error(&session, error))?;
+        if metadata.file_type().is_symlink() {
+            skipped.push(format!("{}: symlink not followed", session.display()));
+            continue;
+        }
+        if !metadata.is_dir() {
             continue;
         }
         for name in [SESSION_LOG, "adapters.json", "summary.md"] {

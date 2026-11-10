@@ -872,6 +872,10 @@ fn backup_directory_and_restore_via_cli() {
     assert!(backup.join("global.db").is_file());
     assert!(backup.join("manifest.json").is_file());
 
+    // An explicit destination is replaced atomically on the next run.
+    let (code, _stdout, stderr) = env.run(&["backup", "--to", &backup_text]);
+    assert_eq!(code, 0, "replace explicit backup: {stderr}");
+
     let restore = env.home_path().join("cli-restored");
     let restore_text = restore.display().to_string();
     let (code, stdout, stderr) = env.run(&["backup", "--restore", &backup_text, "--to-home", &restore_text]);
@@ -1148,4 +1152,84 @@ fn backup_counts_match_snapshot_with_concurrent_writes() {
         live.len() as u64 > expected,
         "the live store must have rows the snapshot does not"
     );
+}
+
+#[test]
+fn backup_rejects_force_without_restore() {
+    let env = common::TestEnv::new();
+    let (code, _stdout, stderr) = env.run(&["backup", "--force"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    let backups = env.home_path().join("backups");
+    assert_eq!(backup_directories(&backups).len(), 0);
+}
+
+#[test]
+fn legacy_backup_validates_encryption_before_writing() {
+    let env = common::TestEnv::new();
+    let path = env.home_path().join("empty-recipient.db");
+    let path_text = path.display().to_string();
+    let (code, _stdout, stderr) = env.run(&["backup", "--to", &path_text, "--encrypt", " "]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(!path.exists(), "plaintext backup must not be written");
+    assert!(!Path::new(&format!("{path_text}.age")).exists());
+}
+
+#[test]
+fn backup_skips_symlinked_session_directories() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = BackupFixture::new();
+    let session = SessionId::new();
+    let outside = fixture.env.home_path().join("outside-session");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    std::fs::write(outside.join("log.jsonl"), "{\"seq\":1}\n").expect("outside log");
+    let sessions = fixture.env.home_path().join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    symlink(&outside, sessions.join(session.as_str())).expect("session symlink");
+
+    let destination = fixture.env.home_path().join("symlink-backup");
+    let report = fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.contains("symlink not followed")),
+        "{:?}",
+        report.skipped
+    );
+    assert!(!destination.join("sessions").join(session.as_str()).exists());
+}
+
+#[test]
+fn backup_offsite_alias_copies_the_default_backup() {
+    let fixture = BackupFixture::new();
+    let target = "rsync://backup.example/alias";
+    let report = fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                offsite: Some(target.to_owned()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("offsite alias backup");
+    assert_eq!(report.offsite.as_deref(), Some(target));
+    assert!(Path::new(&report.directory).join("global.db").is_file());
+    let rsync = fixture
+        .runner
+        .calls()
+        .into_iter()
+        .find(|call| call.argv.first().map(String::as_str) == Some("rsync"))
+        .expect("rsync call");
+    assert_eq!(rsync.argv[3], target);
+    assert!(rsync.shell.is_none());
 }
