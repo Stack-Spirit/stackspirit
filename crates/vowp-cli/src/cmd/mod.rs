@@ -4,6 +4,8 @@
 //! A command whose handler is not implemented yet is an explicit `NotImplemented` stub here,
 //! never a silent no-op.
 
+use std::path::Path;
+
 use crate::cli::{BackupArgs, ChatArgs, Command, MaintCommand, PromoteCommand, SessionCommand, UpCommand};
 use crate::{CliError, Ctx, IoStreams};
 
@@ -72,7 +74,27 @@ pub(crate) fn command_needs_v0_2_handler(command: &Command) -> bool {
 /// The v0.1 handler only writes the legacy single-DB copy. H2 fills the directory,
 /// offsite, encrypted and restore forms.
 fn backup_needs_v0_2_handler(args: &BackupArgs) -> bool {
-    args.offsite.is_some() || args.encrypt.is_some() || args.restore.is_some() || args.to_home.is_some() || args.force
+    args.offsite.is_some()
+        || args.encrypt.is_some()
+        || args.restore.is_some()
+        || args.to_home.is_some()
+        || args.force
+        || args.to.as_deref().is_some_and(backup_target_needs_v0_2_handler)
+}
+
+/// Returns whether a `--to` value names a v0.2 form H2 owns.
+///
+/// The only v0.1 form kept is the legacy single-file `*.db` copy. Offsite targets,
+/// trailing-slash directories and existing directories are refused in C0 instead of
+/// being written as a local file named after the target.
+fn backup_target_needs_v0_2_handler(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let offsite = text.starts_with("rsync://")
+        || text.starts_with("git:")
+        || text.contains("://")
+        || (text.contains('@') && text.contains(':'));
+    let directory = text.ends_with('/') || path.is_dir();
+    offsite || directory || !text.ends_with(".db")
 }
 
 /// Runs one command with a built context.
