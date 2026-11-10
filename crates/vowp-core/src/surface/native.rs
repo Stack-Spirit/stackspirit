@@ -144,7 +144,10 @@ pub trait AppHost: Send + Sync {
     fn health(&self, handle: &AppHandle) -> Result<HostHealth, CoreError>;
     /// Returns the join instructions for the three surfaces.
     fn join_instructions(&self, handle: &AppHandle) -> Result<vowp_protocol::JoinInstructions, CoreError>;
-    /// Reads transcript entries after `cursor`.
+    /// Reads the transcript entries the mirror should consider after `cursor`.
+    ///
+    /// A host may replay a spool and rely on the mirror's `native_events` map for
+    /// idempotency; the returned batch cursor is the last entry it read.
     fn transcript_since(&self, handle: &AppHandle, cursor: &MirrorCursor) -> Result<TranscriptBatch, CoreError>;
 }
 
