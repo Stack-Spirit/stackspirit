@@ -149,8 +149,7 @@ if [ "$mode" = "hog" ]; then
         printf '%s\n' "fake-worker: --hog needs python3" >&2
         exit 1
     fi
-    log_line "hog $job allocating ${hog_mb}MiB for ${hog_hold}s"
-    python3 - "$hog_mb" "$hog_hold" <<'PY'
+    python3 - "$hog_mb" "$hog_hold" <<'PY' &
 import sys
 import time
 
@@ -170,6 +169,14 @@ time.sleep(hold_seconds)
 # Release explicitly before exit so a following job can reuse the memory.
 blocks.clear()
 PY
+    hog_pid=$!
+    # The PID lets the self-test read VmHWM from /proc while the hog holds its
+    # memory, so a worker that only logged and slept cannot pass.
+    log_line "hog $job allocating ${hog_mb}MiB for ${hog_hold}s pid=$hog_pid"
+    if ! wait "$hog_pid"; then
+        printf '%s\n' "fake-worker: memory hog failed for $job" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p src

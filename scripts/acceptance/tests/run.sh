@@ -182,8 +182,22 @@ host_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-selftest.XXXXXX")
 (
     # shellcheck source=../lib.sh
     . "$ACCEPTANCE_DIR/lib.sh"
+    real_first=$(acceptance_find_real_tmux)
+    case "$real_first" in
+        "$host_root"/*) exit 1 ;;
+    esac
     acceptance_env_init "$host_root/runtime" "selftest-host-$$"
     [ -d "$TMUX_TMPDIR" ] || exit 1
+    real_second=$(acceptance_find_real_tmux)
+    [ "$real_first" = "$real_second" ] || exit 1
+    acceptance_env_init "$host_root/runtime" "selftest-host-$$"
+    real_third=$(acceptance_find_real_tmux)
+    [ "$real_first" = "$real_third" ] || exit 1
+    # Even without the cached path, the generated wrapper on PATH is skipped.
+    unset VOWP_ACCEPTANCE_REAL_TMUX
+    real_scanned=$(acceptance_find_real_tmux)
+    [ "$real_first" = "$real_scanned" ] || exit 1
+    grep -Fq "exec \"$real_first\"" "$host_root/runtime/bin/tmux" || exit 1
     if tmux -L "$(printf '%s' default)" ls >/dev/null 2>&1; then
         exit 1
     fi
@@ -223,6 +237,48 @@ fi
 [ ! -e "$guard_root/escape" ] || fail "make-v01-home.sh escaped its destination"
 rm -rf -- "$guard_root"
 
+say "checking the destination allowlist and the generator's exit codes"
+dest_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-dest.XXXXXX")
+ln -s /etc "$dest_root/etc-link"
+(
+    # shellcheck source=../lib.sh
+    . "$ACCEPTANCE_DIR/lib.sh"
+    for bad in / /etc /etc/passwd /usr /usr/bin /bin /sbin /boot /dev /proc /sys \
+        /var /var/lib /opt /root /root/keep /home /tmp /var/tmp "$HOME" "$HOME/" \
+        "$dest_root/etc-link" "$dest_root/etc-link/passwd"; do
+        if (acceptance_validate_dest "$bad") >/dev/null 2>&1; then
+            printf 'accepted unsafe destination: %s\n' "$bad" >&2
+            exit 1
+        fi
+    done
+    for good in /tmp/vowp-acceptance-dest /var/tmp/vowp-acceptance-dest \
+        "$HOME/vowp-acceptance-dest"; do
+        (acceptance_validate_dest "$good") || exit 1
+    done
+    (cd /tmp && acceptance_validate_dest vowp-acceptance-dest) || exit 1
+    if (acceptance_validate_dest /etc 2) >/dev/null 2>&1; then
+        exit 1
+    else
+        [ "$?" -eq 2 ] || exit 1
+    fi
+) || fail "the destination allowlist did not behave"
+rm -rf -- "$dest_root"
+
+if bash "$ACCEPTANCE_DIR/make-v01-home.sh" --help >/dev/null 2>&1; then
+    :
+else
+    fail "make-v01-home.sh --help did not exit 0"
+fi
+for bad_args in "--jobs nope --dest /tmp/unused" "--dest" "--unknown"; do
+    # shellcheck disable=SC2086
+    if bash "$ACCEPTANCE_DIR/make-v01-home.sh" $bad_args >/dev/null 2>&1; then
+        fail "make-v01-home.sh accepted bad arguments: $bad_args"
+    else
+        status=$?
+    fi
+    [ "$status" -eq 2 ] || fail "make-v01-home.sh bad arguments exited $status, not 2: $bad_args"
+done
+
 # --- build -----------------------------------------------------------------
 
 if [ "$NO_BUILD" -eq 1 ]; then
@@ -255,6 +311,10 @@ assert_contains "$out" "vps" "container hostname is not vps"
 assert_contains "$out" "/usr/bin/sudo" "sudo is missing from the sudo variant"
 assert_not_contains "$out" "/vowp" "the image already contains a vowp binary"
 
+say "checking the fresh home has no ~/.vowp before setup"
+bash "$RIG" ssh --name "$sudo_name" 'test ! -e "$HOME/.vowp"' \
+    || fail "the fresh home already has ~/.vowp before setup"
+
 bash "$RIG" ssh --name "$sudo_name" 'sudo -n true' || fail "passwordless sudo does not work"
 bash "$RIG" ssh --name "$sudo_name" 'test -d "$TMUX_TMPDIR" && test -n "$VOWP_ACCEPTANCE_TMUX_SOCKET"' \
     || fail "the SSH session has no private tmux environment"
@@ -273,6 +333,48 @@ out=$(bash "$RIG" phone --name "$sudo_name" 'echo phone-ok; id -un; hostname') \
 assert_contains "$out" "phone-ok" "phone command did not run"
 assert_contains "$out" "vowp" "phone did not log in as vowp"
 assert_contains "$out" "vps" "phone reached the wrong host"
+
+say "checking the phone container's private tmux wrapper"
+phone_env=(
+    -e "HOME=/home/phone"
+    -e "TMUX_TMPDIR=$RIG_PHONE_TMUX_TMPDIR"
+    -e "VOWP_ACCEPTANCE_TMUX_SOCKET=$RIG_TMUX_SOCKET"
+)
+docker exec -u phone "${phone_env[@]}" "$sudo_phone" \
+    sh -c 'test -d "$TMUX_TMPDIR" && test -n "$VOWP_ACCEPTANCE_TMUX_SOCKET"' \
+    || fail "the phone container has no private tmux environment"
+out=$(docker exec -u phone "${phone_env[@]}" "$sudo_phone" \
+    sh -c 'socket=$(printf "%s" default); tmux -L "$socket" ls' 2>&1 || true)
+assert_contains "$out" "refusing the default tmux socket" "the phone tmux wrapper did not refuse the default socket"
+out=$(docker exec -u phone "${phone_env[@]}" "$sudo_phone" \
+    sh -c 'TMUX_TMPDIR= tmux ls' 2>&1 || true)
+assert_contains "$out" "refusing an unset or shared TMUX_TMPDIR" "the phone tmux wrapper did not refuse an empty TMUX_TMPDIR"
+out=$(docker exec -u phone "${phone_env[@]}" "$sudo_phone" \
+    sh -c 'tmux -S /tmp/forbidden-tmux-socket ls' 2>&1 || true)
+assert_contains "$out" "refusing an explicit -S socket path" "the phone tmux wrapper did not refuse an explicit -S"
+
+say "checking up repairs a stopped or missing phone container"
+home_id=$(docker inspect -f '{{.Id}}' "$sudo_home")
+docker stop "$sudo_phone" >/dev/null
+out=$(bash "$RIG" up --name "$sudo_name") \
+    || fail "up did not repair the stopped phone container"
+assert_contains "$out" "repairing the stopped or missing phone container" \
+    "up did not report the stopped phone repair"
+[ "$(docker inspect -f '{{.Id}}' "$sudo_home")" = "$home_id" ] \
+    || fail "up recreated the home container while repairing the phone"
+[ "$(docker inspect -f '{{.State.Running}}' "$sudo_phone")" = "true" ] \
+    || fail "up left the phone container stopped"
+bash "$RIG" phone --name "$sudo_name" 'echo phone-repair-ok' >/dev/null \
+    || fail "the repaired phone container cannot reach the home"
+docker rm -f "$sudo_phone" >/dev/null
+out=$(bash "$RIG" up --name "$sudo_name") \
+    || fail "up did not recreate a missing phone container"
+assert_contains "$out" "repairing the stopped or missing phone container" \
+    "up did not report the missing phone repair"
+[ "$(docker inspect -f '{{.Id}}' "$sudo_home")" = "$home_id" ] \
+    || fail "up recreated the home container while recreating the phone"
+bash "$RIG" phone --name "$sudo_name" 'echo phone-repair-ok' >/dev/null \
+    || fail "the recreated phone container cannot reach the home"
 
 say "checking env, status, list, logs, the phone key and the RIG_NAME default"
 out=$(bash "$RIG" ssh 'echo default-name-ok') \
@@ -325,21 +427,61 @@ grep -q -- "--id fixture-1" /home/vowp/seed-args
 grep -q -- "--id fixture-2" /home/vowp/seed-args
 ' || fail "seed-jobs.sh did not add the expected jobs"
 
-say "running the memory-hog worker once"
+say "running the memory-hog worker once and checking its peak RSS"
 out=$(bash "$RIG" ssh --name "$sudo_name" '
 set -e
 cd /home/vowp/projects/hog
+log=/home/vowp/hog-worker.log
+: >"$log"
+printf "%s\n" "You are the worker for job hog-smoke of project hog. write your report to /home/vowp/projects/hog/.vowp/jobs/hog-smoke/report.md" >/home/vowp/hog-prompt
 start=$(date +%s)
-printf "%s\n" "You are the worker for job hog-smoke of project hog. write your report to /home/vowp/projects/hog/.vowp/jobs/hog-smoke/report.md" \
-    | VOWP_ACCEPTANCE_WORKER_LOG=/home/vowp/hog-worker.log .acceptance/bin/hog-worker
+VOWP_ACCEPTANCE_WORKER_LOG="$log" .acceptance/bin/hog-worker </home/vowp/hog-prompt &
+worker_pid=$!
+hog_pid=
+attempt=0
+while [ "$attempt" -lt 200 ]; do
+    hog_pid=$(sed -n "s/.* allocating [0-9]*MiB for [0-9]*s pid=\([0-9][0-9]*\).*/\1/p" "$log" 2>/dev/null | tail -n 1)
+    [ -n "$hog_pid" ] && break
+    kill -0 "$worker_pid" 2>/dev/null || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+test -n "$hog_pid" || { echo "hog pid missing" >&2; exit 1; }
+vmhwm=0
+attempt=0
+while [ "$attempt" -lt 200 ]; do
+    if [ -r "/proc/$hog_pid/status" ]; then
+        vmhwm=$(grep "^VmHWM:" "/proc/$hog_pid/status" | tr -s "[:space:]" " " | cut -d" " -f2)
+    fi
+    [ "${vmhwm:-0}" -ge 24576 ] && break
+    kill -0 "$hog_pid" 2>/dev/null || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+wait "$worker_pid"
 end=$(date +%s)
 test $((end - start)) -ge 2
 test -f src/hog-smoke.txt
 test -f .vowp/jobs/hog-smoke/report.md
-grep -q "allocating 32MiB" /home/vowp/hog-worker.log
-echo "hog-worker-ok elapsed=$((end-start))"
+grep -q "allocating 32MiB" "$log"
+test "${vmhwm:-0}" -ge 24576
+echo "hog-worker-ok elapsed=$((end-start)) vmhwm_kb=$vmhwm"
 ')
 assert_contains "$out" "hog-worker-ok" "the memory-hog worker did not finish"
+assert_contains "$out" "vmhwm_kb=" "the memory-hog worker did not report a peak RSS"
+
+say "checking rig.sh v01-home forwards the release overrides"
+env_check=$(
+    VOWP_V010_BASE_URL=http://127.0.0.1:9 \
+        VOWP_V010_TARGET=acceptance-env-check \
+        bash "$RIG" v01-home --name "$sudo_name" --dest /home/vowp/acceptance/env-check 2>&1 || true
+)
+assert_contains "$env_check" "http://127.0.0.1:9/v0.1.0/" \
+    "rig.sh v01-home did not forward VOWP_V010_BASE_URL"
+assert_contains "$env_check" "acceptance-env-check" \
+    "rig.sh v01-home did not forward VOWP_V010_TARGET"
+bash "$RIG" ssh --name "$sudo_name" 'rm -rf /home/vowp/acceptance/env-check' \
+    || fail "could not remove the v01-home forwarding probe"
 
 if [ "$SKIP_V01" -eq 0 ]; then
     say "generating a published v0.1 home inside the rig (network)"
@@ -377,6 +519,8 @@ out=$(bash "$RIG" ssh --name "$nosudo_name" 'id -u; command -v sudo || true; com
 assert_contains "$out" "1001" "the no-sudo rig did not run as the unprivileged user"
 assert_not_contains "$out" "sudo" "the no-sudo image contains sudo"
 assert_not_contains "$out" "/vowp" "the no-sudo image contains a vowp binary"
+bash "$RIG" ssh --name "$nosudo_name" 'test ! -e "$HOME/.vowp"' \
+    || fail "the fresh no-sudo home already has ~/.vowp before setup"
 
 bash "$RIG" phone --name "$nosudo_name" 'echo phone-nosudo-ok' >/dev/null || fail "phone failed on the no-sudo rig"
 bash "$RIG" fixture --name "$nosudo_name" hello /home/vowp/projects/hello \

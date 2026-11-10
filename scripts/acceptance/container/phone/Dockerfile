@@ -5,7 +5,11 @@
 # the owner's keys, host files or host tmux server. Running commands here is how
 # the acceptance tests play the phone surface over a separate SSH connection.
 #
-# Build context is this directory (scripts/acceptance/container/phone).
+# It installs the same private tmux wrapper as the home image, so a test that
+# runs tmux here can never reach the container's default server either.
+#
+# Build context is scripts/acceptance/container, not this directory:
+#   docker build -f container/phone/Dockerfile -t vowp-acceptance/phone:local container
 
 FROM ubuntu:24.04
 
@@ -30,7 +34,8 @@ RUN groupadd --gid 1001 phone \
     && useradd --create-home --uid 1001 --gid phone --shell /bin/bash phone \
     && install -d -m 0700 -o phone -g phone /home/phone/.ssh
 
-COPY entrypoint.sh /usr/local/bin/phone-entrypoint
-RUN chmod 0755 /usr/local/bin/phone-entrypoint
+COPY tmux-wrapper.sh /usr/local/bin/tmux
+COPY phone/entrypoint.sh /usr/local/bin/phone-entrypoint
+RUN chmod 0755 /usr/local/bin/tmux /usr/local/bin/phone-entrypoint
 
 ENTRYPOINT ["/usr/local/bin/phone-entrypoint"]

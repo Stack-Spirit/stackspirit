@@ -153,7 +153,10 @@ cmd_build() {
             "$HERE/container"
     fi
     say "building $PHONE_IMAGE"
-    docker build ${extra[@]+"${extra[@]}"} -t "$PHONE_IMAGE" "$HERE/container/phone"
+    docker build ${extra[@]+"${extra[@]}"} \
+        -f "$HERE/container/phone/Dockerfile" \
+        -t "$PHONE_IMAGE" \
+        "$HERE/container"
     say "images ready"
 }
 
@@ -169,7 +172,7 @@ ensure_images() {
     fi
     if ! docker image inspect "$PHONE_IMAGE" >/dev/null 2>&1; then
         say "image $PHONE_IMAGE is missing; building it"
-        docker build -t "$PHONE_IMAGE" "$HERE/container/phone"
+        docker build -f "$HERE/container/phone/Dockerfile" -t "$PHONE_IMAGE" "$HERE/container"
     fi
 }
 
@@ -213,6 +216,21 @@ wait_for_phone() {
     return 1
 }
 
+start_phone_container() {
+    say "starting phone client $RIG_PHONE_CONTAINER"
+    docker run -d \
+        --name "$RIG_PHONE_CONTAINER" \
+        --hostname phone \
+        --label "vowp.acceptance.name=$RIG_NAME" \
+        --label "vowp.acceptance.role=phone" \
+        --network "$RIG_NETWORK" \
+        --env "HOME=/home/phone" \
+        --env "TMUX_TMPDIR=$RIG_PHONE_TMUX_TMPDIR" \
+        --env "VOWP_ACCEPTANCE_TMUX_SOCKET=$RIG_TMUX_SOCKET" \
+        --volume "$RIG_STATE_DIR/phone:/run/vowp-rig/phone:ro" \
+        "$PHONE_IMAGE" >/dev/null
+}
+
 write_state() {
     local file
     file=$(state_file)
@@ -231,6 +249,7 @@ write_state() {
         printf 'RIG_USER_HOME=%q\n' "$RIG_USER_HOME"
         printf 'RIG_HOME=%q\n' "$RIG_HOME"
         printf 'RIG_TMUX_TMPDIR=%q\n' "$RIG_TMUX_TMPDIR"
+        printf 'RIG_PHONE_TMUX_TMPDIR=%q\n' "$RIG_PHONE_TMUX_TMPDIR"
         printf 'RIG_TMUX_SOCKET=%q\n' "$RIG_TMUX_SOCKET"
         printf 'RIG_IN_CONTAINER_SCRIPTS=%q\n' "$RIG_IN_CONTAINER_SCRIPTS"
     } >"$file"
@@ -270,8 +289,30 @@ cmd_up() {
     if [ -e "$(state_file)" ]; then
         load_state
         if container_running "$RIG_HOME_CONTAINER"; then
-            say "rig '$name' is already up"
-            say "run: eval \"\$(bash $0 env --name $name)\""
+            if container_running "$RIG_PHONE_CONTAINER"; then
+                say "rig '$name' is already up"
+                say "run: eval \"\$(bash $0 env --name $name)\""
+                return 0
+            fi
+            RIG_PHONE_TMUX_TMPDIR=${RIG_PHONE_TMUX_TMPDIR:-/home/phone/.acceptance/tmux}
+            if ! docker image inspect "$PHONE_IMAGE" >/dev/null 2>&1; then
+                die "phone image $PHONE_IMAGE is missing; run 'bash $0 build' to repair the phone container"
+            fi
+            say "home container is running; repairing the stopped or missing phone container"
+            docker rm -f "$RIG_PHONE_CONTAINER" >/dev/null 2>&1 || true
+            if ! start_phone_container; then
+                docker rm -f "$RIG_PHONE_CONTAINER" >/dev/null 2>&1 || true
+                die "could not start the replacement phone container"
+            fi
+            if ! wait_for_phone "$RIG_PHONE_CONTAINER" "$RIG_HOME_CONTAINER"; then
+                docker logs "$RIG_PHONE_CONTAINER" >&2 || true
+                docker rm -f "$RIG_PHONE_CONTAINER" >/dev/null 2>&1 || true
+                die "the repaired phone container could not reach the home container"
+            fi
+            write_state
+            say "rig '$name' is up (phone container repaired)"
+            say "phone: bash $0 phone --name $name"
+            say "env:   eval \"\$(bash $0 env --name $name)\""
             return 0
         fi
         say "reusing kept state at $RIG_STATE_DIR"
@@ -300,6 +341,7 @@ cmd_up() {
     RIG_USER_HOME=/home/vowp
     RIG_HOME=/home/vowp/.vowp
     RIG_TMUX_TMPDIR=/home/vowp/.acceptance/tmux
+    RIG_PHONE_TMUX_TMPDIR=/home/phone/.acceptance/tmux
     RIG_TMUX_SOCKET="vowp-acceptance-$name"
     RIG_IN_CONTAINER_SCRIPTS=$IN_CONTAINER_SCRIPTS
 
@@ -387,20 +429,12 @@ EOF
         die "sshd did not become ready in $RIG_HOME_CONTAINER"
     fi
 
-    say "starting phone client $RIG_PHONE_CONTAINER"
-    docker run -d \
-        --name "$RIG_PHONE_CONTAINER" \
-        --hostname phone \
-        --label "vowp.acceptance.name=$name" \
-        --label "vowp.acceptance.role=phone" \
-        --network "$RIG_NETWORK" \
-        --volume "$RIG_STATE_DIR/phone:/run/vowp-rig/phone:ro" \
-        "$PHONE_IMAGE" >/dev/null || {
+    if ! start_phone_container; then
         docker rm -f "$RIG_PHONE_CONTAINER" >/dev/null 2>&1 || true
         docker rm -f "$RIG_HOME_CONTAINER" >/dev/null 2>&1 || true
         docker network rm "$RIG_NETWORK" >/dev/null 2>&1 || true
         die "could not start the phone container"
-    }
+    fi
 
     if ! wait_for_phone "$RIG_PHONE_CONTAINER" "$RIG_HOME_CONTAINER"; then
         docker logs "$RIG_PHONE_CONTAINER" >&2 || true
@@ -552,6 +586,7 @@ cmd_env() {
     printf 'export RIG_USER_HOME=%q\n' "$RIG_USER_HOME"
     printf 'export RIG_HOME=%q\n' "$RIG_HOME"
     printf 'export RIG_TMUX_TMPDIR=%q\n' "$RIG_TMUX_TMPDIR"
+    printf 'export RIG_PHONE_TMUX_TMPDIR=%q\n' "$RIG_PHONE_TMUX_TMPDIR"
     printf 'export RIG_TMUX_SOCKET=%q\n' "$RIG_TMUX_SOCKET"
     printf 'export RIG_IN_CONTAINER_SCRIPTS=%q\n' "$RIG_IN_CONTAINER_SCRIPTS"
 }
@@ -588,6 +623,7 @@ ssh_args() {
     printf '%s\0' \
         -p "$RIG_SSH_PORT" \
         -i "$1" \
+        -o IdentitiesOnly=yes \
         -o BatchMode=yes \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
@@ -653,10 +689,15 @@ cmd_phone() {
     if [ -t 0 ] && [ -t 1 ]; then
         tty=(-it)
     fi
+    local env_args=(
+        -e "HOME=/home/phone"
+        -e "TMUX_TMPDIR=${RIG_PHONE_TMUX_TMPDIR:-/home/phone/.acceptance/tmux}"
+        -e "VOWP_ACCEPTANCE_TMUX_SOCKET=$RIG_TMUX_SOCKET"
+    )
     if [ "$#" -eq 0 ]; then
-        exec docker exec ${tty[@]+"${tty[@]}"} -u phone -e HOME=/home/phone "$RIG_PHONE_CONTAINER" ssh home
+        exec docker exec ${tty[@]+"${tty[@]}"} -u phone "${env_args[@]}" "$RIG_PHONE_CONTAINER" ssh home
     fi
-    exec docker exec ${tty[@]+"${tty[@]}"} -u phone -e HOME=/home/phone "$RIG_PHONE_CONTAINER" ssh home "$@"
+    exec docker exec ${tty[@]+"${tty[@]}"} -u phone "${env_args[@]}" "$RIG_PHONE_CONTAINER" ssh home "$@"
 }
 
 cmd_exec() {
@@ -794,6 +835,14 @@ cmd_v01_home() {
     while IFS= read -r -d '' item; do
         env_args+=("$item")
     done < <(container_env_args)
+    # docker exec does not inherit the caller's environment, so forward the
+    # documented generator overrides explicitly.
+    if [ -n "${VOWP_V010_BASE_URL:-}" ]; then
+        env_args+=(-e "VOWP_V010_BASE_URL=$VOWP_V010_BASE_URL")
+    fi
+    if [ -n "${VOWP_V010_TARGET:-}" ]; then
+        env_args+=(-e "VOWP_V010_TARGET=$VOWP_V010_TARGET")
+    fi
     docker exec -i -u vowp "${env_args[@]}" \
         -e "VOWP_V010_CACHE=$RIG_USER_HOME/.cache/vowp-acceptance" \
         -w "$RIG_USER_HOME" \

@@ -27,6 +27,11 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 WORKER_SOURCE="$SCRIPT_DIR/fake-worker.sh"
 
+# The shared validator is authoritative here too, so the fixture and the v0.1
+# generator can never drift into different destination rules.
+# shellcheck source=../lib.sh
+. "$SCRIPT_DIR/../lib.sh"
+
 say() {
     printf 'acceptance fixture: %s\n' "$*"
 }
@@ -85,14 +90,7 @@ case "$hog_hold" in
 esac
 
 [ -n "$dest" ] || die "destination is required"
-case "$dest" in
-    ""|.|..|/|/tmp|/var/tmp|/home|/home/vowp|"$HOME"|"$HOME"/)
-        die "unsafe destination: '$dest'"
-        ;;
-    */../*|../*|*/..)
-        die "destination must not contain '..': '$dest'"
-        ;;
-esac
+acceptance_validate_dest "$dest"
 
 if [ -e "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
     if [ "$force" != "1" ]; then

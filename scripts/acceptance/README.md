@@ -16,7 +16,7 @@ one-time v0.1 release download), or a real `claude`/`opencode` binary.
 | `rig.sh` | Build, start, inspect and remove the containers; run fixtures and the v0.1 generator. |
 | `lib.sh` | Host-side helpers: temporary HOME, private `TMUX_TMPDIR`, tmux wrapper, SHA-256. |
 | `container/Dockerfile` | Ubuntu 24.04 "fresh VPS" with sshd, git, tmux, curl, python3 and a `vowp` user. `WITH_SUDO=0` removes sudo. |
-| `container/phone/Dockerfile` | SSH-client-only container with its own key. |
+| `container/phone/Dockerfile` | SSH-client-only container with its own key and the same private tmux wrapper as the home image. |
 | `fixtures/fake-worker.sh` | Deterministic fake harness; normal and memory-hog modes; also answers verifier prompts. |
 | `fixtures/project.sh` | Creates a fixture git checkout, a bare local origin, and a fake harness adapter. |
 | `make-v01-home.sh` | Downloads the published v0.1.0 release, verifies its SHA-256, runs the real v0.1 supervisor with a fake harness, and records a manifest. |
@@ -26,7 +26,11 @@ one-time v0.1 release download), or a real `claude`/`opencode` binary.
 
 - Docker with a reachable daemon.
 - `bash`, `ssh`, `ssh-keygen`.
-- `curl` or `wget` and `python3` for the v0.1 generator; both are installed in
+- For the direct-host recipes and the host-side helper checks: `tmux`, `git`,
+  `tar`, and `sha256sum` (or `shasum`). The container images already contain
+  these, so only the direct-host `make-v01-home.sh`/`fixtures/project.sh` path
+  needs them on the host.
+- `curl` or `wget` and `python3` for the v0.1 generator; they are installed in
   the containers, so normally only the host prerequisites matter.
 - Network access while building the images (base image and apt packages) and,
   unless you pass `--binary`, while generating a v0.1 home (published release).
@@ -77,7 +81,8 @@ copying the product source tree there.
 ### Phone
 
 A second container with only an SSH client. It has its own generated key, an
-`ssh_config` naming `home`, and no relationship to the host SSH agent. Both the
+`ssh_config` naming `home`, the same private tmux wrapper and `TMUX_TMPDIR`
+guard as the home image, and no relationship to the host SSH agent. Both the
 owner and phone keys are installed in the home's `authorized_keys`. Use it for
 the phone surface, lease/takeover checks and SSH-drop scenarios:
 
@@ -144,8 +149,10 @@ bash scripts/acceptance/make-v01-home.sh --dest /tmp/v01-home \
 The generator:
 
 1. downloads `vowp-0.1.0-<target>.tar.gz` and `SHA256SUMS` from the published
-   GitHub release (or uses `--binary`), verifies SHA-256, and checks
-   `vowp --version`;
+   GitHub release, verifies the archive SHA-256, and checks the exact
+   `vowp 0.1.0` version; with `--binary` it checks the same exact version and
+   records the binary's SHA-256 in the manifest, but there is no published
+   checksum to compare against in that mode;
 2. creates `<dest>/home` (`VOWP_HOME`), `<dest>/project` (registered at its
    absolute path), and `<dest>/origin.git`;
 3. writes `<dest>/manifest.json` with the binary version and SHA-256, schema
@@ -175,7 +182,7 @@ The card T0 exists so the later tests can be short and repeatable.
 |---|---|
 | **T1 fresh setup** | `up --variant sudo` and `up --variant no-sudo`; run the README prompt over `ssh`; the phone joins with `phone`. The image starts with no VOWP and no `~/.vowp`. |
 | **T2 two projects** | `fixture-pair`, register both projects on one home with `vowp project add` (planned C2), seed jobs, run `vowp up`, and assert neither starves. |
-| **T3 capacity** | `fixture memory-hog --hog-mb … --hog-hold …`, start several jobs, sample `capacity report` (planned E1), and check the brake stops admissions without killing a live worker. `up --memory 1g` also sets a Docker memory limit. |
+| **T3 capacity** | `fixture memory-hog --hog-mb … --hog-hold …`, start several jobs, sample `capacity report` (planned E2), and check the brake stops admissions without killing a live worker. `up --memory 1g` also sets a Docker memory limit. |
 | **T4 surfaces** | Use `ssh` for the owner and `phone` for the second SSH surface; `phone` keeps its own key and connection. `ssh --as phone` exercises the phone key from the host too. |
 | **SSH drop** | Run the client through `phone`, then close the phone container or `docker exec ... pkill ssh`; the home and its files stay untouched. |
 | **T6 migration** | `v01-home` creates the v0.1 home with real history; `manifest.json` gives the pre-migration row counts. The `vowp migrate` command is planned for C2. |
@@ -207,8 +214,9 @@ Useful environment variables:
 | `VOWP_ACCEPTANCE_STATE_DIR` | Root for generated keys, state files and rig metadata (default `${TMPDIR:-/tmp}/vowp-acceptance`). |
 | `VOWP_ACCEPTANCE_VPS_IMAGE` | Base image tag for the VPS variants (default `vowp-acceptance/vps`). |
 | `VOWP_ACCEPTANCE_PHONE_IMAGE` | Phone image tag (default `vowp-acceptance/phone:local`). |
-| `VOWP_V010_BASE_URL` | Release download base URL. |
+| `VOWP_V010_BASE_URL` | Release download base URL (forwarded by `rig.sh v01-home`). |
 | `VOWP_V010_CACHE` | v0.1 archive cache (default `${TMPDIR:-/tmp}/vowp-acceptance-cache`). |
+| `VOWP_V010_TARGET` | Override the release archive target (forwarded by `rig.sh v01-home`). |
 | `RIG_*` | Values printed by `rig.sh env`; use them in test scripts. |
 
 `rig.sh env` prints shell-quoted `export` lines for `RIG_HOME_CONTAINER`,
@@ -253,8 +261,10 @@ home containers; `rig.sh status --name <name>` shows both.
   keys and the read-only `scripts/acceptance` directory. The phone receives its
   own generated private key and SSH config through a read-only mount.
 - The phone has its own key and its own container; it is not the host SSH
-  agent. The generated phone private key is part of the disposable state and is
-  removed by `down`.
+  agent. It also has a private `TMUX_TMPDIR` and the same wrapper as the home,
+  so a phone-side tmux call cannot reach that container's default server. The
+  generated phone private key is part of the disposable state and is removed by
+  `down`.
 - Images contain no VOWP binary and no harness login. The fake harness never
   starts `claude` or `opencode` and never opens a socket or a model turn.
 - Docker build and the v0.1 release download are the only network operations.

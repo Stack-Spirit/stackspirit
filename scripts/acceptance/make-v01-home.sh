@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scripts/acceptance/make-v01-home.sh — generate a disposable v0.1 home.
 #
-# The generator downloads the published VOWP 0.1.0 binary (SHA-256 verified),
-# initialises one git project, adds fake-harness jobs, runs the real v0.1
-# supervisor until they merge, and stops it. The result is a home with genuine
-# v0.1 history for the migration acceptance test (T4):
+# The generator downloads the published VOWP 0.1.0 binary over HTTPS and
+# verifies the release SHA-256, initialises one git project, adds fake-harness
+# jobs, runs the real v0.1 supervisor until they merge, and stops it. The result
+# is a home with genuine v0.1 history for the migration acceptance test (T4):
 #
 #   <dest>/home/vowp.db           v0.1 database
 #   <dest>/project/               the git checkout registered in that database
@@ -15,7 +15,8 @@
 # tmux server: a private TMUX_TMPDIR and socket wrapper are created under
 # <dest>/runtime. The fake harness never calls a model or the network. The only
 # network access is the one-time release download; pass --binary PATH to use a
-# local published 0.1.0 binary instead.
+# local published 0.1.0 binary instead (the exact version is checked; there is
+# no published checksum to compare, so only its SHA-256 is recorded).
 #
 # Usage:
 #   make-v01-home.sh --dest DIR [options]
@@ -37,8 +38,8 @@
 #
 # Exit status:
 #   0  a v0.1 home with real history exists and manifest.json was written
-#   1  setup or supervisor failed
-#   2  bad arguments or a missing tool
+#   1  setup, download or supervisor failed (including a missing tool)
+#   2  bad arguments
 
 set -Eeuo pipefail
 
@@ -59,8 +60,9 @@ FORCE=0
 STARTED_AT=$(date +%s)
 
 usage() {
-    sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
-    exit 2
+    local status=${1:-2}
+    sed -n '2,/^set -Eeuo pipefail$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    exit "$status"
 }
 
 say() {
@@ -72,57 +74,62 @@ die() {
     exit 1
 }
 
+bad_arg() {
+    printf 'make-v01-home: error: %s\n' "$*" >&2
+    exit 2
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dest)
-            [ "$#" -ge 2 ] || die "--dest needs a directory"
+            [ "$#" -ge 2 ] || bad_arg "--dest needs a directory"
             DEST=$2
             shift 2
             ;;
         --binary)
-            [ "$#" -ge 2 ] || die "--binary needs a path"
+            [ "$#" -ge 2 ] || bad_arg "--binary needs a path"
             BINARY=$2
             shift 2
             ;;
         --version)
-            [ "$#" -ge 2 ] || die "--version needs a value"
+            [ "$#" -ge 2 ] || bad_arg "--version needs a value"
             VERSION=$2
             shift 2
             ;;
         --name)
-            [ "$#" -ge 2 ] || die "--name needs a value"
+            [ "$#" -ge 2 ] || bad_arg "--name needs a value"
             PROJECT_NAME=$2
             shift 2
             ;;
         --jobs)
-            [ "$#" -ge 2 ] || die "--jobs needs a number"
+            [ "$#" -ge 2 ] || bad_arg "--jobs needs a number"
             JOBS=$2
             shift 2
             ;;
         --timeout)
-            [ "$#" -ge 2 ] || die "--timeout needs seconds"
+            [ "$#" -ge 2 ] || bad_arg "--timeout needs seconds"
             TIMEOUT=$2
             shift 2
             ;;
         --force) FORCE=1; shift ;;
-        -h|--help) usage ;;
-        *) die "unknown option: $1" ;;
+        -h|--help) usage 0 ;;
+        *) bad_arg "unknown option: $1" ;;
     esac
 done
 
-[ -n "$DEST" ] || { printf '%s\n' "make-v01-home: --dest is required" >&2; usage; }
+[ -n "$DEST" ] || bad_arg "--dest is required"
 case "$JOBS" in
-    ''|*[!0-9]*) die "--jobs must be a whole number" ;;
+    ''|*[!0-9]*) bad_arg "--jobs must be a whole number" ;;
 esac
-[ "$JOBS" -ge 1 ] && [ "$JOBS" -le 16 ] || die "--jobs must be between 1 and 16"
+[ "$JOBS" -ge 1 ] && [ "$JOBS" -le 16 ] || bad_arg "--jobs must be between 1 and 16"
 case "$TIMEOUT" in
-    ''|*[!0-9]*) die "--timeout must be a whole number" ;;
+    ''|*[!0-9]*) bad_arg "--timeout must be a whole number" ;;
 esac
 
 PROJECT_NAME=$(acceptance_slug "$PROJECT_NAME")
-[ -n "$PROJECT_NAME" ] || die "project name is empty after slugging"
+[ -n "$PROJECT_NAME" ] || bad_arg "project name is empty after slugging"
 
-acceptance_validate_dest "$DEST"
+acceptance_validate_dest "$DEST" 2
 if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
     if [ "$FORCE" != "1" ]; then
         die "destination is not empty: $DEST (pass --force to replace it)"
@@ -136,13 +143,11 @@ HOME_DIR="$DEST/home"
 PROJECT_DIR="$DEST/project"
 ORIGIN="$DEST/origin.git"
 RUNTIME="$DEST/runtime"
-FAKE_LOG="$DEST/fake-worker.log"
 LOG="$DEST/supervisor.log"
 SOCKET="vowp-v01-$$"
 
 acceptance_env_init "$RUNTIME" "$SOCKET"
 export VOWP_HOME="$HOME_DIR"
-export VOWP_ACCEPTANCE_WORKER_LOG="$FAKE_LOG"
 mkdir -p "$HOME_DIR" "$PROJECT_DIR"
 
 stop_supervisor() {
@@ -354,7 +359,6 @@ on_quota = "park"
 
 [harnesses.fake-worker]
 mapping = ".vowp/adapters/fake-worker.toml"
-env_pass = ["VOWP_ACCEPTANCE_WORKER_LOG"]
 EOF
 
 printf '.vowp/\n' >"$PROJECT_DIR/.gitignore"
@@ -556,8 +560,10 @@ Generated by \`scripts/acceptance/make-v01-home.sh\` at $(date -u '+%Y-%m-%dT%H:
 
 The project path is recorded in the database, so use this directory in place.
 Do not move \`home/\` without also moving \`project/\` and updating the row.
-For migration, point the v0.2 binary at this home:
+Migration is planned for C2; once that command exists, point the v0.2 binary
+at this home:
 
+    # planned for C2
     vowp --home "$HOME_DIR" migrate
 
 The home was produced with a private \`TMUX_TMPDIR\`, a private tmux socket and
