@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use vowp_core::deps::SystemRng;
 use vowp_core::{AdapterRegistry, Deps, SystemGit, SystemRunner};
 use vowp_protocol::{Clock, NodeFile, NullLog, ProjectName, Snapshot, SystemClock, Timestamp, VowpConfig};
-use vowp_store::NodePaths;
+use vowp_store::{NodePaths, Store};
 use vowp_tmux::Tmux;
 
 use crate::CliError;
@@ -206,6 +206,43 @@ pub fn control_home() -> Result<Option<ControlHome>, CliError> {
 /// Returns whether this machine is configured as a control machine.
 pub fn is_control_machine() -> Result<bool, CliError> {
     Ok(read_control_home()?.is_some())
+}
+
+/// Returns the project a command should act on.
+///
+/// A command explicitly bound to a project uses it. A command running from the node's
+/// home uses the only real project when there is exactly one; with several projects it
+/// refuses and names them, so the caller must pass `--project`. With no real project the
+/// reserved `_node` project is used.
+pub fn selected_project(ctx: &crate::Ctx) -> Result<ProjectName, CliError> {
+    if ctx.project().as_str() != vowp_store::RESERVED_NODE_PROJECT {
+        return Ok(ctx.project().clone());
+    }
+    let global = Store::open_global(ctx.paths())?;
+    let mut projects: Vec<ProjectName> = vowp_core::loops::registry::project_entries(&global)?
+        .into_iter()
+        .filter(|entry| entry.name.as_str() != vowp_store::RESERVED_NODE_PROJECT)
+        .map(|entry| entry.name)
+        .collect();
+    match projects.len() {
+        0 => Ok(ctx.project().clone()),
+        1 => Ok(projects.remove(0)),
+        _ => {
+            let names = projects.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            Err(CliError::Invalid(format!(
+                "several projects are registered ({names}); pass --project <name|path>"
+            )))
+        }
+    }
+}
+
+/// Opens the store bound to [`selected_project`].
+pub fn selected_store(ctx: &crate::Ctx) -> Result<Store, CliError> {
+    let project = selected_project(ctx)?;
+    if &project == ctx.project() {
+        return ctx.store();
+    }
+    Ok(Store::open_with_project(ctx.paths(), &project)?)
 }
 
 /// Writes the node-level `vowp.toml` used by the systemd unit and home-scoped commands.

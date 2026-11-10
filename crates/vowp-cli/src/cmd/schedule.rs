@@ -28,7 +28,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &ScheduleCommand) -> Resu
 fn add(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleAddArgs) -> Result<i32, CliError> {
     let (common, action) = match &args.action {
         ScheduleActionArg::Loop(loop_) => {
-            let store = ctx.store()?;
+            let store = crate::node_ctx::selected_store(ctx)?;
             if store.loop_(&loop_.loop_name)?.is_none() {
                 return Err(CliError::NotFound(format!("loop {}", loop_.loop_name)));
             }
@@ -72,7 +72,8 @@ fn add(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleAddArgs) -> Result<i32,
             "command schedule needs at least one argument".to_owned(),
         ));
     }
-    let store = ctx.store()?;
+    let project = crate::node_ctx::selected_project(ctx)?;
+    let store = crate::node_ctx::selected_store(ctx)?;
     if store.schedule(&common.name)?.is_some() {
         return Err(CliError::Conflict(format!("schedule {} already exists", common.name)));
     }
@@ -84,7 +85,7 @@ fn add(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleAddArgs) -> Result<i32,
     let next_run_at = parsed.next_after(now);
     let schedule = Schedule {
         id: ScheduleId::new(),
-        project: Some(ctx.project().clone()),
+        project: Some(project),
         name: common.name.clone(),
         spec_kind: kind,
         spec: args.spec.clone(),
@@ -116,7 +117,7 @@ fn add(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleAddArgs) -> Result<i32,
 
 /// Lists schedules.
 fn list(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let store = ctx.store()?;
+    let store = crate::node_ctx::selected_store(ctx)?;
     let schedules = store.list_schedules()?;
     if ctx.json() {
         print_json(io, &schedules)?;
@@ -151,7 +152,7 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 
 /// Pauses or resumes one schedule.
 fn set_state(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleNameArgs, state: ActiveState) -> Result<i32, CliError> {
-    let store = ctx.store()?;
+    let store = crate::node_ctx::selected_store(ctx)?;
     let schedule = store
         .schedule(&args.name)?
         .ok_or_else(|| CliError::NotFound(format!("schedule {}", args.name)))?;
@@ -174,7 +175,7 @@ fn set_state(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleNameArgs, state: 
 
 /// Removes one schedule.
 fn remove(ctx: &Ctx, io: &mut dyn IoStreams, args: &ScheduleNameArgs) -> Result<i32, CliError> {
-    let store = ctx.store()?;
+    let store = crate::node_ctx::selected_store(ctx)?;
     let schedule = store
         .schedule(&args.name)?
         .ok_or_else(|| CliError::NotFound(format!("schedule {}", args.name)))?;

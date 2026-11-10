@@ -1334,3 +1334,37 @@ fn up_once_from_the_home_after_init_ticks_every_project() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("2 project(s)"), "{stdout}");
 }
+
+#[test]
+fn loops_and_schedule_refuse_the_home_selection_with_several_projects() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let (code, _, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
+    assert_eq!(code, 0, "{stderr}");
+    vowp_cli::node_ctx::ensure_home_project_file(&NodePaths::new(env.home_path())).expect("home config");
+
+    let bin = env!("CARGO_BIN_EXE_vowp");
+    for args in [vec!["loops"], vec!["schedule", "ls"]] {
+        let output = Command::new(bin)
+            .arg("--home")
+            .arg(env.home_path())
+            .args(&args)
+            .current_dir(env.home_path())
+            .env("HOME", env.home_path())
+            .env("VOWP_HOME", env.home_path())
+            .env("TMUX_TMPDIR", env.home_path().join("tmux"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("VOWP_TMUX_SOCKET")
+            .output()
+            .expect("run vowp");
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("several projects are registered"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("test") && stderr.contains("second"),
+            "{args:?}: {stderr}"
+        );
+    }
+}

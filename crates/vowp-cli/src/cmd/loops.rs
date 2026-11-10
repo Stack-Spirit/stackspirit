@@ -20,7 +20,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &LoopsArgs) -> Result<i32, C
 
 /// Lists every loop row.
 fn list(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let store = ctx.store()?;
+    let store = crate::node_ctx::selected_store(ctx)?;
     let loops = store.list_loops()?;
     if ctx.json() {
         print_json(io, &loops)?;
@@ -56,7 +56,7 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 
 /// Pauses or resumes one loop.
 fn set_state(ctx: &Ctx, io: &mut dyn IoStreams, args: &LoopNameArgs, state: ActiveState) -> Result<i32, CliError> {
-    let store = ctx.store()?;
+    let store = crate::node_ctx::selected_store(ctx)?;
     if args.loop_name == "l1-supervisor" {
         return Err(CliError::Invalid(
             "the l1-supervisor loop cannot be paused; use `vowp down`".to_owned(),
