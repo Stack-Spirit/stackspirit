@@ -460,7 +460,7 @@ fn fleet_queue_includes_waiting_reason() {
         .unwrap_or_else(|| panic!("missing queued job: {value}"));
     assert_eq!(row["project"], "test");
     assert_eq!(row["state"], "ready");
-    assert_eq!(row["waiting_reason"], "RAM 1.2 GB short");
+    assert_eq!(row["waiting_reason"], "waiting: RAM 1.2 GB short");
 }
 
 #[test]

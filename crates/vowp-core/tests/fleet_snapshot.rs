@@ -11,10 +11,10 @@ use tempfile::{TempDir, tempdir};
 use vowp_core::fleet;
 use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemRunner};
 use vowp_protocol::{
-    Clock, Cost, Evidence, Executor, FakeClock, Gate, GateResult, HarnessKind, InboxItem, InboxKind, InboxState, Job,
-    JobId, JobKind, JobState, LedgerEntry, LedgerKind, NewJob, Node, NodeName, ParkedReason, Project, ProjectName,
-    ReportGate, Role, Run, RunId, RunPurpose, RunRole, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Session, SessionId,
-    SessionRole, SessionState, Snapshot, Timestamp, Tokens,
+    ActiveState, Clock, Cost, Evidence, Executor, FakeClock, Gate, GateResult, HarnessKind, InboxItem, InboxKind,
+    InboxState, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind, Loop, LoopKind, NewJob, Node, NodeName,
+    ParkedReason, Project, ProjectName, ReportGate, Role, Run, RunId, RunPurpose, RunRole, SNAPSHOT_FORMAT,
+    SNAPSHOT_VERSION, Session, SessionId, SessionRole, SessionState, Snapshot, Timestamp, Tokens,
 };
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -410,7 +410,7 @@ fn snapshot_cards_cover_every_project_and_state() {
         .expect("ready job in queue");
     assert_eq!(
         waiting.waiting_reason.as_deref(),
-        Some("RAM 1.2 GB short"),
+        Some("waiting: RAM 1.2 GB short"),
         "the admission reason comes from jobs.note"
     );
     assert!(
@@ -562,4 +562,176 @@ fn snapshot_degrades_one_broken_project_and_keeps_the_rest() {
         beta.paused_reason
     );
     assert!(beta.running.is_empty() && beta.queue.is_empty());
+}
+
+#[test]
+fn gate_failures_include_older_attempts() {
+    let fixture = Fixture::new();
+    let job = fixture.job(&fixture.alpha, "g01-two-attempts", 50);
+    let store = fixture.store_for(&fixture.alpha);
+    let now = fixture.clock.now();
+    store
+        .set_job_counters(&job.id, Some(1), None, None)
+        .expect("attempt counter");
+
+    store
+        .insert_gate_result(&GateResult {
+            id: None,
+            job_id: job.id.clone(),
+            run_id: None,
+            attempt: 0,
+            gate_index: 0,
+            gate: Gate::Report(ReportGate::default()),
+            passed: false,
+            evidence: Evidence::Report {
+                front_matter: None,
+                missing_fields: vec!["status".to_owned()],
+                problems: Vec::new(),
+            },
+            output_blob: None,
+            duration_ms: 1,
+            ts: now.minus(Duration::from_secs(60)),
+        })
+        .expect("failed attempt 0");
+    store
+        .insert_gate_result(&GateResult {
+            id: None,
+            job_id: job.id.clone(),
+            run_id: None,
+            attempt: 1,
+            gate_index: 0,
+            gate: Gate::Report(ReportGate::default()),
+            passed: true,
+            evidence: Evidence::Report {
+                front_matter: Some(serde_json::json!({"status": "done"})),
+                missing_fields: Vec::new(),
+                problems: Vec::new(),
+            },
+            output_blob: None,
+            duration_ms: 1,
+            ts: now.minus(Duration::from_secs(10)),
+        })
+        .expect("passed attempt 1");
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    assert_eq!(
+        alpha.gate_failures.len(),
+        1,
+        "a failed older attempt is still a project failure: {:?}",
+        alpha.gate_failures
+    );
+    assert_eq!(alpha.gate_failures[0].job, job.id);
+    assert_eq!(alpha.gate_failures[0].gate, "report");
+    assert!(alpha.gate_failures[0].evidence.contains("status"));
+}
+
+#[test]
+fn gate_failures_keep_only_the_newest_ten() {
+    let fixture = Fixture::new();
+    let job = fixture.job(&fixture.alpha, "g02-many-failures", 50);
+    let store = fixture.store_for(&fixture.alpha);
+    let now = fixture.clock.now();
+    store
+        .set_job_counters(&job.id, Some(1), None, None)
+        .expect("attempt counter");
+
+    for index in 0..12_u32 {
+        store
+            .insert_gate_result(&GateResult {
+                id: None,
+                job_id: job.id.clone(),
+                run_id: None,
+                attempt: 0,
+                gate_index: i32::try_from(index).expect("gate index"),
+                gate: Gate::Report(ReportGate::default()),
+                passed: false,
+                evidence: Evidence::Report {
+                    front_matter: None,
+                    missing_fields: vec![format!("field{index}")],
+                    problems: Vec::new(),
+                },
+                output_blob: None,
+                duration_ms: 1,
+                ts: now.minus(Duration::from_secs(u64::from(index) + 1)),
+            })
+            .expect("failed result");
+    }
+    store
+        .insert_gate_result(&GateResult {
+            id: None,
+            job_id: job.id.clone(),
+            run_id: None,
+            attempt: 1,
+            gate_index: 0,
+            gate: Gate::Report(ReportGate::default()),
+            passed: true,
+            evidence: Evidence::Report {
+                front_matter: Some(serde_json::json!({"status": "done"})),
+                missing_fields: Vec::new(),
+                problems: Vec::new(),
+            },
+            output_blob: None,
+            duration_ms: 1,
+            ts: now,
+        })
+        .expect("passed newest attempt");
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    assert_eq!(alpha.gate_failures.len(), 10, "the card is capped at ten");
+    assert!(
+        alpha.gate_failures[0].evidence.contains("field0"),
+        "newest failure first: {:?}",
+        alpha.gate_failures
+    );
+    assert!(
+        alpha.gate_failures[9].evidence.contains("field9"),
+        "the ten newest survive: {:?}",
+        alpha.gate_failures
+    );
+    assert!(
+        alpha
+            .gate_failures
+            .iter()
+            .all(|failure| !failure.evidence.contains("field10") && !failure.evidence.contains("field11")),
+        "older failures are dropped: {:?}",
+        alpha.gate_failures
+    );
+}
+
+#[test]
+fn supervisor_card_reports_l1_fail_streak() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    fixture
+        .store_for(&fixture.alpha)
+        .upsert_loop(&Loop {
+            name: "l1-supervisor".to_owned(),
+            kind: LoopKind::L1,
+            project: Some(fixture.alpha.clone()),
+            interval_secs: 60,
+            state: ActiveState::Active,
+            bounds: Default::default(),
+            last_run_at: Some(now),
+            next_run_at: Some(now.plus(Duration::from_secs(60))),
+            last_status: "degraded: merge".to_owned(),
+            fail_streak: 3,
+            updated_at: now,
+        })
+        .expect("supervisor loop row");
+
+    let snapshot = fixture.snapshot();
+    assert_eq!(
+        snapshot.supervisor.fail_streak, 3,
+        "the card mirrors loops['l1-supervisor'].fail_streak"
+    );
 }

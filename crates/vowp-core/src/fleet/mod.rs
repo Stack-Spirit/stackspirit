@@ -43,6 +43,8 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
     let mut cards = Vec::new();
     let mut project_inbox = Vec::new();
     let mut running_runs = 0_u32;
+    let mut preferred_fail_streak = None;
+    let mut any_fail_streak = None;
     for project in projects
         .iter()
         .filter(|project| project.name.as_str() != vowp_store::RESERVED_NODE_PROJECT)
@@ -63,6 +65,10 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
         match read {
             Ok(read) => {
                 running_runs = running_runs.saturating_add(read.card.running.len() as u32);
+                any_fail_streak.get_or_insert(read.fail_streak);
+                if project.name == deps.config.project.name {
+                    preferred_fail_streak = Some(read.fail_streak);
+                }
                 project_inbox.extend(read.inbox);
                 cards.push(read.card);
             }
@@ -88,7 +94,12 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
         .collect();
 
     let sequence = snapshot_sequence(global)?;
-    let supervisor = supervisor_snapshot(deps, global)?;
+    let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+    let fail_streak = node_fail_streak(store, &node_project)?
+        .or(preferred_fail_streak)
+        .or(any_fail_streak)
+        .unwrap_or(0);
+    let supervisor = supervisor_snapshot(deps, global, fail_streak)?;
     let limits = global.active_limits(now)?;
     let sessions = session_cards(global, now, &redactor)?;
     let orchestrators = orchestrator_cards(deps.paths.root());
@@ -288,7 +299,7 @@ fn next_sequence(store: &Store) -> Result<u64, CoreError> {
 }
 
 /// Builds the supervisor card from the lock, heartbeat and pause marker.
-fn supervisor_snapshot(deps: &Deps, store: &Store) -> Result<SupervisorSnapshot, CoreError> {
+fn supervisor_snapshot(deps: &Deps, store: &Store, fail_streak: u32) -> Result<SupervisorSnapshot, CoreError> {
     let lock = std::fs::read_to_string(deps.paths.root().join("supervisor.lock")).ok();
     let pid = lock
         .as_deref()
@@ -310,9 +321,28 @@ fn supervisor_snapshot(deps: &Deps, store: &Store) -> Result<SupervisorSnapshot,
         last_tick: read_heartbeat(&deps.paths.root().join("heartbeat")),
         tick_secs: deps.config.node.tick_secs.max(1),
         paused,
-        fail_streak: 0,
+        fail_streak,
         version: env!("CARGO_PKG_VERSION").to_owned(),
     })
+}
+
+/// Reads the `_node` supervisor loop's fail streak when C2 has created it.
+///
+/// Until the node supervisor exists this is `None`; the caller then uses the current
+/// project's `l1-supervisor` row (or the first readable project's row).
+fn node_fail_streak(store: &Store, node_project: &ProjectName) -> Result<Option<u32>, CoreError> {
+    let loop_ = if let Some(paths) = store.paths() {
+        match Store::open_read_only(paths, Some(node_project)) {
+            Ok(node_store) => node_store.loop_("l1-supervisor")?,
+            Err(StoreError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(CoreError::Store(error)),
+        }
+    } else if store.bound_project() == Some(node_project) {
+        store.loop_("l1-supervisor")?
+    } else {
+        return Ok(None);
+    };
+    Ok(loop_.map(|loop_| loop_.fail_streak))
 }
 
 /// Reads the heartbeat's first line as Unix seconds.

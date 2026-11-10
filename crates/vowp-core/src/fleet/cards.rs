@@ -24,6 +24,8 @@ pub(crate) struct ProjectRead {
     pub card: ProjectSnapshot,
     /// Open project and matching node inbox rows.
     pub inbox: Vec<InboxItem>,
+    /// Consecutive failed L1 ticks recorded in the project's `l1-supervisor` loop row.
+    pub fail_streak: u32,
 }
 
 /// Builds one project's snapshot card from a bound store.
@@ -123,9 +125,21 @@ pub(crate) fn project_read(
         })
         .collect();
 
+    // `latest_gate_results` only sees the newest attempt. The card is specified as the last
+    // 10 failures across the project, so walk every attempt the job has recorded. The newest
+    // attempt is added as well, which keeps the card honest even if `job.attempts` is stale.
     let mut gate_failures = Vec::new();
     for job in &jobs {
+        let mut results = Vec::new();
+        for attempt in 0..=job.attempts {
+            results.extend(store.gate_results_for(&job.id, attempt)?);
+        }
         for result in store.latest_gate_results(&job.id)? {
+            if results.iter().all(|seen| seen.id != result.id) {
+                results.push(result);
+            }
+        }
+        for result in results {
             if result.passed {
                 continue;
             }
@@ -143,6 +157,10 @@ pub(crate) fn project_read(
     let last_merge = last_merge(store, project, &jobs, redactor)?;
     let cost_today_usd = cost_today(store, &project.name, now)?;
     let inbox = store.list_inbox(Some(InboxState::Open))?;
+    let fail_streak = store
+        .loop_("l1-supervisor")?
+        .map(|loop_| loop_.fail_streak)
+        .unwrap_or(0);
 
     Ok(ProjectRead {
         card: ProjectSnapshot {
@@ -163,6 +181,7 @@ pub(crate) fn project_read(
             cost_today_usd,
         },
         inbox,
+        fail_streak,
     })
 }
 
@@ -208,13 +227,15 @@ fn blocked_reason(job: &Job) -> String {
 }
 
 /// Returns a job's admission/brake reason when its note carries one.
+///
+/// E2 writes the whole `waiting: RAM 1.2 GB short` line to `jobs.note`; the card carries
+/// that line verbatim (redacted) so the orchestrator sees the same text.
 fn waiting_reason(redactor: &Redactor, job: &Job) -> Option<String> {
-    let reason = job.note.strip_prefix("waiting:")?.trim();
-    if reason.is_empty() {
-        None
-    } else {
-        Some(summarize(redactor, reason))
+    let reason = job.note.trim();
+    if !reason.starts_with("waiting:") || reason == "waiting:" {
+        return None;
     }
+    Some(summarize(redactor, reason))
 }
 
 /// Reads the newest successful merge row for a project.
