@@ -732,3 +732,31 @@ fn remote_stream_large_events() {
     assert!(spilled.output.is_none());
     assert!(spilled.output_ref.is_some(), "the large output was not spilled");
 }
+
+#[test]
+fn remote_stream_requires_hello_before_events() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "no hello");
+    let grant = begin(&deps, &session, "lease", "prompt");
+    let text = lines(&[RemoteLine::Event {
+        event: remote_event(
+            EventId::new(),
+            EventBody::AssistantMessage(AssistantMessage {
+                text: "must not land".to_owned(),
+            }),
+        ),
+    }]);
+    let (result, _) = ingest(&deps, &grant, "lease", &text);
+    let error = result.expect_err("an event without hello must be rejected");
+    assert!(error.to_string().contains("hello"), "unexpected error: {error}");
+    let events = read_events(&deps, &session);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::AssistantMessage(payload)) if payload.text == "must not land"
+        )),
+        "an event without hello reached the log"
+    );
+}
