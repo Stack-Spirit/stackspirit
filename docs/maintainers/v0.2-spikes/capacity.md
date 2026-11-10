@@ -248,6 +248,26 @@ The scripts create a private `TMUX_TMPDIR`, a temporary `VOWP_HOME`, and unset
 `TMUX`/`TMUX_PANE`. They never start tmux, a real harness, or a network client,
 and they never touch `~/.vowp`.
 
+## Verification on this node
+
+The repo-wide gate was run in this worktree with the normal cargo shim and the
+normal `CARGO_TARGET_DIR`:
+
+```sh
+cargo fmt --all -- --check                                      # exit 0
+cargo clippy --workspace --all-targets -- -D warnings           # exit 0
+cargo test --workspace                                          # exit 0, 662 tests
+```
+
+The first gate attempts failed only because the root disk was full (linker
+`SIGBUS`, SQLite `DiskFull`); the runs above passed after stale November 8–9
+build caches under the night target directory and `/tmp/opencode` were removed.
+The spike tooling's own test also passes:
+
+```sh
+sh scripts/spikes/capacity/tests/run.sh                          # exit 0
+```
+
 ## Caveats
 
 - The node was busy with five concurrent jobs (load average 5–16 on 8 CPUs), so
