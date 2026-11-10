@@ -517,6 +517,30 @@ impl Store {
         Ok(())
     }
 
+    /// Returns the number of indexed `session_events` rows in the global database.
+    ///
+    /// This is a real `COUNT(*)`, not the sum of [`vowp_protocol::Session::last_seq`]:
+    /// a sequence gap still leaves fewer rows than `last_seq` suggests, and the backup
+    /// manifest must record the rows a restore will actually see.
+    pub fn count_session_events(&self) -> Result<u64, StoreError> {
+        let value: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM main.session_events", [], |row| row.get(0))?;
+        crate::convert::u64_from_i64(value, "session_events count")
+    }
+
+    /// Returns the number of `runs` rows in the bound project database.
+    ///
+    /// Counts every run row, including orphan runs whose job was deleted and whose
+    /// `job_id` is therefore `NULL`; summing [`Store::runs_of_job`] would miss them.
+    pub fn count_runs(&self) -> Result<u64, StoreError> {
+        self.require_bound()?;
+        let value: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM project.runs", [], |row| row.get(0))?;
+        crate::convert::u64_from_i64(value, "runs count")
+    }
+
     /// Returns the schema names attached to this connection, `main` first.
     fn attached_schemas(&self) -> Vec<String> {
         let mut schemas = vec!["main".to_owned()];

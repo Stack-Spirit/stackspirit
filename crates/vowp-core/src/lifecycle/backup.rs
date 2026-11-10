@@ -171,7 +171,13 @@ pub fn backup(deps: &Deps, store: &Store, opts: &BackupOptions) -> Result<Backup
 }
 
 /// Restores a fresh home from a backup directory.
-pub fn restore(deps: &Deps, _store: &Store, opts: &BackupOptions) -> Result<BackupReport, CoreError> {
+///
+/// The backup is written into a temporary staging home next to `--to-home`, where every
+/// hash and row count is validated; only a fully verified home is swapped into place. A
+/// corrupt or incomplete backup therefore leaves the target untouched and needs no
+/// `--force` retry. Restore reads no live store, so it also works from a machine whose
+/// serving home is lost or not initialised.
+pub fn restore(deps: &Deps, opts: &BackupOptions) -> Result<BackupReport, CoreError> {
     if opts.to.is_some() || opts.offsite.is_some() || opts.encrypt.is_some() {
         return Err(CoreError::Invalid(
             "restore accepts --restore, --to-home and --force only".to_owned(),
@@ -199,58 +205,74 @@ pub fn restore(deps: &Deps, _store: &Store, opts: &BackupOptions) -> Result<Back
         return Err(CoreError::NotFound(format!("backup directory {}", source.display())));
     }
     let manifest = read_manifest(source)?;
-    prepare_restore_home(to_home, opts.force)?;
+    check_restore_target(to_home, opts.force)?;
 
-    let paths = NodePaths::new(to_home);
-    paths.ensure()?;
+    let staging = sibling_home_path(to_home, "restore");
+    let staged = (|| {
+        let paths = NodePaths::new(&staging);
+        paths.ensure()?;
 
-    let mut files = Vec::new();
-    let mut skipped = manifest.skipped.clone();
-    for file in &manifest.files {
-        let Some(destination) = restore_path(&paths, &file.path) else {
-            skipped.push(format!("{}: not part of a node home", file.path));
-            continue;
-        };
-        let source_path = if manifest.encrypted {
-            with_suffix(source.join(&file.path), ".age")
-        } else {
-            source.join(&file.path)
-        };
-        if !source_path.is_file() {
-            return Err(corrupt(
-                source_path.display().to_string(),
-                format!("manifest names a missing file: {}", file.path),
-            ));
+        let mut files = Vec::new();
+        let mut skipped = manifest.skipped.clone();
+        for file in &manifest.files {
+            let Some(destination) = restore_path(&paths, &file.path) else {
+                skipped.push(format!("{}: not part of a node home", file.path));
+                continue;
+            };
+            let source_path = if manifest.encrypted {
+                with_suffix(source.join(&file.path), ".age")
+            } else {
+                source.join(&file.path)
+            };
+            if !source_path.is_file() {
+                return Err(corrupt(
+                    source_path.display().to_string(),
+                    format!("manifest names a missing file: {}", file.path),
+                ));
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+            }
+            if manifest.encrypted {
+                decrypt_file(deps, &source_path, &destination)?;
+            } else {
+                fs::copy(&source_path, &destination).map_err(|error| io_error(&source_path, error))?;
+            }
+            let actual = sha256_file(&destination)?;
+            if actual != file.sha256 {
+                return Err(corrupt(
+                    destination.display().to_string(),
+                    format!(
+                        "sha256 mismatch for {}: expected {}, got {actual}",
+                        file.path, file.sha256
+                    ),
+                ));
+            }
+            let bytes = fs::metadata(&destination)
+                .map_err(|error| io_error(&destination, error))?
+                .len();
+            files.push(BackupFile {
+                path: file.path.clone(),
+                bytes,
+                kind: file.kind.clone(),
+            });
         }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+
+        verify_restored_home(&paths, &manifest)?;
+        Ok((files, skipped))
+    })();
+    let (files, mut skipped) = match staged {
+        Ok(staged) => staged,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
         }
-        if manifest.encrypted {
-            decrypt_file(deps, &source_path, &destination)?;
-        } else {
-            fs::copy(&source_path, &destination).map_err(|error| io_error(&source_path, error))?;
-        }
-        let actual = sha256_file(&destination)?;
-        if actual != file.sha256 {
-            return Err(corrupt(
-                destination.display().to_string(),
-                format!(
-                    "sha256 mismatch for {}: expected {}, got {actual}",
-                    file.path, file.sha256
-                ),
-            ));
-        }
-        let bytes = fs::metadata(&destination)
-            .map_err(|error| io_error(&destination, error))?
-            .len();
-        files.push(BackupFile {
-            path: file.path.clone(),
-            bytes,
-            kind: file.kind.clone(),
-        });
+    };
+    if let Err(error) = install_staged_home(&staging, to_home) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
     }
 
-    verify_restored_home(&paths, &manifest)?;
     if !skipped.iter().any(|entry| entry.starts_with("secrets/")) {
         skipped.push("secrets/: never present in a backup; restore them with `vowp secret set`".to_owned());
     }
@@ -739,16 +761,14 @@ fn counts_from_backup(
 fn global_counts(store: &Store) -> Result<Counts, CoreError> {
     let sessions = store.list_sessions(&SessionFilter::default())?;
     let mut capsules = 0_u64;
-    let mut events = 0_u64;
     for session in &sessions {
         capsules += store.list_capsules(&session.id)?.len() as u64;
-        events += session.last_seq;
     }
     let mut counts = BTreeMap::new();
     counts.insert("nodes".to_owned(), store.list_nodes()?.len() as u64);
     counts.insert("projects".to_owned(), store.list_projects()?.len() as u64);
     counts.insert("sessions".to_owned(), sessions.len() as u64);
-    counts.insert("session_events".to_owned(), events);
+    counts.insert("session_events".to_owned(), store.count_session_events()?);
     counts.insert("capsules".to_owned(), capsules);
     Ok(counts)
 }
@@ -756,13 +776,9 @@ fn global_counts(store: &Store) -> Result<Counts, CoreError> {
 /// Counts the rows a backup manifest records for one project database.
 fn project_counts_for(store: &Store, project: &ProjectName) -> Result<Counts, CoreError> {
     let jobs = store.list_jobs(&JobFilter::default())?;
-    let mut runs = 0_u64;
-    for job in &jobs {
-        runs += store.runs_of_job(&job.id)?.len() as u64;
-    }
     let mut counts = BTreeMap::new();
     counts.insert("jobs".to_owned(), jobs.len() as u64);
-    counts.insert("runs".to_owned(), runs);
+    counts.insert("runs".to_owned(), store.count_runs()?);
     counts.insert("edges".to_owned(), store.list_edges(None)?.len() as u64);
     counts.insert("loops".to_owned(), store.list_loops()?.len() as u64);
     counts.insert("schedules".to_owned(), store.list_schedules()?.len() as u64);
@@ -802,9 +818,14 @@ fn rotate_backups(root: &Path, current: &Path) -> Result<(), CoreError> {
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut newest_per_day: BTreeMap<Date, String> = BTreeMap::new();
-    let mut newest_per_week: BTreeMap<(i32, u8), (Date, String)> = BTreeMap::new();
     for (name, date) in &candidates {
         newest_per_day.insert(*date, name.clone());
+    }
+    // The weekly candidate is the newest *daily* candidate of its ISO week. Deriving it
+    // from `newest_per_day` means several backups on the same date keep the newest name
+    // for that date, not whichever name was seen first.
+    let mut newest_per_week: BTreeMap<(i32, u8), (Date, String)> = BTreeMap::new();
+    for (date, name) in &newest_per_day {
         let (week_year, week, _) = date.to_iso_week_date();
         let key = (week_year, week);
         match newest_per_week.get(&key) {
@@ -989,30 +1010,56 @@ fn swap_destination(staging: &Path, destination: &Path) -> Result<(), CoreError>
     Ok(())
 }
 
-/// Creates or replaces the restore home.
-fn prepare_restore_home(home: &Path, force: bool) -> Result<(), CoreError> {
-    let database = home.join("vowp.db");
-    if database.exists() {
-        if !force {
-            return Err(CoreError::Store(StoreError::Conflict(format!(
-                "{} already exists; pass --force to overwrite",
-                database.display()
-            ))));
-        }
-        for name in ["vowp.db", "vowp.db-wal", "vowp.db-shm", "snapshot.json", "board.json"] {
-            let path = home.join(name);
-            if path.is_file() {
-                fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
-            }
-        }
-        for name in ["projects", "sessions"] {
-            let path = home.join(name);
-            if path.is_dir() {
-                fs::remove_dir_all(&path).map_err(|error| io_error(&path, error))?;
-            }
-        }
+/// Checks that the restore target may be replaced, without touching it.
+fn check_restore_target(home: &Path, force: bool) -> Result<(), CoreError> {
+    if !home.exists() {
+        return Ok(());
     }
-    fs::create_dir_all(home).map_err(|error| io_error(home, error))
+    if !home.is_dir() {
+        return Err(CoreError::Store(StoreError::Conflict(format!(
+            "restore target {} is not a directory",
+            home.display()
+        ))));
+    }
+    if force {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(home).map_err(|error| io_error(home, error))?;
+    if entries.next().is_some() {
+        return Err(CoreError::Store(StoreError::Conflict(format!(
+            "{} is not empty; pass --force to overwrite",
+            home.display()
+        ))));
+    }
+    Ok(())
+}
+
+/// Returns a hidden sibling path used to stage or preserve one home directory.
+fn sibling_home_path(home: &Path, tag: &str) -> PathBuf {
+    let parent = match home.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let name = home
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "home".to_owned());
+    parent.join(format!(".{name}.{tag}-{}", ulid::Ulid::generate()))
+}
+
+/// Replaces the target home with the fully validated staging directory.
+fn install_staged_home(staging: &Path, home: &Path) -> Result<(), CoreError> {
+    if !home.exists() {
+        return fs::rename(staging, home).map_err(|error| io_error(home, error));
+    }
+    let old = sibling_home_path(home, "old");
+    fs::rename(home, &old).map_err(|error| io_error(home, error))?;
+    if let Err(error) = fs::rename(staging, home) {
+        let _ = fs::rename(&old, home);
+        return Err(io_error(home, error));
+    }
+    let _ = fs::remove_dir_all(&old);
+    Ok(())
 }
 
 /// Copies one whole backup directory to an offsite target.

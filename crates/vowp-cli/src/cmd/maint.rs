@@ -72,8 +72,10 @@ fn reindex(ctx: &Ctx, io: &mut dyn IoStreams, args: &ReindexArgs) -> Result<i32,
 }
 
 /// Writes or restores a backup.
+///
+/// Restore is routed before [`Ctx::store`] on purpose: rescuing a lost serving home must
+/// not require an initialised source home, and restoring never reads the live store.
 fn backup(ctx: &Ctx, io: &mut dyn IoStreams, args: &BackupArgs) -> Result<i32, CliError> {
-    let store = ctx.store()?;
     let opts = BackupOptions {
         to: args.to.as_ref().map(|path| path.display().to_string()),
         offsite: args.offsite.clone(),
@@ -83,8 +85,9 @@ fn backup(ctx: &Ctx, io: &mut dyn IoStreams, args: &BackupArgs) -> Result<i32, C
         force: args.force,
     };
     let report = if opts.restore.is_some() {
-        restore_backup(ctx.deps(), &store, &opts)?
+        restore_backup(ctx.deps(), &opts)?
     } else {
+        let store = ctx.store()?;
         write_backup(ctx.deps(), &store, &opts)?
     };
     print_report(ctx, io, &report)?;

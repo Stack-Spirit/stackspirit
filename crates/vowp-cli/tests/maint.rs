@@ -289,8 +289,9 @@ use vowp_core::{
     AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps, FixedRng, SystemGit, SystemRunner,
 };
 use vowp_protocol::{
-    Clock, ErrorKind, FakeClock, JobId, JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, Session,
-    SessionId, SessionState, Timestamp,
+    Actor, Clock, Cost, ErrorKind, EventId, EventIndexRow, EventType, FakeClock, HarnessKind, JobId, JobKind,
+    MemoryLog, NewJob, NodeName, Project, ProjectName, Role, Run, RunId, RunPurpose, RunRole, Session, SessionId,
+    SessionState, Timestamp,
 };
 use vowp_store::{JobFilter, NodePaths, SessionFilter, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -395,14 +396,12 @@ impl BackupFixture {
 
     fn run_restore(
         &self,
-        store: &Store,
         source: &Path,
         to_home: &Path,
         force: bool,
     ) -> Result<vowp_protocol::BackupReport, CoreError> {
         core_restore(
             &self.deps(),
-            store,
             &BackupOptions {
                 restore: Some(source.to_path_buf()),
                 to_home: Some(to_home.to_path_buf()),
@@ -532,7 +531,7 @@ fn backup_global_and_all_project_dbs_are_openable() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(&store, &destination, restore_home.path(), false)
+        .run_restore(&destination, restore_home.path(), false)
         .expect("restore");
 
     let paths = NodePaths::new(restore_home.path());
@@ -571,6 +570,36 @@ fn backup_rotation_seven_daily_four_weekly() {
     }
     assert!(!names.iter().any(|name| name.starts_with("20260110")), "{names:?}");
     assert!(!names.iter().any(|name| name.starts_with("20260113")), "{names:?}");
+}
+
+#[test]
+fn backup_rotation_weekly_keeps_newest_backup_of_the_week() {
+    let fixture = BackupFixture::new();
+    let store = fixture.store();
+    // Three backups share Sunday 2026-01-04. Once seven newer days exist that date is
+    // outside the daily picks, so only the weekly union can keep it.
+    for hour in ["01", "12", "23"] {
+        fixture.clock.set(timestamp(&format!("2026-01-04T{hour}:00:00Z")));
+        fixture.run_backup(&store, BackupOptions::default()).expect("backup");
+    }
+    let start = timestamp("2026-01-14T02:00:00Z");
+    for day in 0..7 {
+        fixture.clock.set(start.plus(Duration::from_secs(day * 24 * 60 * 60)));
+        fixture.run_backup(&store, BackupOptions::default()).expect("backup");
+    }
+
+    let names = backup_directories(&fixture.env.home_path().join("backups"));
+    assert_eq!(names.len(), 8, "{names:?}");
+    assert!(
+        names.iter().any(|name| name.starts_with("20260104T230000")),
+        "the weekly candidate must be the newest backup on the date: {names:?}"
+    );
+    for stale in ["20260104T010000", "20260104T120000"] {
+        assert!(
+            !names.iter().any(|name| name.starts_with(stale)),
+            "{stale} is an older backup of the same date: {names:?}"
+        );
+    }
 }
 
 #[test]
@@ -638,7 +667,7 @@ fn backup_age_encryption_when_configured() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(&store, &destination, restore_home.path(), false)
+        .run_restore(&destination, restore_home.path(), false)
         .expect("encrypted restore");
     assert!(restore_home.path().join("vowp.db").is_file());
 }
@@ -694,7 +723,7 @@ fn restore_drill_reopens_and_counts_match() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     let report = fixture
-        .run_restore(&store, &backup, restore_home.path(), false)
+        .run_restore(&backup, restore_home.path(), false)
         .expect("restore");
     assert!(!report.files.is_empty());
 
@@ -714,12 +743,101 @@ fn restore_drill_reopens_and_counts_match() {
     }
 
     let conflict = fixture
-        .run_restore(&store, &backup, restore_home.path(), false)
+        .run_restore(&backup, restore_home.path(), false)
         .expect_err("existing home needs --force");
     assert_eq!(conflict.kind(), ErrorKind::Conflict);
     fixture
-        .run_restore(&store, &backup, restore_home.path(), true)
+        .run_restore(&backup, restore_home.path(), true)
         .expect("forced restore");
+}
+
+#[test]
+fn restore_corrupt_backup_leaves_no_partial_home() {
+    let fixture = BackupFixture::new();
+    let session = SessionId::new();
+    let session_dir = fixture.env.home_path().join("sessions").join(session.as_str());
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(session_dir.join("log.jsonl"), "{\"seq\":1}\n").expect("log");
+
+    let destination = fixture.env.home_path().join("corrupt-backup");
+    fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+    let corrupt_log = destination.join("sessions").join(session.as_str()).join("log.jsonl");
+    std::fs::write(&corrupt_log, "{\"seq\":1}\ncorrupt\n").expect("corrupt log");
+
+    let parent = tempfile::tempdir().expect("restore parent");
+    let target = parent.path().join("restored-home");
+    let error = fixture
+        .run_restore(&destination, &target, false)
+        .expect_err("a corrupt content file must fail the restore");
+    assert!(
+        matches!(error, CoreError::Store(vowp_store::StoreError::Corrupt { .. })),
+        "{error:?}"
+    );
+    assert!(!target.exists(), "a failed restore must leave no partial home");
+    let leftovers: Vec<String> = std::fs::read_dir(parent.path())
+        .expect("restore parent")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(leftovers.is_empty(), "staging directory left behind: {leftovers:?}");
+
+    // The failed restore did not create the target, so a retry needs no `--force` and
+    // fails on the same corrupt data instead of a target conflict.
+    let retry = fixture
+        .run_restore(&destination, &target, false)
+        .expect_err("the retry must still report corruption");
+    assert!(
+        matches!(retry, CoreError::Store(vowp_store::StoreError::Corrupt { .. })),
+        "{retry:?}"
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn restore_corrupt_backup_leaves_an_existing_target_untouched() {
+    let fixture = BackupFixture::new();
+    let session = SessionId::new();
+    let session_dir = fixture.env.home_path().join("sessions").join(session.as_str());
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(session_dir.join("log.jsonl"), "{\"seq\":1}\n").expect("log");
+
+    let destination = fixture.env.home_path().join("corrupt-forced-backup");
+    fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+    let corrupt_log = destination.join("sessions").join(session.as_str()).join("log.jsonl");
+    std::fs::write(&corrupt_log, "{\"seq\":1}\ncorrupt\n").expect("corrupt log");
+
+    let target = tempfile::tempdir().expect("existing target");
+    let original = target.path().join("vowp.db");
+    std::fs::write(&original, b"original database").expect("sentinel db");
+    let error = fixture
+        .run_restore(&destination, target.path(), true)
+        .expect_err("a corrupt content file must fail the forced restore");
+    assert!(
+        matches!(error, CoreError::Store(vowp_store::StoreError::Corrupt { .. })),
+        "{error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&original).expect("original database still present"),
+        b"original database"
+    );
+    assert!(!target.path().join("sessions").exists(), "no partial session tree");
+    assert!(!target.path().join("projects").exists(), "no partial project tree");
 }
 
 #[test]
@@ -769,7 +887,7 @@ fn backup_includes_session_logs_and_blobs() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(&store, &destination, restore_home.path(), false)
+        .run_restore(&destination, restore_home.path(), false)
         .expect("restore");
     let restored = restore_home.path().join("sessions").join(session.as_str());
     assert_eq!(
@@ -807,6 +925,131 @@ fn backup_manifest_records_counts() {
         .expect("job count");
     assert_eq!(counts, 1);
     assert_eq!(manifest["row_counts"]["global"]["projects"], 1);
+}
+
+#[test]
+fn backup_manifest_counts_session_event_rows_not_last_seq() {
+    let fixture = BackupFixture::new();
+    let store = fixture.store();
+    let session = fixture.session("event gap");
+    store.upsert_session(&session).expect("session");
+    let now = fixture.clock.now();
+    for seq in [1_u64, 3] {
+        store
+            .index_event(&EventIndexRow {
+                session_id: session.id.clone(),
+                seq,
+                id: EventId::new(),
+                ts: now,
+                event_type: EventType::Note,
+                actor: Actor::System,
+                harness: HarnessKind::Vowp,
+                model: None,
+                byte_offset: (seq - 1) * 10,
+                byte_len: 10,
+                summary: format!("event {seq}"),
+            })
+            .expect("index event");
+    }
+    let row = store
+        .session(&session.id)
+        .expect("session lookup")
+        .expect("session row");
+    assert_eq!(row.last_seq, 3, "the sequence gap must be visible");
+    drop(store);
+
+    let destination = fixture.env.home_path().join("event-count-backup");
+    fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(
+        manifest["row_counts"]["global"]["session_events"].as_u64(),
+        Some(2),
+        "the manifest must count event rows, not the sessions' last_seq"
+    );
+
+    let restore_home = tempfile::tempdir().expect("restore home");
+    fixture
+        .run_restore(&destination, restore_home.path(), false)
+        .expect("the row-count restore drill must pass");
+    let restored = Store::open_global(&NodePaths::new(restore_home.path())).expect("restored global");
+    assert_eq!(restored.count_session_events().expect("event rows"), 2);
+}
+
+#[test]
+fn backup_manifest_counts_orphan_runs() {
+    let fixture = BackupFixture::new();
+    let alpha = fixture.env.config.project.name.clone();
+    let job = fixture.insert_job(&alpha, "orphaned run job");
+    let paths = NodePaths::new(fixture.env.home_path());
+    let project = Store::open_with_project(&paths, &alpha).expect("project store");
+    project
+        .insert_run(&Run {
+            id: RunId::new(),
+            job_id: Some(job.clone()),
+            session_id: None,
+            role: RunRole::Worker,
+            purpose: RunPurpose::Start,
+            profile: None,
+            rung: 0,
+            executor: None,
+            provider: None,
+            node: NodeName::parse("local").expect("node"),
+            native_session_id: None,
+            pid: None,
+            window: None,
+            cwd: None,
+            started_at: fixture.clock.now(),
+            ended_at: None,
+            exit_code: None,
+            outcome: None,
+            limit_kind: None,
+            cost: Cost::unknown(),
+            detail: String::new(),
+        })
+        .expect("run");
+    // Deleting the job leaves the run behind with a NULL job_id: an orphan run.
+    project.delete_job(&job).expect("delete job");
+    assert_eq!(project.list_jobs(&JobFilter::default()).expect("jobs").len(), 0);
+    assert_eq!(project.count_runs().expect("run rows"), 1);
+    drop(project);
+
+    let destination = fixture.env.home_path().join("orphan-run-backup");
+    fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup");
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(
+        manifest["row_counts"]["projects"][alpha.as_str()]["runs"].as_u64(),
+        Some(1),
+        "the manifest must count orphan runs too"
+    );
+
+    let restore_home = tempfile::tempdir().expect("restore home");
+    fixture
+        .run_restore(&destination, restore_home.path(), false)
+        .expect("the orphan-run restore drill must pass");
+    let restored = Store::open_with_project(&NodePaths::new(restore_home.path()), &alpha).expect("restored project");
+    assert_eq!(restored.count_runs().expect("restored run rows"), 1);
 }
 
 #[test]
@@ -894,6 +1137,46 @@ fn backup_directory_and_restore_via_cli() {
         "--force",
     ]);
     assert_eq!(code, 0, "forced restore: {stderr}");
+}
+
+#[test]
+fn restore_works_without_an_initialized_source_home() {
+    let env = common::TestEnv::new();
+    let backup = env.home_path().join("lost-home-backup");
+    let backup_text = backup.display().to_string();
+    let (code, _stdout, stderr) = env.run(&["backup", "--to", &backup_text]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // A machine that lost its serving home has no `vowp.db` and no `vowp init`. Running
+    // with that fresh HOME must still reach the restore path.
+    let lost_home = tempfile::tempdir().expect("lost home");
+    let restore_parent = tempfile::tempdir().expect("restore parent");
+    let restore_home = restore_parent.path().join("rescued");
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("HOME", lost_home.path())
+        .env_remove("VOWP_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .current_dir(lost_home.path())
+        .arg("backup")
+        .arg("--restore")
+        .arg(&backup_text)
+        .arg("--to-home")
+        .arg(&restore_home)
+        .output()
+        .expect("run vowp restore");
+    assert!(
+        output.status.success(),
+        "restore from an uninitialised home failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(restore_home.join("vowp.db").is_file());
+    let restored = Store::open_global(&NodePaths::new(&restore_home)).expect("restored global");
+    assert_eq!(restored.list_projects().expect("projects").len(), 1);
+    assert!(
+        !lost_home.path().join(".vowp").join("vowp.db").exists(),
+        "restore must not initialise the source home"
+    );
 }
 
 #[test]
@@ -1056,7 +1339,7 @@ fn backup_project_database_with_open_wal() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(&fixture.store(), &destination, restore_home.path(), false)
+        .run_restore(&destination, restore_home.path(), false)
         .expect("restore the WAL snapshot");
     let restored = Store::open_with_project(&NodePaths::new(restore_home.path()), &alpha).expect("restored project");
     assert_eq!(restored.list_jobs(&JobFilter::default()).expect("jobs").len(), 500);
@@ -1136,7 +1419,7 @@ fn backup_counts_match_snapshot_with_concurrent_writes() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(&fixture.store(), &destination, restore_home.path(), false)
+        .run_restore(&destination, restore_home.path(), false)
         .expect("the snapshot counts must match the snapshot files");
     let restored = Store::open_global(&NodePaths::new(restore_home.path())).expect("restored global");
     let restored_sessions = restored
@@ -1323,12 +1606,7 @@ fn backup_project_database_while_writer_checkpoints() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(
-            &fixture.store(),
-            last_backup.as_ref().expect("backup path"),
-            restore_home.path(),
-            false,
-        )
+        .run_restore(last_backup.as_ref().expect("backup path"), restore_home.path(), false)
         .expect("restore the last snapshot");
     let restored = Store::open_with_project(&NodePaths::new(restore_home.path()), &alpha).expect("restored project");
     restored.integrity_check().expect("restored integrity");
@@ -1388,7 +1666,7 @@ fn backup_skips_symlinked_blobs_and_capsules_roots() {
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
-        .run_restore(&fixture.store(), &destination, restore_home.path(), false)
+        .run_restore(&destination, restore_home.path(), false)
         .expect("restore");
     assert!(
         !restore_home
