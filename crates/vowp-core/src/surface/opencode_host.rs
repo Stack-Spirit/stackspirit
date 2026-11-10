@@ -998,6 +998,9 @@ impl SseDecoder {
         self.raw.extend_from_slice(bytes);
         loop {
             if self.remaining > 0 {
+                if self.raw.is_empty() {
+                    break;
+                }
                 let take = self.remaining.min(self.raw.len());
                 self.line.extend_from_slice(&self.raw[..take]);
                 self.raw.drain(..take);
@@ -1006,6 +1009,9 @@ impl SseDecoder {
                     self.crlf = 2;
                 }
             } else if self.crlf > 0 {
+                if self.raw.is_empty() {
+                    break;
+                }
                 let take = self.crlf.min(self.raw.len());
                 self.raw.drain(..take);
                 self.crlf -= take;
@@ -1875,5 +1881,45 @@ fn text_value(value: Option<&Value>) -> Option<String> {
         }
         Value::Null => None,
         other => Some(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SseDecoder;
+
+    #[test]
+    fn sse_decoder_handles_chunked_split_frames() {
+        let first = "data: {\"type\":\"one\"}\n\n";
+        let second = "data: {\"type\":\"two\"}\n\n";
+        let mut body = Vec::new();
+        for chunk in [first, second] {
+            body.extend_from_slice(format!("{:x}\r\n{chunk}\r\n", chunk.len()).as_bytes());
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        let mut decoder = SseDecoder {
+            chunked: true,
+            ..SseDecoder::default()
+        };
+        let mut events = Vec::new();
+        for byte in body {
+            decoder.feed(&[byte], &mut |value| events.push(value));
+        }
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0]["type"].as_str(), Some("one"));
+        assert_eq!(events[1]["type"].as_str(), Some("two"));
+    }
+
+    #[test]
+    fn sse_decoder_handles_plain_split_frames() {
+        let payload = b"data: {\"type\":\"one\"}\n\ndata: {\"type\":\"two\"}\n\n";
+        let mut decoder = SseDecoder::default();
+        let mut events = Vec::new();
+        for chunk in payload.chunks(3) {
+            decoder.feed(chunk, &mut |value| events.push(value));
+        }
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0]["type"].as_str(), Some("one"));
+        assert_eq!(events[1]["type"].as_str(), Some("two"));
     }
 }
