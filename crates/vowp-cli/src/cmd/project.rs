@@ -323,7 +323,7 @@ fn archive(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectNameAr
     let name = user_project(&args.name)?;
     require_entry(&store, &name)?;
     let entry = registry::set_project_state(&store, &name, ProjectState::Archived, "owner")?;
-    kill_project_windows(registry, &name)?;
+    kill_project_session(registry, &name)?;
     print_entry(registry, io, &entry, "archived")?;
     Ok(0)
 }
@@ -356,7 +356,7 @@ fn remove(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectRmArgs)
         String::new()
     };
     registry::remove_project_record(&store, &name)?;
-    kill_project_windows(registry, &name)?;
+    kill_project_session(registry, &name)?;
     if registry.json {
         print_json(
             io,
@@ -505,16 +505,27 @@ fn project_is_running(registry: &Registry<'_>, name: &ProjectName) -> Result<boo
         .any(|worker| worker.state == vowp_protocol::WorkerState::Busy))
 }
 
-/// Kills the tagged tmux windows of one project session.
-fn kill_project_windows(registry: &Registry<'_>, name: &ProjectName) -> Result<(), CliError> {
+/// Removes the project's tmux session.
+///
+/// `Tmux::kill_session` refuses a session with a foreign untagged window (and a server
+/// `vowp up` did not record). In those cases only the tagged views are removed, exactly
+/// as the old window-by-window cleanup did, and the session is left to its owner.
+fn kill_project_session(registry: &Registry<'_>, name: &ProjectName) -> Result<(), CliError> {
     let session = session_name_for_project(name.as_str());
+    match registry.deps.windows.kill_session(&session) {
+        Ok(()) | Err(vowp_tmux::TmuxError::NotInstalled) => return Ok(()),
+        Err(vowp_tmux::TmuxError::NotTagged { .. } | vowp_tmux::TmuxError::Refused(_)) => {}
+        Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
+    }
     let windows = match registry.deps.windows.list_windows(&session) {
         Ok(windows) => windows,
         Err(vowp_tmux::TmuxError::NotInstalled) => return Ok(()),
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     };
     for window in windows {
-        let _ = registry.deps.windows.kill_window(&session, &window.name);
+        if window.tagged {
+            let _ = registry.deps.windows.kill_window(&session, &window.name);
+        }
     }
     Ok(())
 }
@@ -537,5 +548,77 @@ fn state_name(state: ProjectState) -> &'static str {
         ProjectState::Active => "active",
         ProjectState::Paused => "paused",
         ProjectState::Archived => "archived",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use vowp_core::SystemGit;
+    use vowp_core::deps::{AdapterRegistry, FixedRng, SystemRunner};
+    use vowp_protocol::{FakeClock, MemoryLog, NodeName, Timestamp, VowpConfig};
+    use vowp_tmux::fake::FakeWindows;
+    use vowp_tmux::{LayoutSpec, WindowManager};
+
+    use super::*;
+
+    fn layout() -> LayoutSpec {
+        let argv = || vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()];
+        LayoutSpec {
+            board: argv(),
+            supervisor: argv(),
+            planner: argv(),
+            keeper: argv(),
+            inbox: argv(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn kill_project_session_removes_the_session_and_keeps_foreign_windows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = NodePaths::new(tmp.path().join("node"));
+        let windows = Arc::new(FakeWindows::new());
+        let clock = Arc::new(FakeClock::at(
+            Timestamp::parse("2026-11-10T10:00:00Z").expect("timestamp"),
+        ));
+        let deps = Deps {
+            paths: paths.clone(),
+            config: Arc::new(VowpConfig::with_defaults_for_tests()),
+            node: NodeName::parse("local").expect("node"),
+            clock,
+            log: Arc::new(MemoryLog::new()),
+            adapters: Arc::new(AdapterRegistry::new()),
+            windows: windows.clone(),
+            git: Arc::new(SystemGit::new(Arc::new(SystemRunner))),
+            cmd: Arc::new(SystemRunner),
+            rng: Arc::new(FixedRng(0)),
+        };
+        let registry = Registry {
+            paths: &paths,
+            deps: &deps,
+            json: false,
+            color: false,
+        };
+        let project = ProjectName::parse("demo").expect("project");
+
+        // A normal project session disappears as a whole.
+        windows.ensure_layout("demo", &layout()).expect("layout");
+        assert!(windows.has_session("vowp-demo"));
+        kill_project_session(&registry, &project).expect("kill");
+        assert!(
+            !windows.has_session("vowp-demo"),
+            "archive/rm must call kill_session, not only kill each window"
+        );
+
+        // A foreign untagged window belongs to someone else: the session stays, but the
+        // tagged views are removed.
+        windows.ensure_layout("demo", &layout()).expect("layout again");
+        windows.untagged_window("vowp-demo", "foreign");
+        kill_project_session(&registry, &project).expect("fallback kill");
+        assert!(windows.has_session("vowp-demo"), "foreign session is not destroyed");
+        assert!(windows.window_exists("vowp-demo", "foreign").expect("foreign"));
+        assert!(!windows.window_exists("vowp-demo", "board").expect("board"));
     }
 }

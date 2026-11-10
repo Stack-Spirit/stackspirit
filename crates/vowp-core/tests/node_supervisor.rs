@@ -9,12 +9,14 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use vowp_core::deps::{AdapterRegistry, FixedRng, SystemRunner};
 use vowp_core::loops::NodeSupervisor;
+use vowp_core::requests::{Request, push};
 use vowp_core::{Deps, SystemGit};
 use vowp_protocol::{
-    ActiveState, Cost, FakeClock, InboxState, Job, JobKind, JobState, MemoryLog, NewJob, NodeName, Project,
-    ProjectName, ProjectState, Role, Run, RunId, RunPurpose, RunRole, Timestamp, VowpConfig,
+    ActiveState, Cost, FakeClock, InboxState, Job, JobId, JobKind, JobState, MemoryLog, NewJob, NodeName, Project,
+    ProjectName, ProjectState, Role, Run, RunId, RunPurpose, RunRole, Session, SessionRole, SessionState, Timestamp,
+    VowpConfig,
 };
-use vowp_store::{NodePaths, Store};
+use vowp_store::{MigrationReport, NodePaths, RunFinish, Store};
 use vowp_tmux::fake::FakeWindows;
 
 /// Fixed instant every test clock starts at.
@@ -144,6 +146,86 @@ impl NodeEnv {
                 .expect("state");
         }
         store.require_job(&job.id).expect("job")
+    }
+
+    /// Inserts one session into a project's attached global database.
+    fn insert_session(&self, project: &ProjectName, state: SessionState) -> vowp_protocol::SessionId {
+        let store = self.global();
+        let id = vowp_protocol::SessionId::new();
+        store
+            .upsert_session(&Session {
+                id: id.clone(),
+                project: Some(project.clone()),
+                job_id: None,
+                role: Some(SessionRole::Worker),
+                title: format!("{project} session"),
+                parent_session_id: None,
+                node: self.deps.node.clone(),
+                cwd: self.tmp.path().display().to_string(),
+                state,
+                executor: None,
+                last_seq: 0,
+                last_capsule_id: None,
+                log_bytes: 0,
+                created_at: ts(),
+                updated_at: ts(),
+            })
+            .expect("session row");
+        id
+    }
+
+    /// Inserts one run row, optionally finishing it.
+    fn insert_run(
+        &self,
+        project: &ProjectName,
+        job: Option<&JobId>,
+        session: Option<&vowp_protocol::SessionId>,
+        started_at: Timestamp,
+        finish: Option<vowp_protocol::RunOutcome>,
+    ) -> Run {
+        let store = Store::open_with_project(&self.paths, project)
+            .expect("project store")
+            .with_clock(Arc::new(self.clock.clone()));
+        let run = Run {
+            id: RunId::new(),
+            job_id: job.cloned(),
+            session_id: session.cloned(),
+            role: RunRole::Worker,
+            purpose: RunPurpose::Start,
+            profile: None,
+            rung: 0,
+            executor: None,
+            provider: None,
+            node: self.deps.node.clone(),
+            native_session_id: None,
+            pid: None,
+            window: None,
+            cwd: None,
+            started_at,
+            ended_at: None,
+            exit_code: None,
+            outcome: None,
+            limit_kind: None,
+            cost: Cost::unknown(),
+            detail: String::new(),
+        };
+        store.insert_run(&run).expect("run row");
+        if let Some(outcome) = finish {
+            store
+                .finish_run(
+                    &run.id,
+                    &RunFinish {
+                        outcome,
+                        exit_code: Some(0),
+                        limit_kind: None,
+                        cost: Cost::unknown(),
+                        native_session_id: None,
+                        detail: "test run finished".to_owned(),
+                    },
+                )
+                .expect("finish run");
+        }
+        run
     }
 
     /// Returns the project names named by the `projects` step, in tick order.
@@ -499,6 +581,257 @@ fn a_project_config_that_disagrees_with_the_registry_parks_that_project_only() {
 }
 
 #[test]
+fn node_tick_drains_node_scoped_requests_before_any_project() {
+    let env = NodeEnv::new();
+    let alpha = env.add_project("alpha", |_| {});
+    let beta = env.add_project("beta", |_| {});
+    let job = env.insert_job(&beta, "node-request-job", JobState::Parked);
+    assert!(
+        env.insert_job(&alpha, "alpha-job", JobState::Parked).state == JobState::Parked,
+        "alpha exists so the node request has a wrong project to land on first"
+    );
+    // Keep beta's graph from dispatching the resolved job, so the assertion below sees
+    // the request's own state change rather than the dispatch that follows it.
+    Store::open_with_project(&env.paths, &beta)
+        .expect("beta store")
+        .kv_set("paused", "1")
+        .expect("pause beta dispatch");
+
+    // An unbound handle writes `req:node:<id>`. With two projects, a project-level drain
+    // would apply it to whichever project ticks first (alpha) and drop it because alpha
+    // does not own the job. Only the node's own step can route it to beta.
+    let request = push(&env.global(), &Request::ResolveJob { job: job.id.clone() }).expect("node request");
+    assert_eq!(env.global().kv_prefix("req:node:").expect("queue").len(), 1);
+
+    let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
+    let report = node.tick().expect("tick");
+    let global_step = report
+        .steps
+        .iter()
+        .find(|step| step.name == "global")
+        .expect("global request step");
+    assert!(global_step.ok, "{global_step:?}");
+    assert!(
+        global_step.detail.contains("1 node request(s) applied"),
+        "{global_step:?}"
+    );
+    assert!(env.global().kv_prefix("req:node:").expect("queue").is_empty());
+    assert_eq!(
+        Store::open_with_project(&env.paths, &beta)
+            .expect("beta store")
+            .require_job(&job.id)
+            .expect("job")
+            .state,
+        JobState::Ready,
+        "the node routed the request to the project that owns the job"
+    );
+    assert!(
+        Store::open_with_project(&env.paths, &alpha)
+            .expect("alpha store")
+            .job(&job.id)
+            .expect("lookup")
+            .is_none(),
+        "the first project never saw another project's job"
+    );
+    let _ = request;
+}
+
+#[test]
+fn paused_project_keeps_its_checkpoint_and_board_fresh() {
+    let env = NodeEnv::new();
+    let active = env.add_project("alpha", |_| {});
+    let paused = env.add_project("paused", |_| {});
+    vowp_core::loops::registry::set_project_state(&env.global(), &paused, ProjectState::Paused, "owner")
+        .expect("pause");
+
+    let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
+    let report = node.tick().expect("tick");
+    let paused_report = report.projects.get(&paused).expect("paused project ticked");
+    let board = paused_report
+        .steps
+        .iter()
+        .find(|step| step.name == "board")
+        .expect("paused project has the maintenance board step");
+    assert!(board.ok, "{board:?}");
+    assert!(board.detail.contains("checkpoint"), "{board:?}");
+    assert!(
+        !paused_report.steps.iter().any(|step| step.name == "dispatch"),
+        "a paused project starts no new work: {paused_report:?}"
+    );
+    let checkpoints = env.tmp.path().join("paused/.vowp/checkpoints");
+    let written = std::fs::read_dir(&checkpoints)
+        .expect("checkpoint dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("checkpoint entries");
+    assert_eq!(written.len(), 1, "the paused project wrote one checkpoint: {written:?}");
+    let board: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(env.paths.root().join("board.json")).expect("board"))
+            .expect("board json");
+    assert_eq!(
+        board["project"], "alpha",
+        "the one active project keeps the v0.1 compatibility board"
+    );
+
+    // Once the active project is archived, the paused project is the only one left: the
+    // v0.1 compatibility board must be written for it instead of being deferred forever.
+    vowp_core::loops::registry::set_project_state(&env.global(), &active, ProjectState::Archived, "owner")
+        .expect("archive");
+    let report = node.tick().expect("second tick");
+    assert!(report.projects.contains_key(&paused));
+    let board: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(env.paths.root().join("board.json")).expect("board"))
+            .expect("board json");
+    assert_eq!(board["project"], "paused", "{board}");
+}
+
+#[test]
+fn project_pause_lets_running_work_finish() {
+    let env = NodeEnv::new();
+    let alpha = env.add_project("alpha", |_| {});
+    let paused = env.add_project("paused", |_| {});
+    let job = env.insert_job(&alpha, "finish-me", JobState::Running);
+    let queued = env.insert_job(&alpha, "do-not-start", JobState::Pending);
+
+    // The run ended before the tick, but the job is still `running`: this is exactly the
+    // work a pause must let the maintenance harvest advance.
+    let worktree = env.tmp.path().join("alpha-worktree");
+    let report_path = worktree.join(&job.report);
+    std::fs::create_dir_all(report_path.parent().expect("report parent")).expect("report dir");
+    std::fs::write(
+        &report_path,
+        format!(
+            "---\njob: {}\nstatus: done\nbranch: job/{}\ncommits: []\ntests: \"cargo test: pass\"\n\
+             files_changed: []\nopen_items: []\nquestions_for_owner: []\n---\n\nDone.\n",
+            job.id, job.id
+        ),
+    )
+    .expect("report");
+    Store::open_with_project(&env.paths, &alpha)
+        .expect("alpha store")
+        .set_job_workspace(
+            &job.id,
+            Some(&format!("job/{}", job.id)),
+            Some(&worktree.display().to_string()),
+        )
+        .expect("workspace");
+    let run = env.insert_run(
+        &alpha,
+        Some(&job.id),
+        None,
+        Timestamp::from_unix_secs(0),
+        Some(vowp_protocol::RunOutcome::Ok),
+    );
+
+    vowp_core::loops::registry::set_project_state(&env.global(), &paused, ProjectState::Paused, "owner")
+        .expect("pause peer");
+    vowp_core::loops::registry::set_project_state(&env.global(), &alpha, ProjectState::Paused, "owner")
+        .expect("pause alpha");
+
+    let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
+    let report = node.tick().expect("tick");
+    let tick = report.projects.get(&alpha).expect("paused project ticked");
+    assert!(
+        tick.transitions
+            .iter()
+            .any(|(id, from, to)| id == &job.id && *from == JobState::Running && *to == JobState::Gating),
+        "the finished run advanced while paused: {:?}",
+        tick.transitions
+    );
+    assert!(
+        !tick.steps.iter().any(|step| step.name == "dispatch"),
+        "the paused project dispatched nothing: {tick:?}"
+    );
+    let store = Store::open_with_project(&env.paths, &alpha).expect("alpha store");
+    assert_eq!(
+        store.require_job(&job.id).expect("job").state,
+        JobState::Gating,
+        "running work finished into its next state"
+    );
+    assert_eq!(
+        store.require_job(&queued.id).expect("queued job").state,
+        JobState::Ready,
+        "queued work stays ready but was not started"
+    );
+    assert_eq!(
+        store.require_run(&run.id).expect("run").outcome,
+        Some(vowp_protocol::RunOutcome::Ok)
+    );
+}
+
+#[test]
+fn node_supervisor_restart_reconciles_cross_db() {
+    let env = NodeEnv::new();
+    let alpha = env.add_project("alpha", |_| {});
+    let beta = env.add_project("beta", |_| {});
+    let mut first = NodeSupervisor::new(env.deps.clone()).expect("first supervisor");
+    first.startup().expect("first startup");
+    first.tick().expect("first tick");
+    drop(first);
+
+    // Crash residue in two project databases: a running session with no open run
+    // (alpha) and a closed run that never got its turn.ended/cost rows (beta).
+    let running = env.insert_session(&alpha, SessionState::Running);
+    let idle = env.insert_session(&beta, SessionState::Idle);
+    let run = env.insert_run(&beta, None, Some(&idle), ts(), Some(vowp_protocol::RunOutcome::Crash));
+
+    let mut restarted = NodeSupervisor::new(env.deps.clone()).expect("restarted supervisor");
+    let report = restarted.startup().expect("restart startup");
+    assert_eq!(report.projects, 2, "both projects reconciled");
+    assert!(
+        report.cross_db.sessions_repaired >= 1,
+        "alpha's running session without a run is repaired: {:?}",
+        report.cross_db
+    );
+    assert!(
+        report.cross_db.terminal_events_repaired >= 1,
+        "beta's closed run gets its terminal state: {:?}",
+        report.cross_db
+    );
+    assert!(
+        report.cross_db.ledgers_repaired >= 1,
+        "beta's missing cost row is repaired: {:?}",
+        report.cross_db
+    );
+
+    let alpha_store = Store::open_with_project(&env.paths, &alpha).expect("alpha store");
+    assert_eq!(
+        alpha_store.session(&running).expect("session").expect("row").state,
+        SessionState::Idle
+    );
+    let beta_store = Store::open_with_project(&env.paths, &beta).expect("beta store");
+    let notes = beta_store
+        .ledger_since(&vowp_store::LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::Note),
+            ..vowp_store::LedgerFilter::default()
+        })
+        .expect("ledger");
+    assert!(
+        notes
+            .iter()
+            .any(|entry| entry.run_id.as_ref() == Some(&run.id) && entry.summary == "cost missing after crash"),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn startup_returns_the_migration_it_was_given() {
+    let env = NodeEnv::new();
+    env.add_project("alpha", |_| {});
+    let migration = MigrationReport {
+        from_version: 1,
+        to_version: 2,
+        backup: env.tmp.path().join("backups/pre-0.2.db").display().to_string(),
+        projects: vec![ProjectName::parse("alpha").expect("project")],
+        verified: true,
+        ..MigrationReport::default()
+    };
+    let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
+    node.record_migration(migration.clone());
+    let report = node.startup().expect("startup");
+    assert_eq!(report.migration, Some(migration));
+}
+
+#[test]
 fn the_node_systemd_unit_matches_the_home_supervisor_contract() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let installed = std::fs::read_to_string(root.join("scripts/vowp.service")).expect("installed unit");
@@ -518,5 +851,22 @@ fn the_node_systemd_unit_matches_the_home_supervisor_contract() {
     assert!(
         !installed.contains("Restart=always"),
         "always would restart the supervisor after `vowp down` exits 0"
+    );
+
+    // The constant `vowp init` embeds must not drift back to `Restart=always` either.
+    let template = vowp_core::loops::l8::SYSTEMD_UNIT;
+    for line in [
+        "Environment=VOWP_HOME=%h/.vowp",
+        "ExecStart=%h/.local/bin/vowp up --foreground",
+        "Restart=on-failure",
+        "RestartSec=5",
+        "KillMode=mixed",
+        "WantedBy=default.target",
+    ] {
+        assert!(template.contains(line), "SYSTEMD_UNIT is missing {line:?}:\n{template}");
+    }
+    assert!(
+        !template.contains("Restart=always"),
+        "SYSTEMD_UNIT must not restart after a clean `vowp down`"
     );
 }

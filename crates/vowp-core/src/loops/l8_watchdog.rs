@@ -18,14 +18,18 @@ pub const STALE_AFTER_SECS: u64 = 180;
 
 /// The `vowp.service` systemd user unit text.
 pub const SYSTEMD_UNIT: &str = "[Unit]\n\
-Description=VOWP supervisor\n\
-After=network.target\n\
+Description=VOWP node supervisor\n\
+After=network-online.target\n\
+Wants=network-online.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
+Environment=VOWP_HOME=%h/.vowp\n\
 ExecStart=%h/.local/bin/vowp up --foreground\n\
-Restart=always\n\
+Restart=on-failure\n\
 RestartSec=5\n\
+KillMode=mixed\n\
+WorkingDirectory=%h/.vowp\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n";

@@ -270,6 +270,12 @@ impl Supervisor {
                 steps.push(self.step("schedules", |this| this.step_schedules(now)));
             }
         }
+        // §4.2: board/checkpoint is in the maintenance subset. A paused project keeps its
+        // own checkpoint fresh; the node-level board.json stays the single-project
+        // compatibility copy written by [`NodeSupervisor`].
+        if mode == ProjectTickMode::Maintenance {
+            steps.push(self.step("board", |this| this.step_checkpoint(now)));
+        }
         Ok(TickReport {
             at: now,
             steps,
@@ -1688,31 +1694,46 @@ impl Supervisor {
 
     /// Step 12: board snapshot and checkpoint.
     fn step_board(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        self.write_board_snapshot(now)?;
+        self.step_checkpoint(now)?;
+        Ok("board written".to_owned())
+    }
+
+    /// Writes the board snapshot copy without touching the checkpoint.
+    fn write_board_snapshot(&self, now: Timestamp) -> Result<(), CoreError> {
         let snapshot = BoardSnapshot::collect(&self.store, &self.deps.config, now)?;
         let json = board_json(&snapshot)?;
-        self.atomic_write("board.json", &json)?;
+        self.atomic_write("board.json", &json)
+    }
 
+    /// Writes the project checkpoint when one is due.
+    ///
+    /// This is the maintenance subset's board step for a paused project: the node-level
+    /// `board.json` belongs to the single-project compatibility path, while the
+    /// checkpoint file is per project and can be written by every paused tick.
+    fn step_checkpoint(&mut self, now: Timestamp) -> Result<String, CoreError> {
         let checkpoint_minutes = self.bounds().checkpoint_minutes.unwrap_or(120) as u64;
         let due = match self.last_checkpoint {
             None => checkpoint_minutes > 0,
             Some(last) => now.since(last) >= Duration::from_secs(checkpoint_minutes.saturating_mul(60)),
         };
-        if due && checkpoint_minutes > 0 {
-            let text = crate::ledger::report::checkpoint(&self.store, &self.deps.config, now)?;
-            let project = super::main_repo(&self.deps, &self.store, &self.project)?;
-            let dir = project.join(".vowp/checkpoints");
-            std::fs::create_dir_all(&dir).map_err(|source| CoreError::Io {
-                path: dir.display().to_string(),
-                source,
-            })?;
-            let path = dir.join(format!("{}.md", now.unix_secs()));
-            std::fs::write(&path, text).map_err(|source| CoreError::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
-            self.last_checkpoint = Some(now);
+        if !due || checkpoint_minutes == 0 {
+            return Ok("checkpoint not due".to_owned());
         }
-        Ok("board written".to_owned())
+        let text = crate::ledger::report::checkpoint(&self.store, &self.deps.config, now)?;
+        let project = super::main_repo(&self.deps, &self.store, &self.project)?;
+        let dir = project.join(".vowp/checkpoints");
+        std::fs::create_dir_all(&dir).map_err(|source| CoreError::Io {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let path = dir.join(format!("{}.md", now.unix_secs()));
+        std::fs::write(&path, text).map_err(|source| CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        self.last_checkpoint = Some(now);
+        Ok("checkpoint written".to_owned())
     }
 
     /// Step 13: heartbeat file and supervisor pid.
@@ -2401,6 +2422,7 @@ pub struct NodeSupervisor {
     wake: WakeHandle,
     wake_rx: Option<Receiver<()>>,
     last_failure: BTreeMap<ProjectName, String>,
+    pending_migration: Option<MigrationReport>,
 }
 
 impl NodeSupervisor {
@@ -2419,15 +2441,28 @@ impl NodeSupervisor {
             wake,
             wake_rx: Some(wake_rx),
             last_failure: BTreeMap::new(),
+            pending_migration: None,
         };
         supervisor.reload_projects()?;
         Ok(supervisor)
     }
 
+    /// Records the migration `vowp up` performed before building this supervisor.
+    ///
+    /// The CLI migrates a v0.1 home before [`NodeSupervisor::new`] can open it, so the
+    /// result would otherwise be lost. [`NodeSupervisor::startup`] returns it in
+    /// [`NodeReconcileReport::migration`].
+    pub fn record_migration(&mut self, report: MigrationReport) {
+        self.pending_migration = Some(report);
+    }
+
     /// Startup reconciliation for every project.
     pub fn startup(&mut self) -> Result<NodeReconcileReport, CoreError> {
         self.reload_projects()?;
-        let mut report = NodeReconcileReport::default();
+        let mut report = NodeReconcileReport {
+            migration: self.pending_migration.take(),
+            ..NodeReconcileReport::default()
+        };
         let names: Vec<ProjectName> = self.projects.keys().cloned().collect();
         for name in names {
             let Some(project) = self.projects.get_mut(&name) else {
@@ -2489,6 +2524,10 @@ impl NodeSupervisor {
         steps.push(self.node_step("lifecycle", |this| {
             crate::lifecycle::tick(&this.deps, &this.global, now).map(|()| "lifecycle ticked".to_owned())
         }));
+        // §4.2 step 1: the node drains node-scoped requests itself. A project's
+        // `step_requests` also accepts node keys, but whichever project ticked first would
+        // then apply a request for another project's job to the wrong database.
+        steps.push(self.node_step("global", |this| this.step_global_requests()));
 
         let rotation = self.rotation();
         let mut projects = BTreeMap::new();
@@ -2592,15 +2631,36 @@ impl NodeSupervisor {
             crate::fleet::write_snapshot(&this.deps, &this.global, now).map(|()| "snapshot written".to_owned())
         }));
 
-        let active: Vec<ProjectName> = super::registry::project_entries(&self.global)?
-            .into_iter()
+        // §4.2 step 4: the v0.1 compatibility board is written only when one non-reserved
+        // project needs a tick. An active project owns the copy when there is exactly one.
+        // With no active project, a single paused project still writes it: its maintenance
+        // subset includes board/checkpoint, and a home whose only project is paused must not
+        // leave board.json stale. A broken project is parked and not ticked, so it cannot
+        // write the board.
+        let entries = super::registry::project_entries(&self.global)?;
+        let active: Vec<ProjectName> = entries
+            .iter()
             .filter(|entry| {
                 entry.state == ProjectState::Active && entry.name.as_str() != vowp_store::RESERVED_NODE_PROJECT
             })
-            .map(|entry| entry.name)
+            .map(|entry| entry.name.clone())
             .collect();
-        if let [only] = active.as_slice() {
-            let result = match self.projects.get_mut(only) {
+        let paused: Vec<ProjectName> = entries
+            .iter()
+            .filter(|entry| {
+                entry.state == ProjectState::Paused
+                    && !entry.paused_reason.starts_with("broken:")
+                    && entry.name.as_str() != vowp_store::RESERVED_NODE_PROJECT
+            })
+            .map(|entry| entry.name.clone())
+            .collect();
+        let board_project = match active.as_slice() {
+            [only] => Some(only.clone()),
+            [] if paused.len() == 1 => paused.first().cloned(),
+            _ => None,
+        };
+        if let Some(only) = board_project {
+            let result = match self.projects.get_mut(&only) {
                 Some(project) => project.inner.write_board(now),
                 None => Ok("project not loaded".to_owned()),
             };
@@ -2625,7 +2685,11 @@ impl NodeSupervisor {
             steps.push(StepReport {
                 name: "board",
                 ok: true,
-                detail: format!("node board deferred: {} active project(s)", active.len()),
+                detail: format!(
+                    "node board deferred: {} active and {} paused project(s)",
+                    active.len(),
+                    paused.len()
+                ),
             });
         }
 
@@ -2654,6 +2718,92 @@ impl NodeSupervisor {
             projects,
             skipped,
         })
+    }
+
+    /// §4.2 step 1: drains `req:node:*` and applies each request once on the node.
+    ///
+    /// A request that names a job or an inbox item is routed to the project database that
+    /// owns it. A node-scoped loop request applies to every loaded project, and `Wake`
+    /// has no project effect. A request that matches no project is dropped with a warning,
+    /// exactly like a project step's undecodable request.
+    fn step_global_requests(&mut self) -> Result<String, CoreError> {
+        let requests = crate::requests::drain(&self.global)?;
+        let total = requests.len();
+        let mut applied = 0;
+        let mut dropped = 0;
+        for (id, request) in requests {
+            match self.apply_node_request(&request) {
+                Ok(true) => applied += 1,
+                Ok(false) => {
+                    dropped += 1;
+                    self.deps.log.log(
+                        Level::Warn,
+                        "requests",
+                        &format!(
+                            "dropped node request {} {}: no loaded project owns it",
+                            id.0,
+                            request_name(&request)
+                        ),
+                    );
+                }
+                Err(error) => {
+                    dropped += 1;
+                    self.deps.log.log(
+                        Level::Warn,
+                        "requests",
+                        &format!("dropped node request {} {}: {error}", id.0, request_name(&request)),
+                    );
+                }
+            }
+        }
+        Ok(format!(
+            "{applied} node request(s) applied, {dropped} dropped ({total} drained)"
+        ))
+    }
+
+    /// Applies one node-scoped request to the project that owns it.
+    ///
+    /// Returns `Ok(false)` when no loaded project owns it. `Wake` is node-wide and needs
+    /// no project; an unbound loop request applies to every loaded project.
+    fn apply_node_request(&mut self, request: &crate::requests::Request) -> Result<bool, CoreError> {
+        use crate::requests::Request;
+        match request {
+            Request::Wake => Ok(true),
+            Request::PauseLoop { .. } | Request::ResumeLoop { .. } | Request::RunLoop { .. } => {
+                if self.projects.is_empty() {
+                    return Ok(false);
+                }
+                for project in self.projects.values_mut() {
+                    project.inner.apply_request(request)?;
+                }
+                Ok(true)
+            }
+            Request::AnswerInbox { id } => {
+                for project in self.projects.values_mut() {
+                    if project.inner.store.inbox_item(id)?.is_some() {
+                        project.inner.apply_request(request)?;
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Request::ResolveJob { job, .. }
+            | Request::RetryJob { job, .. }
+            | Request::ParkJob { job, .. }
+            | Request::CancelJob { job, .. }
+            | Request::NudgeJob { job, .. }
+            | Request::RestartJob { job, .. }
+            | Request::ReplanJob { job, .. }
+            | Request::FailJob { job, .. } => {
+                for project in self.projects.values_mut() {
+                    if project.inner.store.job(job)?.is_some() {
+                        project.inner.apply_request(request)?;
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
     }
 
     /// Startup then tick every `[node].tick_secs` or on wake, until `cancel`.
@@ -2847,9 +2997,9 @@ impl NodeSupervisor {
     }
 
     /// Runs one node-level step under `catch_unwind`.
-    fn node_step<F>(&self, name: &'static str, f: F) -> StepReport
+    fn node_step<F>(&mut self, name: &'static str, f: F) -> StepReport
     where
-        F: FnOnce(&Self) -> Result<String, CoreError>,
+        F: FnOnce(&mut Self) -> Result<String, CoreError>,
     {
         match catch_unwind(AssertUnwindSafe(|| f(self))) {
             Ok(Ok(detail)) => StepReport { name, ok: true, detail },

@@ -24,7 +24,7 @@ pub struct MigrateArgs {
     /// Restore from this pre-migration backup instead of migrating.
     #[arg(long, value_name = "BACKUP")]
     pub rollback: Option<PathBuf>,
-    /// Confirm the migration.
+    /// Confirm the migration (`--dry-run` needs no confirmation).
     #[arg(long)]
     pub yes: bool,
 }
@@ -64,7 +64,15 @@ fn migrate(
         }
         (None, true) => vowp_store::migrate_v01_dry_run(paths)?,
         (None, false) => {
-            let _ = args.yes;
+            if !args.yes {
+                // Let the store's preflight classify a v0.2 or missing home first, so a
+                // caller who cannot migrate at all still gets the specific schema error.
+                // On a real v0.1 source, refuse before the backup/swap writes anything.
+                let _ = vowp_store::migrate_v01_dry_run(paths)?;
+                return Err(CliError::Guard(
+                    "refusing to migrate the home without --yes; re-run with --yes, or --dry-run to preview".to_owned(),
+                ));
+            }
             vowp_store::migrate_v01(paths)?
         }
     };

@@ -11,14 +11,16 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use rusqlite::{Connection, params};
 use vowp_core::deps::SystemRng;
 use vowp_core::{AdapterRegistry, CommandRunner, Deps, SystemGit, SystemRunner};
 use vowp_protocol::{
     Adapter, AdapterCapabilities, AdapterError, AdapterRun, Cost, Executor, HarnessConfig, HarnessEvent, HarnessKind,
-    JobKind, JobState, NewJob, Node, NullLog, ProbeResult, Project, ProjectName, ProjectState, Role, RunOutcome,
-    RunSummary, StartInput, StopReason, SystemClock, Timestamp,
+    JobKind, JobState, NewJob, Node, NullLog, ProbeResult, Project, ProjectName, ProjectState, Release, ReleaseId,
+    ReleaseState, Role, RunOutcome, RunSummary, Session, SessionId, SessionRole, StartInput, StopReason, SystemClock,
+    Timestamp,
 };
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePaths, Store, StoreError};
 use vowp_tmux::fake::FakeWindows;
 use vowp_tmux::{Tmux, WindowManager};
 
@@ -75,6 +77,93 @@ fn register_project(paths: &NodePaths, config: &vowp_protocol::VowpConfig, proje
             updated_at: now,
         })
         .expect("project");
+}
+
+/// One v0.1 home built with the documented v0.1 schema.
+///
+/// The fixture is a real SQLite file created from `docs/design/schema.sql`, the same
+/// schema `vowp-store` embeds; it is not a hand-written stub. `rusqlite` is a dev-only
+/// dependency of this package (the store already uses it in production).
+struct V01Env {
+    home: tempfile::TempDir,
+    project: tempfile::TempDir,
+    name: String,
+}
+
+impl V01Env {
+    fn new(name: &str) -> Self {
+        let home = tempfile::tempdir().expect("v0.1 home");
+        let project = tempfile::tempdir().expect("v0.1 project");
+        let mut config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+        config.project.name = ProjectName::parse(name).expect("project name");
+        config.project.path = Some(project.path().display().to_string());
+        std::fs::write(
+            project.path().join("vowp.toml"),
+            toml::to_string_pretty(&config).expect("config"),
+        )
+        .expect("write vowp.toml");
+        std::fs::create_dir_all(project.path().join(".vowp/jobs")).expect("jobs dir");
+
+        let paths = NodePaths::new(home.path());
+        paths.ensure().expect("node paths");
+        let conn = Connection::open(paths.db_path()).expect("v0.1 db");
+        conn.pragma_update(None, "journal_mode", "WAL").expect("wal");
+        conn.execute_batch(include_str!("../../../docs/design/schema.sql"))
+            .expect("v0.1 schema");
+        let now = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO projects (name, path, remote_url, default_branch, config_json, created_at, updated_at)
+             VALUES (?1, ?2, NULL, 'main', '{}', ?3, ?3)",
+            params![name, project.path().display().to_string(), now],
+        )
+        .expect("project row");
+        conn.execute(
+            "INSERT INTO jobs (id, project, title, kind, role, profile, brief_path, report_path, state,
+                               state_changed_at, created_at, updated_at)
+             VALUES ('legacy-job', ?1, 'Legacy job', 'build', 'worker', 'worker',
+                     '.vowp/jobs/legacy-job/brief.md', '.vowp/jobs/legacy-job/report.md', 'done', ?2, ?2, ?2)",
+            params![name, now],
+        )
+        .expect("job row");
+        drop(conn);
+
+        Self {
+            home,
+            project,
+            name: name.to_owned(),
+        }
+    }
+
+    fn home_path(&self) -> &Path {
+        self.home.path()
+    }
+
+    fn paths(&self) -> NodePaths {
+        NodePaths::new(self.home.path())
+    }
+
+    fn run(&self, args: &[&str]) -> (i32, String, String) {
+        let mut full = vec![
+            "vowp".to_owned(),
+            "--home".to_owned(),
+            self.home.path().display().to_string(),
+            "--project".to_owned(),
+            self.project.path().display().to_string(),
+        ];
+        full.extend(args.iter().map(|value| (*value).to_owned()));
+        let mut io = vowp_cli::BufferIo::new("");
+        let code = vowp_cli::run(full, &mut io);
+        (code, io.stdout(), io.stderr())
+    }
+
+    fn run_json(&self, args: &[&str]) -> (i32, serde_json::Value, String) {
+        let mut full = vec!["--json"];
+        full.extend(args.iter().copied());
+        let (code, stdout, stderr) = self.run(&full);
+        let value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("stdout is not JSON ({error}): {stdout:?}; stderr: {stderr:?}"));
+        (code, value, stderr)
+    }
 }
 
 /// Polls `predicate` for up to thirty seconds.
@@ -1375,6 +1464,241 @@ fn detached_up_passes_the_project_context_to_its_child() {
         "down after detached up failed: {}",
         String::from_utf8_lossy(&down.stderr)
     );
+}
+
+#[test]
+fn migrate_requires_yes_and_reports_the_v01_backup() {
+    let env = V01Env::new("legacy");
+
+    let (code, stdout, stderr) = env.run(&["migrate", "--dry-run"]);
+    assert_eq!(code, 0, "a preview needs no --yes: {stderr}");
+    assert!(stdout.contains("would migrate"), "{stdout}");
+    assert!(
+        matches!(Store::open(&env.paths()), Err(StoreError::MigrationRequired)),
+        "the preview writes nothing"
+    );
+
+    let (code, _, stderr) = env.run(&["migrate"]);
+    assert_eq!(code, 5, "a migration needs --yes: {stderr}");
+    assert!(stderr.contains("--yes"), "{stderr}");
+    assert!(
+        matches!(Store::open(&env.paths()), Err(StoreError::MigrationRequired)),
+        "the refused migration must not touch the v0.1 file"
+    );
+
+    let (code, stdout, stderr) = env.run(&["migrate", "--yes"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("migrated schema 1 -> 2"), "{stdout}");
+    assert!(stdout.contains("backup:"), "{stdout}");
+    let backups = std::fs::read_dir(env.paths().backups_dir())
+        .expect("backups dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("backups");
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let backup = backups[0].path();
+    assert!(
+        matches!(Store::open_path(&backup), Err(StoreError::MigrationRequired)),
+        "the backup is the untouched v0.1 file"
+    );
+
+    let store = Store::open(&env.paths()).expect("migrated home");
+    assert_eq!(store.global_schema_version().expect("version"), 2);
+    let project = ProjectName::parse(&env.name).expect("project");
+    let project_store = Store::open_with_project(&env.paths(), &project).expect("project db");
+    assert_eq!(
+        project_store
+            .require_job(&vowp_protocol::JobId::parse("legacy-job").expect("job"))
+            .expect("job")
+            .state,
+        JobState::Done,
+        "the project's history followed the split"
+    );
+
+    let (code, _, stderr) = env.run(&["migrate", "--yes"]);
+    assert_eq!(code, 2, "a v0.2 home is not a migration source: {stderr}");
+}
+
+#[test]
+fn up_migrates_with_backup_first() {
+    let env = V01Env::new("legacy");
+
+    // `--no-migrate` must not open a v0.1 home; it reports the conflict instead.
+    let (code, _, stderr) = env.run(&["up", "--no-migrate", "--once", "--no-tmux"]);
+    assert_eq!(code, 4, "a v0.1 home needs the automatic migration: {stderr}");
+    assert!(stderr.contains("vowp migrate"), "{stderr}");
+    assert!(
+        matches!(Store::open(&env.paths()), Err(StoreError::MigrationRequired)),
+        "the refused up leaves the v0.1 file alone"
+    );
+
+    let (code, value, stderr) = env.run_json(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "automatic migration + tick failed: {stderr}\n{value}");
+
+    // NodeReconcileReport.migration is populated by the automatic path and surfaced in
+    // `up --once --json`; this is not a manual `vowp migrate` call.
+    let migration = &value["migration"];
+    assert_eq!(migration["from_version"], 1, "{value}");
+    assert_eq!(migration["to_version"], 2, "{value}");
+    assert_eq!(migration["verified"], true, "{value}");
+    assert_eq!(migration["dry_run"], false, "{value}");
+    assert_eq!(migration["projects"], serde_json::json!(["legacy"]), "{value}");
+    let backup = PathBuf::from(migration["backup"].as_str().expect("backup path"));
+    assert!(backup.is_file(), "the backup exists before the swap: {backup:?}");
+    assert!(
+        matches!(Store::open_path(&backup), Err(StoreError::MigrationRequired)),
+        "the backup still has the v0.1 schema"
+    );
+
+    let store = Store::open(&env.paths()).expect("migrated home");
+    assert_eq!(store.global_schema_version().expect("version"), 2);
+    let project = ProjectName::parse("legacy").expect("project");
+    let project_store = Store::open_with_project(&env.paths(), &project).expect("project db");
+    assert_eq!(
+        project_store
+            .require_job(&vowp_protocol::JobId::parse("legacy-job").expect("job"))
+            .expect("job")
+            .state,
+        JobState::Done
+    );
+    assert!(
+        env.home_path().join("heartbeat").is_file(),
+        "the tick ran after the migration"
+    );
+    assert!(
+        env.home_path().join("vowp.toml").is_file(),
+        "the node config was installed"
+    );
+}
+
+#[test]
+fn project_rm_archives_db_and_keeps_production_records() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let name = ProjectName::parse("second").expect("project");
+    let (code, _, stderr) = env.run(&["project", "add", second.path().to_str().expect("second path")]);
+    assert_eq!(code, 0, "{stderr}");
+    let paths = NodePaths::new(env.home_path());
+
+    // Production records live in the project DB; the project name on a global session row
+    // is history too. Both must survive `rm`.
+    let project_store = Store::open_with_project(&paths, &name).expect("project store");
+    let release = Release {
+        id: ReleaseId::new(),
+        project: name.clone(),
+        env: "production".to_owned(),
+        change_ref: "v1".to_owned(),
+        from_commit: None,
+        to_commit: Some("abc123".to_owned()),
+        state: ReleaseState::Live,
+        guards: Vec::new(),
+        snapshot_path: None,
+        rollback_cmd: None,
+        probe: serde_json::json!({}),
+        approved_by: None,
+        rolled_back_by: None,
+        note: String::new(),
+        created_at: Timestamp::now(),
+        finished_at: None,
+    };
+    project_store.insert_release(&release).expect("release");
+    let session = Session {
+        id: SessionId::new(),
+        project: Some(name.clone()),
+        job_id: None,
+        role: Some(SessionRole::Worker),
+        title: "second session".to_owned(),
+        parent_session_id: None,
+        node: env.config.node.name.clone(),
+        cwd: second.path().display().to_string(),
+        state: vowp_protocol::SessionState::Idle,
+        executor: None,
+        last_seq: 0,
+        last_capsule_id: None,
+        log_bytes: 0,
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
+    };
+    env.store().upsert_session(&session).expect("session");
+
+    let tmux = env.tmux();
+    let tmux_available = tmux.has_tmux();
+    let spec = vowp_tmux::LayoutSpec {
+        board: vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()],
+        supervisor: vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()],
+        planner: vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()],
+        keeper: vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()],
+        inbox: vec!["sh".to_owned(), "-c".to_owned(), "exec cat".to_owned()],
+        cwd: None,
+    };
+    if tmux_available {
+        tmux.ensure_layout("second", &spec).expect("session");
+        assert!(tmux.session_exists("vowp-second").expect("lookup"));
+    }
+
+    let (code, value, stderr) = env.run_json(&["project", "archive", "second"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["state"], "archived", "{value}");
+    if tmux_available {
+        assert!(
+            !tmux.session_exists("vowp-second").expect("lookup"),
+            "archive removes the project session explicitly"
+        );
+        tmux.ensure_layout("second", &spec).expect("recreate session");
+    }
+
+    let (code, _, stderr) = env.run(&["project", "rm", "second"]);
+    assert_eq!(code, 5, "rm needs --yes: {stderr}");
+    let (code, value, stderr) = env.run_json(&["project", "rm", "second", "--yes"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["removed"], true, "{value}");
+    if tmux_available {
+        assert!(
+            !tmux.session_exists("vowp-second").expect("lookup"),
+            "rm removes the project session explicitly"
+        );
+    }
+
+    let archive_path = PathBuf::from(value["archive_path"].as_str().expect("archive path"));
+    assert!(archive_path.join("project.db").is_file(), "{archive_path:?}");
+    assert!(
+        !paths.project_dir(&name).exists(),
+        "the project directory moved into the archive"
+    );
+    assert!(
+        env.store().project(&name).expect("lookup").is_none(),
+        "the registry row is gone"
+    );
+    assert_eq!(
+        env.store()
+            .session(&session.id)
+            .expect("session lookup")
+            .expect("session row")
+            .project,
+        Some(name.clone()),
+        "sessions.project keeps the text"
+    );
+
+    // Open the archived project DB directly and prove the release is still there:
+    // `rm` archives, it never destroys production records.
+    let archived = Connection::open(archive_path.join("project.db")).expect("archived project db");
+    let releases: i64 = archived
+        .query_row(
+            "SELECT COUNT(*) FROM releases WHERE project = ?1",
+            [name.as_str()],
+            |row| row.get(0),
+        )
+        .expect("releases count");
+    assert_eq!(releases, 1, "the production release row survived the archive");
+    let change_ref: String = archived
+        .query_row(
+            "SELECT change_ref FROM releases WHERE project = ?1",
+            [name.as_str()],
+            |row| row.get(0),
+        )
+        .expect("release row");
+    assert_eq!(change_ref, "v1");
+    assert_eq!(release.project, name);
 }
 
 #[test]

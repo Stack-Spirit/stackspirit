@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use vowp_adapters::proc::{process_alive, valid_pid};
 use vowp_core::Deps;
-use vowp_core::loops::{NodeSupervisor, NodeTickReport};
+use vowp_core::loops::{NodeReconcileReport, NodeSupervisor, NodeTickReport};
 use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
-use vowp_store::{NodePaths, Store, StoreError};
+use vowp_store::{MigrationReport, NodePaths, Store, StoreError};
 use vowp_tmux::{LayoutSpec, TmuxError, WindowManager, WindowSpec, session_name_for_project};
 
 use crate::cli::{DownArgs, Global, UpArgs, UpCommand};
@@ -113,9 +113,23 @@ fn register_checkout_for_up(paths: &NodePaths, deps: &Deps, checkout: Option<&Pa
 /// This is the seam `up --once` uses and the one the hermetic test drives with fake
 /// adapters, a temporary node home and a temporary git repository.
 pub fn tick_once(deps: &Deps) -> Result<NodeTickReport, CliError> {
+    Ok(tick_once_report(deps, None)?.1)
+}
+
+/// Runs startup plus one node tick, returning both reports.
+///
+/// `migration` is the report `vowp up` received from the automatic v0.1 migration (if
+/// any); it is recorded on the supervisor so `NodeReconcileReport.migration` carries it.
+fn tick_once_report(
+    deps: &Deps,
+    migration: Option<MigrationReport>,
+) -> Result<(NodeReconcileReport, NodeTickReport), CliError> {
     let mut supervisor = NodeSupervisor::new(deps.clone())?;
-    supervisor.startup()?;
-    Ok(supervisor.tick()?)
+    if let Some(report) = migration {
+        supervisor.record_migration(report);
+    }
+    let startup = supervisor.startup()?;
+    Ok((startup, supervisor.tick()?))
 }
 
 /// Creates the fixed tmux layout for `project`.
@@ -241,6 +255,8 @@ struct TickOutput {
     dispatched: Vec<String>,
     transitions: Vec<TransitionOutput>,
     merged: Vec<String>,
+    /// Automatic v0.1 migration performed before this tick, when there was one.
+    migration: Option<MigrationReport>,
 }
 
 /// One tick step in JSON output.
@@ -276,6 +292,7 @@ fn run_up(
     signals::clear_stop(paths)?;
     signals::clear_stopped(paths)?;
 
+    let mut migration = None;
     if let Some(report) = migrate_if_needed(paths, !args.no_migrate)? {
         if !json {
             writeln!(
@@ -285,6 +302,7 @@ fn run_up(
                 report.backup
             )?;
         }
+        migration = Some(report);
     }
     crate::node_ctx::ensure_home_project_file(paths)?;
     let checkout = crate::ctx::selected_checkout_root(global, paths)?;
@@ -300,10 +318,10 @@ fn run_up(
     }
 
     if args.once {
-        return run_once(paths, deps, json, io);
+        return run_once(paths, deps, json, io, migration);
     }
     if args.foreground {
-        return run_foreground(paths, deps, json, io);
+        return run_foreground(paths, deps, json, io, migration);
     }
     run_detached(paths, checkout.as_deref(), json, io)
 }
@@ -326,13 +344,19 @@ fn migrate_if_needed(paths: &NodePaths, allow: bool) -> Result<Option<vowp_store
 }
 
 /// Runs `startup()` plus one node tick, prints the report and releases the lock.
-fn run_once(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) -> Result<i32, CliError> {
+fn run_once(
+    paths: &NodePaths,
+    deps: &Deps,
+    json: bool,
+    io: &mut dyn IoStreams,
+    migration: Option<MigrationReport>,
+) -> Result<i32, CliError> {
     let pid = std::process::id();
     write_lock(paths, pid, deps.clock.now())?;
-    let result = tick_once(deps);
+    let result = tick_once_report(deps, migration);
     remove_lock_if_own(paths, pid);
-    let report = result?;
-    print_tick_report(io, &report, json)
+    let (startup, report) = result?;
+    print_tick_report(io, &report, startup.migration.as_ref(), json)
 }
 
 /// Prints one node tick and returns the exit code for `up --once`.
@@ -340,7 +364,12 @@ fn run_once(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) 
 /// A failed node step or a failed project step makes the tick non-zero: `--once` is a
 /// diagnostic run (tests and cron), so a degraded project must not look like success on
 /// the human path while `--json` already reports `ok: false`.
-fn print_tick_report(io: &mut dyn IoStreams, report: &NodeTickReport, json: bool) -> Result<i32, CliError> {
+fn print_tick_report(
+    io: &mut dyn IoStreams,
+    report: &NodeTickReport,
+    migration: Option<&MigrationReport>,
+    json: bool,
+) -> Result<i32, CliError> {
     let project_steps = || {
         report
             .projects
@@ -382,6 +411,7 @@ fn print_tick_report(io: &mut dyn IoStreams, report: &NodeTickReport, json: bool
                 .values()
                 .flat_map(|project| project.merged.iter().map(ToString::to_string))
                 .collect(),
+            migration: migration.cloned(),
         };
         crate::output::print_json(io, &output)?;
     } else {
@@ -416,8 +446,14 @@ fn print_tick_report(io: &mut dyn IoStreams, report: &NodeTickReport, json: bool
 }
 
 /// Runs the supervisor loop in this process until the stop file appears.
-fn run_foreground(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    run_foreground_with_paths(paths, deps, json, io, signals::SignalWatcher::install)
+fn run_foreground(
+    paths: &NodePaths,
+    deps: &Deps,
+    json: bool,
+    io: &mut dyn IoStreams,
+    migration: Option<MigrationReport>,
+) -> Result<i32, CliError> {
+    run_foreground_with_paths(paths, deps, json, io, migration, signals::SignalWatcher::install)
 }
 
 /// Runs the foreground supervisor with an injectable signal-watcher installer.
@@ -434,6 +470,7 @@ where
         &supervisor_deps(ctx.deps().clone(), ctx.paths()),
         ctx.json(),
         io,
+        None,
         install,
     )
 }
@@ -444,6 +481,7 @@ fn run_foreground_with_paths<F>(
     deps: &Deps,
     json: bool,
     io: &mut dyn IoStreams,
+    migration: Option<MigrationReport>,
     install: F,
 ) -> Result<i32, CliError>
 where
@@ -466,6 +504,9 @@ where
             return Err(error.into());
         }
     };
+    if let Some(report) = migration {
+        supervisor.record_migration(report);
+    }
     if !json {
         writeln!(io.out(), "supervisor running (pid {pid}); stop it with `vowp down`")?;
     }
@@ -870,21 +911,28 @@ fn kill_windows(paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
         if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
             continue;
         }
-        kill_project_windows(deps, &entry.name)?;
+        kill_project_session(deps, &entry.name)?;
     }
     Ok(())
 }
 
-/// Kills the tagged windows of one project session.
-fn kill_project_windows(deps: &Deps, project: &ProjectName) -> Result<(), CliError> {
+/// Kills the tagged windows and the session of one project.
+fn kill_project_session(deps: &Deps, project: &ProjectName) -> Result<(), CliError> {
     let session = session_name_for_project(project.as_str());
+    match deps.windows.kill_session(&session) {
+        Ok(()) | Err(TmuxError::NotInstalled) => return Ok(()),
+        Err(TmuxError::NotTagged { .. } | TmuxError::Refused(_)) => {}
+        Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
+    }
     let windows = match deps.windows.list_windows(&session) {
         Ok(windows) => windows,
-        Err(vowp_tmux::TmuxError::NotInstalled) => return Ok(()),
+        Err(TmuxError::NotInstalled) => return Ok(()),
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     };
     for window in windows {
-        let _ = deps.windows.kill_window(&session, &window.name);
+        if window.tagged {
+            let _ = deps.windows.kill_window(&session, &window.name);
+        }
     }
     Ok(())
 }
@@ -996,7 +1044,7 @@ mod tests {
         };
 
         let mut io = crate::BufferIo::new("");
-        let code = print_tick_report(&mut io, &report, false).expect("print");
+        let code = print_tick_report(&mut io, &report, None, false).expect("print");
         assert_eq!(code, 1, "a failed project step must fail `up --once`");
         let stdout = io.stdout();
         assert!(stdout.contains("1/2 steps ok"), "{stdout}");
