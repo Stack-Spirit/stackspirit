@@ -55,9 +55,13 @@ git commit -m "chore: initialise VOWP"
 ```
 
 The merge queue requires a clean main checkout; ignoring `.vowp/` keeps it clean as `vowp job add`
-writes briefs and the supervisor writes checkpoints there. `vowp doctor` must report no `fail` before
-you start. `vowp up` starts the supervisor and opens its tmux windows; `vowp status` and `vowp board`
-show what it is doing, and `vowp down` stops it cleanly.
+writes briefs and the supervisor writes checkpoints there. A project's `.vowp/` directory holds that
+runtime content, not the node database. `vowp doctor` must report no `fail` before you start. `vowp up`
+starts the supervisor and opens its tmux windows; `vowp status` and `vowp board` show what it is doing,
+and `vowp down` stops it cleanly.
+
+A VOWP home runs one project in v0.1. If you want a second project on the same machine or VPS, give it
+its own `VOWP_HOME`; see [Multiple projects and VPS capacity](#multiple-projects-and-vps-capacity).
 
 Add work with `vowp job add ...` or `vowp plan "..."`, or run the
 [hello-vowp example](examples/hello-vowp/README.md) first: it exercises a three-job graph with fake
@@ -78,9 +82,49 @@ node (laptop or VPS)
    └─ windows            tmux views: board, supervisor, planner, keeper, job-*, inbox
 ```
 
-A **node** owns the SQLite database and session store. A **project** is one repository registered on a
-node. **Jobs** form a graph; **loops** move them; **sessions** keep the conversation; **windows** are
-views onto running work. The [concepts overview](docs/concepts/overview.md) has the full vocabulary.
+A **node home** (`~/.vowp` by default, or `$VOWP_HOME`) owns the SQLite database and session store. A
+**project** is one repository registered in that home. In v0.1 one home runs one project's supervisor;
+run additional projects with separate homes. **Jobs** form a graph; **loops** move them; **sessions**
+keep the conversation; **windows** are views onto running work. The
+[concepts overview](docs/concepts/overview.md) has the full vocabulary.
+
+## Multiple projects and VPS capacity
+
+In v0.1, one VOWP home runs one project. The supervisor lock is home-wide
+(`~/.vowp/supervisor.lock`, or `$VOWP_HOME/supervisor.lock`), and `vowp up` starts a supervisor for the
+project in that home. A second `vowp up` for another project in the same home exits 4 with
+`supervisor already running`.
+
+To run several projects on one machine or VPS, give each project its own `VOWP_HOME`:
+
+```sh
+# project A
+cd ~/src/project-a
+VOWP_HOME=$HOME/.vowp-project-a vowp init --name project-a
+VOWP_HOME=$HOME/.vowp-project-a vowp up
+
+# project B, in another terminal
+cd ~/src/project-b
+VOWP_HOME=$HOME/.vowp-project-b vowp init --name project-b
+VOWP_HOME=$HOME/.vowp-project-b vowp up
+```
+
+Each home has its own database, supervisor lock and tmux server, so the supervisors do not collide.
+They share the machine's CPU, memory, harness logins and provider limits; v0.1 has no global
+cross-project scheduler. Use the same `VOWP_HOME` for every command that belongs to a project,
+including `status`, `attach` and `down`. With systemd, set the matching `Environment=VOWP_HOME=...` in
+each project's unit.
+
+## Where state lives
+
+| Path | Contents |
+|---|---|
+| `$VOWP_HOME/` (default `~/.vowp/`) | The node home: database, session logs, supervisor lock, logs, backups and inbox copies. |
+| `$VOWP_HOME/vowp.db` (default `~/.vowp/vowp.db`) | The node SQLite database: jobs, edges, gates, runs, costs, limits, loops and inbox rows. |
+| `<repo>/.vowp/` | Project runtime files: job briefs, reports, planner checkpoints and optional graph snapshots. It does not hold the database. |
+
+The database path is `$VOWP_HOME/vowp.db`, or `~/.vowp/vowp.db` with the default home. It is never
+`<repo>/.vowp/vowp.db`; that directory belongs to the project, not the node.
 
 ## Why VOWP
 
@@ -88,8 +132,10 @@ views onto running work. The [concepts overview](docs/concepts/overview.md) has 
   modes. VOWP never scrapes a TUI, never sends keystrokes to answer a dialog, and never reads or forwards
   login tokens.
 - **The database is the truth for decisions; files are the truth for content.** Jobs, gates, runs and
-  costs live in one SQLite database per node. Briefs, reports, session logs and blobs stay in plain files.
-  Kill everything, restart, and the supervisor continues where it was.
+  costs live in one SQLite database per node home, at `$VOWP_HOME/vowp.db` (`~/.vowp/vowp.db` by
+  default). Briefs, reports, session logs and blobs stay in plain files; a project's `.vowp/` directory
+  holds briefs, reports and checkpoints, not the database. Kill everything, restart, and the supervisor
+  continues where it was.
 - **Deterministic loops, LLM judgment.** A plain program ticks every 60 seconds and never "decides to
   stop". Models are used for judgment: planning, diagnosing a stall, reviewing a report, writing a
   handoff.
@@ -105,7 +151,7 @@ views onto running work. The [concepts overview](docs/concepts/overview.md) has 
 ## How it works
 
 ```
-you ──► vowp CLI ──► SQLite + session logs (~/.vowp)
+you ──► vowp CLI ──► SQLite + session logs ($VOWP_HOME, default ~/.vowp)
                          ▲
                  supervisor (vowp up)
                    ├─ L1 tick every 60 s: reconcile, dispatch, gates, merge

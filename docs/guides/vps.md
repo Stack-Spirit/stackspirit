@@ -221,7 +221,7 @@ that matter most on a VPS:
 | Check | If it reports a problem |
 |---|---|
 | `home` | Make the node home (`~/.vowp` by default) writable by `<your-user>`. |
-| `db` | Move an unsupported or corrupt database aside; do not delete a database from a newer binary. |
+| `db` | The database is `$VOWP_HOME/vowp.db` (`~/.vowp/vowp.db` by default), never `<repo>/.vowp/vowp.db`. Move an unsupported or corrupt database aside; do not delete a database from a newer binary. |
 | `git` / `tmux` | Install the missing program or fix `PATH`; tmux is a warning, but jobs need it. |
 | `config` | Fix the named key in `vowp.toml`. |
 | `harness:claude-code` / `harness:opencode` | Install the harness or set `[harnesses.<name>].binary` to its absolute path. |
@@ -271,7 +271,7 @@ vowp status
 
 `--once` runs a single tick and exits. For the first long run, either leave `vowp up` running in a
 detached tmux layout or use the systemd unit below. `vowp up` exits 4 if a supervisor is already
-running for this node home.
+running for this node home; the lock is shared by every project in that home.
 
 ## Run `vowp up` under systemd
 
@@ -301,7 +301,11 @@ WantedBy=default.target
 ```
 
 The optional `EnvironmentFile` is where you can put provider variables for the service; make it
-readable only by `<your-user>` (`chmod 600`). VOWP itself never reads that file. Enable the unit and
+readable only by `<your-user>` (`chmod 600`). VOWP itself never reads that file. Each unit runs one
+project. If the project uses a non-default home, add
+`Environment=VOWP_HOME=/home/<your-user>/.vowp-<your-project>` to its unit and use the same home for
+its commands. Give each project its own unit name, checkout and home; see
+[Multiple projects and worker capacity](#multiple-projects-and-worker-capacity). Enable the unit and
 keep it running after logout:
 
 ```sh
@@ -326,7 +330,8 @@ journalctl --user -u vowp-<your-project> -f
 ```
 
 When systemd owns the process, stop or restart it with `systemctl --user stop|restart
-vowp-<your-project>`. Do not start a second `vowp up` for the same node home.
+vowp-<your-project>`. Do not start a second `vowp up` for a different project in the same node home;
+give each project its own `VOWP_HOME` and unit.
 
 ## Status, logs and attach
 
@@ -377,6 +382,36 @@ Operate it through VOWP:
   [Contributing](../../CONTRIBUTING.md#run-the-test-suite-safely).
 
 This keeps the supervisor away from any interactive tmux session you or another user may have.
+
+## Multiple projects and worker capacity
+
+A VOWP home runs one project's supervisor in v0.1. The lock is home-wide
+(`~/.vowp/supervisor.lock`, or `$VOWP_HOME/supervisor.lock`), so a second `vowp up` for another project
+in the same home exits 4 with `supervisor already running`.
+
+To host more than one project on the VPS, give each project its own home:
+
+```sh
+# project A
+cd ~/src/project-a
+VOWP_HOME=$HOME/.vowp-project-a vowp init --name project-a
+VOWP_HOME=$HOME/.vowp-project-a vowp up
+
+# project B
+cd ~/src/project-b
+VOWP_HOME=$HOME/.vowp-project-b vowp init --name project-b
+VOWP_HOME=$HOME/.vowp-project-b vowp up
+```
+
+Each home has its own `vowp.db`, supervisor lock and private tmux server/session, so the projects can
+run at the same time. They share the VPS's CPU, memory, harness logins and provider limits. v0.1 has no
+global cross-project scheduler: size `[node].max_workers`, `[node].max_verifiers` and
+`[providers.<name>].max_concurrent` in each project for the share you want it to use.
+
+Use the same `VOWP_HOME` for every command that belongs to a project, including `status`, `attach` and
+`down`; otherwise the command reads a different home. A project's `.vowp/` directory holds briefs,
+reports and checkpoints, not the database. The database is `$VOWP_HOME/vowp.db` (default
+`~/.vowp/vowp.db`).
 
 ## SSH and firewall
 
