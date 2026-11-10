@@ -637,7 +637,7 @@ fn upgrade_command(layout: &Layout) -> String {
          && sudo install -d -m 0700 -o vowp-vault -g vowp-vault {vault} \
          && sudo install -d -m 0755 /usr/local/lib/vowp \
          && sudo install -m 0755 -o root -g root {source} {helper} \
-         && sudo sh -c 'for f in {basic}/[A-Z]*; do [ -e \"$f\" ] && cp -p \"$f\" {restore}/; done; \
+         && sudo sh -c 'for f in {basic}/[A-Z]*; do [ -e \"$f\" ] && mv -f \"$f\" {restore}/; done; \
          chown vowp-vault:vowp-vault {restore}/* 2>/dev/null || true; chmod 0600 {restore}/* 2>/dev/null || true' \
          && echo 'vowp ALL=(vowp-vault) NOPASSWD: {helper}' | sudo tee /etc/sudoers.d/vowp-vault >/dev/null \
          && sudo chmod 0440 /etc/sudoers.d/vowp-vault"
