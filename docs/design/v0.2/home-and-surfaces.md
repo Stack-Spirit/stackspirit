@@ -498,20 +498,28 @@ CREATE TABLE run_usage (                -- one row per finished run (§6.1)
   started_at      TEXT NOT NULL,
   ended_at        TEXT NOT NULL,
   duration_ms     INTEGER NOT NULL,
-  peak_rss_bytes  INTEGER NOT NULL,
+  peak_rss_bytes  INTEGER NOT NULL,       -- cgroup memory.peak, or the sampled peak
+  anon_peak_bytes INTEGER,                -- sampled memory.stat anon at peak; NULL if not sampled
+  file_peak_bytes INTEGER,                -- sampled file pages at peak; NULL if not sampled
+  kernel_peak_bytes INTEGER,              -- sampled kernel memory at peak; NULL if not sampled
+  cpu_usec        INTEGER NOT NULL DEFAULT 0,  -- cpu.stat usage_usec, or accumulated /proc delta
   mean_cpu_cores  REAL NOT NULL,
   max_cpu_cores   REAL NOT NULL,
+  build_mode      TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (build_mode IN ('cold','warm','incremental','unknown')),
   source          TEXT NOT NULL CHECK (source IN ('cgroup','proc_tree','default')),
   oom_killed      INTEGER NOT NULL DEFAULT 0 CHECK (oom_killed IN (0,1)),
   exit_code       INTEGER
 ) STRICT;
-CREATE INDEX run_usage_group ON run_usage(project, job_kind, harness, model, started_at);
+CREATE INDEX run_usage_group ON run_usage(project, job_kind, harness, model, build_mode, started_at);
 
 CREATE TABLE usage_estimates (          -- pooled estimates; '' in a key column means "any"
   project      TEXT NOT NULL,
   job_kind     TEXT NOT NULL,
   harness      TEXT NOT NULL DEFAULT '',
   model        TEXT NOT NULL DEFAULT '',
+  build_mode   TEXT NOT NULL DEFAULT 'unknown'
+                 CHECK (build_mode IN ('cold','warm','incremental','unknown')),
   samples      INTEGER NOT NULL,
   ram_p50_bytes INTEGER NOT NULL,
   ram_p90_bytes INTEGER NOT NULL,
@@ -521,7 +529,7 @@ CREATE TABLE usage_estimates (          -- pooled estimates; '' in a key column 
   duration_p90_ms INTEGER NOT NULL,
   source       TEXT NOT NULL CHECK (source IN ('measured','pooled','default')),
   updated_at   TEXT NOT NULL,
-  PRIMARY KEY (project, job_kind, harness, model)
+  PRIMARY KEY (project, job_kind, harness, model, build_mode)
 ) STRICT;
 
 CREATE TABLE capacity_targets (         -- history; newest row wins
@@ -970,6 +978,7 @@ impl Store {
     /// Runs at supervisor startup and after a crash. Repairs half-done cross-file pairs.
     pub fn reconcile_cross_db(&self) -> Result<CrossDbReconcile, StoreError>;
 }
+```
 
 `schema_version()` is the compatibility shim: it reports **1** for both a bound project and an
 unbound global handle. It is deliberately not the global file's value; new code that means the
@@ -977,6 +986,7 @@ global file calls `global_schema_version()` (2). This keeps `vowp-core/tests/dep
 `vowp-cli/tests/maint.rs` green without editing them; `vowp doctor` prints both
 (`global 2, project 1`).
 
+```rust
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CrossDbReconcile {
     pub runs_closed: u32,              // open run whose session already has turn.ended
@@ -1154,8 +1164,12 @@ Consequences (binding):
   `clock`, `log`, `git`, `cmd`, `windows` and a registry built from that config. Every runner, gate,
   capsule, promote and schedule path continues to call `deps.open_store()` and therefore gets the
   right project DB with no signature change.
-- `Ctx::store()` in the CLI uses `Store::open_with_project(paths, &self.project)`; fleet commands
-  open the global handle explicitly.
+- `Ctx::store()` in the CLI uses `Deps::open_store()`, the same fresh-home/`_node` fallback as the
+  core. This is what lets `vowp reindex` reopen a deleted `vowp.db` when the registry is empty.
+  Commands that explicitly target a named project (`project add`, `init`) create the DB and then
+  open `Store::open_with_project(paths, project)`; fleet commands open the global handle explicitly.
+  `Ctx::store()` never guesses a project when several are registered and the selected one is
+  missing; `Deps::open_store()` returns `NoProject` in that case.
 - `vowp reindex` after `vowp.db` is deleted uses the same fresh-home fallback: it opens the new
   global DB (the fallback may create the empty `_node` DB), rebuilds `sessions`/`session_events`
   from `sessions/*/log.jsonl`, and does not require the deleted project DB. The v0.1
@@ -1676,7 +1690,7 @@ pub struct SessionSurfaceCard {
 
 ```
 
-`CapacitySnapshot` is defined in §6.3; `SurfaceRef` is defined in `surface.rs` (§7.3) and used by the session card; `OrchestratorCard` and `JoinInstructions` in §7.6;
+`CapacitySnapshot` is defined in §6.1; `SurfaceRef` is defined in `surface.rs` (§7.3) and used by the session card; `OrchestratorCard` and `JoinInstructions` in §7.6;
 `SurfaceId`/`SurfaceKind`/`Lease` in §7.3.
 
 ### 5.3 What each card contains (binding order)
@@ -1795,25 +1809,50 @@ board` the refreshing terminal view. Both accept every project.
     `ProcFs` trait faked in tests so macOS CI stays green.
   - store one `host_samples` row; prune 5 s rows older than 24 h and keep 1-min averages for 30
     days (H1).
-- **Per-run usage.** Every adapter run and every command gate gets a scope:
-  - preferred (S1): a systemd user scope per run (`systemd-run --user --scope --unit
-    vowp-run-<run-id>`), reading `memory.peak`, `cpu.stat` and `memory.events` from cgroup v2;
-  - fallback (S1 decides): walk the process tree from `AdapterRun::pid()` (`/proc/<pid>/task/*/children`
-    recursively) every second, sum RSS and CPU deltas;
+- **Per-run usage.** Every adapter run and every command gate gets a scope. S1 (merged
+  2026-11-10) proved the cgroup v2 path on the target VPS and fixed the measurement fields:
+  - preferred: a systemd user scope per run (`systemd-run --user --scope --unit
+    vowp-run-<run-id>`), reading `memory.peak`, `memory.stat` (`anon`, `file`, `kernel`) at the
+    peak sample, `cpu.stat` `usage_usec` and `memory.events` (`oom_kill`) from cgroup v2;
+    `source='cgroup'`. `memory.peak` is cumulative and the user cannot reset it, so per-phase
+    peaks use child cgroups or separate scopes.
+  - fallback: walk the process tree from `AdapterRun::pid()` (`/proc/<pid>/task/*/children`
+    recursively) every second, sum RSS and CPU deltas; `source='proc_tree'`. S1 measured it
+    overcounting warm RSS by ~31 % (shared pages counted once per process) and undercounting CPU
+    by 15–36 % (short-lived processes exit between samples); it also cannot see a build running
+    in a Docker container. It is for keeping a node limping, not for estimates.
   - if neither is available: `source='default'`, `peak_rss_bytes = 1_500_000_000`,
-    `mean_cpu_cores = 1.0`, labelled "default";
-  - E1 records one `run_usage` row per finished run, including `oom_killed` from the cgroup
-    `memory.events` `oom_kill` delta (fallback: outcome `killed` + a memory-heavy estimate).
+    `mean_cpu_cores = 1.0`, labelled "default".
+  - E1 records one `run_usage` row per finished run with `peak_rss_bytes`, the sampled
+    `anon_peak_bytes`/`file_peak_bytes`/`kernel_peak_bytes` (NULL when not sampled), `cpu_usec`,
+    `mean_cpu_cores`, `max_cpu_cores`, `build_mode` (`cold`/`warm`/`incremental`/`unknown`,
+    inferred from the job target directory), `source` (`cgroup`/`proc_tree`/`default`),
+    `oom_killed` from the cgroup `memory.events` `oom_kill` delta (fallback: outcome `killed` + a
+    memory-heavy estimate) and `exit_code`.
+- **S1 evidence behind the defaults and reserve.** A cold `cargo test --workspace` (debug info
+  off, incremental off) peaked at **2.45 GiB** and used **300 s CPU**; warm runs peaked at
+  **0.37 GiB** and **56–60 s CPU**. The build was 91.6 % of cold peak RAM and 99.6 % of cold CPU;
+  on warm runs 44 % of peak RAM and 98 % of CPU. The plan's `1.5 GiB / 1 core` default is
+  plausible for a warm gate run and too low for a cold Rust build; E2 must replace it with p90
+  from real runs quickly. Disk is a first-class dimension: the 290 GB test disk was 98–100 % full
+  and builds failed with `No space left on device` / `sqlite: disk I/O error`, so keep the
+  5 GB / 10 % reserve and add a per-job target-dir budget/cleanup. `MemoryHigh` is a working soft
+  throttle (a 96 MiB allocation under `MemoryHigh=64M` produced 486 `high` events, no OOM kill);
+  do not use it as a hard build cap until estimates exist. `MemoryMax` is writable but was not
+  used because killing a build is worse than throttling it.
 - **No `/proc` (macOS or a minimal container).** The sampler writes `source='fallback'` samples with
   the fields it can read. Admission skips the RAM/CPU checks and uses the owner's `fixed` target
   when one is set, else `1`; the disk check still runs. The board and `capacity show` print
   `capacity: fallback (no /proc), target <n>` so the degradation is visible, exactly as the plan
   requires. `auto` never silently claims a measured target on such a host.
-- **Estimates.** One `usage_estimates` row per exact `(project, job_kind, harness, model)` from the
-  last 50 `run_usage` rows. With fewer than 5 samples, pool in this order until a pool has 5:
-  exact → same `(project, job_kind, harness)` → same `(project, job_kind)` → same `job_kind` across
-  projects → `('*','*','','')` constant. `source` records `measured`, `pooled` or `default`.
-  Percentiles are nearest-rank p50/p90; integer bytes and milliseconds; CPU in cores as `f64`.
+- **Estimates.** One `usage_estimates` row per exact `(project, job_kind, harness, model,
+  build_mode)` from the last 50 `run_usage` rows. With fewer than 5 samples, pool in this order
+  until a pool has 5: exact → same `(project, job_kind, harness, build_mode)` → same
+  `(project, job_kind, build_mode)` → same `(job_kind, build_mode)` across projects →
+  `('*','*','','','unknown')` constant. A `cold` estimate never pools into `warm`/`incremental`
+  before the constant; S1 measured a 6.6× RAM and 5× CPU gap between cold and warm. `source`
+  records `measured`, `pooled` or `default`. Percentiles are nearest-rank p50/p90; integer bytes
+  and milliseconds; CPU in cores as `f64`.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1853,8 +1892,13 @@ pub struct RunUsage {
     pub ended_at: Timestamp,
     pub duration_ms: u64,
     pub peak_rss_bytes: u64,
+    pub anon_peak_bytes: Option<u64>,
+    pub file_peak_bytes: Option<u64>,
+    pub kernel_peak_bytes: Option<u64>,
+    pub cpu_usec: u64,
     pub mean_cpu_cores: f64,
     pub max_cpu_cores: f64,
+    pub build_mode: BuildMode,
     pub source: UsageSource,
     pub oom_killed: bool,
     pub exit_code: Option<i32>,
@@ -1864,12 +1908,22 @@ pub struct RunUsage {
 #[serde(rename_all = "snake_case")]
 pub enum UsageSource { Cgroup, ProcTree, Default }
 
+/// Inference from the job's target directory; `unknown` when it cannot be told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildMode { Cold, Warm, Incremental, #[default] Unknown }
+
 /// What a remote `__exec` measured on the executor node; `ingest` fills the rest of RunUsage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteUsage {
     pub peak_rss_bytes: u64,
+    pub anon_peak_bytes: Option<u64>,
+    pub file_peak_bytes: Option<u64>,
+    pub kernel_peak_bytes: Option<u64>,
+    pub cpu_usec: u64,
     pub mean_cpu_cores: f64,
     pub max_cpu_cores: f64,
+    pub build_mode: BuildMode,
     pub oom_killed: bool,
     pub source: UsageSource,
 }
@@ -1880,6 +1934,7 @@ pub struct UsageEstimate {
     pub job_kind: Option<JobKind>,         // None = the '' pooled key
     pub harness: Option<HarnessKind>,
     pub model: Option<String>,
+    pub build_mode: Option<BuildMode>,
     pub samples: u32,
     pub ram_p50_bytes: u64,
     pub ram_p90_bytes: u64,
@@ -1900,6 +1955,7 @@ pub struct UsageQuery {
     pub job_kind: Option<JobKind>,
     pub harness: Option<HarnessKind>,
     pub model: Option<String>,
+    pub build_mode: Option<BuildMode>,
     pub since: Option<Timestamp>,
 }
 
@@ -1909,6 +1965,7 @@ pub struct EstimateKey {
     pub job_kind: Option<JobKind>,         // None = the '' pooled key
     pub harness: Option<HarnessKind>,      // None means the pooled '' key
     pub model: Option<String>,             // None means the pooled '' key
+    pub build_mode: Option<BuildMode>,     // None means the pooled 'unknown' key
 }
 ```
 
@@ -1924,11 +1981,15 @@ pub struct RunScope { /* cgroup path or root pid + baseline */ }
 impl RunScope {
     pub fn begin(deps: &Deps, run: &RunId, root_pid: u32) -> Result<RunScope, CoreError>;
     pub fn sample(&self) -> Result<ScopeSample, CoreError>;
-    /// Stops sampling and writes the run_usage row.
-    pub fn finish(self, store: &Store) -> Result<RunUsage, CoreError>;
+    /// Stops sampling and writes the run_usage row; E1 infers `build_mode` before this call.
+    pub fn finish(self, store: &Store, build_mode: BuildMode) -> Result<RunUsage, CoreError>;
 }
 pub struct ScopeSample {
     pub peak_rss_bytes: u64,
+    pub anon_peak_bytes: Option<u64>,
+    pub file_peak_bytes: Option<u64>,
+    pub kernel_peak_bytes: Option<u64>,
+    pub cpu_usec: u64,
     pub mean_cpu_cores: f64,
     pub max_cpu_cores: f64,
     pub oom_killed: bool,
@@ -2198,13 +2259,18 @@ same session; only the lease holder writes.**
    starts the adapter exactly as `run_turn` would (same `StartInput`), resolving `env_names` from
    the surface's own vault/environment; a missing name is a clear error naming the variable, never
    a silent empty value. The executor node owns the harness binary and any secret it injects; the
-   home never sends a value over the wire. It writes every adapter event as one `RemoteLine` JSON
-   object to stdout.
+   home never sends a value over the wire. It writes every adapter event to its local spool
+   **before** putting a `RemoteLine` JSON object on stdout (S2).
 3. `vowp __exec` pipes those lines into `ssh <home> vowp session ingest <session> --run
    <run-id>`. The first line is `RemoteLine::Hello`, which carries the lease token from the grant;
    `ingest` validates it before accepting any event, so the token is never in argv or `ps`. It
    assigns `seq`, appends with the supplied event id and timestamp, updates the index, and acks
-   `{event_id, seq}`. It also heartbeats the lease.
+   `{event_id, seq}`. It also heartbeats the lease. The client keeps a **64-event in-flight
+   window** and consumes acks asynchronously; it does not wait for one ack per event across a WAN
+   (S2 measured ~9 events/s with a one-event window at 80 ms RTT, versus ~230–260 events/s with a
+   64-event window after setup). When `surface::sweep_leases` detects a takeover, `ingest` pushes
+   `IngestAck::LeaseRevoked` on the same stdout stream; the client stops input immediately and
+   follows read-only (S2: 99.6–265 ms live SSH, <2 s bound; §7.3).
 4. The executor node is registered once with `vowp node add laptop -` (no inbound ssh target); the run row and snapshot name it. On the harness summary, `__exec` calls `vault::redact_job_artifacts` on the executor node
    (the report and raw mirror live in the executor's worktree), sends `RemoteLine::Summary`; `ingest`
    writes `cost`, `limit` or `error`, `turn.ended`, `session.executor{detach}`, finishes the project
@@ -2212,12 +2278,20 @@ same session; only the lease holder writes.**
    with `source='default'` when the executor could not measure), and acks `{run_id, done:true}`.
    The home is now the only writer and the turn is complete.
 
-**SSH drop.** `__exec` keeps the adapter running and spools every unacked `RemoteLine` to
-`<spool>/<session>/<run>/events.jsonl` (append, fsync every 20 lines and at summary). On reconnect it
-starts `ingest --replay` and replays the spool in order; `ingest` is idempotent by event id
-(`session_events.id` unique; `Store::event_row_by_id` returns the existing seq). An acked id is
-written to `acked.json` and removed from the spool on the next successful flush. The test kills the
-fake SSH process mid-stream and asserts no gap and no duplicate.
+**Spool, ack window and replay (S2, merged 2026-11-10).** `__exec` keeps the adapter running and
+appends each event to `<spool>/<session>/<run>/events.jsonl`, fsyncing it **before** the send; an
+event that was not durably spooled is never sent. Acks are written to `acked.json` by event id. On
+reconnect it starts `ingest --replay` and resends every event from the first unacked one; `ingest`
+is idempotent by event id (`session_events.id` unique; `Store::event_row_by_id` returns the
+existing seq). A known id with different content is `duplicate-conflict` and is not appended. The
+spool survives a killed client, not just a killed SSH: a new process reads `events.jsonl` +
+`acked.json` and finishes the turn. A torn final line is truncated; corruption before the last
+complete line is an error. `control_master` is an optimisation for reconnects and probes, never a
+correctness requirement: S2 measured a handshake drop from 810–953 ms to 243–256 ms at 80 ms RTT
+and a reconnect drop from 292–409 ms to 82–92 ms loopback, but per-event RTT is unchanged. A dead
+master falls back to a cold connection and the turn continues. The test kills the fake SSH process
+mid-stream (including an ack lost after append and a cut mid-line) and asserts no gap and no
+duplicate.
 
 **Wire types** (`vowp-protocol/src/surface.rs`):
 
@@ -2258,6 +2332,9 @@ pub enum IngestAck {
     Ack { event_id: EventId, seq: u64 },
     Duplicate { event_id: EventId, seq: u64 },
     Summary { run_id: RunId, done: bool },
+    /// Pushed by the home when a takeover revokes this run's lease (S2). The client stops
+    /// sending events immediately; it does not wait for its next heartbeat.
+    LeaseRevoked { reason: String, by: String, at: Timestamp, last_seq: u64 },
     Error { kind: ErrorKind, message: String },
 }
 
@@ -2395,9 +2472,13 @@ Rules:
    executor or a live run—writes a `switch` row/event with `reason='takeover'` and the target
    executor. A pre-attach session (`sessions.executor IS NULL`, for example a fresh orchestrator
    holding the lease) has no valid `to_executor`, so it gets the note only; `switches.to_executor`
-   stays non-null. The old surface's next write check (every write, and a
-   2-second poll in `chat`/MCP) fails with `Refused("this surface is read-only; taken over by …")`.
-   The old surface prints exactly:
+   stays non-null. **The home pushes `IngestAck::LeaseRevoked` on the active ingest channel** when
+   the takeover commits; S2 measured the notice in 99.6–265 ms live over SSH and below 2 s in the
+   hermetic poll, so the old surface does not wait for its next heartbeat. `surface::sweep_leases()`
+   (the C0 hook) signals the ingest writer through an in-process channel/condvar, with a ≤250 ms
+   poll as the fallback; never poll SQLite per event. The old surface's every write check also
+   fails with `Refused("this surface is read-only; taken over by …")`. The old surface prints
+   exactly:
    `Taken over by phone at 14:05. This surface is now read-only (follow mode).`
    and keeps reading new events.
 3. **Drain.** A turn running on the old surface is drained with the existing v0.1 switch drain: up to
@@ -2473,9 +2554,10 @@ Three layers, exactly as plan §7.4:
 3. **Changing app/harness/model = VOWP handoff:** the app transcript is mirrored into the session
    log; `session_resume` returns the capsule + last turns.
 
-**Transcript mirror.** `surface/mirror.rs` polls the app's own API (opencode server API or
-`opencode session export`; Claude's transcript importer) from a cursor stored in
-`~/.vowp/orchestrators/<name>/mirror.json`:
+**Transcript mirror.** `surface/mirror.rs` consumes opencode's `/api/event` SSE (S3; not the
+`/session` web page and not the session-log endpoint) and backfills from
+`/api/experimental/session/<id>/export` or `opencode session export`; Claude uses the transcript
+importer. The cursor is stored in `~/.vowp/orchestrators/<name>/mirror.json`:
 
 ```rust
 pub struct MirrorCursor { pub last_native_id: Option<String>, pub updated_at: Timestamp }
@@ -2484,12 +2566,19 @@ pub fn mirror_once(deps: &Deps, store: &Store, session: &SessionId, app: &AppHan
                    cursor: &mut MirrorCursor) -> Result<MirrorReport, CoreError>;
 ```
 
-Mapping: app user message → `user.message`; app assistant message → `assistant.message`; tool call →
-`tool.call`, tool result → `tool.result`; file edits → `file.change`; plan → `plan`. Each native id
-is inserted into `native_events` in the same transaction as the event index row; a duplicate is
-skipped. The mirror never writes `turn.started`/`turn.ended` (the app's own turn is not a VOWP run)
-and never writes a second assistant message for a chunked stream: it accumulates chunks and writes
-one message at completion, the same v0.1 rule.
+Mapping (S3's proven table): `session.inbox.enqueued` with `item.type=user` → `user.message`;
+`session.text.ended` (the full text; `text.started`/`text.delta` are UI-only) →
+`assistant.message`, coalesced by `assistantMessageID`; `session.tool.called` → `tool.call`,
+`session.tool.success`/`session.tool.failed` → `tool.result`; `session.usage.updated` → `cost`
+(tokens and USD; no durable seq, so never use it for ordering); `session.execution.started` →
+`turn.started`; `session.execution.succeeded`/`interrupted` → `turn.ended`;
+`session.execution.failed` → `error` then `turn.ended`; `session.step.failed` → `error`;
+`session.model.selected` → `switch` only when the executor/model actually changes, else `note`;
+`session.instructions.updated` → `note` or nothing; `session.step.*`, `session.tool.input.*`,
+`session.inbox.delivered`, `server.connected`, `project.updated` and `mcp.*` are not session
+content. Each native id is inserted into `native_events` in the same transaction as the event
+index row; a duplicate is skipped. The mirror never writes a second assistant message for a
+chunked stream: it accumulates chunks and writes one message at completion, the same v0.1 rule.
 
 **App host trait.** Tests use a fake; no real app or network in the test suite.
 
@@ -2516,13 +2605,49 @@ pub struct TranscriptEntry { pub native_id: String, pub kind: TranscriptKind, pu
                              pub path: Option<String> }
 ```
 
-`opencode_host.rs` starts `opencode serve --hostname 127.0.0.1 --port <p>` as a child, waits for
-`/global/health`, records pid/port in `host.json` (0600), and stops it with SIGTERM. The exact
-commands and API paths are confirmed by S3; if S3 differs, only this file changes.
+`opencode_host.rs` targets the **opencode v2 contract proven by S3** (2.0.28): the HTTP API lives
+under `/api/...` (`/api/event` SSE with a `server.connected` hello, `/api/mcp?location[directory]=…`,
+`/api/session`, `/api/session/<id>/message|prompt`; `/session` is the web app, not the JSON API).
+Auth is HTTP **Basic** `opencode:<token>` (a Bearer token is rejected). The preferred host is the
+managed service:
+
+```sh
+opencode service set port <p>     # private XDG_STATE_HOME
+opencode service start            # binds 127.0.0.1, prints the URL
+opencode pair                     # single-use link, expires in 5 minutes
+```
+
+`opencode pair` discovers `$XDG_STATE_HOME/opencode/service.json`, so a foreground
+`opencode serve --hostname 127.0.0.1 --port <p>` host must write a matching `service.json`
+(`id`, `version`, `url`, `pid`, `password`) or VOWP manages the pair link itself. The host binds
+`127.0.0.1` only; `opencode service set hostname 0.0.0.0` is forbidden. Every host command runs
+with a private `XDG_STATE_HOME`/`XDG_DATA_HOME` under the orchestrator directory, never the
+owner's global opencode state (S3: a bare CLI attaches to the global background service and can
+conflict with another job). The pair link is shown with the
+`ssh -L <local>:127.0.0.1:<p> <home>` command, treated as a secret, and never logged. The
+managed service's default location is `$HOME`, so `orchestrator` must pass
+`location.directory = <orchestrator-dir>` on `POST /api/session` (or make the app open that
+project). `host.json` (0600) records pid/port plus the service.json path; stop with SIGTERM (or
+`opencode service stop`). Health is a successful `/api/event` `server.connected` or an authenticated
+`GET /api/session`, not `/global/health`.
+
 `claude_remote.rs` starts Claude Remote Control only when a claude.ai login is present (probe checks
 for the login directory, never reads it); otherwise `start` returns
 `CoreError::Refused("Claude Remote Control needs a claude.ai login on the home")` and the setup
-report says so.
+report says so. Claude Code's project-local `.mcp.json` is project-scoped and needs one-time owner
+approval; non-interactive `claude mcp list` reports `Pending approval` until then. Claude Code
+sends `server/discover` before `initialize`, so the VOWP MCP server must implement it or return a
+valid `method not found` (S3; §7.7).
+
+**opencode MCP exposure is not proven (S3).** opencode v2.0.28 loaded the project-local
+`opencode.json`, `opencode mcp list` and `/api/mcp` reported the server `connected`, and the dummy
+server received `initialize` + `tools/list`; but the model request's `tools` array contained only
+the built-in tools, and the model never called the MCP tool. `connected` is proof of configuration,
+not of tool availability. F5/F6 must re-test with a real provider and find the permission/config
+flag (or an upstream fix) before promising that the opencode orchestrator can call VOWP tools.
+Until then the orchestrator's tool path is `vowp chat` or Claude Code, and the opencode surface
+still has the mirrored transcript and lease. This is open assumption §16.20.
+
 `session_resume` context (implemented in `surface/mirror.rs`, F5):
 
 ```rust
@@ -2601,7 +2726,10 @@ impl Orchestrator {
    the lease, and prints join instructions for the desktop, the phone and `vowp chat`. The
    instructions use generic placeholders (`<home-ssh-target>`, `<session>`); `vowp setup control`
    and `vowp tunnel` on the control machine print the concrete target, so the home never needs to
-   know an owner hostname.
+   know an owner hostname. On opencode, the MCP server may be configured and `connected` but not
+   exposed to the model in v2.0.28 (S3; §16.20); the `AGENTS.md` template and join instructions
+   must not promise tool calls until F5/F6 re-test, and the tool-capable fallbacks are Claude Code
+   (after the owner approves `.mcp.json`) and `vowp chat`.
 3. `orchestrator ls` reads every `orchestrator.json` and returns `[OrchestratorCard]`;
    `orchestrator stop <name>` stops the host and releases the lease (the session stays);
    `orchestrator resume <name>` starts the host again. `NodeSupervisor::startup` calls
@@ -2648,10 +2776,19 @@ tools refuse with the takeover notice.
 | `session_resume` | write | `{session, surface?, takeover?}` | `{session, capsule, tail, lease}` |
 
 `initialize`, `notifications/initialized`, `tools/list`, `tools/call` and `ping` are implemented;
-unknown methods return JSON-RPC `-32601`. A tool error is `{"isError":true,"content":[{"type":"text",
-"text":"<kind>: <message>"}]}`. `secret_request` returns a one-time URL and expiry; it never returns
-a value. `session_resume` with a live lease and `takeover=false` returns the holder notice; with
-`takeover=true` it calls `surface::takeover`.
+unknown methods return JSON-RPC `-32601`. `server/discover` is answered with a valid empty
+capability or `-32601`; Claude Code tolerates the error (S3). A tool error is
+`{"isError":true,"content":[{"type":"text","text":"<kind>: <message>"}]}`. `secret_request` returns
+a one-time URL and expiry; it never returns a value. `session_resume` with a live lease and
+`takeover=false` returns the holder notice; with `takeover=true` it calls `surface::takeover`.
+
+**Availability caveat (S3, open).** A server can be loaded and report `connected` while the
+opencode v2.0.28 model request does not include its tools (S3's `vowp_spike_echo` was never in the
+`tools` array and was never called). `vowp mcp` therefore implements and tests the protocol, and
+the config/host writes the project-local server entry, but v0.2 does not promise that an opencode
+orchestrator can call those tools until F5/F6 re-test with a real provider (open assumption
+§16.20). Claude Code's path is proven after the one-time `.mcp.json` approval; `vowp chat` is the
+tool-free fallback.
 
 ### 7.8 What a surface may write
 
@@ -2742,11 +2879,13 @@ impl NodeCtx {
 
 `Ctx::build` uses `NodeCtx`: a home keeps the v0.1 behaviour; a control machine builds a
 **remote** context (no local store) and a command that needs a store routes instead. The local
-`Ctx::store()` still opens the home DB on the home. Fleet commands (`status`, `board`, `fleet`,
-`capacity`, `gc`, `backup`) use a **fleet context** that loads only the node file and opens
-`Store::open_global`; they do not require a `vowp.toml` in the cwd. Project commands open
-`Store::open_with_project` for the selected project. `vowp init`/`project add` start on the global
-handle and auto-bind the new project as described in §3.7.
+`Ctx::store()` opens the home DB on the home through `Deps::open_store()` (the fresh-home/`_node`
+fallback in §3.8), so `reindex` still works after `vowp.db` is deleted. Fleet commands (`status`,
+`board`, `fleet`, `capacity`, `gc`, `backup`) use a **fleet context** that loads only the node file
+and opens `Store::open_global`; they do not require a `vowp.toml` in the cwd. Project commands open
+`Store::open_with_project` for the selected project after `project add`/`init` created its DB.
+`vowp init`/`project add` start on the global handle and auto-bind the new project as described in
+§3.7.
 
 ### 8.3 Tunnels
 
@@ -3500,6 +3639,9 @@ keeps v0.1 behaviour exactly.
    let _ = crate::lifecycle::tick(&self.deps, &self.store, now);
    ```
 
+   `sweep_leases` also signals the active ingest writer with `IngestAck::LeaseRevoked` when a
+   takeover commits (S2); C0's no-op keeps v0.1 and F2 fills the push.
+
 2. **`crates/vowp-core/src/loops/supervisor.rs`, `Supervisor::step_dispatch`** — after
    `let job = self.store.require_job(&choice.job_id)?;` and before `apply_with(...)`:
 
@@ -3696,12 +3838,15 @@ pub struct RemoteHome { pub name: String, pub ssh_target: String, pub remote_hom
 pub struct CachedSnapshot { pub snapshot: Snapshot, pub fetched_at: Timestamp, pub source: String }
 
 // ssh_stream.rs
+pub const INGEST_ACK_WINDOW: usize = 64;
+
 pub struct SshTarget { pub node: NodeName, pub ssh_target: String, pub remote_home: String }
-pub struct IngestClient { /* ssh child, spool path, acked ids */ }
+pub struct IngestClient { /* ssh child, spool path, acked ids, in-flight window, revoked notice */ }
 impl IngestClient {
     pub fn new(target: SshTarget, session: SessionId, run: RunId, lease: String, spool: PathBuf) -> Self;
     pub fn send(&mut self, line: &RemoteLine) -> Result<Option<IngestAck>, CliError>;
     pub fn replay(&mut self) -> Result<u32, CliError>;
+    pub fn revoked(&self) -> Option<&IngestAck>;
     pub fn finish(&mut self) -> Result<(), CliError>;
 }
 
@@ -3716,10 +3861,17 @@ pub fn serve(io: &mut dyn IoStreams, opts: &McpOptions) -> Result<i32, CliError>
 ```
 
 `SshTarget` is built from `NodeCtx::remote()` plus the executor node row. `IngestClient` owns the
-spool files (`events.jsonl`, `acked.json`); a failed `send` writes the line to the spool and returns
-`Ok(None)`, and the next `send`/`replay` reconnects. `Hello` is never spooled (it carries the lease
-token); it is re-sent from the grant on every reconnect. It never spawns a shell; the argv is built
-by `remote::build_ssh_argv` with the private quoting helper.
+spool files (`events.jsonl`, `acked.json`); it appends and fsyncs an event to `events.jsonl`
+**before** `send` writes it to ssh, records each ack in `acked.json`, and keeps at most
+`INGEST_ACK_WINDOW` (64) unacked events in flight. A failed `send` leaves the event spooled and
+returns `Ok(None)`; the next `send`/`replay` reconnects and resends from the first unacked event.
+`replay` returns the number of events resent. `send` can return `IngestAck::LeaseRevoked`; `__exec`
+then stops reading stdin, prints the read-only notice once and exits 75 without sending more
+events, while the surface follows the log read-only. `Hello` is never spooled (it carries the lease
+token); it is re-sent from the grant on every reconnect. ControlMaster is optional (`ssh -M -N -S
+<private socket>` under `~/.vowp/tmp/`, mode 0700); a dead master falls back to a cold connection.
+It never spawns a shell; the argv is built by `remote::build_ssh_argv` with the private quoting
+helper.
 
 ### 13.7 `SessionRole`, `SwitchReason` and test literals
 
@@ -3863,8 +4015,9 @@ the `_node` fallback.
 
 **E1 measure**
 `sampler_parses_proc_meminfo_load_and_pressure`, `sampler_degrades_on_non_linux`,
-`scope_reads_cgroup_memory_peak`, `scope_falls_back_to_process_tree`,
-`run_usage_written_for_adapter_and_gate`, `estimates_use_exact_group_then_pool_then_default`,
+`scope_reads_cgroup_memory_peak`, `scope_records_anon_file_kernel_and_cpu_usec`,
+`scope_falls_back_to_process_tree`, `run_usage_written_for_adapter_and_gate`,
+`build_mode_cold_warm_split`, `estimates_use_exact_group_then_pool_then_default`,
 `estimates_need_five_samples`, `oom_kill_marks_run_usage`, `sampler_prunes_old_rows`.
 
 **E2 admission**
@@ -3885,13 +4038,16 @@ the `_node` fallback.
 **F1 remote exec**
 `turn_begin_writes_framing_events_and_returns_grant`,
 `remote_exec_streams_events_and_home_assigns_seq`, `remote_ingest_is_idempotent_by_event_id`,
-`ssh_drop_spools_and_replays_without_gap_or_duplicate`, `remote_ingest_rejects_bad_lease`,
-`remote_summary_finishes_run_and_terminal_events`, `remote_probe_uses_remote_node_and_switch`, `remote_summary_writes_run_usage`,
+`exec_spools_and_fsyncs_before_send`, `ingest_ack_window_is_64_and_async`,
+`ssh_drop_spools_and_replays_without_gap_or_duplicate`, `client_crash_resumes_from_spool`,
+`remote_ingest_rejects_bad_lease`, `remote_summary_finishes_run_and_terminal_events`,
+`remote_probe_uses_remote_node_and_switch`, `remote_summary_writes_run_usage`,
 `lease_token_never_in_argv_or_logs`.
 
 **F2 leases**
 `lease_acquire_is_one_holder`, `heartbeat_keeps_lease_live`, `stale_lease_free_after_sixty_seconds`,
-`takeover_cuts_old_surface_within_two_seconds`, `takeover_drains_and_writes_capsule`,
+`takeover_cuts_old_surface_within_two_seconds`, `lease_revoked_is_pushed_within_2s`,
+`takeover_drains_and_writes_capsule`,
 `takeover_before_first_executor_writes_note_only`,
 `follow_mode_prints_new_events_and_refuses_writes`, `lease_check_rejects_wrong_token`,
 `lease_sweep_drops_dead_surface`.
@@ -3909,13 +4065,15 @@ the `_node` fallback.
 `orchestrator_state_survives_supervisor_restart`.
 
 **F5 app hosts/mirror**
-`opencode_host_starts_and_stops_with_fake_server`, `opencode_mirror_maps_messages_to_events`,
+`opencode_host_starts_and_stops_with_fake_server`, `opencode_v2_service_pair_basic_auth`,
+`opencode_mirror_maps_messages_to_events`, `mirror_reads_api_event_and_backfills_export`,
 `mirror_is_incremental_and_idempotent`, `claude_importer_maps_transcript`,
 `claude_remote_refuses_without_login`, `resume_context_builds_capsule_and_tail`,
-`app_host_fake_never_opens_a_socket`.
+`app_host_fake_never_opens_a_socket`. The real-provider MCP tool-exposure re-test is an F5/F6
+acceptance check (§16.20), not a hermetic unit test.
 
 **F6 MCP**
-`mcp_initialize_and_tools_list`, `mcp_read_tools_return_snapshot_data`,
+`mcp_initialize_and_tools_list`, `mcp_server_discover_answered`, `mcp_read_tools_return_snapshot_data`,
 `mcp_write_tool_checks_lease_and_records_actor`, `mcp_old_app_write_gets_read_only_notice`,
 `mcp_secret_request_never_returns_value`, `mcp_unknown_method_is_jsonrpc_error`,
 `mcp_works_over_scripted_stdio_client`.
@@ -3961,19 +4119,39 @@ the `_node` fallback.
 These are the items the later jobs may only resolve in the direction stated; anything else is a
 follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
 
-1. **S1 capacity spike (not merged).** This spec prefers a systemd user scope per run and falls
-   back to a `/proc` process-tree walk. If S1 proves user cgroups are not delegated, E1 uses the
-   fallback and labels `source='proc_tree'`; if `memory.peak` is unavailable, the maximum sampled
-   RSS is the peak. No interface changes.
-2. **S2 remote-exec spike (not merged).** The transport is SSH with one `session ingest` process
-   per run; ControlMaster multiplexing is an optimization inside `ssh_stream.rs`, not a protocol
-   change. Spool format, ack file and replay are fixed above; if S2 measures a different ack
-   cadence, only the flush interval changes.
-3. **S3 app-surface spike (not merged).** Exact `opencode serve` flags, `opencode pair` syntax,
-   server API paths and project-local MCP config shapes come from S3. Claude Remote Control needs
-   a claude.ai login on the home; the VPS has none by the owner's choice, so `claude_remote.rs`
-   ships the refusal path and a 5-minute owner test is part of T3. `opencode_host.rs` and
-   `mirror.rs` are the only files that absorb S3 differences.
+1. **S1 capacity spike (merged 2026-11-10).** S1 proved cgroup v2 user scopes and the `/proc`
+   fallback on the target VPS. This spec uses the scope when available and records
+   `memory.peak`, sampled `anon`/`file`/`kernel` at the peak, `cpu.stat usage_usec` and a
+   `build_mode` (`cold`/`warm`/`incremental`/`unknown`); `source='proc_tree'` is a fallback only.
+   S1 measured `/proc` overcounting warm RSS by ~31 % and undercounting CPU by 15–36 %, and
+   missing a Docker build entirely. `memory.peak` is cumulative and not user-resettable, so
+   per-phase peaks use child cgroups or separate scopes. Disk is a first-class dimension: the
+   290 GB test disk was 98–100 % full and builds failed on ENOSPC, so the 5 GB / 10 % reserve and
+   a per-job target-dir budget stay. `MemoryHigh` is a safe soft throttle; `MemoryMax` is not
+   used. The cold/warm gap is large (2.45 GiB / 300 s CPU vs 0.37 GiB / 56–60 s), so the
+   `1.5 GiB / 1 core` default is warm-only and estimates are split by `build_mode`. The only
+   interface growth is in §6.1 (`RunUsage`, `UsageEstimate`, `ScopeSample`, `usage_estimates`).
+2. **S2 remote-exec spike (merged 2026-11-10).** The transport is SSH with one `session ingest`
+   process per run. The client writes and fsyncs every event to its spool **before** sending,
+   keeps a 64-event in-flight ack window, and replays from the first unacked event; acks are
+   written only after append, duplicate ids are idempotent, and a known id with different content
+   is `duplicate-conflict`. A killed client resumes from `events.jsonl` + `acked.json`. ControlMaster
+   is an optimisation for handshake/reconnect latency, never a correctness dependency; a dead
+   master falls back to a cold connection. The home pushes `IngestAck::LeaseRevoked` on the same
+   channel (99.6–265 ms live SSH, <2 s hermetic); `surface::sweep_leases()` signals the writer via
+   channel/condvar with a ≤250 ms poll fallback. Per-event fsync is not required. The only wire
+   growth is `IngestAck::LeaseRevoked` and `INGEST_ACK_WINDOW` in §7.2/§13.6.
+3. **S3 app-surface spike (merged 2026-11-10).** opencode v2.0.28 is the proven contract: HTTP API
+   under `/api/...` (`/api/event` SSE, `/api/mcp`, `/api/session`, `/api/session/<id>/message|prompt`),
+   HTTP Basic `opencode:<token>`, the managed `opencode service`/`opencode pair` path with
+   `$XDG_STATE_HOME/opencode/service.json`, loopback-only bind, single-use 5-minute pair links, and
+   `location.directory` on session creation (the managed service defaults to `$HOME`). The mirror
+   consumes `/api/event` and backfills with export. Claude Code's `.mcp.json` is project-scoped and
+   needs one-time approval; Claude Code sends `server/discover` first. Claude Remote Control still
+   needs a claude.ai login; the VPS has none by the owner's choice, so `claude_remote.rs` ships the
+   refusal path and a 5-minute owner test is part of T3. The Mac desktop app click-through and a
+   real Claude Remote Control join are the two remaining owner checks; the pair/tunnel/API path is
+   proven. F5/F6 pin or version-check 2.0.28. See item 20 for the MCP tool-exposure gap.
 4. **Capacity inbox kind.** The plan says an inbox item of kind `capacity`. v0.2 does **not** add
    `InboxKind::Capacity` (it would force edits outside C0's owned files); advice is a `decision`
    item linked by `capacity_advice.inbox_id`. If the owner wants a distinct filter, v0.3 adds the
@@ -4033,6 +4211,15 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
     `crates/vowp-cli/src/errors.rs` maps `NotImplemented` to `ErrorKind::Internal`/exit 1 and
     `crates/vowp-cli/tests/core.rs` asserts that. This spec follows the code and freezes exit 1 so
     C0 needs no unowned edit. The card text must be amended to 1.
+20. **opencode MCP tool exposure (S3 open).** opencode v2.0.28 loads a project-local MCP server,
+    `opencode mcp list`/`/api/mcp` reports it `connected`, and the server receives
+    `initialize`/`tools/list`, but the model request's `tools` array contained only the built-ins
+    and the model never called the MCP tool. v0.2 therefore writes the config and implements the
+    server (§7.7) but does **not** promise that the opencode orchestrator can call VOWP tools until
+    F5/F6 re-test with a real provider and find the permission/config flag or an upstream fix.
+    Claude Code's path is proven after the one-time `.mcp.json` approval; `vowp chat` is the
+    tool-free fallback. The `AGENTS.md` template and join instructions must not promise the tools
+    before that re-test.
 
 ### 16.1 Questions for the owner (none block this spec)
 
