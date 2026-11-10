@@ -198,7 +198,7 @@ fn run_switch_inner(
     let result = (|| -> Result<(SessionState, Option<vowp_protocol::CapsuleId>), CoreError> {
         // A local target is probed through its adapter. A remote target is probed over SSH
         // with `vowp doctor --json`; the local registry cannot see the executor's harness.
-        let probe = match probe_target(deps, &store, &to_node, &req.to.executor) {
+        let probe = match probe_target(deps, &store, &to_node, req.to.node.is_some(), &req.to.executor) {
             Ok(probe) => probe,
             Err(error) => vowp_protocol::ProbeResult {
                 ok: false,
@@ -693,9 +693,20 @@ fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
 ///
 /// The remote probe is the sessions.md §5 step 3 check: a switch whose target node is not
 /// this node must prove that the executor's harness is available there before the switch
-/// touches the source. A missing node row or ssh target is a failed probe, not a panic.
-fn probe_target(deps: &Deps, store: &Store, node: &NodeName, executor: &Executor) -> Result<ProbeResult, CoreError> {
+/// touches the source. A requested node without a row is a failed probe: falling back to
+/// the local registry would claim a remote executor was checked when it was not. An
+/// absent default node (no `to.node`) keeps the v0.1 local probe.
+fn probe_target(
+    deps: &Deps,
+    store: &Store,
+    node: &NodeName,
+    requested: bool,
+    executor: &Executor,
+) -> Result<ProbeResult, CoreError> {
     let row = store.node(node)?;
+    if row.is_none() && requested {
+        return Err(CoreError::NotFound(format!("node {node}")));
+    }
     let remote = row.as_ref().is_some_and(|row| !row.is_local);
     if !remote {
         return match deps.adapters.get(executor) {

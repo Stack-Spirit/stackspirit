@@ -12,8 +12,8 @@ use std::time::Duration;
 use clap::Args;
 use serde::Deserialize;
 use vowp_protocol::{
-    Executor, ExecutorRef, HarnessEvent, IngestAck, NodeName, RemoteEvent, RemoteLine, RunRole, StartInput, TurnGrant,
-    TurnRequest,
+    Cost, Executor, ExecutorRef, HarnessEvent, IngestAck, NodeName, RemoteEvent, RemoteLine, RunOutcome, RunRole,
+    StartInput, StopReason, TurnGrant, TurnRequest,
 };
 
 use crate::ssh_stream::{INGEST_ACK_WINDOW, IngestClient, SshTarget};
@@ -124,13 +124,24 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         window: None,
         timeout: None,
     };
-    let vault_env = vowp_core::vault::env_for(ctx.deps(), &turn).map_err(CliError::Core)?;
-    let env = resolve_env(&grant.env_names, &vault_env)?;
-    let adapter = ctx
-        .deps()
-        .adapters
-        .get(&executor)
-        .ok_or_else(|| CliError::Invalid(format!("harness for {executor} is not installed on this machine")))?;
+    let vault_env = match vowp_core::vault::env_for(ctx.deps(), &turn) {
+        Ok(env) => env,
+        Err(error) => return Err(fail_turn(&mut client, io, CliError::Core(error))),
+    };
+    let env = match resolve_env(&grant.env_names, &vault_env) {
+        Ok(env) => env,
+        Err(error) => return Err(fail_turn(&mut client, io, error)),
+    };
+    let adapter = match ctx.deps().adapters.get(&executor) {
+        Some(adapter) => adapter,
+        None => {
+            return Err(fail_turn(
+                &mut client,
+                io,
+                CliError::Invalid(format!("harness for {executor} is not installed on this machine")),
+            ));
+        }
+    };
     let start = StartInput {
         session_id: grant.session_id.clone(),
         executor: executor.clone(),
@@ -144,7 +155,16 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         event_log_hint: Some(ctx.paths().run_raw_path(&grant.run_id)),
         timeout: None,
     };
-    let mut adapter_run = adapter.start(start).map_err(vowp_core::CoreError::Adapter)?;
+    let mut adapter_run = match adapter.start(start) {
+        Ok(run) => run,
+        Err(error) => {
+            return Err(fail_turn(
+                &mut client,
+                io,
+                CliError::Core(vowp_core::CoreError::Adapter(error)),
+            ));
+        }
+    };
     loop {
         match adapter_run.events().recv_timeout(EVENT_POLL) {
             Ok(event) => {
@@ -189,7 +209,16 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         }
     }
 
-    let summary = adapter_run.wait().map_err(vowp_core::CoreError::Adapter)?;
+    let summary = match adapter_run.wait() {
+        Ok(summary) => summary,
+        Err(error) => {
+            return Err(fail_turn(
+                &mut client,
+                io,
+                CliError::Core(vowp_core::CoreError::Adapter(error)),
+            ));
+        }
+    };
     // C0 hook: redact the executor-side report and raw mirror before the summary leaves
     // this machine (G1 fills). The grant carries no job id, so this redacts node artifacts.
     if let Ok(store) = ctx.store() {
@@ -224,6 +253,34 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
     }
     print_done(ctx, io, &grant, false)?;
     Ok(0)
+}
+
+/// Reports a turn that could not start or finish, then returns the original error.
+///
+/// `begin_turn` already wrote the attach, `turn.started` and the run on the home. A
+/// summary with [`RunOutcome::Error`] reuses the v0.1 failed-start finalisation there:
+/// error event, `turn.ended`, detach and `finish_run`, so the session is not left
+/// `running` with an open run.
+fn fail_turn(client: &mut IngestClient, io: &mut dyn IoStreams, error: CliError) -> CliError {
+    let message = error.to_string();
+    let summary = RemoteLine::Summary {
+        exit_code: None,
+        outcome: RunOutcome::Error,
+        native_session_id: None,
+        cost: Cost::unknown(),
+        limit: None,
+        result_text: Some(message),
+        stop_reason: StopReason::Error,
+        usage: None,
+    };
+    let reported = client.send(&summary).and_then(|ack| match ack {
+        Some(IngestAck::Error { message, .. }) => Err(CliError::Remote(message)),
+        _ => client.finish(),
+    });
+    if let Err(report_error) = reported {
+        let _ = writeln!(io.err(), "could not report the failed turn to the home: {report_error}");
+    }
+    error
 }
 
 /// Prints the read-only takeover notice once; returns whether the lease was revoked.

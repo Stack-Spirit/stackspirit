@@ -505,96 +505,110 @@ impl<'a> IngestSession<'a> {
             })
             .unwrap_or(0);
         let run_events = &prior[run_start..];
-        let saw_cost = run_events.iter().any(|event| {
-            matches!(
-                event.body(),
-                Ok(EventBody::Cost(payload)) if payload.run_id.as_ref() == Some(&self.grant.run)
-            )
-        });
+        // Harness cost events carry no run id (`CostEvent { run_id: None }`), so the run
+        // slice — which starts at this run's attach — is the authority: any cost after the
+        // attach belongs to this run and the summary must not append a second one.
+        let saw_cost = run_events.iter().any(|event| event.event_type == EventType::Cost);
         let saw_limit = run_events.iter().any(|event| event.event_type == EventType::Limit);
         let saw_error = run_events.iter().any(|event| event.event_type == EventType::Error);
+        // A home crash after appending `turn.ended` but before `finish_run` leaves the run
+        // row open. The terminal event is the marker that the turn was already closed, so a
+        // replayed summary must finish the row without appending the framing events again.
+        let saw_terminal = run_events.iter().any(|event| event.event_type == EventType::TurnEnded);
+        let saw_detach = run_events.iter().any(|event| {
+            matches!(
+                event.body(),
+                Ok(EventBody::SessionExecutor(payload))
+                    if payload.action == AttachAction::Detach
+                        && payload.run_id.as_ref() == Some(&self.grant.run)
+            )
+        });
 
-        if cost.usd.is_some() && !saw_cost {
-            append_event(
-                self.deps,
-                self.store,
-                &self.log,
-                harness,
-                EventBody::Cost(CostEvent {
-                    cost: cost.clone(),
-                    run_id: Some(self.grant.run.clone()),
-                }),
-                Some(node.clone()),
-                native_session_id.clone(),
-            )?;
-        }
-        if let Some(limit) = &limit {
-            if !saw_limit {
+        let ended_at = self.deps.clock.now();
+        if !saw_terminal {
+            if cost.usd.is_some() && !saw_cost {
                 append_event(
                     self.deps,
                     self.store,
                     &self.log,
                     harness,
-                    EventBody::Limit(limit.clone()),
+                    EventBody::Cost(CostEvent {
+                        cost: cost.clone(),
+                        run_id: Some(self.grant.run.clone()),
+                    }),
                     Some(node.clone()),
                     native_session_id.clone(),
                 )?;
             }
-        } else if !saw_error && matches!(outcome, RunOutcome::Error | RunOutcome::Crash) {
+            if let Some(limit) = &limit {
+                if !saw_limit {
+                    append_event(
+                        self.deps,
+                        self.store,
+                        &self.log,
+                        harness,
+                        EventBody::Limit(limit.clone()),
+                        Some(node.clone()),
+                        native_session_id.clone(),
+                    )?;
+                }
+            } else if !saw_error && matches!(outcome, RunOutcome::Error | RunOutcome::Crash) {
+                append_event(
+                    self.deps,
+                    self.store,
+                    &self.log,
+                    harness,
+                    EventBody::Error(ErrorEvent {
+                        kind: ErrorKind::AdapterFailed,
+                        message: vowp_adapters::classify::redact(
+                            result_text.as_deref().unwrap_or("adapter ended without a result"),
+                            300,
+                        ),
+                        retryable: outcome == RunOutcome::Crash,
+                    }),
+                    Some(node.clone()),
+                    native_session_id.clone(),
+                )?;
+            }
+
+            let duration_ms = u64::try_from(ended_at.since(run.started_at).as_millis()).unwrap_or(u64::MAX);
             append_event(
                 self.deps,
                 self.store,
                 &self.log,
                 harness,
-                EventBody::Error(ErrorEvent {
-                    kind: ErrorKind::AdapterFailed,
-                    message: vowp_adapters::classify::redact(
-                        result_text.as_deref().unwrap_or("adapter ended without a result"),
-                        300,
-                    ),
-                    retryable: outcome == RunOutcome::Crash,
+                EventBody::TurnEnded(TurnEnded {
+                    turn,
+                    stop_reason,
+                    duration_ms: Some(duration_ms),
                 }),
                 Some(node.clone()),
                 native_session_id.clone(),
             )?;
         }
-
-        let ended_at = self.deps.clock.now();
-        let duration_ms = u64::try_from(ended_at.since(run.started_at).as_millis()).unwrap_or(u64::MAX);
-        append_event(
-            self.deps,
-            self.store,
-            &self.log,
-            harness,
-            EventBody::TurnEnded(TurnEnded {
-                turn,
-                stop_reason,
-                duration_ms: Some(duration_ms),
-            }),
-            Some(node.clone()),
-            native_session_id.clone(),
-        )?;
-        let detach_reason = match limit {
-            Some(_) => "limit",
-            None if outcome == RunOutcome::Crash => "crash",
-            None => "turn_done",
-        };
-        append_event(
-            self.deps,
-            self.store,
-            &self.log,
-            harness,
-            EventBody::SessionExecutor(SessionExecutor {
-                action: AttachAction::Detach,
-                executor: executor.clone().unwrap_or_else(unknown_executor),
-                node: node.clone(),
-                native_session_id: native_session_id.clone(),
-                run_id: Some(self.grant.run.clone()),
-                reason: Some(detach_reason.to_owned()),
-            }),
-            Some(node.clone()),
-            native_session_id.clone(),
-        )?;
+        if !saw_detach {
+            let detach_reason = match limit {
+                Some(_) => "limit",
+                None if outcome == RunOutcome::Crash => "crash",
+                None => "turn_done",
+            };
+            append_event(
+                self.deps,
+                self.store,
+                &self.log,
+                harness,
+                EventBody::SessionExecutor(SessionExecutor {
+                    action: AttachAction::Detach,
+                    executor: executor.clone().unwrap_or_else(unknown_executor),
+                    node: node.clone(),
+                    native_session_id: native_session_id.clone(),
+                    run_id: Some(self.grant.run.clone()),
+                    reason: Some(detach_reason.to_owned()),
+                }),
+                Some(node.clone()),
+                native_session_id.clone(),
+            )?;
+        }
         self.log.sync()?;
 
         if let Some(native) = &native_session_id {

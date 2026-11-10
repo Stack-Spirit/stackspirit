@@ -16,13 +16,13 @@ use vowp_core::session::remote::{BeginTurn, IngestGrant, begin_turn, ingest_line
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
-    Actor, AssistantMessage, BuildMode, Cost, EventBody, EventEnvelope, EventId, EventSource, EventType, Executor,
-    ExecutorRef, FakeClock, HarnessKind, IngestAck, LimitEvent, LimitKind, MemoryLog, NodeName, RemoteEvent,
+    Actor, AssistantMessage, BuildMode, Cost, CostEvent, EventBody, EventEnvelope, EventId, EventSource, EventType,
+    Executor, ExecutorRef, FakeClock, HarnessKind, IngestAck, LimitEvent, LimitKind, MemoryLog, NodeName, RemoteEvent,
     RemoteLine, RemoteUsage, RunOutcome, RunPurpose, SessionId, SessionRole, StopReason, Timestamp, Tokens, ToolResult,
-    UsageSource,
+    TurnEnded, UsageSource,
 };
 use vowp_store::NodePaths;
-use vowp_store::session_log::SessionLog;
+use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_tmux::fake::FakeWindows;
 
 fn ts() -> Timestamp {
@@ -408,6 +408,172 @@ fn remote_summary_finishes_run_and_terminal_events() {
         .expect("a summary without measurements still writes the default row");
     assert_eq!(usage.source, UsageSource::Default);
     assert_eq!(usage.exit_code, Some(0));
+}
+
+#[test]
+fn remote_streamed_cost_is_not_duplicated_by_summary() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "streamed cost");
+    let grant = begin(&deps, &session, "lease", "prompt");
+    let cost = Cost::receipt(
+        0.25,
+        Tokens {
+            input: 10,
+            output: 5,
+            ..Tokens::default()
+        },
+    );
+    // Both real adapters emit `CostEvent { run_id: None }`; the summary carries the same
+    // receipt. The home must count it once.
+    let text = lines(&[
+        hello(&grant, "lease"),
+        RemoteLine::Event {
+            event: remote_event(
+                EventId::new(),
+                EventBody::Cost(CostEvent {
+                    cost: cost.clone(),
+                    run_id: None,
+                }),
+            ),
+        },
+        RemoteLine::Summary {
+            exit_code: Some(0),
+            outcome: RunOutcome::Ok,
+            native_session_id: None,
+            cost: cost.clone(),
+            limit: None,
+            result_text: Some("done".to_owned()),
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let (result, _) = ingest(&deps, &grant, "lease", &text);
+    result.expect("ingest");
+
+    let events = read_events(&deps, &session);
+    let costs: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_type == EventType::Cost)
+        .collect();
+    assert_eq!(
+        costs.len(),
+        1,
+        "a streamed cost plus the summary cost appended two cost events"
+    );
+    let payload = match costs[0].body() {
+        Ok(EventBody::Cost(payload)) => payload,
+        other => panic!("cost event has the wrong body: {other:?}"),
+    };
+    assert_eq!(payload.cost.usd, Some(0.25));
+    assert_eq!(payload.cost.tokens.input, 10);
+    assert_eq!(payload.cost.tokens.output, 5);
+    let store = deps.open_store().expect("store");
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.cost.usd, Some(0.25));
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+}
+
+#[test]
+fn remote_summary_replay_finishes_an_open_run_with_terminal_events() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "crash before finish");
+    let grant = begin(&deps, &session, "lease", "prompt");
+
+    // Simulate a home crash after the summary appended `turn.ended` but before
+    // `finish_run`: the log has the terminal event, the run row is still open.
+    let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("open log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: Some("deepseek/deepseek-flash".to_owned()),
+                node: Some(laptop()),
+                native_session_id: None,
+            },
+            body: EventBody::TurnEnded(TurnEnded {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+                duration_ms: Some(5),
+            }),
+            raw: None,
+            ts: Some(ts()),
+        })
+        .expect("seed terminal event");
+    let store = deps.open_store().expect("store");
+    store.index_event(&index_row(&appended)).expect("index terminal");
+    log.sync().expect("sync");
+    drop(log);
+    let open = store.require_run(&grant.run_id).expect("run");
+    assert!(open.ended_at.is_none(), "the seeded run must still be open");
+
+    let text = lines(&[hello(&grant, "lease"), summary(Cost::unknown())]);
+    let (result, acks) = ingest(&deps, &grant, "lease", &text);
+    let report = result.expect("replayed summary");
+    assert!(report.done);
+    assert!(matches!(acks[0], IngestAck::Summary { done: true, .. }));
+
+    let events = read_events(&deps, &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::TurnEnded)
+            .count(),
+        1,
+        "the replay appended a second turn.ended"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event.body(),
+                Ok(EventBody::SessionExecutor(payload))
+                    if payload.action == vowp_protocol::AttachAction::Detach
+                        && payload.run_id.as_ref() == Some(&grant.run_id)
+            ))
+            .count(),
+        1,
+        "the replay appended a second detach"
+    );
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=events.len() as u64).collect::<Vec<_>>()
+    );
+    let store = deps.open_store().expect("store");
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+    assert!(run.ended_at.is_some());
+    let row = store.require_session(&session).expect("session");
+    assert_eq!(row.state, vowp_protocol::SessionState::Idle);
+
+    // A second replay after the repaired finish is still a no-op.
+    ingest(&deps, &grant, "lease", &text).0.expect("second replay");
+    let events = read_events(&deps, &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::TurnEnded)
+            .count(),
+        1
+    );
+    let ledger = store
+        .ledger_since(&vowp_store::LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::Cost),
+            ..vowp_store::LedgerFilter::default()
+        })
+        .expect("ledger");
+    assert_eq!(
+        ledger
+            .iter()
+            .filter(|row| row.run_id.as_ref() == Some(&grant.run_id))
+            .count(),
+        1,
+        "the summary replay wrote a second cost ledger row"
+    );
 }
 
 #[test]

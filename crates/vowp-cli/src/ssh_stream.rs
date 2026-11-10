@@ -896,15 +896,16 @@ mod tests {
         let marker = tmp.path().join("child-saw-spool.txt");
         let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool.clone());
         // The child snapshots the spool after reading the frame. If send wrote before the
-        // fsynced append, the snapshot would be empty.
+        // fsynced append, the snapshot would be empty. Write the marker through a
+        // temporary file and rename it so the parent never observes an empty marker.
         attach_child(
             &mut client,
             Command::new("sh").args([
                 "-c",
                 &format!(
-                    "IFS= read -r line; cat '{}' > '{}'; cat >/dev/null",
-                    spool.join("events.jsonl").display(),
-                    marker.display()
+                    "IFS= read -r line; cat '{spool}' > '{marker}.tmp' && mv '{marker}.tmp' '{marker}'; cat >/dev/null",
+                    spool = spool.join("events.jsonl").display(),
+                    marker = marker.display()
                 ),
             ]),
         );

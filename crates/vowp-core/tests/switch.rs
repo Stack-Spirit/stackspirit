@@ -955,6 +955,70 @@ fn remote_probe_failure_keeps_source() {
 }
 
 #[test]
+fn unregistered_switch_node_fails_probe() {
+    let tmp = tempdir().expect("tempdir");
+    // The local registry has a healthy target adapter. Before the fix the missing node
+    // row fell back to this probe and completed a "remote" switch without probing it.
+    let target = Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new()));
+    let target_adapter: Arc<dyn Adapter> = target.clone();
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("source handoff")))
+            .with("claude-code", target_adapter),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "ghost switch");
+    let ghost = NodeName::parse("ghost").expect("node");
+    let request = SwitchRequest {
+        session_id: session.clone(),
+        to: ExecutorRef {
+            executor: claude(),
+            node: Some(ghost.clone()),
+        },
+        reason: SwitchReason::User,
+        drain_secs: 5,
+    };
+
+    let error =
+        run_switch(&deps, &request, &CancelToken::default()).expect_err("an unregistered node must fail the probe");
+    assert!(matches!(error, CoreError::SwitchAborted(_)), "got {error:?}");
+
+    let store = deps.open_store().expect("store");
+    let row = store.require_session(&session).expect("session");
+    assert_eq!(row.executor, Some(opencode()), "the source stays attached");
+    let switch = store
+        .list_switches(&session)
+        .expect("switches")
+        .into_iter()
+        .next()
+        .expect("switch row");
+    assert_eq!(switch.state, SwitchState::Aborted);
+    assert!(
+        switch.error.as_deref().is_some_and(|detail| detail.contains("probe")),
+        "{:?}",
+        switch.error
+    );
+    assert!(
+        target.starts().is_empty(),
+        "the local adapter was started for a node it cannot represent"
+    );
+    let events = read_events(&deps, &session);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::SessionExecutor(payload))
+                if payload.action == AttachAction::Attach && payload.node == ghost
+        )),
+        "the switch attached the target on the unregistered node"
+    );
+    assert!(
+        !events.iter().any(|event| event.event_type == EventType::Capsule),
+        "no capsule is written for an unregistered target"
+    );
+}
+
+#[test]
 fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     let tmp = tempdir().expect("tempdir");
     let clock = FakeClock::at(ts());

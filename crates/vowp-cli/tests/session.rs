@@ -840,6 +840,87 @@ fn remote_exec_streams_over_fake_ssh() {
 }
 
 #[test]
+fn remote_exec_start_failure_finalises_the_turn() {
+    let env = common::TestEnv::new();
+    let script = configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "start nothing");
+    std::fs::remove_file(&script).expect("remove the fake harness binary");
+
+    let output = run_exec(&env, &grant_path, None);
+    assert!(
+        !output.status.success(),
+        "__exec reported success after the harness failed to start: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_failed_turn_finalised(&env, &id, &grant);
+}
+
+#[test]
+fn remote_exec_env_failure_finalises_the_turn() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "missing env");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&grant_path).expect("grant")).expect("grant JSON");
+    value["env_names"] = serde_json::json!(["VOWP_EXEC_TEST_MISSING_ENV_9F3C"]);
+    std::fs::write(&grant_path, value.to_string()).expect("rewrite grant");
+    std::fs::set_permissions(&grant_path, std::fs::Permissions::from_mode(0o600)).expect("grant mode");
+
+    let output = run_exec(&env, &grant_path, None);
+    assert!(
+        !output.status.success(),
+        "__exec reported success after env resolution failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_failed_turn_finalised(&env, &id, &grant);
+}
+
+/// Asserts a failed `__exec` sent a summary that closed the run and the session.
+fn assert_failed_turn_finalised(env: &common::TestEnv, id: &str, grant: &TurnGrant) {
+    let session_id = vowp_protocol::SessionId::parse(id).expect("session id");
+    let events = SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), &session_id)
+        .expect("log")
+        .read_all()
+        .expect("events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::TurnEnded)
+            .count(),
+        1,
+        "a failed start left the turn open or ended it twice"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::Error(payload))
+                if payload.kind == vowp_protocol::ErrorKind::AdapterFailed && !payload.message.is_empty()
+        )),
+        "the failure was not recorded as an error event"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::SessionExecutor(payload))
+                if payload.action == vowp_protocol::AttachAction::Detach
+                    && payload.run_id.as_ref() == Some(&grant.run_id)
+        )),
+        "the failed turn left the executor attached"
+    );
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Error));
+    assert!(run.ended_at.is_some(), "the failed run was left open");
+    let session = store.require_session(&session_id).expect("session");
+    assert_eq!(session.state, vowp_protocol::SessionState::Idle);
+    let spool = env.home_path().join("spool").join(id).join(grant.run_id.to_string());
+    let acked = std::fs::read_to_string(spool.join("acked.json")).expect("acked");
+    assert!(acked.contains("\"summary\": true"), "{acked}");
+}
+
+#[test]
 fn ssh_drop_spools_and_replays_without_gap_or_duplicate() {
     let env = common::TestEnv::new();
     configure(&env);
