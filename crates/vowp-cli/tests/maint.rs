@@ -1233,3 +1233,105 @@ fn backup_offsite_alias_copies_the_default_backup() {
     assert_eq!(rsync.argv[3], target);
     assert!(rsync.shell.is_none());
 }
+
+#[test]
+fn backup_project_database_while_writer_checkpoints() {
+    let fixture = BackupFixture::new();
+    let alpha = fixture.env.config.project.name.clone();
+    let paths = NodePaths::new(fixture.env.home_path());
+    let seed = Store::open_with_project(&paths, &alpha).expect("seed project");
+    for index in 0..500 {
+        seed.insert_job(
+            &alpha,
+            &NewJob {
+                id: JobId::parse(&format!("seed-{index:04}")).expect("job id"),
+                title: "x".repeat(8 * 1024),
+                kind: JobKind::Build,
+                role: Role::Worker,
+                profile: None,
+                needs: Vec::new(),
+                owns: Vec::new(),
+                reads: Vec::new(),
+                gates: None,
+                priority: None,
+                loop_: None,
+                brief_text: None,
+            },
+            "seed",
+        )
+        .expect("seed job");
+    }
+    drop(seed);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_paths = paths.clone();
+    let writer_project = alpha.clone();
+    let writer_stop = Arc::clone(&stop);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let store = Store::open_with_project(&writer_paths, &writer_project).expect("writer project");
+        let mut written = 0_u64;
+        while !writer_stop.load(Ordering::Relaxed) {
+            store
+                .insert_job(
+                    &writer_project,
+                    &NewJob {
+                        id: JobId::parse(&format!("live-{written}")).expect("job id"),
+                        title: "y".repeat(8 * 1024),
+                        kind: JobKind::Build,
+                        role: Role::Worker,
+                        profile: None,
+                        needs: Vec::new(),
+                        owns: Vec::new(),
+                        reads: Vec::new(),
+                        gates: None,
+                        priority: None,
+                        loop_: None,
+                        brief_text: None,
+                    },
+                    "writer",
+                )
+                .expect("writer job");
+            written += 1;
+            if written == 1 {
+                started_tx.send(()).expect("writer started signal");
+            }
+        }
+        written
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("writer must commit before the backup starts");
+
+    let mut last_backup = None;
+    for round in 0..2 {
+        let destination = fixture.env.home_path().join(format!("writer-backup-{round}"));
+        fixture
+            .run_backup(
+                &fixture.store(),
+                BackupOptions {
+                    to: Some(destination.display().to_string()),
+                    ..BackupOptions::default()
+                },
+            )
+            .expect("backup while a project writer checkpoints");
+        last_backup = Some(destination);
+    }
+    stop.store(true, Ordering::SeqCst);
+    let written = writer.join().expect("writer thread");
+    assert!(written > 0, "the writer must commit while backups run");
+
+    let restore_home = tempfile::tempdir().expect("restore home");
+    fixture
+        .run_restore(
+            &fixture.store(),
+            last_backup.as_ref().expect("backup path"),
+            restore_home.path(),
+            false,
+        )
+        .expect("restore the last snapshot");
+    let restored = Store::open_with_project(&NodePaths::new(restore_home.path()), &alpha).expect("restored project");
+    restored.integrity_check().expect("restored integrity");
+    let jobs = restored.list_jobs(&JobFilter::default()).expect("jobs");
+    assert!(jobs.len() >= 500, "restored only {} jobs", jobs.len());
+}

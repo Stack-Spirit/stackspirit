@@ -351,7 +351,7 @@ fn write_full_backup(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
         }
-        copy_project_db(deps, &project.name, &source, &target)?;
+        copy_project_db(deps, &project.name, &target)?;
         record_file(destination, &target, "project-db", &mut files)?;
         project_snapshots.push((project.name.clone(), target));
     }
@@ -445,84 +445,27 @@ fn write_full_backup(
     })
 }
 
-/// Copies one project database through a consistent SQLite checkpoint.
+/// Copies one project database with SQLite's online backup API.
 ///
-/// `Store::backup` backs up `main`; a project database is normally attached as `project`.
-/// The live project file is copied together with its WAL into a temporary home, opened as
-/// an attached project so SQLite replays the WAL, integrity-checked, and closed so SQLite
-/// checkpoints the WAL into a standalone project database. That standalone file is then
-/// copied into the backup. No raw database-header rewrite is involved, so a project with a
-/// populated WAL is safe to back up while the supervisor keeps writing.
-fn copy_project_db(deps: &Deps, project: &ProjectName, source: &Path, destination: &Path) -> Result<(), CoreError> {
-    fs::create_dir_all(deps.paths.tmp_dir()).map_err(|error| io_error(&deps.paths.tmp_dir(), error))?;
+/// A project database is attached as `project`; [`Store::backup`] only copies `main`, so
+/// [`Store::backup_project`] backs up the attached schema directly. SQLite's online backup
+/// sees a consistent snapshot even while a writer is committing and checkpointing.
+fn copy_project_db(deps: &Deps, project: &ProjectName, destination: &Path) -> Result<(), CoreError> {
+    let store = Store::open_with_project(&deps.paths, project)?;
     let mut last_error = None;
-    for _ in 0..3 {
-        let root = deps
-            .paths
-            .tmp_dir()
-            .join(format!("backup-project-{}", ulid::Ulid::generate()));
-        let paths = NodePaths::new(&root);
-        let result = (|| {
-            let global = Store::open_global(&paths)?;
-            let now = deps.clock.now();
-            global.upsert_project(&Project {
-                name: project.clone(),
-                path: String::new(),
-                remote_url: None,
-                default_branch: "main".to_owned(),
-                config: serde_json::json!({}),
-                created_at: now,
-                updated_at: now,
-            })?;
-            drop(global);
-
-            let temporary = paths.project_db_path(project);
-            remove_database_files(&temporary)?;
-            fs::copy(source, &temporary).map_err(|error| io_error(source, error))?;
-            for suffix in ["-wal", "-shm"] {
-                let sidecar = with_suffix(source.to_path_buf(), suffix);
-                if sidecar.is_file() {
-                    fs::copy(&sidecar, with_suffix(temporary.clone(), suffix))
-                        .map_err(|error| io_error(&sidecar, error))?;
-                }
-            }
-
-            let store = Store::open_with_project(&paths, project)?;
-            store.integrity_check()?;
-            drop(store);
-
-            let wal = with_suffix(temporary.clone(), "-wal");
-            if wal.exists() {
-                let bytes = fs::metadata(&wal).map_err(|error| io_error(&wal, error))?.len();
-                if bytes > 0 {
-                    return Err(CoreError::Command(format!(
-                        "SQLite did not checkpoint the project WAL for {}",
-                        project.as_str()
-                    )));
-                }
-                fs::remove_file(&wal).map_err(|error| io_error(&wal, error))?;
-            }
-            fs::copy(&temporary, destination).map_err(|error| io_error(&temporary, error))?;
-            Ok(())
-        })();
-        let _ = fs::remove_dir_all(&root);
-        match result {
+    for attempt in 0..3 {
+        match store.backup_project(destination) {
             Ok(()) => return Ok(()),
-            Err(error) => last_error = Some(error),
+            Err(StoreError::Busy) if attempt < 2 => {
+                last_error = Some(StoreError::Busy);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error.into()),
         }
     }
-    Err(last_error.unwrap_or_else(|| CoreError::Command("project database backup failed".to_owned())))
-}
-
-/// Removes a database file and its SQLite sidecars.
-fn remove_database_files(path: &Path) -> Result<(), CoreError> {
-    for suffix in ["", "-wal", "-shm"] {
-        let file = with_suffix(path.to_path_buf(), suffix);
-        if file.exists() {
-            fs::remove_file(&file).map_err(|error| io_error(&file, error))?;
-        }
-    }
-    Ok(())
+    Err(last_error
+        .map(CoreError::from)
+        .unwrap_or_else(|| CoreError::Command("project database backup failed".to_owned())))
 }
 
 /// Copies the authoritative session files into the backup directory.
