@@ -12,9 +12,9 @@ use std::time::Duration;
 use clap::Args;
 use serde::Deserialize;
 use vowp_protocol::{
-    Executor, HarnessEvent, IngestAck, NodeName, RemoteEvent, RemoteLine, SessionId, StartInput, TurnGrant,
+    Executor, ExecutorRef, HarnessEvent, IngestAck, NodeName, RemoteEvent, RemoteLine, RunRole, StartInput, TurnGrant,
+    TurnRequest,
 };
-use vowp_store::NodePaths;
 
 use crate::ssh_stream::{INGEST_ACK_WINDOW, IngestClient, SshTarget};
 use crate::{CliError, Ctx, IoStreams};
@@ -70,13 +70,19 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         grant.lease_token.clone(),
         spool,
     )
-    .with_project(Some(ctx.project().to_string()));
+    .with_project(Some(ctx.project().to_string()))
+    .with_executor(grant.executor.clone(), grant.node.clone());
 
     // A spool that survived a killed client is replayed and finished without starting the
     // harness again. A spool with events but no summary cannot be completed: the harness
     // process is gone and no terminal frame exists.
     if client.has_spool() {
         if client.summary_acked() {
+            if !client.all_acked() {
+                return Err(CliError::Conflict(
+                    "the spool records a summary ack but some events are unacknowledged".to_owned(),
+                ));
+            }
             print_done(ctx, io, &grant, true)?;
             return Ok(0);
         }
@@ -85,13 +91,41 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
                 "the spool has unacknowledged events but no summary; begin a new turn".to_owned(),
             ));
         }
+        // A killed client may have stopped before its artifact redaction; run it again
+        // before the replayed summary leaves this machine. Redaction is best-effort on a
+        // surface that has no local store.
+        if let Ok(store) = ctx.store() {
+            let _ = vowp_core::vault::redact_job_artifacts(ctx.deps(), &store, None);
+        }
         client.replay()?;
+        if report_revoked(io, client.revoked())? {
+            return Ok(75);
+        }
         client.finish()?;
+        if report_revoked(io, client.revoked())? {
+            return Ok(75);
+        }
         print_done(ctx, io, &grant, false)?;
         return Ok(0);
     }
 
-    let env = resolve_env(&grant.env_names)?;
+    let turn = TurnRequest {
+        session_id: grant.session_id.clone(),
+        executor: ExecutorRef {
+            executor: executor.clone(),
+            node: Some(grant.node.clone()),
+        },
+        purpose: grant.purpose,
+        role: RunRole::Worker,
+        job_id: None,
+        prompt: grant.prompt.clone(),
+        profile: None,
+        rung: 0,
+        window: None,
+        timeout: None,
+    };
+    let vault_env = vowp_core::vault::env_for(ctx.deps(), &turn).map_err(CliError::Core)?;
+    let env = resolve_env(&grant.env_names, &vault_env)?;
     let adapter = ctx
         .deps()
         .adapters
@@ -156,6 +190,11 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
     }
 
     let summary = adapter_run.wait().map_err(vowp_core::CoreError::Adapter)?;
+    // C0 hook: redact the executor-side report and raw mirror before the summary leaves
+    // this machine (G1 fills). The grant carries no job id, so this redacts node artifacts.
+    if let Ok(store) = ctx.store() {
+        let _ = vowp_core::vault::redact_job_artifacts(ctx.deps(), &store, None);
+    }
     let line = RemoteLine::Summary {
         exit_code: summary.exit_code,
         outcome: summary.outcome,
@@ -180,8 +219,23 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         }
     }
     client.finish()?;
+    if report_revoked(io, client.revoked())? {
+        return Ok(75);
+    }
     print_done(ctx, io, &grant, false)?;
     Ok(0)
+}
+
+/// Prints the read-only takeover notice once; returns whether the lease was revoked.
+fn report_revoked(io: &mut dyn IoStreams, ack: Option<&IngestAck>) -> Result<bool, CliError> {
+    if let Some(IngestAck::LeaseRevoked { by, reason, .. }) = ack {
+        writeln!(
+            io.err(),
+            "Taken over by {by}: {reason}. This surface is now read-only (follow mode)."
+        )?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Reads and validates the grant file: JSON and mode 0600.
@@ -204,15 +258,22 @@ pub fn read_grant(path: &Path) -> Result<TurnGrant, CliError> {
         .map_err(|error| CliError::Invalid(format!("{}: invalid grant: {error}", path.display())))
 }
 
-/// Resolves every secret name the grant lists from this surface's environment.
-fn resolve_env(names: &[String]) -> Result<Vec<(String, String)>, CliError> {
+/// Resolves every secret name the grant lists from the surface vault, then its environment.
+fn resolve_env(names: &[String], vault_env: &[(String, String)]) -> Result<Vec<(String, String)>, CliError> {
+    let mut resolved: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for (name, value) in vault_env {
+        resolved.insert(name.as_str(), value.as_str());
+    }
     let mut env = Vec::with_capacity(names.len());
     for name in names {
-        let value = std::env::var(name).map_err(|_| {
-            CliError::Invalid(format!(
-                "environment variable {name} is not set on the executor surface"
-            ))
-        })?;
+        let value = match resolved.get(name.as_str()) {
+            Some(value) => (*value).to_owned(),
+            None => std::env::var(name).map_err(|_| {
+                CliError::Invalid(format!(
+                    "environment variable {name} is not set on the executor surface"
+                ))
+            })?,
+        };
         env.push((name.clone(), value));
     }
     Ok(env)
@@ -313,10 +374,4 @@ fn print_done(ctx: &Ctx, io: &mut dyn IoStreams, grant: &TurnGrant, replay: bool
         writeln!(io.out(), "{document}")?;
     }
     Ok(())
-}
-
-/// Returns the session id when a caller needs to build a spool path (kept for tests).
-#[allow(dead_code)]
-pub fn spool_dir(home: &NodePaths, session: &SessionId, run: &vowp_protocol::RunId) -> PathBuf {
-    home.root().join("spool").join(session.as_str()).join(run.as_str())
 }

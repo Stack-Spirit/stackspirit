@@ -18,8 +18,8 @@ use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
     Actor, AssistantMessage, BuildMode, Cost, EventBody, EventEnvelope, EventId, EventSource, EventType, Executor,
     ExecutorRef, FakeClock, HarnessKind, IngestAck, LimitEvent, LimitKind, MemoryLog, NodeName, RemoteEvent,
-    RemoteLine, RemoteUsage, RunOutcome, RunPurpose, RunUsage, SessionId, SessionRole, StopReason, Timestamp, Tokens,
-    ToolResult, UsageSource,
+    RemoteLine, RemoteUsage, RunOutcome, RunPurpose, SessionId, SessionRole, StopReason, Timestamp, Tokens, ToolResult,
+    UsageSource,
 };
 use vowp_store::NodePaths;
 use vowp_store::session_log::SessionLog;
@@ -402,6 +402,12 @@ fn remote_summary_finishes_run_and_terminal_events() {
             .iter()
             .any(|row| row.provider == "deepseek")
     );
+    let usage = store
+        .run_usage(&grant.run_id)
+        .expect("read run_usage")
+        .expect("a summary without measurements still writes the default row");
+    assert_eq!(usage.source, UsageSource::Default);
+    assert_eq!(usage.exit_code, Some(0));
 }
 
 #[test]
@@ -453,33 +459,28 @@ fn remote_summary_writes_run_usage() {
     assert_eq!(recorded["peak_rss_bytes"], usage.peak_rss_bytes);
     assert_eq!(recorded["cpu_usec"], usage.cpu_usec);
     assert_eq!(recorded["source"], "proc_tree");
-    // The typed row is what the E1 hook writes; keep its image covered here too.
-    let expected = RunUsage {
-        run_id: grant.run_id.clone(),
-        project: deps.config.project.name.clone(),
-        job_id: None,
-        job_kind: None,
-        role: vowp_protocol::RunRole::Worker,
-        harness: Some(HarnessKind::Opencode),
-        model: Some("deepseek/deepseek-flash".to_owned()),
-        provider: Some("deepseek".to_owned()),
-        node: laptop(),
-        started_at: ts(),
-        ended_at: ts(),
-        duration_ms: 0,
-        peak_rss_bytes: usage.peak_rss_bytes,
-        anon_peak_bytes: usage.anon_peak_bytes,
-        file_peak_bytes: usage.file_peak_bytes,
-        kernel_peak_bytes: usage.kernel_peak_bytes,
-        cpu_usec: usage.cpu_usec,
-        mean_cpu_cores: usage.mean_cpu_cores,
-        max_cpu_cores: usage.max_cpu_cores,
-        build_mode: usage.build_mode,
-        source: usage.source,
-        oom_killed: usage.oom_killed,
-        exit_code: Some(0),
-    };
-    assert_eq!(expected.run_id, grant.run_id);
+
+    // E1's store API is the observable result: the remote summary writes a real row.
+    let typed = store
+        .run_usage(&grant.run_id)
+        .expect("read run_usage")
+        .expect("run_usage row");
+    assert_eq!(typed.run_id, grant.run_id);
+    assert_eq!(typed.project, deps.config.project.name);
+    assert_eq!(typed.role, vowp_protocol::RunRole::Worker);
+    assert_eq!(typed.harness, Some(HarnessKind::Opencode));
+    assert_eq!(typed.model.as_deref(), Some("deepseek/deepseek-flash"));
+    assert_eq!(typed.provider.as_deref(), Some("deepseek"));
+    assert_eq!(typed.node, laptop());
+    assert_eq!(typed.peak_rss_bytes, usage.peak_rss_bytes);
+    assert_eq!(typed.anon_peak_bytes, usage.anon_peak_bytes);
+    assert_eq!(typed.file_peak_bytes, usage.file_peak_bytes);
+    assert_eq!(typed.cpu_usec, usage.cpu_usec);
+    assert_eq!(typed.mean_cpu_cores, usage.mean_cpu_cores);
+    assert_eq!(typed.max_cpu_cores, usage.max_cpu_cores);
+    assert_eq!(typed.build_mode, usage.build_mode);
+    assert_eq!(typed.source, usage.source);
+    assert_eq!(typed.exit_code, Some(0));
 }
 
 #[test]
@@ -557,7 +558,7 @@ fn duplicate_id_content_conflict_is_not_appended() {
 }
 
 #[test]
-fn ssh_drop_spools_and_replays_without_gap_or_duplicate() {
+fn home_ingest_replays_after_ack_loss_without_gap_or_duplicate() {
     let tmp = tempdir().expect("tempdir");
     let deps = deps(&tmp);
     let service = SessionService::new(deps.clone());
@@ -613,7 +614,7 @@ fn ssh_drop_spools_and_replays_without_gap_or_duplicate() {
 }
 
 #[test]
-fn remote_stream_mid_line_drop_has_no_gap() {
+fn home_ingest_mid_line_drop_has_no_gap() {
     let tmp = tempdir().expect("tempdir");
     let deps = deps(&tmp);
     let service = SessionService::new(deps.clone());

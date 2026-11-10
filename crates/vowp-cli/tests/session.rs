@@ -538,6 +538,95 @@ fn run_exec(env: &common::TestEnv, grant: &Path, spool: Option<&Path>) -> std::p
     command.output().expect("run __exec")
 }
 
+/// One fake-ssh fixture: fake `ssh`/`vowp` PATH, control home and trace files.
+struct SshFixture {
+    bin: tempfile::TempDir,
+    control: tempfile::TempDir,
+    args: std::path::PathBuf,
+    runs: std::path::PathBuf,
+    hello: std::path::PathBuf,
+}
+
+/// Installs a fake `ssh` that runs the quoted remote command locally.
+fn ssh_fixture(env: &common::TestEnv, script: &str) -> SshFixture {
+    let bin = tempfile::tempdir().expect("fake bin");
+    let ssh = bin.path().join("ssh");
+    std::fs::write(&ssh, script).expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_vowp"), bin.path().join("vowp")).expect("vowp link");
+    let control = tempfile::tempdir().expect("control home");
+    let pointer = serde_json::json!({
+        "role": "control",
+        "home": "local",
+        "ssh_target": "fake.example",
+        "remote_home": env.home_path().display().to_string(),
+        "created_at": "2026-11-08T18:00:00Z",
+    });
+    std::fs::write(control.path().join("control.json"), pointer.to_string()).expect("control");
+    SshFixture {
+        args: bin.path().join("ssh-args.txt"),
+        runs: bin.path().join("ssh-runs.txt"),
+        hello: bin.path().join("hello.json"),
+        bin,
+        control,
+    }
+}
+
+/// The forwarding fake ssh used by the happy-path tests.
+const FORWARDING_SSH: &str = "#!/bin/sh\n\
+for last; do :; done\n\
+IFS= read -r line\n\
+printf '%s\\n' \"$line\" > \"$FAKE_SSH_HELLO\"\n\
+printf '%s\\n' \"$@\" >> \"$FAKE_SSH_ARGS\"\n\
+{ printf '%s\\n' \"$line\"; cat; } | /bin/sh -c \"$last\"\n";
+
+/// A fake ssh that cuts its first connection: it forwards at most two complete lines
+/// (plus 12 bytes of the next line in `mid_line` mode) and drops every ack.
+const CUTTING_SSH: &str = "#!/bin/sh\n\
+printf '%s\\n' \"$@\" >> \"$FAKE_SSH_ARGS\"\n\
+printf 'run\\n' >> \"$FAKE_SSH_RUNS\"\n\
+for last; do :; done\n\
+if [ \"$(wc -l < \"$FAKE_SSH_RUNS\")\" -eq 1 ]; then\n\
+  if [ \"$FAKE_SSH_MODE\" = \"mid_line\" ]; then\n\
+    { i=0; while [ $i -lt 2 ]; do IFS= read -r line || break; printf '%s\\n' \"$line\"; i=$((i+1)); done; head -c 12 2>/dev/null; } | /bin/sh -c \"$last\" >/dev/null\n\
+  else\n\
+    { i=0; while [ $i -lt 2 ]; do IFS= read -r line || break; printf '%s\\n' \"$line\"; i=$((i+1)); done; } | /bin/sh -c \"$last\" >/dev/null\n\
+  fi\n\
+  exit 0\n\
+fi\n\
+exec /bin/sh -c \"$last\"\n";
+
+/// Runs `__exec` with the fixture's fake ssh and control home.
+fn run_exec_over_ssh(
+    env: &common::TestEnv,
+    fixture: &SshFixture,
+    grant: &Path,
+    spool: Option<&Path>,
+    extra: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .env("PATH", format!("{}:/usr/bin:/bin", fixture.bin.path().display()))
+        .env("VOWP_CONTROL_HOME", fixture.control.path())
+        .env("FAKE_SSH_ARGS", &fixture.args)
+        .env("FAKE_SSH_RUNS", &fixture.runs)
+        .env("FAKE_SSH_HELLO", &fixture.hello)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .arg("__exec")
+        .arg("--grant")
+        .arg(grant);
+    for (name, value) in extra {
+        command.env(name, value);
+    }
+    if let Some(spool) = spool {
+        command.arg("--spool-dir").arg(spool);
+    }
+    command.output().expect("run __exec over fake ssh")
+}
+
 /// Returns every regular file below `root`.
 fn files_below(root: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
@@ -682,29 +771,23 @@ fn lease_token_never_in_argv_or_logs() {
     let id = create(&env);
     let token = "lease-token-4f9c2b7d-never-log";
     let (grant, grant_path) = begin_remote_turn(&env, &id, token, "keep the token private");
-    let argv = [
-        "vowp".to_owned(),
-        "--home".to_owned(),
-        env.home_path().display().to_string(),
-        "--project".to_owned(),
-        env.project_path().display().to_string(),
-        "__exec".to_owned(),
-        "--grant".to_owned(),
-        grant_path.display().to_string(),
-    ];
-    assert!(
-        !argv.iter().any(|part| part.contains(token)),
-        "the lease token was placed on argv"
-    );
+    let fixture = ssh_fixture(&env, FORWARDING_SSH);
     let mode = std::fs::metadata(&grant_path).expect("grant").permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the grant file is not mode 0600");
 
-    let output = run_exec(&env, &grant_path, None);
+    let output = run_exec_over_ssh(&env, &fixture, &grant_path, None, &[]);
     assert!(
         output.status.success(),
         "__exec failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // This is the real argv ssh received, not a hand-built literal.
+    let argv = std::fs::read_to_string(&fixture.args).expect("ssh argv trace");
+    assert!(!argv.contains(token), "the lease token was placed on argv: {argv}");
+    assert!(argv.contains("session"), "the ingest command was not traced: {argv}");
+    assert!(argv.contains("ingest"), "the ingest command was not traced: {argv}");
+
     for path in files_below(env.home_path()) {
         if path == grant_path {
             continue;
@@ -717,7 +800,7 @@ fn lease_token_never_in_argv_or_logs() {
             path.display()
         );
     }
-    assert_ne!(grant.lease_token, "");
+    let _ = grant;
 }
 
 #[test]
@@ -726,40 +809,21 @@ fn remote_exec_streams_over_fake_ssh() {
     configure(&env);
     let id = create(&env);
     let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "stream over ssh");
-
-    let bin = tempfile::tempdir().expect("fake bin");
-    let ssh = bin.path().join("ssh");
-    std::fs::write(&ssh, "#!/bin/sh\nfor last; do :; done\nexec /bin/sh -c \"$last\"\n").expect("fake ssh");
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_vowp"), bin.path().join("vowp")).expect("vowp link");
-    let control = tempfile::tempdir().expect("control home");
-    let pointer = serde_json::json!({
-        "role": "control",
-        "home": "local",
-        "ssh_target": "fake.example",
-        "remote_home": env.home_path().display().to_string(),
-        "created_at": "2026-11-08T18:00:00Z",
-    });
-    std::fs::write(control.path().join("control.json"), pointer.to_string()).expect("control");
-
-    let output = env
-        .command(env!("CARGO_BIN_EXE_vowp"))
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
-        .env("VOWP_CONTROL_HOME", control.path())
-        .arg("--home")
-        .arg(env.home_path())
-        .arg("--project")
-        .arg(env.project_path())
-        .arg("__exec")
-        .arg("--grant")
-        .arg(&grant_path)
-        .output()
-        .expect("run __exec over ssh");
+    let fixture = ssh_fixture(&env, FORWARDING_SSH);
+    let output = run_exec_over_ssh(&env, &fixture, &grant_path, None, &[]);
     assert!(
         output.status.success(),
         "__exec over ssh failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    let hello: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture.hello).expect("hello trace")).expect("hello JSON");
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["executor"], grant.executor);
+    assert_eq!(hello["node"], "local");
+    assert_eq!(hello["run_id"], grant.run_id.to_string());
+
     let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
     let events = SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), &session_id)
         .expect("log")
@@ -773,4 +837,164 @@ fn remote_exec_streams_over_fake_ssh() {
     let store = env.store();
     let run = store.require_run(&grant.run_id).expect("run");
     assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
+}
+
+#[test]
+fn ssh_drop_spools_and_replays_without_gap_or_duplicate() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "survive an ack loss");
+    let fixture = ssh_fixture(&env, CUTTING_SSH);
+    let output = run_exec_over_ssh(&env, &fixture, &grant_path, None, &[("FAKE_SSH_MODE", "ack_lost")]);
+    assert!(
+        output.status.success(),
+        "ack-loss replay failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runs = std::fs::read_to_string(&fixture.runs).expect("ssh runs");
+    assert!(runs.lines().count() >= 2, "the client did not reconnect: {runs}");
+
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
+    let events = SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), &session_id)
+        .expect("log")
+        .read_all()
+        .expect("events");
+    let mut ids = std::collections::HashSet::new();
+    for event in &events {
+        assert!(ids.insert(event.id.clone()), "duplicate event id {}", event.id);
+    }
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=events.len() as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::TurnEnded)
+            .count(),
+        1
+    );
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
+    assert!(run.ended_at.is_some());
+    let spool = env.home_path().join("spool").join(&id).join(grant.run_id.to_string());
+    let acked = std::fs::read_to_string(spool.join("acked.json")).expect("acked");
+    assert!(acked.contains("\"summary\": true"), "{acked}");
+}
+
+#[test]
+fn ssh_mid_line_cut_replays_without_gap() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "survive a mid-line cut");
+    let fixture = ssh_fixture(&env, CUTTING_SSH);
+    let output = run_exec_over_ssh(&env, &fixture, &grant_path, None, &[("FAKE_SSH_MODE", "mid_line")]);
+    assert!(
+        output.status.success(),
+        "mid-line replay failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runs = std::fs::read_to_string(&fixture.runs).expect("ssh runs");
+    assert!(runs.lines().count() >= 2, "the client did not reconnect: {runs}");
+
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
+    let events = SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), &session_id)
+        .expect("log")
+        .read_all()
+        .expect("events");
+    let mut ids = std::collections::HashSet::new();
+    for event in &events {
+        assert!(ids.insert(event.id.clone()), "duplicate event id {}", event.id);
+    }
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
+    let _ = grant;
+}
+
+#[test]
+fn session_ingest_json_stdout_is_only_acks() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, _grant_path) = begin_remote_turn(&env, &id, "lease-token", "ingest a scripted stream");
+    let ts = Timestamp::parse("2026-11-08T18:00:00Z").expect("timestamp");
+    let hello = RemoteLine::Hello {
+        session_id: grant.session_id.clone(),
+        run_id: grant.run_id.clone(),
+        executor: grant.executor.clone(),
+        node: grant.node.clone(),
+        spool_id: "cli-test".to_owned(),
+        lease: grant.lease_token.clone(),
+    };
+    let event = RemoteLine::Event {
+        event: RemoteEvent {
+            id: vowp_protocol::EventId::new(),
+            ts,
+            event_type: EventType::AssistantMessage,
+            actor: Actor::Assistant,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: Some("deepseek/deepseek-flash".to_owned()),
+                node: Some(grant.node.clone()),
+                native_session_id: None,
+            },
+            payload: serde_json::json!({"text": "scripted ingest"}),
+            raw: None,
+            replayable: true,
+        },
+    };
+    let summary = RemoteLine::Summary {
+        exit_code: Some(0),
+        outcome: vowp_protocol::RunOutcome::Ok,
+        native_session_id: None,
+        cost: Cost::unknown(),
+        limit: None,
+        result_text: Some("done".to_owned()),
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+    };
+    let text = format!(
+        "{}\n{}\n{}\n",
+        serde_json::to_string(&hello).expect("hello"),
+        serde_json::to_string(&event).expect("event"),
+        serde_json::to_string(&summary).expect("summary")
+    );
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["--json", "session", "ingest", &id, "--run", grant.run_id.as_str()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().expect("spawn ingest");
+    {
+        use std::io::Write as _;
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin.write_all(text.as_bytes()).expect("write stream");
+    }
+    let output = child.wait_with_output().expect("ingest output");
+    assert!(
+        output.status.success(),
+        "session ingest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut acks = Vec::new();
+    for line in stdout.lines() {
+        let ack: vowp_protocol::IngestAck =
+            serde_json::from_str(line).unwrap_or_else(|error| panic!("non-ack stdout line {line:?}: {error}"));
+        acks.push(ack);
+    }
+    assert!(
+        acks.iter()
+            .any(|ack| matches!(ack, vowp_protocol::IngestAck::Summary { done: true, .. })),
+        "no summary ack: {acks:?}"
+    );
 }

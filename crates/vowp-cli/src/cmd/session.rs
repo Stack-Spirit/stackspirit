@@ -528,17 +528,9 @@ fn ingest(ctx: &Ctx, io: &mut dyn IoStreams, args: &crate::cli::IngestArgs) -> R
             break;
         }
     }
-    let report = ingest.finish()?;
-    if ctx.json() {
-        print_json(
-            io,
-            &serde_json::json!({
-                "events": report.events,
-                "duplicates": report.duplicates,
-                "done": report.done,
-            }),
-        )?;
-    }
+    // Streaming commands write only their wire frames on stdout: an extra report document
+    // after the acknowledgements would make `--json` output unparsable.
+    ingest.finish()?;
     Ok(0)
 }
 

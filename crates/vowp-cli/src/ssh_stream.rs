@@ -99,6 +99,8 @@ pub struct IngestClient {
     session: SessionId,
     run: RunId,
     lease: String,
+    executor: String,
+    executor_node: NodeName,
     spool: PathBuf,
     project: Option<String>,
     connection: Option<Connection>,
@@ -106,6 +108,10 @@ pub struct IngestClient {
     inflight: VecDeque<vowp_protocol::EventId>,
     summary_inflight: bool,
     spool_checked: bool,
+    spool_syncs: usize,
+    max_inflight: usize,
+    window_timeout: Duration,
+    summary_timeout: Duration,
     revoked: Option<IngestAck>,
 }
 
@@ -113,11 +119,14 @@ impl IngestClient {
     /// Creates a client. The caller starts the SSH child with [`crate::remote`].
     pub fn new(target: SshTarget, session: SessionId, run: RunId, lease: String, spool: PathBuf) -> Self {
         let acked = load_ack_file(&spool).unwrap_or_default();
+        let executor_node = target.node.clone();
         Self {
             target,
             session,
             run,
             lease,
+            executor: String::new(),
+            executor_node,
             spool,
             project: None,
             connection: None,
@@ -125,6 +134,10 @@ impl IngestClient {
             inflight: VecDeque::new(),
             summary_inflight: false,
             spool_checked: false,
+            spool_syncs: 0,
+            max_inflight: 0,
+            window_timeout: WINDOW_TIMEOUT,
+            summary_timeout: SUMMARY_ACK_TIMEOUT,
             revoked: None,
         }
     }
@@ -132,6 +145,13 @@ impl IngestClient {
     /// Selects the project the remote ingest should open; `None` lets the home choose.
     pub fn with_project(mut self, project: Option<String>) -> Self {
         self.project = project;
+        self
+    }
+
+    /// Sets the executor string and executor node carried by every `Hello` frame.
+    pub fn with_executor(mut self, executor: impl Into<String>, node: NodeName) -> Self {
+        self.executor = executor.into();
+        self.executor_node = node;
         self
     }
 
@@ -206,6 +226,7 @@ impl IngestClient {
                     return Ok(None);
                 }
                 self.inflight.push_back(event.id.clone());
+                self.max_inflight = self.max_inflight.max(self.inflight.len());
                 self.drain_acks(false)
             }
             RemoteLine::Summary { .. } => {
@@ -215,7 +236,6 @@ impl IngestClient {
                 if self.acked.summary {
                     return self.drain_acks(false);
                 }
-                self.ensure_connected()?;
                 if !self.ensure_connected()? {
                     return Ok(None);
                 }
@@ -258,11 +278,16 @@ impl IngestClient {
 
     /// Flushes the spool, waits for the summary ack and closes the stream.
     pub fn finish(&mut self) -> Result<(), CliError> {
-        if self.connection.is_none() && self.summary_present() && !self.acked.summary {
+        self.finish_with_timeout(self.summary_timeout)
+    }
+
+    /// [`IngestClient::finish`] with an injectable summary-ack deadline.
+    fn finish_with_timeout(&mut self, timeout: Duration) -> Result<(), CliError> {
+        if !timeout.is_zero() && self.connection.is_none() && self.summary_present() && !self.acked.summary {
             let _ = self.ensure_connected();
             let _ = self.replay_pending();
         }
-        let deadline = Instant::now() + SUMMARY_ACK_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         while self.summary_present() && !self.acked.summary && self.revoked.is_none() && Instant::now() < deadline {
             if self.connection.is_none() {
                 if !self.ensure_connected().unwrap_or(false) {
@@ -288,6 +313,24 @@ impl IngestClient {
                     "ingest ended without a run summary ({status})"
                 )));
             }
+        }
+        // A takeover means the home deliberately ended this surface's turn; the caller
+        // reports the read-only notice and exits 75 rather than treating it as success.
+        if self.revoked.is_some() {
+            return Ok(());
+        }
+        if !self.summary_present() {
+            return Err(CliError::Remote("ingest finished without a run summary".to_owned()));
+        }
+        if !self.acked.summary {
+            return Err(CliError::Remote(format!(
+                "the home did not acknowledge the summary within {timeout:?}"
+            )));
+        }
+        if !self.all_acked() {
+            return Err(CliError::Remote(
+                "the home acknowledged the summary but not every event".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -336,8 +379,8 @@ impl IngestClient {
         let hello = RemoteLine::Hello {
             session_id: self.session.clone(),
             run_id: self.run.clone(),
-            executor: String::new(),
-            node: self.target.node.clone(),
+            executor: self.executor.clone(),
+            node: self.executor_node.clone(),
             spool_id: self.spool.display().to_string(),
             lease: self.lease.clone(),
         };
@@ -401,7 +444,7 @@ impl IngestClient {
 
     /// Waits until the in-flight window has room; `false` means the connection dropped.
     fn wait_for_window(&mut self) -> Result<bool, CliError> {
-        let deadline = Instant::now() + WINDOW_TIMEOUT;
+        let deadline = Instant::now() + self.window_timeout;
         while self.inflight.len() >= INGEST_ACK_WINDOW {
             if Instant::now() >= deadline {
                 return Ok(false);
@@ -426,11 +469,18 @@ impl IngestClient {
                     {
                         continue;
                     }
+                    // Replay obeys the same window as a live send; a reconnect must not
+                    // dump an unbounded spool into the pipe.
+                    if !self.wait_for_window()? || self.connection.is_none() {
+                        self.disconnect();
+                        return Ok(sent);
+                    }
                     if self.write_line(&line).is_err() {
                         self.disconnect();
                         return Ok(sent);
                     }
                     self.inflight.push_back(event.id.clone());
+                    self.max_inflight = self.max_inflight.max(self.inflight.len());
                     sent += 1;
                 }
                 RemoteLine::Summary { .. } => {
@@ -553,6 +603,7 @@ impl IngestClient {
         file.write_all(&text)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        self.spool_syncs += 1;
         Ok(())
     }
 
@@ -701,7 +752,7 @@ mod tests {
     use std::process::Stdio;
     use std::time::Instant;
 
-    use vowp_protocol::{Actor, EventId, EventSource, EventType, HarnessKind, Timestamp};
+    use vowp_protocol::{Actor, Cost, EventId, EventSource, EventType, HarnessKind, RunOutcome, StopReason, Timestamp};
 
     fn target() -> SshTarget {
         SshTarget {
@@ -739,14 +790,23 @@ mod tests {
         }
     }
 
-    /// Attaches a child that consumes bytes and never acknowledges anything.
-    fn silent_connection(client: &mut IngestClient) {
-        let mut child = Command::new("sh")
-            .args(["-c", "cat >/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("silent child");
+    fn summary() -> RemoteLine {
+        RemoteLine::Summary {
+            exit_code: Some(0),
+            outcome: RunOutcome::Ok,
+            native_session_id: None,
+            cost: Cost::unknown(),
+            limit: None,
+            result_text: Some("done".to_owned()),
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        }
+    }
+
+    /// Attaches `command` as the ingest child with piped stdio and an ack reader.
+    fn attach_child(client: &mut IngestClient, command: &mut Command) {
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = command.spawn().expect("child");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         let (sender, events) = channel();
@@ -759,19 +819,73 @@ mod tests {
         });
     }
 
+    /// Attaches a child that consumes bytes and never acknowledges anything.
+    fn silent_connection(client: &mut IngestClient) {
+        attach_child(client, Command::new("sh").args(["-c", "exec sleep 30"]));
+    }
+
+    fn write_spool(spool: &Path, lines: &[RemoteLine]) {
+        std::fs::create_dir_all(spool).expect("spool dir");
+        let text = lines
+            .iter()
+            .map(|line| serde_json::to_string(line).expect("line"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(spool.join("events.jsonl"), text).expect("spool");
+    }
+
     #[test]
     fn ingest_ack_window_is_64_and_async() {
         assert_eq!(INGEST_ACK_WINDOW, 64);
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), tmp.path().join("spool"));
+        client.window_timeout = Duration::from_millis(50);
         silent_connection(&mut client);
+
         let start = Instant::now();
-        let ack = client.send(&event("first")).expect("send");
-        assert!(ack.is_none(), "the client waited for an ack that never came");
+        for index in 0..INGEST_ACK_WINDOW {
+            let ack = client.send(&event(&format!("event {index}"))).expect("send");
+            assert!(ack.is_none(), "the client waited for an ack that never came");
+        }
         assert!(
             start.elapsed() < Duration::from_secs(2),
-            "send blocked for {:?}",
+            "64 sends blocked for {:?}",
             start.elapsed()
+        );
+        assert_eq!(client.inflight.len(), INGEST_ACK_WINDOW);
+
+        let start = Instant::now();
+        let ack = client.send(&event("one too many")).expect("send");
+        assert!(ack.is_none());
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "the 65th event did not wait for window room: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            client.inflight.len(),
+            INGEST_ACK_WINDOW,
+            "the in-flight window grew past {INGEST_ACK_WINDOW}"
+        );
+        let spool = std::fs::read_to_string(tmp.path().join("spool/events.jsonl")).expect("spool");
+        assert_eq!(spool.lines().count(), INGEST_ACK_WINDOW + 1);
+    }
+
+    #[test]
+    fn replay_obeys_the_inflight_window() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spool = tmp.path().join("spool");
+        let lines: Vec<RemoteLine> = (0..100).map(|index| event(&format!("replayed {index}"))).collect();
+        write_spool(&spool, &lines);
+        let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool);
+        client.window_timeout = Duration::from_millis(50);
+        silent_connection(&mut client);
+        let sent = client.replay().expect("replay");
+        assert_eq!(sent as usize, INGEST_ACK_WINDOW);
+        assert_eq!(
+            client.max_inflight, INGEST_ACK_WINDOW,
+            "replay put more than {INGEST_ACK_WINDOW} events in flight"
         );
     }
 
@@ -779,14 +893,38 @@ mod tests {
     fn exec_spools_and_fsyncs_before_send() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let spool = tmp.path().join("spool");
+        let marker = tmp.path().join("child-saw-spool.txt");
         let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool.clone());
-        silent_connection(&mut client);
+        // The child snapshots the spool after reading the frame. If send wrote before the
+        // fsynced append, the snapshot would be empty.
+        attach_child(
+            &mut client,
+            Command::new("sh").args([
+                "-c",
+                &format!(
+                    "IFS= read -r line; cat '{}' > '{}'; cat >/dev/null",
+                    spool.join("events.jsonl").display(),
+                    marker.display()
+                ),
+            ]),
+        );
         client.send(&event("spooled before send")).expect("send");
 
-        let path = spool.join("events.jsonl");
-        let text = std::fs::read_to_string(&path).expect("spool line");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let text = loop {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                break text;
+            }
+            assert!(Instant::now() < deadline, "the child never snapshotted the spool");
+            thread::sleep(Duration::from_millis(10));
+        };
         assert!(text.contains("spooled before send"), "{text}");
-        assert!(text.ends_with('\n'), "the spool line is not complete");
+
+        let path = spool.join("events.jsonl");
+        let spool_text = std::fs::read_to_string(&path).expect("spool line");
+        assert!(spool_text.contains("spooled before send"), "{spool_text}");
+        assert!(spool_text.ends_with('\n'), "the spool line is not complete");
+        assert!(client.spool_syncs > 0, "the spool line was not fsynced");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -799,5 +937,50 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn finish_fails_when_the_summary_was_never_acknowledged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spool = tmp.path().join("spool");
+        write_spool(&spool, &[event("one"), summary()]);
+        let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool);
+        client.summary_timeout = Duration::ZERO;
+        let error = client
+            .finish()
+            .expect_err("an unacknowledged summary must not look like success");
+        assert!(error.to_string().contains("acknowledge"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn finish_fails_when_events_are_unacked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spool = tmp.path().join("spool");
+        write_spool(&spool, &[event("not acked"), summary()]);
+        std::fs::write(spool.join("acked.json"), br#"{"events":{},"summary":true}"#).expect("acked");
+        let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool);
+        let error = client
+            .finish()
+            .expect_err("an unacked event must not look like success");
+        assert!(error.to_string().contains("event"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn finish_accepts_a_recorded_summary_ack() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spool = tmp.path().join("spool");
+        let line = event("one");
+        let id = match &line {
+            RemoteLine::Event { event } => event.id.to_string(),
+            _ => unreachable!(),
+        };
+        write_spool(&spool, &[line, summary()]);
+        let acked = serde_json::json!({
+            "events": {id: 5},
+            "summary": true,
+        });
+        std::fs::write(spool.join("acked.json"), acked.to_string()).expect("acked");
+        let mut client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool);
+        client.finish().expect("a recorded summary ack finishes");
     }
 }

@@ -17,7 +17,7 @@ use vowp_protocol::{
     Actor, AttachAction, BLOB_SPILL_BYTES, CostEvent, ErrorEvent, ErrorKind, EventBody, EventEnvelope, EventSource,
     EventType, Executor, ExecutorRef, HarnessKind, Limit, LimitEvent, LimitRowKind, NodeName, RemoteEvent, RemoteLine,
     RemoteUsage, Run, RunId, RunOutcome, RunPurpose, RunRole, RunUsage, Session, SessionExecutor, SessionId,
-    SessionRole, SessionState, StopReason, Timestamp, TurnEnded, TurnGrant, TurnStarted, UsageSource, UserMessage,
+    SessionRole, SessionState, StopReason, Timestamp, TurnEnded, TurnGrant, TurnStarted, UserMessage,
 };
 use vowp_store::session_files::{AdapterMapping, add_adapter_mapping};
 use vowp_store::session_log::{AppendedEvent, NewEvent, SessionLog, index_row};
@@ -96,7 +96,8 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
     if session.state == SessionState::Closed {
         return Err(CoreError::Invalid("session is closed; no further turns".to_owned()));
     }
-    check_cwd(deps, &session.cwd)?;
+    // The cwd belongs to the executor node; `__exec` runs there and checks its own paths.
+    // The home must not reject a valid remote cwd because the laptop uses another root.
     // C0 hook: a live lease must match the token presented by the surface (F2 fills).
     crate::surface::check_lease_with(store, &req.session, Some(&req.lease))?;
 
@@ -660,8 +661,9 @@ impl<'a> IngestSession<'a> {
         let usage = remote_usage_row(self.deps, &session, &run, usage, ended_at, exit_code);
         let usage_value = serde_json::to_value(&usage).unwrap_or(serde_json::Value::Null);
         self.record_cost_ledger(&run, &cost, &usage_value, outcome)?;
-        // E1 fills this C0 hook; by then the remote usage lands in `run_usage`.
         crate::capacity::usage::record(self.store, &usage)?;
+        // C0 hook: redact the home-side copy of the report and raw mirror (G1 fills).
+        let _ = crate::vault::redact_job_artifacts(self.deps, self.store, run.job_id.as_ref());
         write_ack(
             ack,
             &vowp_protocol::IngestAck::Summary {
@@ -811,7 +813,7 @@ fn append_event(
     Ok(appended)
 }
 
-/// Builds the `RunUsage` row a summary carries, defaulting to a zero measurement.
+/// Builds the `RunUsage` row a summary carries, defaulting to E1's conservative row.
 fn remote_usage_row(
     deps: &Deps,
     session: &Session,
@@ -820,26 +822,19 @@ fn remote_usage_row(
     ended_at: Timestamp,
     exit_code: Option<i32>,
 ) -> RunUsage {
-    let executor = run.executor.as_ref();
-    let default = RemoteUsage {
-        peak_rss_bytes: 0,
-        anon_peak_bytes: None,
-        file_peak_bytes: None,
-        kernel_peak_bytes: None,
-        cpu_usec: 0,
-        mean_cpu_cores: 0.0,
-        max_cpu_cores: 0.0,
-        build_mode: vowp_protocol::BuildMode::Unknown,
-        oom_killed: false,
-        source: UsageSource::Default,
+    let project = session
+        .project
+        .clone()
+        .unwrap_or_else(|| deps.config.project.name.clone());
+    let Some(usage) = usage else {
+        let mut row = crate::capacity::usage::default_for(run, &project, None, ended_at);
+        row.exit_code = exit_code;
+        return row;
     };
-    let usage = usage.unwrap_or(default);
+    let executor = run.executor.as_ref();
     RunUsage {
         run_id: run.id.clone(),
-        project: session
-            .project
-            .clone()
-            .unwrap_or_else(|| deps.config.project.name.clone()),
+        project,
         job_id: run.job_id.clone(),
         job_kind: None,
         role: run.role,
@@ -907,33 +902,6 @@ fn env_names(deps: &Deps, executor: &Executor) -> Vec<String> {
     harness_config(deps, executor)
         .map(|config| config.env_pass.clone())
         .unwrap_or_default()
-}
-
-/// Checks `cwd` against the project path, worktree root and `[node].cwd_allow`.
-fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
-    let path = std::path::Path::new(cwd);
-    let mut roots: Vec<&str> = Vec::new();
-    if let Some(project) = &deps.config.project.path {
-        roots.push(project);
-    }
-    if let Some(root) = &deps.config.project.worktree_root {
-        roots.push(root);
-    }
-    roots.extend(deps.config.node.cwd_allow.iter().map(String::as_str));
-    if roots.is_empty() {
-        return Ok(());
-    }
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    for root in roots {
-        let root = std::path::Path::new(root);
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        if path.starts_with(&root) {
-            return Ok(());
-        }
-    }
-    Err(CoreError::Refused(format!(
-        "working directory {cwd} is outside the allow-list"
-    )))
 }
 
 /// Generates the uuid-v4 a fresh harness session is pre-assigned.
