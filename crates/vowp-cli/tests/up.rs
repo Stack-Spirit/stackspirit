@@ -1092,6 +1092,12 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     );
     let (code, _, stderr) = env.run(&["project", "pause", "_node"]);
     assert_eq!(code, 2, "the reserved project is refused: {stderr}");
+
+    // A removed project can be re-added: the registry marker is replaced by the new row.
+    let (code, value, stderr) = env.run_json(&["project", "add", &second_path]);
+    assert_eq!(code, 0, "re-add after rm: {stderr}");
+    assert_eq!(value["name"], "second", "{value}");
+    assert_eq!(value["state"], "active", "{value}");
 }
 
 #[test]

@@ -57,8 +57,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32
                     "this is a control machine; the home runs the supervisor".to_owned(),
                 ));
             }
-            register_checkout_for_up(ctx)?;
-            run_up(ctx.paths(), &deps, ctx.json(), io, args)
+            run_up(ctx, &deps, io, args)
         }
         UpCommand::Down(args) => run_down(ctx.paths(), &deps, ctx.json(), io, args),
     }
@@ -182,7 +181,9 @@ struct TransitionOutput {
 }
 
 /// Runs `vowp up`.
-fn run_up(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliError> {
+fn run_up(ctx: &Ctx, deps: &Deps, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliError> {
+    let paths = ctx.paths();
+    let json = ctx.json();
     if let Some(pid) = live_supervisor_pid(paths) {
         return Err(CliError::Conflict(format!(
             "supervisor already running (pid {pid}); `vowp status` shows it"
@@ -201,6 +202,7 @@ fn run_up(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams, ar
             )?;
         }
     }
+    register_checkout_for_up(ctx)?;
     if !args.no_tmux {
         match ensure_node_windows(paths, deps.windows.as_ref()) {
             Ok(()) => {}
