@@ -11,6 +11,13 @@ use vowp_store::Store;
 use crate::CoreError;
 use crate::deps::Deps;
 
+/// Returns false when the job must wait; writes the waiting reason to `jobs.note`.
+///
+/// C0 always returns true, which keeps v0.1 dispatch unchanged. E2 owns the body.
+pub(crate) fn admit(_deps: &Deps, _store: &Store, _job: &Job) -> Result<bool, CoreError> {
+    Ok(true)
+}
+
 /// Decides Start versus Resume using the store.
 ///
 /// `vowp_graph::transition` only sees `job.continues`; a Ready job with a prior run or

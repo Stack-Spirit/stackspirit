@@ -1277,7 +1277,7 @@ fn run_role(role: Option<SessionRole>) -> RunRole {
         Some(SessionRole::Planner) => RunRole::Planner,
         Some(SessionRole::Keeper) => RunRole::Keeper,
         Some(SessionRole::Verifier) => RunRole::Verifier,
-        Some(SessionRole::Worker | SessionRole::User) | None => RunRole::Worker,
+        Some(SessionRole::Worker | SessionRole::User | SessionRole::Orchestrator) | None => RunRole::Worker,
     }
 }
 

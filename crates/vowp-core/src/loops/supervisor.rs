@@ -201,6 +201,11 @@ impl Supervisor {
         self.merged.clear();
         self.repeat_tripped = None;
         let paused = self.store.kv_get("paused")?.as_deref() == Some("1");
+        // C0 hooks: node-level measure, lease sweep and lifecycle tick.
+        // C2 moves these three calls to NodeSupervisor::tick before the project loop.
+        let _ = crate::capacity::sample(&self.deps, &self.store, now);
+        let _ = crate::surface::sweep_leases(&self.deps, &self.store, now);
+        let _ = crate::lifecycle::tick(&self.deps, &self.store, now);
         let mut steps = Vec::new();
 
         steps.push(self.step("requests", Self::step_requests));
@@ -217,6 +222,8 @@ impl Supervisor {
             steps.push(self.step("probes", |this| this.step_probes(now)));
             steps.push(self.step("schedules", |this| this.step_schedules(now)));
         }
+        // C0 hook: node snapshot after the project steps. C2 moves it after the project loop.
+        let _ = crate::fleet::write_snapshot(&self.deps, &self.store, now);
         steps.push(self.step("board", |this| this.step_board(now)));
         steps.push(self.step("heartbeat", |this| this.step_heartbeat(now)));
         if let Err(error) = self.update_loop_rows(now, &steps) {
@@ -1263,6 +1270,10 @@ impl Supervisor {
         let mut dispatched = 0;
         for choice in choices {
             let job = self.store.require_job(&choice.job_id)?;
+            // C0 hook: capacity admission. C0 returns true (admit); E2 fills dispatch::admit.
+            if !dispatch::admit(&self.deps, &self.store, &job)? {
+                continue;
+            }
             self.dispatched.push(job.id.clone());
             let resume = dispatch::purpose_for_dispatch(&self.store, &job)?;
             self.start_purpose_override = Some(resume);

@@ -116,6 +116,8 @@ impl SessionService {
             return Err(CoreError::Invalid("session is closed; no further turns".to_owned()));
         }
         self.check_cwd(&session.cwd)?;
+        // C0 hook: a live lease must match VOWP_LEASE_TOKEN (F2 fills).
+        crate::surface::check_lease(&self.deps, &store, &req.session_id)?;
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
@@ -233,6 +235,9 @@ impl SessionService {
         store.insert_run(&run)?;
         store.set_session_state(&req.session_id, SessionState::Running, Some(&executor))?;
 
+        // C0 hook: inject exactly the configured secret names (G1 fills).
+        let mut start_env = self.start_env(&executor);
+        start_env.extend(crate::vault::env_for(&self.deps, &req)?);
         let start_input = vowp_protocol::StartInput {
             session_id: req.session_id.clone(),
             executor: executor.clone(),
@@ -240,7 +245,7 @@ impl SessionService {
             prompt,
             resume: native.clone(),
             new_native_id: native.is_none().then(|| self.fresh_native_id()),
-            env: self.start_env(&executor),
+            env: start_env,
             permission_mode: self
                 .harness_config(&executor)
                 .and_then(|config| config.permission_mode.clone()),
@@ -443,12 +448,17 @@ impl SessionService {
         }
         self.record_cost_ledger(&store, &run, &summary)?;
 
+        // C0 hook: redact job artifacts written by the harness (report.md, raw mirror) (G1 fills).
+        let _ = crate::vault::redact_job_artifacts(&self.deps, &store, req.job_id.as_ref());
         Ok(TurnResult { run_id, summary })
     }
 
     /// Writes a capsule through [`CapsuleWriter`].
     pub fn write_capsule(&self, session: &SessionId, trigger: CapsuleTrigger) -> Result<Capsule, CoreError> {
-        CapsuleWriter::new(self.deps.clone()).write(session, trigger)
+        let capsule = CapsuleWriter::new(self.deps.clone()).write(session, trigger)?;
+        // C0 hook: redact the capsule file and body row (G1 fills).
+        let store = self.deps.open_store()?;
+        crate::vault::redact_capsule(&self.deps, &store, &capsule)
     }
 
     /// Startup recovery: finish or abort switches left in `started`, close dangling runs.
@@ -583,13 +593,19 @@ impl SessionService {
             node,
             native_session_id: native,
         };
-        let appended = log.append(NewEvent {
-            actor: actor_for(&body),
-            source,
-            body,
-            raw: None,
-            ts,
-        })?;
+        let appended = log.append(
+            // C0 hook: exact-value redaction before the log line exists (G1 fills).
+            crate::vault::redact_event(
+                &self.deps,
+                NewEvent {
+                    actor: actor_for(&body),
+                    source,
+                    body,
+                    raw: None,
+                    ts,
+                },
+            )?,
+        )?;
         store.index_event(&index_row(&appended))?;
         Ok(appended)
     }
@@ -610,13 +626,19 @@ impl SessionService {
             node: Some(node.clone()),
             native_session_id: native.map(str::to_owned),
         };
-        let appended = log.append(NewEvent {
-            actor: event.actor,
-            source,
-            body: event.body,
-            raw: event.raw,
-            ts: event.ts,
-        })?;
+        let appended = log.append(
+            // C0 hook: exact-value redaction before the log line exists (G1 fills).
+            crate::vault::redact_event(
+                &self.deps,
+                NewEvent {
+                    actor: event.actor,
+                    source,
+                    body: event.body,
+                    raw: event.raw,
+                    ts: event.ts,
+                },
+            )?,
+        )?;
         store.index_event(&index_row(&appended))?;
         Ok(())
     }
@@ -858,23 +880,29 @@ pub(crate) fn last_assistant_text(
 /// Appends the `capsule` event to a summarised session and syncs the log.
 pub(crate) fn append_capsule_event(deps: &Deps, store: &Store, capsule: &Capsule) -> Result<(), CoreError> {
     let log = SessionLog::open(&deps.paths, &capsule.session_id, deps.clock.clone())?;
-    let appended = log.append(NewEvent {
-        actor: Actor::System,
-        source: EventSource {
-            harness: HarnessKind::Vowp,
-            model: None,
-            node: Some(deps.node.clone()),
-            native_session_id: None,
-        },
-        body: EventBody::Capsule(CapsuleEvent {
-            capsule_id: capsule.capsule_id.clone(),
-            version: capsule.version,
-            trigger: capsule.trigger,
-            at_seq: capsule.at_seq,
-        }),
-        raw: None,
-        ts: None,
-    })?;
+    let appended = log.append(
+        // C0 hook: exact-value redaction before the log line exists (G1 fills).
+        crate::vault::redact_event(
+            deps,
+            NewEvent {
+                actor: Actor::System,
+                source: EventSource {
+                    harness: HarnessKind::Vowp,
+                    model: None,
+                    node: Some(deps.node.clone()),
+                    native_session_id: None,
+                },
+                body: EventBody::Capsule(CapsuleEvent {
+                    capsule_id: capsule.capsule_id.clone(),
+                    version: capsule.version,
+                    trigger: capsule.trigger,
+                    at_seq: capsule.at_seq,
+                }),
+                raw: None,
+                ts: None,
+            },
+        )?,
+    )?;
     store.index_event(&index_row(&appended))?;
     log.sync()?;
     Ok(())
