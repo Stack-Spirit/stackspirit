@@ -1,63 +1,307 @@
-//! Secret storage, injection and redaction. C0 returns no values and redacts nothing.
+//! Secret storage, injection and redaction.
+//!
+//! Values are files, never rows: basic mode keeps them in `<VOWP_HOME>/secrets/<NAME>` owned
+//! by the current user, and vault-user mode keeps them in
+//! `$VOWP_VAULT_HOME/secrets/<NAME>` (default `/home/vowp-vault/secrets`) owned by
+//! `vowp-vault`. Both are mode 0600. The mode file is `<VOWP_HOME>/secrets/mode`.
+//!
+//! `vowp-store` does not yet expose the frozen `secret_index` helpers from the v0.2 spec, so
+//! the index lives in the global `kv` table under `secret:<NAME>`. It stores only the name,
+//! last four characters and timestamps, exactly like the `secret_index` row; values never
+//! enter the database.
+//!
+//! Tests and packaging may override `VOWP_VAULT_HOME`, `VOWP_VAULT_SUDO` and
+//! `VOWP_VAULT_HELPER`. Production uses `/home/vowp-vault`, `sudo` and the running binary.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and §13.2. G1 fills the module.
 
 pub mod request;
 
-use vowp_protocol::{Capsule, JobId, SecretInfo, SecretName, TurnRequest, VaultMode};
+use std::collections::BTreeSet;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde_json::Value;
+use vowp_protocol::{
+    Capsule, EventBody, HarnessKind, JobId, Level, SecretInfo, SecretName, Timestamp, TurnRequest, VaultMode,
+};
 use vowp_store::Store;
+use vowp_store::session_files::write_capsule_file;
 use vowp_store::session_log::NewEvent;
 
 use crate::CoreError;
 use crate::deps::Deps;
 
-pub use request::{SecretRequestServer, request_secret};
+pub use request::{REQUEST_TTL, SecretRequestServer, request_secret};
+
+/// Prefix of the global `kv` rows that carry secret metadata.
+const INDEX_PREFIX: &str = "secret:";
+
+/// Default home of the `vowp-vault` user.
+const DEFAULT_VAULT_HOME: &str = "/home/vowp-vault";
+
+/// Default installed path of the root-owned vault helper.
+const DEFAULT_HELPER: &str = "/usr/local/lib/vowp/__vault-admin";
+
+/// Counter used to make atomic-write temporary names unique inside one process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Returns the node's vault mode.
-pub fn mode(_deps: &Deps) -> Result<VaultMode, CoreError> {
-    Ok(VaultMode::Basic)
+///
+/// A missing mode file means basic mode. Any value other than `vault` or `basic` is a
+/// configuration error rather than a silent fallback.
+pub fn mode(deps: &Deps) -> Result<VaultMode, CoreError> {
+    let path = deps.paths.root().join("secrets").join("mode");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(VaultMode::Basic),
+        Err(source) => return Err(io_error(&path, source)),
+    };
+    match text.trim() {
+        "vault" => Ok(VaultMode::VaultUser),
+        "basic" => Ok(VaultMode::Basic),
+        other => Err(CoreError::Invalid(format!(
+            "{} must contain `vault` or `basic`, found `{other}`",
+            path.display()
+        ))),
+    }
 }
 
 /// Resolves exactly the configured secret names for one harness turn.
-pub fn env_for(_deps: &Deps, _req: &TurnRequest) -> Result<Vec<(String, String)>, CoreError> {
-    Ok(Vec::new())
+///
+/// Only `[harnesses.<name>].env_pass` names are resolved; a missing secret is a warning that
+/// names the variable and never a hard failure. A configured name that is not a valid
+/// [`SecretName`] is skipped with a warning.
+pub fn env_for(deps: &Deps, req: &TurnRequest) -> Result<Vec<(String, String)>, CoreError> {
+    let executor = &req.executor.executor;
+    let Some(config) = harness_config(deps, executor.harness, &executor.model) else {
+        return Ok(Vec::new());
+    };
+    let layout = Layout::from_deps(deps);
+    let mut result: Vec<(String, String)> = Vec::new();
+    for configured in &config.env_pass {
+        let name = match SecretName::parse(configured) {
+            Ok(name) => name,
+            Err(_) => {
+                deps.log.log(
+                    Level::Warn,
+                    "vault",
+                    &format!("ignoring invalid secret name in env_pass: {configured}"),
+                );
+                continue;
+            }
+        };
+        if result.iter().any(|(existing, _)| existing == name.as_str()) {
+            continue;
+        }
+        match read_value_impl(deps, &layout, &name)? {
+            Some(value) => result.push((name.to_string(), value)),
+            None => deps
+                .log
+                .log(Level::Warn, "vault", &format!("secret {name} is not set; not injected")),
+        }
+    }
+    Ok(result)
 }
 
-/// Stores one secret value.
-pub fn write_secret(_deps: &Deps, _name: &SecretName, _value: &str) -> Result<SecretInfo, CoreError> {
-    Err(CoreError::Invalid(
-        "secret storage is not implemented in this build".to_owned(),
-    ))
+/// Stores one secret value and returns its metadata.
+///
+/// Basic mode writes the file atomically with mode 0600; vault-user mode sends the value on
+/// stdin to the hidden `__vault-admin` helper, so it never appears in argv. The index row is
+/// updated either way.
+pub fn write_secret(deps: &Deps, name: &SecretName, value: &str) -> Result<SecretInfo, CoreError> {
+    let layout = Layout::from_deps(deps);
+    write_secret_impl(deps, &layout, name, value)
 }
 
-/// Removes one secret.
-pub fn remove_secret(_deps: &Deps, _name: &SecretName) -> Result<bool, CoreError> {
-    Err(CoreError::Invalid(
-        "secret storage is not implemented in this build".to_owned(),
-    ))
+/// Removes one secret and returns whether anything existed.
+pub fn remove_secret(deps: &Deps, name: &SecretName) -> Result<bool, CoreError> {
+    let layout = Layout::from_deps(deps);
+    remove_secret_impl(deps, &layout, name)
+}
+
+/// Lists stored secret metadata, ordered by name. Values are never read.
+pub fn list_secrets(deps: &Deps) -> Result<Vec<SecretInfo>, CoreError> {
+    list_index(deps)
 }
 
 /// Redacts exact secret values from one event before it is appended.
-pub fn redact_event(_deps: &Deps, ev: NewEvent) -> Result<NewEvent, CoreError> {
-    Ok(ev)
+pub fn redact_event(deps: &Deps, ev: NewEvent) -> Result<NewEvent, CoreError> {
+    let redactor = Redactor::load(deps)?;
+    if redactor.is_empty() {
+        return Ok(ev);
+    }
+    let NewEvent {
+        actor,
+        source,
+        body,
+        raw,
+        ts,
+    } = ev;
+    let event_type = body.event_type();
+    let mut body_value = body.to_value();
+    redactor.redact_value(&mut body_value);
+    let body = EventBody::from_parts(event_type, body_value)?;
+    let raw = raw.map(|mut value| {
+        redactor.redact_value(&mut value);
+        value
+    });
+    Ok(NewEvent {
+        actor,
+        source,
+        body,
+        raw,
+        ts,
+    })
 }
 
 /// Redacts exact secret values from plain text.
-pub fn redact_text(_deps: &Deps, text: &str) -> String {
-    text.to_owned()
+///
+/// If the secrets cannot be loaded, the whole text is replaced instead of risking a leak;
+/// the error is logged without a value.
+pub fn redact_text(deps: &Deps, text: &str) -> String {
+    match Redactor::load(deps) {
+        Ok(redactor) => redactor.redact(text),
+        Err(error) => {
+            deps.log
+                .log(Level::Error, "vault", &format!("redaction unavailable: {error}"));
+            "[REDACTED: secret values unavailable]".to_owned()
+        }
+    }
 }
 
 /// Redacts exact secret values from a capsule and rewrites its file and row.
-pub fn redact_capsule(_deps: &Deps, _store: &Store, capsule: &Capsule) -> Result<Capsule, CoreError> {
-    Ok(capsule.clone())
+pub fn redact_capsule(deps: &Deps, store: &Store, capsule: &Capsule) -> Result<Capsule, CoreError> {
+    let redactor = Redactor::load(deps)?;
+    if redactor.is_empty() {
+        return Ok(capsule.clone());
+    }
+    let mut value = serde_json::to_value(capsule).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    redactor.redact_value(&mut value);
+    let redacted: Capsule = serde_json::from_value(value).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    if &redacted == capsule {
+        return Ok(capsule.clone());
+    }
+    write_capsule_file(&deps.paths, &redacted)?;
+    store.update_capsule_body(&redacted)?;
+    Ok(redacted)
 }
 
 /// Redacts exact secret values from the job artifacts of the last turn.
-pub fn redact_job_artifacts(_deps: &Deps, _store: &Store, _job: Option<&JobId>) -> Result<(), CoreError> {
+///
+/// Both the job's `report.md` (in its worktree and in the project checkout when that is a
+/// different path) and the latest run's raw mirror are covered.
+pub fn redact_job_artifacts(deps: &Deps, store: &Store, job: Option<&JobId>) -> Result<(), CoreError> {
+    let Some(job_id) = job else {
+        return Ok(());
+    };
+    let Some(job) = store.job(job_id)? else {
+        return Ok(());
+    };
+    let redactor = Redactor::load(deps)?;
+    if redactor.is_empty() {
+        return Ok(());
+    }
+    let mut paths = BTreeSet::new();
+    let report = Path::new(&job.report);
+    if report.is_absolute() {
+        paths.insert(report.to_path_buf());
+    } else {
+        if let Some(worktree) = &job.worktree {
+            paths.insert(Path::new(worktree).join(report));
+        }
+        if let Some(project) = store.project(&job.project)? {
+            paths.insert(Path::new(&project.path).join(report));
+        }
+    }
+    if let Some(run) = store.last_run_of_job(&job.id)? {
+        paths.insert(deps.paths.run_raw_path(&run.id));
+    }
+    for path in paths {
+        redact_file(&path, &redactor)?;
+    }
     Ok(())
 }
 
-/// The exact-value redactor. C0 loads nothing; G1 fills the loader.
+/// Reads one secret for the hidden `__vault-exec` helper.
+///
+/// Returns `None` when the name is not stored. In vault-user mode an unreadable vault file
+/// is re-read through the sudo helper, which runs as `vowp-vault`.
+pub fn read_value(deps: &Deps, name: &SecretName) -> Result<Option<String>, CoreError> {
+    let layout = Layout::from_deps(deps);
+    read_value_impl(deps, &layout, name)
+}
+
+/// Reads one secret for execution: vault storage first, then the configured mode.
+///
+/// The hidden helper runs as `vowp-vault` and cannot read the mode file in the `vowp` user's
+/// home, so it tries the vault directory directly before falling back to [`read_value`].
+pub fn read_value_for_exec(deps: &Deps, name: &SecretName) -> Result<Option<String>, CoreError> {
+    let layout = Layout::from_deps(deps);
+    match read_value_at(&layout.vault_dir(), name) {
+        Ok(Some(value)) => return Ok(Some(value)),
+        Ok(None) => {}
+        Err(CoreError::Io { path: _, source }) if source.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(error) => return Err(error),
+    }
+    read_value_impl(deps, &layout, name)
+}
+
+/// Writes one secret file as the `vowp-vault` user.
+///
+/// This is the body of the hidden `__vault-admin set` helper; it always writes the vault
+/// directory and never touches the index (the calling `vowp` process owns that row).
+pub fn admin_set(deps: &Deps, name: &SecretName, value: &str) -> Result<SecretInfo, CoreError> {
+    let layout = Layout::from_deps(deps);
+    admin_set_at(&layout.vault_dir(), name, value, deps.clock.now())
+}
+
+/// Removes one secret file as the `vowp-vault` user.
+pub fn admin_remove(deps: &Deps, name: &SecretName) -> Result<bool, CoreError> {
+    let layout = Layout::from_deps(deps);
+    admin_remove_at(&layout.vault_dir(), name)
+}
+
+/// What `vowp secret upgrade` should do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upgrade {
+    /// Secrets are already stored as the vault user.
+    AlreadyVault,
+    /// The vault user was found and the mode file was switched.
+    Switched,
+    /// The owner must run this one shell command, then re-run `vowp secret upgrade`.
+    NeedsCommand(String),
+    /// Passwordless sudo is unavailable, so the vault user cannot be created here.
+    NoSudo(String),
+}
+
+/// Plans or completes the switch from basic mode to vault-user mode.
+///
+/// Nothing privileged is ever run: when the vault user is ready the mode file is written,
+/// otherwise the exact command the owner must run is returned.
+pub fn upgrade(deps: &Deps) -> Result<Upgrade, CoreError> {
+    if mode(deps)? == VaultMode::VaultUser {
+        return Ok(Upgrade::AlreadyVault);
+    }
+    let layout = Layout::from_deps(deps);
+    if vault_user_ready(&layout) {
+        write_mode(deps, VaultMode::VaultUser)?;
+        return Ok(Upgrade::Switched);
+    }
+    if sudo_available(&layout) {
+        Ok(Upgrade::NeedsCommand(upgrade_command(&layout)))
+    } else {
+        Ok(Upgrade::NoSudo(
+            "passwordless sudo is not available; create the `vowp-vault` user and the sudoers helper first".to_owned(),
+        ))
+    }
+}
+
+/// The exact-value redactor. Loads the stored values, longest first.
 #[derive(Debug, Clone, Default)]
 pub struct Redactor {
     values: Vec<(String, String)>,
@@ -65,8 +309,27 @@ pub struct Redactor {
 
 impl Redactor {
     /// Loads the configured secret values, longest first.
-    pub fn load(_deps: &Deps) -> Result<Redactor, CoreError> {
-        Ok(Redactor::default())
+    pub fn load(deps: &Deps) -> Result<Redactor, CoreError> {
+        let layout = Layout::from_deps(deps);
+        let mode = mode(deps)?;
+        let mut names: BTreeSet<String> = list_index(deps)?
+            .into_iter()
+            .map(|info| info.name.to_string())
+            .collect();
+        for dir in storage_dirs(&layout, mode) {
+            collect_secret_names(&dir, &mut names);
+        }
+        let mut values = Vec::new();
+        for name in names {
+            let name = SecretName::parse(&name)?;
+            if let Some(value) = read_value_impl(deps, &layout, &name)? {
+                if !value.is_empty() {
+                    values.push((name.to_string(), value));
+                }
+            }
+        }
+        values.sort_by(|left, right| right.1.len().cmp(&left.1.len()).then_with(|| left.0.cmp(&right.0)));
+        Ok(Redactor { values })
     }
 
     /// Replaces every exact occurrence with `[REDACTED:<NAME>]`.
@@ -84,5 +347,689 @@ impl Redactor {
     /// Returns true when no secret value is loaded.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    /// Redacts string values inside one JSON value without touching object keys.
+    fn redact_value(&self, value: &mut Value) {
+        match value {
+            Value::String(text) => *text = self.redact(text),
+            Value::Array(items) => {
+                for item in items {
+                    self.redact_value(item);
+                }
+            }
+            Value::Object(map) => {
+                for item in map.values_mut() {
+                    self.redact_value(item);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
+    /// Redacts exact byte sequences, for artifacts that may not be valid UTF-8.
+    fn redact_bytes(&self, bytes: &[u8]) -> Vec<u8> {
+        let mut result = bytes.to_vec();
+        for (name, value) in &self.values {
+            if value.is_empty() {
+                continue;
+            }
+            result = replace_bytes(&result, value.as_bytes(), format!("[REDACTED:{name}]").as_bytes());
+        }
+        result
+    }
+}
+
+/// Basic and vault storage directories for one effective mode.
+fn storage_dirs(layout: &Layout, mode: VaultMode) -> Vec<PathBuf> {
+    match mode {
+        VaultMode::Basic => vec![layout.basic_dir.clone()],
+        VaultMode::VaultUser => vec![layout.basic_dir.clone(), layout.vault_dir()],
+    }
+}
+
+/// Adds every valid secret file name in `dir` to `names`, ignoring unreadable directories.
+fn collect_secret_names(dir: &Path, names: &mut BTreeSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Ok(name) = SecretName::parse(&entry.file_name().to_string_lossy()) {
+            names.insert(name.to_string());
+        }
+    }
+}
+
+/// The on-disk locations and helper programs used by one vault operation.
+#[derive(Debug, Clone)]
+struct Layout {
+    basic_dir: PathBuf,
+    vault_home: PathBuf,
+    sudo: PathBuf,
+    helper: PathBuf,
+}
+
+impl Layout {
+    /// Builds the layout from the node home and the documented environment overrides.
+    fn from_deps(deps: &Deps) -> Self {
+        let vault_home = std::env::var_os("VOWP_VAULT_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_VAULT_HOME));
+        let sudo = std::env::var_os("VOWP_VAULT_SUDO")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("sudo"));
+        let helper = std::env::var_os("VOWP_VAULT_HELPER")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let installed = PathBuf::from(DEFAULT_HELPER);
+                installed.is_file().then_some(installed)
+            })
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| PathBuf::from("vowp"));
+        Self {
+            basic_dir: deps.paths.root().join("secrets"),
+            vault_home,
+            sudo,
+            helper,
+        }
+    }
+
+    /// Returns the vault user's secret directory.
+    fn vault_dir(&self) -> PathBuf {
+        self.vault_home.join("secrets")
+    }
+}
+
+/// Stores one secret through an explicit layout (also used by the module tests).
+fn write_secret_impl(deps: &Deps, layout: &Layout, name: &SecretName, value: &str) -> Result<SecretInfo, CoreError> {
+    let name = SecretName::parse(name.as_str())?;
+    if value.is_empty() {
+        return Err(CoreError::Invalid("secret value must not be empty".to_owned()));
+    }
+    let now = deps.clock.now();
+    let created_at = list_index(deps)?
+        .into_iter()
+        .find(|info| info.name == name)
+        .map(|info| info.created_at)
+        .unwrap_or(now);
+    match mode(deps)? {
+        VaultMode::Basic => {
+            ensure_private_dir(&layout.basic_dir)?;
+            write_atomic(&layout.basic_dir.join(name.as_str()), value.as_bytes(), 0o600)?;
+        }
+        VaultMode::VaultUser => {
+            let mut command = helper_command(deps, layout, &["__vault-admin", "set", name.as_str()]);
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            run_helper_with_value(command, value.as_bytes(), "set")?;
+        }
+    }
+    let info = SecretInfo {
+        name,
+        last4: last4(value),
+        created_at,
+        updated_at: now,
+    };
+    put_index(deps, &info)?;
+    Ok(info)
+}
+
+/// Removes one secret through an explicit layout.
+fn remove_secret_impl(deps: &Deps, layout: &Layout, name: &SecretName) -> Result<bool, CoreError> {
+    let name = SecretName::parse(name.as_str())?;
+    let indexed = list_index(deps)?.into_iter().any(|info| info.name == name);
+    let file_existed = match mode(deps)? {
+        VaultMode::Basic => remove_file_if_present(&layout.basic_dir.join(name.as_str()))?,
+        VaultMode::VaultUser => {
+            let command = helper_command(deps, layout, &["__vault-admin", "rm", name.as_str()]);
+            let output = run_helper_capture(command, None, "rm")?;
+            String::from_utf8_lossy(&output).trim_start().starts_with("removed")
+        }
+    };
+    let removed_index = remove_index(deps, &name)?;
+    Ok(file_existed || removed_index || indexed)
+}
+
+/// Reads one secret file, falling back to the sudo helper in vault mode.
+fn read_value_impl(deps: &Deps, layout: &Layout, name: &SecretName) -> Result<Option<String>, CoreError> {
+    match mode(deps)? {
+        VaultMode::Basic => read_value_at(&layout.basic_dir, name),
+        VaultMode::VaultUser => match read_value_at(&layout.vault_dir(), name) {
+            Ok(value) => Ok(value),
+            Err(CoreError::Io { path: _, source }) if source.kind() == std::io::ErrorKind::PermissionDenied => {
+                read_via_helper(deps, layout, name).map_err(|error| {
+                    deps.log.log(
+                        Level::Error,
+                        "vault",
+                        &format!("secret {name} is in the vault but could not be read: {error}"),
+                    );
+                    CoreError::Invalid(format!("secret {name} is not readable through the vault helper"))
+                })
+            }
+            Err(error) => Err(error),
+        },
+    }
+}
+
+/// Reads a vault value through `__vault-exec` running as `vowp-vault`.
+fn read_via_helper(deps: &Deps, layout: &Layout, name: &SecretName) -> Result<Option<String>, CoreError> {
+    let mut command = helper_command(deps, layout, &["__vault-exec", "--env", name.as_str()]);
+    command
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(format!("printf %s \"${{{name}}}\""));
+    let output = run_helper_capture(command, Some(b""), "read")?;
+    let value = String::from_utf8(output).map_err(|_| CoreError::Invalid(format!("secret {name} is not UTF-8")))?;
+    Ok(Some(value))
+}
+
+/// Writes one secret file into `dir`; the helper and tests share this implementation.
+fn admin_set_at(dir: &Path, name: &SecretName, value: &str, now: Timestamp) -> Result<SecretInfo, CoreError> {
+    let name = SecretName::parse(name.as_str())?;
+    if value.is_empty() {
+        return Err(CoreError::Invalid("secret value must not be empty".to_owned()));
+    }
+    ensure_private_dir(dir)?;
+    write_atomic(&dir.join(name.as_str()), value.as_bytes(), 0o600)?;
+    Ok(SecretInfo {
+        name,
+        last4: last4(value),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// Removes one secret file from `dir`; the helper and tests share this implementation.
+fn admin_remove_at(dir: &Path, name: &SecretName) -> Result<bool, CoreError> {
+    let name = SecretName::parse(name.as_str())?;
+    remove_file_if_present(&dir.join(name.as_str()))
+}
+
+/// Reads one secret file from an explicit directory.
+fn read_value_at(dir: &Path, name: &SecretName) -> Result<Option<String>, CoreError> {
+    let path = dir.join(name.as_str());
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io_error(&path, source)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(CoreError::Invalid(format!(
+            "secret file {} must not be a symlink",
+            path.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(CoreError::Invalid(format!(
+            "secret path {} is not a file",
+            path.display()
+        )));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(CoreError::Invalid(format!(
+            "secret file {} must be mode 0600",
+            path.display()
+        )));
+    }
+    let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
+    let value = String::from_utf8(bytes)
+        .map_err(|_| CoreError::Invalid(format!("secret file {} is not valid UTF-8", path.display())))?;
+    Ok(Some(value))
+}
+
+/// Writes the mode file atomically with mode 0600.
+fn write_mode(deps: &Deps, mode: VaultMode) -> Result<(), CoreError> {
+    let dir = deps.paths.root().join("secrets");
+    ensure_private_dir(&dir)?;
+    let text = match mode {
+        VaultMode::VaultUser => "vault\n",
+        VaultMode::Basic => "basic\n",
+    };
+    write_atomic(&dir.join("mode"), text.as_bytes(), 0o600)
+}
+
+/// Returns whether the installed helper runs as the vault user through passwordless sudo.
+fn vault_user_ready(layout: &Layout) -> bool {
+    layout.vault_home.is_dir() && layout.helper.is_file() && run_vault_probe(layout)
+}
+
+/// Returns whether passwordless sudo is available for the helper or for plain commands.
+fn sudo_available(layout: &Layout) -> bool {
+    run_status(Command::new(&layout.sudo).args(["-n", "true"])) || run_vault_probe(layout)
+}
+
+/// Runs the installed helper's harmless version probe as `vowp-vault`.
+fn run_vault_probe(layout: &Layout) -> bool {
+    let mut command = Command::new(&layout.sudo);
+    command
+        .args(["-n", "-u", "vowp-vault"])
+        .arg(&layout.helper)
+        .arg("--version");
+    run_status(&mut command)
+}
+
+/// Runs one status probe with all streams discarded.
+fn run_status(command: &mut Command) -> bool {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Returns the one command the owner runs to create the vault user and move basic secrets.
+fn upgrade_command(layout: &Layout) -> String {
+    let basic = shell_quote(&layout.basic_dir);
+    let vault = shell_quote(&layout.vault_dir());
+    let helper = shell_quote(&PathBuf::from(DEFAULT_HELPER));
+    let source = shell_quote(&layout.helper);
+    let home = shell_quote(&layout.vault_home);
+    let restore = format!("{vault}/secrets");
+    format!(
+        "sudo useradd --system --home {home} --shell /usr/sbin/nologin vowp-vault \
+         && sudo install -d -m 0700 -o vowp-vault -g vowp-vault {vault} \
+         && sudo install -d -m 0755 /usr/local/lib/vowp \
+         && sudo install -m 0755 -o root -g root {source} {helper} \
+         && sudo sh -c 'for f in {basic}/[A-Z]*; do [ -e \"$f\" ] && cp -p \"$f\" {restore}/; done; \
+         chown vowp-vault:vowp-vault {restore}/* 2>/dev/null || true; chmod 0600 {restore}/* 2>/dev/null || true' \
+         && echo 'vowp ALL=(vowp-vault) NOPASSWD: {helper}' | sudo tee /etc/sudoers.d/vowp-vault >/dev/null \
+         && sudo chmod 0440 /etc/sudoers.d/vowp-vault"
+    )
+}
+
+/// Quotes one path for a POSIX shell.
+fn shell_quote(text: &Path) -> String {
+    format!("'{}'", text.display().to_string().replace('\'', "'\\''"))
+}
+
+/// Builds the sudo helper command with the node home and project path as global flags.
+fn helper_command(deps: &Deps, layout: &Layout, args: &[&str]) -> Command {
+    let mut command = Command::new(&layout.sudo);
+    command
+        .arg("-n")
+        .arg("-u")
+        .arg("vowp-vault")
+        .arg(&layout.helper)
+        .args(args)
+        .arg("--home")
+        .arg(deps.paths.root());
+    if let Some(project) = project_root(deps) {
+        command.arg("--project").arg(project);
+    }
+    command
+}
+
+/// Returns the project checkout path, from config or from the registered project row.
+fn project_root(deps: &Deps) -> Option<PathBuf> {
+    if let Some(path) = &deps.config.project.path {
+        return Some(PathBuf::from(path));
+    }
+    Store::open_global(&deps.paths)
+        .ok()
+        .and_then(|store| store.project(&deps.config.project.name).ok().flatten())
+        .map(|project| PathBuf::from(project.path))
+        .or_else(|| {
+            let cwd = std::env::current_dir().ok()?;
+            cwd.join("vowp.toml").is_file().then_some(cwd)
+        })
+}
+
+/// Runs a helper with a value on stdin and rejects a non-zero exit.
+fn run_helper_with_value(mut command: Command, value: &[u8], action: &str) -> Result<(), CoreError> {
+    let mut child = command.spawn().map_err(|source| CoreError::Io {
+        path: "vowp-vault helper".to_owned(),
+        source,
+    })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(value);
+    }
+    let output = child.wait_with_output().map_err(|source| CoreError::Io {
+        path: "vowp-vault helper".to_owned(),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(helper_failure(action, output.status.code(), &output.stderr));
+    }
+    Ok(())
+}
+
+/// Runs a helper and returns its stdout, rejecting a non-zero exit.
+fn run_helper_capture(mut command: Command, stdin: Option<&[u8]>, action: &str) -> Result<Vec<u8>, CoreError> {
+    command
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|source| CoreError::Io {
+        path: "vowp-vault helper".to_owned(),
+        source,
+    })?;
+    if let Some(value) = stdin
+        && let Some(mut pipe) = child.stdin.take()
+    {
+        let _ = pipe.write_all(value);
+    }
+    let output = child.wait_with_output().map_err(|source| CoreError::Io {
+        path: "vowp-vault helper".to_owned(),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(helper_failure(action, output.status.code(), &output.stderr));
+    }
+    Ok(output.stdout)
+}
+
+/// Builds a value-free helper error from the exit status and a short stderr tail.
+fn helper_failure(action: &str, code: Option<i32>, stderr: &[u8]) -> CoreError {
+    let detail = String::from_utf8_lossy(stderr);
+    let detail: String = detail.trim().chars().take(300).collect();
+    CoreError::Command(format!(
+        "vowp-vault helper {action} failed (exit {code:?}){}",
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    ))
+}
+
+/// Ensures `dir` exists with mode 0700.
+fn ensure_private_dir(dir: &Path) -> Result<(), CoreError> {
+    if !dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|source| io_error(dir, source))?;
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|source| io_error(dir, source))
+}
+
+/// Writes `bytes` through a temporary file in the same directory, fsyncs and renames.
+fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), CoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CoreError::Invalid(format!("{} has no parent directory", path.display())))?;
+    if !parent.exists() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "secret".to_owned());
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".{file_name}.tmp.{}.{counter}", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(mode);
+    let mut file = options.open(&temp).map_err(|source| io_error(&temp, source))?;
+    let result = (|| -> Result<(), CoreError> {
+        file.write_all(bytes).map_err(|source| io_error(&temp, source))?;
+        file.sync_all().map_err(|source| io_error(&temp, source))?;
+        drop(file);
+        fs::rename(&temp, path).map_err(|source| io_error(path, source))?;
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Removes a file when it exists and returns whether it did.
+fn remove_file_if_present(path: &Path) -> Result<bool, CoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+/// Replaces every occurrence of `needle` in `haystack`, including overlapping-free repeats.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return haystack.to_vec();
+    }
+    let mut result = Vec::with_capacity(haystack.len());
+    let mut index = 0;
+    while index < haystack.len() {
+        if haystack[index..].starts_with(needle) {
+            result.extend_from_slice(replacement);
+            index += needle.len();
+        } else {
+            result.push(haystack[index]);
+            index += 1;
+        }
+    }
+    result
+}
+
+/// Redacts one artifact file when it exists; permission bits are preserved.
+fn redact_file(path: &Path, redactor: &Redactor) -> Result<(), CoreError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io_error(path, source)),
+    };
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    let redacted = redactor.redact_bytes(&bytes);
+    if redacted == bytes {
+        return Ok(());
+    }
+    write_atomic(path, &redacted, metadata.permissions().mode() & 0o777)
+}
+
+/// Returns the last four characters of a value.
+fn last4(value: &str) -> String {
+    let chars: Vec<char> = value.chars().rev().take(4).collect();
+    chars.into_iter().rev().collect()
+}
+
+/// Returns the harness config used for `executor`, matching the session service's lookup.
+fn harness_config<'a>(deps: &'a Deps, harness: HarnessKind, model: &str) -> Option<&'a vowp_protocol::HarnessConfig> {
+    let key = match harness {
+        HarnessKind::ClaudeCode => "claude-code",
+        HarnessKind::Opencode => "opencode",
+        HarnessKind::Cli => model,
+        HarnessKind::Vowp => return None,
+    };
+    deps.config
+        .harnesses
+        .get(key)
+        .or_else(|| deps.config.harnesses.get(&format!("cli:{key}")))
+}
+
+/// Opens the global store for index rows.
+fn index_store(deps: &Deps) -> Result<Store, CoreError> {
+    Ok(Store::open_global(&deps.paths)?.with_clock(deps.clock.clone()))
+}
+
+/// Lists index rows, ordered by name.
+fn list_index(deps: &Deps) -> Result<Vec<SecretInfo>, CoreError> {
+    let store = index_store(deps)?;
+    let mut infos = Vec::new();
+    for (_, text) in store.kv_prefix(INDEX_PREFIX)? {
+        let info: SecretInfo =
+            serde_json::from_str(&text).map_err(|error| CoreError::Invalid(format!("secret index: {error}")))?;
+        infos.push(info);
+    }
+    infos.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+    Ok(infos)
+}
+
+/// Inserts or replaces one index row.
+fn put_index(deps: &Deps, info: &SecretInfo) -> Result<(), CoreError> {
+    let key = format!("{INDEX_PREFIX}{}", info.name);
+    let text = serde_json::to_string(info).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    index_store(deps)?.kv_set(&key, &text)?;
+    Ok(())
+}
+
+/// Removes one index row and returns whether it existed.
+fn remove_index(deps: &Deps, name: &SecretName) -> Result<bool, CoreError> {
+    Ok(index_store(deps)?.kv_delete(&format!("{INDEX_PREFIX}{name}"))?)
+}
+
+/// Maps one filesystem error onto the core error with its path.
+fn io_error(path: &Path, source: std::io::Error) -> CoreError {
+    CoreError::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+    use vowp_protocol::{FakeClock, MemoryLog, NodeName, VowpConfig};
+    use vowp_store::NodePaths;
+    use vowp_tmux::fake::FakeWindows;
+
+    use super::*;
+    use crate::deps::{AdapterRegistry, FixedRng, SystemRunner};
+
+    fn now() -> Timestamp {
+        Timestamp::parse("2026-11-10T12:00:00Z").expect("timestamp")
+    }
+
+    fn deps(root: &Path) -> Deps {
+        let paths = NodePaths::new(root);
+        paths.ensure().expect("node paths");
+        Store::open(&paths).expect("store");
+        Deps {
+            paths,
+            config: Arc::new(VowpConfig::with_defaults_for_tests()),
+            node: NodeName::parse("local").expect("node"),
+            clock: Arc::new(FakeClock::at(now())),
+            log: Arc::new(MemoryLog::new()),
+            adapters: Arc::new(AdapterRegistry::new()),
+            windows: Arc::new(FakeWindows::new()),
+            git: Arc::new(crate::SystemGit::default()),
+            cmd: Arc::new(SystemRunner),
+            rng: Arc::new(FixedRng(0)),
+        }
+    }
+
+    fn layout_with(root: &Path) -> Layout {
+        Layout {
+            basic_dir: root.join("secrets"),
+            vault_home: root.join("vault-home"),
+            sudo: root.join("fake-sudo"),
+            helper: root.join("vowp"),
+        }
+    }
+
+    fn fake_sudo(layout: &Layout) -> PathBuf {
+        let script = layout.vault_home.join("secrets");
+        fs::create_dir_all(&script).expect("vault dir");
+        let path = &layout.sudo;
+        let body = format!(
+            "#!/bin/sh\n\
+             umask 077\n\
+             log=\"{}/argv.log\"\n\
+             printf '%s\\n' \"$*\" >> \"$log\"\n\
+             shift 3\n\
+             shift\n\
+             cmd=\"$1\"\n\
+             shift\n\
+             case \"$cmd\" in\n\
+             __vault-admin)\n\
+             action=\"$1\"\n\
+             name=\"$2\"\n\
+             if [ \"$action\" = set ]; then cat > \"{}/$name\"; echo \"saved $name\"; else rm -f \"{}/$name\"; echo \"removed $name\"; fi\n\
+             ;;\n\
+             __vault-exec)\n\
+             shift\n\
+             name=\"$1\"\n\
+             shift\n\
+             while [ \"$1\" != \"--\" ]; do shift; done\n\
+             shift\n\
+             value=$(cat \"{}/$name\")\n\
+             exec env \"$name=$value\" \"$@\"\n\
+             ;;\n\
+             esac\n",
+            layout.vault_home.display(),
+            script.display(),
+            script.display(),
+            script.display(),
+        );
+        fs::write(path, body).expect("fake sudo");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("fake sudo mode");
+        path.clone()
+    }
+
+    #[test]
+    fn vault_mode_writes_value_on_stdin_and_reads_it_back() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+        fake_sudo(&layout);
+        write_mode(&deps, VaultMode::VaultUser).expect("mode");
+        let name = SecretName::parse("VAULT_KEY").expect("name");
+        let value = "sk-vault-secret-4f2a";
+
+        let info = write_secret_impl(&deps, &layout, &name, value).expect("write");
+
+        assert_eq!(info.last4, "4f2a");
+        let stored = fs::read_to_string(layout.vault_dir().join("VAULT_KEY")).expect("stored");
+        assert_eq!(stored, value);
+        let argv = fs::read_to_string(layout.vault_home.join("argv.log")).expect("argv log");
+        assert!(!argv.contains(value), "the value must never be on the helper argv");
+        assert_eq!(
+            read_value_impl(&deps, &layout, &name).expect("read"),
+            Some(value.to_owned())
+        );
+        assert!(remove_secret_impl(&deps, &layout, &name).expect("remove"));
+        assert!(!layout.vault_dir().join("VAULT_KEY").exists());
+    }
+
+    #[test]
+    fn admin_helpers_write_and_remove_private_files() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("vault");
+        let name = SecretName::parse("ADMIN_KEY").expect("name");
+        admin_set_at(&dir, &name, "admin-value-9c1d", now()).expect("set");
+        let path = dir.join("ADMIN_KEY");
+        assert_eq!(fs::read_to_string(&path).expect("value"), "admin-value-9c1d");
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&dir).expect("metadata").permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(admin_remove_at(&dir, &name).expect("remove"));
+        assert!(!admin_remove_at(&dir, &name).expect("second remove"));
+    }
+
+    #[test]
+    fn index_metadata_never_contains_the_value() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let name = SecretName::parse("INDEX_KEY").expect("name");
+        write_secret(&deps, &name, "index-value-7b3c").expect("write");
+        let store = index_store(&deps).expect("store");
+        let rows = store.kv_prefix(INDEX_PREFIX).expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].1.contains("index-value-7b3c"));
+        assert!(rows[0].1.contains("7b3c"));
+        let parsed: SecretInfo = serde_json::from_str(&rows[0].1).expect("metadata");
+        assert_eq!(parsed.name, name);
+        assert_eq!(parsed.last4, "7b3c");
     }
 }
