@@ -144,7 +144,7 @@ tail before appending, reject a gap in the home log, and make the verifier fail 
 
 ## Latency and throughput
 
-Four live runs on the same Linux 6.8 / OpenSSH 9.6 / Python 3.12 host, with a private loopback
+Several live runs on the same Linux 6.8 / OpenSSH 9.6 / Python 3.12 host, with a private loopback
 sshd. The "delay" rows go through a loopback TCP proxy that sleeps 40 ms one-way before every
 forwarded chunk (~80 ms RTT). The host was shared with other jobs and load varied; the ranges below
 show that spread. The committed `evidence/live-check.json` is one of the runs
