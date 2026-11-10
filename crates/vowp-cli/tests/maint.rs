@@ -787,3 +787,194 @@ fn backup_manifest_records_counts() {
     assert_eq!(counts, 1);
     assert_eq!(manifest["row_counts"]["global"]["projects"], 1);
 }
+
+#[test]
+fn backup_to_git_uses_argv_not_shell() {
+    let fixture = BackupFixture::new();
+    let store = fixture.store();
+    let target = "git:https://example.invalid/vowp-backup.git";
+    let report = fixture
+        .run_backup(
+            &store,
+            BackupOptions {
+                to: Some(target.to_owned()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("git offsite backup");
+    assert_eq!(report.offsite.as_deref(), Some(target));
+
+    let git_calls: Vec<CommandSpec> = fixture
+        .runner
+        .calls()
+        .into_iter()
+        .filter(|call| call.argv.first().map(String::as_str) == Some("git"))
+        .collect();
+    assert_eq!(git_calls.len(), 4, "{git_calls:?}");
+    assert!(git_calls.iter().all(|call| call.shell.is_none()));
+    assert_eq!(git_calls[0].argv, ["git", "init", "-q"]);
+    assert_eq!(git_calls[1].argv, ["git", "add", "-A"]);
+    assert_eq!(
+        git_calls[2].argv,
+        [
+            "git",
+            "-c",
+            "user.name=vowp",
+            "-c",
+            "user.email=vowp@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "vowp backup",
+        ]
+    );
+    assert_eq!(
+        git_calls[3].argv,
+        [
+            "git",
+            "push",
+            "--force",
+            "https://example.invalid/vowp-backup.git",
+            "HEAD:refs/heads/main",
+        ]
+    );
+}
+
+#[test]
+fn backup_directory_and_restore_via_cli() {
+    let env = common::TestEnv::new();
+    let backup = env.home_path().join("cli-backup");
+    let backup_text = backup.display().to_string();
+    let (code, stdout, stderr) = env.run(&["backup", "--to", &backup_text]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("files"), "{stdout}");
+    assert!(backup.join("global.db").is_file());
+    assert!(backup.join("manifest.json").is_file());
+
+    let restore = env.home_path().join("cli-restored");
+    let restore_text = restore.display().to_string();
+    let (code, stdout, stderr) = env.run(&["backup", "--restore", &backup_text, "--to-home", &restore_text]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&backup_text), "{stdout}");
+    assert!(restore.join("vowp.db").is_file());
+
+    let (code, _stdout, stderr) = env.run(&["backup", "--restore", &backup_text, "--to-home", &restore_text]);
+    assert_eq!(code, 4, "restore without --force: {stderr}");
+    let (code, _stdout, stderr) = env.run(&[
+        "backup",
+        "--restore",
+        &backup_text,
+        "--to-home",
+        &restore_text,
+        "--force",
+    ]);
+    assert_eq!(code, 0, "forced restore: {stderr}");
+}
+
+#[test]
+fn backup_offsite_cli_runs_rsync_argv() {
+    let env = common::TestEnv::new();
+    let bin = tempfile::tempdir().expect("fake bin");
+    let rsync = bin.path().join("rsync");
+    let log = env.home_path().join("rsync.log");
+    std::fs::write(&rsync, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$VOWP_RSYNC_LOG\"\n").expect("fake rsync");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&rsync, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let target = "rsync://example.invalid/vowp";
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+        .env("VOWP_RSYNC_LOG", &log)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["backup", "--to", target])
+        .output()
+        .expect("run vowp backup");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let args = std::fs::read_to_string(&log).expect("rsync log");
+    let lines: Vec<&str> = args.lines().collect();
+    assert_eq!(lines[0], "-a", "{lines:?}");
+    assert!(lines[1].ends_with('/'), "{lines:?}");
+    assert_eq!(lines[2], target, "{lines:?}");
+}
+
+#[test]
+fn backup_encryption_cli_runs_age_argv() {
+    let env = common::TestEnv::new();
+    let bin = tempfile::tempdir().expect("fake bin");
+    let age = bin.path().join("age");
+    let log = env.home_path().join("age.log");
+    std::fs::write(
+        &age,
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> "$VOWP_AGE_LOG"
+out=""
+src=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -r) shift 2 ;;
+    --decrypt) shift ;;
+    *) src="$1"; shift ;;
+  esac
+done
+cp "$src" "$out"
+"#,
+    )
+    .expect("fake age");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let destination = env.home_path().join("cli-encrypted");
+    let destination_text = destination.display().to_string();
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+        .env("VOWP_AGE_LOG", &log)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args([
+            "--json",
+            "backup",
+            "--to",
+            &destination_text,
+            "--encrypt",
+            "age1testrecipient",
+        ])
+        .output()
+        .expect("run vowp backup");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("backup json");
+    assert_eq!(report["encrypted"], true);
+    assert!(destination.join("global.db.age").is_file());
+    assert!(!destination.join("global.db").exists());
+    let age_args = std::fs::read_to_string(&log).expect("age log");
+    assert!(age_args.contains("-r\nage1testrecipient\n"), "{age_args}");
+    assert!(age_args.contains("-o\n"), "{age_args}");
+
+    let restore = env.home_path().join("cli-encrypted-restored");
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+        .env("VOWP_AGE_LOG", &log)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args([
+            "backup",
+            "--restore",
+            &destination_text,
+            "--to-home",
+            restore.to_str().expect("restore path"),
+        ])
+        .output()
+        .expect("run vowp restore");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(restore.join("vowp.db").is_file());
+}

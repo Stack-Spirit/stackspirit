@@ -315,26 +315,10 @@ fn ctx_build_requires_init() {
 #[test]
 fn c0_refuses_frozen_flags_whose_handlers_are_not_implemented() {
     let env = common::TestEnv::new();
-    let restore = env.home_path().join("restore-src");
-    let to_home = env.home_path().join("restore-dst");
-    let restore = restore.to_str().expect("restore path");
-    let to_home = to_home.to_str().expect("target path");
-    let existing_dir = env.home_path().join("backups");
-    let existing_dir = existing_dir.to_str().expect("backups dir");
-    let trailing = format!("{}/", env.home_path().join("new-backup").display());
     let legacy = env.home_path().join("legacy.db");
     let legacy = legacy.to_str().expect("legacy path");
     let cases: &[&[&str]] = &[
         &["up", "--no-migrate"],
-        &["backup", "--force"],
-        &["backup", "--offsite", "rsync://example.invalid/backup"],
-        &["backup", "--encrypt", "age1example"],
-        &["backup", "--restore", restore, "--to-home", to_home],
-        &["backup", "--to", "rsync://example.invalid/backup"],
-        &["backup", "--to", "user@host:path"],
-        &["backup", "--to", "git:origin"],
-        &["backup", "--to", existing_dir],
-        &["backup", "--to", trailing.as_str()],
         &["loops", "--all"],
         &["schedule", "--all", "ls"],
         &["chat", "s", "--node", "laptop"],
@@ -347,11 +331,8 @@ fn c0_refuses_frozen_flags_whose_handlers_are_not_implemented() {
         assert_eq!(code, 1, "{args:?}: {stderr}");
         assert!(stderr.contains("not implemented in this build"), "{args:?}: {stderr}");
     }
-    let backups = env.home_path().join("backups");
-    let written = std::fs::read_dir(&backups).map(|entries| entries.count()).unwrap_or(0);
-    assert_eq!(written, 0, "a refused backup must not write a backup file");
 
-    // The legacy single-file form still works in C0.
+    // The legacy single-file form still works.
     let (code, _stdout, stderr) = env.run(&["backup", "--to", legacy]);
     assert_eq!(code, 0, "legacy .db backup failed: {stderr}");
     assert!(
