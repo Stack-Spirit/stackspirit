@@ -59,6 +59,12 @@ The script performs, in order: the working-tree scan, `cargo fmt --check`, clipp
 top-level path allow-list, the orphan commit, and the scan of `public-main`. It refuses to continue on a
 failure. It never pushes.
 
+When rehearsing the squash in a temporary clone, give Cargo a target directory for that clone (for
+example `CARGO_TARGET_DIR=$PWD/target scripts/audit/squash-for-public.sh`) or run `cargo clean` in the
+clone afterwards. A shared target directory can reuse test binaries compiled with the clone's
+`CARGO_MANIFEST_DIR`; once the clone is deleted, tests that read fixtures from that path fail even
+though the real checkout is clean.
+
 ```sh
 git log --oneline --decorate -1 public-main
 git rev-list --count public-main                 # must be 1
