@@ -890,6 +890,71 @@ fn remote_probe_uses_remote_node_and_switch() {
 }
 
 #[test]
+fn remote_probe_failure_keeps_source() {
+    let tmp = tempdir().expect("tempdir");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(DoctorRunner {
+        calls: Arc::clone(&calls),
+        output: CommandOutput {
+            exit_code: Some(0),
+            timed_out: false,
+            output: br#"{"ok":false,"checks":[{"name":"harness","status":"fail"}]}"#.to_vec(),
+            duration: Duration::from_millis(5),
+        },
+    });
+    let mut deps = deps(
+        &tmp,
+        AdapterRegistry::new().with("opencode", Arc::new(capsule_adapter("local source"))),
+    );
+    deps.cmd = runner;
+    let store = deps.open_store().expect("store");
+    let now = store.clock().now();
+    store
+        .upsert_node(&Node {
+            name: NodeName::parse("laptop").expect("node"),
+            ssh_target: Some("laptop.example".to_owned()),
+            is_local: false,
+            capabilities: serde_json::json!({}),
+            last_seen_at: None,
+            created_at: now,
+        })
+        .expect("node row");
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "failed remote switch");
+    let request = SwitchRequest {
+        session_id: session.clone(),
+        to: ExecutorRef {
+            executor: claude(),
+            node: Some(NodeName::parse("laptop").expect("node")),
+        },
+        reason: SwitchReason::User,
+        drain_secs: 5,
+    };
+    let error = run_switch(&deps, &request, &CancelToken::default()).expect_err("failed probe aborts");
+    assert!(matches!(error, CoreError::SwitchAborted(_)), "got {error:?}");
+    let store = deps.open_store().expect("store");
+    let row = store.require_session(&session).expect("session");
+    assert_eq!(row.executor, Some(opencode()), "the source executor stays attached");
+    let switch = store
+        .list_switches(&session)
+        .expect("switches")
+        .into_iter()
+        .next()
+        .expect("switch row");
+    assert_eq!(switch.state, SwitchState::Aborted);
+    assert!(
+        switch.error.as_deref().is_some_and(|detail| detail.contains("probe")),
+        "{:?}",
+        switch.error
+    );
+    assert_eq!(
+        calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
+        1,
+        "the failed probe ran once"
+    );
+}
+
+#[test]
 fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     let tmp = tempdir().expect("tempdir");
     let clock = FakeClock::at(ts());
