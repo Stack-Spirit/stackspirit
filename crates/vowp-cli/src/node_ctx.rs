@@ -208,6 +208,32 @@ pub fn is_control_machine() -> Result<bool, CliError> {
     Ok(read_control_home()?.is_some())
 }
 
+/// Writes the node-level `vowp.toml` used by the systemd unit and home-scoped commands.
+///
+/// The file describes the reserved `_node` project and lives directly in the home. Its
+/// presence makes `vowp up`, `vowp migrate`, `vowp project` and `vowp status` work from
+/// `~/.vowp` with no checkout and no `--project`. It is created by `init`, after a
+/// migration and before an `up` starts the supervisor; an existing file is never
+/// overwritten.
+pub fn ensure_home_project_file(paths: &NodePaths) -> Result<(), CliError> {
+    let path = paths.root().join("vowp.toml");
+    if path.is_file() {
+        return Ok(());
+    }
+    let mut config = VowpConfig::with_defaults_for_tests();
+    config.project.name = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+    config.project.path = Some(paths.root().display().to_string());
+    config.project.push = false;
+    config.validate()?;
+    std::fs::create_dir_all(paths.root())?;
+    let text =
+        toml::to_string_pretty(&config).map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()))?;
+    let temp = paths.root().join(".vowp.toml.tmp");
+    std::fs::write(&temp, text)?;
+    std::fs::rename(&temp, &path)?;
+    Ok(())
+}
+
 /// Builds the node-level dependencies `vowp up` and `down` need without a project context.
 ///
 /// The base config is a valid default; [`NodeSupervisor`](vowp_core::loops::NodeSupervisor)

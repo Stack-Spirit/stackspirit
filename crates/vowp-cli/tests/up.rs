@@ -1060,6 +1060,14 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["state"], "paused", "{value}");
     assert_eq!(value["paused_reason"], "owner", "{value}");
+
+    // Re-adding the same checkout is idempotent for the registry state and weight.
+    let (code, value, stderr) = env.run_json(&["project", "add", &second_path]);
+    assert_eq!(code, 0, "idempotent add: {stderr}");
+    assert_eq!(value["state"], "paused", "{value}");
+    assert_eq!(value["weight"], 42, "{value}");
+    assert_eq!(value["paused_reason"], "owner", "{value}");
+
     let (code, value, stderr) = env.run_json(&["project", "resume", "second"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["state"], "active", "{value}");
@@ -1076,9 +1084,10 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     assert_eq!(code, 5, "rm needs --yes: {stderr}");
     let (code, value, stderr) = env.run_json(&["project", "rm", "second", "--yes"]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(value["project"], "second", "{value}");
-    let archived_to = value["archived_to"].as_str().expect("archived path");
-    assert!(Path::new(archived_to).is_dir(), "{archived_to}");
+    assert_eq!(value["name"], "second", "{value}");
+    assert_eq!(value["removed"], true, "{value}");
+    let archive_path = value["archive_path"].as_str().expect("archive path");
+    assert!(Path::new(archive_path).is_dir(), "{archive_path}");
 
     let (code, value, stderr) = env.run_json(&["project", "ls"]);
     assert_eq!(code, 0, "{stderr}");
@@ -1098,6 +1107,81 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     assert_eq!(code, 0, "re-add after rm: {stderr}");
     assert_eq!(value["name"], "second", "{value}");
     assert_eq!(value["state"], "active", "{value}");
+}
+
+#[test]
+fn init_refuses_the_reserved_node_project_name() {
+    let home = tempfile::tempdir().expect("home");
+    let repo = git_repo();
+    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--home")
+        .arg(home.path())
+        .args(["init", "--name", "_node"])
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("VOWP_HOME", home.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp init");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reserved"), "{stderr}");
+    assert!(!repo.path().join("vowp.toml").exists(), "no config was written");
+}
+
+#[test]
+fn detached_up_passes_the_project_context_to_its_child() {
+    let env = common::TestEnv::new();
+    let cwd = tempfile::tempdir().expect("cwd");
+    let bin = env!("CARGO_BIN_EXE_vowp");
+    let output = Command::new(bin)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .arg("up")
+        .arg("--no-tmux")
+        .current_dir(cwd.path())
+        .env("HOME", env.home_path())
+        .env("VOWP_HOME", env.home_path())
+        .env("TMUX_TMPDIR", env.home_path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run detached vowp up");
+    assert!(
+        output.status.success(),
+        "detached up failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        env.home_path().join("supervisor.lock").is_file(),
+        "the detached supervisor wrote its lock"
+    );
+    let down = Command::new(bin)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["down", "--force"])
+        .current_dir(cwd.path())
+        .env("HOME", env.home_path())
+        .env("VOWP_HOME", env.home_path())
+        .env("TMUX_TMPDIR", env.home_path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp down");
+    assert!(
+        down.status.success(),
+        "down after detached up failed: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
 }
 
 #[test]

@@ -128,11 +128,12 @@ fn dispatch(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectArgs)
     }
 }
 
-/// Result of `project rm`.
+/// Result of `project rm` (the public `ProjectRemoved` shape).
 #[derive(Debug, Serialize)]
-struct RemovedProject {
-    project: String,
-    archived_to: Option<String>,
+struct ProjectRemoved {
+    name: String,
+    archive_path: String,
+    removed: bool,
 }
 
 /// Registers one checkout.
@@ -192,7 +193,7 @@ pub fn register_checkout(
 
     let store = Store::open_global(paths)?;
     let now = store.clock().now();
-    let config_json = serde_json::to_value(&config).map_err(vowp_protocol::ProtocolError::from)?;
+    let mut config_json = serde_json::to_value(&config).map_err(vowp_protocol::ProtocolError::from)?;
     let created = match store.project(&project)? {
         Some(existing) => {
             if !same_path(&existing.path, &root) {
@@ -200,6 +201,14 @@ pub fn register_checkout(
                     "project {project} is already registered at {}",
                     existing.path
                 )));
+            }
+            // Re-adding the same checkout is idempotent for the registry: a fresh
+            // `vowp.toml` must not reset a pause, archive or owner-chosen weight.
+            if registry::project_entry(&store, &project)?.is_some()
+                && let Some(meta) = existing.config.get("vowp_registry")
+                && let Some(object) = config_json.as_object_mut()
+            {
+                object.insert("vowp_registry".to_owned(), meta.clone());
             }
             store.upsert_project(&Project {
                 name: project.clone(),
@@ -321,30 +330,31 @@ fn remove(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectRmArgs)
     }
 
     let source = registry.paths.project_dir(&name);
-    let archived_to = if source.exists() {
+    let archive_path = if source.exists() {
         let stamp = store.clock().now().unix_millis();
         let archive_root = registry.paths.root().join("archive/projects");
         std::fs::create_dir_all(&archive_root)?;
         let target = archive_root.join(format!("{name}-{stamp}"));
         std::fs::rename(&source, &target)?;
-        Some(target.display().to_string())
+        target.display().to_string()
     } else {
-        None
+        String::new()
     };
     registry::remove_project_record(&store, &name)?;
     kill_project_windows(registry, &name)?;
     if registry.json {
         print_json(
             io,
-            &RemovedProject {
-                project: name.to_string(),
-                archived_to: archived_to.clone(),
+            &ProjectRemoved {
+                name: name.to_string(),
+                archive_path: archive_path.clone(),
+                removed: true,
             },
         )?;
-    } else if let Some(target) = archived_to {
-        writeln!(io.out(), "removed project {name}; database archived to {target}")?;
-    } else {
+    } else if archive_path.is_empty() {
         writeln!(io.out(), "removed project {name}")?;
+    } else {
+        writeln!(io.out(), "removed project {name}; database archived to {archive_path}")?;
     }
     Ok(0)
 }

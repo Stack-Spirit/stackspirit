@@ -421,7 +421,7 @@ fn the_node_systemd_unit_matches_the_home_supervisor_contract() {
         assert!(installed.contains(line), "unit is missing {line:?}:\n{installed}");
     }
     assert!(
-        !installed.lines().any(|line| line.trim() == "Restart=always"),
+        !installed.contains("Restart=always"),
         "always would restart the supervisor after `vowp down` exits 0"
     );
 }

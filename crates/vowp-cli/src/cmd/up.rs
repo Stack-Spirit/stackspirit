@@ -202,6 +202,7 @@ fn run_up(ctx: &Ctx, deps: &Deps, io: &mut dyn IoStreams, args: &UpArgs) -> Resu
             )?;
         }
     }
+    crate::node_ctx::ensure_home_project_file(paths)?;
     register_checkout_for_up(ctx)?;
     if !args.no_tmux {
         match ensure_node_windows(paths, deps.windows.as_ref()) {
@@ -219,13 +220,15 @@ fn run_up(ctx: &Ctx, deps: &Deps, io: &mut dyn IoStreams, args: &UpArgs) -> Resu
     if args.foreground {
         return run_foreground(paths, deps, json, io);
     }
-    run_detached(paths, json, io)
+    run_detached(paths, Some(ctx.project_root()), json, io)
 }
 
 /// Migrates a v0.1 home before the supervisor opens it.
 ///
 /// The store's `open_global` refuses a version-1 file with [`StoreError::MigrationRequired`];
-/// that is the only signal needed. `--no-migrate` turns the refusal into a clear conflict.
+/// that is the only signal needed. `allow=false` (the `--no-migrate` path) turns the refusal
+/// into a clear conflict. C0's dispatch guard in `cmd/mod.rs` currently refuses that flag
+/// before this handler; the branch is ready for the owner follow-up that removes the guard.
 fn migrate_if_needed(paths: &NodePaths, allow: bool) -> Result<Option<vowp_store::MigrationReport>, CliError> {
     match Store::open_global(paths) {
         Ok(_) => Ok(None),
@@ -556,19 +559,23 @@ fn signal_child(pid: u32, signal: &str) -> std::io::Result<()> {
 }
 
 /// Re-executes this binary with `--foreground` and returns as soon as it owns the lock.
-fn run_detached(paths: &NodePaths, json: bool, io: &mut dyn IoStreams) -> Result<i32, CliError> {
+fn run_detached(
+    paths: &NodePaths,
+    project: Option<&Path>,
+    json: bool,
+    io: &mut dyn IoStreams,
+) -> Result<i32, CliError> {
     std::fs::create_dir_all(paths.logs_dir())?;
     let log_path = paths.logs_dir().join("supervisor.log");
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
 
     let exe = std::env::current_exe()?;
     let configure = |command: &mut Command| {
-        command
-            .arg("--home")
-            .arg(paths.root())
-            .arg("up")
-            .arg("--foreground")
-            .arg("--no-tmux");
+        command.arg("--home").arg(paths.root());
+        if let Some(project) = project {
+            command.arg("--project").arg(project);
+        }
+        command.arg("up").arg("--foreground").arg("--no-tmux");
     };
 
     // `setsid` detaches the supervisor from the caller's terminal; when it is not

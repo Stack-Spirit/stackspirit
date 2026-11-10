@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use vowp_protocol::VowpConfig;
 use vowp_store::MigrationReport;
 
 use crate::output::{Table, print_json};
@@ -53,8 +54,31 @@ fn migrate(
             vowp_store::migrate_v01(paths)?
         }
     };
+    if !report.dry_run {
+        if report.to_version == 2 {
+            crate::node_ctx::ensure_home_project_file(paths)?;
+        } else if report.to_version == 1 {
+            remove_node_project_file(paths);
+        }
+    }
     print_report(json, color, io, &report)?;
     Ok(0)
+}
+
+/// Removes the node-level `vowp.toml` when a rollback returns the home to v0.1.
+///
+/// Only the reserved `_node` file is removed; a user file with another project name is
+/// left alone.
+fn remove_node_project_file(paths: &vowp_store::NodePaths) {
+    let path = paths.root().join("vowp.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if VowpConfig::from_toml(&text)
+        .is_ok_and(|config| config.project.name.as_str() == vowp_store::RESERVED_NODE_PROJECT)
+    {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Prints one migration report as JSON or a short human summary with per-table counts.
