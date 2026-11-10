@@ -41,8 +41,9 @@ owner infrastructure, no build history and no secret values.
 ### 1.2 Out of scope (v0.2)
 
 - More than one home, replication, leader election, multi-VPS scheduling.
-- Any listening HTTP/SSE API, web window, phone browser board or ACP adapter. Those notes moved to
-  [`../v0.3/`](../v0.3/README.md).
+- Any listening HTTP/SSE API, web window or phone browser board; those notes moved to
+  [`../v0.3/`](../v0.3/README.md). The ACP adapter and cost dashboard stay in `v0.2/` as deferred
+  design notes (not v0.2 delivery).
 - Multi-user accounts, quotas, roles or audit.
 - Windows support, a native desktop app, or a VOWP-specific chat app.
 - A second session or job state machine. v0.1's log, capsule, switch and request queue are reused.
@@ -888,6 +889,7 @@ project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE   -- jobs
 project TEXT REFERENCES projects(name) ON DELETE CASCADE            -- loops, schedules, inbox
 project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE   -- releases
 job_id  TEXT REFERENCES jobs(id) ON DELETE SET NULL                 -- sessions (global file!)
+session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL          -- runs (project file!)
 ```
 
 They become the plain columns shown in §3.2/§3.3. The store exposes:
@@ -1185,7 +1187,14 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
                                         OR (r.job_id IS NULL AND :p = :primary);
    INSERT INTO project.gate_results  SELECT g.* FROM old.gate_results g
                                      JOIN old.jobs j ON g.job_id = j.id WHERE j.project = :p;
-   INSERT INTO project.workers       SELECT * FROM old.workers       WHERE :p = :primary;
+   INSERT INTO project.workers
+   SELECT w.* FROM old.workers w
+   LEFT JOIN old.jobs j  ON w.job_id = j.id
+   LEFT JOIN old.runs r  ON w.run_id = r.id
+   LEFT JOIN old.jobs rj ON r.job_id = rj.id
+   WHERE j.project = :p
+      OR (w.job_id IS NULL AND rj.project = :p)
+      OR (w.job_id IS NULL AND w.run_id IS NULL AND :p = :primary);
    INSERT INTO project.loops         SELECT * FROM old.loops
                                      WHERE project = :p OR (project IS NULL AND :p = :primary);
    INSERT INTO project.schedules     SELECT * FROM old.schedules
@@ -1197,8 +1206,16 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
 
    Node-wide `loops`/`schedules` (`project IS NULL`) go to the primary project and are listed in the
    report; a v0.1 home had one running project, so this preserves the rows without duplicating a
-   command into every project. `workers` and runs with `job_id IS NULL` (planner/keeper/capsule/
-   probe/gate history) also go to the primary project; the report names them.
+   command into every project. **Workers follow their job's project**: a worker whose `job_id`
+   belongs to project `p` is copied to `p`, so its `job_id`/`run_id` foreign keys resolve inside
+   that DB. A worker with no job but a run whose run belongs to `p` also goes to `p`; an idle worker
+   with neither goes to the primary. A worker row that cannot be assigned to exactly one project
+   (for example a run with `job_id IS NULL`, such as a planner/keeper run) is **dropped and listed
+   in the report**; worker slots are advisory and the node supervisor recreates idle slots with
+   `ensure_worker_slots`. This avoids the `FOREIGN KEY constraint failed` a blind
+   `INSERT INTO project.workers SELECT * ... WHERE :p = :primary` produces on a multi-project home.
+   Runs with `job_id IS NULL` (planner/keeper/capsule/probe/gate history) go to the primary project;
+   the report names them.
 
    The destination tables have the same column order as v0.1, so `SELECT *` is safe here; the
    destination DDL is the authority and a schema test compares the two column lists at build time.
@@ -1212,6 +1229,8 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
    - every `jobs.project`, `releases.project` equals `:p`;
    - every `runs.session_id` is `NULL` or exists in global `sessions`;
    - every `inbox.job_id` is `NULL` or exists in project `jobs`;
+   - every `workers.job_id`/`workers.run_id` is `NULL` or exists in that project's `jobs`/`runs`;
+     the number of dropped unassignable workers equals the report's count;
    - no project table contains a `REFERENCES projects` clause (`PRAGMA foreign_key_list`);
    - `SELECT COUNT(*) FROM old.inbox WHERE project IS NOT NULL` equals the project inbox count and
      the old node count equals `node_inbox`.
@@ -2164,6 +2183,7 @@ impl Store {
 ```
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct SurfaceId(pub String);          // ULID, 26 chars
 impl SurfaceId { pub fn new() -> Self; }
 impl std::fmt::Display for SurfaceId { /* writes the inner string */ }
@@ -2198,6 +2218,13 @@ pub struct LeaseStatus {
     pub acquired_at: Option<Timestamp>,
     pub heartbeat_at: Option<Timestamp>,
     pub token: Option<String>,      // Some only in the response to --acquire
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TakeoverReport {
+    pub previous: Option<String>,
+    pub drained: bool,
+    pub capsule_id: Option<CapsuleId>,
 }
 ```
 
@@ -2239,8 +2266,8 @@ impl LeaseGuard {
     pub fn release(self) -> Result<(), CoreError>;
 }
 pub struct AcquireLease { pub session: SessionId, pub surface: Surface, pub takeover: bool }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct TakeoverReport { pub previous: Option<String>, pub drained: bool, pub capsule_id: Option<CapsuleId> }
+// Defined in `vowp-protocol/src/surface.rs`; core re-exports it, never redefines it.
+pub use vowp_protocol::TakeoverReport;
 pub fn takeover(deps: &Deps, store: &Store, session: &SessionId, target: &Surface,
                 now: Timestamp) -> Result<TakeoverReport, CoreError>;
 pub fn sweep_leases(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, CoreError>;
@@ -2662,8 +2689,9 @@ vowp secret request <NAME>          # one-time 127.0.0.1 paste page; URL + expir
   those names for that harness (plus names listed by `[env.*]` deploy/promote commands) and returns
   `(name, value)` pairs to the adapter; a missing name is a warning, not a hard failure (unless the
   config marks it required in v0.3). `vowp __vault-exec` is the hidden read/inject helper:
-  `vowp __vault-exec --user <vowp-vault> --env NAME -- <cmd…>` reads only `NAME` and execs the
-  command; in basic mode it is a plain exec with the same argv. The same root-owned helper has the
+  `vowp __vault-exec --env NAME -- <cmd…>` reads only `NAME` and execs the command; the `sudo -u
+  vowp-vault` wrapper in the sudoers line chooses the user, so the helper has no `--user` flag.
+  In basic mode it is a plain exec with the same argv. The same root-owned helper has the
   **only write path** in vault mode: `vowp __vault-admin set <NAME>` reads the value from stdin
   (never argv), validates the name and writes the file 0600 as `vowp-vault`; `vowp __vault-admin rm
   <NAME>` unlinks it. The one sudoers line allows only these fixed subcommands, never an arbitrary
@@ -2929,7 +2957,7 @@ exits 2 with `not implemented in this build` only in C0; no final build ships a 
 
 | Command | Args / subcommands | JSON |
 |---|---|---|
-| `project` | `add <path> [--name] [--weight]`, `ls`, `pause <n>`, `resume <n>`, `archive <n>`, `rm <n> --yes`, `weight <n> <w>` | `ProjectEntry` or `[ProjectEntry]` |
+| `project` | `add <path> [--name] [--weight]`, `ls [--all]`, `pause <n>`, `resume <n>`, `archive <n>`, `rm <n> --yes`, `weight <n> <w>` | `ProjectEntry` or `[ProjectEntry]` |
 | `fleet` | `status [--refresh] [--cached]`, `queue [--project] [--state]`, `inbox [--project] [--all]`, `capacity` | §5.5 |
 | `capacity` | `show`, `report [--since] [--limit]`, `set [--target <n>] [--mode auto\|fixed] [--override] [--reason] [--by]` | §6.5 |
 | `control` | `init [--name <home-name>] <ssh-target> [--strict] [--force]`, `status` | `ControlConfig` / `FleetStatus` |
@@ -3077,7 +3105,7 @@ a passing test. Everything in this section is binding for C0 and for the feature
   `CapacityTarget`, `CapacityAdvice`, `AdviceState`, `CapacityReport`, `RunningCapacity`,
   `WaitingJob`).
 - `vowp-protocol/src/surface.rs` — `SurfaceId`, `SurfaceKind`, `Surface`, `Lease`, `SurfaceRef`,
-  `RemoteLine`, `IngestAck`, `TurnGrant`, `OrchestratorApp`, `OrchestratorCard`,
+  `TakeoverReport`, `RemoteLine`, `IngestAck`, `TurnGrant`, `OrchestratorApp`, `OrchestratorCard`,
   `JoinInstructions`.
 - `vowp-protocol/src/snapshot.rs` — `SNAPSHOT_FORMAT`, `SNAPSHOT_VERSION`, `ProjectState`,
   `ProjectEntry`, `Snapshot`, `SupervisorSnapshot`, `ProjectSnapshot`, `RunningJobCard`,
@@ -3087,8 +3115,10 @@ a passing test. Everything in this section is binding for C0 and for the feature
   `BackupReport`, `BackupFile`, `CatalogFilter`.
 - `vowp-protocol/src/vault.rs` — `SecretName`, `SecretInfo`, `VaultMode`, `SecretRequest`.
 - `vowp-protocol/src/lib.rs` — `pub mod` lines and re-exports.
-- `vowp-protocol/src/session.rs` — `SessionRole::Orchestrator` and `SwitchReason::Takeover`
-  (additive; update the wire-name tests).
+- `vowp-protocol/src/event.rs` — `SessionRole::Orchestrator` and `SwitchReason::Takeover`
+  (additive; update the wire-name tests). Both enums are defined in `event.rs` (lines around 40
+  and 714); `session.rs` only re-exports `SessionRole` and imports `SwitchReason`, so do **not**
+  edit `session.rs` for these variants. C0's `owns` must name `crates/vowp-protocol/src/event.rs`.
 - `vowp-protocol/src/schema.rs` — add the new types to `all_schemas()`; add `snapshot`.
 
 All new types derive `Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema`; enums use
@@ -3129,7 +3159,7 @@ vowp-core/src/
                                    pub use lease::{LeaseGuard, check_lease}; pub use takeover::takeover;
                                    pub fn sweep_leases(deps, store, now) -> Result<u32, CoreError>;
     lease.rs                 (F2)  LeaseGuard, AcquireLease, new_lease_token
-    takeover.rs              (F2)  takeover, TakeoverReport
+    takeover.rs              (F2)  takeover; returns vowp_protocol::TakeoverReport (defined in surface.rs)
     follow.rs                (F3)  follow
     orchestrator.rs          (F4)  Orchestrator, NewOrchestrator, OrchestratorInfo
     native.rs                (F5)  AppHost, HostRequest, AppHandle, HostHealth, TranscriptBatch, TranscriptEntry
@@ -3447,13 +3477,15 @@ by `remote::build_ssh_argv` with the private quoting helper.
 
 ### 13.7 `SessionRole`, `SwitchReason` and test literals
 
-The two additive enum variants (`SessionRole::Orchestrator`, `SwitchReason::Takeover`) require
-updating exhaustive matches in `vowp-core` and tests. C0 owns the enum edit but must also update
-the match arms that the compiler points at, even when the file is not in its `owns`; this is the one
-allowed exception, recorded in the C0 report: the alternative is a workspace that does not compile.
-The new arms are behaviour-preserving (`Orchestrator` behaves like `User` for session selection;
-`Takeover` maps to the existing takeover switch path and is rejected by `session switch` unless the
-surface holds the lease).
+The two additive enum variants are in `crates/vowp-protocol/src/event.rs`:
+`SessionRole::Orchestrator` and `SwitchReason::Takeover`. They require updating exhaustive matches
+in `vowp-core` and tests. C0 owns the `event.rs` edit but must also update the match arms that the
+compiler points at, even when the file is not in its `owns`; this is the one allowed exception,
+recorded in the C0 report: the alternative is a workspace that does not compile. The new arms are
+behaviour-preserving (`Orchestrator` behaves like `User` for session selection; `Takeover` maps to
+the existing takeover switch path and is rejected by `session switch` unless the surface holds the
+lease). Known exhaustive sites: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator` to
+the `Worker | User` arm).
 
 ---
 
@@ -3496,6 +3528,7 @@ is not allowed.
 `every_sql_statement_names_its_database`, `v01_database_migrates_with_matching_row_counts`,
 `migration_refuses_while_supervisor_runs`, `migration_is_restartable_at_each_step`,
 `migration_rollback_restores_v01_home`, `migration_multi_project_split`, `migration_node_rows_go_to_primary`,
+`migration_workers_follow_their_job_project`, `migration_unassignable_workers_dropped_and_reported`,
 `crash_between_global_and_project_write_is_repaired`, `cost_ledger_replay_does_not_duplicate`,
 `cross_db_reconcile_is_idempotent`, `request_queue_is_project_scoped`,
 `schema_versions_are_global_2_project_1`.
@@ -3536,6 +3569,13 @@ is not allowed.
 `owner_override_above_advice_is_honoured_and_shown`, `capacity_set_history_and_json`,
 `fairness_round_robins_by_weight`, `waiting_reason_on_board_and_queue`,
 `auto_target_uses_measured_limit`.
+
+**E3 advisor**
+`advisor_writes_capacity_advice_on_timer_and_events`,
+`advisor_creates_decision_inbox_item_with_apply_keep`,
+`advisor_never_changes_target_itself`, `advisor_applies_only_after_owner_yes`,
+`advisor_report_json_includes_estimates_and_waiting`,
+`advisor_respects_the_thirty_minute_gap`.
 
 **F1 remote exec**
 `turn_begin_writes_framing_events_and_returns_grant`,

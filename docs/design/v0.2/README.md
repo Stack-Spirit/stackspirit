@@ -74,7 +74,8 @@ C0 freezes every interface; C1 can run in parallel because the store split stays
 ## Out of scope for v0.2
 
 - More than one home, replication or a multi-VPS scheduler.
-- A listening HTTP/SSE API, a web window, a phone browser board or an ACP adapter (v0.3).
+- A listening HTTP/SSE API, a web window or a phone browser board (v0.3); the ACP adapter and
+  cost dashboard are deferred design notes, not v0.2 delivery.
 - Multi-user accounts, quotas, roles or audit.
 - Windows support or a native desktop app.
 - A VOWP-specific chat app: the product surfaces are the opencode and Claude apps, with `vowp chat`
@@ -86,4 +87,4 @@ C0 freezes every interface; C1 can run in parallel because the store split stays
 - [`../architecture.md`](../architecture.md) — components, on-disk layout and compatibility rules.
 - [`../sessions.md`](../sessions.md) — the log, capsule, switch and bundle rules v0.2 reuses.
 - [`../cli.md`](../cli.md) — every v0.1 command and exit code; v0.2 adds the commands in the spec §12.
-- [`../v0.3/README.md`](../v0.3/README.md) — the daemon, browser and ACP notes moved out of v0.2.
+- [`../v0.3/README.md`](../v0.3/README.md) — the daemon and browser notes moved out of v0.2; the ACP and cost notes stay here as deferred.

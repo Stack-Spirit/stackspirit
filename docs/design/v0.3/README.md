@@ -1,4 +1,4 @@
-# v0.3 design notes — the daemon, the browser and ACP
+# v0.3 design notes — the daemon and the browser
 
 Status: planned for v0.3, **not** part of v0.2. These notes were moved here by the v0.2 spec
 (`docs/design/v0.2/home-and-surfaces.md`) because v0.2's surfaces are the opencode/Claude apps and
