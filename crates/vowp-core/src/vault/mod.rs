@@ -299,11 +299,12 @@ fn upgrade_impl(deps: &Deps, layout: &Layout) -> Result<Upgrade, CoreError> {
         write_mode(deps, VaultMode::VaultUser)?;
         return Ok(Upgrade::Switched);
     }
-    if sudo_available(layout) {
+    if sudo_present(layout) {
         Ok(Upgrade::NeedsCommand(upgrade_command(layout)))
     } else {
         Ok(Upgrade::NoSudo(
-            "passwordless sudo is not available; create the `vowp-vault` user and the sudoers helper first".to_owned(),
+            "sudo is not installed; install it and re-run `vowp secret upgrade` to get the vault setup command"
+                .to_owned(),
         ))
     }
 }
@@ -637,9 +638,25 @@ fn vault_user_ready(layout: &Layout) -> bool {
     layout.vault_home.is_dir() && layout.helper.is_file() && run_vault_probe(layout)
 }
 
-/// Returns whether passwordless sudo is available for the helper or for plain commands.
-fn sudo_available(layout: &Layout) -> bool {
-    run_status(Command::new(&layout.sudo).args(["-n", "true"])) || run_vault_probe(layout)
+/// Returns whether the `sudo` program exists, whether or not it asks for a password.
+///
+/// The common upgrade path is a machine without passwordless sudo: the owner types a password
+/// when running the printed command. Only a missing `sudo` makes the upgrade impossible here.
+fn sudo_present(layout: &Layout) -> bool {
+    let sudo = &layout.sudo;
+    if sudo.as_os_str().is_empty() {
+        return false;
+    }
+    if sudo.is_absolute() || sudo.components().count() > 1 {
+        return is_executable(sudo);
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(sudo))))
+}
+
+/// Returns whether one path names an executable regular file.
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 /// Runs the installed helper's harmless version probe as `vowp-vault`.
@@ -680,10 +697,10 @@ fn upgrade_command(layout: &Layout) -> String {
     let source = shell_quote(&layout.helper);
     let home = shell_quote(&layout.vault_home);
     format!(
-        "sudo useradd --system --home {home} --shell /usr/sbin/nologin vowp-vault \
+        "id -u vowp-vault >/dev/null 2>&1 || sudo useradd --system --home {home} --shell /usr/sbin/nologin vowp-vault \
          && sudo install -d -m 0700 -o vowp-vault -g vowp-vault {vault} \
          && sudo install -d -m 0755 /usr/local/lib/vowp \
-         && sudo install -m 0755 -o root -g root {source} {helper} \
+         && if [ {source} -ef {helper} ]; then true; else sudo install -m 0755 -o root -g root {source} {helper}; fi \
          && sudo sh -c '{MIGRATE_SCRIPT}' vowp-migrate {basic} {vault} \
          && echo 'vowp ALL=(vowp-vault) NOPASSWD: {helper}' | sudo tee /etc/sudoers.d/vowp-vault >/dev/null \
          && sudo chmod 0440 /etc/sudoers.d/vowp-vault"
@@ -1213,6 +1230,69 @@ mod tests {
             layout.basic_dir.join("UPGRADE_KEY").is_file(),
             "the failed move leaves the basic copy in place"
         );
+    }
+
+    #[test]
+    fn upgrade_prints_the_command_when_sudo_needs_a_password() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+        // A normal sudo exists but its non-interactive probes fail until the owner types a password.
+        fake_tool(tmp.path(), "fake-sudo", "#!/bin/sh\nexit 1\n");
+
+        let outcome = upgrade_impl(&deps, &layout).expect("upgrade");
+
+        match outcome {
+            Upgrade::NeedsCommand(command) => {
+                assert!(
+                    command.contains(&format!(
+                        "vowp-migrate {} {}",
+                        shell_quote(&layout.basic_dir),
+                        shell_quote(&layout.vault_dir())
+                    )),
+                    "{command}"
+                );
+                assert!(command.contains("sudo useradd"), "{command}");
+            }
+            other => panic!("expected NeedsCommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_reports_missing_sudo_without_printing_a_command() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+
+        let outcome = upgrade_impl(&deps, &layout).expect("upgrade");
+
+        match outcome {
+            Upgrade::NoSudo(reason) => assert!(reason.contains("sudo is not installed"), "{reason}"),
+            other => panic!("expected NoSudo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_command_skips_useradd_when_the_vault_user_exists() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with(tmp.path());
+        fs::create_dir_all(&layout.basic_dir).expect("basic dir");
+        fs::write(layout.basic_dir.join("UPGRADE_KEY"), "basic-upgrade-value-1357").expect("basic value");
+        let command = upgrade_command(&layout);
+
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).expect("fake bin");
+        fake_upgrade_tools(&bin);
+        fake_tool(&bin, "id", "#!/bin/sh\nexit 0\n");
+        fake_tool(&bin, "useradd", "#!/bin/sh\nexit 1\n");
+
+        let output = run_with_fakes(&command, &bin, tmp.path(), true);
+        assert!(
+            output.status.success(),
+            "an existing vault user must not fail the retry: {}\n{command}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(layout.vault_dir().join("UPGRADE_KEY").is_file());
     }
 
     #[test]
