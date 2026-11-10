@@ -4,6 +4,7 @@
 mod support;
 
 use std::collections::VecDeque;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -673,6 +674,171 @@ fn bundle_import_redacts_secret_from_old_bundle_capsule_file_and_row() {
         );
         assert!(text.contains(marker), "the capsule file records the redaction");
     }
+}
+
+#[test]
+fn bundle_import_sidecar_and_first_turn_seed_do_not_carry_secret() {
+    let tmp = tempdir().expect("tempdir");
+    let secret = "sidecar-\"quoted\"\\path\nsecond line";
+    let adapter = ScriptedAdapter::new(
+        HarnessKind::Opencode,
+        vec![good_draft(&format!("Continue with {secret}"))],
+    );
+    let deps = deps_with_clock(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(adapter)),
+        FakeClock::at(ts()),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp);
+
+    // Build the bundle before this node knows the secret, like a bundle from a node
+    // that never had it: the embedded capsule still carries the raw value.
+    let exported = bundle::export(&deps, &session, 20).expect("export");
+    assert!(
+        exported.capsule.intent.contains(secret),
+        "the source bundle carries the secret"
+    );
+
+    let name = SecretName::parse("SIDECAR_KEY").expect("secret name");
+    vowp_core::vault::write_secret(&deps, &name, secret).expect("write secret");
+    let marker = "[REDACTED:SIDECAR_KEY]";
+    let escaped = serde_json::to_string(secret).expect("json-escape the secret");
+    let escaped = &escaped[1..escaped.len() - 1];
+
+    let child = bundle::import(&deps, &exported, None, None).expect("import");
+
+    let sidecar_path = deps.paths.session_dir(&child).join("import.json");
+    let sidecar = std::fs::read_to_string(&sidecar_path).expect("import sidecar");
+    assert!(!sidecar.contains(secret), "import.json does not hold the raw secret");
+    assert!(
+        !sidecar.contains(escaped),
+        "import.json does not hold the JSON-escaped secret"
+    );
+    assert!(sidecar.contains(marker), "import.json records the redaction");
+    let stored = bundle::from_json(&sidecar).expect("the redacted sidecar still validates");
+    assert_eq!(stored.capsule.intent, format!("Continue with {marker}"));
+
+    // The public seed still gets a raw bundle from a caller that exported it earlier.
+    let seed = bundle::imported_seed(&deps, &exported, &child, "next step");
+    assert!(!seed.contains(secret), "the raw value does not reach the seed: {seed}");
+    assert!(
+        !seed.contains(escaped),
+        "the JSON-escaped value does not reach the seed"
+    );
+    assert!(seed.contains(marker), "the seed records the redaction: {seed}");
+    assert!(seed.ends_with("next step"));
+
+    let stored_seed = bundle::imported_seed(&deps, &stored, &child, "next step");
+    assert!(!stored_seed.contains(secret));
+    assert!(!stored_seed.contains(escaped));
+    assert!(stored_seed.contains(marker));
+
+    let store = deps.open_store().expect("store");
+    let row = store
+        .latest_capsule(&child)
+        .expect("latest capsule")
+        .expect("imported capsule row");
+    assert_eq!(row.intent, format!("Continue with {marker}"));
+    for path in list_capsule_files(&deps.paths, &child).expect("capsule files") {
+        let text = std::fs::read_to_string(path).expect("read capsule file");
+        assert!(!text.contains(secret), "the capsule file does not hold the raw secret");
+        assert!(
+            !text.contains(escaped),
+            "the capsule file does not hold the JSON-escaped secret"
+        );
+    }
+}
+
+#[test]
+fn bundle_import_redaction_error_leaves_no_raw_capsule_file_or_row() {
+    let tmp = tempdir().expect("tempdir");
+    let marker = "IMPORT-FAILURE-RAW-CAPSULE-9d2";
+    let adapter = ScriptedAdapter::new(
+        HarnessKind::Opencode,
+        vec![good_draft(&format!("Continue with {marker}"))],
+    );
+    let deps = deps_with_clock(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(adapter)),
+        FakeClock::at(ts()),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp);
+    let exported = bundle::export(&deps, &session, 20).expect("export");
+    assert!(
+        exported.capsule.intent.contains(marker),
+        "the source bundle carries the marker"
+    );
+
+    // A secret file the vault refuses (mode 0644) makes Redactor::load fail, the same
+    // error path as an unreadable vault during import.
+    let secrets = deps.paths.root().join("secrets");
+    std::fs::create_dir_all(&secrets).expect("secrets dir");
+    let broken = secrets.join("BROKEN_IMPORT_KEY");
+    std::fs::write(&broken, "not a usable secret").expect("write broken secret");
+    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).expect("break secret mode");
+
+    // The origin session and its export capsule already exist and legitimately carry the
+    // marker. The ordering guarantee is stronger than "no raw capsule survives": a failed
+    // redaction must do nothing at all. The old write-then-redact order created the child
+    // session row and log, then the raw capsule file/row, before it noticed the vault error.
+    let mut files_before = files_under(&deps.paths.sessions_dir());
+    files_before.sort();
+    let store = deps.open_store().expect("store");
+    let mut sessions_before: Vec<SessionId> = store
+        .list_sessions(&SessionFilter::default())
+        .expect("sessions before")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    sessions_before.sort();
+
+    let error = bundle::import(&deps, &exported, None, None).expect_err("the redaction must fail");
+    match &error {
+        vowp_core::CoreError::Invalid(message) => assert!(
+            message.contains("must be mode 0600"),
+            "unexpected redaction error: {message}"
+        ),
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let mut files_after = files_under(&deps.paths.sessions_dir());
+    files_after.sort();
+    assert_eq!(
+        files_after, files_before,
+        "a failed import must not leave a session directory, log, capsule file or sidecar"
+    );
+    let mut sessions_after: Vec<SessionId> = store
+        .list_sessions(&SessionFilter::default())
+        .expect("sessions after")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    sessions_after.sort();
+    assert_eq!(
+        sessions_after, sessions_before,
+        "a failed import must not leave a child session row or capsule row"
+    );
+}
+
+/// Returns every regular file below `dir`, recursively.
+fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    files
 }
 
 /// An adapter that returns the next scripted assistant message, reusing the last one.

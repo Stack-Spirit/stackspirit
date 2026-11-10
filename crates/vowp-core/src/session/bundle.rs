@@ -230,9 +230,13 @@ pub fn import(
 ) -> Result<SessionId, CoreError> {
     bundle.validate()?;
     let inline = decode_blobs(bundle)?;
+    // Redact before anything is persisted. A bundle may predate the local vault (or come
+    // from a node that never knew these secrets); if the redactor cannot be loaded the
+    // import fails with no raw capsule file, row or sidecar left behind.
+    let bundle = redact_bundle(deps, bundle)?;
     let store = deps.open_store()?;
-    let target = target_executor(deps, bundle, executor);
-    let cwd = resolve_cwd(deps, bundle, cwd);
+    let target = target_executor(deps, &bundle, executor);
+    let cwd = resolve_cwd(deps, &bundle, cwd);
     let origin = bundle.session.id.clone();
     // The origin row may name a project/job this node has never seen. The session
     // index has foreign keys to both tables, so an absent row becomes NULL exactly as
@@ -300,9 +304,8 @@ pub fn import(
 
     let path = write_capsule_file(&deps.paths, &capsule)?;
     store.insert_capsule(&capsule, &path.to_string_lossy())?;
-    // The bundle can predate the local secrets, or come from a node that never saw
-    // them. Rewrite the capsule file and cached row before the child records its id.
-    let capsule = crate::vault::redact_capsule(deps, &store, &capsule)?;
+    // `capsule` already carries the local redactions applied to the whole bundle above,
+    // so the file and cached row are never written with a raw value first.
     let capsule_event = log.append(NewEvent {
         actor: Actor::System,
         source: vowp_source(deps),
@@ -332,7 +335,7 @@ pub fn import(
 
     reindex(&store, &deps.paths, Some(&child))?;
     store.set_session_state(&child, SessionState::Idle, Some(&target.executor))?;
-    write_import_sidecar(deps, &child, bundle)?;
+    write_import_sidecar(deps, &child, &bundle)?;
     Ok(child)
 }
 
@@ -340,11 +343,14 @@ pub fn import(
 ///
 /// Import deliberately keeps the bundle tail out of the child log, so the first turn
 /// on the child uses this text as its seed: capsule plus the exported tail. The capsule
-/// is rendered under the **child** session id, not the origin id.
+/// is rendered under the **child** session id, not the origin id. The rendered text is
+/// redacted again because a bundle may predate the local vault; a redaction failure
+/// withholds the seed instead of risking a raw value.
 pub fn imported_seed(deps: &Deps, bundle: &Bundle, child: &SessionId, next_input: &str) -> String {
     let mut capsule = bundle.capsule.clone();
     capsule.session_id = child.clone();
-    seed_prompt(&capsule, &bundle.tail, deps.config.capsule.tail_turns, next_input)
+    let seed = seed_prompt(&capsule, &bundle.tail, deps.config.capsule.tail_turns, next_input);
+    crate::vault::redact_text(deps, &seed)
 }
 
 /// Builds the first-turn seed from the bundle sidecar, when the session has one.
@@ -390,7 +396,7 @@ fn import_sidecar_path(deps: &Deps, child: &SessionId) -> PathBuf {
     deps.paths.session_dir(child).join(IMPORT_SIDECAR)
 }
 
-/// Writes the validated source bundle beside the child log.
+/// Writes the redacted bundle beside the child log.
 fn write_import_sidecar(deps: &Deps, child: &SessionId, bundle: &Bundle) -> Result<(), CoreError> {
     let path = import_sidecar_path(deps, child);
     let bytes = serde_json::to_vec_pretty(bundle).map_err(json_error)?;
@@ -403,6 +409,86 @@ fn write_import_sidecar(deps: &Deps, child: &SessionId, bundle: &Bundle) -> Resu
         path: path.display().to_string(),
         source,
     })
+}
+
+/// Returns a copy of `bundle` with every payload secret value replaced.
+///
+/// Import uses this before persisting anything: a bundle can carry values from a node
+/// that never knew the local secrets, and neither the capsule file/row nor the import
+/// sidecar may hold them. Only free-text payloads are redacted; structural fields such
+/// as the bundle format, ids, timestamps and typed enums keep their original values, so
+/// a secret that happens to match one of them cannot make the sidecar unparseable or
+/// change the imported session identity. The checksum is recomputed so the sidecar keeps
+/// the unchanged bundle format and still passes [`Bundle::validate`].
+fn redact_bundle(deps: &Deps, bundle: &Bundle) -> Result<Bundle, CoreError> {
+    let redactor = crate::vault::Redactor::load(deps)?;
+    if redactor.is_empty() {
+        return Ok(bundle.clone());
+    }
+    let mut redacted = bundle.clone();
+    redacted.session.title = redactor.redact(&bundle.session.title);
+    redacted.session.cwd = redactor.redact(&bundle.session.cwd);
+    redact_capsule_payload(&redactor, &mut redacted.capsule);
+    for event in &mut redacted.tail {
+        redact_json_strings(&redactor, &mut event.payload);
+        if let Some(raw) = &mut event.raw {
+            redact_json_strings(&redactor, raw);
+        }
+    }
+    for switch in &mut redacted.lineage {
+        if let Some(error) = &mut switch.error {
+            *error = redactor.redact(error);
+        }
+    }
+    redacted.checksum = checksum(&redacted)?;
+    Ok(redacted)
+}
+
+/// Redacts the free-text fields of one capsule, leaving ids, enums and telemetry alone.
+fn redact_capsule_payload(redactor: &crate::vault::Redactor, capsule: &mut Capsule) {
+    capsule.intent = redactor.redact(&capsule.intent);
+    for text in &mut capsule.constraints {
+        *text = redactor.redact(text);
+    }
+    for decision in &mut capsule.decisions {
+        decision.what = redactor.redact(&decision.what);
+        decision.why = redactor.redact(&decision.why);
+    }
+    redact_strings(redactor, &mut capsule.state.done);
+    redact_strings(redactor, &mut capsule.state.in_progress);
+    redact_strings(redactor, &mut capsule.state.blocked);
+    redact_strings(redactor, &mut capsule.state.next_steps);
+    for file in &mut capsule.files {
+        file.path = redactor.redact(&file.path);
+        file.note = redactor.redact(&file.note);
+    }
+    redact_strings(redactor, &mut capsule.gotchas);
+    redact_strings(redactor, &mut capsule.open_questions);
+}
+
+/// Redacts every string in one list.
+fn redact_strings(redactor: &crate::vault::Redactor, texts: &mut [String]) {
+    for text in texts {
+        *text = redactor.redact(text);
+    }
+}
+
+/// Redacts string values inside one decoded JSON value without touching object keys.
+fn redact_json_strings(redactor: &crate::vault::Redactor, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = redactor.redact(text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_strings(redactor, item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                redact_json_strings(redactor, item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 /// Returns whether an event belongs in a bundle tail.
