@@ -682,8 +682,12 @@ fn sudo_present(layout: &Layout) -> bool {
     if sudo.is_absolute() || sudo.components().count() > 1 {
         return is_executable(sudo);
     }
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(sudo))))
+    std::env::var_os("PATH").is_some_and(|paths| executable_in_paths(sudo, &paths))
+}
+
+/// Returns whether `name` names an executable in one `PATH`-style list.
+fn executable_in_paths(name: &Path, paths: &std::ffi::OsStr) -> bool {
+    std::env::split_paths(paths).any(|dir| is_executable(&dir.join(name)))
 }
 
 /// Returns whether one path names an executable regular file.
@@ -1111,6 +1115,18 @@ mod tests {
             !args.contains(&deps.paths.root().display().to_string()),
             "the helper must not receive the owner's home: {args:?}"
         );
+    }
+
+    #[test]
+    fn sudo_present_finds_a_bare_name_on_path() {
+        let tmp = tempdir().expect("tempdir");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).expect("fake bin");
+        fake_tool(&bin, "sudo", "#!/bin/sh\nexit 0\n");
+        let paths = std::env::join_paths([&bin]).expect("path list");
+
+        assert!(executable_in_paths(Path::new("sudo"), &paths));
+        assert!(!executable_in_paths(Path::new("other-sudo"), &paths));
     }
 
     #[test]
