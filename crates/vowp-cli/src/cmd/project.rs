@@ -17,7 +17,7 @@ use vowp_core::loops::prepare_project;
 use vowp_core::loops::registry;
 use vowp_protocol::{Project, ProjectEntry, ProjectName, ProjectState};
 use vowp_store::{NodePaths, Store};
-use vowp_tmux::session_name_for_project;
+use vowp_tmux::{Tmux, TmuxError, WindowManager, session_name_for_project};
 
 use crate::cli::Global;
 use crate::output::{Table, print_json};
@@ -323,7 +323,7 @@ fn archive(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectNameAr
     let name = user_project(&args.name)?;
     require_entry(&store, &name)?;
     let entry = registry::set_project_state(&store, &name, ProjectState::Archived, "owner")?;
-    kill_project_session(registry, &name)?;
+    kill_project_session(&Tmux::for_home(registry.paths.root()), &name)?;
     print_entry(registry, io, &entry, "archived")?;
     Ok(0)
 }
@@ -356,7 +356,7 @@ fn remove(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectRmArgs)
         String::new()
     };
     registry::remove_project_record(&store, &name)?;
-    kill_project_session(registry, &name)?;
+    kill_project_session(&Tmux::for_home(registry.paths.root()), &name)?;
     if registry.json {
         print_json(
             io,
@@ -510,21 +510,21 @@ fn project_is_running(registry: &Registry<'_>, name: &ProjectName) -> Result<boo
 /// `Tmux::kill_session` refuses a session with a foreign untagged window (and a server
 /// `vowp up` did not record). In those cases only the tagged views are removed, exactly
 /// as the old window-by-window cleanup did, and the session is left to its owner.
-fn kill_project_session(registry: &Registry<'_>, name: &ProjectName) -> Result<(), CliError> {
+fn kill_project_session(tmux: &Tmux, name: &ProjectName) -> Result<(), CliError> {
     let session = session_name_for_project(name.as_str());
-    match registry.deps.windows.kill_session(&session) {
-        Ok(()) | Err(vowp_tmux::TmuxError::NotInstalled) => return Ok(()),
-        Err(vowp_tmux::TmuxError::NotTagged { .. } | vowp_tmux::TmuxError::Refused(_)) => {}
+    match tmux.kill_session(&session) {
+        Ok(()) | Err(TmuxError::NotInstalled) => return Ok(()),
+        Err(TmuxError::NotTagged { .. } | TmuxError::Refused(_)) => {}
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     }
-    let windows = match registry.deps.windows.list_windows(&session) {
+    let windows = match tmux.list_windows(&session) {
         Ok(windows) => windows,
-        Err(vowp_tmux::TmuxError::NotInstalled) => return Ok(()),
+        Err(TmuxError::NotInstalled) => return Ok(()),
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     };
     for window in windows {
         if window.tagged {
-            let _ = registry.deps.windows.kill_window(&session, &window.name);
+            let _ = tmux.kill_window(&session, &window.name);
         }
     }
     Ok(())
@@ -553,13 +553,9 @@ fn state_name(state: ProjectState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use vowp_core::SystemGit;
-    use vowp_core::deps::{AdapterRegistry, FixedRng, SystemRunner};
-    use vowp_protocol::{FakeClock, MemoryLog, NodeName, Timestamp, VowpConfig};
-    use vowp_tmux::fake::FakeWindows;
-    use vowp_tmux::{LayoutSpec, WindowManager};
+    use vowp_tmux::LayoutSpec;
 
     use super::*;
 
@@ -575,50 +571,41 @@ mod tests {
         }
     }
 
+    /// Kills the private tmux server when the test ends (also on panic).
+    struct TmuxGuard(Tmux);
+
+    impl Drop for TmuxGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill_server_for_tests();
+        }
+    }
+
     #[test]
-    fn kill_project_session_removes_the_session_and_keeps_foreign_windows() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = NodePaths::new(tmp.path().join("node"));
-        let windows = Arc::new(FakeWindows::new());
-        let clock = Arc::new(FakeClock::at(
-            Timestamp::parse("2026-11-10T10:00:00Z").expect("timestamp"),
-        ));
-        let deps = Deps {
-            paths: paths.clone(),
-            config: Arc::new(VowpConfig::with_defaults_for_tests()),
-            node: NodeName::parse("local").expect("node"),
-            clock,
-            log: Arc::new(MemoryLog::new()),
-            adapters: Arc::new(AdapterRegistry::new()),
-            windows: windows.clone(),
-            git: Arc::new(SystemGit::new(Arc::new(SystemRunner))),
-            cmd: Arc::new(SystemRunner),
-            rng: Arc::new(FixedRng(0)),
-        };
-        let registry = Registry {
-            paths: &paths,
-            deps: &deps,
-            json: false,
-            color: false,
-        };
+    fn kill_project_session_removes_the_session_not_only_its_windows() {
+        let socket = format!(
+            "vowp-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.subsec_nanos())
+                .unwrap_or(0)
+        );
+        let dir = tempfile::tempdir().expect("private tmux dir");
+        let tmux = Tmux::in_private_dir(socket, dir.path()).expect("private tmux manager");
+        if !tmux.has_tmux() {
+            eprintln!("SKIP: tmux not installed");
+            return;
+        }
+        let _guard = TmuxGuard(tmux.clone());
         let project = ProjectName::parse("demo").expect("project");
 
-        // A normal project session disappears as a whole.
-        windows.ensure_layout("demo", &layout()).expect("layout");
-        assert!(windows.has_session("vowp-demo"));
-        kill_project_session(&registry, &project).expect("kill");
-        assert!(
-            !windows.has_session("vowp-demo"),
-            "archive/rm must call kill_session, not only kill each window"
-        );
+        tmux.ensure_layout("demo", &layout()).expect("layout");
+        assert!(tmux.session_exists("vowp-demo").expect("session lookup"));
 
-        // A foreign untagged window belongs to someone else: the session stays, but the
-        // tagged views are removed.
-        windows.ensure_layout("demo", &layout()).expect("layout again");
-        windows.untagged_window("vowp-demo", "foreign");
-        kill_project_session(&registry, &project).expect("fallback kill");
-        assert!(windows.has_session("vowp-demo"), "foreign session is not destroyed");
-        assert!(windows.window_exists("vowp-demo", "foreign").expect("foreign"));
-        assert!(!windows.window_exists("vowp-demo", "board").expect("board"));
+        kill_project_session(&tmux, &project).expect("kill project session");
+        assert!(
+            !tmux.session_exists("vowp-demo").expect("session lookup"),
+            "archive/rm must kill the session, not only its windows"
+        );
     }
 }

@@ -82,7 +82,29 @@ pub mod l7 {
 
 /// L8 watchdog helpers (spec: `loops.md` §10).
 pub mod l8 {
-    pub use super::l8_watchdog::{CRON_CHECK_SH, STALE_AFTER_SECS, SYSTEMD_UNIT, heartbeat_age, write_heartbeat};
+    pub use super::l8_watchdog::{CRON_CHECK_SH, STALE_AFTER_SECS, heartbeat_age, write_heartbeat};
+
+    /// The `vowp.service` systemd user unit text, aligned with `scripts/vowp.service`.
+    ///
+    /// The v0.1 constant in `l8_watchdog` is kept for source compatibility; this public
+    /// module value is the one `vowp init` and the L8 tests use. `Restart=on-failure` is
+    /// deliberate: a clean `vowp down` exits 0 and must not be restarted by systemd.
+    pub const SYSTEMD_UNIT: &str = "[Unit]\n\
+Description=VOWP node supervisor\n\
+After=network-online.target\n\
+Wants=network-online.target\n\
+\n\
+[Service]\n\
+Type=simple\n\
+Environment=VOWP_HOME=%h/.vowp\n\
+ExecStart=%h/.local/bin/vowp up --foreground\n\
+Restart=on-failure\n\
+RestartSec=5\n\
+KillMode=mixed\n\
+WorkingDirectory=%h/.vowp\n\
+\n\
+[Install]\n\
+WantedBy=default.target\n";
 }
 
 /// L2 prompt templates (spec: `loops.md` §3).

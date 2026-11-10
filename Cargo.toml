@@ -161,5 +161,4 @@ vowp-tmux = { version = "0.1.0", path = "crates/vowp-tmux" }
 workspace = true
 
 [dev-dependencies]
-rusqlite = { version = "0.40.2", features = ["bundled"] }
 tempfile = "3.27.0"
