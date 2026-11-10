@@ -2,7 +2,8 @@
 
 Status: planned for v0.3, **not** part of v0.2. These notes were moved here by the v0.2 spec
 (`docs/design/v0.2/home-and-surfaces.md`) because v0.2's surfaces are the opencode/Claude apps and
-`vowp chat`, and v0.2 opens no listening socket.
+`vowp chat`, and v0.2 opens no **public** HTTP/SSE API or public port. Its only listeners are the
+loopback-only secret paste page and the app server joined through an SSH tunnel.
 
 ## Why they moved
 

@@ -911,13 +911,21 @@ Exit mapping: `WrongProject` and `NoProject` are `ErrorKind::InvalidInput` (exit
 naming the bound project or `--project`; `MigrationRequired` is `ErrorKind::Conflict` (exit 4) with
 the hint `vowp migrate`. The CLI exit table (§12.4) repeats this.
 
-`insert_job`, `patch_job`, `insert_release`, `update_release`, `upsert_loop`, `insert_schedule`,
-`insert_inbox`, `append_ledger` and `insert_run` return `WrongProject` for a mismatched name.
-`list_jobs`, `list_edges`, `count_jobs_by_state`, `list_releases`, `list_inbox`, `ledger_since` and
-`cost_totals` return `WrongProject` for a filter that names another project. A `None` filter means
-"the bound project" (or "all" for the fleet methods that open each project DB in turn). A
-project-scoped method on an unbound handle returns `NoProject`; `Store::open` auto-binds when the
-registry has exactly one non-reserved project, so the v0.1 callers never see it.
+Only methods whose arguments or filters can name a project return `WrongProject`:
+`insert_job(project, …)`, `insert_release`/`update_release` (`Release.project`),
+`upsert_loop` (`Loop.project`), `insert_schedule` (`Schedule.project`), `insert_inbox`
+(`InboxItem.project`), `append_ledger` (`LedgerEntry.project`), `list_jobs` (`JobFilter.project`),
+`list_edges(Option<&ProjectName>)`, `count_jobs_by_state(Option<&ProjectName>)`,
+`list_releases(project, …)` and `cost_totals` (`CostQuery.project`). A `None` where the method
+allows it means "the bound project".
+
+Methods with no project argument never take another project: `patch_job`, `insert_run`, `list_inbox`,
+`ledger_since` and the run/worker/session repositories operate on the bound project. They return
+`NoProject` on an unbound handle; a row that belongs elsewhere is `NotFound` (the row is not in this
+project DB), `InvalidInput` (a job/run id that cannot belong here) or `Corrupt` (a stored
+`jobs.project` that disagrees with the bound project). `list_inbox` and `ledger_since` read the
+bound project plus the node rows; they need no project filter. This keeps the v0.1 signatures
+source-compatible.
 
 ### 3.7 Store binding, ordered writes and reconcile
 
@@ -946,10 +954,21 @@ impl Store {
     /// In-memory global + one lazily attached in-memory project DB (tests).
     pub fn open_memory() -> Result<Store, StoreError>;
     pub fn project(&self) -> Option<&ProjectName>;
+    /// Compatibility accessor: the bound project's `PRAGMA user_version` (1) when bound, else the
+    /// global version (2). The v0.1 tests (`vowp-core/tests/deps.rs`, `vowp-cli/tests/maint.rs`)
+    /// assert 1, so this stays their answer.
+    pub fn schema_version(&self) -> Result<i64, StoreError>;
+    /// The global file's `PRAGMA user_version` (2). `vowp doctor` and `vowp migrate` print this.
+    pub fn global_schema_version(&self) -> Result<i64, StoreError>;
     pub fn project_schema_version(&self) -> Result<i64, StoreError>;
     /// Runs at supervisor startup and after a crash. Repairs half-done cross-file pairs.
     pub fn reconcile_cross_db(&self) -> Result<CrossDbReconcile, StoreError>;
 }
+
+`schema_version()` is the compatibility shim described above: a `Deps`-bound handle reports the
+project's 1, a global handle reports 2. This keeps the existing core/CLI tests green without editing
+them; new code that means the global file calls `global_schema_version()`. `vowp doctor` prints both
+(`global 2, project 1`).
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CrossDbReconcile {
@@ -975,13 +994,19 @@ projects use two stores (or a temporary file), never two project DBs on one conn
 
 Routing for the renamed tables (binding for C1):
 
-- `insert_inbox(project=None)` writes `node_inbox`; `Some(p)` writes the project `inbox` and returns
-  `WrongProject` if the handle is bound elsewhere. A `job_id` with `project=None` is
-  `InvalidInput`: a job item belongs to exactly one project, and letting it float would show it in
-  every project's L7. `list_inbox` on a bound handle reads the project inbox plus `node_inbox` rows
-  whose `project` is `NULL` or equals the bound project; de-duplicates by id (ids are ULIDs, so a
-  collision is corruption, not a merge) and sorts `created_at, id`. `inbox_item`, `answer_inbox`
-  and `dismiss_inbox` look in `node_inbox` first, then the project inbox. `vowp inbox answer` on a
+- `insert_inbox(&InboxItem)` routes by `item.project`: `None` writes `node_inbox`, `Some(p)` writes
+  the project `inbox` and returns `WrongProject` if the handle is bound elsewhere. A `job_id` with
+  `project=None` is `InvalidInput`: a job item belongs to exactly one project, and letting it float
+  would show it in every project's L7.
+- `insert_node_inbox(&InboxItem)` is the explicit node-level writer: it always writes `node_inbox`,
+  allows `project = Some(p)` for a notice about project `p`, and requires `project = Some(p)` when
+  `job_id` is set. §4.2 (broken project) and §6.3 (OOM job) use this, so a node notice can name its
+  project without being copied into every project's inbox. On a bound handle it still writes the
+  global table; a project name that is not registered is `InvalidInput`.
+- `list_inbox` on a bound handle reads the project inbox plus `node_inbox` rows whose `project` is
+  `NULL` or equals the bound project; de-duplicates by id (ids are ULIDs, so a collision is
+  corruption, not a merge) and sorts `created_at, id`. `inbox_item`, `answer_inbox` and
+  `dismiss_inbox` look in `node_inbox` first, then the project inbox. `vowp inbox answer` on a
   fleet-wide item therefore keeps working on a bound handle.
 - `append_ledger(project=None)` writes `node_ledger`; `Some(p)` writes the project `ledger`.
   `ledger_since` and `cost_totals` read both and merge; a `Some(p)` query includes the project's
@@ -991,11 +1016,12 @@ Routing for the renamed tables (binding for C1):
   `kv['req:<ULID>']`; with several projects every project's `step_requests` would drain every
   project's job request. v0.2 keys are `kv['req:<project>:<ULID>']` for a request that names a
   project job/loop/schedule, and `kv['req:node:<ULID>']` for a node-wide request (`Wake`).
-  `Store::push_request` on a bound handle writes the project key; on an unbound handle it writes the
-  node key. `Store::take_requests` on a bound handle atomically drains that project's keys **and**
-  the node keys; on an unbound handle it drains only node keys. The `kind`/`payload` wire form is
-  unchanged, so `vowp_core::requests` needs no change. A decoded project request for another
-  project can never reach this handle; a test proves it.
+  `Store::push_request` on a bound handle writes the project key **unless `kind == "wake"`**, which
+  always writes the node key; on an unbound handle every request writes the node key.
+  `Store::take_requests` on a bound handle atomically drains that project's keys **and** the node
+  keys; on an unbound handle it drains only node keys. The `kind`/`payload` wire form is unchanged,
+  so `vowp_core::requests` needs no change. A decoded project request for another project can never
+  reach this handle; a test proves it.
 
 Write order and idempotency:
 
@@ -1101,9 +1127,11 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
    or if `journal_mode` is not WAL. Read `projects`; every project row is split into its own DB.
    The **primary project** is the one with the most jobs (ties: lexicographically first); node-scoped
    rows with no project column (`workers`, runs with `job_id IS NULL`) go there. Refuse if a job,
-   loop, schedule, inbox or release names a project that has no registry row, or if an edge's two
-   jobs are in different projects (v0.1 never wrote those; report the ids). This handles a real
-   v0.1 home that registered a second project before discovering that one supervisor cannot run it.
+   loop, schedule, inbox or release names a project that has no registry row, if an inbox
+   `job_id` does not resolve to a `jobs` row (it would become a job-bearing `node_inbox` item with
+   no project), or if an edge's two jobs are in different projects (v0.1 never wrote those; report
+   the ids). This handles a real v0.1 home that registered a second project before discovering that
+   one supervisor cannot run it.
 2. **Backup.** `Store::backup` the whole file to
    `~/.vowp/backups/pre-0.2-<UTC timestamp>.db`; fsync the backups directory; print the path.
 3. **Manifest.** Write `~/.vowp/migration.json` (0600) with
@@ -1137,9 +1165,11 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
    ```sql
    INSERT INTO node_inbox (id, project, job_id, kind, title, body, options_json,
                            state, answer, answered_by, created_at, answered_at)
-   SELECT id, NULL, job_id, kind, title, body, options_json,
-          state, answer, answered_by, created_at, answered_at
-   FROM old.inbox WHERE old.inbox.project IS NULL;
+   SELECT i.id,
+          (SELECT j.project FROM old.jobs j WHERE j.id = i.job_id),
+          i.job_id, i.kind, i.title, i.body, i.options_json,
+          i.state, i.answer, i.answered_by, i.created_at, i.answered_at
+   FROM old.inbox i WHERE i.project IS NULL;
 
    INSERT INTO node_ledger (id, ts, kind, project, job_id, run_id, session_id, role,
                             provider, harness, model, usd, tokens_in, tokens_out,
@@ -1229,6 +1259,7 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
    - every `jobs.project`, `releases.project` equals `:p`;
    - every `runs.session_id` is `NULL` or exists in global `sessions`;
    - every `inbox.job_id` is `NULL` or exists in project `jobs`;
+   - every `node_inbox.job_id` is `NULL` or has a non-NULL `project` that exists in `projects`;
    - every `workers.job_id`/`workers.run_id` is `NULL` or exists in that project's `jobs`/`runs`;
      the number of dropped unassignable workers equals the report's count;
    - no project table contains a `REFERENCES projects` clause (`PRAGMA foreign_key_list`);
@@ -1309,7 +1340,8 @@ automatically after step 2's backup unless `--no-migrate` is given.
   running work finishes and nothing new starts. An **archived** project gets no tick.
 - A project step panic or error is caught; `loops['l1-supervisor'].fail_streak` increments and the
   next project runs. At 3 consecutive failures the node supervisor sets
-  `projects.state='paused'`, `paused_reason='broken: <error>'`, writes a `node_inbox` `notice`
+  `projects.state='paused'`, `paused_reason='broken: <error>'`, writes a `node_inbox` `notice` via
+  `Store::insert_node_inbox` with `project = Some(<that project>)`
   ("project X paused after 3 failed ticks: …"), and continues the fleet. `vowp project resume`
   clears it. One broken project never stops another.
 - `vowp project pause <p>` sets `state='paused'` with reason `owner`, stops new dispatch, and lets
@@ -1682,6 +1714,11 @@ board` the refreshing terminal view. Both accept every project.
     `mean_cpu_cores = 1.0`, labelled "default";
   - E1 records one `run_usage` row per finished run, including `oom_killed` from the cgroup
     `memory.events` `oom_kill` delta (fallback: outcome `killed` + a memory-heavy estimate).
+- **No `/proc` (macOS or a minimal container).** The sampler writes `source='fallback'` samples with
+  the fields it can read. Admission skips the RAM/CPU checks and uses the owner's `fixed` target
+  when one is set, else `1`; the disk check still runs. The board and `capacity show` print
+  `capacity: fallback (no /proc), target <n>` so the degradation is visible, exactly as the plan
+  requires. `auto` never silently claims a measured target on such a host.
 - **Estimates.** One `usage_estimates` row per exact `(project, job_kind, harness, model)` from the
   last 50 `run_usage` rows. With fewer than 5 samples, pool in this order until a pool has 5:
   exact → same `(project, job_kind, harness)` → same `(project, job_kind)` → same `job_kind` across
@@ -1925,7 +1962,8 @@ pub enum BrakeCode { MemoryPressure, SwapGrowth, DiskLow, Provider }
 - `Provider`: every provider of the project's next run is limited.
 - Brakes clear automatically when the condition clears for two samples. Running work is never
   signalled. A kernel OOM kill is recorded (`run_usage.oom_killed=1`), the job is parked with a
-  `node_inbox` notice, and its estimate's p90 is raised by 25% for the next admission.
+  `node_inbox` notice via `Store::insert_node_inbox` with `project = Some(<job project>)`, and its
+  estimate's p90 is raised by 25% for the next admission.
 - The board shows `brake: memory pressure (avg10 14.2)` and the owner override line
   `owner override: 8 (advised 5)`.
 
@@ -2099,12 +2137,29 @@ fake SSH process mid-stream and asserts no gap and no duplicate.
 pub enum RemoteLine {
     Hello { session_id: SessionId, run_id: RunId, executor: String, node: NodeName,
             spool_id: String, lease: String },
-    Event { event_id: EventId, ts: Timestamp, actor: Actor, source: EventSource,
-            body: EventBody, raw: Option<serde_json::Value>, replayable: bool },
+    Event { event: RemoteEvent },
     Heartbeat { at: Timestamp },
     Summary { exit_code: Option<i32>, outcome: RunOutcome, native_session_id: Option<String>,
               cost: Cost, limit: Option<LimitEvent>, result_text: Option<String>,
               stop_reason: StopReason, usage: Option<RemoteUsage> },
+}
+
+/// The serializable part of one event, without the home-assigned `session_id`/`seq`.
+///
+/// `EventBody` itself has no serde implementation (it is the typed view of an envelope's
+/// `payload`); `__exec` builds this from `EventBody::event_type()` + `EventBody::to_value()`,
+/// and `ingest` rebuilds the body with `EventBody::from_parts` before `append_with_id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteEvent {
+    pub id: EventId,
+    pub ts: Timestamp,
+    #[serde(rename = "type")]
+    pub event_type: EventType,
+    pub actor: Actor,
+    pub source: EventSource,
+    pub payload: serde_json::Value,
+    pub raw: Option<serde_json::Value>,
+    pub replayable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2950,8 +3005,11 @@ The plan never contains a secret value, a token or a private key. `requires` ent
 Global flags, exit codes, id prefixes and error JSON are unchanged from `cli.md` §1. New commands
 follow the same rules: `--json` prints one document (lists print arrays), errors are
 `{"error":{"kind","message","hint?}}` and exit codes are the v0.1 table. A command that cannot run
-exits 2 with `not implemented in this build` only in C0; no final build ships a stub (the existing
-`no_command_returns_not_implemented` test is extended).
+exits **1** with `not implemented in this build` only in C0; no final build ships a stub (the
+existing `no_command_returns_not_implemented` test is extended). `CliError::NotImplemented` is
+already mapped to `ErrorKind::Internal`/exit 1 by `crates/vowp-cli/src/errors.rs`, and
+`crates/vowp-cli/tests/core.rs` asserts that; this spec follows the code, so C0 needs neither
+`errors.rs` nor that test in its owns.
 
 ### 12.1 New top-level commands
 
@@ -2968,7 +3026,6 @@ exits 2 with `not implemented in this build` only in C0; no final build ships a 
 | `orchestrator` | `new [--name] [--project] --app <a> [--executor]`, `ls`, `stop <n>`, `resume <n>` | `OrchestratorCard` / `[OrchestratorCard]` |
 | `migrate` | `[--dry-run] [--rollback <backup>] [--yes]` | `MigrationReport` |
 | `mcp` | `--session <id> --surface <id> --token-file <path>` | stdio MCP, no `--json` |
-| `chat` | `[<session>] [--executor] [--node] [--follow] [--takeover]` | interactive only |
 
 Hidden commands (not in `--help`): `__exec`, `__vault-exec`, `__window capacity`,
 `session turn-begin`, `session ingest`, `session lease`, `session takeover`.
@@ -2988,6 +3045,7 @@ Hidden commands (not in `--help`): `__exec`, `__vault-exec`, `__window capacity`
 | `loops` | Loop rows are per project. `loops`/`loops pause/resume` use the selected project; with more than one project and no `--project`, exit 2 listing them. `loops --all` lists every project's rows with a project column. Provider `limits` stay global, so L6 state is per project but the limit row it writes is shared. |
 | `schedule` | Schedules are per project. `schedule add/ls/pause/resume/rm` use the selected project; `--all` lists every project's rows. A node-wide `[[schedules]]` is not supported in v0.2; the node-level L9 is the `gc-nightly` command schedule in each project. |
 | `node` | On control, reads `nodes.json`; on home, unchanged plus `host`-aware rows. `node add <name> -` registers a surface-only executor node (a laptop that dials the home; the home never dials it). |
+| `chat` | Changed, not new: v0.1 already has `chat` as an alias of `session chat`. F3 adds `--executor/--node/--follow/--takeover` and the lease/remote handler; `chat` stays in `V0_1_COMMANDS`, not `V0_2_COMMANDS`. |
 
 ### 12.3 `--json` shapes for the complex commands
 
@@ -3103,14 +3161,14 @@ a passing test. Everything in this section is binding for C0 and for the feature
   `RunUsage`, `UsageSource`, `UsageEstimate`, `EstimateSource`, `AdmitRequest`, `AdmitDecision`,
   `WaitReason`, `WaitCode`, `BrakeState`, `BrakeReason`, `BrakeCode`, `TargetMode`,
   `CapacityTarget`, `CapacityAdvice`, `AdviceState`, `CapacityReport`, `RunningCapacity`,
-  `WaitingJob`).
+  `WaitingJob`, `RemoteUsage`).
 - `vowp-protocol/src/surface.rs` — `SurfaceId`, `SurfaceKind`, `Surface`, `Lease`, `SurfaceRef`,
-  `TakeoverReport`, `RemoteLine`, `IngestAck`, `TurnGrant`, `OrchestratorApp`, `OrchestratorCard`,
-  `JoinInstructions`.
+  `LeaseStatus`, `TakeoverReport`, `RemoteEvent`, `RemoteLine`, `IngestAck`, `TurnGrant`,
+  `OrchestratorApp`, `OrchestratorCard`, `JoinInstructions`.
 - `vowp-protocol/src/snapshot.rs` — `SNAPSHOT_FORMAT`, `SNAPSHOT_VERSION`, `ProjectState`,
   `ProjectEntry`, `Snapshot`, `SupervisorSnapshot`, `ProjectSnapshot`, `RunningJobCard`,
   `BlockedJobCard`, `QueueJobCard`, `MergeCard`, `GateFailureCard`, `InboxSummary`,
-  `SessionSurfaceCard`.
+  `SessionSurfaceCard`, `CapacitySnapshot`.
 - `vowp-protocol/src/catalog.rs` — `CatalogClass`, `CatalogEntry`, `GcReport`, `GcClassReport`,
   `BackupReport`, `BackupFile`, `CatalogFilter`.
 - `vowp-protocol/src/vault.rs` — `SecretName`, `SecretInfo`, `VaultMode`, `SecretRequest`.
@@ -3120,6 +3178,11 @@ a passing test. Everything in this section is binding for C0 and for the feature
   and 714); `session.rs` only re-exports `SessionRole` and imports `SwitchReason`, so do **not**
   edit `session.rs` for these variants. C0's `owns` must name `crates/vowp-protocol/src/event.rs`.
 - `vowp-protocol/src/schema.rs` — add the new types to `all_schemas()`; add `snapshot`.
+
+Core-only helper types have explicit homes: `SamplerHandle` in `capacity/sampler.rs`,
+`ScopeSample`/`ProcFs` in `capacity/scope.rs`, `AdviceTrigger` in `capacity/advisor.rs`;
+`UsageQuery`/`EstimateKey` are store types in `vowp-store/src/repo_capacity.rs`. They are declared
+by C0 as stubs and filled by E1/E2/E3/C1.
 
 All new types derive `Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema`; enums use
 `#[serde(rename_all = "snake_case")]`; timestamps are `Timestamp`. No new dependency is needed.
@@ -3304,7 +3367,8 @@ pub fn native_event(&self, session: &SessionId, harness: HarnessKind, native_id:
     -> Result<Option<EventId>, StoreError>;
 pub fn set_session_compacted(&self, session: &SessionId, at: Timestamp) -> Result<(), StoreError>;
 
-// repo_misc.rs (secrets)
+// repo_misc.rs (inbox + secrets)
+pub fn insert_node_inbox(&self, i: &InboxItem) -> Result<(), StoreError>;
 pub fn upsert_secret_index(&self, name: &SecretName, last4: &str, now: Timestamp) -> Result<(), StoreError>;
 pub fn list_secret_index(&self) -> Result<Vec<SecretInfo>, StoreError>;
 pub fn remove_secret_index(&self, name: &SecretName) -> Result<bool, StoreError>;
@@ -3411,33 +3475,47 @@ keeps v0.1 behaviour exactly.
    (three at the top, snapshot at the end); C2 may call it once instead of the four lines. C0's
    bodies are no-ops.
 
-### 13.5 CLI stubs (C0)
+### 13.5 CLI stubs and the `cli.rs` freeze (C0)
 
-C0 adds one `Args` struct per command in its own `cmd/<name>.rs` and only one enum line per command
-in `cli.rs`:
+`crates/vowp-cli/src/cli.rs` is C0-owned, and it is the one place where every command variant and
+every flag is declared. C0 adds, in the same commit as the stubs:
+
+- the new top-level commands `project`, `fleet`, `capacity`, `secret`, `gc`, `tunnel`, `setup`,
+  `control`, `orchestrator`, `migrate`, `exec` (hidden `__exec`) and `mcp`;
+- the hidden `SessionCommand` variants `TurnBegin` and `Ingest` (handlers in `cmd/session.rs`, F1)
+  and `Lease` and `Takeover` (handlers in the new `cmd/lease.rs`, F2);
+- the new/changed flags on existing commands: `ChatArgs` (`--executor/--node/--follow/--takeover`),
+  `BackupArgs` (`--to/--offsite/--encrypt/--restore/--to-home`), `SchemaArgs` (`snapshot`),
+  `LoopsArgs` (`--all`), `ScheduleArgs` (`--all`), `InitArgs`/`DoctorArgs` (project/doctor checks);
+- a new `cmd/schema.rs` and its dispatch, moving the `schema` command out of `cmd/maint.rs`, so
+  D1's `vowp schema snapshot` has an owned file (H2 keeps `backup`/`reindex` in `maint.rs`);
+- `vowp-protocol/src/schema.rs` to C0's owns for `all_schemas()`.
+
+The command files:
 
 ```text
-cmd/project.rs      ProjectArgs { command: ProjectCommand }
-cmd/fleet.rs        FleetArgs { command: FleetCommand }
-cmd/capacity.rs     CapacityArgs { command: CapacityCommand }
-cmd/secret.rs       SecretArgs { command: SecretCommand }
-cmd/gc.rs           GcArgs { apply, class, now }
-cmd/tunnel.rs       TunnelArgs { command: TunnelCommand }
-cmd/setup.rs        SetupArgs { command: SetupCommand }
-cmd/control.rs      ControlArgs { command: ControlCommand }
-cmd/orchestrator.rs OrchestratorArgs { command: OrchestratorCommand }
-cmd/migrate.rs      MigrateArgs { dry_run, rollback, yes }
-cmd/exec.rs         ExecArgs { grant: PathBuf, spool_dir: Option<PathBuf> }
-cmd/mcp.rs          McpArgs { session, surface, token_file }
+cmd/project.rs      ProjectArgs { command: ProjectCommand }            (C0 stub; C2)
+cmd/fleet.rs        FleetArgs { command: FleetCommand }                (C0 stub; D1)
+cmd/capacity.rs     CapacityArgs { command: CapacityCommand }          (C0 stub; E2)
+cmd/secret.rs       SecretArgs { command: SecretCommand }              (C0 stub; G1)
+cmd/gc.rs           GcArgs { apply, class, now }                       (C0 stub; H1)
+cmd/tunnel.rs       TunnelArgs { command: TunnelCommand }              (C0 stub; D2)
+cmd/setup.rs        SetupArgs { command: SetupCommand }                (C0 stub; I1)
+cmd/control.rs      ControlArgs { command: ControlCommand }            (C0 stub; D2)
+cmd/orchestrator.rs OrchestratorArgs { command: OrchestratorCommand }  (C0 stub; F4)
+cmd/migrate.rs      MigrateArgs { dry_run, rollback, yes }             (C0 stub; C2)
+cmd/exec.rs         ExecArgs { grant: PathBuf, spool_dir: Option<PathBuf> } (C0 stub; F1)
+cmd/mcp.rs          McpArgs { session, surface, token_file }           (C0 stub; F6)
+cmd/lease.rs        LeaseArgs/TakeoverArgs (hidden)                    (C0 stub; F2)
+cmd/schema.rs       SchemaArgs { command }                             (C0 stub; D1)
 ```
 
-`cmd/session.rs` is owned by F1/F2/F3, not C0; the hidden `turn-begin`, `ingest`, `lease` and
-`takeover` subcommands are added by those jobs. C0's help test only compares the top-level commands
-in `V0_1_COMMANDS ∪ V0_2_COMMANDS`, so hidden subcommands are not part of the freeze.
-
-Every handler returns `CliError::NotImplemented("...")` and exit 2 in C0; `vowp --help` lists the
-new commands and `V0_2_COMMANDS` is added next to `V0_1_COMMANDS` for the help test. No feature job
-re-adds a command; it fills the existing file.
+`cmd/session.rs` stays F1/F3-owned; C0 only declares `TurnBegin`/`Ingest` in `cli.rs`. F1 adds the
+handlers before F3 edits the same file in its wave. Every handler returns
+`CliError::NotImplemented("...")` and **exit 1** in C0 (the current `errors.rs` mapping; no unowned
+file edit); `vowp --help` lists the new top-level commands and `V0_2_COMMANDS` is added next to
+`V0_1_COMMANDS` for the help test (without `chat`, which is already v0.1). No feature job re-adds a
+command; it fills the existing file.
 
 ### 13.6 CLI support types
 
@@ -3493,15 +3571,16 @@ the `Worker | User` arm).
 
 | Job | Creates/fills |
 |---|---|
-| C2 | `loops/supervisor.rs` (`NodeSupervisor`), `loops/mod.rs`, `loops/reconcile.rs`, `cmd/up.rs`, `cmd/project.rs`, `cmd/migrate.rs`, `node_ctx.rs`, `scripts/vowp.service`, `framework/templates/scripts/vowp.service`, tests `loops_supervisor.rs`, `node_supervisor.rs`, `up.rs` |
+| C0 | `cli.rs`, `cmd/mod.rs`, `cmd/schema.rs` (new), `vowp-protocol/src/schema.rs`, `vowp-core/src/deps.rs` (the `open_store` line), `vowp-protocol/src/event.rs` (the two enum variants), and the new stub files listed in §13.5 |
+| C2 | `loops/supervisor.rs` (`NodeSupervisor`), `loops/mod.rs`, `loops/reconcile.rs`, `cmd/up.rs`, `cmd/project.rs`, `cmd/migrate.rs`, `cmd/init.rs`, `cmd/loops.rs`, `cmd/schedule.rs`, `node_ctx.rs`, `scripts/vowp.service`, `framework/templates/scripts/vowp.service`, tests `loops_supervisor.rs`, `node_supervisor.rs`, `up.rs` |
 | F1 | `session/{service,switch,remote}.rs`, `cmd/{exec,session}.rs`, `ssh_stream.rs`, tests `session_run.rs`, `switch.rs`, `remote_exec.rs`, `session.rs` |
 | E1 | `capacity/{sampler,usage,estimates,scope}.rs`, `repo_capacity.rs`, `vowp-adapters/src/proc/mod.rs`, `gates/cmd.rs`, `capacity_measure.rs` |
-| D1 | `fleet/**`, `ledger/board.rs`, `cmd/{fleet,status,board}.rs`, `fleet_snapshot.rs`, `status.rs`, `board.rs` |
+| D1 | `fleet/**`, `ledger/board.rs`, `cmd/{fleet,status,board,doctor,schema}.rs`, `fleet_snapshot.rs`, `status.rs`, `board.rs` |
 | D2 | `ctx.rs`, `remote.rs`, `cmd/{control,tunnel,node}.rs`, `remote.rs`, `control.rs` |
 | G1 | `vault/**`, `cmd/secret.rs`, `vault.rs` |
 | H1 | `lifecycle/{mod,classes,gc,compact}.rs`, `repo_catalog.rs`, `cmd/gc.rs`, `lifecycle.rs` |
-| H2 | `lifecycle/backup.rs`, `cmd/maint.rs`, `maint.rs` |
-| F2 | `surface/{lease,takeover}.rs`, `repo_surfaces.rs`, `surface_lease.rs` |
+| H2 | `lifecycle/backup.rs`, `cmd/maint.rs` (backup/reindex only; `schema` moved to D1), `maint.rs` |
+| F2 | `surface/{lease,takeover}.rs`, `repo_surfaces.rs`, `cmd/lease.rs` (new; `session lease/takeover`), `surface_lease.rs` |
 | E2 | `capacity/{admit,brakes,targets,fair}.rs`, `loops/dispatch.rs`, `cmd/capacity.rs`, `capacity_admit.rs` |
 | F5 | `surface/{native,opencode_host,claude_remote,mirror}.rs`, `session/importer.rs`, `app_hosts.rs`, `mirror.rs` |
 | F6 | `cmd/mcp.rs`, `mcp/**`, `mcp.rs` |
@@ -3510,6 +3589,30 @@ the `Worker | User` arm).
 | F4 | `surface/orchestrator.rs`, `cmd/orchestrator.rs`, `framework/skills/vowp-orchestrator/**`, `framework/templates/ORCHESTRATOR.md`, `framework.rs`, `orchestrator.rs` |
 | I1 | `cmd/setup.rs`, `setup/**`, `scripts/install.sh`, `setup.rs` |
 | I1b | `setup/verify.rs`, `setup_verify.rs` |
+
+### 14.1 Ownership extensions required by this spec
+
+The v0.2 card `owns` lists were written before the interfaces below were frozen. The supervisor must
+extend them (this spec cannot edit the private plan) before the named jobs start; a job must never
+edit one of these paths silently.
+
+| Path | Owner | Why |
+|---|---|---|
+| `crates/vowp-cli/src/cli.rs` | C0 | Every new top-level variant and every changed `*Args` flag, including the hidden `SessionCommand::{TurnBegin,Ingest,Lease,Takeover}`; F1/F2/F3 only fill handlers. |
+| `crates/vowp-cli/src/cmd/mod.rs` | C0 | Declares `schema`, `lease` and the other new modules. |
+| `crates/vowp-cli/src/cmd/schema.rs` | C0 stub, D1 fills | `vowp schema snapshot`; moved out of `cmd/maint.rs` so H2 and D1 do not share a file. |
+| `crates/vowp-protocol/src/schema.rs` | C0 | `all_schemas()` must include `Snapshot` and the new types. |
+| `crates/vowp-protocol/src/event.rs` | C0 | `SessionRole::Orchestrator` and `SwitchReason::Takeover` are defined here, not in `session.rs`. |
+| `crates/vowp-core/src/deps.rs` | C0 | The `open_store()` project binding in §3.8; no `Deps` field change. |
+| `crates/vowp-cli/src/cmd/init.rs` | C2 | `init` creates the project DB and `_node`, and registers the project. |
+| `crates/vowp-cli/src/cmd/loops.rs` | C2 | Loop rows are per project; `--all` and the project selection. |
+| `crates/vowp-cli/src/cmd/schedule.rs` | C2 | Schedules are per project; `--all` and the project selection. |
+| `crates/vowp-cli/src/cmd/doctor.rs` | D1 | Projects, snapshot and schema checks; G1 supplies `vault::mode`, no doctor edit. |
+| `crates/vowp-cli/src/cmd/lease.rs` | F2 (new) | `session lease` and `session takeover` handlers; keeps F1/F3's `cmd/session.rs` untouched. |
+| `crates/vowp-cli/src/cmd/maint.rs` | H2 | Keeps `backup`/`reindex`; the `schema` handler moves to D1's new file. |
+
+`crates/vowp-cli/src/errors.rs` and `crates/vowp-cli/tests/core.rs` are **not** extended: C0 stubs
+exit 1 through the existing `NotImplemented` mapping, which the test already asserts.
 
 ---
 
@@ -3531,6 +3634,7 @@ is not allowed.
 `migration_workers_follow_their_job_project`, `migration_unassignable_workers_dropped_and_reported`,
 `crash_between_global_and_project_write_is_repaired`, `cost_ledger_replay_does_not_duplicate`,
 `cross_db_reconcile_is_idempotent`, `request_queue_is_project_scoped`,
+`schema_version_compat_shim_reports_project_one`, `global_schema_version_reports_two`,
 `schema_versions_are_global_2_project_1`.
 
 **C2 node supervisor**
@@ -3672,7 +3776,9 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
 4. **Capacity inbox kind.** The plan says an inbox item of kind `capacity`. v0.2 does **not** add
    `InboxKind::Capacity` (it would force edits outside C0's owned files); advice is a `decision`
    item linked by `capacity_advice.inbox_id`. If the owner wants a distinct filter, v0.3 adds the
-   enum variant additively.
+   enum variant additively. T2 acceptance test 3 and any K4 wording must therefore look for a
+   `decision` item whose `capacity_advice.inbox_id` matches, not for an `InboxKind::Capacity` that
+   does not exist.
 5. **`max_workers` is a preference.** v0.1 treats it as a cap. v0.2 admission ignores it as a hard
    limit; the owner target and the measured checks decide. `ensure_worker_slots` still creates that
    many project slots for tmux/visible bookkeeping.
