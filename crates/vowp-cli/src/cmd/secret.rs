@@ -5,6 +5,7 @@
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and §12.
 
+use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -153,7 +154,7 @@ pub fn vault_admin(ctx: &Ctx, io: &mut dyn IoStreams, args: &VaultAdminArgs) -> 
 /// Stores a secret after reading it from a hidden terminal prompt.
 fn set_secret(ctx: &Ctx, io: &mut dyn IoStreams, args: &SecretSetArgs) -> Result<i32, CliError> {
     let name = SecretName::parse(&args.name)?;
-    if !io.is_tty() {
+    if !std::io::stdin().is_terminal() {
         return Err(CliError::Guard(
             "run it in a terminal or use `vowp secret request`".to_owned(),
         ));
