@@ -40,6 +40,11 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SessionCommand) -> Resul
         SessionCommand::Import(args) => import(ctx, io, args),
         SessionCommand::Watch(args) => watch(ctx, io, args),
         SessionCommand::Tail(args) => tail(ctx, io, args),
+        SessionCommand::TurnBegin(_) | SessionCommand::Ingest(_) => {
+            Err(CliError::NotImplemented("not implemented in this build"))
+        }
+        SessionCommand::Lease(args) => crate::cmd::lease::lease(ctx, io, args),
+        SessionCommand::Takeover(args) => crate::cmd::lease::takeover(ctx, io, args),
     }
 }
 
@@ -57,6 +62,19 @@ pub fn maybe_run_remote(
     let crate::cli::Command::Session { command } = command else {
         return Ok(None);
     };
+    // The hidden session interfaces run on the home that owns the session. Their `--node`
+    // names the executor or surface, not a redirect target, so they must not go through the
+    // generic `--node` SSH redirect below.
+    if matches!(
+        command,
+        SessionCommand::TurnBegin(_)
+            | SessionCommand::Ingest(_)
+            | SessionCommand::Lease(_)
+            | SessionCommand::Takeover(_)
+    ) {
+        let ctx = Ctx::build(global, io)?;
+        return Ok(Some(run(&ctx, io, command)?));
+    }
     let node = match command {
         SessionCommand::New(args) => args.node.as_deref().or(global.node.as_deref()),
         SessionCommand::Switch(args) => args.node.as_deref().or(global.node.as_deref()),
@@ -427,6 +445,7 @@ fn reason_name(reason: SwitchReason) -> &'static str {
         SwitchReason::Context => "context",
         SwitchReason::Failover => "failover",
         SwitchReason::ProbeBack => "probe_back",
+        SwitchReason::Takeover => "takeover",
     }
 }
 

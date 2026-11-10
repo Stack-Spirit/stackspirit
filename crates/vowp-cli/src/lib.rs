@@ -10,14 +10,19 @@ use std::io::{BufRead, BufReader, Cursor, IsTerminal, Write};
 
 use clap::Parser;
 
+pub mod chat;
 pub mod cli;
 pub mod cmd;
 pub mod ctx;
 pub mod errors;
 pub mod framework;
+pub mod mcp;
+pub mod node_ctx;
 pub mod output;
 pub mod remote;
+pub mod setup;
 pub mod signals;
+pub mod ssh_stream;
 
 pub use cli::{Cli, Command, Global};
 pub use ctx::Ctx;
