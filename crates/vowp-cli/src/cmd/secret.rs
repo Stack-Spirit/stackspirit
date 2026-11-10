@@ -9,6 +9,7 @@ use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use clap::{Args, Subcommand};
@@ -277,9 +278,14 @@ fn request_secret(ctx: &Ctx, io: &mut dyn IoStreams, args: &SecretRequestArgs) -
 /// The signal watcher runs `stty echo` from its own thread, which is safe outside a signal
 /// handler, and then exits with the conventional `128 + signal` status. A normal return
 /// restores echo before the watcher is removed, so a late signal cannot leave it off.
+///
+/// The prompt and the watcher share one [`EchoTerminal`] lock. A signal that arrives while
+/// `stty -echo` is running therefore waits for that child and restores echo afterwards; a
+/// signal that wins first holds the lock until the process exits, so a hide that has not
+/// started yet cannot disable echo after the restore.
 struct EchoGuard {
     active: bool,
-    stty: PathBuf,
+    terminal: Arc<EchoTerminal>,
     watcher: Option<SignalRestore>,
 }
 
@@ -294,18 +300,17 @@ impl EchoGuard {
 
     /// Builds a guard with an explicit `stty` program and exit action (used by tests).
     fn hide_with(stty: &Path, exit: impl Fn(i32) + Send + 'static) -> Result<Self, CliError> {
-        let path = stty.to_path_buf();
-        let restore_path = path.clone();
-        let watcher = SignalRestore::install(move || set_echo(&restore_path, true), exit).map_err(|error| {
+        let terminal = Arc::new(EchoTerminal::new(stty));
+        let watcher = SignalRestore::install(Arc::clone(&terminal), exit).map_err(|error| {
             CliError::Guard(format!("could not install the terminal echo restore handler: {error}"))
         })?;
-        if let Err(error) = set_echo(stty, false) {
+        if let Err(error) = terminal.set(false) {
             drop(watcher);
             return Err(CliError::Guard(format!("could not hide terminal echo: {error}")));
         }
         Ok(Self {
             active: true,
-            stty: path,
+            terminal,
             watcher: Some(watcher),
         })
     }
@@ -315,7 +320,8 @@ impl EchoGuard {
         if !self.active {
             return Ok(());
         }
-        set_echo(&self.stty, true)
+        self.terminal
+            .set(true)
             .map_err(|error| CliError::Guard(format!("could not restore terminal echo: {error}")))?;
         self.active = false;
         drop(self.watcher.take());
@@ -328,6 +334,36 @@ impl Drop for EchoGuard {
         if let Err(error) = self.restore() {
             eprintln!("vowp: {error}");
         }
+    }
+}
+
+/// One terminal's echo state, serialised between the prompt and the signal watcher.
+struct EchoTerminal {
+    stty: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl EchoTerminal {
+    /// Names the `stty` program this terminal is changed through.
+    fn new(stty: &Path) -> Self {
+        Self {
+            stty: stty.to_path_buf(),
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// Runs `stty` with one echo mode while holding the shared lock.
+    fn set(&self, enable: bool) -> Result<(), String> {
+        let _guard = self.lock();
+        set_echo(&self.stty, enable)
+    }
+
+    /// Takes the terminal lock, recovering from a poisoned lock.
+    ///
+    /// The signal watcher keeps this guard until it exits the process, so any hide that has
+    /// not started yet blocks instead of running after the restore.
+    fn lock(&self) -> MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -363,18 +399,20 @@ struct SignalRestore {
 }
 
 impl SignalRestore {
-    /// Registers `restore` for SIGINT and SIGTERM; `exit` runs after a successful restore.
-    fn install(
-        restore: impl Fn() -> Result<(), String> + Send + 'static,
-        exit: impl Fn(i32) + Send + 'static,
-    ) -> std::io::Result<Self> {
+    /// Restores echo for SIGINT/SIGTERM; `exit` runs after the restore.
+    ///
+    /// The terminal lock is taken before the restore and deliberately held until `exit`
+    /// ends the process. That orders the restore after any in-flight `stty -echo` and keeps
+    /// a hide that has not started yet from running afterwards.
+    fn install(terminal: Arc<EchoTerminal>, exit: impl Fn(i32) + Send + 'static) -> std::io::Result<Self> {
         let mut signals = Signals::new([SIGINT, SIGTERM])?;
         let handle = signals.handle();
         let thread = thread::Builder::new()
             .name("vowp-echo-restore".to_owned())
             .spawn(move || {
                 for signal in signals.forever() {
-                    match restore() {
+                    let _guard = terminal.lock();
+                    match set_echo(&terminal.stty, true) {
                         Ok(()) => exit(128 + signal),
                         Err(error) => {
                             eprintln!("vowp: {error}; terminal echo may still be disabled");
@@ -413,6 +451,25 @@ mod tests {
         let body = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {code}\n", log.display());
         fs::write(&script, body).expect("fake stty");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("fake stty mode");
+        (script, log)
+    }
+
+    /// Installs a fake `stty` whose `-echo` records `start` and then blocks briefly.
+    fn slow_stty(dir: &Path) -> (PathBuf, PathBuf) {
+        let log = dir.join("stty.log");
+        let script = dir.join("stty");
+        let body = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"-echo\" ]; then\n\
+             printf 'start\\n' >> '{log}'\n\
+             sleep 0.3\n\
+             fi\n\
+             printf '%s\\n' \"$*\" >> '{log}'\n\
+             exit 0\n",
+            log = log.display()
+        );
+        fs::write(&script, body).expect("slow stty");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("slow stty mode");
         (script, log)
     }
 
@@ -483,6 +540,60 @@ mod tests {
             logged(&log),
             vec!["-echo", "echo"],
             "the SIGINT path must restore echo before exiting"
+        );
+    }
+
+    #[test]
+    #[ignore = "child process for echo_guard_waits_for_hide_before_restoring"]
+    fn echo_guard_signal_during_hide_child() {
+        let stty = std::env::var("VOWP_TEST_ECHO_STTY").expect("parent passes a fake stty path");
+        let log = PathBuf::from(std::env::var("VOWP_TEST_ECHO_LOG").expect("parent passes a log path"));
+        let raiser = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if logged(&log).iter().any(|line| line == "start") {
+                    signal_hook::low_level::raise(SIGINT).expect("raise SIGINT");
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for the hide to start"
+                );
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let _guard = EchoGuard::hide_with(Path::new(&stty), |code| std::process::exit(code)).expect("hide echo");
+        let _ = raiser.join();
+        thread::sleep(std::time::Duration::from_secs(5));
+        panic!("the SIGINT path did not end the process");
+    }
+
+    #[test]
+    fn echo_guard_waits_for_hide_before_restoring() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (stty, log) = slow_stty(tmp.path());
+
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "cmd::secret::tests::echo_guard_signal_during_hide_child",
+                "--ignored",
+            ])
+            .env("VOWP_TEST_ECHO_STTY", &stty)
+            .env("VOWP_TEST_ECHO_LOG", &log)
+            .output()
+            .expect("run the hide-race child");
+
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "the child must exit with 128 + SIGINT; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            logged(&log),
+            vec!["start", "-echo", "echo"],
+            "the signal restore must wait for the in-flight stty -echo"
         );
     }
 }
