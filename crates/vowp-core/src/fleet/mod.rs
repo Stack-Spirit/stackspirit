@@ -158,7 +158,8 @@ pub fn write_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<(), 
 
     // Redact the structured document rather than its serialized text: a value containing
     // quotes, backslashes or newlines is JSON-escaped in the file and would not match as
-    // an exact substring there.
+    // an exact substring there. `redact_json_strings` returns before walking the tree when
+    // no secret is configured, so a large snapshot costs nothing extra on every tick.
     let mut value = serde_json::to_value(&snapshot).map_err(|error| CoreError::Invalid(error.to_string()))?;
     redact_json_strings(&redactor, &mut value);
     let text = serde_json::to_string_pretty(&value).map_err(|error| CoreError::Invalid(error.to_string()))?;
@@ -444,17 +445,29 @@ fn merge_inbox(items: Vec<InboxItem>) -> Vec<InboxItem> {
 /// This covers snapshot fields the card builders copy verbatim (paused reasons, limits,
 /// orchestrator cards) as well as the text they already summarize. Working on the value
 /// tree means a secret containing JSON-special characters still matches its raw form.
-fn redact_json_strings(redactor: &Redactor, value: &mut serde_json::Value) {
+///
+/// Returns whether the tree was traversed; an empty redactor (no configured secrets)
+/// returns immediately instead of cloning every string in the snapshot.
+fn redact_json_strings(redactor: &Redactor, value: &mut serde_json::Value) -> bool {
+    if redactor.is_empty() {
+        return false;
+    }
+    redact_json_value(redactor, value);
+    true
+}
+
+/// Recursively redacts the string values of one JSON value.
+fn redact_json_value(redactor: &Redactor, value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(text) => *text = redactor.redact(text),
         serde_json::Value::Array(items) => {
             for item in items {
-                redact_json_strings(redactor, item);
+                redact_json_value(redactor, item);
             }
         }
         serde_json::Value::Object(map) => {
             for item in map.values_mut() {
-                redact_json_strings(redactor, item);
+                redact_json_value(redactor, item);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
@@ -466,4 +479,25 @@ fn redact_json_strings(redactor: &Redactor, value: &mut serde_json::Value) {
 /// The 200-character body cap does not apply to titles and questions.
 fn full_title(redactor: &Redactor, text: &str) -> String {
     redactor.redact(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_redactor_skips_snapshot_string_traversal() {
+        let redactor = Redactor::default();
+        assert!(redactor.is_empty());
+        let original = serde_json::json!({
+            "title": "plain title",
+            "nested": ["still here", {"count": 2}, true, null],
+        });
+        let mut value = original.clone();
+        assert!(
+            !redact_json_strings(&redactor, &mut value),
+            "an empty redactor must not enter the traversal"
+        );
+        assert_eq!(value, original, "the document is left exactly as built");
+    }
 }

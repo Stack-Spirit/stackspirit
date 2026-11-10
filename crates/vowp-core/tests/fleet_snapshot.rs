@@ -908,6 +908,45 @@ fn snapshot_written_atomically_every_tick() {
 }
 
 #[test]
+fn snapshot_without_secrets_is_written_unchanged() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let ready = fixture.job_with_title(&fixture.alpha, "plain-01", "plain title", 40);
+    fixture.set_state(
+        &fixture.alpha,
+        &ready,
+        JobState::Ready,
+        StateChange {
+            note: None,
+            parked_reason: None,
+        },
+    );
+    fixture
+        .store
+        .set_project_state(&fixture.alpha, ProjectState::Paused, "owner unavailable")
+        .expect("pause alpha");
+
+    let mut built = fixture.snapshot();
+    fleet::write_snapshot(&fixture.deps, &fixture.store, now).expect("write snapshot");
+    let written = fleet::read_snapshot(&fixture.paths).expect("read snapshot");
+
+    assert_eq!(written.sequence, built.sequence + 1);
+    built.sequence = written.sequence;
+    assert_eq!(built, written, "a home without secrets writes the same document");
+    let alpha = written
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    assert_eq!(alpha.paused_reason, "owner unavailable");
+    let queued = alpha.queue.iter().find(|job| job.job == ready.id).expect("ready job");
+    assert_eq!(queued.title, "plain title");
+    assert_eq!(queued.waiting_reason, None);
+    let text = std::fs::read_to_string(fixture.paths.root().join("snapshot.json")).expect("snapshot text");
+    assert!(!text.contains("[REDACTED:"), "no secret marker is introduced");
+}
+
+#[test]
 fn snapshot_write_redacts_secret_values_including_json_escaped_text() {
     let fixture = Fixture::new();
     let now = fixture.clock.now();

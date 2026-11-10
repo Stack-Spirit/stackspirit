@@ -300,6 +300,9 @@ pub fn import(
 
     let path = write_capsule_file(&deps.paths, &capsule)?;
     store.insert_capsule(&capsule, &path.to_string_lossy())?;
+    // The bundle can predate the local secrets, or come from a node that never saw
+    // them. Rewrite the capsule file and cached row before the child records its id.
+    let capsule = crate::vault::redact_capsule(deps, &store, &capsule)?;
     let capsule_event = log.append(NewEvent {
         actor: Actor::System,
         source: vowp_source(deps),

@@ -617,6 +617,64 @@ fn bundle_export_redacts_secret_from_capsule_file_row_and_json() {
     }
 }
 
+#[test]
+fn bundle_import_redacts_secret_from_old_bundle_capsule_file_and_row() {
+    let tmp = tempdir().expect("tempdir");
+    let secret = "import-\"quoted\"\\path\nsecond line";
+    let adapter = ScriptedAdapter::new(
+        HarnessKind::Opencode,
+        vec![good_draft(&format!("Continue with {secret}"))],
+    );
+    let deps = deps_with_clock(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(adapter)),
+        FakeClock::at(ts()),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp);
+
+    // This bundle is old/foreign: it was produced before the local home knew the secret,
+    // so its embedded capsule still carries the raw value.
+    let exported = bundle::export(&deps, &session, 20).expect("export");
+    assert!(
+        exported.capsule.intent.contains(secret),
+        "the source bundle carries the secret"
+    );
+
+    let name = SecretName::parse("IMPORT_KEY").expect("secret name");
+    vowp_core::vault::write_secret(&deps, &name, secret).expect("write secret");
+    let marker = "[REDACTED:IMPORT_KEY]";
+
+    let child = bundle::import(&deps, &exported, None, None).expect("import");
+    let store = deps.open_store().expect("store");
+    let row = store
+        .latest_capsule(&child)
+        .expect("latest capsule")
+        .expect("imported capsule row");
+    assert_eq!(row.intent, format!("Continue with {marker}"));
+    assert!(!row.intent.contains(secret), "the row does not hold the raw secret");
+    let row_json = serde_json::to_string(&row).expect("capsule row json");
+    let escaped = serde_json::to_string(secret).expect("json-escape the secret");
+    let escaped = &escaped[1..escaped.len() - 1];
+    assert!(
+        !row_json.contains(escaped),
+        "the row does not hold the JSON-escaped secret"
+    );
+
+    let files = list_capsule_files(&deps.paths, &child).expect("capsule files");
+    assert!(!files.is_empty(), "import wrote a capsule file");
+    for path in files {
+        let text = std::fs::read_to_string(path).expect("read capsule file");
+        assert!(!text.contains(secret), "the capsule file does not hold the raw secret");
+        assert!(
+            !text.contains(escaped),
+            "the capsule file does not hold the JSON-escaped secret"
+        );
+        assert!(text.contains(marker), "the capsule file records the redaction");
+    }
+}
+
 /// An adapter that returns the next scripted assistant message, reusing the last one.
 #[derive(Clone)]
 struct ScriptedAdapter {
