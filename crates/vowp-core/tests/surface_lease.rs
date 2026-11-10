@@ -509,11 +509,11 @@ fn lease_sweep_drops_dead_surface() {
     let _guard = acquire(&deps, &store, &session, &target).expect("lease");
 
     clock.advance(STALE_AFTER + Duration::from_secs(1));
-    let dropped = vowp_core::surface::lease::sweep_leases(&deps, &store, clock.now()).expect("sweep");
+    let dropped = vowp_core::surface::sweep_leases(&deps, &store, clock.now()).expect("sweep");
     assert_eq!(dropped, 1);
     assert!(store.lease(&session).expect("lease").is_none());
     assert_eq!(
-        vowp_core::surface::lease::sweep_leases(&deps, &store, clock.now()).expect("second sweep"),
+        vowp_core::surface::sweep_leases(&deps, &store, clock.now()).expect("second sweep"),
         0
     );
 }

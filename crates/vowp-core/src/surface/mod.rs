@@ -22,7 +22,7 @@ pub use vowp_protocol::TakeoverReport;
 
 /// Removes leases whose heartbeat is older than the stale window.
 ///
-/// C0 removes nothing, which keeps v0.1 behaviour unchanged. F2 fills the sweep.
-pub fn sweep_leases(_deps: &Deps, _store: &Store, _now: Timestamp) -> Result<u32, CoreError> {
-    Ok(0)
+/// Delegates to [`lease::sweep_leases`], which deletes stale rows and reports the count.
+pub fn sweep_leases(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, CoreError> {
+    lease::sweep_leases(deps, store, now)
 }
