@@ -13,9 +13,25 @@ use crate::deps::Deps;
 
 /// Returns false when the job must wait; writes the waiting reason to `jobs.note`.
 ///
-/// C0 always returns true, which keeps v0.1 dispatch unchanged. E2 owns the body.
-pub(crate) fn admit(_deps: &Deps, _store: &Store, _job: &Job) -> Result<bool, CoreError> {
-    Ok(true)
+/// E2 owns the body: it builds the node-wide admission request, asks the capacity manager,
+/// records `waiting: <reason>` on the job so the board and queue show it, and clears a stale
+/// waiting note once the job is admitted.
+pub fn admit(deps: &Deps, store: &Store, job: &Job) -> Result<bool, CoreError> {
+    let request = crate::capacity::request_for(deps, store, job)?;
+    let manager = crate::capacity::CapacityManager::new(deps.clone());
+    match manager.admit(store, &request, deps.clock.now())? {
+        vowp_protocol::AdmitDecision::Admit => {
+            let note = store.require_job(&job.id)?.note;
+            if note.trim_start().starts_with("waiting:") {
+                store.set_job_note(&job.id, "")?;
+            }
+            Ok(true)
+        }
+        vowp_protocol::AdmitDecision::Wait(reason) => {
+            store.set_job_note(&job.id, &format!("waiting: {}", reason.detail))?;
+            Ok(false)
+        }
+    }
 }
 
 /// Decides Start versus Resume using the store.
