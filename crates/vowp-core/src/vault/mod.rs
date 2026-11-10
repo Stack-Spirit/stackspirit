@@ -292,6 +292,15 @@ pub fn admin_remove(deps: &Deps, name: &SecretName) -> Result<bool, CoreError> {
     admin_remove_at(&layout.vault_dir(), name)
 }
 
+/// Checks that the helper can write and clean up inside the vault directory.
+///
+/// This is the readiness probe: it exercises the real helper context and directory without
+/// touching any secret name.
+pub fn admin_probe(deps: &Deps) -> Result<(), CoreError> {
+    let layout = Layout::from_deps(deps);
+    admin_probe_at(&layout.vault_dir())
+}
+
 /// What `vowp secret upgrade` should do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Upgrade {
@@ -622,6 +631,25 @@ fn admin_remove_at(dir: &Path, name: &SecretName) -> Result<bool, CoreError> {
     remove_file_if_present(&dir.join(name.as_str()))
 }
 
+/// Creates and removes one private probe file in `dir`; the helper and tests share this.
+fn admin_probe_at(dir: &Path) -> Result<(), CoreError> {
+    ensure_private_dir(dir)?;
+    let name = format!(
+        ".vowp-probe-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = dir.join(name);
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|source| io_error(&path, source))?;
+    drop(file);
+    fs::remove_file(&path).map_err(|source| io_error(&path, source))
+}
+
 /// Reads one secret file from an explicit directory.
 fn read_value_at(dir: &Path, name: &SecretName) -> Result<Option<String>, CoreError> {
     let path = dir.join(name.as_str());
@@ -698,10 +726,10 @@ fn is_executable(path: &Path) -> bool {
 /// Runs the installed helper's harmless real operation as `vowp-vault`.
 ///
 /// `--version` is handled by clap before `Ctx::build`, so it does not prove that the helper can
-/// run as the vault user. Removing a probe name exercises the same context and vault path as
-/// the real `set`/`rm` operations without writing anything.
+/// run as the vault user. `__vault-admin probe` exercises the same context and vault directory
+/// as the real `set`/`rm` operations without touching a secret.
 fn run_vault_probe(layout: &Layout) -> bool {
-    let mut command = helper_command(layout, &["__vault-admin", "rm", "VOWP_PROBE"]);
+    let mut command = helper_command(layout, &["__vault-admin", "probe"]);
     run_status(&mut command)
 }
 
@@ -1066,7 +1094,7 @@ mod tests {
              __vault-admin)\n\
              action=\"$1\"\n\
              name=\"$2\"\n\
-             if [ \"$action\" = set ]; then cat > \"{}/$name\"; echo \"saved $name\"; else rm -f \"{}/$name\"; echo \"removed $name\"; fi\n\
+             if [ \"$action\" = probe ]; then exit 0; elif [ \"$action\" = set ]; then cat > \"{}/$name\"; echo \"saved $name\"; else rm -f \"{}/$name\"; echo \"removed $name\"; fi\n\
              ;;\n\
              __vault-exec)\n\
              shift\n\
@@ -1145,7 +1173,7 @@ mod tests {
         assert!(vault_user_ready(&layout));
         let argv = fs::read_to_string(layout.vault_home.join("argv.log")).expect("argv log");
         assert!(
-            argv.contains("__vault-admin rm VOWP_PROBE"),
+            argv.contains("__vault-admin probe"),
             "the probe must run a real helper operation: {argv}"
         );
         assert!(
@@ -1496,6 +1524,21 @@ mod tests {
         );
         assert!(admin_remove_at(&dir, &name).expect("remove"));
         assert!(!admin_remove_at(&dir, &name).expect("second remove"));
+    }
+
+    #[test]
+    fn admin_probe_checks_the_vault_directory_without_leaving_a_file() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("vault");
+
+        admin_probe_at(&dir).expect("probe");
+
+        assert!(dir.is_dir());
+        assert_eq!(
+            fs::read_dir(&dir).expect("vault dir").count(),
+            0,
+            "the probe leaves no file behind"
+        );
     }
 
     #[test]

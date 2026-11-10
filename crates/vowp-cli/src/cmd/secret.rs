@@ -85,6 +85,8 @@ pub struct VaultAdminArgs {
 /// The hidden `__vault-admin` actions.
 #[derive(Debug, Clone, Subcommand)]
 pub enum VaultAdminCommand {
+    /// Check that the helper context and vault directory are usable.
+    Probe,
     /// Read one value from stdin and write it as the vault user.
     Set(VaultNameArgs),
     /// Remove one secret as the vault user.
@@ -128,6 +130,10 @@ pub fn vault_exec(ctx: &Ctx, _io: &mut dyn IoStreams, args: &VaultExecArgs) -> R
 /// Runs the hidden `vowp __vault-admin`.
 pub fn vault_admin(ctx: &Ctx, io: &mut dyn IoStreams, args: &VaultAdminArgs) -> Result<i32, CliError> {
     match &args.command {
+        VaultAdminCommand::Probe => {
+            vault::admin_probe(ctx.deps())?;
+            Ok(0)
+        }
         VaultAdminCommand::Set(set) => {
             let name = SecretName::parse(&set.name)?;
             let value = crate::read_stdin(io)?;
