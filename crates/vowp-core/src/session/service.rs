@@ -138,7 +138,7 @@ impl SessionService {
             .saturating_add(1) as u32;
 
         let native = if adapter.capabilities().can_resume_native {
-            store.native_for(&req.session_id, executor.harness)?
+            native_for_node(&store, &req.session_id, executor.harness, &node)?
         } else {
             None
         };
@@ -815,6 +815,27 @@ fn limit_row_kind(kind: vowp_protocol::LimitKind) -> LimitRowKind {
         vowp_protocol::LimitKind::Context => LimitRowKind::Context,
         vowp_protocol::LimitKind::Auth => LimitRowKind::Auth,
     }
+}
+
+/// Returns the newest native session id for `harness` recorded on `node`.
+///
+/// A native id is only valid on the machine that homes it: resuming a session id from
+/// another node either fails or, worse, attaches to an unrelated conversation. The store
+/// keeps the node column; callers must pass the node the run will actually execute on.
+pub(crate) fn native_for_node(
+    store: &Store,
+    session: &SessionId,
+    harness: HarnessKind,
+    node: &NodeName,
+) -> Result<Option<String>, CoreError> {
+    // `natives_of` sorts oldest first by (created_at, first_seq, native_session_id), so the
+    // reverse scan returns the most recently recorded id for this node.
+    Ok(store
+        .natives_of(session)?
+        .into_iter()
+        .rev()
+        .find(|native| native.harness == harness && &native.node == node)
+        .map(|native| native.native_session_id))
 }
 
 /// Selects the events of the last `turns` complete turns from `events`.

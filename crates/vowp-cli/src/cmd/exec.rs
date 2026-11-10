@@ -1,9 +1,12 @@
 //! Hidden `vowp __exec` — the remote executor client.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.2 and §12.5. The command starts the
-//! harness on this machine, spools every event before sending it, and streams the run into
-//! `vowp session ingest` on the home. Re-running it over an existing spool resumes the turn
-//! after a killed client instead of starting a second harness process.
+//! harness on this machine, spools every event before sending it, and owns the SSH child
+//! that runs `vowp session ingest` on the home. `RemoteLine` frames go to that child's
+//! stdin; this command's own stdout is a single status document (see [`print_status`]), not
+//! a stream of `RemoteLine` objects. Re-running it over an existing spool resumes the turn
+//! after a killed client instead of starting a second harness process. A spool with a
+//! malformed complete line is refused rather than mistaken for an empty spool.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -23,6 +26,10 @@ use crate::{CliError, Ctx, IoStreams};
 const EVENT_POLL: Duration = Duration::from_secs(1);
 
 /// Arguments for the hidden `vowp __exec`.
+///
+/// The command streams `RemoteLine` frames to the home through its own ingest child and
+/// prints one status document (`{run_id, session_id, done, resumed, ack_window}`) when it
+/// is done; it does not emit the frames on its own stdout.
 #[derive(Debug, Clone, Args)]
 pub struct ExecArgs {
     /// Grant file written by `session turn-begin` (mode 0600).
@@ -49,6 +56,9 @@ pub struct TurnBeginRequest {
     /// Node; must match the command argument when present.
     #[serde(default)]
     pub node: Option<String>,
+    /// Absolute checkout path on the surface, when it differs from the home's session cwd.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Runs the hidden `vowp __exec`.
@@ -76,17 +86,17 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
     // A spool that survived a killed client is replayed and finished without starting the
     // harness again. A spool with events but no summary cannot be completed: the harness
     // process is gone and no terminal frame exists.
-    if client.has_spool() {
+    if client.has_spool()? {
         if client.summary_acked() {
-            if !client.all_acked() {
+            if !client.all_acked()? {
                 return Err(CliError::Conflict(
                     "the spool records a summary ack but some events are unacknowledged".to_owned(),
                 ));
             }
-            print_done(ctx, io, &grant, true)?;
+            print_status(ctx, io, &grant, true)?;
             return Ok(0);
         }
-        if !client.summary_present() {
+        if !client.summary_present()? {
             return Err(CliError::Conflict(
                 "the spool has unacknowledged events but no summary; begin a new turn".to_owned(),
             ));
@@ -105,10 +115,23 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         if report_revoked(io, client.revoked())? {
             return Ok(75);
         }
-        print_done(ctx, io, &grant, false)?;
+        print_status(ctx, io, &grant, false)?;
         return Ok(0);
     }
 
+    // The grant names the surface's checkout, not the home's. Validate it on the machine
+    // that will run the harness; the home deliberately tolerates a path it cannot see.
+    let cwd = PathBuf::from(&grant.cwd);
+    if !cwd.is_dir() {
+        return Err(fail_turn(
+            &mut client,
+            io,
+            CliError::Invalid(format!(
+                "working directory {} does not exist on this surface",
+                cwd.display()
+            )),
+        ));
+    }
     let turn = TurnRequest {
         session_id: grant.session_id.clone(),
         executor: ExecutorRef {
@@ -145,7 +168,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
     let start = StartInput {
         session_id: grant.session_id.clone(),
         executor: executor.clone(),
-        cwd: PathBuf::from(&grant.cwd),
+        cwd,
         prompt: grant.prompt.clone(),
         resume: grant.resume_native.clone(),
         new_native_id: grant.native_hint.clone(),
@@ -251,7 +274,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
     if report_revoked(io, client.revoked())? {
         return Ok(75);
     }
-    print_done(ctx, io, &grant, false)?;
+    print_status(ctx, io, &grant, false)?;
     Ok(0)
 }
 
@@ -418,8 +441,12 @@ fn read_control_config() -> Result<Option<ControlPointer>, CliError> {
     Ok(Some(pointer))
 }
 
-/// Prints the hidden command's small JSON status document.
-fn print_done(ctx: &Ctx, io: &mut dyn IoStreams, grant: &TurnGrant, replay: bool) -> Result<(), CliError> {
+/// Prints the hidden command's status document.
+///
+/// The shape is `{run_id, session_id, done, resumed, ack_window}`. It is a terminal
+/// summary of the client side, not a `RemoteLine`: those frames travel on the ingest
+/// child's stdin and are never re-printed here.
+fn print_status(ctx: &Ctx, io: &mut dyn IoStreams, grant: &TurnGrant, replay: bool) -> Result<(), CliError> {
     let document = serde_json::json!({
         "run_id": grant.run_id.to_string(),
         "session_id": grant.session_id.to_string(),

@@ -156,16 +156,21 @@ impl IngestClient {
     }
 
     /// Returns whether the spool already holds at least one frame.
-    pub fn has_spool(&self) -> bool {
-        !self.spool_lines().unwrap_or_default().is_empty()
+    ///
+    /// A corrupt complete line is an error, not an empty spool: starting a second harness
+    /// on top of unreadable events would hide the loss.
+    pub fn has_spool(&self) -> Result<bool, CliError> {
+        Ok(!self.spool_lines()?.is_empty())
     }
 
     /// Returns whether the spool holds a run summary frame.
-    pub fn summary_present(&self) -> bool {
-        self.spool_lines()
-            .unwrap_or_default()
+    ///
+    /// Propagates a spool parse error for the same reason as [`IngestClient::has_spool`].
+    pub fn summary_present(&self) -> Result<bool, CliError> {
+        Ok(self
+            .spool_lines()?
             .iter()
-            .any(|line| matches!(line, RemoteLine::Summary { .. }))
+            .any(|line| matches!(line, RemoteLine::Summary { .. })))
     }
 
     /// Returns whether the home acknowledged the run summary.
@@ -174,11 +179,11 @@ impl IngestClient {
     }
 
     /// Returns whether every spooled event id has an acknowledgement.
-    pub fn all_acked(&self) -> bool {
-        self.spool_lines().unwrap_or_default().iter().all(|line| match line {
+    pub fn all_acked(&self) -> Result<bool, CliError> {
+        Ok(self.spool_lines()?.iter().all(|line| match line {
             RemoteLine::Event { event } => self.acked.events.contains_key(event.id.as_str()),
             _ => true,
-        })
+        }))
     }
 
     /// Spools an event and sends it, returning an ack when one arrived.
@@ -283,12 +288,12 @@ impl IngestClient {
 
     /// [`IngestClient::finish`] with an injectable summary-ack deadline.
     fn finish_with_timeout(&mut self, timeout: Duration) -> Result<(), CliError> {
-        if !timeout.is_zero() && self.connection.is_none() && self.summary_present() && !self.acked.summary {
+        if !timeout.is_zero() && self.connection.is_none() && self.summary_present()? && !self.acked.summary {
             let _ = self.ensure_connected();
             let _ = self.replay_pending();
         }
         let deadline = Instant::now() + timeout;
-        while self.summary_present() && !self.acked.summary && self.revoked.is_none() && Instant::now() < deadline {
+        while self.summary_present()? && !self.acked.summary && self.revoked.is_none() && Instant::now() < deadline {
             if self.connection.is_none() {
                 if !self.ensure_connected().unwrap_or(false) {
                     thread::sleep(Duration::from_millis(50));
@@ -303,12 +308,12 @@ impl IngestClient {
         }
         if let Some(connection) = self.connection.take() {
             let status = connection.close()?;
-            if self.revoked.is_none() && self.summary_present() && !self.acked.summary {
+            if self.revoked.is_none() && self.summary_present()? && !self.acked.summary {
                 return Err(CliError::Remote(format!(
                     "ingest ended without acknowledging the summary ({status})"
                 )));
             }
-            if self.revoked.is_none() && !self.summary_present() {
+            if self.revoked.is_none() && !self.summary_present()? {
                 return Err(CliError::Remote(format!(
                     "ingest ended without a run summary ({status})"
                 )));
@@ -319,7 +324,7 @@ impl IngestClient {
         if self.revoked.is_some() {
             return Ok(());
         }
-        if !self.summary_present() {
+        if !self.summary_present()? {
             return Err(CliError::Remote("ingest finished without a run summary".to_owned()));
         }
         if !self.acked.summary {
@@ -327,7 +332,7 @@ impl IngestClient {
                 "the home did not acknowledge the summary within {timeout:?}"
             )));
         }
-        if !self.all_acked() {
+        if !self.all_acked()? {
             return Err(CliError::Remote(
                 "the home acknowledged the summary but not every event".to_owned(),
             ));
@@ -964,6 +969,29 @@ mod tests {
             .finish()
             .expect_err("an unacked event must not look like success");
         assert!(error.to_string().contains("event"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn corrupt_spool_is_reported_instead_of_looking_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spool = tmp.path().join("spool");
+        std::fs::create_dir_all(&spool).expect("spool dir");
+        std::fs::write(spool.join("events.jsonl"), b"{\"type\": \"event\"\n").expect("corrupt spool line");
+        let client = IngestClient::new(target(), session(), run(), "lease".to_owned(), spool);
+
+        for (name, error) in [
+            ("has_spool", client.has_spool().expect_err("has_spool must fail")),
+            (
+                "summary_present",
+                client.summary_present().expect_err("summary_present must fail"),
+            ),
+            ("all_acked", client.all_acked().expect_err("all_acked must fail")),
+        ] {
+            assert!(
+                error.to_string().contains("invalid spool line"),
+                "{name} hid the corruption: {error}"
+            );
+        }
     }
 
     #[test]

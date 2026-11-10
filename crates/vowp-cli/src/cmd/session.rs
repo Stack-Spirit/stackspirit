@@ -499,6 +499,7 @@ fn turn_begin(ctx: &Ctx, io: &mut dyn IoStreams, args: &crate::cli::TurnBeginArg
             },
             purpose,
             node,
+            cwd: request.cwd,
             prompt: request.prompt,
         },
     )?;

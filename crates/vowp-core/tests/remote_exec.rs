@@ -10,16 +10,18 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
 use tempfile::{TempDir, tempdir};
+use vowp_core::session::bundle;
 use vowp_core::session::remote::{BeginTurn, IngestGrant, begin_turn, ingest_lines};
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
     Actor, AssistantMessage, BuildMode, Cost, CostEvent, EventBody, EventEnvelope, EventId, EventSource, EventType,
     Executor, ExecutorRef, FakeClock, HarnessKind, IngestAck, LimitEvent, LimitKind, MemoryLog, NodeName, RemoteEvent,
-    RemoteLine, RemoteUsage, RunOutcome, RunPurpose, SessionId, SessionRole, StopReason, Timestamp, Tokens, ToolResult,
-    TurnEnded, UsageSource,
+    RemoteLine, RemoteUsage, RunId, RunOutcome, RunPurpose, SessionId, SessionRole, StopReason, Timestamp, Tokens,
+    ToolResult, TurnEnded, UsageSource, UserMessage,
 };
 use vowp_store::NodePaths;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -77,6 +79,17 @@ fn create_session(service: &SessionService, tmp: &TempDir, name: &str) -> Sessio
 }
 
 fn begin(deps: &Deps, session: &SessionId, lease: &str, prompt: &str) -> vowp_protocol::TurnGrant {
+    begin_on(deps, session, lease, prompt, laptop(), None)
+}
+
+fn begin_on(
+    deps: &Deps,
+    session: &SessionId,
+    lease: &str,
+    prompt: &str,
+    node: NodeName,
+    cwd: Option<String>,
+) -> vowp_protocol::TurnGrant {
     let store = deps.open_store().expect("store");
     begin_turn(
         deps,
@@ -86,14 +99,44 @@ fn begin(deps: &Deps, session: &SessionId, lease: &str, prompt: &str) -> vowp_pr
             lease: lease.to_owned(),
             executor: ExecutorRef {
                 executor: opencode(),
-                node: Some(laptop()),
+                node: Some(node.clone()),
             },
             purpose: RunPurpose::Start,
-            node: laptop(),
+            node,
+            cwd,
             prompt: prompt.to_owned(),
         },
     )
     .expect("begin turn")
+}
+
+/// Dependencies whose built-in opencode adapter can resume native sessions.
+///
+/// The registry resolves adapters from config without probing or spawning a harness.
+fn resumable_deps(tmp: &TempDir) -> Deps {
+    let mut deps = deps(tmp);
+    deps.adapters = Arc::new(AdapterRegistry::from_config(deps.config.as_ref()).expect("adapter registry from config"));
+    deps
+}
+
+/// Produces the capsule draft the capsule writer records during bundle export.
+fn capsule_adapter(intent: &str) -> FakeAdapter {
+    let draft = serde_json::json!({
+        "intent": intent,
+        "constraints": [],
+        "decisions": [],
+        "state": {"done": ["started"], "in_progress": ["import"], "blocked": [], "next_steps": ["continue"]},
+        "files": [],
+        "gotchas": [],
+        "open_questions": []
+    });
+    FakeAdapter::from_bodies(
+        HarnessKind::Opencode,
+        ts(),
+        vec![EventBody::AssistantMessage(AssistantMessage {
+            text: draft.to_string(),
+        })],
+    )
 }
 
 fn read_events(deps: &Deps, session: &SessionId) -> Vec<EventEnvelope> {
@@ -217,6 +260,196 @@ fn turn_begin_writes_framing_events_and_returns_grant() {
 
     let log = std::fs::read_to_string(deps.paths.log_path(&session)).expect("log text");
     assert!(!log.contains("lease-token"), "the lease token reached the session log");
+}
+
+#[test]
+fn imported_session_first_remote_turn_uses_imported_seed() {
+    let tmp = tempdir().expect("tempdir");
+    let base = deps(&tmp);
+    let mut export_deps = base.clone();
+    export_deps.adapters =
+        Arc::new(AdapterRegistry::new().with("opencode", Arc::new(capsule_adapter("Continue the remote import"))));
+    let service = SessionService::new(export_deps.clone());
+    let origin = create_session(&service, &tmp, "origin");
+    {
+        let log = SessionLog::open(&export_deps.paths, &origin, export_deps.clock.clone()).expect("origin log");
+        log.append(NewEvent {
+            actor: Actor::User,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(export_deps.node.clone()),
+                native_session_id: None,
+            },
+            body: EventBody::UserMessage(UserMessage {
+                text: "ORIGIN-TAIL-REMOTE-7f3".to_owned(),
+                attachments: Vec::new(),
+                note: None,
+            }),
+            raw: None,
+            ts: Some(ts()),
+        })
+        .expect("origin tail");
+        log.sync().expect("sync origin");
+    }
+
+    let exported = bundle::export(&export_deps, &origin, 10).expect("export");
+    let child = bundle::import(&export_deps, &exported, None, None).expect("import");
+    assert!(
+        export_deps.paths.session_dir(&child).join("import.json").is_file(),
+        "the import sidecar was not written"
+    );
+
+    // The first remote turn must consume the sidecar even though this executor supports
+    // native resume: no native id exists yet for the child on this node.
+    let remote = resumable_deps(&tmp);
+    let grant = begin(&remote, &child, "lease", "pick up the remote import");
+
+    assert_eq!(grant.resume_native, None);
+    assert!(
+        grant.prompt.contains("Continue the remote import"),
+        "the capsule markdown is missing from the seed"
+    );
+    assert!(
+        grant.prompt.contains("ORIGIN-TAIL-REMOTE-7f3"),
+        "the bundle tail is missing from the seed"
+    );
+    assert!(
+        grant.prompt.ends_with("pick up the remote import"),
+        "the first turn's input is not the seed's next message"
+    );
+
+    let events = read_events(&remote, &child);
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::UserMessage(payload))
+                if payload.note.as_deref() == Some("handoff")
+                    && payload.text.contains("ORIGIN-TAIL-REMOTE-7f3")
+        )),
+        "the log does not show the seeded prompt the executor received"
+    );
+    assert!(
+        !remote.paths.session_dir(&child).join("import.json").exists(),
+        "the import sidecar was not consumed by the first remote turn"
+    );
+    let store = remote.open_store().expect("store");
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.native_session_id, None);
+}
+
+#[test]
+fn native_session_ids_are_scoped_to_the_run_node() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = resumable_deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "node scoped native");
+    let store = deps.open_store().expect("store");
+    store
+        .upsert_native(&session, HarnessKind::Opencode, "home-native", &deps.node, 1)
+        .expect("home native");
+
+    // The home has a native id, but this turn executes on the laptop. It must not inherit it.
+    let laptop_first = begin(&deps, &session, "lease", "first laptop turn");
+    assert_eq!(
+        laptop_first.resume_native, None,
+        "a remote turn inherited the home node's native session id"
+    );
+
+    store
+        .upsert_native(&session, HarnessKind::Opencode, "laptop-native", &laptop(), 2)
+        .expect("laptop native");
+    let laptop = begin(&deps, &session, "lease", "second laptop turn");
+    assert_eq!(
+        laptop.resume_native.as_deref(),
+        Some("laptop-native"),
+        "the laptop did not resume the native id recorded on the laptop"
+    );
+    assert_eq!(laptop.native_hint, None, "a resumed turn asked for a fresh native id");
+
+    let home = begin_on(&deps, &session, "lease", "home turn", deps.node.clone(), None);
+    assert_eq!(
+        home.resume_native.as_deref(),
+        Some("home-native"),
+        "the home did not resume the native id recorded on the home"
+    );
+    let home_run = store.require_run(&home.run_id).expect("home run");
+    assert_eq!(home_run.native_session_id.as_deref(), Some("home-native"));
+
+    // A harness whose adapter cannot resume native must not be asked to, even when a
+    // matching id exists for the node; it starts fresh instead.
+    let mut non_resumable = deps.clone();
+    non_resumable.adapters = Arc::new(AdapterRegistry::new());
+    let fresh = begin(&non_resumable, &session, "lease", "no native resume");
+    assert_eq!(
+        fresh.resume_native, None,
+        "a non-resumable harness was asked to resume a native session"
+    );
+    assert!(fresh.native_hint.is_some(), "the fresh start got no native id hint");
+}
+
+#[test]
+fn begin_turn_uses_the_surface_cwd_without_probing_it_on_the_home() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "surface cwd");
+    // This path exists only on the surface; the home must not reject it for being absent.
+    let surface = tmp.path().join("surface-checkout");
+    assert!(!surface.exists());
+    let cwd = surface.display().to_string();
+
+    let grant = begin_on(
+        &deps,
+        &session,
+        "lease",
+        "run in the surface checkout",
+        laptop(),
+        Some(cwd.clone()),
+    );
+    assert_eq!(grant.cwd, cwd);
+
+    let store = deps.open_store().expect("store");
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.cwd.as_deref(), Some(cwd.as_str()));
+    let row = store.require_session(&session).expect("session");
+    assert_ne!(row.cwd, cwd, "the session metadata keeps the home's checkout");
+}
+
+#[test]
+fn ingest_rejects_unknown_or_mismatched_runs_before_events() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(&tmp);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "run owner");
+    let grant = begin(&deps, &session, "lease", "prompt");
+    let other = create_session(&service, &tmp, "other session");
+    let store = deps.open_store().expect("store");
+
+    let unknown = IngestGrant {
+        session: session.clone(),
+        lease: "lease".to_owned(),
+        run: RunId::new(),
+    };
+    let mut reader = Cursor::new(Vec::<u8>::new());
+    let mut ack = Vec::new();
+    let error = ingest_lines(&deps, &store, &unknown, &mut reader, &mut ack)
+        .expect_err("an unknown run must be refused before ingest starts");
+    assert!(error.to_string().contains("run"), "unexpected error: {error}");
+
+    let mismatched = IngestGrant {
+        session: other,
+        lease: "lease".to_owned(),
+        run: grant.run_id.clone(),
+    };
+    let mut reader = Cursor::new(Vec::<u8>::new());
+    let mut ack = Vec::new();
+    let error = ingest_lines(&deps, &store, &mismatched, &mut reader, &mut ack)
+        .expect_err("a run from another session must be refused before ingest starts");
+    assert!(
+        error.to_string().contains("does not belong"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

@@ -25,8 +25,9 @@ use vowp_store::{RunFinish, Store};
 
 use crate::CoreError;
 use crate::deps::Deps;
+use crate::session::bundle;
 use crate::session::seed::seed_prompt;
-use crate::session::service::tail_of_complete_turns;
+use crate::session::service::{native_for_node, tail_of_complete_turns};
 
 /// How long an ingest waits for a previous writer of the same session log.
 const WRITER_WAIT: Duration = Duration::from_secs(5);
@@ -59,6 +60,11 @@ pub struct BeginTurn {
     pub purpose: RunPurpose,
     /// Executor node.
     pub node: NodeName,
+    /// Working directory on the surface, when it differs from the home's session cwd.
+    ///
+    /// The path belongs to the executor node, so the home never requires it to exist here.
+    /// `vowp __exec` validates it on the machine that will actually run the harness.
+    pub cwd: Option<String>,
     /// Prompt to send.
     pub prompt: String,
 }
@@ -103,14 +109,50 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
 
     let executor = req.executor.executor.clone();
     let node = req.node.clone();
+    // The home's cwd for this session names its own checkout, which may not exist on a
+    // surface that runs a different worktree. The request may therefore carry the
+    // surface's absolute path; the home records it without probing the surface filesystem
+    // and `__exec` checks it where the harness will actually start.
+    let cwd = match &req.cwd {
+        Some(cwd) if !cwd.is_empty() => {
+            if !std::path::Path::new(cwd).is_absolute() {
+                return Err(CoreError::Invalid(format!("surface cwd must be absolute: {cwd}")));
+            }
+            cwd.clone()
+        }
+        _ => session.cwd.clone(),
+    };
     let prior = SessionLog::open_read(&deps.paths, &req.session)?.read_all()?;
     let turn = prior
         .iter()
         .filter(|event| event.event_type == EventType::TurnStarted)
         .count()
         .saturating_add(1) as u32;
-    let native = store.native_for(&req.session, executor.harness)?;
-    let (prompt, handoff) = if native.is_none() {
+    // Mirror `run_turn`: native resume is only requested from a harness that supports it,
+    // and only for the node that owns the run. A native id recorded on the home must never
+    // be resumed by a turn that executes on another machine.
+    let can_resume_native = deps
+        .adapters
+        .get(&executor)
+        .is_some_and(|adapter| adapter.capabilities().can_resume_native);
+    let native = if can_resume_native {
+        native_for_node(store, &req.session, executor.harness, &node)?
+    } else {
+        None
+    };
+    // An imported child keeps the bundle tail out of its log, so its first turn seeds from
+    // the sidecar written by `bundle::import` (sessions.md §6.3 step 5). This is the same
+    // precedence as `run_turn`: no resumable native id means the bundle seed comes first,
+    // then the latest capsule.
+    let imported = if native.is_none() {
+        bundle::pending_import_seed(deps, &req.session, &req.prompt)?
+    } else {
+        None
+    };
+    let imported_used = imported.is_some();
+    let (prompt, handoff) = if let Some(seed) = imported {
+        (seed, true)
+    } else if native.is_none() {
         match store.latest_capsule(&req.session)? {
             Some(capsule) => {
                 let tail = tail_of_complete_turns(&prior, deps.config.capsule.tail_turns);
@@ -140,7 +182,7 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
         native_session_id: native.clone(),
         pid: None,
         window: None,
-        cwd: Some(session.cwd.clone()),
+        cwd: Some(cwd.clone()),
         started_at: deps.clock.now(),
         ended_at: None,
         exit_code: None,
@@ -189,6 +231,9 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
         Some(node.clone()),
         native.clone(),
     )?;
+    if imported_used {
+        bundle::clear_pending_import(deps, &req.session)?;
+    }
     log.sync()?;
     store.insert_run(&run)?;
     store.set_session_state(&req.session, SessionState::Running, Some(&executor))?;
@@ -201,10 +246,10 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
         executor: executor.to_string(),
         purpose: req.purpose,
         node,
-        cwd: session.cwd,
+        cwd,
         prompt,
-        resume_native: native,
-        native_hint: Some(fresh_native_id(deps)),
+        resume_native: native.clone(),
+        native_hint: native.is_none().then(|| fresh_native_id(deps)),
         env_names: env_names(deps, &executor),
         lease_token: req.lease.clone(),
         tail_seq,
@@ -254,8 +299,20 @@ pub struct IngestSession<'a> {
 }
 
 impl<'a> IngestSession<'a> {
-    /// Opens the session log and waits for a previous ingest writer to release it.
+    /// Validates the run/session pair, then opens the session log.
+    ///
+    /// The `--run` argument is often assembled by hand or by an older surface, so the
+    /// check happens before the first event is accepted rather than when the summary
+    /// arrives. A run that does not exist or belongs to another session must not write
+    /// into this log.
     pub fn begin(deps: &'a Deps, store: &'a Store, grant: &IngestGrant) -> Result<Self, CoreError> {
+        let run = store.require_run(&grant.run)?;
+        if run.session_id.as_ref() != Some(&grant.session) {
+            return Err(CoreError::Invalid(format!(
+                "run {} does not belong to session {}",
+                grant.run, grant.session
+            )));
+        }
         let log = open_log_wait(deps, &grant.session, WRITER_WAIT)?;
         Ok(Self {
             deps,

@@ -491,14 +491,28 @@ const REMOTE_EXECUTOR: &str = "opencode:deepseek/deepseek-flash#max";
 
 /// Writes a `turn-begin` request, runs it in-process and stores the grant at mode 0600.
 fn begin_remote_turn(env: &common::TestEnv, id: &str, lease: &str, prompt: &str) -> (TurnGrant, std::path::PathBuf) {
+    begin_remote_turn_with_cwd(env, id, lease, prompt, None)
+}
+
+/// [`begin_remote_turn`] with an explicit surface checkout path.
+fn begin_remote_turn_with_cwd(
+    env: &common::TestEnv,
+    id: &str,
+    lease: &str,
+    prompt: &str,
+    cwd: Option<&Path>,
+) -> (TurnGrant, std::path::PathBuf) {
     let request_path = env.project_path().join("turn-request.json");
-    let request = serde_json::json!({
+    let mut request = serde_json::json!({
         "lease": lease,
         "prompt": prompt,
         "executor": REMOTE_EXECUTOR,
         "purpose": "start",
         "node": "local",
     });
+    if let Some(cwd) = cwd {
+        request["cwd"] = serde_json::json!(cwd.display().to_string());
+    }
     std::fs::write(&request_path, request.to_string()).expect("request");
     let (code, stdout, stderr) = env.run(&[
         "session",
@@ -657,10 +671,12 @@ fn remote_turn_begin_and_exec_streams_over_local_ingest() {
         "__exec failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains(&grant.run_id.to_string()),
-        "the status document does not name the run"
-    );
+    let status: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).expect("__exec status JSON");
+    assert_eq!(status["run_id"], grant.run_id.to_string());
+    assert_eq!(status["done"], true);
+    assert_eq!(status["resumed"], false);
+    assert_eq!(status["ack_window"], 64);
 
     let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
     let paths = vowp_store::NodePaths::new(env.home_path());
@@ -699,6 +715,117 @@ fn remote_turn_begin_and_exec_streams_over_local_ingest() {
     assert!(spool_text.contains("assistant.message"), "{spool_text}");
     let acked = std::fs::read_to_string(spool.join("acked.json")).expect("acked");
     assert!(acked.contains("\"summary\": true"), "{acked}");
+}
+
+#[test]
+fn remote_turn_uses_the_surface_checkout_cwd() {
+    let env = common::TestEnv::new();
+    let script = configure(&env);
+    let id = create(&env);
+    let surface = env.project_path().join("surface-checkout");
+    std::fs::create_dir_all(&surface).expect("surface checkout");
+    let marker = env.project_path().join("harness-cwd.txt");
+    let fixture = script.parent().expect("fake bin").join("capsule.jsonl");
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.0.28'; exit 0; fi\npwd -P > '{}'\ncat '{}'\n",
+        marker.display(),
+        fixture.display()
+    );
+    std::fs::write(&script, body).expect("fake script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let (grant, grant_path) =
+        begin_remote_turn_with_cwd(&env, &id, "lease-token", "run in my checkout", Some(&surface));
+    let expected = surface.display().to_string();
+    assert_eq!(grant.cwd, expected);
+    let output = run_exec(&env, &grant_path, None);
+    assert!(
+        output.status.success(),
+        "__exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let observed = std::fs::read_to_string(&marker).expect("harness cwd marker");
+    assert_eq!(
+        std::fs::canonicalize(observed.trim()).expect("observed cwd"),
+        std::fs::canonicalize(&surface).expect("surface cwd"),
+        "the harness did not start in the surface checkout"
+    );
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.cwd.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
+fn remote_exec_refuses_a_corrupt_spool() {
+    let env = common::TestEnv::new();
+    let script = configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "do not start twice");
+    let marker = env.project_path().join("harness-started.txt");
+    let fixture = script.parent().expect("fake bin").join("capsule.jsonl");
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.0.28'; exit 0; fi\ntouch '{}'\ncat '{}'\n",
+        marker.display(),
+        fixture.display()
+    );
+    std::fs::write(&script, body).expect("fake script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let spool = env.project_path().join("corrupt-spool");
+    std::fs::create_dir_all(&spool).expect("spool dir");
+    std::fs::write(spool.join("events.jsonl"), b"{\"type\": \"event\"\n").expect("corrupt spool");
+    let output = run_exec(&env, &grant_path, Some(&spool));
+    assert!(
+        !output.status.success(),
+        "__exec accepted a corrupt spool: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid spool line"),
+        "the corruption was not reported: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "__exec started a second harness on top of a corrupt spool"
+    );
+
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert!(
+        run.ended_at.is_none(),
+        "the refused client finalised the turn it never ran"
+    );
+}
+
+#[test]
+fn session_ingest_refuses_a_run_from_another_session() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let first = create(&env);
+    let (grant, _grant_path) = begin_remote_turn(&env, &first, "lease-token", "own this run");
+    let second = create(&env);
+
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["session", "ingest", second.as_str(), "--run", grant.run_id.as_str()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run ingest");
+    assert!(
+        !output.status.success(),
+        "ingest accepted a run owned by another session"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not belong"),
+        "the mismatch was not reported: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
