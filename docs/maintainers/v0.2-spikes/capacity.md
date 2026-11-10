@@ -192,6 +192,13 @@ let the node reach this state.
   pressure every 5 s. For per-job usage, start the adapter run and its command
   gates in one transient user scope; read `memory.peak` and `cpu.stat` when the
   scope ends. No 5 s host sample can reconstruct a per-job peak.
+- **User-manager environment:** `systemd-run --user` needs the user manager's
+  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. The probe ran with
+  `XDG_RUNTIME_DIR=/run/user/1001` and
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus` from the login
+  session, and `Linger=yes` keeps the manager alive. VOWP's supervisor is a
+  systemd user unit and has the same environment; a bare cron/SSH path must set
+  them (or go through `systemctl --user`).
 - **Store** per run: peak RAM (`memory.peak`), `anon`/`file`/`kernel` at peak
   if sampled, CPU usec (`usage_usec`), duration, exit code, and a
   cold/warm/incremental label if it can be inferred. Store the scope method
