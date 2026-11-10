@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 
 use vowp_core::deps::AdapterRegistry;
 use vowp_protocol::{
-    Cost, Executor, Job, JobId, LimitEvent, LimitKind, NodeName, Profile, Run, RunId, RunOutcome, RunPurpose, RunRole,
-    RunSummary, Session, SessionId, SessionRole, StopReason, Switch, SwitchReason, SwitchState, Timestamp, VowpConfig,
+    Cost, Executor, Job, JobId, LedgerKind, LimitEvent, LimitKind, NodeName, Profile, Run, RunId, RunOutcome,
+    RunPurpose, RunRole, RunSummary, Session, SessionId, SessionRole, StopReason, Switch, SwitchReason, SwitchState,
+    Timestamp, VowpConfig,
 };
-use vowp_store::Store;
+use vowp_store::{LedgerFilter, Store};
 
 /// A valid capsule draft that the capsule writer accepts.
 pub fn draft_json(intent: &str) -> String {
@@ -261,6 +262,26 @@ pub fn completed_switch_reasons(node: &TestNode, role: SessionRole) -> Vec<Switc
             .collect(),
         None => Vec::new(),
     }
+}
+
+/// Returns whether the switch ledger contains an entry for `reason`.
+///
+/// L6 finishes the session switch row before it appends the matching `switch` ledger row
+/// (the two writes use different store handles), so a test that only waits for the
+/// completed switch can observe it while the ledger row is still missing. Wait on this
+/// durable condition before asserting the ledger contents.
+pub fn switch_ledger_reason_recorded(node: &TestNode, reason: &str) -> bool {
+    node.store()
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::Switch),
+            ..LedgerFilter::default()
+        })
+        .map(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.detail.get("reason").and_then(|value| value.as_str()) == Some(reason))
+        })
+        .unwrap_or(false)
 }
 
 /// Counts jobs whose id starts with `prefix`.

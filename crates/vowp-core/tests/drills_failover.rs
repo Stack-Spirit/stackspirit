@@ -76,8 +76,9 @@ fn drill_failover_and_probe_back() {
     assert!(
         wait_until(Duration::from_secs(10), || {
             completed_switch_reasons(&node, vowp_protocol::SessionRole::Planner).contains(&SwitchReason::Limit)
+                && switch_ledger_reason_recorded(&node, "limit")
         }),
-        "the planner session switches on the limit"
+        "the planner session switches on the limit and records it in the ledger"
     );
     node.wait_runs();
 
@@ -127,6 +128,7 @@ fn drill_failover_and_probe_back() {
         supervisor.tick().expect("probe tick");
         if store.limit_for("claude").expect("limit").is_none()
             && completed_switch_reasons(&node, vowp_protocol::SessionRole::Planner).contains(&SwitchReason::ProbeBack)
+            && switch_ledger_reason_recorded(&node, "probe_back")
         {
             probed = true;
             break;
