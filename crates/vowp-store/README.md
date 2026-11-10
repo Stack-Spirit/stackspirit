@@ -6,8 +6,9 @@ of the VOWP workspace.
 
 ## What it provides
 
-- The SQLite schema, migrations and typed repository access for jobs, runs, sessions, loops, nodes, the
-  cost ledger and miscellaneous state.
+- The split SQLite schema (one global database plus one database per project), the v0.1→v0.2
+  migration, cross-file reconcile and typed repository access for jobs, runs, sessions, loops,
+  nodes, the cost ledger and miscellaneous state.
 - The append-only JSONL session log and session file layout under a node's home directory.
 - Content-addressed blob storage, `reindex` recovery and consistent backups.
 - Path helpers and typed errors for the storage layer.
