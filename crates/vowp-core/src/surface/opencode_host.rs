@@ -178,7 +178,17 @@ impl OpencodeHost {
             let path = format!("/api/session/{native}/event?after=0");
             if let Ok((status, events)) = client.request_events(&path, self.sse_window) {
                 if (200..300).contains(&status) {
-                    return Ok(map_events(&events, false));
+                    if !events.is_empty() {
+                        return Ok(map_events(&events, false));
+                    }
+                    // Some builds treat `after=0` as "now"; the plain endpoint replays all.
+                    let plain = format!("/api/session/{native}/event");
+                    if let Ok((status, events)) = client.request_events(&plain, self.sse_window) {
+                        if (200..300).contains(&status) && !events.is_empty() {
+                            return Ok(map_events(&events, false));
+                        }
+                    }
+                    return Ok(Vec::new());
                 }
             }
         }
