@@ -122,9 +122,7 @@ esac
 PROJECT_NAME=$(acceptance_slug "$PROJECT_NAME")
 [ -n "$PROJECT_NAME" ] || die "project name is empty after slugging"
 
-case "$DEST" in
-    ""|/|"$HOME"|"$HOME"/) die "refusing an unsafe destination: '$DEST'" ;;
-esac
+acceptance_validate_dest "$DEST"
 if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
     if [ "$FORCE" != "1" ]; then
         die "destination is not empty: $DEST (pass --force to replace it)"

@@ -90,7 +90,8 @@ bash scripts/acceptance/rig.sh phone --name demo 'printf "%s\n" "phone surface"'
 
 `fixture` creates an ordinary git checkout with a committed fake harness and a
 bare local `origin` next to it. It does not register the project with a home;
-the v0.2 test registers it with `vowp project add` (or the command under test).
+the v0.2 test registers it with `vowp project add` (planned for C2) or the
+command under test.
 
 ```sh
 # A small project whose worker writes src/<job>.txt and a report.
@@ -129,7 +130,8 @@ verifier report. This lets a test exercise the real review gate without a model.
 Generate a real v0.1 home inside the rig:
 
 ```sh
-bash scripts/acceptance/rig.sh v01-home --name demo --jobs 2
+bash scripts/acceptance/rig.sh v01-home --name demo \
+    --dest /home/vowp/acceptance/v01 --jobs 2
 
 # Or run the generator directly on a Linux/macOS host:
 bash scripts/acceptance/make-v01-home.sh --dest /tmp/v01-home --jobs 2
@@ -155,9 +157,11 @@ The generator:
    generator also kills on exit.
 
 The project path is recorded in the v0.1 database, so use the generated
-directory in place. For migration, point the v0.2 binary at the same home:
+directory in place. Migration is planned for C2; once that command exists,
+point the v0.2 binary at the same home:
 
 ```sh
+# planned for C2
 vowp --home /home/vowp/acceptance/v01/home migrate
 ```
 
@@ -170,11 +174,11 @@ The card T0 exists so the later tests can be short and repeatable.
 | Test | Rig usage |
 |---|---|
 | **T1 fresh setup** | `up --variant sudo` and `up --variant no-sudo`; run the README prompt over `ssh`; the phone joins with `phone`. The image starts with no VOWP and no `~/.vowp`. |
-| **T2 two projects** | `fixture-pair`, register both projects on one home, seed jobs, run `vowp up`, and assert neither starves. |
-| **T3 capacity** | `fixture memory-hog --hog-mb … --hog-hold …`, start several jobs, sample `capacity report`, and check the brake stops admissions without killing a live worker. `up --memory 1g` also sets a Docker memory limit. |
+| **T2 two projects** | `fixture-pair`, register both projects on one home with `vowp project add` (planned C2), seed jobs, run `vowp up`, and assert neither starves. |
+| **T3 capacity** | `fixture memory-hog --hog-mb … --hog-hold …`, start several jobs, sample `capacity report` (planned E1), and check the brake stops admissions without killing a live worker. `up --memory 1g` also sets a Docker memory limit. |
 | **T4 surfaces** | Use `ssh` for the owner and `phone` for the second SSH surface; `phone` keeps its own key and connection. `ssh --as phone` exercises the phone key from the host too. |
 | **SSH drop** | Run the client through `phone`, then close the phone container or `docker exec ... pkill ssh`; the home and its files stay untouched. |
-| **T6 migration** | `v01-home` creates the v0.1 home with real history; `manifest.json` gives the pre-migration row counts. |
+| **T6 migration** | `v01-home` creates the v0.1 home with real history; `manifest.json` gives the pre-migration row counts. The `vowp migrate` command is planned for C2. |
 | **T7/T8 GC + secrets** | Use any fixture project, put the home under a temporary `VOWP_HOME`, and point the test's logs/report paths inside the container. |
 
 ## Command reference
@@ -258,13 +262,15 @@ home containers; `rig.sh status --name <name>` shows both.
 
 ## Limits and ownership
 
-- The rig is Linux-container based; the host scripts are POSIX-ish bash and
-  work on macOS, but the VPS images are Ubuntu 24.04 Linux. macOS-specific
-  product code is not exercised by the rig (the repo's CI covers macOS).
+- The rig is Linux-container based; the host scripts are bash and avoid
+  GNU-only tools such as `seq`, so the intended macOS path uses the same
+  commands, but the self-test itself runs on Linux. macOS-specific product
+  code is not exercised by the rig (the repo's CI covers macOS).
 - The no-sudo variant removes `sudo` only; it does not emulate a systemd-less
   host beyond the container's normal lack of a running init system.
 - All paths in the v0.1 home are absolute. Use the generated directory in
   place or move `home/` and `project/` together and update the project row.
-- This directory is internal (`scripts/acceptance/**`) and is pruned from the
-  public tree, like `scripts/audit/`. Keep hostnames, owner paths and keys out
-  of it.
+- This directory is internal (`scripts/acceptance/**`). The public-tree audit
+  must add `prune scripts/acceptance/` before publication; it is not yet in
+  `scripts/audit/public-tree.txt`, so do not assume it is automatically
+  excluded. Keep hostnames, owner paths and keys out of it.

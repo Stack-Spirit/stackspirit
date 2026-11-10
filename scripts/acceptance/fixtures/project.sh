@@ -14,7 +14,7 @@
 #     writes its report.
 #
 # Nothing is registered with a VOWP home here. v0.2 tests register the checkout
-# with `vowp project add`. A v0.1 home needs a separate `vowp init` checkout
+# with `vowp project add` (planned for C2). A v0.1 home needs a separate `vowp init` checkout
 # first: v0.1 init refuses while this fixture's `vowp.toml` exists, and --force
 # would overwrite the fake-harness config.
 #
@@ -86,7 +86,12 @@ esac
 
 [ -n "$dest" ] || die "destination is required"
 case "$dest" in
-    /|"$HOME"|"$HOME"/) die "refusing to use $dest as a fixture destination" ;;
+    ""|.|..|/|/tmp|/var/tmp|/home|/home/vowp|"$HOME"|"$HOME"/)
+        die "unsafe destination: '$dest'"
+        ;;
+    */../*|../*|*/..)
+        die "destination must not contain '..': '$dest'"
+        ;;
 esac
 
 if [ -e "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
@@ -214,7 +219,7 @@ cat >"$dest/.acceptance/seed-jobs.sh" <<'EOF'
 #        VOWP=/path/to/vowp .acceptance/seed-jobs.sh 4 hog
 #
 # Run from the project root. Register the project with v0.2 `vowp project add`
-# before starting a supervisor. The fake worker writes
+# (planned for C2) before starting a supervisor. The fake worker writes
 # src/<job>.txt, commits it, and writes the report the `report` gate needs.
 set -Eeuo pipefail
 
@@ -226,7 +231,8 @@ case "$count" in
 esac
 [ "$count" -ge 1 ] || { printf '%s\n' "seed-jobs: count must be at least 1" >&2; exit 2; }
 
-for index in $(seq 1 "$count"); do
+index=1
+while [ "$index" -le "$count" ]; do
     id="${prefix}-${index}"
     body=$(cat <<BRIEF
 # Goal
@@ -258,6 +264,7 @@ BRIEF
         --gates "report,owns_respected" \
         --brief - >/dev/null
     printf '%s\n' "seed-jobs: added $id"
+    index=$((index + 1))
 done
 EOF
 chmod 0755 "$dest/.acceptance/seed-jobs.sh"

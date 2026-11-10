@@ -184,6 +184,21 @@ acceptance_sha256_file() {
     fi
 }
 
+# Reject destinations that could escape their parent or wipe a system root.
+# The optional --force paths in the fixture/generator scripts delete the
+# destination, so a traversal component must fail before mkdir/rm.
+acceptance_validate_dest() {
+    local dest=$1
+    case "$dest" in
+        ""|.|..|/|/tmp|/var/tmp|/home|/home/vowp|"$HOME"|"$HOME"/)
+            acceptance_die "unsafe destination: '$dest'"
+            ;;
+        */../*|../*|*/..)
+            acceptance_die "destination must not contain '..': '$dest'"
+            ;;
+    esac
+}
+
 # Validate a project-name slug (the same shape VOWP accepts).
 acceptance_slug() {
     printf '%s\n' "$1" \

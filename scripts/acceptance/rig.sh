@@ -75,7 +75,10 @@ require_docker() {
 
 validate_name() {
     case "$1" in
-        ''|*[!A-Za-z0-9_.-]*)
+        ''|.|..|.*)
+            die "invalid rig name: '$1' (must not be empty, '.', '..' or start with a dot)"
+            ;;
+        *[!A-Za-z0-9_.-]*)
             die "invalid rig name: '$1' (use letters, digits, dot, underscore or hyphen)"
             ;;
     esac
@@ -177,7 +180,7 @@ wait_for_home() {
     local key=$2
     local port=$3
     local attempt
-    for attempt in $(seq 1 60); do
+    for ((attempt = 1; attempt <= 60; attempt++)); do
         if ssh -p "$port" -i "$key" \
             -o BatchMode=yes -o ConnectTimeout=2 \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -197,7 +200,7 @@ wait_for_phone() {
     local phone_container=$1
     local home_container=$2
     local attempt
-    for attempt in $(seq 1 30); do
+    for ((attempt = 1; attempt <= 30; attempt++)); do
         if docker exec -u phone -e HOME=/home/phone "$phone_container" \
             ssh -o BatchMode=yes -o ConnectTimeout=2 home true >/dev/null 2>&1; then
             return 0

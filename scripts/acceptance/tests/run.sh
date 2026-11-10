@@ -201,6 +201,28 @@ host_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-selftest.XXXXXX")
 ) || fail "the host-side private tmux helper did not behave"
 rm -rf -- "$host_root"
 
+say "checking unsafe rig names and destinations are refused before writes"
+guard_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-guard.XXXXXX")
+mkdir -p "$guard_root/names" "$guard_root/child"
+for bad_name in . .. .hidden; do
+    if VOWP_ACCEPTANCE_STATE_DIR="$guard_root/names/state" \
+        bash "$RIG" up --name "$bad_name" --no-build >/dev/null 2>&1; then
+        fail "up accepted the unsafe rig name '$bad_name'"
+    fi
+done
+if [ -n "$(ls -A "$guard_root/names" 2>/dev/null)" ]; then
+    fail "an unsafe rig name wrote state under the state root"
+fi
+if (cd "$guard_root/child" && bash "$ACCEPTANCE_DIR/fixtures/project.sh" hello ../escape >/dev/null 2>&1); then
+    fail "fixtures/project.sh accepted a '..' destination"
+fi
+[ ! -e "$guard_root/escape" ] || fail "fixtures/project.sh escaped its destination"
+if (cd "$guard_root/child" && bash "$ACCEPTANCE_DIR/make-v01-home.sh" --dest ../escape >/dev/null 2>&1); then
+    fail "make-v01-home.sh accepted a '..' destination"
+fi
+[ ! -e "$guard_root/escape" ] || fail "make-v01-home.sh escaped its destination"
+rm -rf -- "$guard_root"
+
 # --- build -----------------------------------------------------------------
 
 if [ "$NO_BUILD" -eq 1 ]; then
