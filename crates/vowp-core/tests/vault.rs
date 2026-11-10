@@ -620,6 +620,42 @@ fn one_time_page_serves_a_form_and_stores_exactly_one_value() {
 }
 
 #[test]
+fn one_time_page_keeps_the_request_open_after_a_malformed_post() {
+    let tmp = tempdir().expect("tempdir");
+    let (deps, _) = deps(tmp.path());
+    let name = vowp_protocol::SecretName::parse("RETRY_KEY").expect("name");
+    let server = SecretRequestServer::bind_with_token(&deps, &name, now(), "retry-token".to_owned()).expect("bind");
+    let url = server.request().url.clone();
+    let client = {
+        let url = url.clone();
+        thread::spawn(move || {
+            let (status, _) = http(
+                &url,
+                "POST",
+                Some("application/x-www-form-urlencoded"),
+                "other=not-the-value",
+            );
+            assert_eq!(status, 400, "a POST without `value` is rejected");
+            let (status, body) = http(
+                &url,
+                "POST",
+                Some("application/x-www-form-urlencoded"),
+                "value=retry-value-1357",
+            );
+            assert_eq!(status, 200);
+            assert!(body.contains("RETRY_KEY saved"));
+        })
+    };
+    let info = server.wait(Duration::from_secs(5)).expect("saved after retry");
+    client.join().expect("client");
+    assert_eq!(info.last4, "1357");
+    assert_eq!(
+        fs::read_to_string(secret_path(&deps, "RETRY_KEY")).expect("value"),
+        "retry-value-1357"
+    );
+}
+
+#[test]
 fn one_time_page_times_out_without_a_value() {
     let tmp = tempdir().expect("tempdir");
     let (deps, _) = deps(tmp.path());
