@@ -12,7 +12,7 @@ use vowp_protocol::{
     Run, RunOutcome, SessionId, SessionState, Timestamp,
 };
 
-use crate::db::{RunFinish, SessionFilter, Store};
+use crate::db::{RunFinish, Store};
 use crate::error::StoreError;
 use crate::session_log::{NewEvent, SessionLog, index_row};
 
@@ -68,11 +68,7 @@ impl Store {
         // 2. A running session with no open run: note it and let dispatch resume.
         let open_runs = self.open_runs()?;
         let open_sessions: HashSet<SessionId> = open_runs.iter().filter_map(|run| run.session_id.clone()).collect();
-        let running = self.list_sessions(&SessionFilter {
-            project: Some(bound.clone()),
-            state: Some(SessionState::Running),
-            ..SessionFilter::default()
-        })?;
+        let running = self.sessions_for_reconcile(&bound, SessionState::Running)?;
         for session in running {
             if open_sessions.contains(&session.id) {
                 continue;
@@ -182,13 +178,17 @@ impl Store {
     }
 
     /// Returns whether a repair note with this text already exists at or after `since`.
+    ///
+    /// Real log events store the note summary as `note: <text>`; the in-memory fallback stores
+    /// the bare text. Accept both so a second reconcile cannot append a duplicate note.
     fn has_note_since(&self, session: &SessionId, text: &str, since: Timestamp) -> Result<bool, StoreError> {
         let found = self
             .conn
             .query_row(
                 "SELECT 1 FROM main.session_events
-                 WHERE session_id = ?1 AND type = 'note' AND summary = ?2 AND ts >= ?3 LIMIT 1",
-                params![session.as_str(), text, since.as_rfc3339()],
+                 WHERE session_id = ?1 AND type = 'note' AND (summary = ?2 OR summary = ?3)
+                   AND ts >= ?4 LIMIT 1",
+                params![session.as_str(), text, format!("note: {text}"), since.as_rfc3339()],
                 |_| Ok(()),
             )
             .optional()?

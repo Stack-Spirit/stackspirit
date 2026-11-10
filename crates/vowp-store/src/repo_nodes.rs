@@ -218,7 +218,8 @@ impl Store {
 
         let bound_name = self.bound_project().cloned();
         let is_node = project.name.as_str() == crate::RESERVED_NODE_PROJECT;
-        let should_bind = !existed
+        let should_bind = self.auto_bind
+            && !existed
             && if is_node {
                 bound_name.is_none() && real_before == 0
             } else {

@@ -402,6 +402,94 @@ fn migration_resume_finishes_a_swap() {
 }
 
 #[test]
+fn migration_resume_finishes_swap_with_stale_projects() {
+    let (_tmp, paths, ..) = v01_home();
+    let backup = paths.backups_dir().join("pre-0.2-stale.db");
+    std::fs::copy(paths.db_path(), &backup).expect("back up v0.1 file");
+
+    let stage = paths.tmp_dir().join("migrate-stale-stage");
+    let staged_projects = stage.join("projects");
+    std::fs::create_dir_all(&staged_projects).expect("stage projects");
+    let global = Connection::open(stage.join("global.db")).expect("stage global");
+    global
+        .execute_batch(include_str!("../src/schema/global.sql"))
+        .expect("global schema");
+    drop(global);
+
+    let write_project = |path: &Path, job: &str| {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("project dir");
+        let conn = Connection::open(path).expect("project db");
+        conn.execute_batch(include_str!("../src/schema/project.sql"))
+            .expect("project schema");
+        conn.execute(
+            "INSERT INTO jobs (
+                id, project, title, kind, role, profile, brief_path, report_path,
+                state_changed_at, created_at, updated_at
+             ) VALUES (?1, 'alpha', ?1, 'build', 'worker', 'worker', 'b', 'r', ?2, ?2, ?2)",
+            params![job, T0],
+        )
+        .expect("job");
+    };
+    write_project(&staged_projects.join("alpha/project.db"), "staged-job");
+    write_project(&staged_projects.join("beta/project.db"), "beta-job");
+    write_project(&staged_projects.join("_node/project.db"), "node-job");
+
+    // A stale projects/ directory exists from an earlier attempt.
+    let stale = paths.projects_dir();
+    write_project(&stale.join("alpha/project.db"), "stale-job");
+
+    // Simulate a crash after step 8.2: the global file is already v2 but projects/ is old.
+    std::fs::copy(stage.join("global.db"), paths.db_path()).expect("install v2 global");
+    let manifest = serde_json::json!({
+        "from": 1,
+        "to": 2,
+        "backup": backup.display().to_string(),
+        "stage": stage.display().to_string(),
+        "state": "swapping",
+    });
+    std::fs::write(
+        paths.migration_manifest_path(),
+        serde_json::to_vec(&manifest).expect("json"),
+    )
+    .expect("manifest");
+
+    resume_migration(&paths).expect("resume with stale projects");
+    assert!(!paths.migration_manifest_path().exists());
+    assert!(
+        !stage.exists(),
+        "the stage is removed only after projects are installed"
+    );
+    let installed = Connection::open(paths.project_db_path(&project("alpha"))).expect("installed");
+    let staged: i64 = installed
+        .query_row("SELECT COUNT(*) FROM jobs WHERE id = 'staged-job'", [], |row| {
+            row.get(0)
+        })
+        .expect("staged job");
+    let stale: i64 = installed
+        .query_row("SELECT COUNT(*) FROM jobs WHERE id = 'stale-job'", [], |row| row.get(0))
+        .expect("stale job");
+    assert_eq!(staged, 1, "the staged project database was installed");
+    assert_eq!(stale, 0, "the stale directory did not win");
+
+    let aside = std::fs::read_dir(paths.backups_dir())
+        .expect("backups")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("projects-before-0.2-"))
+        })
+        .expect("stale projects moved aside");
+    let old = Connection::open(aside.join("alpha/project.db")).expect("old project");
+    let old_stale: i64 = old
+        .query_row("SELECT COUNT(*) FROM jobs WHERE id = 'stale-job'", [], |row| row.get(0))
+        .expect("old job");
+    assert_eq!(old_stale, 1, "the old directory is preserved in backups");
+}
+
+#[test]
 fn v01_database_refuses_to_open_without_migration() {
     let (_tmp, paths, ..) = v01_home();
     let error = match Store::open(&paths) {

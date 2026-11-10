@@ -401,6 +401,58 @@ fn schema_matches_enums() {
         names(&[InboxState::Open, InboxState::Answered, InboxState::Dismissed]),
     );
     check(
+        "node_inbox",
+        "kind",
+        names(&[
+            InboxKind::Question,
+            InboxKind::Approval,
+            InboxKind::Decision,
+            InboxKind::Notice,
+        ]),
+    );
+    check(
+        "node_inbox",
+        "state",
+        names(&[InboxState::Open, InboxState::Answered, InboxState::Dismissed]),
+    );
+    check(
+        "node_ledger",
+        "kind",
+        names(&[
+            LedgerKind::Dispatch,
+            LedgerKind::Gate,
+            LedgerKind::Merge,
+            LedgerKind::Cost,
+            LedgerKind::Switch,
+            LedgerKind::Limit,
+            LedgerKind::Promote,
+            LedgerKind::Rollback,
+            LedgerKind::Inbox,
+            LedgerKind::Schedule,
+            LedgerKind::State,
+            LedgerKind::Note,
+        ]),
+    );
+    check(
+        "node_ledger",
+        "role",
+        names(&[
+            RunRole::Planner,
+            RunRole::Keeper,
+            RunRole::Worker,
+            RunRole::Verifier,
+            RunRole::Capsule,
+            RunRole::Probe,
+            RunRole::Merge,
+            RunRole::Gate,
+        ]),
+    );
+    check(
+        "node_ledger",
+        "cost_source",
+        names(&[CostSource::Receipt, CostSource::PriceTable, CostSource::Unknown]),
+    );
+    check(
         "limits",
         "kind",
         names(&[

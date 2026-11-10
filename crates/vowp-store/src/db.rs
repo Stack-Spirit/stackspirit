@@ -27,8 +27,11 @@ pub const GLOBAL_SCHEMA_VERSION: i64 = 2;
 /// Schema version of every project database written by this build.
 pub const PROJECT_SCHEMA_VERSION: i64 = 1;
 
-/// Compatibility alias for the global schema version.
-pub const SCHEMA_VERSION: i64 = GLOBAL_SCHEMA_VERSION;
+/// Compatibility alias for the v0.1 schema version.
+///
+/// New code that means the global file uses [`GLOBAL_SCHEMA_VERSION`]; this constant keeps its
+/// historical value 1 so external users of the v0.1 API are not surprised.
+pub const SCHEMA_VERSION: i64 = PROJECT_SCHEMA_VERSION;
 
 /// Embedded global schema (user_version 2).
 pub(crate) const GLOBAL_SCHEMA_SQL: &str = include_str!("schema/global.sql");
@@ -176,9 +179,12 @@ pub struct Store {
     savepoints: AtomicU64,
     /// Node root for a file-backed handle; `None` for an in-memory test store.
     pub(crate) paths: Option<NodePaths>,
-    /// The bound project, if any. `&'static` lets [`Store::project`] keep the keyed
+    /// The bound project, if any. `&'static` lets [`Store::bound_project`] return the keyed
     /// signature from the spec; rebinding leaks one tiny name object per handle at most.
     bound: Mutex<Option<&'static ProjectName>>,
+    /// Whether `upsert_project` may auto-bind this handle. `open`/`open_memory` allow it;
+    /// `open_global`, `open_with_project` and `open_read_only` never auto-bind.
+    pub(crate) auto_bind: bool,
 }
 
 impl Store {
@@ -189,7 +195,7 @@ impl Store {
     /// projects the handle is fleet-only and project methods return [`StoreError::NoProject`].
     pub fn open(paths: &NodePaths) -> Result<Store, StoreError> {
         paths.ensure()?;
-        let store = Self::open_global_unbound(paths)?;
+        let store = Self::open_global_unbound(paths, true)?;
         let projects = store.list_projects()?;
         let real: Vec<&vowp_protocol::Project> = projects
             .iter()
@@ -205,7 +211,7 @@ impl Store {
     /// Opens the global database only; project-scoped methods return `NoProject`.
     pub fn open_global(paths: &NodePaths) -> Result<Store, StoreError> {
         paths.ensure()?;
-        Self::open_global_unbound(paths)
+        Self::open_global_unbound(paths, false)
     }
 
     /// Opens the global database and attaches exactly `project`.
@@ -213,7 +219,7 @@ impl Store {
     /// The project must be registered and its database must already exist.
     pub fn open_with_project(paths: &NodePaths, project: &ProjectName) -> Result<Store, StoreError> {
         paths.ensure()?;
-        let store = Self::open_global_unbound(paths)?;
+        let store = Self::open_global_unbound(paths, true)?;
         if !store.project_row_exists(project)? {
             return Err(StoreError::not_found("project", project.as_str()));
         }
@@ -289,6 +295,7 @@ impl Store {
             savepoints: AtomicU64::new(0),
             paths: Some(paths.clone()),
             bound: Mutex::new(None),
+            auto_bind: false,
         };
         if let Some(name) = project {
             if !store.project_row_exists(name)? {
@@ -312,6 +319,7 @@ impl Store {
             savepoints: AtomicU64::new(0),
             paths: None,
             bound: Mutex::new(None),
+            auto_bind: true,
         })
     }
 
@@ -329,7 +337,7 @@ impl Store {
             ));
         }
         let conn = Connection::open(path)?;
-        Self::from_global_connection(conn, path.display().to_string(), true, None)
+        Self::from_global_connection(conn, path.display().to_string(), true, None, false)
     }
 
     /// Replaces the clock used for new timestamps.
@@ -483,11 +491,12 @@ impl Store {
     }
 
     /// Opens the global database without binding a project.
-    fn open_global_unbound(paths: &NodePaths) -> Result<Store, StoreError> {
+    fn open_global_unbound(paths: &NodePaths, auto_bind: bool) -> Result<Store, StoreError> {
         crate::migrate::resume_migration(paths)?;
         let path = paths.db_path();
         let conn = Connection::open(&path)?;
-        let store = Self::from_global_connection(conn, path.display().to_string(), true, Some(paths.clone()))?;
+        let store =
+            Self::from_global_connection(conn, path.display().to_string(), true, Some(paths.clone()), auto_bind)?;
         Ok(store)
     }
 
@@ -497,6 +506,7 @@ impl Store {
         path: String,
         wal: bool,
         paths: Option<NodePaths>,
+        auto_bind: bool,
     ) -> Result<Store, StoreError> {
         // Check the version before enabling WAL: opening a future or v0.1 database must not
         // touch it.
@@ -526,6 +536,7 @@ impl Store {
             savepoints: AtomicU64::new(0),
             paths,
             bound: Mutex::new(None),
+            auto_bind,
         })
     }
 
@@ -726,6 +737,7 @@ mod tests {
     fn schema_versions_are_global_2_project_1() {
         assert_eq!(GLOBAL_SCHEMA_VERSION, 2);
         assert_eq!(PROJECT_SCHEMA_VERSION, 1);
+        assert_eq!(SCHEMA_VERSION, 1);
         assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 2;"));
         assert!(PROJECT_SCHEMA.contains("PRAGMA user_version = 1;"));
     }

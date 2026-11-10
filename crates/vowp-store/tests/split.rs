@@ -435,6 +435,24 @@ fn inbox_list_merges_node_and_project_rows() {
 }
 
 #[test]
+fn inbox_list_on_an_unbound_handle_returns_node_rows_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = NodePaths::new(tmp.path());
+    let store = Store::open_global(&paths).expect("global");
+    let item = inbox(&InboxId::new(), None, None, now());
+    store.insert_node_inbox(&item).expect("node item");
+    store.upsert_project(&project_row("proj")).expect("project registry");
+    let project_item = inbox(&InboxId::new(), Some(project("proj")), None, now());
+    let bound = Store::open_with_project(&paths, &project("proj")).expect("bound");
+    bound.insert_inbox(&project_item).expect("project item");
+    assert_eq!(
+        store.list_inbox(None).expect("fleet inbox"),
+        vec![item],
+        "the unbound handle does not read a project inbox"
+    );
+}
+
+#[test]
 fn ledger_since_and_cost_totals_merge_both_files() {
     let fixture = Fixture::new();
     fixture
@@ -738,6 +756,27 @@ fn cross_db_reconcile_repairs_sessions_and_terminal_events() {
     assert_eq!(report.terminal_events_repaired, 1);
     assert_eq!(report.ledgers_repaired, 1);
     let second = fixture.store.reconcile_cross_db().expect("idempotent");
+    assert_eq!(second, Default::default());
+}
+
+#[test]
+fn reconcile_repairs_project_less_session_on_node_handle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = NodePaths::new(tmp.path());
+    let store = Store::open(&paths).expect("store");
+    store.upsert_project(&project_row("_node")).expect("node project");
+    let session_id = SessionId::new();
+    store
+        .upsert_session(&session(&session_id, None, SessionState::Running))
+        .expect("project-less session");
+
+    let report = store.reconcile_cross_db().expect("reconcile");
+    assert_eq!(report.sessions_repaired, 1);
+    assert_eq!(
+        store.require_session(&session_id).expect("session").state,
+        SessionState::Idle
+    );
+    let second = store.reconcile_cross_db().expect("idempotent");
     assert_eq!(second, Default::default());
 }
 

@@ -47,6 +47,14 @@ pub struct MigrationReport {
     pub dry_run: bool,
     /// Worker slots that could not be assigned to exactly one project.
     pub dropped_workers: u32,
+    /// Worker rows that were dropped, as `node:kind:slot`.
+    pub dropped_worker_rows: Vec<String>,
+    /// Job-less runs moved to the primary project.
+    pub primary_runs: Vec<String>,
+    /// Node-wide loops moved to the primary project.
+    pub node_wide_loops: Vec<String>,
+    /// Node-wide schedules moved to the primary project.
+    pub node_wide_schedules: Vec<String>,
     /// Human-readable notes for the report.
     pub warnings: Vec<String>,
 }
@@ -62,7 +70,10 @@ struct Source {
     primary: ProjectName,
     backup: PathBuf,
     counts: BTreeMap<String, u64>,
-    dropped_workers: u32,
+    dropped_worker_rows: Vec<String>,
+    primary_runs: Vec<String>,
+    node_wide_loops: Vec<String>,
+    node_wide_schedules: Vec<String>,
 }
 
 /// A manifest persisted in `<home>/migration.json`.
@@ -132,8 +143,8 @@ pub fn migrate_v01_dry_run(paths: &NodePaths) -> Result<MigrationReport, StoreEr
     tables.insert(
         "workers_dropped".to_owned(),
         MigrationCount {
-            before: u64::from(source.dropped_workers),
-            after: u64::from(source.dropped_workers),
+            before: u64::try_from(source.dropped_worker_rows.len()).unwrap_or(u64::MAX),
+            after: u64::try_from(source.dropped_worker_rows.len()).unwrap_or(u64::MAX),
         },
     );
     Ok(MigrationReport {
@@ -144,7 +155,11 @@ pub fn migrate_v01_dry_run(paths: &NodePaths) -> Result<MigrationReport, StoreEr
         tables,
         verified: true,
         dry_run: true,
-        dropped_workers: source.dropped_workers,
+        dropped_workers: u32::try_from(source.dropped_worker_rows.len()).unwrap_or(u32::MAX),
+        dropped_worker_rows: source.dropped_worker_rows.clone(),
+        primary_runs: source.primary_runs.clone(),
+        node_wide_loops: source.node_wide_loops.clone(),
+        node_wide_schedules: source.node_wide_schedules.clone(),
         warnings: Vec::new(),
     })
 }
@@ -177,6 +192,10 @@ pub fn migrate_rollback(paths: &NodePaths, backup: &Path) -> Result<MigrationRep
         verified: true,
         dry_run: false,
         dropped_workers: 0,
+        dropped_worker_rows: Vec::new(),
+        primary_runs: Vec::new(),
+        node_wide_loops: Vec::new(),
+        node_wide_schedules: Vec::new(),
         warnings: vec![format!("current split database moved to {}", failed.display())],
     })
 }
@@ -266,8 +285,11 @@ fn preflight(paths: &NodePaths) -> Result<Source, StoreError> {
     }
     validate_source(&conn, &known)?;
     let primary = primary_project(&conn, &projects)?;
-    let (worker_assignments, dropped_workers) = worker_plan(&conn, &primary, &known)?;
+    let (worker_assignments, dropped_worker_rows) = worker_plan(&conn, &primary, &known)?;
     let counts = source_counts(&conn, &projects, &primary, &worker_assignments)?;
+    let primary_runs = string_column(&conn, "SELECT id FROM runs WHERE job_id IS NULL ORDER BY id")?;
+    let node_wide_loops = string_column(&conn, "SELECT name FROM loops WHERE project IS NULL ORDER BY name")?;
+    let node_wide_schedules = string_column(&conn, "SELECT name FROM schedules WHERE project IS NULL ORDER BY name")?;
     let backup = paths
         .backups_dir()
         .join(format!("pre-0.2-{}.db", Timestamp::now().unix_millis()));
@@ -276,7 +298,10 @@ fn preflight(paths: &NodePaths) -> Result<Source, StoreError> {
         primary,
         backup,
         counts,
-        dropped_workers,
+        dropped_worker_rows,
+        primary_runs,
+        node_wide_loops,
+        node_wide_schedules,
     })
 }
 
@@ -407,7 +432,7 @@ fn worker_plan(
     conn: &Connection,
     primary: &ProjectName,
     known: &HashSet<String>,
-) -> Result<(HashMap<String, u64>, u32), StoreError> {
+) -> Result<(HashMap<String, u64>, Vec<String>), StoreError> {
     let mut assignments = HashMap::new();
     let mut total = 0_u64;
     for project in known {
@@ -437,7 +462,21 @@ fn worker_plan(
     }
     let workers = count_sql(conn, "SELECT COUNT(*) FROM workers")?;
     let dropped = workers.saturating_sub(total);
-    Ok((assignments, u32::try_from(dropped).unwrap_or(u32::MAX)))
+    let mut dropped_rows = string_column(
+        conn,
+        "SELECT w.node || ':' || w.kind || ':' || w.slot FROM workers w
+         LEFT JOIN jobs j ON w.job_id = j.id
+         LEFT JOIN runs r ON w.run_id = r.id
+         LEFT JOIN jobs rj ON r.job_id = rj.id
+         WHERE NOT (
+             j.project IS NOT NULL
+             OR (w.job_id IS NULL AND rj.project IS NOT NULL)
+             OR (w.job_id IS NULL AND w.run_id IS NULL)
+         )
+         ORDER BY w.node, w.kind, w.slot",
+    )?;
+    dropped_rows.truncate(dropped as usize);
+    Ok((assignments, dropped_rows))
 }
 
 /// Counts every source table and every split destination family.
@@ -613,8 +652,8 @@ fn copy_and_verify(paths: &NodePaths, stage: &Path, source: &Source) -> Result<M
     tables.insert(
         "workers_dropped".to_owned(),
         MigrationCount {
-            before: u64::from(source.dropped_workers),
-            after: u64::from(source.dropped_workers),
+            before: u64::try_from(source.dropped_worker_rows.len()).unwrap_or(u64::MAX),
+            after: u64::try_from(source.dropped_worker_rows.len()).unwrap_or(u64::MAX),
         },
     );
 
@@ -685,14 +724,19 @@ fn copy_and_verify(paths: &NodePaths, stage: &Path, source: &Source) -> Result<M
         tables,
         verified: true,
         dry_run: false,
-        dropped_workers: source.dropped_workers,
-        warnings: if source.dropped_workers > 0 {
-            vec![format!(
-                "{} worker slot rows were unassignable and were dropped",
-                source.dropped_workers
-            )]
-        } else {
+        dropped_workers: u32::try_from(source.dropped_worker_rows.len()).unwrap_or(u32::MAX),
+        dropped_worker_rows: source.dropped_worker_rows.clone(),
+        primary_runs: source.primary_runs.clone(),
+        node_wide_loops: source.node_wide_loops.clone(),
+        node_wide_schedules: source.node_wide_schedules.clone(),
+        warnings: if source.dropped_worker_rows.is_empty() {
             Vec::new()
+        } else {
+            vec![format!(
+                "{} worker slot rows were unassignable and were dropped: {}",
+                source.dropped_worker_rows.len(),
+                source.dropped_worker_rows.join(", ")
+            )]
         },
     })
 }
@@ -989,28 +1033,47 @@ fn swap_from_stage(paths: &NodePaths, stage: &Path, backup: &Path) -> Result<(),
         std::fs::rename(&staged_global, paths.db_path())
             .map_err(|err| StoreError::io(paths.db_path().display(), err))?;
     }
-    let staged_projects = stage.join("projects");
-    if paths.projects_dir().exists() {
-        let aside = paths
-            .backups_dir()
-            .join(format!("projects-before-0.2-{}", Timestamp::now().unix_millis()));
-        std::fs::rename(paths.projects_dir(), &aside).map_err(|err| StoreError::io(aside.display(), err))?;
-    }
-    if staged_projects.exists() {
-        std::fs::rename(&staged_projects, paths.projects_dir())
-            .map_err(|err| StoreError::io(paths.projects_dir().display(), err))?;
-    }
+    install_staged_projects(paths, &stage.join("projects"))?;
     sync_dir(paths.root())?;
     let _ = std::fs::remove_dir_all(stage);
     Ok(())
 }
 
+/// Installs the staged `projects/` directory, moving any old directory aside first.
+///
+/// The move-aside is the crash-safe step §3.9 calls for: a stale `projects/` must never make
+/// the staged project databases disappear.
+fn install_staged_projects(paths: &NodePaths, staged_projects: &Path) -> Result<(), StoreError> {
+    if !staged_projects.exists() {
+        return Ok(());
+    }
+    if paths.projects_dir().exists() {
+        std::fs::create_dir_all(paths.backups_dir())
+            .map_err(|err| StoreError::io(paths.backups_dir().display(), err))?;
+        let mut aside = paths
+            .backups_dir()
+            .join(format!("projects-before-0.2-{}", Timestamp::now().unix_millis()));
+        if aside.exists() {
+            aside = paths
+                .backups_dir()
+                .join(format!("projects-before-0.2-{}", ulid::Ulid::generate()));
+        }
+        std::fs::rename(paths.projects_dir(), &aside).map_err(|err| StoreError::io(aside.display(), err))?;
+    }
+    std::fs::rename(staged_projects, paths.projects_dir())
+        .map_err(|err| StoreError::io(paths.projects_dir().display(), err))
+}
+
 /// Finishes a swap that already put the v2 global file in place.
 fn finish_swap(paths: &NodePaths, stage: &Path) -> Result<(), StoreError> {
     let staged_projects = stage.join("projects");
-    if !paths.projects_dir().exists() && staged_projects.exists() {
-        std::fs::rename(&staged_projects, paths.projects_dir())
-            .map_err(|err| StoreError::io(paths.projects_dir().display(), err))?;
+    if staged_projects.exists() {
+        install_staged_projects(paths, &staged_projects)?;
+    } else if !paths.projects_dir().exists() {
+        // The global file is v2 but neither the staged nor the installed project directory
+        // exists. Keep the manifest and stage so the caller can roll back instead of losing
+        // the only copy.
+        return Err(StoreError::MigrationRequired);
     }
     let _ = std::fs::remove_dir_all(stage);
     sync_dir(paths.root())?;
@@ -1040,6 +1103,17 @@ fn write_manifest(paths: &NodePaths, manifest: &Manifest) -> Result<(), StoreErr
         std::fs::write(&path, bytes).map_err(|err| StoreError::io(path.display(), err))?;
     }
     Ok(())
+}
+
+/// Reads one string column from an internal constant query.
+fn string_column(conn: &Connection, sql: &str) -> Result<Vec<String>, StoreError> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut values = Vec::new();
+    for row in rows {
+        values.push(row?);
+    }
+    Ok(values)
 }
 
 /// Counts rows for an internal constant query.

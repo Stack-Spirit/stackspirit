@@ -1,14 +1,16 @@
 //! Real child-process crash injection for the global/project write order.
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.7 and §15 (C1).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
 use vowp_protocol::{
-    Actor, Cost, EventId, EventIndexRow, EventType, FakeClock, HarnessKind, NodeName, Project, ProjectName, Run, RunId,
-    RunPurpose, RunRole, Session, SessionId, SessionRole, SessionState, Timestamp,
+    Actor, Cost, EventBody, EventSource, FakeClock, HarnessKind, NodeName, Project, ProjectName, Run, RunId,
+    RunPurpose, RunRole, Session, SessionId, SessionRole, SessionState, Timestamp, TurnStarted,
 };
+use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_store::{NodePaths, RunFinish, Store};
 
 const EPOCH: &str = "2026-01-01T00:00:00.000Z";
@@ -19,6 +21,10 @@ fn now() -> Timestamp {
 
 fn project() -> ProjectName {
     ProjectName::parse("proj").expect("project")
+}
+
+fn node_project() -> ProjectName {
+    ProjectName::parse("_node").expect("node project")
 }
 
 fn open_bound(root: &Path) -> Store {
@@ -44,11 +50,15 @@ fn open_bound(root: &Path) -> Store {
 }
 
 fn session(store: &Store, state: SessionState) -> SessionId {
+    session_with_project(store, Some(project()), state)
+}
+
+fn session_with_project(store: &Store, project: Option<ProjectName>, state: SessionState) -> SessionId {
     let id = SessionId::new();
     store
         .upsert_session(&Session {
             id: id.clone(),
-            project: Some(project()),
+            project,
             job_id: None,
             role: Some(SessionRole::Worker),
             title: "crash".to_owned(),
@@ -65,6 +75,41 @@ fn session(store: &Store, state: SessionState) -> SessionId {
         })
         .expect("session");
     id
+}
+
+fn open_node_bound(root: &Path) -> Store {
+    let paths = NodePaths::new(root);
+    let clock = FakeClock::at(now());
+    let store = Store::open(&paths).expect("store").with_clock(Arc::new(clock));
+    if store.project(&node_project()).expect("lookup").is_none() {
+        store
+            .upsert_project(&Project {
+                name: node_project(),
+                path: root.display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::json!({}),
+                created_at: now(),
+                updated_at: now(),
+            })
+            .expect("node project");
+    }
+    Store::open_with_project(&paths, &node_project())
+        .expect("bound node")
+        .with_clock(Arc::new(FakeClock::at(now())))
+}
+
+fn assert_no_duplicate_seqs(store: &Store) {
+    for session in store.list_sessions(&Default::default()).expect("sessions") {
+        let events = store.event_rows(&session.id, 0, 10_000).expect("events");
+        let seqs: Vec<u64> = events.iter().map(|event| event.seq).collect();
+        let unique: HashSet<u64> = seqs.iter().copied().collect();
+        assert_eq!(seqs.len(), unique.len(), "duplicate event seq in {}", session.id);
+        assert!(
+            seqs.windows(2).all(|pair| pair[0] < pair[1]),
+            "event seq is not monotonic"
+        );
+    }
 }
 
 fn open_run(store: &Store, session: &SessionId) -> RunId {
@@ -97,9 +142,31 @@ fn open_run(store: &Store, session: &SessionId) -> RunId {
     id
 }
 
+fn write_turn_started(root: &Path, store: &Store, session: &SessionId) {
+    let paths = NodePaths::new(root);
+    let log = SessionLog::create(&paths, session, Arc::new(FakeClock::at(now()))).expect("log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(NodeName::parse("local").expect("node")),
+                native_session_id: None,
+            },
+            body: EventBody::TurnStarted(TurnStarted { turn: 1 }),
+            raw: None,
+            ts: Some(now()),
+        })
+        .expect("turn started");
+    store.index_event(&index_row(&appended)).expect("index event");
+    log.sync().expect("sync");
+}
+
 fn child_case() -> Option<&'static str> {
     std::env::var("VOWP_CRASH_CASE").ok().map(|value| match value.as_str() {
         "global" => "global",
+        "node" => "node",
         "project" => "project",
         _ => "unknown",
     })
@@ -127,21 +194,7 @@ fn crash_between_global_framing_and_project_run() {
         let root = child_root();
         let store = open_bound(&root);
         let session = session(&store, SessionState::Running);
-        store
-            .index_event(&EventIndexRow {
-                session_id: session,
-                seq: 1,
-                id: EventId::new(),
-                ts: now(),
-                event_type: EventType::TurnStarted,
-                actor: Actor::System,
-                harness: HarnessKind::Vowp,
-                model: None,
-                byte_offset: 0,
-                byte_len: 0,
-                summary: "turn started".to_owned(),
-            })
-            .expect("global event");
+        write_turn_started(&root, &store, &session);
         std::process::exit(0);
     }
 
@@ -154,6 +207,31 @@ fn crash_between_global_framing_and_project_run() {
         store.list_sessions(&Default::default()).expect("sessions")[0].state,
         SessionState::Idle
     );
+    assert_no_duplicate_seqs(&store);
+    let second = store.reconcile_cross_db().expect("idempotent");
+    assert_eq!(second, Default::default());
+}
+
+#[test]
+fn crash_on_node_handle_repairs_project_less_session() {
+    if child_case() == Some("node") {
+        let root = child_root();
+        let store = open_node_bound(&root);
+        let session = session_with_project(&store, None, SessionState::Running);
+        write_turn_started(&root, &store, &session);
+        std::process::exit(0);
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    run_child("crash_on_node_handle_repairs_project_less_session", "node", tmp.path());
+    let store = open_node_bound(tmp.path());
+    let report = store.reconcile_cross_db().expect("reconcile");
+    assert_eq!(report.sessions_repaired, 1);
+    let sessions = store.list_sessions(&Default::default()).expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].project, None);
+    assert_eq!(sessions[0].state, SessionState::Idle);
+    assert_no_duplicate_seqs(&store);
     let second = store.reconcile_cross_db().expect("idempotent");
     assert_eq!(second, Default::default());
 }
@@ -164,6 +242,7 @@ fn crash_between_project_finish_and_terminal_events() {
         let root = child_root();
         let store = open_bound(&root);
         let session = session(&store, SessionState::Idle);
+        write_turn_started(&root, &store, &session);
         let run = open_run(&store, &session);
         store
             .finish_run(
@@ -191,6 +270,7 @@ fn crash_between_project_finish_and_terminal_events() {
     let report = store.reconcile_cross_db().expect("reconcile");
     assert_eq!(report.terminal_events_repaired, 1);
     assert_eq!(report.ledgers_repaired, 1);
+    assert_no_duplicate_seqs(&store);
     let second = store.reconcile_cross_db().expect("idempotent");
     assert_eq!(second, Default::default());
 }

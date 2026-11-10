@@ -277,7 +277,8 @@ impl Store {
     /// Lists inbox items, oldest first, optionally restricted to one state.
     ///
     /// A bound handle merges the project inbox with `node_inbox` rows whose project is `NULL`
-    /// or equals the bound project.
+    /// or equals the bound project. An unbound (fleet) handle returns only `node_inbox` rows;
+    /// that is the deliberate extension to §3.6 used for fleet-wide reads.
     pub fn list_inbox(&self, state: Option<InboxState>) -> Result<Vec<InboxItem>, StoreError> {
         let bound = self.bound_project().cloned();
         let mut items = Vec::new();

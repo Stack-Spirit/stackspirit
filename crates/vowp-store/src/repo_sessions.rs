@@ -294,6 +294,43 @@ impl Store {
             .ok_or_else(|| StoreError::not_found("session", id.as_str()))
     }
 
+    /// Lists running sessions reconciled by the handle bound to `project`.
+    ///
+    /// A `_node` handle also owns project-less sessions: their `sessions.project` is `NULL`
+    /// while their runs live in the `_node` database (§3.8).
+    pub(crate) fn sessions_for_reconcile(
+        &self,
+        project: &ProjectName,
+        state: SessionState,
+    ) -> Result<Vec<Session>, StoreError> {
+        let (sql, values): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
+            if project.as_str() == crate::RESERVED_NODE_PROJECT {
+                (
+                    format!(
+                        "SELECT {SESSION_COLUMNS} FROM main.sessions
+                         WHERE state = ? AND (project = ? OR project IS NULL)
+                         ORDER BY updated_at DESC, id DESC"
+                    ),
+                    vec![Box::new(enum_to_text(&state)?), Box::new(project.as_str().to_owned())],
+                )
+            } else {
+                (
+                    format!(
+                        "SELECT {SESSION_COLUMNS} FROM main.sessions
+                         WHERE state = ? AND project = ? ORDER BY updated_at DESC, id DESC"
+                    ),
+                    vec![Box::new(enum_to_text(&state)?), Box::new(project.as_str().to_owned())],
+                )
+            };
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), read_session_row)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(session_from_row(row?)?);
+        }
+        Ok(sessions)
+    }
+
     /// Lists sessions matching `filter`, most recently updated first.
     pub fn list_sessions(&self, filter: &SessionFilter) -> Result<Vec<Session>, StoreError> {
         let mut query = format!("SELECT {SESSION_COLUMNS} FROM main.sessions WHERE 1 = 1");
