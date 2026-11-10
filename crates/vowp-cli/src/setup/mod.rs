@@ -43,6 +43,8 @@ pub struct SetupAnswers {
     pub repositories: Vec<String>,
     /// Harnesses workers should use (`opencode`, `claude-code`, ...).
     pub harnesses: Vec<String>,
+    /// Provider names the chosen harnesses use; only names, never keys.
+    pub providers: Vec<String>,
     /// Secret names to check, never values.
     pub secrets: Vec<String>,
     /// Whether merged work should be pushed to a GitHub remote.
@@ -63,9 +65,17 @@ impl SetupAnswers {
             if repository.trim().is_empty() || repository.chars().any(char::is_control) {
                 return Err(CliError::Invalid("repository path must not be empty".to_owned()));
             }
+            if repository.contains("://") || repository.starts_with("git@") {
+                return Err(CliError::Invalid(format!(
+                    "{repository} is a URL; clone it on the home and pass the checkout path"
+                )));
+            }
         }
         for harness in &self.harnesses {
             validate_name(harness, "harness")?;
+        }
+        for provider in &self.providers {
+            validate_name(provider, "provider")?;
         }
         for secret in &self.secrets {
             SecretName::parse(secret)?;
@@ -201,6 +211,18 @@ impl SudoMode {
     }
 }
 
+/// Whether a requested harness is installed and appears signed in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HarnessStatus {
+    /// The adapter binary was found (`claude` for `claude-code`).
+    pub installed: bool,
+    /// A known credential file exists in the effective user's home.
+    ///
+    /// Unknown harnesses report `true` here: setup cannot inspect every vendor's login
+    /// store, so the plan still requires `login:<harness>` but does not invent a check.
+    pub login: bool,
+}
+
 /// The read-only facts `setup plan` and `setup home` collect from the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
@@ -224,8 +246,8 @@ pub struct Probe {
     pub vowp_user_home: Option<String>,
     /// Tools the phases need.
     pub tools: BTreeMap<String, bool>,
-    /// Required harnesses the target has.
-    pub harnesses: BTreeMap<String, bool>,
+    /// Required harnesses: installed binary and detected login.
+    pub harnesses: BTreeMap<String, HarnessStatus>,
     /// Free disk in KiB on the login home.
     pub disk_free_kb: Option<u64>,
 }
@@ -316,18 +338,9 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
     let effective_home = probe.effective_home();
     let transit = |argv: Vec<String>| as_user(&probe.user, &effective_user, &effective_home, argv);
     let vowp_home = format!("{effective_home}/.vowp");
-    let installed_matches = probe
-        .vowp_version
-        .as_deref()
-        .is_some_and(|version| version == answers.version);
-    let vowp_bin = if installed_matches {
-        probe
-            .vowp_path
-            .clone()
-            .unwrap_or_else(|| format!("{effective_home}/.local/bin/vowp"))
-    } else {
-        format!("{effective_home}/.local/bin/vowp")
-    };
+    // The unit always runs `%h/.local/bin/vowp`; a `vowp` elsewhere on PATH is not
+    // enough. The install phase therefore always targets the per-user prefix.
+    let vowp_bin = format!("{effective_home}/.local/bin/vowp");
 
     let mut phases = Vec::new();
     let mut handoffs = Vec::new();
@@ -341,7 +354,12 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
             commands::PROBE_SCRIPT.to_owned(),
         ]],
         files: Vec::new(),
-        requires: vec!["network".to_owned(), "ssh-key-login".to_owned()],
+        requires: {
+            let mut requires = vec!["network".to_owned(), "ssh-key-login".to_owned()];
+            requires.extend(answers.harnesses.iter().map(|harness| format!("login:{harness}")));
+            requires.extend(answers.providers.iter().map(|provider| format!("provider:{provider}")));
+            requires
+        },
         idempotent: true,
     });
     let missing_tools: Vec<&str> = ["git", "tmux", "curl"]
@@ -356,13 +374,18 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         });
     }
     for harness in &answers.harnesses {
-        if !probe.harnesses.get(harness).copied().unwrap_or(false) {
+        let status = probe.harnesses.get(harness).copied().unwrap_or_default();
+        if !status.installed {
             handoffs.push(SetupHandoff {
-                phase: "preflight".to_owned(),
+                phase: "user".to_owned(),
                 kind: "login".to_owned(),
-                prompt: format!(
-                    "Install and sign in to {harness} on the home with its own login flow, then re-run setup."
-                ),
+                prompt: format!("Install {harness} on the home with its own flow, then re-run setup."),
+            });
+        } else if !status.login {
+            handoffs.push(SetupHandoff {
+                phase: "user".to_owned(),
+                kind: "login".to_owned(),
+                prompt: format!("Sign in to {harness} on the home with its own login flow, then re-run setup."),
             });
         }
     }
@@ -414,22 +437,26 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
                 "sh".to_owned(),
                 "-c".to_owned(),
                 format!(
-                    "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron --no-watchdog",
+                    "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron",
                     shell_quote(&install_url),
                     shell_quote(&answers.version)
                 ),
             ]),
         ],
         files: vec![format!("{effective_home}/.local/bin/vowp")],
-        requires: vec!["network".to_owned()],
+        requires: {
+            let mut requires = vec!["network".to_owned()];
+            requires.extend(answers.harnesses.iter().map(|harness| format!("login:{harness}")));
+            requires
+        },
         idempotent: true,
     });
 
     phases.push(SetupPhase {
         id: "home".to_owned(),
         title: "Create the home, the global database and the node registry".to_owned(),
-        commands: vec![
-            transit(vec![
+        commands: {
+            let mut command = vec![
                 vowp_bin.clone(),
                 "setup".to_owned(),
                 "__home-init".to_owned(),
@@ -437,23 +464,38 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
                 node.clone(),
                 "--root".to_owned(),
                 vowp_home.clone(),
-            ]),
-            transit(vec![
-                vowp_bin.clone(),
-                "--home".to_owned(),
-                vowp_home.clone(),
-                "doctor".to_owned(),
-                "--json".to_owned(),
-            ]),
-        ],
+            ];
+            for harness in &answers.harnesses {
+                command.push("--harness".to_owned());
+                command.push(harness.clone());
+            }
+            for provider in &answers.providers {
+                command.push("--provider".to_owned());
+                command.push(provider.clone());
+            }
+            vec![
+                transit(command),
+                transit(vec![
+                    vowp_bin.clone(),
+                    "--home".to_owned(),
+                    vowp_home.clone(),
+                    "doctor".to_owned(),
+                    "--json".to_owned(),
+                ]),
+            ]
+        },
         files: vec![
             vowp_home.clone(),
             format!("{vowp_home}/vowp.db"),
             format!("{vowp_home}/vowp.toml"),
             format!("{vowp_home}/projects/_node/project.db"),
-            format!("{effective_home}/.vowp-control/setup.json (control machine)"),
         ],
-        requires: Vec::new(),
+        requires: {
+            let mut requires = Vec::new();
+            requires.extend(answers.harnesses.iter().map(|harness| format!("login:{harness}")));
+            requires.extend(answers.providers.iter().map(|provider| format!("provider:{provider}")));
+            requires
+        },
         idempotent: true,
     });
 
@@ -484,7 +526,11 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         title: "Install the user systemd unit, enable linger and start it".to_owned(),
         commands: service_commands,
         files: vec![format!("{effective_home}/.config/systemd/user/vowp.service")],
-        requires: Vec::new(),
+        requires: if effective_user == probe.user {
+            vec!["systemd".to_owned()]
+        } else {
+            vec!["sudo".to_owned(), "systemd".to_owned()]
+        },
         idempotent: true,
     });
 
@@ -507,11 +553,27 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
             "Use basic secret mode (no sudo)".to_owned()
         },
         commands: vault_commands,
-        files: Vec::new(),
-        requires: if probe.sudo == SudoMode::Passwordless {
-            vec!["sudo".to_owned()]
+        files: if probe.sudo == SudoMode::Passwordless {
+            vec![
+                format!("{vowp_home}/secrets/mode"),
+                "/home/vowp-vault".to_owned(),
+                "/usr/local/lib/vowp/__vault-admin".to_owned(),
+                "/etc/sudoers.d/vowp-vault".to_owned(),
+            ]
         } else {
-            Vec::new()
+            vec![
+                format!("{vowp_home}/secrets/<NAME>"),
+                format!("{vowp_home}/secrets/mode"),
+            ]
+        },
+        requires: {
+            let mut requires = if probe.sudo == SudoMode::Passwordless {
+                vec!["sudo".to_owned()]
+            } else {
+                Vec::new()
+            };
+            requires.extend(answers.secrets.iter().map(|secret| format!("secret:{secret}")));
+            requires
         },
         idempotent: true,
     });
@@ -554,7 +616,11 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         },
         commands: project_commands,
         files: project_files,
-        requires: Vec::new(),
+        requires: answers
+            .repositories
+            .iter()
+            .map(|repository| format!("owner-answer:repository {repository} exists on the home with vowp.toml"))
+            .collect(),
         idempotent: true,
     });
 
@@ -596,7 +662,7 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
 }
 
 /// Builds the plan `setup control` prints.
-pub fn control_plan(target: &str, name: &str, probe: &Probe) -> SetupPlan {
+pub fn control_plan(target: &str, name: &str, probe: &Probe, remote_home: &str) -> SetupPlan {
     SetupPlan {
         target: target.to_owned(),
         version: probe.vowp_version.clone().unwrap_or_else(|| "unknown".to_owned()),
@@ -615,6 +681,7 @@ pub fn control_plan(target: &str, name: &str, probe: &Probe) -> SetupPlan {
                 "~/.vowp-control/surfaces.json".to_owned(),
                 "~/.vowp-control/tunnels.json".to_owned(),
                 "~/.vowp-control/setup.json".to_owned(),
+                format!("{remote_home} (on the home)"),
             ],
             requires: vec!["network".to_owned(), "ssh-key-login".to_owned()],
             idempotent: true,
@@ -638,6 +705,9 @@ pub struct LocalSetupState {
     pub name: String,
     /// VOWP version the home run installed.
     pub version: String,
+    /// Absolute `~/.vowp` path of the home the run actually used.
+    #[serde(default)]
+    pub remote_home: String,
     /// When the record was last written.
     pub updated_at: Timestamp,
 }

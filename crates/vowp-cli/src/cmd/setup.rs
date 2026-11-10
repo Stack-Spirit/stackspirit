@@ -49,6 +49,9 @@ pub struct SetupAnswerArgs {
     /// A harness the workers should use (`opencode`, `claude-code`); repeatable.
     #[arg(long = "harness", value_name = "NAME")]
     pub harnesses: Vec<String>,
+    /// A provider name the chosen harnesses use; repeatable, never a key.
+    #[arg(long = "provider", value_name = "NAME")]
+    pub providers: Vec<String>,
     /// A secret name to check for; repeatable, never a value.
     #[arg(long = "secret", value_name = "NAME")]
     pub secrets: Vec<String>,
@@ -69,6 +72,7 @@ impl SetupAnswerArgs {
             name: self.name.clone(),
             repositories: self.repositories.clone(),
             harnesses: self.harnesses.clone(),
+            providers: self.providers.clone(),
             secrets: self.secrets.clone(),
             github_remote: self.github_remote,
         };
@@ -135,6 +139,12 @@ pub struct SetupHomeInitArgs {
     /// Home directory to create; the process context may not know it yet.
     #[arg(long, value_name = "DIR")]
     pub root: Option<std::path::PathBuf>,
+    /// Harness to write into the new home profiles; repeatable.
+    #[arg(long = "harness", value_name = "NAME")]
+    pub harnesses: Vec<String>,
+    /// Provider name to write into the new home config; repeatable.
+    #[arg(long = "provider", value_name = "NAME")]
+    pub providers: Vec<String>,
 }
 
 /// Runs `vowp setup`.

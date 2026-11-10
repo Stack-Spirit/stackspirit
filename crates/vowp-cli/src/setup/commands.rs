@@ -9,7 +9,10 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
-use vowp_protocol::{Node, NodeName, Project, ProjectName, SecretName, Timestamp, VowpConfig};
+use vowp_protocol::{
+    Node, NodeName, OnCreditsExhausted, OnQuota, Profile, Project, ProjectName, ProviderConfig, SecretName, Timestamp,
+    VowpConfig,
+};
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::quote::shell_quote;
 
@@ -19,8 +22,8 @@ use crate::remote;
 use crate::{CliError, Ctx, IoStreams};
 
 use super::{
-    CommandOutput, LocalSetupState, Probe, SetupAnswers, SetupCheck, SetupHandoff, SetupOutcome, SetupRunner, SudoMode,
-    as_user, build_plan, control_plan, print_outcome, print_plan,
+    CommandOutput, HarnessStatus, LocalSetupState, Probe, SetupAnswers, SetupCheck, SetupHandoff, SetupOutcome,
+    SetupRunner, SudoMode, as_user, build_plan, control_plan, print_outcome, print_plan,
 };
 
 /// The read-only probe script; `setup plan` runs only this.
@@ -171,22 +174,6 @@ pub fn probe(runner: &mut dyn SetupRunner, harnesses: &[String]) -> Result<Probe
             tools.insert(tool.to_owned(), value == "yes");
         }
     }
-    let mut harness_map = BTreeMap::new();
-    for harness in harnesses {
-        if let Some(found) = tools.get(harness) {
-            harness_map.insert(harness.clone(), *found);
-            continue;
-        }
-        let found = runner.run(
-            &[
-                "sh".to_owned(),
-                "-c".to_owned(),
-                format!("command -v {} >/dev/null 2>&1", shell_quote(harness)),
-            ],
-            None,
-        )?;
-        harness_map.insert(harness.clone(), found.success());
-    }
     let vowp_version = {
         let raw = field("vowp.version");
         raw.strip_prefix("vowp ")
@@ -201,6 +188,30 @@ pub fn probe(runner: &mut dyn SetupRunner, harnesses: &[String]) -> Result<Probe
         let raw = field("vowp.user_home");
         (!raw.is_empty()).then_some(raw)
     };
+    let effective_home = if user == "vowp" || user == "root" || sudo == SudoMode::Passwordless {
+        vowp_user_home.clone().unwrap_or_else(|| "/home/vowp".to_owned())
+    } else {
+        home.clone()
+    };
+    let mut harness_map = BTreeMap::new();
+    for harness in harnesses {
+        let binary = harness_binary(harness);
+        let installed = match tools.get(binary) {
+            Some(found) => *found,
+            None => runner
+                .run(
+                    &[
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        format!("command -v {} >/dev/null 2>&1", shell_quote(binary)),
+                    ],
+                    None,
+                )?
+                .success(),
+        };
+        let login = harness_login(runner, harness, &effective_home)?;
+        harness_map.insert(harness.clone(), HarnessStatus { installed, login });
+    }
     let disk_free_kb = field("disk.free_kb").parse::<u64>().ok();
     Ok(Probe {
         os,
@@ -216,6 +227,36 @@ pub fn probe(runner: &mut dyn SetupRunner, harnesses: &[String]) -> Result<Probe
         harnesses: harness_map,
         disk_free_kb,
     })
+}
+
+/// Maps a documented harness name to the binary its adapter runs.
+fn harness_binary(harness: &str) -> &str {
+    match harness {
+        "claude-code" => "claude",
+        other => other,
+    }
+}
+
+/// Returns the credential-file check for a known harness.
+fn harness_login_script(harness: &str) -> Option<&'static str> {
+    match harness {
+        "opencode" => {
+            Some("[ -s \"$HOME/.local/share/opencode/auth.json\" ] || [ -s \"$HOME/.config/opencode/auth.json\" ]")
+        }
+        "claude-code" => Some("[ -s \"$HOME/.claude/.credentials.json\" ] || [ -s \"$HOME/.claude.json\" ]"),
+        _ => None,
+    }
+}
+
+/// Returns whether `harness` looks signed in for `home`; unknown harnesses are not guessed.
+fn harness_login(runner: &mut dyn SetupRunner, harness: &str, home: &str) -> Result<bool, CliError> {
+    let Some(script) = harness_login_script(harness) else {
+        return Ok(true);
+    };
+    let command = format!("HOME={}; export HOME; {script}", shell_quote(home));
+    Ok(runner
+        .run(&["sh".to_owned(), "-c".to_owned(), command], None)?
+        .success())
 }
 
 /// Runs `vowp setup plan`.
@@ -246,21 +287,9 @@ pub fn run_home(
 ) -> Result<i32, CliError> {
     let answers = args.clone();
     answers.validate()?;
-    let mut runner = SshRunner::new(answers.target.clone());
-    let probe = probe(&mut runner, &answers.harnesses)?;
-    if !probe.is_supported() {
-        return Err(CliError::Guard(probe.unsupported_message()));
-    }
-    let plan = build_plan(&answers, &probe, yes)?;
-    if !apply {
-        if ctx.json() {
-            output::print_json(io, &plan)?;
-        } else {
-            print_plan(io, &plan)?;
-        }
-        return Ok(0);
-    }
-    if !yes {
+    // Missing approval is a local guard; do not open SSH or probe a target the owner has
+    // not approved yet.
+    if apply && !yes {
         let outcome = SetupOutcome {
             status: "handoff".to_owned(),
             phase: "preflight".to_owned(),
@@ -275,10 +304,27 @@ pub fn run_home(
         print_outcome_document(ctx, io, &outcome)?;
         return Ok(5);
     }
+    let mut runner = SshRunner::new(answers.target.clone());
+    let probe = probe(&mut runner, &answers.harnesses)?;
+    if !probe.is_supported() {
+        return Err(CliError::Guard(probe.unsupported_message()));
+    }
+    let plan = build_plan(&answers, &probe, yes)?;
+    if !apply {
+        if ctx.json() {
+            output::print_json(io, &plan)?;
+        } else {
+            print_plan(io, &plan)?;
+        }
+        return Ok(0);
+    }
 
-    let local_changed = write_setup_state(&answers, &probe)?;
-    let executor = Executor::new(answers, probe, local_changed);
-    let outcome = executor.run()?;
+    let mut executor = Executor::new(answers.clone(), probe.clone());
+    let mut outcome = executor.run()?;
+    let state_home = format!("{}/.vowp", executor.remote_home.trim_end_matches('/'));
+    if write_setup_state(&answers, &probe, &state_home)? {
+        outcome.changed.push("~/.vowp-control/setup.json".to_owned());
+    }
     print_outcome_document(ctx, io, &outcome)?;
     Ok(if outcome.status == "handoff" { 5 } else { 0 })
 }
@@ -321,7 +367,21 @@ pub fn run_control(
 
     let mut runner = SshRunner::new(target.clone());
     let probe = probe(&mut runner, &[])?;
-    let plan = control_plan(&target, &name, &probe);
+    // `setup home` may have created the home under the vowp user, not the SSH login
+    // user. A recorded state or an existing control config is authoritative; the probe
+    // fallback is only for the first control run without a home record.
+    let remote_home = state
+        .as_ref()
+        .filter(|state| state.target == target && !state.remote_home.is_empty())
+        .map(|state| state.remote_home.clone())
+        .or_else(|| {
+            existing
+                .as_ref()
+                .filter(|config| config.ssh_target == target && !config.remote_home.is_empty())
+                .map(|config| config.remote_home.clone())
+        })
+        .unwrap_or_else(|| format!("{}/.vowp", probe.home.trim_end_matches('/')));
+    let plan = control_plan(&target, &name, &probe, &remote_home);
     if !args.apply {
         if ctx.json() {
             output::print_json(io, &plan)?;
@@ -359,7 +419,7 @@ pub fn run_control(
         role: "control".to_owned(),
         home: name.clone(),
         ssh_target: target.clone(),
-        remote_home: format!("{}/.vowp", probe.home.trim_end_matches('/')),
+        remote_home: remote_home.clone(),
         created_at,
     };
     let config_bytes = serde_json::to_vec_pretty(&config).map_err(vowp_protocol::ProtocolError::from)?;
@@ -420,14 +480,14 @@ pub fn run_control(
         detail: format!("{} ({})", name, target),
     });
 
-    if !state
-        .as_ref()
-        .is_some_and(|state| state.target == target && state.name == config.home)
-    {
+    if !state.as_ref().is_some_and(|state| {
+        state.target == target && state.name == config.home && state.remote_home == config.remote_home
+    }) {
         let state = LocalSetupState {
             target: target.clone(),
             name: config.home.clone(),
             version: probe.vowp_version.clone().unwrap_or_else(|| "unknown".to_owned()),
+            remote_home: config.remote_home.clone(),
             updated_at: Timestamp::now(),
         };
         let bytes = serde_json::to_vec_pretty(&state).map_err(vowp_protocol::ProtocolError::from)?;
@@ -509,7 +569,7 @@ pub fn run_home_init(
             created_at: now,
         })?;
     }
-    ensure_home_config(paths, &node_name)?;
+    ensure_home_config(paths, &node_name, &args.harnesses, &args.providers)?;
 
     let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
     let project_before = store.project(&node_project)?.is_some();
@@ -563,12 +623,17 @@ struct HomeInitReport {
 }
 
 /// Writes the node-level `vowp.toml` with this home's node name when it is absent.
-fn ensure_home_config(paths: &NodePaths, node: &NodeName) -> Result<(), CliError> {
+fn ensure_home_config(
+    paths: &NodePaths,
+    node: &NodeName,
+    harnesses: &[String],
+    providers: &[String],
+) -> Result<(), CliError> {
     let path = paths.root().join("vowp.toml");
     if path.is_file() {
         return Ok(());
     }
-    let mut config = VowpConfig::with_defaults_for_tests();
+    let mut config = home_config(harnesses, providers)?;
     config.project.name = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
     config.project.path = Some(paths.root().display().to_string());
     config.project.push = false;
@@ -581,6 +646,48 @@ fn ensure_home_config(paths: &NodePaths, node: &NodeName) -> Result<(), CliError
     std::fs::write(&temp, text)?;
     std::fs::rename(&temp, &path)?;
     Ok(())
+}
+
+/// Builds the home config from the owner's harness/provider answers.
+fn home_config(harnesses: &[String], providers: &[String]) -> Result<VowpConfig, CliError> {
+    let mut config = VowpConfig::with_defaults_for_tests();
+    if !harnesses.is_empty() {
+        let mut ladder = Vec::new();
+        for (index, harness) in harnesses.iter().enumerate() {
+            let provider = providers.get(index).or_else(|| providers.first()).map(String::as_str);
+            ladder.push(default_executor(harness, provider)?);
+        }
+        for role in ["planner", "keeper", "worker", "verifier"] {
+            config.profiles.insert(
+                role.to_owned(),
+                Profile {
+                    ladder: ladder.clone(),
+                    on_quota: OnQuota::NextThenProbeBack,
+                    node: None,
+                },
+            );
+        }
+    }
+    for provider in providers {
+        config.providers.entry(provider.clone()).or_insert(ProviderConfig {
+            max_concurrent: 4,
+            on_credits_exhausted: OnCreditsExhausted::Park,
+            prices: BTreeMap::new(),
+        });
+    }
+    Ok(config)
+}
+
+/// Returns the default executor for one harness/provider answer.
+fn default_executor(harness: &str, provider: Option<&str>) -> Result<vowp_protocol::Executor, CliError> {
+    let text = match (harness, provider) {
+        ("opencode", None | Some("deepseek")) => "opencode:deepseek/deepseek-flash#max".to_owned(),
+        ("opencode", Some(provider)) => format!("opencode:{provider}/default"),
+        ("claude-code", None | Some("anthropic")) => "claude-code:claude-sonnet-5-5@medium".to_owned(),
+        ("claude-code", Some(provider)) => format!("claude-code:{provider}/default"),
+        (harness, _) => format!("{harness}:default"),
+    };
+    Ok(vowp_protocol::Executor::parse(&text)?)
 }
 
 /// Executes the home phases and collects checks and hand-offs.
@@ -600,7 +707,7 @@ struct Executor {
 
 impl Executor {
     /// Builds the executor after the probe and the local state write.
-    fn new(answers: SetupAnswers, probe: Probe, local_changed: bool) -> Self {
+    fn new(answers: SetupAnswers, probe: Probe) -> Self {
         let login_user = probe.user.clone();
         // Start as the login user. `user_phase` switches to vowp after the account exists.
         let effective_user = login_user.clone();
@@ -609,22 +716,8 @@ impl Executor {
             Some(name) => name.clone(),
             None => probe.default_node_name(),
         };
-        let vowp_bin = if probe
-            .vowp_version
-            .as_deref()
-            .is_some_and(|version| version == answers.version)
-        {
-            probe
-                .vowp_path
-                .clone()
-                .unwrap_or_else(|| format!("{remote_home}/.local/bin/vowp"))
-        } else {
-            format!("{remote_home}/.local/bin/vowp")
-        };
-        let mut changed = Vec::new();
-        if local_changed {
-            changed.push("~/.vowp-control/setup.json".to_owned());
-        }
+        let vowp_bin = format!("{remote_home}/.local/bin/vowp");
+        let changed = Vec::new();
         Self {
             runner: SshRunner::new(answers.target.clone()),
             answers,
@@ -641,11 +734,14 @@ impl Executor {
     }
 
     /// Runs every phase in order.
-    fn run(mut self) -> Result<SetupOutcome, CliError> {
+    fn run(&mut self) -> Result<SetupOutcome, CliError> {
         if let Some(handoff) = self.preflight()? {
             return Ok(self.handoff(handoff));
         }
         if let Some(handoff) = self.user_phase()? {
+            return Ok(self.handoff(handoff));
+        }
+        if let Some(handoff) = self.harness_login_phase()? {
             return Ok(self.handoff(handoff));
         }
         if let Some(handoff) = self.install_phase()? {
@@ -667,10 +763,10 @@ impl Executor {
         self.check("tunnels", "ok", "no tunnels requested");
         Ok(SetupOutcome {
             status: "ok".to_owned(),
-            phase: self.phase,
-            changed: self.changed,
+            phase: self.phase.clone(),
+            changed: self.changed.clone(),
             handoff: None,
-            checks: self.checks,
+            checks: self.checks.clone(),
         })
     }
 
@@ -751,11 +847,42 @@ impl Executor {
             }));
         }
         self.check("preflight.tools", "ok", "git, tmux and curl are present");
+        match self.probe.disk_free_kb {
+            Some(free) if free >= 5 * 1024 * 1024 => self.check(
+                "preflight.disk",
+                "ok",
+                format!("{:.1} GiB free on the home", free as f64 / 1024.0 / 1024.0),
+            ),
+            Some(free) => {
+                self.check(
+                    "preflight.disk",
+                    "fail",
+                    format!(
+                        "only {:.1} GiB free; VOWP needs at least 5 GiB",
+                        free as f64 / 1024.0 / 1024.0
+                    ),
+                );
+                return Ok(Some(SetupHandoff {
+                    phase: "preflight".to_owned(),
+                    kind: "owner-answer".to_owned(),
+                    prompt: "Free at least 5 GiB on the home (or grow the disk), then re-run setup.".to_owned(),
+                }));
+            }
+            None => self.check("preflight.disk", "warn", "could not read free disk space"),
+        }
         let missing_harnesses: Vec<&String> = self
             .answers
             .harnesses
             .iter()
-            .filter(|harness| !self.probe.harnesses.get(*harness).copied().unwrap_or(false))
+            .filter(|harness| {
+                !self
+                    .probe
+                    .harnesses
+                    .get(*harness)
+                    .copied()
+                    .unwrap_or_default()
+                    .installed
+            })
             .collect();
         if !missing_harnesses.is_empty() {
             let names = missing_harnesses
@@ -793,7 +920,11 @@ impl Executor {
             self.check(
                 "user.mode",
                 "ok",
-                format!("no-sudo mode: running as {} ({mode})", self.login_user),
+                format!(
+                    "no-sudo mode: running as {} (sudo {}; {mode})",
+                    self.login_user,
+                    self.probe.sudo.as_str()
+                ),
             );
             return Ok(None);
         }
@@ -841,6 +972,37 @@ impl Executor {
         } else {
             self.changed.push("user:vowp".to_owned());
             self.check("user.mode", "ok", "created the vowp user and copied the SSH key");
+        }
+        Ok(None)
+    }
+
+    /// Checks the chosen harnesses' sign-in state as the effective user.
+    fn harness_login_phase(&mut self) -> Result<Option<SetupHandoff>, CliError> {
+        self.phase = "user".to_owned();
+        let harnesses = self.answers.harnesses.clone();
+        for harness in &harnesses {
+            let Some(script) = harness_login_script(harness) else {
+                continue;
+            };
+            let output = self.remote(vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()], None)?;
+            if !output.success() {
+                self.check(
+                    "user.harness_login",
+                    "fail",
+                    format!("{harness} is installed but not signed in for {}", self.effective_user),
+                );
+                return Ok(Some(SetupHandoff {
+                    phase: "user".to_owned(),
+                    kind: "login".to_owned(),
+                    prompt: format!(
+                        "Sign in to {harness} on the home as {} with its own login flow, then re-run setup.",
+                        self.effective_user
+                    ),
+                }));
+            }
+        }
+        if !harnesses.is_empty() {
+            self.check("user.harness_login", "ok", "the chosen harnesses are signed in");
         }
         Ok(None)
     }
@@ -901,18 +1063,24 @@ impl Executor {
                 None,
             )?
             .success();
-        let output = self.remote(
-            vec![
-                self.vowp_bin.clone(),
-                "setup".to_owned(),
-                "__home-init".to_owned(),
-                "--name".to_owned(),
-                self.node_name.clone(),
-                "--root".to_owned(),
-                vowp_home.clone(),
-            ],
-            None,
-        )?;
+        let mut init = vec![
+            self.vowp_bin.clone(),
+            "setup".to_owned(),
+            "__home-init".to_owned(),
+            "--name".to_owned(),
+            self.node_name.clone(),
+            "--root".to_owned(),
+            vowp_home.clone(),
+        ];
+        for harness in &self.answers.harnesses {
+            init.push("--harness".to_owned());
+            init.push(harness.clone());
+        }
+        for provider in &self.answers.providers {
+            init.push("--provider".to_owned());
+            init.push(provider.clone());
+        }
+        let output = self.remote(init, None)?;
         if !output.success() {
             return Err(self.failed("creating the home", &output));
         }
@@ -1255,7 +1423,7 @@ fn read_setup_state(root: &std::path::Path) -> Result<Option<LocalSetupState>, C
 }
 
 /// Writes the local setup state `setup control` reads; returns whether it changed.
-fn write_setup_state(answers: &SetupAnswers, probe: &Probe) -> Result<bool, CliError> {
+fn write_setup_state(answers: &SetupAnswers, probe: &Probe, remote_home: &str) -> Result<bool, CliError> {
     let root = remote::control_root()?;
     remote::ensure_private_dir(&root)?;
     let name = match &answers.name {
@@ -1264,16 +1432,19 @@ fn write_setup_state(answers: &SetupAnswers, probe: &Probe) -> Result<bool, CliE
     };
     let path = root.join("setup.json");
     let existing = read_setup_state(&root)?;
-    if existing
-        .as_ref()
-        .is_some_and(|state| state.target == answers.target && state.name == name && state.version == answers.version)
-    {
+    if existing.as_ref().is_some_and(|state| {
+        state.target == answers.target
+            && state.name == name
+            && state.version == answers.version
+            && state.remote_home == remote_home
+    }) {
         return Ok(false);
     }
     let state = LocalSetupState {
         target: answers.target.clone(),
         name,
         version: answers.version.clone(),
+        remote_home: remote_home.to_owned(),
         updated_at: Timestamp::now(),
     };
     let bytes = serde_json::to_vec_pretty(&state).map_err(vowp_protocol::ProtocolError::from)?;
