@@ -1368,3 +1368,57 @@ fn loops_and_schedule_refuse_the_home_selection_with_several_projects() {
         );
     }
 }
+
+#[test]
+fn loops_and_schedule_all_handlers_list_every_project() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let (code, _, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "{stderr}");
+    vowp_cli::node_ctx::ensure_home_project_file(&NodePaths::new(env.home_path())).expect("home config");
+
+    let global = vowp_cli::Global {
+        json: true,
+        home: Some(env.home_path().to_path_buf()),
+        project: Some(env.home_path().display().to_string()),
+        ..vowp_cli::Global::default()
+    };
+    let io = vowp_cli::BufferIo::new("");
+    let ctx = vowp_cli::Ctx::build(&global, &io).expect("home context");
+
+    let mut loops_io = vowp_cli::BufferIo::new("");
+    let code = vowp_cli::cmd::loops::run(
+        &ctx,
+        &mut loops_io,
+        &vowp_cli::cli::LoopsArgs {
+            command: None,
+            all: true,
+        },
+    )
+    .expect("loops --all");
+    assert_eq!(code, 0);
+    let loops: serde_json::Value = serde_json::from_str(&loops_io.stdout()).expect("loops json");
+    let projects: Vec<&str> = loops
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|loop_| loop_["project"].as_str().expect("project"))
+        .collect();
+    assert!(projects.contains(&"test") && projects.contains(&"second"), "{loops}");
+
+    let mut schedule_io = vowp_cli::BufferIo::new("");
+    let code = vowp_cli::cmd::schedule::run(
+        &ctx,
+        &mut schedule_io,
+        &vowp_cli::cli::ScheduleArgs {
+            command: vowp_cli::cli::ScheduleCommand::Ls,
+            all: true,
+        },
+    )
+    .expect("schedule --all ls");
+    assert_eq!(code, 0);
+    assert_eq!(schedule_io.stdout().trim(), "[]");
+}
