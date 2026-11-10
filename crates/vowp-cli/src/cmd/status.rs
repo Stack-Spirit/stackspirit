@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
+use vowp_core::fleet;
 use vowp_core::ledger::BoardSnapshot;
-use vowp_protocol::{Limit, LimitRowKind, Timestamp};
+use vowp_protocol::{Limit, LimitRowKind, ProjectState, Snapshot, Timestamp};
 use vowp_store::NodePaths;
 
 use crate::cli::StatusArgs;
@@ -27,6 +28,18 @@ struct StatusOutput {
     limits: Vec<LimitOutput>,
     cost_today_usd: Option<f64>,
     inbox_open: u32,
+    home: String,
+    projects: Vec<ProjectStatus>,
+}
+
+/// One project row in the status document.
+#[derive(Debug, Serialize)]
+struct ProjectStatus {
+    name: String,
+    state: &'static str,
+    running: u32,
+    ready: u32,
+    blocked: u32,
 }
 
 /// The supervisor block of [`StatusOutput`].
@@ -59,6 +72,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &StatusArgs) -> Result<i32, 
     let now = ctx.clock().now();
     let store = ctx.store()?;
     let snapshot = BoardSnapshot::collect(&store, ctx.config(), now)?;
+    let fleet = fleet::build_snapshot(ctx.deps(), &store, now)?;
     let (pid, started_at) = read_lock(ctx.paths());
     // A clean shutdown removes the heartbeat and leaves a stopped marker. It is not a live
     // supervisor even if a heartbeat file survived the stop.
@@ -85,10 +99,12 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &StatusArgs) -> Result<i32, 
             limits: snapshot.limits.iter().map(LimitOutput::from).collect(),
             cost_today_usd: snapshot.cost_today.usd,
             inbox_open: snapshot.inbox_open,
+            home: fleet.home.to_string(),
+            projects: fleet.projects.iter().map(project_status).collect(),
         };
         crate::output::print_json(io, &output)?;
     } else {
-        print_human(io, pid, started_at, stopped, heartbeat_age_secs, &snapshot)?;
+        print_human(io, pid, started_at, stopped, heartbeat_age_secs, &snapshot, &fleet)?;
     }
 
     if args.check && stale {
@@ -105,6 +121,7 @@ fn print_human(
     stopped: bool,
     heartbeat_age_secs: Option<i64>,
     snapshot: &BoardSnapshot,
+    fleet: &Snapshot,
 ) -> Result<(), CliError> {
     let now = snapshot.at;
     match pid {
@@ -127,8 +144,41 @@ fn print_human(
         None if stopped => writeln!(io.out(), "supervisor: stopped")?,
         None => writeln!(io.out(), "supervisor: not running")?,
     }
+    writeln!(io.out(), "home: {}", fleet.home)?;
+    writeln!(io.out(), "projects:")?;
+    for project in &fleet.projects {
+        let ready = project.jobs_by_state.get("ready").copied().unwrap_or(0);
+        writeln!(
+            io.out(),
+            "  {}  {}  running {}  ready {ready}  blocked {}",
+            project.name,
+            project_state_name(project.state),
+            project.running.len(),
+            project.blocked.len()
+        )?;
+    }
     write!(io.out(), "{}", snapshot.render_text(false))?;
     Ok(())
+}
+
+/// Converts one snapshot project card into the status row shape.
+fn project_status(project: &vowp_protocol::ProjectSnapshot) -> ProjectStatus {
+    ProjectStatus {
+        name: project.name.to_string(),
+        state: project_state_name(project.state),
+        running: project.running.len().try_into().unwrap_or(u32::MAX),
+        ready: project.jobs_by_state.get("ready").copied().unwrap_or(0),
+        blocked: project.blocked.len().try_into().unwrap_or(u32::MAX),
+    }
+}
+
+/// Returns the lowercase registry state name.
+fn project_state_name(state: ProjectState) -> &'static str {
+    match state {
+        ProjectState::Active => "active",
+        ProjectState::Paused => "paused",
+        ProjectState::Archived => "archived",
+    }
 }
 
 /// Formats a duration as `1h 02m`, `3m 04s` or `12s`.
