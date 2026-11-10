@@ -20,8 +20,8 @@ use vowp_core::{AdapterRegistry, Deps};
 use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, Capsule, CapsuleId, CapsuleState,
     CapsuleTrigger, Cost, EventBody, EventEnvelope, EventSource, Executor, ExecutorRef, FakeClock, HarnessEvent,
-    HarnessKind, LimitEvent, LimitKind, MemoryLog, NodeName, ProbeResult, RunOutcome, RunSummary, SessionCreated,
-    SessionId, SessionRole, StartInput, StopReason, Timestamp, ToolCall, ToolResult, TurnEnded,
+    HarnessKind, LimitEvent, LimitKind, MemoryLog, NodeName, ProbeResult, RunOutcome, RunSummary, SecretName,
+    SessionCreated, SessionId, SessionRole, StartInput, StopReason, Timestamp, ToolCall, ToolResult, TurnEnded,
 };
 use vowp_store::session_files::list_capsule_files;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -564,6 +564,57 @@ fn compacted_session_export_and_resume_start_from_the_capsule() {
         "a compacted bundle must not invent an event tail: {seed}"
     );
     assert!(seed.contains("continue the work"));
+}
+
+#[test]
+fn bundle_export_redacts_secret_from_capsule_file_row_and_json() {
+    let tmp = tempdir().expect("tempdir");
+    let secret = "bundle-\"quoted\"\\path\nsecond line";
+    let adapter = ScriptedAdapter::new(
+        HarnessKind::Opencode,
+        vec![good_draft(&format!("Continue with {secret}"))],
+    );
+    let deps = deps_with_clock(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", Arc::new(adapter)),
+        FakeClock::at(ts()),
+    );
+    let name = SecretName::parse("BUNDLE_KEY").expect("secret name");
+    vowp_core::vault::write_secret(&deps, &name, secret).expect("write secret");
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp);
+
+    let exported = bundle::export(&deps, &session, 20).expect("export");
+    let marker = "[REDACTED:BUNDLE_KEY]";
+    assert_eq!(exported.capsule.intent, format!("Continue with {marker}"));
+    let json = bundle::to_json(&exported).expect("bundle json");
+    let escaped = serde_json::to_string(secret).expect("json-escape the secret");
+    let escaped = &escaped[1..escaped.len() - 1];
+    assert!(!json.contains(secret), "the raw secret is not exported");
+    assert!(!json.contains(escaped), "the JSON-escaped secret is not exported");
+    assert!(json.contains(marker), "the bundle records the redaction");
+
+    let store = deps.open_store().expect("store");
+    assert_eq!(
+        store
+            .latest_capsule(&session)
+            .expect("latest capsule")
+            .expect("capsule row")
+            .intent,
+        exported.capsule.intent,
+        "the cached capsule body is redacted too"
+    );
+    let files = list_capsule_files(&deps.paths, &session).expect("capsule files");
+    assert!(!files.is_empty(), "export wrote a capsule file");
+    for path in files {
+        let text = std::fs::read_to_string(path).expect("read capsule file");
+        assert!(!text.contains(secret), "the capsule file does not hold the raw secret");
+        assert!(
+            !text.contains(escaped),
+            "the capsule file does not hold the JSON-escaped secret"
+        );
+    }
 }
 
 /// An adapter that returns the next scripted assistant message, reusing the last one.

@@ -24,10 +24,11 @@ use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Clock,
     Cost, EventBody, EventEnvelope, EventId, EventIndexRow, EventSource, EventType, Executor, ExecutorRef, FakeClock,
     HarnessEvent, HarnessKind, Limit, LimitRowKind, MemoryLog, Node, NodeName, ProbeResult, Run, RunId, RunOutcome,
-    RunPurpose, RunRole, RunSummary, SessionId, SessionOps, SessionRole, StartInput, StopReason, SwitchReason,
-    SwitchRequest, SwitchState, Timestamp, TurnRequest,
+    RunPurpose, RunRole, RunSummary, SecretName, SessionId, SessionOps, SessionRole, StartInput, StopReason,
+    SwitchReason, SwitchRequest, SwitchState, Timestamp, TurnRequest,
 };
 use vowp_store::NodePaths;
+use vowp_store::session_files::list_capsule_files;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_tmux::fake::FakeWindows;
 
@@ -512,6 +513,55 @@ fn switch_happy_path_events_rows_and_lineage() {
         )),
         "a pure switch does not start a turn or deliver a seed"
     );
+}
+
+#[test]
+fn switch_redacts_secret_from_written_capsule_file_and_row() {
+    let tmp = tempdir().expect("tempdir");
+    let secret = "switch-\"quoted\"\\path\nsecond line";
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter(&format!("handoff {secret}"))))
+            .with(
+                "claude-code",
+                Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+            ),
+    );
+    let name = SecretName::parse("SWITCH_KEY").expect("secret name");
+    vowp_core::vault::write_secret(&deps, &name, secret).expect("write secret");
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "switch redaction");
+    let store = deps.open_store().expect("store");
+
+    let switch = run_switch(
+        &deps,
+        &request(&session, claude(), SwitchReason::User),
+        &CancelToken::default(),
+    )
+    .expect("switch");
+
+    let marker = "[REDACTED:SWITCH_KEY]";
+    let capsule = store
+        .latest_capsule(&session)
+        .expect("latest capsule")
+        .expect("capsule row");
+    assert_eq!(capsule.intent, format!("handoff {marker}"));
+    assert_eq!(Some(&capsule.capsule_id), switch.capsule_id.as_ref());
+
+    let files = list_capsule_files(&deps.paths, &session).expect("capsule files");
+    assert!(!files.is_empty(), "the switch wrote a capsule file");
+    let escaped = serde_json::to_string(secret).expect("json-escape the secret");
+    let escaped = &escaped[1..escaped.len() - 1];
+    for path in files {
+        let text = std::fs::read_to_string(path).expect("read capsule file");
+        assert!(!text.contains(secret), "the capsule file does not hold the raw secret");
+        assert!(
+            !text.contains(escaped),
+            "the capsule file does not hold the JSON-escaped secret"
+        );
+        assert!(text.contains(marker), "the capsule file records the redaction");
+    }
 }
 
 #[test]

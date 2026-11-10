@@ -297,6 +297,12 @@ fn run_switch_inner(
                 }
             },
         };
+        // The service path redacts after the writer returns; this direct switch path must
+        // do the same or the capsule file and row keep the value the writer just drafted.
+        let capsule = match capsule {
+            Some(capsule) => Some(crate::vault::redact_capsule(deps, &store, &capsule)?),
+            None => None,
+        };
         let capsule_id = capsule.as_ref().map(|capsule| capsule.capsule_id.clone());
 
         let log = SessionLog::open(&deps.paths, &req.session_id, deps.clock.clone())?;

@@ -14,7 +14,8 @@ use vowp_protocol::{
     ActiveState, Clock, Cost, Evidence, Executor, FakeClock, Gate, GateResult, HarnessKind, InboxItem, InboxKind,
     InboxState, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind, Loop, LoopKind, NewJob, Node, NodeName,
     ParkedReason, Project, ProjectName, ProjectState, ReportGate, Role, Run, RunId, RunPurpose, RunRole,
-    SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Session, SessionId, SessionRole, SessionState, Snapshot, Timestamp, Tokens,
+    SNAPSHOT_FORMAT, SNAPSHOT_VERSION, SecretName, Session, SessionId, SessionRole, SessionState, Snapshot, Timestamp,
+    Tokens,
 };
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -904,6 +905,144 @@ fn snapshot_written_atomically_every_tick() {
     let second = fleet::read_snapshot(&fixture.paths).expect("second read");
     assert_eq!(second.sequence, 2, "the sequence increments every write");
     assert_eq!(second.projects.len(), 2);
+}
+
+#[test]
+fn snapshot_write_redacts_secret_values_including_json_escaped_text() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let secret = "snap-\"quoted\"\\path\nsecond line";
+    let name = SecretName::parse("SNAPSHOT_KEY").expect("secret name");
+    vowp_core::vault::write_secret(&fixture.deps, &name, secret).expect("write secret");
+    let marker = "[REDACTED:SNAPSHOT_KEY]";
+
+    let ready = fixture.job_with_title(&fixture.alpha, "s01-ready", &format!("ready {secret}"), 50);
+    fixture.set_state(
+        &fixture.alpha,
+        &ready,
+        JobState::Ready,
+        StateChange {
+            note: None,
+            parked_reason: None,
+        },
+    );
+    let alpha_store = fixture.store_for(&fixture.alpha);
+    alpha_store
+        .set_job_note(&ready.id, &format!("waiting: {secret}"))
+        .expect("waiting note");
+
+    let failed = fixture.job(&fixture.alpha, "s02-failed", 10);
+    fixture.set_state(
+        &fixture.alpha,
+        &failed,
+        JobState::Failed,
+        StateChange {
+            note: Some(format!("blocked {secret}")),
+            parked_reason: None,
+        },
+    );
+
+    alpha_store
+        .insert_gate_result(&GateResult {
+            id: None,
+            job_id: ready.id.clone(),
+            run_id: None,
+            attempt: 0,
+            gate_index: 0,
+            gate: Gate::Report(ReportGate::default()),
+            passed: false,
+            evidence: Evidence::Report {
+                front_matter: None,
+                missing_fields: vec![format!("status {secret}")],
+                problems: Vec::new(),
+            },
+            output_blob: None,
+            duration_ms: 1,
+            ts: now.minus(Duration::from_secs(30)),
+        })
+        .expect("gate result");
+
+    alpha_store
+        .insert_inbox(&InboxItem {
+            id: vowp_protocol::InboxId::new(),
+            project: Some(fixture.alpha.clone()),
+            job_id: None,
+            kind: InboxKind::Question,
+            title: format!("question {secret}"),
+            body: String::new(),
+            options: Vec::new(),
+            state: InboxState::Open,
+            answer: None,
+            answered_by: None,
+            created_at: now.minus(Duration::from_secs(10)),
+            answered_at: None,
+        })
+        .expect("inbox item");
+
+    fixture
+        .store
+        .upsert_session(&Session {
+            id: SessionId::new(),
+            project: Some(fixture.alpha.clone()),
+            job_id: None,
+            role: Some(SessionRole::Worker),
+            title: format!("session {secret}"),
+            parent_session_id: None,
+            node: NodeName::parse("local").expect("node"),
+            cwd: "/srv/vowp".to_owned(),
+            state: SessionState::Idle,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now.minus(Duration::from_secs(60)),
+            updated_at: now.minus(Duration::from_secs(5)),
+        })
+        .expect("session");
+
+    // `paused_reason` is copied verbatim by the card builder, so this field proves the
+    // final structured pass runs rather than only the per-field redaction inside the cards.
+    fixture
+        .store
+        .set_project_state(&fixture.alpha, ProjectState::Paused, &format!("owner {secret}"))
+        .expect("pause alpha");
+
+    fleet::write_snapshot(&fixture.deps, &fixture.store, now).expect("write snapshot");
+    let text = std::fs::read_to_string(fixture.paths.root().join("snapshot.json")).expect("snapshot text");
+    let escaped = serde_json::to_string(secret).expect("json-escape the secret");
+    let escaped = &escaped[1..escaped.len() - 1];
+    assert!(!text.contains(secret), "the raw secret is not written");
+    assert!(
+        !text.contains(escaped),
+        "the JSON-escaped secret is not written: {escaped:?}"
+    );
+    assert!(text.contains(marker), "the snapshot records the redaction");
+
+    let snapshot = fleet::read_snapshot(&fixture.paths).expect("read snapshot");
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    assert_eq!(alpha.paused_reason, format!("owner {marker}"));
+    let queued = alpha.queue.iter().find(|job| job.job == ready.id).expect("ready job");
+    assert_eq!(queued.title, format!("ready {marker}"));
+    assert_eq!(
+        queued.waiting_reason.as_deref(),
+        Some(format!("waiting: {marker}").as_str())
+    );
+    let blocked = alpha
+        .blocked
+        .iter()
+        .find(|job| job.job == failed.id)
+        .expect("failed job");
+    assert_eq!(blocked.detail, format!("blocked {marker}"));
+    assert_eq!(
+        alpha.gate_failures[0].evidence,
+        format!("missing fields: status {marker}")
+    );
+    assert_eq!(snapshot.inbox[0].title, format!("question {marker}"));
+    assert_eq!(snapshot.sessions[0].title, format!("session {marker}"));
 }
 
 #[test]

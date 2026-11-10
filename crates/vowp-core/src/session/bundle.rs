@@ -148,6 +148,10 @@ pub fn export(deps: &Deps, session: &SessionId, tail: usize) -> Result<Bundle, C
         (capsule, tail_events, blobs_inline, reader.last_seq()?)
     };
 
+    // The writer persists before the caller can inspect the capsule, so the export path
+    // applies the same final redaction the session service applies to its capsules.
+    let capsule = crate::vault::redact_capsule(deps, &store, &capsule)?;
+
     row.last_seq = last_seq;
     row.log_bytes = if compacted {
         0

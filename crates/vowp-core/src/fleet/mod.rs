@@ -35,12 +35,22 @@ const GIB: u64 = 1024 * 1024 * 1024;
 /// project is not a card. A project whose database cannot be read becomes a paused card with
 /// the error as its reason, so one broken project never hides the rest of the fleet.
 pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snapshot, CoreError> {
+    let redactor = Redactor::load(deps)?;
+    build_snapshot_with_redactor(deps, store, now, &redactor)
+}
+
+/// Builds the derived snapshot with a redactor the caller already loaded.
+fn build_snapshot_with_redactor(
+    deps: &Deps,
+    store: &Store,
+    now: Timestamp,
+    redactor: &Redactor,
+) -> Result<Snapshot, CoreError> {
     let global_owned = match store.paths() {
         Some(paths) => Some(Store::open_read_only(paths, None)?),
         None => None,
     };
     let global = global_owned.as_ref().unwrap_or(store);
-    let redactor = Redactor::load(deps)?;
     let projects = global.list_project_entries()?;
 
     let mut cards = Vec::new();
@@ -54,11 +64,11 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
     {
         let read = if let Some(paths) = store.paths() {
             match Store::open_read_only(paths, Some(&project.name)) {
-                Ok(project_store) => cards::project_read(deps, &redactor, &project_store, project, now),
+                Ok(project_store) => cards::project_read(deps, redactor, &project_store, project, now),
                 Err(error) => Err(CoreError::Store(error)),
             }
         } else if store.bound_project() == Some(&project.name) {
-            cards::project_read(deps, &redactor, store, project, now)
+            cards::project_read(deps, redactor, store, project, now)
         } else {
             Err(CoreError::Invalid(format!(
                 "project {} has no open database",
@@ -90,7 +100,7 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
             project: item.project.clone(),
             job_id: item.job_id.clone(),
             kind: item.kind,
-            title: full_title(&redactor, &item.title),
+            title: full_title(redactor, &item.title),
             created_at: item.created_at,
             age_secs: now.since(item.created_at).as_secs(),
         })
@@ -104,7 +114,7 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
         .unwrap_or(0);
     let supervisor = supervisor_snapshot(deps, global, fail_streak)?;
     let limits = global.active_limits(now)?;
-    let sessions = session_cards(global, now, &redactor)?;
+    let sessions = session_cards(global, now, redactor)?;
     let orchestrators = orchestrator_cards(deps.paths.root());
     let target = crate::capacity::targets::current(store)?;
     let capacity = CapacitySnapshot {
@@ -141,11 +151,17 @@ pub fn build_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<Snap
 /// The sequence is read from `kv['snapshot_sequence']`, incremented and stored before the
 /// temporary file is renamed, so a crash can leave a gap but never repeats a number.
 pub fn write_snapshot(deps: &Deps, store: &Store, now: Timestamp) -> Result<(), CoreError> {
-    let mut snapshot = build_snapshot(deps, store, now)?;
+    let redactor = Redactor::load(deps)?;
+    let mut snapshot = build_snapshot_with_redactor(deps, store, now, &redactor)?;
     let sequence = next_sequence(store)?;
     snapshot.sequence = sequence;
 
-    let text = serde_json::to_string_pretty(&snapshot).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    // Redact the structured document rather than its serialized text: a value containing
+    // quotes, backslashes or newlines is JSON-escaped in the file and would not match as
+    // an exact substring there.
+    let mut value = serde_json::to_value(&snapshot).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    redact_json_strings(&redactor, &mut value);
+    let text = serde_json::to_string_pretty(&value).map_err(|error| CoreError::Invalid(error.to_string()))?;
     let tmp_dir = deps.paths.tmp_dir();
     std::fs::create_dir_all(&tmp_dir).map_err(|source| CoreError::Io {
         path: tmp_dir.display().to_string(),
@@ -421,6 +437,28 @@ fn merge_inbox(items: Vec<InboxItem>) -> Vec<InboxItem> {
             .then_with(|| left.id.cmp(&right.id))
     });
     items
+}
+
+/// Redacts every string inside one structured JSON value without touching object keys.
+///
+/// This covers snapshot fields the card builders copy verbatim (paused reasons, limits,
+/// orchestrator cards) as well as the text they already summarize. Working on the value
+/// tree means a secret containing JSON-special characters still matches its raw form.
+fn redact_json_strings(redactor: &Redactor, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = redactor.redact(text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_strings(redactor, item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                redact_json_strings(redactor, item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 /// Redacts one title or question, keeping the full text.
