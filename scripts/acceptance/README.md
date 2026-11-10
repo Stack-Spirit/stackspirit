@@ -40,15 +40,16 @@ bash scripts/acceptance/rig.sh build
 bash scripts/acceptance/rig.sh up --name demo
 eval "$(bash scripts/acceptance/rig.sh env --name demo)"
 
-bash scripts/acceptance/rig.sh ssh 'uname -a'
-bash scripts/acceptance/rig.sh phone 'echo this runs on the home'
-bash scripts/acceptance/rig.sh exec 'echo this is a docker exec, as vowp'
+bash scripts/acceptance/rig.sh ssh --name demo 'uname -a'
+bash scripts/acceptance/rig.sh phone --name demo 'echo this runs on the home'
+bash scripts/acceptance/rig.sh exec --name demo 'echo this is a docker exec, as vowp'
 
 bash scripts/acceptance/rig.sh down --name demo
 ```
 
 `down --keep-state` keeps the generated keys and state file; a later `up`
-reuses them instead of generating new keys.
+reuses them instead of generating new keys. After the `eval`, `RIG_NAME` makes
+`--name` optional; the commands here pass it explicitly.
 
 `ssh` runs a command on the home through sshd using the owner key. `phone` runs
 a command inside the phone container and then over a second SSH connection to
@@ -66,8 +67,8 @@ containers have no VOWP binary until the test installs one.
 - No VOWP source or binary, no `~/.vowp`, no harness logins.
 - SSH sessions get `TMUX_TMPDIR=/home/vowp/.acceptance/tmux` and a private
   `VOWP_ACCEPTANCE_TMUX_SOCKET` through sshd `SetEnv`. `/usr/local/bin/tmux` is
-  a wrapper that refuses the name `default` and an empty/shared `TMUX_TMPDIR`, and
-  adds `-L <private>` when a call omits one.
+  a wrapper that refuses the name `default`, an empty/shared `TMUX_TMPDIR`, and
+  an explicit `-S <path>`, and adds `-L <private>` when a call omits one.
 
 The rig mounts `scripts/acceptance` read-only at `/opt/vowp-acceptance` so tests
 can run `fixtures/project.sh` and `make-v01-home.sh` inside the VPS without
@@ -81,8 +82,8 @@ owner and phone keys are installed in the home's `authorized_keys`. Use it for
 the phone surface, lease/takeover checks and SSH-drop scenarios:
 
 ```sh
-bash scripts/acceptance/rig.sh phone 'hostname; id -un'
-bash scripts/acceptance/rig.sh phone 'printf "%s\n" "phone surface"'
+bash scripts/acceptance/rig.sh phone --name demo 'hostname; id -un'
+bash scripts/acceptance/rig.sh phone --name demo 'printf "%s\n" "phone surface"'
 ```
 
 ## Fixture projects
@@ -106,7 +107,7 @@ bash scripts/acceptance/rig.sh fixture-pair --name demo /home/vowp/projects/pair
 Each fixture contains `.acceptance/seed-jobs.sh`:
 
 ```sh
-bash scripts/acceptance/rig.sh ssh '
+bash scripts/acceptance/rig.sh ssh --name demo '
 cd /home/vowp/projects/hello &&
 .acceptance/seed-jobs.sh 3 &&
 vowp up --detach
@@ -199,7 +200,7 @@ Useful environment variables:
 
 | Variable | Meaning |
 |---|---|
-| `VOWP_ACCEPTANCE_STATE_DIR` | Root for keys, state files and generated public keys (default `${TMPDIR:-/tmp}/vowp-acceptance`). |
+| `VOWP_ACCEPTANCE_STATE_DIR` | Root for generated keys, state files and rig metadata (default `${TMPDIR:-/tmp}/vowp-acceptance`). |
 | `VOWP_ACCEPTANCE_VPS_IMAGE` | Base image tag for the VPS variants (default `vowp-acceptance/vps`). |
 | `VOWP_ACCEPTANCE_PHONE_IMAGE` | Phone image tag (default `vowp-acceptance/phone:local`). |
 | `VOWP_V010_BASE_URL` | Release download base URL. |
@@ -244,10 +245,12 @@ home containers; `rig.sh status --name <name>` shows both.
   server when it is absent.
 - Keys are generated per rig under the state directory (mode 0600/0700) and
   removed by `down` unless `--keep-state` is passed. No key is committed.
-- The containers have no host home mount. Only generated public keys and the
-  read-only `scripts/acceptance` directory are mounted.
+- The containers have no host home mount. The home receives generated public
+  keys and the read-only `scripts/acceptance` directory. The phone receives its
+  own generated private key and SSH config through a read-only mount.
 - The phone has its own key and its own container; it is not the host SSH
-  agent.
+  agent. The generated phone private key is part of the disposable state and is
+  removed by `down`.
 - Images contain no VOWP binary and no harness login. The fake harness never
   starts `claude` or `opencode` and never opens a socket or a model turn.
 - Docker build and the v0.1 release download are the only network operations.

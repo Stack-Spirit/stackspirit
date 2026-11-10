@@ -30,6 +30,8 @@ NO_BUILD=0
 KEEP=0
 SKIP_V01=0
 V01_JOBS=2
+VPS_IMAGE_BASE=${VOWP_ACCEPTANCE_VPS_IMAGE:-vowp-acceptance/vps}
+PHONE_IMAGE=${VOWP_ACCEPTANCE_PHONE_IMAGE:-vowp-acceptance/phone:local}
 STARTED_AT=$(date +%s)
 
 say() {
@@ -42,7 +44,7 @@ fail() {
 }
 
 usage() {
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -121,6 +123,53 @@ assert_not_contains() {
     esac
 }
 
+assert_rig_containers_gone() {
+    local label=$1
+    local name=$2
+    local home=$3
+    local phone=$4
+    local network=$5
+    local listing
+
+    if docker inspect "$home" >/dev/null 2>&1; then
+        fail "$label: down left home container $home"
+    fi
+    if docker inspect "$phone" >/dev/null 2>&1; then
+        fail "$label: down left phone container $phone"
+    fi
+    if docker network inspect "$network" >/dev/null 2>&1; then
+        fail "$label: down left network $network"
+    fi
+    listing=$(bash "$RIG" list) || fail "$label: rig.sh list failed"
+    if printf '%s\n' "$listing" | awk -v n="$name" '$3 == n { found = 1 } END { exit(found ? 0 : 1) }'; then
+        fail "$label: down left the rig visible in rig.sh list"
+    fi
+}
+
+assert_rig_gone() {
+    local label=$1
+    local name=$2
+    local home=$3
+    local phone=$4
+    local network=$5
+    local state=$6
+
+    assert_rig_containers_gone "$label" "$name" "$home" "$phone" "$network"
+    if [ -e "$state" ]; then
+        fail "$label: down left state at $state"
+    fi
+}
+
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail "sha256sum or shasum is required"
+    fi
+}
+
 # --- static checks and the host-side privacy helper ------------------------
 
 say "checking script syntax"
@@ -141,6 +190,9 @@ host_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-selftest.XXXXXX")
     if TMUX_TMPDIR= tmux ls >/dev/null 2>&1; then
         exit 1
     fi
+    if tmux -S /tmp/forbidden-tmux-socket ls >/dev/null 2>&1; then
+        exit 1
+    fi
     case "$(tmux -V 2>&1)" in
         tmux\ *) ;;
         *) exit 1 ;;
@@ -153,9 +205,9 @@ rm -rf -- "$host_root"
 
 if [ "$NO_BUILD" -eq 1 ]; then
     say "skipping image build (--no-build)"
-    docker image inspect vowp-acceptance/vps:sudo >/dev/null 2>&1 || fail "missing image vowp-acceptance/vps:sudo"
-    docker image inspect vowp-acceptance/vps:no-sudo >/dev/null 2>&1 || fail "missing image vowp-acceptance/vps:no-sudo"
-    docker image inspect vowp-acceptance/phone:local >/dev/null 2>&1 || fail "missing image vowp-acceptance/phone:local"
+    docker image inspect "$VPS_IMAGE_BASE:sudo" >/dev/null 2>&1 || fail "missing image $VPS_IMAGE_BASE:sudo"
+    docker image inspect "$VPS_IMAGE_BASE:no-sudo" >/dev/null 2>&1 || fail "missing image $VPS_IMAGE_BASE:no-sudo"
+    docker image inspect "$PHONE_IMAGE" >/dev/null 2>&1 || fail "missing image $PHONE_IMAGE"
 else
     say "building images"
     bash "$RIG" build --variant all || fail "image build failed"
@@ -167,6 +219,11 @@ sudo_name="$PREFIX-sudo"
 created+=("$sudo_name")
 say "starting the sudo rig ($sudo_name)"
 bash "$RIG" up --name "$sudo_name" --variant sudo || fail "sudo rig did not start"
+eval "$(bash "$RIG" env --name "$sudo_name")" || fail "rig.sh env failed for the sudo rig"
+sudo_home=$RIG_HOME_CONTAINER
+sudo_phone=$RIG_PHONE_CONTAINER
+sudo_network=$RIG_NETWORK
+sudo_state=$RIG_STATE_DIR
 
 say "checking SSH, sudo and the fresh-VPS contract"
 out=$(bash "$RIG" ssh --name "$sudo_name" 'id -un; hostname; command -v sudo; command -v vowp || true') \
@@ -185,6 +242,8 @@ out=$(bash "$RIG" ssh --name "$sudo_name" 'socket=$(printf "%s" default); tmux -
 assert_contains "$out" "refusing the default tmux socket" "the image tmux wrapper did not refuse the default socket"
 out=$(bash "$RIG" ssh --name "$sudo_name" 'TMUX_TMPDIR= tmux ls' 2>&1 || true)
 assert_contains "$out" "refusing an unset or shared TMUX_TMPDIR" "the image tmux wrapper did not refuse an empty TMUX_TMPDIR"
+out=$(bash "$RIG" ssh --name "$sudo_name" 'tmux -S /tmp/forbidden-tmux-socket ls' 2>&1 || true)
+assert_contains "$out" "refusing an explicit -S socket path" "the image tmux wrapper did not refuse an explicit -S"
 
 say "checking the phone's separate SSH connection"
 out=$(bash "$RIG" phone --name "$sudo_name" 'echo phone-ok; id -un; hostname') \
@@ -192,6 +251,20 @@ out=$(bash "$RIG" phone --name "$sudo_name" 'echo phone-ok; id -un; hostname') \
 assert_contains "$out" "phone-ok" "phone command did not run"
 assert_contains "$out" "vowp" "phone did not log in as vowp"
 assert_contains "$out" "vps" "phone reached the wrong host"
+
+say "checking env, status, list, logs, the phone key and the RIG_NAME default"
+out=$(bash "$RIG" ssh 'echo default-name-ok') \
+    || fail "commands after 'eval \"\$(rig.sh env)\"' do not use RIG_NAME"
+assert_contains "$out" "default-name-ok" "the RIG_NAME default did not reach ssh"
+out=$(bash "$RIG" status --name "$sudo_name") || fail "rig.sh status failed"
+assert_contains "$out" "home:      running" "status does not report the running home"
+out=$(bash "$RIG" list) || fail "rig.sh list failed"
+assert_contains "$out" "$sudo_name" "list does not show the running rig"
+out=$(bash "$RIG" logs --name "$sudo_name" --tail 2) || fail "rig.sh logs failed"
+assert_contains "$out" "--- home" "logs do not include the home container"
+out=$(bash "$RIG" ssh --as phone --name "$sudo_name" 'echo phone-key-ok') \
+    || fail "ssh --as phone failed"
+assert_contains "$out" "phone-key-ok" "ssh --as phone did not use the phone key"
 
 say "creating fixture projects"
 bash "$RIG" fixture --name "$sudo_name" hello /home/vowp/projects/hello \
@@ -209,6 +282,26 @@ test -f /home/vowp/projects/hog-origin.git/HEAD
 /home/vowp/projects/hello/.acceptance/bin/fake-worker --version
 ')
 assert_contains "$out" "acceptance-fake-worker 1.0.0" "the fake worker does not answer --version"
+
+say "checking fixture-pair and seed-jobs.sh"
+bash "$RIG" fixture-pair --name "$sudo_name" /home/vowp/projects/pair >/dev/null \
+    || fail "fixture-pair failed"
+bash "$RIG" ssh --name "$sudo_name" '
+set -e
+test -f /home/vowp/projects/pair/hello/vowp.toml
+test -f /home/vowp/projects/pair/memory-hog/vowp.toml
+cat >/home/vowp/fake-vowp <<"EOS"
+#!/bin/sh
+printf "%s\n" "$*" >> /home/vowp/seed-args
+EOS
+chmod +x /home/vowp/fake-vowp
+rm -f /home/vowp/seed-args
+cd /home/vowp/projects/hello
+VOWP=/home/vowp/fake-vowp .acceptance/seed-jobs.sh 2 fixture >/dev/null
+test "$(wc -l < /home/vowp/seed-args)" -eq 2
+grep -q -- "--id fixture-1" /home/vowp/seed-args
+grep -q -- "--id fixture-2" /home/vowp/seed-args
+' || fail "seed-jobs.sh did not add the expected jobs"
 
 say "running the memory-hog worker once"
 out=$(bash "$RIG" ssh --name "$sudo_name" '
@@ -241,6 +334,7 @@ if [ "$KEEP" -eq 1 ]; then
 else
     say "stopping the sudo rig"
     bash "$RIG" down --name "$sudo_name" || fail "down failed for the sudo rig"
+    assert_rig_gone "sudo rig" "$sudo_name" "$sudo_home" "$sudo_phone" "$sudo_network" "$sudo_state"
     created=("${created[@]/$sudo_name/}")
 fi
 
@@ -250,6 +344,11 @@ nosudo_name="$PREFIX-nosudo"
 created+=("$nosudo_name")
 say "starting the no-sudo rig ($nosudo_name)"
 bash "$RIG" up --name "$nosudo_name" --variant no-sudo || fail "no-sudo rig did not start"
+eval "$(bash "$RIG" env --name "$nosudo_name")" || fail "rig.sh env failed for the no-sudo rig"
+nosudo_home=$RIG_HOME_CONTAINER
+nosudo_phone=$RIG_PHONE_CONTAINER
+nosudo_network=$RIG_NETWORK
+nosudo_state=$RIG_STATE_DIR
 
 out=$(bash "$RIG" ssh --name "$nosudo_name" 'id -u; command -v sudo || true; command -v vowp || true') \
     || fail "SSH into the no-sudo rig failed"
@@ -268,7 +367,32 @@ if [ "$KEEP" -eq 1 ]; then
 else
     say "stopping the no-sudo rig"
     bash "$RIG" down --name "$nosudo_name" || fail "down failed for the no-sudo rig"
+    assert_rig_gone "no-sudo rig" "$nosudo_name" "$nosudo_home" "$nosudo_phone" "$nosudo_network" "$nosudo_state"
     created=("${created[@]/$nosudo_name/}")
+fi
+
+if [ "$KEEP" -eq 0 ]; then
+    keep_name="$PREFIX-keep"
+    created+=("$keep_name")
+    say "checking down --keep-state and key reuse"
+    bash "$RIG" up --name "$keep_name" >/dev/null || fail "keep-state rig did not start"
+    eval "$(bash "$RIG" env --name "$keep_name")" || fail "rig.sh env failed for the keep-state rig"
+    keep_home=$RIG_HOME_CONTAINER
+    keep_phone=$RIG_PHONE_CONTAINER
+    keep_network=$RIG_NETWORK
+    keep_state=$RIG_STATE_DIR
+    key_before=$(file_sha256 "$RIG_OWNER_KEY")
+    bash "$RIG" ssh --name "$keep_name" 'echo before-keep' >/dev/null || fail "keep-state rig SSH failed"
+    bash "$RIG" down --name "$keep_name" --keep-state || fail "down --keep-state failed"
+    assert_rig_containers_gone "keep-state rig" "$keep_name" "$keep_home" "$keep_phone" "$keep_network"
+    [ -e "$keep_state" ] || fail "down --keep-state removed the state directory"
+    bash "$RIG" up --name "$keep_name" >/dev/null || fail "up after down --keep-state failed"
+    key_after=$(file_sha256 "$RIG_OWNER_KEY")
+    [ "$key_before" = "$key_after" ] || fail "up after --keep-state generated a new owner key"
+    bash "$RIG" ssh --name "$keep_name" 'echo after-keep' >/dev/null || fail "reused keep-state rig SSH failed"
+    bash "$RIG" down --name "$keep_name" || fail "final down failed for the keep-state rig"
+    assert_rig_gone "keep-state rig" "$keep_name" "$keep_home" "$keep_phone" "$keep_network" "$keep_state"
+    created=("${created[@]/$keep_name/}")
 fi
 
 say "PASS in $(( $(date +%s) - STARTED_AT ))s"

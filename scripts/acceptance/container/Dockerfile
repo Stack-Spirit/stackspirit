@@ -6,16 +6,17 @@
 # `vowp` account.
 #
 # Build with:
-#   docker build --build-arg WITH_SUDO=1 -t vowp-acceptance-vps:sudo .
-#   docker build --build-arg WITH_SUDO=0 -t vowp-acceptance-vps:no-sudo .
+#   docker build --build-arg WITH_SUDO=1 -t vowp-acceptance/vps:sudo .
+#   docker build --build-arg WITH_SUDO=0 -t vowp-acceptance/vps:no-sudo .
 #
 # WITH_SUDO=0 leaves no `sudo` binary and no sudoers entry, for the no-sudo
 # setup path. Both variants are otherwise identical so a failure is a sudo
 # failure, not an image difference.
 #
-# Everything runs inside the container. The rig mounts only read-only test
-# scripts and generated public keys; no host home, tmux socket or VOWP home is
-# visible.
+# Everything runs inside the container. The rig mounts read-only test scripts
+# and the generated public keys for the home; the phone container receives its
+# own generated private key and SSH config. No host home, tmux socket or VOWP
+# home is visible.
 
 FROM ubuntu:24.04
 

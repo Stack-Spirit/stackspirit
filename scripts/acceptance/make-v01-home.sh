@@ -10,7 +10,6 @@
 #   <dest>/project/               the git checkout registered in that database
 #   <dest>/origin.git             its local bare origin
 #   <dest>/manifest.json          version, job states, row counts, log counts
-#   <dest>/fake-worker.log        every fake-harness turn (if any)
 #
 # It never uses the caller's ~/.vowp, HOME independent of <dest>/runtime, or
 # tmux server: a private TMUX_TMPDIR and socket wrapper are created under
@@ -60,7 +59,7 @@ FORCE=0
 STARTED_AT=$(date +%s)
 
 usage() {
-    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -275,10 +274,8 @@ else
 fi
 BINARY=$(CDPATH='' cd -- "$(dirname -- "$BINARY")" && pwd)/$(basename -- "$BINARY")
 version_text=$("$BINARY" --version 2>&1) || die "binary failed to run: $BINARY --version"
-case "$version_text" in
-    "vowp $VERSION"*) ;;
-    *) die "expected 'vowp $VERSION', got: $version_text" ;;
-esac
+[ "$version_text" = "vowp $VERSION" ] \
+    || die "expected exact version 'vowp $VERSION', got: $version_text"
 BINARY_SHA256=$(acceptance_sha256_file "$BINARY")
 say "$version_text at $BINARY"
 
@@ -359,6 +356,7 @@ on_quota = "park"
 
 [harnesses.fake-worker]
 mapping = ".vowp/adapters/fake-worker.toml"
+env_pass = ["VOWP_ACCEPTANCE_WORKER_LOG"]
 EOF
 
 printf '.vowp/\n' >"$PROJECT_DIR/.gitignore"

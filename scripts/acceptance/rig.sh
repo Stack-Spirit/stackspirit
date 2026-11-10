@@ -64,7 +64,7 @@ die() {
 }
 
 usage() {
-    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -89,7 +89,7 @@ validate_variant() {
     esac
 }
 
-name=$DEFAULT_NAME
+name=${RIG_NAME:-$DEFAULT_NAME}
 state_dir() {
     printf '%s/%s\n' "${STATE_ROOT%/}" "$name"
 }
@@ -445,16 +445,43 @@ cmd_down() {
         network=$RIG_NETWORK
     fi
 
+    local failures=0
+    local container
     say "removing rig '$name'"
-    docker rm -f "$phone" >/dev/null 2>&1 || true
-    docker rm -f "$home" >/dev/null 2>&1 || true
-    docker network rm "$network" >/dev/null 2>&1 || true
+
+    # An absent container/network is already down. A present one that cannot
+    # be removed is a real failure: reporting success would leave a rig behind
+    # and make the self-test's teardown check meaningless.
+    for container in "$phone" "$home"; do
+        if docker inspect "$container" >/dev/null 2>&1; then
+            if ! docker rm -f "$container" >/dev/null 2>&1; then
+                warn "could not remove container $container"
+                failures=$((failures + 1))
+            fi
+        fi
+    done
+    if docker network inspect "$network" >/dev/null 2>&1; then
+        if ! docker network rm "$network" >/dev/null 2>&1; then
+            warn "could not remove network $network"
+            failures=$((failures + 1))
+        fi
+    fi
 
     if [ "$keep_state" -eq 1 ]; then
         say "kept state at $dir"
+    elif [ -e "$dir" ]; then
+        if ! rm -rf -- "$dir"; then
+            warn "could not remove state at $dir"
+            failures=$((failures + 1))
+        else
+            say "removed state at $dir"
+        fi
     else
-        rm -rf -- "$dir"
-        say "removed state at $dir"
+        say "no state at $dir"
+    fi
+
+    if [ "$failures" -ne 0 ]; then
+        die "could not fully remove rig '$name' ($failures removal failure(s))"
     fi
 }
 

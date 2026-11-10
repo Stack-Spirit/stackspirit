@@ -41,6 +41,10 @@ for arg in "$@"; do
             printf '%s\n' "acceptance tmux: refusing the default tmux socket" >&2
             exit 1
             ;;
+        -S|-S?*)
+            printf '%s\n' "acceptance tmux: refusing an explicit -S socket path" >&2
+            exit 1
+            ;;
         -L|-L?*) has_socket=1 ;;
     esac
     previous=$arg

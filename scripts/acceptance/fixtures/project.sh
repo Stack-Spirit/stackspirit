@@ -13,8 +13,10 @@
 #   * for `memory-hog`, a worker that allocates and holds memory before it
 #     writes its report.
 #
-# Nothing is registered with a VOWP home here. Tests register the checkout with
-# `vowp init`, `vowp project add`, or the v0.1 `init` they are exercising.
+# Nothing is registered with a VOWP home here. v0.2 tests register the checkout
+# with `vowp project add`. A v0.1 home needs a separate `vowp init` checkout
+# first: v0.1 init refuses while this fixture's `vowp.toml` exists, and --force
+# would overwrite the fake-harness config.
 #
 # The script is safe to run inside the fresh-VPS container (the rig mounts this
 # directory read-only at /opt/vowp-acceptance) or on the host. It never reads
@@ -23,7 +25,6 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 WORKER_SOURCE="$SCRIPT_DIR/fake-worker.sh"
 
 say() {
@@ -36,7 +37,7 @@ die() {
 }
 
 usage() {
-    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -183,6 +184,7 @@ on_quota = "park"
 
 [harnesses.$harness]
 mapping = ".acceptance/adapters/$harness.toml"
+env_pass = ["VOWP_ACCEPTANCE_WORKER_LOG"]
 EOF
 
 cat >"$dest/.gitignore" <<'EOF'
@@ -211,8 +213,8 @@ cat >"$dest/.acceptance/seed-jobs.sh" <<'EOF'
 # Usage: .acceptance/seed-jobs.sh [count] [prefix]
 #        VOWP=/path/to/vowp .acceptance/seed-jobs.sh 4 hog
 #
-# Run from the project root. The project must already be registered (or this
-# must be the v0.1 checkout used with `vowp init`). The fake worker writes
+# Run from the project root. Register the project with v0.2 `vowp project add`
+# before starting a supervisor. The fake worker writes
 # src/<job>.txt, commits it, and writes the report the `report` gate needs.
 set -Eeuo pipefail
 
