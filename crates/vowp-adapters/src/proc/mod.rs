@@ -6,11 +6,13 @@
 //! joins both readers and then calls [`StreamParser::finish`]. Signals go to the whole group
 //! through `/bin/kill`; there is no `unsafe` code.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -290,15 +292,29 @@ impl ProcMeter {
     }
 
     /// Builds the sidecar record after the child exits.
-    fn finish(mut self, exit_code: Option<i32>) -> ProcUsage {
-        let (data, source) = match self.cgroup.take() {
-            Some(cgroup) => (cgroup.finish(), UsageSource::Cgroup),
-            None => (self.proc_data(), UsageSource::ProcTree),
+    ///
+    /// `signal` is the terminating signal and `stopped_by_us` says whether this process asked
+    /// for the kill (stop, interrupt or timeout). Without readable cgroup `memory.events` there
+    /// is no OOM record, so a SIGKILL that we did not request is the only available evidence.
+    fn finish(mut self, exit_code: Option<i32>, signal: Option<i32>, stopped_by_us: bool) -> ProcUsage {
+        let (mut data, source, oom_accounted) = match self.cgroup.take() {
+            Some(cgroup) => {
+                let (data, accounted) = cgroup.finish();
+                (data, UsageSource::Cgroup, accounted)
+            }
+            None => (self.proc_data(), UsageSource::ProcTree, false),
         };
-        let (data, source) = if data.is_empty() {
-            (MeterData::default_measurement(), UsageSource::Default)
-        } else {
+        let measured = !data.is_empty();
+        if !data.oom_killed && !oom_accounted && oom_from_outcome(exit_code, signal, stopped_by_us) {
+            data.oom_killed = true;
+        }
+        let (data, source) = if measured {
             (data, source)
+        } else {
+            // Keep the compiled default figures, but carry the OOM verdict with them.
+            let mut default = MeterData::default_measurement();
+            default.oom_killed = data.oom_killed;
+            (default, UsageSource::Default)
         };
         ProcUsage {
             run_id: String::new(),
@@ -320,6 +336,15 @@ impl ProcMeter {
     }
 }
 
+/// Returns true when an exit cgroup accounting cannot explain looks like an OOM kill.
+///
+/// Without a cgroup the kernel does not record why a process died. A SIGKILL (signal 9) or the
+/// shell's 137 exit status are the only evidence available; kills this program requested for a
+/// stop, interrupt or timeout are not OOM kills.
+fn oom_from_outcome(exit_code: Option<i32>, signal: Option<i32>, stopped_by_us: bool) -> bool {
+    !stopped_by_us && (exit_code == Some(137) || signal == Some(9))
+}
+
 /// A cgroup v2 user scope for one adapter run.
 struct CgroupMeter {
     path: PathBuf,
@@ -335,6 +360,8 @@ struct CgroupMeter {
     started: Instant,
     max_cores: f64,
     oom_killed: bool,
+    /// Whether `memory.events` was readable, i.e. whether `oom_killed` can be trusted.
+    oom_accounted: bool,
 }
 
 impl CgroupMeter {
@@ -355,6 +382,7 @@ impl CgroupMeter {
             started: Instant::now(),
             max_cores: 0.0,
             oom_killed: false,
+            oom_accounted: false,
         }
     }
 
@@ -459,6 +487,7 @@ impl CgroupMeter {
             started: now,
             max_cores: 0.0,
             oom_killed: false,
+            oom_accounted: false,
         })
     }
 
@@ -468,23 +497,23 @@ impl CgroupMeter {
         None
     }
 
-    /// Reads one cgroup file.
-    fn read_u64(&self, name: &str, key: Option<&str>) -> u64 {
-        let Ok(text) = std::fs::read_to_string(self.path.join(name)) else {
-            return 0;
-        };
+    /// Reads one cgroup file, returning `None` when it is absent or unparseable.
+    fn read_optional_u64(&self, name: &str, key: Option<&str>) -> Option<u64> {
+        let text = std::fs::read_to_string(self.path.join(name)).ok()?;
         match key {
-            None => text.trim().parse().unwrap_or(0),
-            Some(key) => text
-                .lines()
-                .find_map(|line| {
-                    let mut parts = line.split_whitespace();
-                    (parts.next() == Some(key))
-                        .then(|| parts.next()?.parse().ok())
-                        .flatten()
-                })
-                .unwrap_or(0),
+            None => text.trim().parse().ok(),
+            Some(key) => text.lines().find_map(|line| {
+                let mut parts = line.split_whitespace();
+                (parts.next() == Some(key))
+                    .then(|| parts.next()?.parse().ok())
+                    .flatten()
+            }),
         }
+    }
+
+    /// Reads one cgroup file, treating absence as zero.
+    fn read_u64(&self, name: &str, key: Option<&str>) -> u64 {
+        self.read_optional_u64(name, key).unwrap_or(0)
     }
 
     /// Reads one `memory.stat` field.
@@ -502,7 +531,7 @@ impl CgroupMeter {
     fn sample(&mut self) -> MeterData {
         let peak = self.read_u64("memory.peak", None);
         let cpu_usec = self.read_u64("cpu.stat", Some("usage_usec"));
-        let oom_kill = self.read_u64("memory.events", Some("oom_kill"));
+        let oom_kill = self.read_optional_u64("memory.events", Some("oom_kill"));
         let now = Instant::now();
         if peak > self.peak {
             self.peak = peak;
@@ -513,8 +542,11 @@ impl CgroupMeter {
         if cpu_usec >= self.cpu_usec {
             self.cpu_usec = cpu_usec;
         }
-        if oom_kill > 0 {
-            self.oom_killed = true;
+        if let Some(oom_kill) = oom_kill {
+            self.oom_accounted = true;
+            if oom_kill > 0 {
+                self.oom_killed = true;
+            }
         }
         let elapsed = now.saturating_duration_since(self.last_sample).as_secs_f64();
         if elapsed > 0.0 {
@@ -542,10 +574,14 @@ impl CgroupMeter {
     }
 
     /// Samples one last time and releases the holder.
-    fn finish(mut self) -> MeterData {
+    ///
+    /// Returns the measurement and whether `memory.events` was readable, so the caller knows
+    /// whether a zero `oom_killed` is authoritative.
+    fn finish(mut self) -> (MeterData, bool) {
         let data = self.sample();
+        let oom_accounted = self.oom_accounted;
         self.stop();
-        data
+        (data, oom_accounted)
     }
 
     /// Releases the holder process and its hold file.
@@ -1016,6 +1052,7 @@ fn spawn_waiter(
             }
         };
         let exit = status.as_ref().and_then(std::process::ExitStatus::code);
+        let signal = status.as_ref().and_then(ExitStatusExt::signal);
         let stdout_result = stdout_thread.join();
         let stderr_tail = stderr_thread.join().unwrap_or_default();
         let killed = shared.killed.load(Ordering::SeqCst);
@@ -1037,7 +1074,7 @@ fn spawn_waiter(
             let _ = tx.send(event);
         }
         if let (Some(path), Some(run_id)) = (usage_path, usage_run_id) {
-            let usage = meter.finish(exit);
+            let usage = meter.finish(exit, signal, killed);
             write_usage_sidecar(&path, usage, &run_id);
         }
         *shared.summary.lock().unwrap_or_else(PoisonError::into_inner) = Some(summary);
@@ -1350,12 +1387,33 @@ mod tests {
 
     #[test]
     fn proc_meter_without_proc_uses_the_default_source() {
-        let usage = ProcMeter::new(0, None).finish(None);
+        let usage = ProcMeter::new(0, None).finish(None, None, false);
         assert_eq!(usage.source, UsageSource::Default);
         assert_eq!(usage.peak_rss_bytes, DEFAULT_PEAK_RSS_BYTES);
         assert_eq!(usage.mean_cpu_cores, DEFAULT_MEAN_CPU_CORES);
         assert_eq!(usage.max_cpu_cores, DEFAULT_MEAN_CPU_CORES);
         assert_eq!(usage.cpu_usec, 0);
+    }
+
+    #[test]
+    fn killed_or_137_without_cgroup_is_oom_with_default_sample() {
+        let exited_137 = ProcMeter::new(0, None).finish(Some(137), None, false);
+        assert!(exited_137.oom_killed, "exit 137 without a cgroup must count as OOM");
+        assert_eq!(exited_137.source, UsageSource::Default);
+        assert_eq!(exited_137.peak_rss_bytes, DEFAULT_PEAK_RSS_BYTES);
+        assert_eq!(exited_137.mean_cpu_cores, DEFAULT_MEAN_CPU_CORES);
+        assert_eq!(exited_137.cpu_usec, 0);
+
+        let signalled = ProcMeter::new(0, None).finish(None, Some(9), false);
+        assert!(signalled.oom_killed, "an unrequested SIGKILL must count as OOM");
+        assert_eq!(signalled.source, UsageSource::Default);
+
+        let failed = ProcMeter::new(0, None).finish(Some(1), None, false);
+        assert!(!failed.oom_killed, "an ordinary failure is not an OOM kill");
+
+        let stopped = ProcMeter::new(0, None).finish(Some(137), None, true);
+        assert!(!stopped.oom_killed, "a stop we requested is not an OOM kill");
+        assert_eq!(stopped.source, UsageSource::Default);
     }
 
     #[test]
@@ -1379,6 +1437,37 @@ mod tests {
         assert_eq!(data.kernel_peak_bytes, Some(500_000));
         assert_eq!(data.cpu_usec, 1_500_000);
         assert!(data.oom_killed);
-        assert_eq!(meter.finish().peak_rss_bytes, 3_000_000);
+        let (finished, accounted) = meter.finish();
+        assert_eq!(finished.peak_rss_bytes, 3_000_000);
+        assert!(accounted);
+    }
+
+    #[test]
+    fn cgroup_without_oom_events_falls_back_to_the_exit_outcome() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().to_path_buf();
+        std::fs::write(path.join("memory.peak"), "3000000\n").expect("peak");
+        let mut meter = ProcMeter::new(0, None);
+        meter.cgroup = Some(CgroupMeter::fixture(path));
+        let usage = meter.finish(Some(137), None, false);
+        assert!(usage.oom_killed, "missing memory.events must not hide an OOM kill");
+        assert_eq!(usage.source, UsageSource::Cgroup);
+        assert_eq!(usage.peak_rss_bytes, 3_000_000);
+    }
+
+    #[test]
+    fn cgroup_oom_events_are_authoritative_over_the_exit_outcome() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().to_path_buf();
+        std::fs::write(path.join("memory.peak"), "3000000\n").expect("peak");
+        std::fs::write(path.join("memory.events"), "oom_kill 0\n").expect("events");
+        let mut meter = ProcMeter::new(0, None);
+        meter.cgroup = Some(CgroupMeter::fixture(path));
+        let usage = meter.finish(Some(137), None, false);
+        assert!(
+            !usage.oom_killed,
+            "a readable memory.events saying zero must beat the exit-code heuristic"
+        );
+        assert_eq!(usage.source, UsageSource::Cgroup);
     }
 }

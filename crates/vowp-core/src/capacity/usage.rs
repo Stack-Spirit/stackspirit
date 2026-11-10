@@ -99,11 +99,20 @@ pub fn import_sidecars(deps: &Deps, store: &Store) -> Result<u32, CoreError> {
                 continue;
             }
         };
-        let Some((run, project, job_kind)) = find_run(store, deps, &sidecar.run_id)? else {
+        let Some(FoundRun {
+            run,
+            project,
+            job_kind,
+            job_worktree,
+        }) = find_run(store, deps, &sidecar.run_id)?
+        else {
             continue;
         };
         let build_mode = if sidecar.build_mode == vowp_protocol::BuildMode::Unknown {
-            run.cwd
+            // The adapter never sees the job's real target directory when a shim or an external
+            // CARGO_TARGET_DIR is used. Infer from the job worktree, never the session cwd; when
+            // there is no job worktree the honest answer is `unknown`.
+            job_worktree
                 .as_deref()
                 .map(Path::new)
                 .map(infer_build_mode)
@@ -143,23 +152,29 @@ pub fn import_sidecars(deps: &Deps, store: &Store) -> Result<u32, CoreError> {
     Ok(imported)
 }
 
-/// Finds a run row and its project, searching the bound project first.
-fn find_run(
-    store: &Store,
-    deps: &Deps,
-    run_id: &str,
-) -> Result<Option<(Run, ProjectName, Option<JobKind>)>, CoreError> {
+/// A run row plus the job data that sidecar import needs.
+struct FoundRun {
+    run: Run,
+    project: ProjectName,
+    job_kind: Option<JobKind>,
+    job_worktree: Option<String>,
+}
+
+/// Finds a run row, its project, job kind and job worktree, searching the bound project first.
+fn find_run(store: &Store, deps: &Deps, run_id: &str) -> Result<Option<FoundRun>, CoreError> {
     let id = match vowp_protocol::RunId::parse(run_id) {
         Ok(id) => id,
         Err(_) => return Ok(None),
     };
     if let Some(project) = store.bound_project() {
         if let Some(run) = store.run(&id)? {
-            let kind = match &run.job_id {
-                Some(job) => store.job(job)?.map(|job| job.kind),
-                None => None,
-            };
-            return Ok(Some((run, project.clone(), kind)));
+            let (job_kind, job_worktree) = job_kind_and_worktree(store, &run)?;
+            return Ok(Some(FoundRun {
+                run,
+                project: project.clone(),
+                job_kind,
+                job_worktree,
+            }));
         }
     }
     for project in store.list_projects()? {
@@ -171,12 +186,25 @@ fn find_run(
             Err(_) => continue,
         };
         if let Some(run) = project_store.run(&id)? {
-            let kind = match &run.job_id {
-                Some(job) => project_store.job(job)?.map(|job| job.kind),
-                None => None,
-            };
-            return Ok(Some((run, project.name, kind)));
+            let (job_kind, job_worktree) = job_kind_and_worktree(&project_store, &run)?;
+            return Ok(Some(FoundRun {
+                run,
+                project: project.name,
+                job_kind,
+                job_worktree,
+            }));
         }
     }
     Ok(None)
+}
+
+/// Returns a run's job kind and worktree, when the run belongs to a job.
+fn job_kind_and_worktree(store: &Store, run: &Run) -> Result<(Option<JobKind>, Option<String>), CoreError> {
+    let Some(job_id) = &run.job_id else {
+        return Ok((None, None));
+    };
+    let Some(job) = store.job(job_id)? else {
+        return Ok((None, None));
+    };
+    Ok((Some(job.kind), job.worktree))
 }

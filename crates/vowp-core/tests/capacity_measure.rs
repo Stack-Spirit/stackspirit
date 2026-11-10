@@ -80,6 +80,10 @@ fn insert_job(store: &Store, project: &ProjectName, id: &str) -> Job {
 }
 
 fn insert_run(store: &Store, job: &Job, run_id: &RunId, node: &NodeName) -> Run {
+    insert_run_with_cwd(store, job, run_id, node, None)
+}
+
+fn insert_run_with_cwd(store: &Store, job: &Job, run_id: &RunId, node: &NodeName, cwd: Option<String>) -> Run {
     let run = Run {
         id: run_id.clone(),
         job_id: Some(job.id.clone()),
@@ -94,7 +98,7 @@ fn insert_run(store: &Store, job: &Job, run_id: &RunId, node: &NodeName) -> Run 
         native_session_id: None,
         pid: None,
         window: None,
-        cwd: None,
+        cwd,
         started_at: now(),
         ended_at: None,
         exit_code: Some(0),
@@ -105,6 +109,26 @@ fn insert_run(store: &Store, job: &Job, run_id: &RunId, node: &NodeName) -> Run 
     };
     store.insert_run(&run).unwrap();
     run
+}
+
+fn default_sidecar(run_id: &RunId) -> ProcUsage {
+    ProcUsage {
+        run_id: run_id.as_str().to_owned(),
+        started_at: now(),
+        ended_at: now().plus(Duration::from_secs(1)),
+        duration_ms: 1_000,
+        peak_rss_bytes: scope::DEFAULT_PEAK_RSS_BYTES,
+        anon_peak_bytes: None,
+        file_peak_bytes: None,
+        kernel_peak_bytes: None,
+        cpu_usec: 0,
+        mean_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
+        max_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
+        build_mode: BuildMode::Unknown,
+        source: UsageSource::Default,
+        oom_killed: false,
+        exit_code: Some(0),
+    }
 }
 
 fn usage_row(project: &ProjectName, kind: JobKind, model: &str, peak: u64, index: u64) -> RunUsage {
@@ -427,29 +451,55 @@ fn adapter_default_sidecar_is_imported() {
     insert_run(&store, &job, &run_id, &deps.node);
     std::fs::create_dir_all(deps.paths.runs_dir()).unwrap();
     let sidecar = deps.paths.run_raw_path(&run_id).with_extension("usage.json");
-    let record = ProcUsage {
-        run_id: run_id.as_str().to_owned(),
-        started_at: now(),
-        ended_at: now().plus(Duration::from_secs(1)),
-        duration_ms: 1_000,
-        peak_rss_bytes: scope::DEFAULT_PEAK_RSS_BYTES,
-        anon_peak_bytes: None,
-        file_peak_bytes: None,
-        kernel_peak_bytes: None,
-        cpu_usec: 0,
-        mean_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
-        max_cpu_cores: scope::DEFAULT_MEAN_CPU_CORES,
-        build_mode: BuildMode::Unknown,
-        source: UsageSource::Default,
-        oom_killed: false,
-        exit_code: Some(0),
-    };
+    let record = default_sidecar(&run_id);
     std::fs::write(&sidecar, serde_json::to_vec(&record).unwrap()).unwrap();
     assert_eq!(capacity::usage::import_sidecars(&deps, &store).unwrap(), 1);
     let usage = store.run_usage(&run_id).unwrap().expect("default run_usage");
     assert_eq!(usage.source, UsageSource::Default);
     assert_eq!(usage.peak_rss_bytes, scope::DEFAULT_PEAK_RSS_BYTES);
     assert_eq!(usage.mean_cpu_cores, scope::DEFAULT_MEAN_CPU_CORES);
+}
+
+#[test]
+fn sidecar_build_mode_uses_job_worktree_not_run_cwd() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let store = test_store(&root);
+    let project = insert_project(&store);
+    let deps = test_deps(&root);
+    std::fs::create_dir_all(deps.paths.runs_dir()).unwrap();
+
+    // The job worktree is warm; the session cwd only looks cold. A build-mode inference that
+    // falls back to run.cwd would mislabel this run as cold.
+    let worktree = tmp.path().join("job-worktree");
+    std::fs::create_dir_all(worktree.join("target/debug/deps")).unwrap();
+    std::fs::write(worktree.join("Cargo.toml"), "[package]\nname = \"job\"\n").unwrap();
+    std::fs::write(worktree.join("target/debug/deps/libjob.rlib"), "x").unwrap();
+    let session = tmp.path().join("session-cwd");
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(session.join("Cargo.toml"), "[package]\nname = \"session\"\n").unwrap();
+
+    let job = insert_job(&store, &project, "build-mode-target");
+    store
+        .set_job_workspace(&job.id, Some("job/build-mode-target"), worktree.to_str())
+        .unwrap();
+    let run_id = RunId::new();
+    insert_run_with_cwd(&store, &job, &run_id, &deps.node, Some(session.display().to_string()));
+    let sidecar = deps.paths.run_raw_path(&run_id).with_extension("usage.json");
+    std::fs::write(&sidecar, serde_json::to_vec(&default_sidecar(&run_id)).unwrap()).unwrap();
+    assert_eq!(capacity::usage::import_sidecars(&deps, &store).unwrap(), 1);
+    let usage = store.run_usage(&run_id).unwrap().expect("job-target usage row");
+    assert_eq!(usage.build_mode, BuildMode::Warm);
+
+    // Without a job worktree there is no trustworthy target directory to read.
+    let job = insert_job(&store, &project, "build-mode-no-worktree");
+    let run_id = RunId::new();
+    insert_run_with_cwd(&store, &job, &run_id, &deps.node, Some(worktree.display().to_string()));
+    let sidecar = deps.paths.run_raw_path(&run_id).with_extension("usage.json");
+    std::fs::write(&sidecar, serde_json::to_vec(&default_sidecar(&run_id)).unwrap()).unwrap();
+    assert_eq!(capacity::usage::import_sidecars(&deps, &store).unwrap(), 1);
+    let usage = store.run_usage(&run_id).unwrap().expect("no-worktree usage row");
+    assert_eq!(usage.build_mode, BuildMode::Unknown);
 }
 
 #[test]

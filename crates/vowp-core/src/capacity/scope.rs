@@ -6,13 +6,19 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+#[cfg(target_os = "linux")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use vowp_adapters::proc::resolve_binary;
 use vowp_protocol::{BuildMode, ProjectName, RunId, RunUsage, Timestamp, UsageSource};
 use vowp_store::Store;
