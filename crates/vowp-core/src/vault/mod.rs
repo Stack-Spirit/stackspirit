@@ -312,12 +312,16 @@ impl Redactor {
     pub fn load(deps: &Deps) -> Result<Redactor, CoreError> {
         let layout = Layout::from_deps(deps);
         let mode = mode(deps)?;
-        let mut names: BTreeSet<String> = list_index(deps)?
-            .into_iter()
-            .map(|info| info.name.to_string())
-            .collect();
-        for dir in storage_dirs(&layout, mode) {
-            collect_secret_names(&dir, &mut names);
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        match mode {
+            // Basic storage is complete on disk; avoid a store query on every event.
+            VaultMode::Basic => collect_secret_names(&layout.basic_dir, &mut names),
+            VaultMode::VaultUser => {
+                names.extend(list_index(deps)?.into_iter().map(|info| info.name.to_string()));
+                for dir in storage_dirs(&layout, mode) {
+                    collect_secret_names(&dir, &mut names);
+                }
+            }
         }
         let mut values = Vec::new();
         for name in names {
