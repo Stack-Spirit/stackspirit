@@ -742,18 +742,24 @@ def main(argv: list[str] | None = None) -> int:
     scope_cpu = scope_stats.get("cpu_usage_usec") or 0
     container_peak = (container_stats or {}).get("peak_bytes") or 0
     container_cpu = (container_stats or {}).get("cpu_usage_usec") or 0
+    cgroup_available = cgroups.nested
     result["summary"] = {
-        "job_peak_bytes": (max_combined_current if args.cargo_mode == "shim" else scope_peak),
-        "job_peak_upper_bound_bytes": scope_peak + (container_peak if args.cargo_mode == "shim" else 0),
-        "job_peak_excluding_observer_bytes": max_component_current,
-        "job_peak_anon_bytes": max_component_anon,
-        "job_peak_kernel_bytes": max_component_kernel,
-        "harness_peak_bytes": (component_stats["harness"] or {}).get("peak_bytes") or 0,
-        "build_peak_bytes": (build_component or {}).get("peak_bytes") or 0,
-        "job_cpu_usec": max(scope_cpu - main_cpu, 0) + (container_cpu if args.cargo_mode == "shim" else 0),
-        "observer_cpu_usec": main_cpu,
-        "harness_cpu_usec": (component_stats["harness"] or {}).get("cpu_usage_usec") or 0,
-        "build_cpu_usec": (build_component or {}).get("cpu_usage_usec") or 0,
+        "cgroup_available": cgroup_available,
+        "job_peak_bytes": ((max_combined_current if args.cargo_mode == "shim" else scope_peak) if cgroup_available else 0),
+        "job_peak_upper_bound_bytes": (scope_peak + (container_peak if args.cargo_mode == "shim" else 0)) if cgroup_available else 0,
+        "job_peak_excluding_observer_bytes": max_component_current if cgroup_available else 0,
+        "job_peak_anon_bytes": max_component_anon if cgroup_available else 0,
+        "job_peak_kernel_bytes": max_component_kernel if cgroup_available else 0,
+        "harness_peak_bytes": ((component_stats["harness"] or {}).get("peak_bytes") or 0) if cgroup_available else 0,
+        "build_peak_bytes": ((build_component or {}).get("peak_bytes") or 0) if cgroup_available else 0,
+        "job_cpu_usec": (
+            (max(scope_cpu - main_cpu, 0) + (container_cpu if args.cargo_mode == "shim" else 0))
+            if cgroup_available
+            else (job_cpu_usec + (container_cpu_usec if args.cargo_mode == "shim" else 0))
+        ),
+        "observer_cpu_usec": main_cpu if cgroup_available else observer_cpu_usec,
+        "harness_cpu_usec": ((component_stats["harness"] or {}).get("cpu_usage_usec") or 0) if cgroup_available else 0,
+        "build_cpu_usec": ((build_component or {}).get("cpu_usage_usec") or 0) if cgroup_available else 0,
         "proc_job_peak_rss_bytes": job_peak_rss + (container_peak_rss if args.cargo_mode == "shim" else 0),
         "proc_job_cpu_usec": job_cpu_usec + (container_cpu_usec if args.cargo_mode == "shim" else 0),
         "proc_observer_cpu_usec": observer_cpu_usec,
