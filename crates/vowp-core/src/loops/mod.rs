@@ -28,7 +28,7 @@ use vowp_store::{SessionFilter, StateChange, Store};
 /// project marks the row; the row itself remains for the session text that names it.
 pub mod registry {
     use serde::{Deserialize, Serialize};
-    use serde_json::{Value, json};
+    use serde_json::json;
     use vowp_protocol::{Project, ProjectEntry, ProjectName, ProjectState, Timestamp};
     use vowp_store::Store;
 
@@ -210,18 +210,6 @@ pub mod registry {
         meta.removed = true;
         meta.paused_reason = "removed".to_owned();
         write_meta(store, project, &meta)
-    }
-
-    /// Serialises the metadata for tests that inspect the raw config.
-    #[allow(dead_code)]
-    pub(crate) fn meta_key() -> &'static str {
-        META
-    }
-
-    /// Reads the reserved metadata value from a raw config, for tests.
-    #[allow(dead_code)]
-    pub(crate) fn raw_meta(config: &Value) -> Option<Value> {
-        config.get(META).cloned()
     }
 }
 
