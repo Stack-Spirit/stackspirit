@@ -28,6 +28,7 @@ pub mod repo_misc;
 pub mod repo_nodes;
 pub mod repo_projects;
 pub mod repo_runs;
+pub mod repo_secrets;
 pub mod repo_sessions;
 pub mod repo_surfaces;
 pub mod session_files;

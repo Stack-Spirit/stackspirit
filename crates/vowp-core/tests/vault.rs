@@ -25,8 +25,8 @@ use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemRunner};
 use vowp_protocol::{
     Actor, AssistantMessage, CancelToken, Capsule, CapsuleId, CapsuleState, CapsuleTrigger, Cost, EventBody,
     EventSource, Executor, ExecutorRef, FakeClock, HarnessConfig, HarnessKind, JobId, JobKind, MemoryLog, NewJob,
-    NewSession, NodeName, Role, Run, RunPurpose, RunRole, SessionId, SessionRole, Timestamp, ToolCall, TurnRequest,
-    VowpConfig,
+    NewSession, NodeName, Role, Run, RunPurpose, RunRole, SecretInfo, SessionId, SessionRole, Timestamp, ToolCall,
+    TurnRequest, VowpConfig,
 };
 use vowp_store::session_files::{read_capsule_file, write_capsule_file};
 use vowp_store::session_log::{NewEvent, SessionLog};
@@ -188,6 +188,55 @@ fn basic_mode_writes_lists_replaces_and_removes() {
     assert!(!path.exists());
     assert!(vault::list_secrets(&later_deps).expect("list").is_empty());
     assert!(!vault::remove_secret(&later_deps, &name).expect("second remove"));
+}
+
+#[test]
+fn legacy_kv_secret_metadata_migrates_to_the_secret_index_once() {
+    let tmp = tempdir().expect("tempdir");
+    let (deps, _) = deps(tmp.path());
+    let name = vowp_protocol::SecretName::parse("LEGACY_KEY").expect("name");
+    let legacy = SecretInfo {
+        name: name.clone(),
+        last4: "4f2a".to_owned(),
+        created_at: now(),
+        updated_at: now().plus(Duration::from_secs(60)),
+    };
+    let secrets = deps.paths.root().join("secrets");
+    fs::create_dir_all(&secrets).expect("secrets dir");
+    fs::write(secrets.join("mode"), "basic\n").expect("mode file");
+    {
+        let store = Store::open_global(&deps.paths).expect("store");
+        let text = serde_json::to_string(&legacy).expect("legacy metadata");
+        store.kv_set("secret:LEGACY_KEY", &text).expect("legacy row");
+        store.kv_set("unrelated", "kept").expect("unrelated row");
+    }
+
+    let listed = vault::list_secrets(&deps).expect("list migrates the legacy row");
+
+    assert_eq!(listed, vec![legacy.clone()]);
+    {
+        let store = Store::open_global(&deps.paths).expect("store");
+        assert_eq!(store.list_secret_index().expect("index rows"), vec![legacy.clone()]);
+        assert!(
+            store.kv_prefix("secret:").expect("legacy rows").is_empty(),
+            "the migrated kv keys must be removed"
+        );
+        assert_eq!(
+            store.kv_get("unrelated").expect("unrelated row"),
+            Some("kept".to_owned()),
+            "unrelated kv rows must stay"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(secrets.join("mode")).expect("mode"),
+        "basic\n",
+        "the vault mode metadata must be preserved"
+    );
+    assert_eq!(
+        vault::list_secrets(&deps).expect("second access"),
+        vec![legacy],
+        "a second access and migration is a no-op"
+    );
 }
 
 #[test]
@@ -736,6 +785,45 @@ fn one_time_page_keeps_the_request_open_after_a_malformed_post() {
     assert_eq!(
         fs::read_to_string(secret_path(&deps, "RETRY_KEY")).expect("value"),
         "retry-value-1357"
+    );
+}
+
+#[test]
+fn one_time_page_survives_a_connection_that_sends_no_headers() {
+    let tmp = tempdir().expect("tempdir");
+    let (deps, _) = deps(tmp.path());
+    let name = vowp_protocol::SecretName::parse("PRECONNECT_KEY").expect("name");
+    let server =
+        SecretRequestServer::bind_with_token(&deps, &name, now(), "preconnect-token".to_owned()).expect("bind");
+    let url = server.request().url.clone();
+    let client = {
+        let url = url.clone();
+        thread::spawn(move || {
+            let authority = url
+                .strip_prefix("http://")
+                .expect("http url")
+                .split('/')
+                .next()
+                .expect("authority");
+            // A loopback preconnect that closes before sending a request line must not end
+            // the one-time page.
+            drop(TcpStream::connect(authority).expect("preconnect"));
+            let (status, body) = http(&url, "GET", None, "");
+            assert_eq!(status, 200, "the form is still served after the preconnect");
+            assert!(body.contains("PRECONNECT_KEY"));
+            let (status, body) = http(&url, "POST", Some("text/plain; charset=utf-8"), "preconnect-value-2468");
+            assert_eq!(status, 200);
+            assert!(body.contains("PRECONNECT_KEY saved"));
+        })
+    };
+    let info = server
+        .wait(Duration::from_secs(5))
+        .expect("saved after a connection without headers");
+    client.join().expect("client");
+    assert_eq!(info.last4, "2468");
+    assert_eq!(
+        fs::read_to_string(secret_path(&deps, "PRECONNECT_KEY")).expect("value"),
+        "preconnect-value-2468"
     );
 }
 

@@ -31,6 +31,12 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// How long one accepted connection may take to send its request.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The number of connections without a complete request that ends the page.
+///
+/// A loopback preconnect or port scan must not end the one-time request, but the loop still
+/// needs a bound so a client cannot keep the page busy forever.
+const MAX_MALFORMED_CONNECTIONS: u32 = 16;
+
 /// A running one-time paste page.
 ///
 /// [`SecretRequestServer::start`] returns only the request document and serves in the
@@ -124,9 +130,11 @@ impl SecretRequestServer {
     ///
     /// The call ends after one successful POST, after `timeout`, or at the request's fixed
     /// expiry, whichever comes first. Malformed requests receive a page and do not consume
-    /// the single use.
+    /// the single use. A connection that sends no complete request (a preconnect or a port
+    /// scan) is ignored too, up to `MAX_MALFORMED_CONNECTIONS` connections.
     pub fn wait(self, timeout: Duration) -> Result<SecretInfo, CoreError> {
         let deadline = Instant::now() + timeout;
+        let mut malformed = 0_u32;
         loop {
             if self.deps.clock.now().unix_secs() >= self.request.expires_at.unix_secs() {
                 return Err(CoreError::Command(
@@ -141,8 +149,16 @@ impl SecretRequestServer {
             }
             match self.listener.accept() {
                 Ok((stream, _)) => match self.serve(stream) {
-                    Ok(Some(info)) => return Ok(info),
-                    Ok(None) => {}
+                    Ok(Served::Saved(info)) => return Ok(info),
+                    Ok(Served::Handled) => {}
+                    Ok(Served::Malformed) => {
+                        malformed += 1;
+                        if malformed >= MAX_MALFORMED_CONNECTIONS {
+                            return Err(CoreError::Command(format!(
+                                "secret request gave up after {malformed} connections without a request"
+                            )));
+                        }
+                    }
                     Err(error) => return Err(error),
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -159,13 +175,16 @@ impl SecretRequestServer {
     }
 
     /// Serves one connection; a successful POST returns the stored metadata.
-    fn serve(&self, mut stream: TcpStream) -> Result<Option<SecretInfo>, CoreError> {
+    ///
+    /// An unreadable request is answered when possible and reported as
+    /// [`Served::Malformed`], so the one-time page keeps waiting for the owner.
+    fn serve(&self, mut stream: TcpStream) -> Result<Served, CoreError> {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(CONNECTION_TIMEOUT));
         let _ = stream.set_write_timeout(Some(CONNECTION_TIMEOUT));
         let request = match read_request(&mut stream) {
             Ok(request) => request,
-            Err(error) => {
+            Err(_) => {
                 let _ = respond(
                     &mut stream,
                     400,
@@ -173,19 +192,19 @@ impl SecretRequestServer {
                     "text/plain; charset=utf-8",
                     "bad request",
                 );
-                return Err(error);
+                return Ok(Served::Malformed);
             }
         };
         let path = request.target.split('?').next().unwrap_or(&request.target);
         let expected = format!("/s/{}", self.token);
         if path != expected {
             let _ = respond(&mut stream, 404, "Not Found", "text/plain; charset=utf-8", "not found");
-            return Ok(None);
+            return Ok(Served::Handled);
         }
         if request.method == "GET" {
             let page = form_page(&self.name);
             let _ = respond(&mut stream, 200, "OK", "text/html; charset=utf-8", &page);
-            return Ok(None);
+            return Ok(Served::Handled);
         }
         if request.method != "POST" {
             let _ = respond(
@@ -195,7 +214,7 @@ impl SecretRequestServer {
                 "text/plain; charset=utf-8",
                 "method not allowed",
             );
-            return Ok(None);
+            return Ok(Served::Handled);
         }
         let Some(value) = posted_value(&request) else {
             let _ = respond(
@@ -205,7 +224,7 @@ impl SecretRequestServer {
                 "text/plain; charset=utf-8",
                 "a non-empty value is required",
             );
-            return Ok(None);
+            return Ok(Served::Handled);
         };
         let info = match write_secret(&self.deps, &self.name, &value) {
             Ok(info) => info,
@@ -222,8 +241,18 @@ impl SecretRequestServer {
         };
         let page = saved_page(&info);
         let _ = respond(&mut stream, 200, "OK", "text/html; charset=utf-8", &page);
-        Ok(Some(info))
+        Ok(Served::Saved(info))
     }
+}
+
+/// What one accepted connection did.
+enum Served {
+    /// A value was stored.
+    Saved(SecretInfo),
+    /// The request was answered but did not store a value.
+    Handled,
+    /// The connection sent no complete request; the page keeps waiting.
+    Malformed,
 }
 
 /// One parsed HTTP request.

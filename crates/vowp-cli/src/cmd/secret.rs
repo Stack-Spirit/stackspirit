@@ -7,9 +7,13 @@
 
 use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
 
 use clap::{Args, Subcommand};
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::iterator::{Handle, Signals};
 use vowp_core::vault::{self, REQUEST_TTL, SecretRequestServer, Upgrade};
 use vowp_protocol::{SecretInfo, SecretName, VaultMode};
 
@@ -164,12 +168,13 @@ fn set_secret(ctx: &Ctx, io: &mut dyn IoStreams, args: &SecretSetArgs) -> Result
             "run it in a terminal or use `vowp secret request`".to_owned(),
         ));
     }
-    let guard = EchoGuard::hide();
+    let mut guard = EchoGuard::hide()?;
     write!(io.err(), "value for {name}: ")?;
     io.err().flush()?;
     let mut line = String::new();
-    io.input().read_line(&mut line)?;
-    drop(guard);
+    let read = io.input().read_line(&mut line);
+    guard.restore()?;
+    read?;
     writeln!(io.err())?;
     let value = line.trim_end_matches(&['\r', '\n'][..]).to_owned();
     let info = vault::write_secret(ctx.deps(), &name, &value)?;
@@ -267,26 +272,217 @@ fn request_secret(ctx: &Ctx, io: &mut dyn IoStreams, args: &SecretRequestArgs) -
     Ok(0)
 }
 
-/// Restores terminal echo on every return path, including errors.
+/// Restores terminal echo on every return path, including SIGINT and SIGTERM.
+///
+/// The signal watcher runs `stty echo` from its own thread, which is safe outside a signal
+/// handler, and then exits with the conventional `128 + signal` status. A normal return
+/// restores echo before the watcher is removed, so a late signal cannot leave it off.
 struct EchoGuard {
     active: bool,
+    stty: PathBuf,
+    watcher: Option<SignalRestore>,
 }
 
 impl EchoGuard {
     /// Disables echo when the process has a terminal on stdin.
-    fn hide() -> Self {
-        let active = Command::new("stty")
-            .arg("-echo")
-            .status()
-            .is_ok_and(|status| status.success());
-        Self { active }
+    ///
+    /// A missing or failing `stty` is a hard error: a hidden prompt must never read a value
+    /// while the terminal still echoes it.
+    fn hide() -> Result<Self, CliError> {
+        Self::hide_with(Path::new("stty"), |code| std::process::exit(code))
+    }
+
+    /// Builds a guard with an explicit `stty` program and exit action (used by tests).
+    fn hide_with(stty: &Path, exit: impl Fn(i32) + Send + 'static) -> Result<Self, CliError> {
+        let path = stty.to_path_buf();
+        let restore_path = path.clone();
+        let watcher = SignalRestore::install(move || set_echo(&restore_path, true), exit).map_err(|error| {
+            CliError::Guard(format!("could not install the terminal echo restore handler: {error}"))
+        })?;
+        if let Err(error) = set_echo(stty, false) {
+            drop(watcher);
+            return Err(CliError::Guard(format!("could not hide terminal echo: {error}")));
+        }
+        Ok(Self {
+            active: true,
+            stty: path,
+            watcher: Some(watcher),
+        })
+    }
+
+    /// Restores echo and stops the signal watcher; a second call is a no-op.
+    fn restore(&mut self) -> Result<(), CliError> {
+        if !self.active {
+            return Ok(());
+        }
+        set_echo(&self.stty, true)
+            .map_err(|error| CliError::Guard(format!("could not restore terminal echo: {error}")))?;
+        self.active = false;
+        drop(self.watcher.take());
+        Ok(())
     }
 }
 
 impl Drop for EchoGuard {
     fn drop(&mut self) {
-        if self.active {
-            let _ = Command::new("stty").arg("echo").status();
+        if let Err(error) = self.restore() {
+            eprintln!("vowp: {error}");
         }
+    }
+}
+
+/// Runs `stty` with one echo mode, describing a spawn or exit failure.
+fn set_echo(stty: &Path, enable: bool) -> Result<(), String> {
+    let mode = if enable { "echo" } else { "-echo" };
+    let output = Command::new(stty)
+        .arg(mode)
+        .stdin(Stdio::inherit())
+        .output()
+        .map_err(|error| format!("could not run `{} {mode}`: {error}", stty.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    Err(format!(
+        "`{} {mode}` exited {}{}",
+        stty.display(),
+        output.status,
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    ))
+}
+
+/// Watches SIGINT and SIGTERM while the hidden prompt is open.
+struct SignalRestore {
+    handle: Handle,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SignalRestore {
+    /// Registers `restore` for SIGINT and SIGTERM; `exit` runs after a successful restore.
+    fn install(
+        restore: impl Fn() -> Result<(), String> + Send + 'static,
+        exit: impl Fn(i32) + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let mut signals = Signals::new([SIGINT, SIGTERM])?;
+        let handle = signals.handle();
+        let thread = thread::Builder::new()
+            .name("vowp-echo-restore".to_owned())
+            .spawn(move || {
+                for signal in signals.forever() {
+                    match restore() {
+                        Ok(()) => exit(128 + signal),
+                        Err(error) => {
+                            eprintln!("vowp: {error}; terminal echo may still be disabled");
+                            exit(1);
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            handle,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for SignalRestore {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// Installs a fake `stty` that records each mode argument and exits with `code`.
+    fn fake_stty(dir: &Path, code: i32) -> (PathBuf, PathBuf) {
+        let log = dir.join("stty.log");
+        let script = dir.join("stty");
+        let body = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {code}\n", log.display());
+        fs::write(&script, body).expect("fake stty");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("fake stty mode");
+        (script, log)
+    }
+
+    /// Returns the arguments the fake `stty` recorded.
+    fn logged(log: &Path) -> Vec<String> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn echo_guard_restores_echo_when_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (stty, log) = fake_stty(tmp.path(), 0);
+
+        {
+            let _guard = EchoGuard::hide_with(&stty, |_| {}).expect("hide echo");
+            assert_eq!(logged(&log), vec!["-echo"], "echo must be off while the prompt is open");
+        }
+
+        assert_eq!(logged(&log), vec!["-echo", "echo"], "dropping the guard restores echo");
+    }
+
+    #[test]
+    fn echo_guard_refuses_when_stty_cannot_disable_echo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (stty, log) = fake_stty(tmp.path(), 1);
+
+        let error = match EchoGuard::hide_with(&stty, |_| {}) {
+            Ok(_) => panic!("a failing stty must be a hard error"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("could not hide terminal echo"), "{error}");
+        assert_eq!(logged(&log), vec!["-echo"], "a failed hide does not run a restore");
+    }
+
+    #[test]
+    #[ignore = "child process for echo_guard_restores_echo_on_sigint"]
+    fn echo_guard_signal_child() {
+        let stty = std::env::var("VOWP_TEST_ECHO_STTY").expect("parent passes a fake stty path");
+        let _guard = EchoGuard::hide_with(Path::new(&stty), |code| std::process::exit(code)).expect("hide echo");
+        signal_hook::low_level::raise(SIGINT).expect("raise SIGINT");
+        thread::sleep(std::time::Duration::from_secs(5));
+        panic!("SIGINT did not restore echo and exit");
+    }
+
+    #[test]
+    fn echo_guard_restores_echo_on_sigint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (stty, log) = fake_stty(tmp.path(), 0);
+
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "cmd::secret::tests::echo_guard_signal_child", "--ignored"])
+            .env("VOWP_TEST_ECHO_STTY", &stty)
+            .output()
+            .expect("run the signal child");
+
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "the child must exit with 128 + SIGINT; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            logged(&log),
+            vec!["-echo", "echo"],
+            "the SIGINT path must restore echo before exiting"
+        );
     }
 }

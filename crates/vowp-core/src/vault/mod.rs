@@ -5,10 +5,9 @@
 //! `$VOWP_VAULT_HOME/secrets/<NAME>` (default `/home/vowp-vault/secrets`) owned by
 //! `vowp-vault`. Both are mode 0600. The mode file is `<VOWP_HOME>/secrets/mode`.
 //!
-//! `vowp-store` does not yet expose the frozen `secret_index` helpers from the v0.2 spec, so
-//! the index lives in the global `kv` table under `secret:<NAME>`. It stores only the name,
-//! last four characters and timestamps, exactly like the `secret_index` row; values never
-//! enter the database.
+//! Metadata lives in the global `secret_index` table: name, last four characters and
+//! timestamps. Values never enter the database. Rows left by the first G1 implementation in
+//! the `kv` table under `secret:<NAME>` are migrated into `secret_index` on first access.
 //!
 //! Tests and packaging may override `VOWP_VAULT_HOME`, `VOWP_VAULT_SUDO` and
 //! `VOWP_VAULT_HELPER`. Production uses `/home/vowp-vault`, `sudo` and the running binary.
@@ -37,9 +36,6 @@ use crate::CoreError;
 use crate::deps::Deps;
 
 pub use request::{REQUEST_TTL, SecretRequestServer, request_secret};
-
-/// Prefix of the global `kv` rows that carry secret metadata.
-const INDEX_PREFIX: &str = "secret:";
 
 /// Default home of the `vowp-vault` user.
 const DEFAULT_VAULT_HOME: &str = "/home/vowp-vault";
@@ -255,17 +251,9 @@ pub fn redact_job_artifacts(deps: &Deps, store: &Store, job: Option<&JobId>) -> 
 
 /// Reads one secret for the hidden `__vault-exec` helper.
 ///
-/// Returns `None` when the name is not stored. In vault-user mode an unreadable vault file
-/// is re-read through the sudo helper, which runs as `vowp-vault`.
-pub fn read_value(deps: &Deps, name: &SecretName) -> Result<Option<String>, CoreError> {
-    let layout = Layout::from_deps(deps);
-    read_value_impl(deps, &layout, name)
-}
-
-/// Reads one secret for execution: vault storage first, then the configured mode.
-///
-/// The hidden helper runs as `vowp-vault` and cannot read the mode file in the `vowp` user's
-/// home, so it tries the vault directory directly before falling back to [`read_value`].
+/// Returns `None` when the name is not stored. The hidden helper runs as `vowp-vault` and
+/// cannot read the mode file in the `vowp` user's home, so it tries the vault directory
+/// directly before falling back to a normal mode-aware read.
 pub fn read_value_for_exec(deps: &Deps, name: &SecretName) -> Result<Option<String>, CoreError> {
     let layout = Layout::from_deps(deps);
     match read_value_at(&layout.vault_dir(), name) {
@@ -986,35 +974,27 @@ fn harness_config<'a>(deps: &'a Deps, harness: HarnessKind, model: &str) -> Opti
         .or_else(|| deps.config.harnesses.get(&format!("cli:{key}")))
 }
 
-/// Opens the global store for index rows.
+/// Opens the global store for index rows, migrating any legacy `kv` metadata first.
 fn index_store(deps: &Deps) -> Result<Store, CoreError> {
-    Ok(Store::open_global(&deps.paths)?.with_clock(deps.clock.clone()))
+    let store = Store::open_global(&deps.paths)?.with_clock(deps.clock.clone());
+    store.migrate_secret_kv_to_index()?;
+    Ok(store)
 }
 
 /// Lists index rows, ordered by name.
 fn list_index(deps: &Deps) -> Result<Vec<SecretInfo>, CoreError> {
-    let store = index_store(deps)?;
-    let mut infos = Vec::new();
-    for (_, text) in store.kv_prefix(INDEX_PREFIX)? {
-        let info: SecretInfo =
-            serde_json::from_str(&text).map_err(|error| CoreError::Invalid(format!("secret index: {error}")))?;
-        infos.push(info);
-    }
-    infos.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
-    Ok(infos)
+    Ok(index_store(deps)?.list_secret_index()?)
 }
 
 /// Inserts or replaces one index row.
 fn put_index(deps: &Deps, info: &SecretInfo) -> Result<(), CoreError> {
-    let key = format!("{INDEX_PREFIX}{}", info.name);
-    let text = serde_json::to_string(info).map_err(|error| CoreError::Invalid(error.to_string()))?;
-    index_store(deps)?.kv_set(&key, &text)?;
+    index_store(deps)?.upsert_secret_index(&info.name, &info.last4, info.updated_at)?;
     Ok(())
 }
 
 /// Removes one index row and returns whether it existed.
 fn remove_index(deps: &Deps, name: &SecretName) -> Result<bool, CoreError> {
-    Ok(index_store(deps)?.kv_delete(&format!("{INDEX_PREFIX}{name}"))?)
+    Ok(index_store(deps)?.remove_secret_index(name)?)
 }
 
 /// Maps one filesystem error onto the core error with its path.
@@ -1573,12 +1553,16 @@ mod tests {
         let name = SecretName::parse("INDEX_KEY").expect("name");
         write_secret(&deps, &name, "index-value-7b3c").expect("write");
         let store = index_store(&deps).expect("store");
-        let rows = store.kv_prefix(INDEX_PREFIX).expect("rows");
+        let rows = store.list_secret_index().expect("rows");
         assert_eq!(rows.len(), 1);
-        assert!(!rows[0].1.contains("index-value-7b3c"));
-        assert!(rows[0].1.contains("7b3c"));
-        let parsed: SecretInfo = serde_json::from_str(&rows[0].1).expect("metadata");
-        assert_eq!(parsed.name, name);
-        assert_eq!(parsed.last4, "7b3c");
+        let text = serde_json::to_string(&rows).expect("metadata json");
+        assert!(!text.contains("index-value-7b3c"));
+        assert!(text.contains("7b3c"));
+        assert_eq!(rows[0].name, name);
+        assert_eq!(rows[0].last4, "7b3c");
+        assert!(
+            store.kv_prefix("secret:").expect("legacy rows").is_empty(),
+            "new writes must use secret_index, not kv"
+        );
     }
 }
