@@ -7,6 +7,7 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::Duration;
 
 use vowp_protocol::{
     Actor, AssistantMessage, Cost, EventBody, EventSource, EventType, HarnessKind, RemoteEvent, RemoteLine, StopReason,
@@ -85,6 +86,114 @@ fn create(env: &common::TestEnv) -> String {
     ]);
     assert_eq!(code, 0, "{stderr}");
     stdout.trim().to_owned()
+}
+
+/// Closes a session and compacts it through the real `gc --apply` path.
+///
+/// Returns the capsule id that now carries the history; the log file is gone when this
+/// helper returns.
+fn compact(env: &common::TestEnv, id: &str) -> String {
+    let session_id = vowp_protocol::SessionId::parse(id).expect("session id");
+    let store = env.store();
+    let session = store.require_session(&session_id).expect("session");
+    store
+        .set_session_state(
+            &session_id,
+            vowp_protocol::SessionState::Closed,
+            session.executor.as_ref(),
+        )
+        .expect("close session");
+    drop(store);
+
+    let now = Timestamp::now()
+        .plus(Duration::from_secs(60 * 24 * 60 * 60))
+        .as_rfc3339();
+    let (code, stdout, stderr) = env.run(&["gc", "--apply", "--now", &now]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("compacted 1 sessions"), "{stdout}");
+    let log = env.home_path().join("sessions").join(id).join("log.jsonl");
+    assert!(!log.exists(), "gc did not compact {id}");
+    env.store()
+        .latest_capsule(&session_id)
+        .expect("capsule query")
+        .expect("capsule")
+        .capsule_id
+        .to_string()
+}
+
+#[test]
+fn compacted_session_show_capsule_succeeds_and_event_reads_exit_3() {
+    let env = common::TestEnv::new();
+    let id = create(&env);
+    let capsule_id = compact(&env, &id);
+    let message = format!("session compacted to capsule {capsule_id}; use 'session show --capsule'");
+
+    let (code, stdout, stderr) = env.run(&["session", "show", &id, "--capsule"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&format!("id: {id}")), "{stdout}");
+    assert!(stdout.contains(&format!("capsule: {capsule_id}")), "{stdout}");
+
+    let (code, value, stderr) = env.run_json(&["session", "show", &id, "--capsule"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["capsule"]["capsule_id"], capsule_id);
+
+    // `show` without event flags only prints index metadata; it must not open the log either.
+    let (code, _, stderr) = env.run(&["session", "show", &id]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, _, stderr) = env.run(&["session", "tail", &id]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains(&message), "{stderr}");
+
+    for flags in [vec!["--events", "1"], vec!["--events", "1", "--capsule"]] {
+        let mut args = vec!["session", "show", id.as_str()];
+        args.extend(flags);
+        let (code, _, stderr) = env.run(&args);
+        assert_eq!(code, 3, "{stderr}");
+        assert!(stderr.contains(&message), "{stderr}");
+    }
+}
+
+#[test]
+fn compacted_session_export_writes_the_capsule_and_an_empty_tail() {
+    let env = common::TestEnv::new();
+    let id = create(&env);
+    let capsule_id = compact(&env, &id);
+    let path = env.project_path().join("compacted.vowp-bundle.json");
+
+    let (code, stdout, stderr) = env.run(&[
+        "session",
+        "export",
+        &id,
+        "--out",
+        path.to_str().expect("path"),
+        "--tail",
+        "20",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&path.display().to_string()), "{stdout}");
+
+    let text = std::fs::read_to_string(&path).expect("bundle written");
+    let bundle: serde_json::Value = serde_json::from_str(&text).expect("bundle JSON");
+    assert_eq!(bundle["session"]["id"], id);
+    assert_eq!(bundle["capsule"]["capsule_id"], capsule_id);
+    assert_eq!(
+        bundle["tail"].as_array().map(Vec::len),
+        Some(0),
+        "a compacted export must not invent an event tail: {bundle}"
+    );
+    assert!(bundle["compacted_at"].is_string(), "{bundle}");
+
+    // Importing the bundle keeps the compacted capsule as the resume source.
+    let (code, stdout, stderr) = env.run(&["session", "import", path.to_str().expect("path")]);
+    assert_eq!(code, 0, "{stderr}");
+    let child = stdout.trim();
+    assert!(!child.is_empty());
+    let sidecar = env.home_path().join("sessions").join(child).join("import.json");
+    let imported: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sidecar).expect("import sidecar")).expect("sidecar JSON");
+    assert_eq!(imported["capsule"]["capsule_id"], capsule_id);
+    assert_eq!(imported["tail"].as_array().map(Vec::len), Some(0));
 }
 
 #[test]

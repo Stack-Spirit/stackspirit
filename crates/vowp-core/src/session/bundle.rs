@@ -19,8 +19,9 @@ use vowp_protocol::{
 };
 use vowp_store::blobs::BlobStore;
 use vowp_store::reindex::reindex;
-use vowp_store::session_files::write_capsule_file;
+use vowp_store::session_files::{list_capsule_files, read_capsule_file, write_capsule_file};
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
+use vowp_store::{NodePaths, Store};
 
 use crate::deps::Deps;
 use crate::error::CoreError;
@@ -64,6 +65,10 @@ pub struct Bundle {
     pub lineage: Vec<vowp_protocol::Switch>,
     /// Base64 content of small blobs referenced by `tail`, keyed by sha256.
     pub blobs_inline: BTreeMap<String, String>,
+    /// When the origin log was replaced by compaction, so `tail` is empty and `capsule`
+    /// carries the whole history. Absent for a live-log export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_at: Option<Timestamp>,
     /// `"sha256:"` followed by the digest of the canonical bundle without this field.
     pub checksum: String,
 }
@@ -87,6 +92,9 @@ impl Bundle {
         if expected != self.checksum {
             return Err(CoreError::Invalid("checksum mismatch".to_owned()));
         }
+        if self.compacted_at.is_some() && !self.tail.is_empty() {
+            return Err(CoreError::Invalid("compacted bundle carries an event tail".to_owned()));
+        }
         self.capsule.validate()?;
         Ok(())
     }
@@ -96,40 +104,59 @@ impl Bundle {
 ///
 /// `tail == 0` selects the default of 20 events; values above 500 are capped. A fresh
 /// capsule with trigger `Export` is written first so the bundle never depends on the
-/// origin node being alive later.
+/// origin node being alive later. A compacted session has no log to read: its latest
+/// capsule is exported as-is and the event tail is empty (with [`Bundle::compacted_at`]
+/// recording why), so compaction's history is preserved rather than dropped.
 pub fn export(deps: &Deps, session: &SessionId, tail: usize) -> Result<Bundle, CoreError> {
     let store = deps.open_store()?;
     let mut row = store.require_session(session)?;
-    let reader = SessionLog::open_read(&deps.paths, session)?;
-    let events = reader.read_all()?;
-    let count = if tail == 0 { DEFAULT_TAIL } else { tail.min(MAX_TAIL) };
-    let eligible: Vec<EventEnvelope> = events.into_iter().filter(is_tail_event).collect();
-    let start = eligible.len().saturating_sub(count);
-    let tail_events = eligible[start..].to_vec();
+    let compacted_at = store.lifecycle_compacted_at(session)?;
+    let log_present = deps.paths.log_path(session).is_file();
+    let compacted = compacted_at.is_some() || !log_present;
 
-    let capsule = CapsuleWriter::new(deps.clone()).write(session, CapsuleTrigger::Export)?;
+    let (capsule, tail_events, blobs_inline, last_seq) = if compacted {
+        let capsule = latest_capsule(&store, &deps.paths, session)?.ok_or_else(|| {
+            CoreError::NotFound(format!("session {session} was compacted but has no capsule to export"))
+        })?;
+        // Compaction deleted the log on purpose: there is no full-log replay after it.
+        (capsule, Vec::new(), BTreeMap::new(), row.last_seq)
+    } else {
+        let reader = SessionLog::open_read(&deps.paths, session)?;
+        let events = reader.read_all()?;
+        let count = if tail == 0 { DEFAULT_TAIL } else { tail.min(MAX_TAIL) };
+        let eligible: Vec<EventEnvelope> = events.into_iter().filter(is_tail_event).collect();
+        let start = eligible.len().saturating_sub(count);
+        let tail_events = eligible[start..].to_vec();
 
-    row.last_seq = reader.last_seq()?;
-    row.log_bytes = std::fs::metadata(deps.paths.log_path(session))
-        .map(|meta| meta.len())
-        .unwrap_or(row.log_bytes);
-    row.last_capsule_id = Some(capsule.capsule_id.clone());
+        let capsule = CapsuleWriter::new(deps.clone()).write(session, CapsuleTrigger::Export)?;
 
-    let mut blobs_inline = BTreeMap::new();
-    for event in &tail_events {
-        for blob in blob_refs(event) {
-            if blob.bytes > INLINE_BLOB_MAX || blobs_inline.contains_key(&blob.sha256) {
-                continue;
-            }
-            match reader.blobs().get(&blob.sha256) {
-                Ok(bytes) => {
-                    blobs_inline.insert(blob.sha256.clone(), base64_encode(&bytes));
+        let mut blobs_inline = BTreeMap::new();
+        for event in &tail_events {
+            for blob in blob_refs(event) {
+                if blob.bytes > INLINE_BLOB_MAX || blobs_inline.contains_key(&blob.sha256) {
+                    continue;
                 }
-                Err(vowp_store::StoreError::NotFound { .. }) => {}
-                Err(error) => return Err(error.into()),
+                match reader.blobs().get(&blob.sha256) {
+                    Ok(bytes) => {
+                        blobs_inline.insert(blob.sha256.clone(), base64_encode(&bytes));
+                    }
+                    Err(vowp_store::StoreError::NotFound { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
-    }
+        (capsule, tail_events, blobs_inline, reader.last_seq()?)
+    };
+
+    row.last_seq = last_seq;
+    row.log_bytes = if compacted {
+        0
+    } else {
+        std::fs::metadata(deps.paths.log_path(session))
+            .map(|meta| meta.len())
+            .unwrap_or(row.log_bytes)
+    };
+    row.last_capsule_id = Some(capsule.capsule_id.clone());
 
     let mut bundle = Bundle {
         format: BUNDLE_FORMAT.to_owned(),
@@ -141,10 +168,35 @@ pub fn export(deps: &Deps, session: &SessionId, tail: usize) -> Result<Bundle, C
         tail: tail_events,
         lineage: store.list_switches(session)?,
         blobs_inline,
+        compacted_at: if compacted { compacted_at } else { None },
         checksum: String::new(),
     };
     bundle.checksum = checksum(&bundle)?;
     Ok(bundle)
+}
+
+/// Returns a session's latest capsule, falling back to the authoritative capsule files.
+///
+/// Compaction keeps the capsule files even when the index cache is rebuilt, so the file
+/// scan is what makes an export possible from a compacted session whose row is missing.
+fn latest_capsule(store: &Store, paths: &NodePaths, session: &SessionId) -> Result<Option<Capsule>, CoreError> {
+    if let Some(capsule) = store.latest_capsule(session)? {
+        return Ok(Some(capsule));
+    }
+    let mut latest: Option<Capsule> = None;
+    for path in list_capsule_files(paths, session)? {
+        let capsule = read_capsule_file(&path)?;
+        if capsule.session_id != *session {
+            continue;
+        }
+        let newer = latest
+            .as_ref()
+            .is_none_or(|current| (capsule.at_seq, capsule.created_at) > (current.at_seq, current.created_at));
+        if newer {
+            latest = Some(capsule);
+        }
+    }
+    Ok(latest)
 }
 
 /// Serialises a bundle as pretty JSON.

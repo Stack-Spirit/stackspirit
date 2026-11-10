@@ -12,6 +12,8 @@ use std::time::Duration;
 use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
 use tempfile::{TempDir, tempdir};
+use vowp_core::lifecycle::compact_session;
+use vowp_core::session::bundle;
 use vowp_core::session::capsule::CapsuleWriter;
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, Deps};
@@ -22,7 +24,7 @@ use vowp_protocol::{
     SessionId, SessionRole, StartInput, StopReason, Timestamp, ToolCall, ToolResult, TurnEnded,
 };
 use vowp_store::session_files::list_capsule_files;
-use vowp_store::session_log::SessionLog;
+use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_store::{LedgerFilter, NodePaths, SessionFilter};
 use vowp_tmux::fake::FakeWindows;
 
@@ -502,6 +504,66 @@ fn capsule_debounce_120s_except_manual_switch_limit_export() {
         let capsule = writer.write(&session, trigger).expect("exempt trigger");
         assert_ne!(capsule.capsule_id, later.capsule_id, "{trigger:?} never debounces");
     }
+}
+
+#[test]
+fn compacted_session_export_and_resume_start_from_the_capsule() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps_with_clock(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new(),
+        FakeClock::at(ts()),
+    );
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp);
+    let store = deps.open_store().expect("store");
+    {
+        let log = SessionLog::open(&deps.paths, &session, deps.clock.clone()).expect("log");
+        let appended = log
+            .append(NewEvent {
+                actor: Actor::User,
+                source: source(),
+                body: EventBody::UserMessage(vowp_protocol::UserMessage {
+                    text: "remember the frobnicator".to_owned(),
+                    attachments: Vec::new(),
+                    note: None,
+                }),
+                raw: None,
+                ts: None,
+            })
+            .expect("append");
+        store.index_event(&index_row(&appended)).expect("index");
+        log.sync().expect("sync");
+    }
+    store
+        .set_session_state(&session, vowp_protocol::SessionState::Closed, Some(&executor()))
+        .expect("close session");
+
+    let compacted = compact_session(&deps, &store, &session, ts()).expect("compact session");
+    assert!(!compacted.skipped);
+    let capsule = store.latest_capsule(&session).expect("capsule query").expect("capsule");
+    assert_eq!(compacted.capsule_id.as_ref(), Some(&capsule.capsule_id));
+    assert!(!deps.paths.log_path(&session).exists(), "compaction deletes the log");
+
+    let exported = bundle::export(&deps, &session, 20).expect("export compacted session");
+    assert_eq!(exported.capsule.capsule_id, capsule.capsule_id);
+    assert_eq!(exported.capsule.intent, capsule.intent);
+    assert!(exported.tail.is_empty(), "a compacted bundle has no event tail");
+    assert_eq!(exported.compacted_at, Some(ts()));
+    assert_eq!(exported.session.log_bytes, 0);
+
+    let child = bundle::import(&deps, &exported, None, None).expect("import compacted bundle");
+    let seed = bundle::imported_seed(&deps, &exported, &child, "continue the work");
+    assert!(
+        seed.contains(&capsule.intent),
+        "resume lost the capsule history: {seed}"
+    );
+    assert!(
+        seed.contains("(no earlier turns)"),
+        "a compacted bundle must not invent an event tail: {seed}"
+    );
+    assert!(seed.contains("continue the work"));
 }
 
 /// An adapter that returns the next scripted assistant message, reusing the last one.

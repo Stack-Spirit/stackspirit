@@ -614,10 +614,22 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionLsArgs) -> Result<i32, 
 fn show(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionShowArgs) -> Result<i32, CliError> {
     let store = ctx.store()?;
     let session = resolve_session(&store, &args.id)?;
-    let events = SessionLog::open_read(ctx.paths(), &session.id)
-        .map_err(vowp_core::CoreError::from)?
-        .read_all()
-        .map_err(vowp_core::CoreError::from)?;
+    // Compaction deletes log.jsonl, so the compacted check must happen before any read
+    // path opens the log. `--capsule` alone is a valid inspection of the surviving history.
+    let compacted = compacted_capsule(ctx, &store, &session)?;
+    if let Some(capsule_id) = &compacted
+        && args.events.is_some()
+    {
+        return Err(CliError::NotFound(compacted_message(capsule_id)));
+    }
+    let events = if compacted.is_some() {
+        Vec::new()
+    } else {
+        SessionLog::open_read(ctx.paths(), &session.id)
+            .map_err(vowp_core::CoreError::from)?
+            .read_all()
+            .map_err(vowp_core::CoreError::from)?
+    };
     let executor_history: Vec<EventEnvelope> = events
         .iter()
         .filter(|event| event.event_type == vowp_protocol::EventType::SessionExecutor)
@@ -625,7 +637,7 @@ fn show(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionShowArgs) -> Result<i32
         .collect();
     let switches = store.list_switches(&session.id)?;
     let capsule = if args.capsule {
-        store.latest_capsule(&session.id)?
+        latest_capsule(ctx, &store, &session)?
     } else {
         None
     };
@@ -763,6 +775,54 @@ fn show(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionShowArgs) -> Result<i32
         }
     }
     Ok(0)
+}
+
+/// Returns the capsule that replaced the log when `session` was compacted.
+///
+/// `sessions.compacted_at` is the authoritative flag; a missing log with no flag is treated
+/// the same way because there is nothing left to replay. Callers must check this before
+/// opening `log.jsonl`, which compaction deletes.
+fn compacted_capsule(
+    ctx: &Ctx,
+    store: &Store,
+    session: &Session,
+) -> Result<Option<vowp_protocol::CapsuleId>, CliError> {
+    let compacted = store.lifecycle_compacted_at(&session.id)?.is_some();
+    if !compacted && ctx.paths().log_path(&session.id).is_file() {
+        return Ok(None);
+    }
+    Ok(latest_capsule(ctx, store, session)?
+        .map(|capsule| capsule.capsule_id)
+        .or_else(|| session.last_capsule_id.clone()))
+}
+
+/// Returns the latest capsule from the index, or from the authoritative capsule files.
+///
+/// Compaction keeps the capsule files even when the index cache is rebuilt, so the file
+/// scan keeps `show --capsule` and the compacted-session refusals working.
+fn latest_capsule(ctx: &Ctx, store: &Store, session: &Session) -> Result<Option<vowp_protocol::Capsule>, CliError> {
+    if let Some(capsule) = store.latest_capsule(&session.id)? {
+        return Ok(Some(capsule));
+    }
+    let mut latest: Option<vowp_protocol::Capsule> = None;
+    for path in vowp_store::session_files::list_capsule_files(ctx.paths(), &session.id)? {
+        let capsule = vowp_store::session_files::read_capsule_file(&path)?;
+        if capsule.session_id != session.id {
+            continue;
+        }
+        let newer = latest
+            .as_ref()
+            .is_none_or(|current| (capsule.at_seq, capsule.created_at) > (current.at_seq, current.created_at));
+        if newer {
+            latest = Some(capsule);
+        }
+    }
+    Ok(latest)
+}
+
+/// Returns the exact refusal for an event read on a compacted session.
+fn compacted_message(capsule_id: &vowp_protocol::CapsuleId) -> String {
+    format!("session compacted to capsule {capsule_id}; use 'session show --capsule'")
 }
 
 /// Creates an interactive session and prints its id.
@@ -1322,6 +1382,9 @@ fn transcript_body(value: &serde_json::Value) -> Option<EventBody> {
 fn tail(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionTailArgs) -> Result<i32, CliError> {
     let store = ctx.store()?;
     let session = resolve_session(&store, &args.id)?;
+    if let Some(capsule_id) = compacted_capsule(ctx, &store, &session)? {
+        return Err(CliError::NotFound(compacted_message(&capsule_id)));
+    }
     let reader = SessionLog::open_read(ctx.paths(), &session.id).map_err(vowp_core::CoreError::from)?;
     let after = args.from.unwrap_or(0);
     let mut last = after;
