@@ -6,9 +6,9 @@
 //! maps ssh's own failure (255) to [`CliError::Remote`].
 //!
 //! On a control machine every command that needs the home is routed here, before
-//! [`crate::Ctx::build`] would look for a local database. `status` and `fleet status` add
-//! the snapshot cache: a successful call refreshes it, and an unreachable home is served
-//! from it with an "as of" time. Writes never use the cache.
+//! [`crate::Ctx::build`] would look for a local database. `fleet status` refreshes the
+//! snapshot cache from the home's `snapshot.json`; `status` and `fleet status` serve the
+//! cache with an "as of" time when the home is unreachable. Writes never use the cache.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
