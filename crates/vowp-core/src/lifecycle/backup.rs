@@ -9,14 +9,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::{Date, Month};
-use vowp_protocol::{BackupFile, BackupReport, ProjectName, SessionId, Timestamp};
+use vowp_protocol::{BackupFile, BackupReport, Project, ProjectName, SessionId, Timestamp};
 use vowp_store::{JobFilter, LedgerFilter, NodePaths, SessionFilter, Store, StoreError};
 
 use crate::CoreError;
@@ -28,10 +28,6 @@ const AGE_BINARY: &str = "age";
 const RSYNC_BINARY: &str = "rsync";
 const GIT_BINARY: &str = "git";
 const TOOL_TIMEOUT: Duration = Duration::from_secs(1800);
-/// Byte offset of SQLite's four-byte big-endian `user_version` in the database header.
-const SQLITE_USER_VERSION_OFFSET: u64 = 60;
-const GLOBAL_USER_VERSION: u32 = 2;
-const PROJECT_USER_VERSION: u32 = 1;
 
 /// Options for `vowp backup` and `vowp backup --restore`.
 #[derive(Debug, Clone, Default)]
@@ -84,11 +80,17 @@ struct ManifestFile {
     sha256: String,
 }
 
+/// Row counts for one database, keyed by table name.
+type Counts = BTreeMap<String, u64>;
+
+/// Row counts for every project database, keyed by project name.
+type ProjectCounts = BTreeMap<String, Counts>;
+
 /// Per-database row counts used by the restore drill.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RowCounts {
-    global: BTreeMap<String, u64>,
-    projects: BTreeMap<String, BTreeMap<String, u64>>,
+    global: Counts,
+    projects: ProjectCounts,
 }
 
 /// Writes one backup.
@@ -327,9 +329,8 @@ fn write_full_backup(
     store.backup(&global_path)?;
     record_file(destination, &global_path, "global-db", &mut files)?;
 
-    let global_counts = global_counts(store)?;
-    let mut project_counts = BTreeMap::new();
-    for project in store.list_projects()? {
+    let mut project_snapshots = Vec::new();
+    for project in projects_from_backup(deps, &global_path)? {
         let source = deps.paths.project_db_path(&project.name);
         if !source.is_file() {
             Store::create_project_db(&deps.paths, &project.name)?;
@@ -340,14 +341,14 @@ fn write_full_backup(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
         }
-        copy_project_db(deps, &source, &target)?;
+        copy_project_db(deps, &project.name, &source, &target)?;
         record_file(destination, &target, "project-db", &mut files)?;
-        let bound = Store::open_with_project(&deps.paths, &project.name)?;
-        project_counts.insert(
-            project.name.as_str().to_owned(),
-            project_counts_for(&bound, &project.name)?,
-        );
+        project_snapshots.push((project.name.clone(), target));
     }
+
+    // Counts must describe the files that were just written. Counting the live store
+    // here would race with a running supervisor and make a successful backup unrestorable.
+    let (global_counts, project_counts) = counts_from_backup(deps, &global_path, &project_snapshots)?;
 
     copy_sessions(deps, destination, &mut files, &mut skipped)?;
 
@@ -434,21 +435,39 @@ fn write_full_backup(
     })
 }
 
-/// Copies one project database with SQLite's online backup API.
+/// Copies one project database through a consistent SQLite checkpoint.
 ///
 /// `Store::backup` backs up `main`; a project database is normally attached as `project`.
-/// We therefore take a file-level snapshot of the project database (including its WAL), open
-/// it as a temporary `main` handle after restoring its header to the global schema version,
-/// run SQLite's backup API into the destination and put the project schema version back.
-fn copy_project_db(deps: &Deps, source: &Path, destination: &Path) -> Result<(), CoreError> {
+/// The live project file is copied together with its WAL into a temporary home, opened as
+/// an attached project so SQLite replays the WAL, integrity-checked, and closed so SQLite
+/// checkpoints the WAL into a standalone project database. That standalone file is then
+/// copied into the backup. No raw database-header rewrite is involved, so a project with a
+/// populated WAL is safe to back up while the supervisor keeps writing.
+fn copy_project_db(deps: &Deps, project: &ProjectName, source: &Path, destination: &Path) -> Result<(), CoreError> {
     fs::create_dir_all(deps.paths.tmp_dir()).map_err(|error| io_error(&deps.paths.tmp_dir(), error))?;
     let mut last_error = None;
     for _ in 0..3 {
-        let temporary = deps
+        let root = deps
             .paths
             .tmp_dir()
-            .join(format!("backup-project-{}.db", ulid::Ulid::generate()));
+            .join(format!("backup-project-{}", ulid::Ulid::generate()));
+        let paths = NodePaths::new(&root);
         let result = (|| {
+            let global = Store::open_global(&paths)?;
+            let now = deps.clock.now();
+            global.upsert_project(&Project {
+                name: project.clone(),
+                path: String::new(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            })?;
+            drop(global);
+
+            let temporary = paths.project_db_path(project);
+            remove_database_files(&temporary)?;
             fs::copy(source, &temporary).map_err(|error| io_error(source, error))?;
             for suffix in ["-wal", "-shm"] {
                 let sidecar = with_suffix(source.to_path_buf(), suffix);
@@ -457,22 +476,43 @@ fn copy_project_db(deps: &Deps, source: &Path, destination: &Path) -> Result<(),
                         .map_err(|error| io_error(&sidecar, error))?;
                 }
             }
-            set_user_version(&temporary, GLOBAL_USER_VERSION)?;
-            let store = Store::open_path(&temporary)?;
+
+            let store = Store::open_with_project(&paths, project)?;
             store.integrity_check()?;
-            store.backup(destination)?;
             drop(store);
-            set_user_version(destination, PROJECT_USER_VERSION)
+
+            let wal = with_suffix(temporary.clone(), "-wal");
+            if wal.exists() {
+                let bytes = fs::metadata(&wal).map_err(|error| io_error(&wal, error))?.len();
+                if bytes > 0 {
+                    return Err(CoreError::Command(format!(
+                        "SQLite did not checkpoint the project WAL for {}",
+                        project.as_str()
+                    )));
+                }
+                fs::remove_file(&wal).map_err(|error| io_error(&wal, error))?;
+            }
+            fs::copy(&temporary, destination).map_err(|error| io_error(&temporary, error))?;
+            Ok(())
         })();
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = fs::remove_file(with_suffix(temporary.clone(), suffix));
-        }
+        let _ = fs::remove_dir_all(&root);
         match result {
             Ok(()) => return Ok(()),
             Err(error) => last_error = Some(error),
         }
     }
     Err(last_error.unwrap_or_else(|| CoreError::Command("project database backup failed".to_owned())))
+}
+
+/// Removes a database file and its SQLite sidecars.
+fn remove_database_files(path: &Path) -> Result<(), CoreError> {
+    for suffix in ["", "-wal", "-shm"] {
+        let file = with_suffix(path.to_path_buf(), suffix);
+        if file.exists() {
+            fs::remove_file(&file).map_err(|error| io_error(&file, error))?;
+        }
+    }
+    Ok(())
 }
 
 /// Copies the authoritative session files into the backup directory.
@@ -655,8 +695,63 @@ fn compare_counts(
     Ok(())
 }
 
+/// Lists the projects registered in the global backup snapshot.
+fn projects_from_backup(deps: &Deps, global: &Path) -> Result<Vec<Project>, CoreError> {
+    let root = deps
+        .paths
+        .tmp_dir()
+        .join(format!("backup-projects-{}", ulid::Ulid::generate()));
+    let paths = NodePaths::new(&root);
+    let result = (|| {
+        fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+        fs::copy(global, paths.db_path()).map_err(|error| io_error(global, error))?;
+        let store = Store::open_read_only(&paths, None)?;
+        Ok(store.list_projects()?)
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
+/// Counts rows from the backup snapshots, not from the live home.
+///
+/// The manifest is written after the database files, so reading the live store here would
+/// record rows that are not in the backup whenever the supervisor is running. The snapshots
+/// are copied into a temporary home and opened read-only, which keeps the backup directory
+/// untouched and makes the counts describe exactly the files a restore will see.
+fn counts_from_backup(
+    deps: &Deps,
+    global: &Path,
+    projects: &[(ProjectName, PathBuf)],
+) -> Result<(Counts, ProjectCounts), CoreError> {
+    let root = deps
+        .paths
+        .tmp_dir()
+        .join(format!("backup-count-{}", ulid::Ulid::generate()));
+    let paths = NodePaths::new(&root);
+    let result = (|| {
+        fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+        fs::copy(global, paths.db_path()).map_err(|error| io_error(global, error))?;
+        let global_store = Store::open_read_only(&paths, None)?;
+        let global_counts = global_counts(&global_store)?;
+        drop(global_store);
+
+        let mut project_counts = BTreeMap::new();
+        for (name, snapshot) in projects {
+            let directory = paths.project_dir(name);
+            fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
+            let target = paths.project_db_path(name);
+            fs::copy(snapshot, &target).map_err(|error| io_error(snapshot, error))?;
+            let store = Store::open_read_only(&paths, Some(name))?;
+            project_counts.insert(name.as_str().to_owned(), project_counts_for(&store, name)?);
+        }
+        Ok((global_counts, project_counts))
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
 /// Counts the rows a backup manifest records for the global database.
-fn global_counts(store: &Store) -> Result<BTreeMap<String, u64>, CoreError> {
+fn global_counts(store: &Store) -> Result<Counts, CoreError> {
     let sessions = store.list_sessions(&SessionFilter::default())?;
     let mut capsules = 0_u64;
     let mut events = 0_u64;
@@ -674,7 +769,7 @@ fn global_counts(store: &Store) -> Result<BTreeMap<String, u64>, CoreError> {
 }
 
 /// Counts the rows a backup manifest records for one project database.
-fn project_counts_for(store: &Store, project: &ProjectName) -> Result<BTreeMap<String, u64>, CoreError> {
+fn project_counts_for(store: &Store, project: &ProjectName) -> Result<Counts, CoreError> {
     let jobs = store.list_jobs(&JobFilter::default())?;
     let mut runs = 0_u64;
     for job in &jobs {
@@ -1063,20 +1158,6 @@ fn run_tool(
         }
         Err(error) => Err(error),
     }
-}
-
-/// Sets SQLite's `user_version` header field.
-fn set_user_version(path: &Path, version: u32) -> Result<(), CoreError> {
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| io_error(path, error))?;
-    file.seek(SeekFrom::Start(SQLITE_USER_VERSION_OFFSET))
-        .map_err(|error| io_error(path, error))?;
-    file.write_all(&version.to_be_bytes())
-        .map_err(|error| io_error(path, error))?;
-    file.sync_all().map_err(|error| io_error(path, error))
 }
 
 /// Hashes one file with SHA-256.

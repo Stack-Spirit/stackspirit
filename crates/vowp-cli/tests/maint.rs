@@ -280,6 +280,7 @@ fn node_add_and_rm_probe_with_fake_ssh() {
 // ---------------------------------------------------------------------------
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -288,8 +289,8 @@ use vowp_core::{
     AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps, FixedRng, SystemGit, SystemRunner,
 };
 use vowp_protocol::{
-    Clock, ErrorKind, FakeClock, JobId, JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, SessionId,
-    Timestamp,
+    Clock, ErrorKind, FakeClock, JobId, JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, Session,
+    SessionId, SessionState, Timestamp,
 };
 use vowp_store::{JobFilter, NodePaths, SessionFilter, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -366,6 +367,26 @@ impl BackupFixture {
         };
         store.insert_job(project, &new, "test").expect("insert job");
         id
+    }
+
+    fn session(&self, title: &str) -> Session {
+        Session {
+            id: SessionId::new(),
+            project: None,
+            job_id: None,
+            role: None,
+            title: title.to_owned(),
+            parent_session_id: None,
+            node: NodeName::parse("local").expect("node"),
+            cwd: "/tmp".to_owned(),
+            state: SessionState::Idle,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: self.clock.now(),
+            updated_at: self.clock.now(),
+        }
     }
 
     fn run_backup(&self, store: &Store, opts: BackupOptions) -> Result<vowp_protocol::BackupReport, CoreError> {
@@ -977,4 +998,154 @@ cp "$src" "$out"
         .expect("run vowp restore");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(restore.join("vowp.db").is_file());
+}
+
+#[test]
+fn backup_project_database_with_open_wal() {
+    let fixture = BackupFixture::new();
+    let alpha = fixture.env.config.project.name.clone();
+    let paths = NodePaths::new(fixture.env.home_path());
+    let writer = Store::open_with_project(&paths, &alpha).expect("project writer");
+    for index in 0..500 {
+        let id = JobId::parse(&format!("wal-job-{index:04}")).expect("job id");
+        writer
+            .insert_job(
+                &alpha,
+                &NewJob {
+                    id,
+                    title: format!("wal job {index}"),
+                    kind: JobKind::Build,
+                    role: Role::Worker,
+                    profile: None,
+                    needs: Vec::new(),
+                    owns: Vec::new(),
+                    reads: Vec::new(),
+                    gates: None,
+                    priority: None,
+                    loop_: None,
+                    brief_text: None,
+                },
+                "test",
+            )
+            .expect("insert job");
+    }
+    let wal = fixture
+        .env
+        .home_path()
+        .join("projects")
+        .join(alpha.as_str())
+        .join("project.db-wal");
+    let wal_bytes = std::fs::metadata(&wal).expect("populated WAL").len();
+    assert!(wal_bytes > 0, "the test must leave a populated WAL");
+
+    let destination = fixture.env.home_path().join("wal-backup");
+    fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup while the project WAL is open");
+    drop(writer);
+
+    let restore_home = tempfile::tempdir().expect("restore home");
+    fixture
+        .run_restore(&fixture.store(), &destination, restore_home.path(), false)
+        .expect("restore the WAL snapshot");
+    let restored = Store::open_with_project(&NodePaths::new(restore_home.path()), &alpha).expect("restored project");
+    assert_eq!(restored.list_jobs(&JobFilter::default()).expect("jobs").len(), 500);
+}
+
+#[test]
+fn backup_counts_match_snapshot_with_concurrent_writes() {
+    let fixture = BackupFixture::new();
+    let paths = NodePaths::new(fixture.env.home_path());
+    let seed = Store::open_global(&paths).expect("seed store");
+    for index in 0..3000 {
+        seed.upsert_session(&fixture.session(&format!("seed-{index}")))
+            .expect("seed session");
+    }
+    drop(seed);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_paths = paths.clone();
+    let writer_stop = Arc::clone(&stop);
+    let writer_clock = fixture.clock.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let store = Store::open_global(&writer_paths).expect("writer store");
+        let mut written = 0_u64;
+        while !writer_stop.load(Ordering::Relaxed) {
+            let session = Session {
+                id: SessionId::new(),
+                project: None,
+                job_id: None,
+                role: None,
+                title: format!("live-{written}"),
+                parent_session_id: None,
+                node: NodeName::parse("local").expect("node"),
+                cwd: "/tmp".to_owned(),
+                state: SessionState::Idle,
+                executor: None,
+                last_seq: 0,
+                last_capsule_id: None,
+                log_bytes: 0,
+                created_at: writer_clock.now(),
+                updated_at: writer_clock.now(),
+            };
+            store.upsert_session(&session).expect("writer session");
+            written += 1;
+            if written == 1 {
+                started_tx.send(()).expect("writer started signal");
+            }
+        }
+        written
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("writer must commit before the backup starts");
+
+    let destination = fixture.env.home_path().join("race-backup");
+    let report = fixture
+        .run_backup(
+            &fixture.store(),
+            BackupOptions {
+                to: Some(destination.display().to_string()),
+                ..BackupOptions::default()
+            },
+        )
+        .expect("backup during concurrent writes");
+    stop.store(true, Ordering::SeqCst);
+    let written = writer.join().expect("writer thread");
+    assert!(written > 0, "the writer must commit while the backup runs");
+    assert!(!report.files.is_empty());
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).expect("manifest"))
+            .expect("manifest json");
+    let expected = manifest["row_counts"]["global"]["sessions"]
+        .as_u64()
+        .expect("manifest sessions");
+    assert!(expected >= 3000, "{expected}");
+
+    let restore_home = tempfile::tempdir().expect("restore home");
+    fixture
+        .run_restore(&fixture.store(), &destination, restore_home.path(), false)
+        .expect("the snapshot counts must match the snapshot files");
+    let restored = Store::open_global(&NodePaths::new(restore_home.path())).expect("restored global");
+    let restored_sessions = restored
+        .list_sessions(&SessionFilter::default())
+        .expect("restored sessions");
+    assert_eq!(restored_sessions.len() as u64, expected);
+
+    let live = fixture
+        .store()
+        .list_sessions(&SessionFilter::default())
+        .expect("live sessions");
+    assert!(
+        live.len() as u64 > expected,
+        "the live store must have rows the snapshot does not"
+    );
 }
