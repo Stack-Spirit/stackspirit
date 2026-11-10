@@ -45,6 +45,20 @@ impl Machine {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod fake ssh");
     }
 
+    /// Writes the `$HOME` and `vowp --version` probe answers used by `control init`.
+    fn write_init_ssh(&self) {
+        self.write_fake_ssh(
+            "printf '%s\\n' \"$@\" >> \"$FAKE_SSH_ARGS\"\n\
+             last=\"\"\n\
+             for arg in \"$@\"; do last=\"$arg\"; done\n\
+             case \"$last\" in\n\
+               *HOME*) printf '/home/fake' ;;\n\
+               *version*) printf 'vowp 0.1.0\\n' ;;\n\
+               *) exit 0 ;;\n\
+             esac\n",
+        );
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_vowp"));
         command
@@ -178,16 +192,7 @@ impl Drop for TunnelGuard {
 #[test]
 fn control_init_writes_control_json() {
     let machine = Machine::new();
-    machine.write_fake_ssh(
-        "printf '%s\\n' \"$@\" >> \"$FAKE_SSH_ARGS\"\n\
-         last=\"\"\n\
-         for arg in \"$@\"; do last=\"$arg\"; done\n\
-         case \"$last\" in\n\
-           *HOME*) printf '/home/fake' ;;\n\
-           *version*) printf 'vowp 0.1.0\\n' ;;\n\
-           *) exit 0 ;;\n\
-         esac\n",
-    );
+    machine.write_init_ssh();
 
     let output = machine.run(&["--json", "control", "init", "--name", "vowp-home", "fake.example"]);
     assert!(
@@ -224,6 +229,128 @@ fn control_init_writes_control_json() {
     // A second init refuses to overwrite without --force.
     let output = machine.run(&["control", "init", "--name", "vowp-home", "fake.example"]);
     assert_eq!(output.status.code(), Some(4), "overwrite without --force is a conflict");
+}
+
+#[test]
+fn control_init_force_retargets_the_node_mirror() {
+    let machine = Machine::new();
+    machine.write_init_ssh();
+
+    let output = machine.run(&["control", "init", "--name", "old-home", "old.example"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = machine.run(&["control", "init", "--force", "--name", "new-home", "new.example"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config: ControlConfig = serde_json::from_str(
+        &std::fs::read_to_string(machine.control.path().join("control.json")).expect("control.json"),
+    )
+    .expect("control.json JSON");
+    assert_eq!(config.home, "new-home");
+    assert_eq!(config.ssh_target, "new.example");
+    assert_eq!(config.remote_home, "/home/fake/.vowp");
+
+    let nodes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(machine.control.path().join("nodes.json")).expect("nodes.json"))
+            .expect("nodes JSON");
+    let rows = nodes.as_array().expect("nodes array");
+    assert_eq!(rows.len(), 1, "the old home's node must not survive: {nodes}");
+    assert_eq!(rows[0]["name"], "new-home");
+    assert_eq!(rows[0]["ssh_target"], "new.example");
+}
+
+#[test]
+fn control_init_is_refused_on_a_home() {
+    let home = tempfile::tempdir().expect("temp home");
+    std::fs::create_dir_all(home.path().join("tmux")).expect("private tmux dir");
+    let project = tempfile::tempdir().expect("temp project");
+    let config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+    std::fs::write(
+        project.path().join("vowp.toml"),
+        toml::to_string_pretty(&config).expect("config"),
+    )
+    .expect("vowp.toml");
+    let store = vowp_store::Store::open(&vowp_store::NodePaths::new(home.path())).expect("store");
+    let now = store.clock().now();
+    store
+        .upsert_project(&vowp_protocol::Project {
+            name: config.project.name.clone(),
+            path: project.path().display().to_string(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::to_value(&config).expect("config json"),
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("project");
+
+    let bin = tempfile::tempdir().expect("fake bin");
+    let ssh = bin.path().join("ssh");
+    let args = bin.path().join("ssh-args");
+    std::fs::write(&ssh, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_SSH_ARGS\"\nexit 0\n").expect("fake ssh");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env_remove("VOWP_CONTROL_HOME")
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env("FAKE_SSH_ARGS", &args)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .arg("--home")
+        .arg(home.path())
+        .args(["control", "init", "--name", "h", "fake.example"])
+        .output()
+        .expect("run vowp");
+
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("this is a home"), "{stderr}");
+    assert!(
+        !home.path().join(".vowp-control").join("control.json").exists(),
+        "control init must not write a control config on a home"
+    );
+    assert!(!args.exists(), "control init must refuse before probing the ssh target");
+}
+
+#[test]
+fn control_version_json_runs_store_free_on_control() {
+    let machine = Machine::new();
+    machine.seed_control();
+    machine.write_fake_ssh("printf 'ssh was invoked\\n' >> \"$FAKE_SSH_ARGS\"\nexit 0\n");
+
+    let output = machine.run(&["--json", "version"]);
+    assert!(
+        output.status.success(),
+        "version on a control machine must not need a local store; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("version JSON");
+    assert!(
+        value["version"].as_str().unwrap_or_default().starts_with("0.1"),
+        "{value}"
+    );
+    assert_eq!(value["schema"], 1);
+    assert!(recorded(&machine).is_empty(), "version must stay local");
 }
 
 #[test]
@@ -295,11 +422,26 @@ fn control_fleet_status_refreshes_the_cache() {
         "fleet status was not routed: {:?}",
         recorded(&machine)
     );
-    assert!(
-        machine.control.path().join("snapshot.json").is_file(),
-        "a successful fleet status must refresh the snapshot cache"
+
+    let home_document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_path).expect("home snapshot")).expect("home snapshot JSON");
+    let cached: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(machine.control.path().join("snapshot.json")).expect("cached snapshot"),
+    )
+    .expect("cached snapshot JSON");
+    assert_eq!(
+        cached, home_document,
+        "the cache must hold the home's document, not a placeholder or an older snapshot"
     );
-    assert!(machine.control.path().join("snapshot.meta.json").is_file());
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(machine.control.path().join("snapshot.meta.json")).expect("snapshot meta"),
+    )
+    .expect("snapshot meta JSON");
+    assert_eq!(meta["source"], "remote");
+    let fetched_at = Timestamp::parse(meta["fetched_at"].as_str().expect("fetched_at")).expect("timestamp");
+    let age = Timestamp::now().unix_secs().saturating_sub(fetched_at.unix_secs());
+    assert!(age < 60, "the cache metadata must be fresh, age {age}s");
 }
 
 /// Returns whether any recorded ssh invocation contains `needle`.
@@ -393,6 +535,118 @@ fn control_write_never_uses_cache() {
         !recorded(&machine).is_empty(),
         "the write must have been sent to the home"
     );
+}
+
+#[test]
+fn control_routes_secret_writes_with_tty_and_requests_through_a_tunnel() {
+    let machine = Machine::new();
+    machine.seed_control();
+    machine.write_fake_ssh(
+        "printf '%s\\n' '---' >> \"$FAKE_SSH_ARGS\"\n\
+         printf '%s\\n' \"$@\" >> \"$FAKE_SSH_ARGS\"\n\
+         if [ \"$1\" = \"-N\" ]; then exec sleep 30; fi\n\
+         last=\"\"\n\
+         for arg in \"$@\"; do last=\"$arg\"; done\n\
+         case \"$last\" in\n\
+           *secret*request*)\n\
+             printf 'open http://127.0.0.1:4096/s/test-token\\n'\n\
+             printf 'expires 2030-01-01T00:00:00.000Z (single use, 10 minutes)\\n'\n\
+             printf 'DEEPSEEK_API_KEY saved, ends in -1234\\n'\n\
+             ;;\n\
+         esac\n\
+         exit 0\n",
+    );
+
+    // §9.3: the home's hidden prompt needs a TTY.
+    let output = machine.run(&["secret", "set", "DEEPSEEK_API_KEY"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = recorded_calls(&machine);
+    let set_call = calls
+        .iter()
+        .find(|call| call.iter().any(|arg| arg.contains("'secret' 'set'")))
+        .expect("the write was routed to the home");
+    assert!(
+        set_call.iter().any(|arg| arg == "-t"),
+        "secret set must use ssh -t: {set_call:?}"
+    );
+    assert_eq!(
+        set_call.last().map(String::as_str),
+        Some("vowp '--home' '/home/fake/.vowp' 'secret' 'set' 'DEEPSEEK_API_KEY'")
+    );
+
+    std::fs::remove_file(&machine.args).expect("clear recorded ssh calls");
+    let output = machine.run(&["secret", "request", "DEEPSEEK_API_KEY"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let calls = recorded_calls(&machine);
+    let request_call = calls
+        .iter()
+        .find(|call| call.iter().any(|arg| arg.contains("'secret' 'request'")))
+        .expect("the request was routed to the home");
+    assert_eq!(
+        request_call.last().map(String::as_str),
+        Some("vowp '--home' '/home/fake/.vowp' 'secret' 'request' 'DEEPSEEK_API_KEY'"),
+        "the wrapper asks the home for the human header, not a second JSON document"
+    );
+    assert!(
+        !request_call.iter().any(|arg| arg == "--json"),
+        "the remote request must not print its raw URL: {request_call:?}"
+    );
+
+    let tunnel_call = calls
+        .iter()
+        .find(|call| call.first().is_some_and(|arg| arg == "-N"))
+        .expect("secret request must open a local tunnel");
+    let forward = tunnel_call
+        .iter()
+        .position(|arg| arg == "-L")
+        .and_then(|index| tunnel_call.get(index + 1))
+        .expect("the tunnel has a -L forward");
+    let (local, remote) = forward
+        .strip_prefix("127.0.0.1:")
+        .and_then(|rest| rest.split_once(':'))
+        .expect("the forward names the local and home ports");
+    assert_eq!(remote, "127.0.0.1:4096", "{forward}");
+    let local_port: u16 = local.parse().expect("local port");
+    assert_eq!(tunnel_call.last().map(String::as_str), Some("fake.example"));
+    assert!(
+        stdout.contains(&format!("http://127.0.0.1:{local_port}/s/test-token")),
+        "the owner must see the local URL: {stdout}"
+    );
+    assert!(
+        !stdout.contains(":4096/"),
+        "the home's raw URL must never be printed: {stdout}"
+    );
+    assert!(
+        stdout.contains("DEEPSEEK_API_KEY saved, ends in -1234"),
+        "the home's completion line is forwarded: {stdout}"
+    );
+
+    let tunnels: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(machine.control.path().join("tunnels.json")).expect("tunnels.json"),
+    )
+    .expect("tunnels JSON");
+    assert_eq!(tunnels, json!([]), "the request wrapper closes the tunnel it opened");
+}
+
+/// Splits the fake ssh log into one argument vector per invocation.
+fn recorded_calls(machine: &Machine) -> Vec<Vec<String>> {
+    std::fs::read_to_string(&machine.args)
+        .unwrap_or_default()
+        .split("---\n")
+        .filter_map(|chunk| {
+            let lines: Vec<String> = chunk.lines().map(str::to_owned).collect();
+            (!lines.is_empty()).then_some(lines)
+        })
+        .collect()
 }
 
 #[test]

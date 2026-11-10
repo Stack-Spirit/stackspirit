@@ -68,6 +68,11 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ControlArgs) -> Result<i32,
 
 /// Writes the control configuration and its companion files.
 fn run_init(ctx: &Ctx, io: &mut dyn IoStreams, args: &ControlInitArgs) -> Result<i32, CliError> {
+    if ctx.role() == NodeRole::Home {
+        return Err(CliError::Guard(
+            "this is a home; run `vowp control init` on the control machine".to_owned(),
+        ));
+    }
     if args.ssh_target.trim().is_empty() {
         return Err(CliError::Invalid("ssh target must not be empty".to_owned()));
     }
@@ -79,7 +84,8 @@ fn run_init(ctx: &Ctx, io: &mut dyn IoStreams, args: &ControlInitArgs) -> Result
         Some(control) => control.root.clone(),
         None => remote::control_root()?,
     };
-    if let Some(existing) = remote::read_control_config(&root)? {
+    let existing = remote::read_control_config(&root)?;
+    if let Some(existing) = &existing {
         if !args.force {
             return Err(CliError::Conflict(format!(
                 "control machine already configured for home {}; pass --force to replace {}",
@@ -135,7 +141,14 @@ fn run_init(ctx: &Ctx, io: &mut dyn IoStreams, args: &ControlInitArgs) -> Result
         last_seen_at: version.ok.then_some(now),
         created_at: now,
     };
-    let mut nodes = remote::read_node_registry(&root)?;
+    // The registry mirrors the configured home's fleet. Re-pointing the control machine
+    // at a different home must not keep the old home's node row.
+    let home_changed = existing.as_ref().is_some_and(|old| old.home != config.home);
+    let mut nodes = if home_changed {
+        Vec::new()
+    } else {
+        remote::read_node_registry(&root)?
+    };
     nodes.retain(|existing| existing.name != node.name);
     nodes.push(node);
     nodes.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));

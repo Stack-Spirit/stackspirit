@@ -146,9 +146,11 @@ fn schema(ctx: &Ctx, io: &mut dyn IoStreams, args: &SchemaArgs) -> Result<i32, C
 }
 
 /// Prints the binary, git and schema versions.
+///
+/// The printed schema version is the project schema this binary writes, so the command
+/// needs no store: it works on a control machine, which has no local database.
 fn version(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let store = ctx.store()?;
-    let schema = store.schema_version()?;
+    let schema = vowp_store::SCHEMA_VERSION;
     let git = git_sha();
     if ctx.json() {
         print_json(
