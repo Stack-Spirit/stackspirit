@@ -158,6 +158,7 @@ class FakeSshTransport:
         trace.parent.mkdir(parents=True, exist_ok=True)
         command = [
             sys.executable,
+            "-B",
             str(Path(self.args.fake_ssh_script).resolve()),
             "--conn-index",
             str(conn_index),
@@ -166,7 +167,7 @@ class FakeSshTransport:
         ]
         if self.args.fake_ssh_plan:
             command += ["--plan", str(Path(self.args.fake_ssh_plan).resolve())]
-        command += ["--", sys.executable, str(Path(self.args.ingest_script).resolve())]
+        command += ["--", sys.executable, "-B", str(Path(self.args.ingest_script).resolve())]
         command += ingest_argv(self.args)
         stderr_path = Path(self.args.workdir) / f"conn-{conn_index:03d}.stderr"
         stderr = stderr_path.open("ab")
@@ -193,6 +194,7 @@ class RealSshTransport:
     def start(self, conn_index: int) -> FrameConnection:
         remote = [
             self.args.remote_python,
+            "-B",
             str(Path(self.args.ingest_script).resolve()),
             *ingest_argv(self.args),
         ]

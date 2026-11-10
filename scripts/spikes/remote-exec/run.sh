@@ -27,8 +27,15 @@ export PYTHONDONTWRITEBYTECODE=1
 # so a future helper cannot accidentally attach to the caller's server.
 unset TMUX TMUX_PANE 2>/dev/null || true
 
+# The repo-wide safety_grep test reads every file under scripts/ as UTF-8, so a
+# stray .pyc would fail it. Clean bytecode on every exit, including failures.
+cleanup_pycache() {
+    find "$HERE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+}
+trap cleanup_pycache EXIT
+
 python3 -B -m unittest discover -s "$HERE/tests" -v
 
 if [ "$MODE" = "--live" ]; then
-    exec python3 -B "$HERE/live_check.py" "$@"
+    python3 -B "$HERE/live_check.py" "$@"
 fi

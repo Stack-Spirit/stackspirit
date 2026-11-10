@@ -73,6 +73,7 @@ class SpikeTest(unittest.TestCase):
     def spike_args(self) -> list[str]:
         return [
             sys.executable,
+            "-B",
             str(SPIKE / "remote_exec_spike.py"),
         ]
 
@@ -130,6 +131,7 @@ class SpikeTest(unittest.TestCase):
         process = subprocess.Popen(
             [
                 sys.executable,
+                "-B",
                 str(SPIKE / "ingest.py"),
                 "--session-dir",
                 str(self.home),
@@ -168,6 +170,7 @@ class SpikeTest(unittest.TestCase):
         return subprocess.run(
             [
                 sys.executable,
+                "-B",
                 str(SPIKE / "ingest.py"),
                 "--session-dir",
                 str(self.home),

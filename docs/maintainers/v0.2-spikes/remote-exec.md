@@ -20,8 +20,8 @@ v0.1 workspace; `v2-f1-remote-exec` owns the Rust implementation.
 | Kill SSH mid-stream, spool and replay with no gap or duplicate? | Yes, including an ack lost after the home appended and a cut in the middle of a line. | 200 events, 3 forced cuts, 12 re-sends, 6 duplicate acks, home log still exactly 200 unique ids in order. |
 | Spool survives a killed client, not just a killed SSH? | Yes. A second process resumes the on-disk spool and finishes the turn. | `evidence/client-resume.json`, `test_client_crash_resumes_from_spool`. |
 | Latency? | Loopback ack RTT is single-digit to low-teens ms. On a synthetic 80 ms RTT, per-event ack-wait is ~85 ms and ~9 events/s; a 64-event window gives ~250 events/s after setup. | `evidence/live-check.json`; table below. |
-| ControlMaster? | **Use it as a reconnect/probe optimisation, not as a correctness dependency.** Handshake p50 falls from 810–922 ms to 245–256 ms at 80 ms RTT (loopback: 217–239 ms to 11–22 ms); reconnect falls from 292–347 ms to 82–88 ms on loopback. It does not reduce per-event RTT. | `bench` and `reconnect-*` in `evidence/live-check.json`. |
-| Takeover notice within 2 s? | Yes. Real SSH: 120–265 ms across runs; hermetic poll: below 2 s with a 100 ms poll. | `lease-revoke` in `evidence/live-check.json`; `test_lease_revoked_notice_reaches_the_client_within_2s`. |
+| ControlMaster? | **Use it as a reconnect/probe optimisation, not as a correctness dependency.** Handshake p50 falls from 810–953 ms to 243–256 ms at 80 ms RTT (loopback: 217–294 ms to 11–22 ms); reconnect falls from 292–409 ms to 82–92 ms on loopback. It does not reduce per-event RTT. | `bench` and `reconnect-*` in `evidence/live-check.json`. |
+| Takeover notice within 2 s? | Yes. Real SSH: 100–265 ms across runs; hermetic poll: below 2 s with a 100 ms poll. | `lease-revoke` in `evidence/live-check.json`; `test_lease_revoked_notice_reaches_the_client_within_2s`. |
 
 Decision for F1/F2: the protocol and spool/replay model are sound; build them in Rust. Use one
 long-lived `ssh -T` channel per turn, with acks and lease notices on the channel's stdout. Use
@@ -148,33 +148,33 @@ Four live runs on the same Linux 6.8 / OpenSSH 9.6 / Python 3.12 host, with a pr
 sshd. The "delay" rows go through a loopback TCP proxy that sleeps 40 ms one-way before every
 forwarded chunk (~80 ms RTT). The host was shared with other jobs and load varied; the ranges below
 show that spread. The committed `evidence/live-check.json` is one of the runs
-(`2026-11-10T12:11:24Z`, lease notice 244.9 ms); the cleaner runs measured 120–143 ms.
+(`2026-11-10T12:17:23Z`, lease notice 99.6 ms); the other runs measured 120–265 ms.
 
 Handshake (`ssh <target> true`; 8 samples loopback, 4 samples delayed per run):
 
 | Path | Cold p50 | Mux p50 |
 |---|---:|---:|
-| loopback | 216.9–239.3 ms | 10.5–22.1 ms |
-| ~80 ms RTT | 810.3–921.8 ms | 244.5–256.3 ms |
+| loopback | 216.9–294.0 ms | 10.5–22.1 ms |
+| ~80 ms RTT | 810.3–952.7 ms | 243.1–256.3 ms |
 
 Streams (ranges over the runs; the committed run is the high end where noted):
 
 | Scenario | Window | Events | Total | Ack p50 | Ack p95 | Connect p50 |
 |---|---:|---:|---:|---:|---:|---:|
-| loopback, cold | 64 | 400 | 0.298–1.081 s | 3.9–8.7 ms | 4.5–17.8 ms | 273–384 ms |
-| loopback, mux | 64 | 400 | 0.151–0.279 s | 3.3–13.2 ms | 5.0–64.0 ms | 83–129 ms |
-| ~80 ms RTT, cold | 1 | 16 | 2.43–2.87 s | 82.0–86.7 ms | 94.5–156.4 ms | 926–1119 ms |
-| ~80 ms RTT, cold | 64 | 120 | 1.36–2.24 s | 127.7–160.1 ms | 166.1–192.3 ms | 872–1760 ms |
-| ~80 ms RTT, mux | 64 | 120 | 0.76–1.54 s | 133.8–165.5 ms | 165.4–174.3 ms | 290–1042 ms |
+| loopback, cold | 64 | 400 | 0.298–1.081 s | 3.9–18.1 ms | 4.5–61.9 ms | 273–562 ms |
+| loopback, mux | 64 | 400 | 0.151–0.279 s | 3.3–20.0 ms | 5.0–64.0 ms | 83–131 ms |
+| ~80 ms RTT, cold | 1 | 16 | 2.43–2.87 s | 82.0–86.7 ms | 94.5–175.7 ms | 926–1119 ms |
+| ~80 ms RTT, cold | 64 | 120 | 1.36–2.24 s | 127.7–176.3 ms | 166.1–221.1 ms | 872–1760 ms |
+| ~80 ms RTT, mux | 64 | 120 | 0.76–1.54 s | 132.5–165.5 ms | 161.8–174.3 ms | 290–1042 ms |
 
 One loaded run measured 110 ms p50 on the 400-event loopback-cold stream; the same scenario was
-3.9–8.7 ms in the cleaner runs. Treat the loopback p50 as a transport floor, not a promise under
+3.9–18.1 ms in the other runs. Treat the loopback p50 as a transport floor, not a promise under
 CPU contention. The delayed mux stream at the high end had lost its master and fallen back to a cold
 connection (see the ControlMaster caveat); the live-master runs were 0.76–0.81 s total.
 
 Throughput including SSH setup is ~6 events/s with a one-event window, 54–89 events/s with a
-64-event window, and 78–158 events/s with mux. Excluding setup, the clean 64-event delayed runs are
-~248 and ~260 events/s. The per-event RTT is a floor set by the network (~85 ms at 80 ms RTT); a
+64-event window, and 78–158 events/s with mux. Excluding setup, the 64-event delayed runs are
+~230–260 events/s. The per-event RTT is a floor set by the network (~85 ms at 80 ms RTT); a
 larger window does not reduce it, it amortises it. **Do not wait for one ack per event across a
 WAN.**
 
@@ -182,8 +182,8 @@ Reconnect after `SIGKILL` of the client's `ssh` process at event 100 (300 events
 
 | Scenario | Reconnect | Total | Re-sent | Duplicate acks | Verify |
 |---|---:|---:|---:|---:|---|
-| cold | 291.6–346.8 ms | 0.83–1.09 s | 8 | 0–6 | ok |
-| mux | 81.6–88.2 ms | 0.36–0.44 s | 6–8 | 1 | ok |
+| cold | 291.6–409.2 ms | 0.83–1.19 s | 8 | 0–8 | ok |
+| mux | 81.6–92.2 ms | 0.36–0.57 s | 6–8 | 1–8 | ok |
 
 The reconnect number is the time from spawning the replacement transport to `hello.ack`, so it
 includes SSH setup and the remote ingest process start. Every run still verified 300/300.
@@ -192,8 +192,8 @@ includes SSH setup and the remote ingest process start. Every run still verified
 
 Use a ControlMaster per home **as an optimisation**, with the cold path always available:
 
-- Measured savings are one full handshake: 217–239 → 11–22 ms loopback, 810–922 → 245–256 ms at
-  80 ms RTT, and 292–347 → 82–88 ms on reconnect. It does not improve per-event ack RTT.
+- Measured savings are one full handshake: 217–294 → 11–22 ms loopback, 810–953 → 243–256 ms at
+  80 ms RTT, and 292–409 → 82–92 ms on reconnect. It does not improve per-event ack RTT.
 - Start a dedicated master (`ssh -M -N -S <socket>`) while a session is active, or use
   `ControlMaster=auto` with a real persistent master. Do not make the first streaming `ssh` the only
   master: killing that stream process also kills the master, and the next connection is cold.
@@ -214,10 +214,9 @@ stream. The client has a reader thread, so it prints the notice even while the h
 Measured:
 
 - Hermetic test: notice below 2 s with the home's 100 ms poll.
-- Live SSH: **120–265 ms** from the takeover write to the client receiving the frame (the client
+- Live SSH: **99.6–265 ms** from the takeover write to the client receiving the frame (the client
   prints "lease revoked: taken over by phone ...; this surface is read-only" and exits 75 without
-  sending more events). The committed run is at the high end at 244.9 ms; the cleaner runs were
-  120–143 ms.
+  sending more events). The committed run is 99.6 ms; the other runs were 120–265 ms.
 - The home appended no event after the revocation.
 
 The prototype uses a JSON lease file as a stand-in for the global DB row. F2 should not poll SQLite
@@ -275,9 +274,9 @@ scripts/spikes/remote-exec/run.sh --live \
 ```
 
 The live command starts `/usr/sbin/sshd` as the current user on a free `127.0.0.1` port with
-temporary host/client keys; it never touches the real VOWP home, the user's tmux server, an
-external network or a real harness. On a machine without sshd it prints `skipped` (exit 0); the
-hermetic suite still runs.
+temporary host/client keys; the client children get a temporary `HOME`, `VOWP_HOME` and `TMPDIR`. It
+never touches the real VOWP home, the user's tmux server, an external network or a real harness. On a
+machine without sshd it prints `skipped` (exit 0); the hermetic suite still runs.
 
 A direct cut/replay run:
 
@@ -314,7 +313,7 @@ Expected: `status=ok`, `reconnects=2`, `resent=2`, `duplicate_acks=1`, verifier 
 - Live measurements are loopback plus an artificial 40 ms one-way proxy, not a real WAN. The
   ControlMaster conclusion is based on handshake and reconnect measurements; a real WAN test belongs
   to the acceptance rig.
-- The lease file poll models a DB lookup. The 120–265 ms live notice is a design proof, not the final
+- The lease file poll models a DB lookup. The 100–265 ms live notice is a design proof, not the final
   F2 notification path; an in-process signal should be faster and cheaper.
 - The separate ControlMaster was sometimes closed by the peer under the crude delay proxy. The cold
   fallback still completed every turn. F1 should treat master death as expected and covered.

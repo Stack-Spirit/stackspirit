@@ -304,13 +304,16 @@ class MuxMaster:
             str(self.socket_path),
         ] + [self.target]
         log = self.log_path.open("ab")
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=log,
-            start_new_session=True,
-        )
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=log,
+                start_new_session=True,
+            )
+        finally:
+            log.close()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -364,6 +367,23 @@ class MuxMaster:
         self.process = None
 
 
+def client_env(root: Path) -> dict[str, str]:
+    """A temporary HOME/VOWP_HOME/TMPDIR for the client child processes."""
+    for name in ("live-home", "live-vowp", "live-tmp"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(root / "live-home"),
+            "VOWP_HOME": str(root / "live-vowp"),
+            "TMPDIR": str(root / "live-tmp"),
+        }
+    )
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    return env
+
+
 def run_client(root: Path, name: str, *, port: int, key: Path, target: str, events: int,
                window: int, mux_socket: Path | None = None, kill_after: int = 0,
                event_interval: float = 0.0) -> dict[str, Any]:
@@ -375,6 +395,7 @@ def run_client(root: Path, name: str, *, port: int, key: Path, target: str, even
     wire.write_json_atomic(lease_file, wire.lease_document("tok-live"))
     command = [
         sys.executable,
+        "-B",
         str(spike),
         "run",
         "--workdir",
@@ -410,7 +431,14 @@ def run_client(root: Path, name: str, *, port: int, key: Path, target: str, even
         command += ["--kill-ssh-after-events", str(kill_after)]
     if event_interval:
         command += ["--event-interval", str(event_interval)]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=client_env(root),
+    )
     summary_path = workdir / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
     verification = wire.verify_stream(home_dir / "log.jsonl", workdir / "spool.jsonl")
@@ -439,6 +467,7 @@ def run_takeover_client(root: Path, *, port: int, key: Path, target: str,
     wire.write_json_atomic(lease_file, wire.lease_document("tok-live"))
     command = [
         sys.executable,
+        "-B",
         str(spike),
         "run",
         "--workdir",
@@ -472,11 +501,18 @@ def run_takeover_client(root: Path, *, port: int, key: Path, target: str,
     ]
     if mux_socket is not None:
         command += ["--ssh-mux-socket", str(mux_socket)]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=client_env(root),
+    )
     time.sleep(0.8)
     takeover = subprocess.run(
         [
             sys.executable,
+            "-B",
             str(spike),
             "takeover",
             "--lease-file",
@@ -491,6 +527,7 @@ def run_takeover_client(root: Path, *, port: int, key: Path, target: str,
         capture_output=True,
         text=True,
         check=False,
+        env=client_env(root),
     )
     written_at = json.loads(takeover.stdout)["written_at"] if takeover.returncode == 0 else None
     stdout, stderr = process.communicate(timeout=30)

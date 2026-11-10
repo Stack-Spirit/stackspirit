@@ -10,6 +10,6 @@ test_stream_survives_three_ssh_cuts (test_remote_exec.SpikeTest.test_stream_surv
 test_verify_rejects_a_log_with_a_gap (test_remote_exec.SpikeTest.test_verify_rejects_a_log_with_a_gap) ... ok
 
 ----------------------------------------------------------------------
-Ran 10 tests in 4.300s
+Ran 10 tests in 5.973s
 
 OK
