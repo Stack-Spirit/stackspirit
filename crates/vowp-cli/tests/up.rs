@@ -1197,6 +1197,106 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
 }
 
 #[test]
+fn init_registers_through_project_add_and_refuses_registry_conflicts() {
+    let home = tempfile::tempdir().expect("home");
+    let first = git_repo();
+    let second = git_repo();
+    let init = |repo: &Path, name: &str, force: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vowp"));
+        command
+            .arg("--home")
+            .arg(home.path())
+            .args(["init", "--name", name])
+            .current_dir(repo)
+            .env("HOME", home.path())
+            .env("VOWP_HOME", home.path())
+            .env("TMUX_TMPDIR", home.path().join("tmux"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("VOWP_TMUX_SOCKET");
+        if force {
+            command.arg("--force");
+        }
+        command.output().expect("run vowp init")
+    };
+
+    let output = init(first.path(), "shared", false);
+    assert!(
+        output.status.success(),
+        "first init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The same name at a different checkout is a conflict, not a silent move.
+    let output = init(second.path(), "shared", false);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already registered at"), "{stderr}");
+    assert!(
+        !second.path().join("vowp.toml").exists(),
+        "a conflict must not leave a half-initialised checkout"
+    );
+
+    let ls = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--json")
+        .arg("--home")
+        .arg(home.path())
+        .arg("project")
+        .arg("ls")
+        .env("HOME", home.path())
+        .env("VOWP_HOME", home.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp project ls");
+    assert!(ls.status.success(), "{}", String::from_utf8_lossy(&ls.stderr));
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&ls.stdout).expect("project ls json");
+    let shared = entries
+        .iter()
+        .find(|entry| entry["name"] == "shared")
+        .expect("shared project");
+    assert_eq!(
+        shared["path"],
+        first.path().display().to_string(),
+        "the registry still points at the first checkout"
+    );
+
+    // A checkout already registered under another name is refused before any file changes.
+    let output = init(first.path(), "other", true);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already registered as project shared"), "{stderr}");
+    let config = std::fs::read_to_string(first.path().join("vowp.toml")).expect("original config");
+    assert!(
+        config.contains("name = \"shared\""),
+        "the failed init must not rewrite the original config: {config}"
+    );
+
+    // The original checkout can still be added idempotently.
+    let re_add = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--home")
+        .arg(home.path())
+        .arg("project")
+        .arg("add")
+        .arg(first.path())
+        .env("HOME", home.path())
+        .env("VOWP_HOME", home.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp project add");
+    assert!(
+        re_add.status.success(),
+        "the original checkout is still registered: {}",
+        String::from_utf8_lossy(&re_add.stderr)
+    );
+}
+
+#[test]
 fn init_refuses_the_reserved_node_project_name() {
     let home = tempfile::tempdir().expect("home");
     let repo = git_repo();
