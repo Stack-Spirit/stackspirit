@@ -284,21 +284,54 @@ pub enum Upgrade {
 /// Nothing privileged is ever run: when the vault user is ready the mode file is written,
 /// otherwise the exact command the owner must run is returned.
 pub fn upgrade(deps: &Deps) -> Result<Upgrade, CoreError> {
+    let layout = Layout::from_deps(deps);
+    upgrade_impl(deps, &layout)
+}
+
+/// Completes the upgrade through an explicit layout (also used by the module tests).
+fn upgrade_impl(deps: &Deps, layout: &Layout) -> Result<Upgrade, CoreError> {
     if mode(deps)? == VaultMode::VaultUser {
         return Ok(Upgrade::AlreadyVault);
     }
-    let layout = Layout::from_deps(deps);
-    if vault_user_ready(&layout) {
+    if vault_user_ready(layout) {
+        migrate_basic_to_vault(deps, layout)?;
         write_mode(deps, VaultMode::VaultUser)?;
         return Ok(Upgrade::Switched);
     }
-    if sudo_available(&layout) {
-        Ok(Upgrade::NeedsCommand(upgrade_command(&layout)))
+    if sudo_available(layout) {
+        Ok(Upgrade::NeedsCommand(upgrade_command(layout)))
     } else {
         Ok(Upgrade::NoSudo(
             "passwordless sudo is not available; create the `vowp-vault` user and the sudoers helper first".to_owned(),
         ))
     }
+}
+
+/// Copies every basic-mode secret into the vault through the helper, then removes the copy.
+fn migrate_basic_to_vault(deps: &Deps, layout: &Layout) -> Result<u32, CoreError> {
+    let entries = match fs::read_dir(&layout.basic_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => return Err(io_error(&layout.basic_dir, source)),
+    };
+    let mut moved = 0;
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(&layout.basic_dir, source))?;
+        let Ok(name) = SecretName::parse(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        let value = read_value_at(&layout.basic_dir, &name)?
+            .ok_or_else(|| CoreError::Invalid(format!("secret {name} disappeared during upgrade")))?;
+        let mut command = helper_command(deps, layout, &["__vault-admin", "set", name.as_str()]);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        run_helper_with_value(command, value.as_bytes(), "migrate")?;
+        remove_file_if_present(&layout.basic_dir.join(name.as_str()))?;
+        moved += 1;
+    }
+    Ok(moved)
 }
 
 /// The exact-value redactor. Loads the stored values, longest first.
@@ -654,6 +687,9 @@ fn shell_quote(text: &Path) -> String {
 }
 
 /// Builds the sudo helper command with the node home and project path as global flags.
+///
+/// The flags must come before the hidden subcommand and before any `--` argument separator:
+/// `VaultExecArgs.argv` is `last = true`, so anything after `--` belongs to the child command.
 fn helper_command(deps: &Deps, layout: &Layout, args: &[&str]) -> Command {
     let mut command = Command::new(&layout.sudo);
     command
@@ -661,12 +697,12 @@ fn helper_command(deps: &Deps, layout: &Layout, args: &[&str]) -> Command {
         .arg("-u")
         .arg("vowp-vault")
         .arg(&layout.helper)
-        .args(args)
         .arg("--home")
         .arg(deps.paths.root());
     if let Some(project) = project_root(deps) {
         command.arg("--project").arg(project);
     }
+    command.args(args);
     command
 }
 
@@ -937,20 +973,28 @@ mod tests {
         }
     }
 
-    fn fake_sudo(layout: &Layout) -> PathBuf {
-        let script = layout.vault_home.join("secrets");
-        fs::create_dir_all(&script).expect("vault dir");
-        let path = &layout.sudo;
+    fn fake_sudo(layout: &Layout) {
+        let vault = layout.vault_home.join("secrets");
+        fs::create_dir_all(&vault).expect("vault dir");
+        let helper = "#!/bin/sh\nexit 0\n";
+        fs::write(&layout.helper, helper).expect("helper file");
+        fs::set_permissions(&layout.helper, fs::Permissions::from_mode(0o755)).expect("helper mode");
         let body = format!(
             "#!/bin/sh\n\
              umask 077\n\
              log=\"{}/argv.log\"\n\
              printf '%s\\n' \"$*\" >> \"$log\"\n\
-             shift 3\n\
-             shift\n\
-             cmd=\"$1\"\n\
-             shift\n\
+             shift 3 || exit 0\n\
+             helper=\"$1\"; shift || exit 0\n\
+             while [ $# -gt 0 ]; do\n\
+             case \"$1\" in\n\
+             --home|--project) shift 2 ;;\n\
+             *) break ;;\n\
+             esac\n\
+             done\n\
+             cmd=\"$1\"; shift || true\n\
              case \"$cmd\" in\n\
+             --version|true) exit 0 ;;\n\
              __vault-admin)\n\
              action=\"$1\"\n\
              name=\"$2\"\n\
@@ -967,13 +1011,66 @@ mod tests {
              ;;\n\
              esac\n",
             layout.vault_home.display(),
-            script.display(),
-            script.display(),
-            script.display(),
+            vault.display(),
+            vault.display(),
+            vault.display(),
         );
-        fs::write(path, body).expect("fake sudo");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("fake sudo mode");
-        path.clone()
+        fs::write(&layout.sudo, body).expect("fake sudo");
+        fs::set_permissions(&layout.sudo, fs::Permissions::from_mode(0o755)).expect("fake sudo mode");
+    }
+
+    #[test]
+    fn helper_command_puts_global_flags_before_the_subcommand() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+        let command = helper_command(&deps, &layout, &["__vault-exec", "--env", "NAME"]);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let home = args.iter().position(|arg| arg == "--home").expect("--home");
+        let subcommand = args.iter().position(|arg| arg == "__vault-exec").expect("subcommand");
+        assert!(
+            home < subcommand,
+            "global flags must precede the hidden subcommand: {args:?}"
+        );
+        if project_root(&deps).is_some() {
+            let project = args.iter().position(|arg| arg == "--project").expect("--project");
+            assert!(
+                project < subcommand,
+                "the project flag must precede the subcommand: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_moves_basic_secrets_into_the_vault() {
+        let tmp = tempdir().expect("tempdir");
+        let deps = deps(tmp.path());
+        let layout = layout_with(tmp.path());
+        fake_sudo(&layout);
+        let name = SecretName::parse("UPGRADE_KEY").expect("name");
+        let value = "basic-upgrade-value-1357";
+        write_secret_impl(&deps, &layout, &name, value).expect("basic write");
+        assert!(layout.basic_dir.join("UPGRADE_KEY").is_file());
+
+        let outcome = upgrade_impl(&deps, &layout).expect("upgrade");
+
+        assert_eq!(outcome, Upgrade::Switched);
+        assert!(
+            !layout.basic_dir.join("UPGRADE_KEY").exists(),
+            "the basic copy must be moved"
+        );
+        assert_eq!(
+            fs::read_to_string(layout.vault_dir().join("UPGRADE_KEY")).expect("vault file"),
+            value
+        );
+        assert_eq!(mode(&deps).expect("mode"), VaultMode::VaultUser);
+        assert_eq!(
+            read_via_helper(&deps, &layout, &name).expect("helper read"),
+            Some(value.to_owned())
+        );
     }
 
     #[test]
@@ -995,6 +1092,10 @@ mod tests {
         assert!(!argv.contains(value), "the value must never be on the helper argv");
         assert_eq!(
             read_value_impl(&deps, &layout, &name).expect("read"),
+            Some(value.to_owned())
+        );
+        assert_eq!(
+            read_via_helper(&deps, &layout, &name).expect("helper read"),
             Some(value.to_owned())
         );
         assert!(remove_secret_impl(&deps, &layout, &name).expect("remove"));

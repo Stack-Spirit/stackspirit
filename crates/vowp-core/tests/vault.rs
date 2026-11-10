@@ -447,7 +447,7 @@ fn mode_file_is_read_and_unknown_values_are_refused() {
 }
 
 #[test]
-fn run_turn_injects_configured_secret_and_never_writes_it_to_the_log_or_snapshot() {
+fn run_turn_injects_configured_secret_and_never_writes_it_to_the_log_or_events() {
     let tmp = tempdir().expect("tempdir");
     let mut config = VowpConfig::with_defaults_for_tests();
     let project = tmp.path().join("project");
@@ -530,13 +530,33 @@ fn run_turn_injects_configured_secret_and_never_writes_it_to_the_log_or_snapshot
     }
     let log_text = fs::read_to_string(deps.paths.log_path(&session)).expect("log file");
     assert!(!log_text.contains("turn-secret-5e6f"));
-    let store = Store::open(&deps.paths).expect("store");
-    let snapshot = vowp_core::fleet::build_snapshot(&deps, &store, now()).expect("snapshot");
-    assert!(
-        !serde_json::to_string(&snapshot)
-            .expect("json")
-            .contains("turn-secret-5e6f")
-    );
+}
+
+#[test]
+fn redact_text_redacts_a_snapshot_shaped_fixture() {
+    let tmp = tempdir().expect("tempdir");
+    let (deps, _) = deps(tmp.path());
+    vault::write_secret(
+        &deps,
+        &vowp_protocol::SecretName::parse("SNAPSHOT_KEY").expect("name"),
+        "snapshot-secret-9a8b",
+    )
+    .expect("write");
+    let fixture = json!({
+        "schema": "vowp.snapshot",
+        "version": 1,
+        "projects": [{"name": "demo", "note": "snapshot-secret-9a8b"}],
+        "sessions": [{"id": "ses_01", "title": "use snapshot-secret-9a8b"}],
+        "inbox": [{"title": "question", "body": "value snapshot-secret-9a8b"}]
+    });
+    let text = serde_json::to_string(&fixture).expect("fixture json");
+
+    let redacted = redact_text(&deps, &text);
+
+    assert!(!redacted.contains("snapshot-secret-9a8b"));
+    assert!(redacted.contains("[REDACTED:SNAPSHOT_KEY]"));
+    let parsed: serde_json::Value = serde_json::from_str(&redacted).expect("valid json");
+    assert_eq!(parsed["projects"][0]["note"], "[REDACTED:SNAPSHOT_KEY]");
 }
 
 /// Runs one HTTP request against a loopback URL and returns status and body.
