@@ -84,7 +84,20 @@ opencode pair                         # one-time link, 5 minutes
   Over SSH? Forward the port, then open the link on your machine:
   ssh -L <port>:127.0.0.1:<port> <host>
   If port <port> is busy locally, forward another port and use it in the link.
+
+  To connect from other devices, run `opencode service set hostname 0.0.0.0`.
 ```
+
+The last line is opencode's opt-in public bind; VOWP must not run it. The
+spike kept the bind on `127.0.0.1`.
+
+**Secret handling in the reproduction.** The script captures the raw pair output
+only under `$WORK/private` (mode 0700), writes only the redacted transcript to
+the evidence tree, keeps the redeemed token in memory, and deletes the raw pair
+output, token files, private service state (which contains the server password),
+SSH keys and temporary Claude config in cleanup **even with `KEEP=1`**. The kept
+evidence has no pair code, token or service password; it only has
+`/auth/connect/<code>`.
 
 The spike then did what the Mac does:
 
@@ -130,7 +143,9 @@ message; it must appear in the throwaway session and in the live event stream.
   (tested) or VOWP must manage the pair link itself.
 - **The pair link is single-use and expires in 5 minutes.** Reusing it returned
   HTTP 401 with `Pairing link expired or already used`. Never log the code or
-  token; treat both as secrets.
+  token; treat both as secrets. The reproduction keeps the raw pair output
+  outside the evidence tree, keeps the token in memory only, and deletes the
+  raw output, token, private service state and SSH keys even with `KEEP=1`.
 - **Auth is Basic, not Bearer.** `Authorization: Bearer <token>` was rejected;
   `Authorization: Basic base64("opencode:<token>")` worked. The server password
   printed at startup works the same way.
@@ -427,11 +442,16 @@ tunnel, not a phone SSH app UI.
 KEEP=1 scripts/spikes/apps/run.sh
 ```
 
-The script uses only localhost and temporary state. `KEEP=1` leaves the
-evidence under `/tmp/vowp-s3-apps.*/evidence/` (versions, pair output with the
-code redacted, MCP logs, messages, export, SSE capture and the VOWP mapping).
-It prints `PASS=21 FAIL=0` and `RESULT: PASS` on this host; it exits non-zero
-on any failed check. It does not use tmux at all, so no tmux server is touched.
+The script uses only localhost and temporary state. `KEEP=1` keeps **only the
+redacted evidence** under `/tmp/vowp-s3-apps.*/evidence/` (versions, the
+redacted pair transcript, MCP logs, messages, export, SSE capture and the VOWP
+mapping). In cleanup, even with `KEEP=1`, it removes the raw one-time pair
+output, the redeemed token (never written to a file), the private service state
+(which contains the server password), the SSH keys and the temporary Claude
+config. The evidence's pair transcript contains `/auth/connect/<code>`, not the
+code. It prints `PASS=21 FAIL=0` and `RESULT: PASS` on this host; it exits
+non-zero on any failed check. It does not use tmux at all, so no tmux server is
+touched.
 
 ## 8. Limits
 

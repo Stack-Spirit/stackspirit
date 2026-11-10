@@ -7,7 +7,11 @@
 #
 # Usage:
 #   scripts/spikes/apps/run.sh            # clean up the temp directory
-#   KEEP=1 scripts/spikes/apps/run.sh     # keep the evidence directory
+#   KEEP=1 scripts/spikes/apps/run.sh     # keep only the redacted evidence
+#
+# KEEP=1 never keeps the raw one-time pair output, the redeemed token, the
+# private opencode service state (it contains the server password) or the SSH
+# keys. The evidence tree gets a redacted pair transcript only.
 #
 # The script prints PASS/FAIL lines and exits non-zero if a check fails.
 set -euo pipefail
@@ -19,7 +23,8 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/vowp-s3-apps.XXXXXX")
 EVIDENCE="$WORK/evidence"
 PROJECT="$WORK/project"
 PHONE="$WORK/phone"
-mkdir -p "$EVIDENCE" "$PROJECT" "$PHONE" "$WORK/tmux" "$WORK/ssh" "$WORK/xdg/config" "$WORK/xdg/data" "$WORK/xdg/state" "$WORK/xdg/cache" "$WORK/phone/config" "$WORK/phone/data" "$WORK/phone/state" "$WORK/phone/cache" "$WORK/claude/home" "$WORK/claude/config"
+mkdir -p "$EVIDENCE" "$PROJECT" "$PHONE" "$WORK/private" "$WORK/tmux" "$WORK/ssh" "$WORK/xdg/config" "$WORK/xdg/data" "$WORK/xdg/state" "$WORK/xdg/cache" "$WORK/phone/config" "$WORK/phone/data" "$WORK/phone/state" "$WORK/phone/cache" "$WORK/claude/home" "$WORK/claude/config"
+chmod 700 "$WORK/private"
 
 # Keep every child out of the real harness/TUI/tmux state.
 unset TMUX TMUX_PANE OPENCODE OPENCODE_SESSION_ID OPENCODE_PASSWORD OPENCODE_SERVER OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
@@ -122,6 +127,11 @@ cleanup() {
   if [ -n "$SSHD_PID" ]; then kill "$SSHD_PID" 2>/dev/null; wait "$SSHD_PID" 2>/dev/null; fi
   stop_service
   if [ -n "$FAKE_PID" ]; then kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null; fi
+  # Even with KEEP=1, never retain secrets or the private material that holds
+  # them: raw pair output, redeemed token, service state (server password),
+  # SSH keys and the temporary Claude config.
+  rm -rf "$WORK/private" "$WORK/xdg" "$WORK/ssh" "$WORK/claude" \
+         "$WORK/token.json" "$WORK/token.txt" "$WORK/pair-reuse.json"
   if [ "$KEEP" = "1" ]; then
     printf '\nkept evidence in %s\n' "$WORK"
   else
@@ -227,15 +237,17 @@ else
 fi
 
 say "generate a pair link and forward it through a private SSH tunnel"
-( cd "$PROJECT" && oe opencode pair ) >"$EVIDENCE/pair-raw.txt" 2>&1 || die "opencode pair failed"
-redact <"$EVIDENCE/pair-raw.txt" | tee "$EVIDENCE/pair.txt"
-LINK=$(grep -oE 'http://127\.0\.0\.1:[0-9]+/auth/connect/[A-Za-z0-9_-]+' "$EVIDENCE/pair-raw.txt" | head -1 || true)
+PAIR_RAW="$WORK/private/pair-raw.txt"
+( cd "$PROJECT" && oe opencode pair ) >"$PAIR_RAW" 2>&1 || die "opencode pair failed"
+redact <"$PAIR_RAW" >"$EVIDENCE/pair.txt"
+cat "$EVIDENCE/pair.txt"
+LINK=$(grep -oE 'http://127\.0\.0\.1:[0-9]+/auth/connect/[A-Za-z0-9_-]+' "$PAIR_RAW" | head -1 || true)
 [ -n "$LINK" ] || die "pair output had no connect link"
 case "$LINK" in
   *":$OPORT/auth/connect/"*) ok "pair link points at the private server" ;;
   *) bad "pair link does not point at the private server" ;;
 esac
-grep -q "ssh -L $OPORT:127.0.0.1:$OPORT" "$EVIDENCE/pair-raw.txt" && ok "pair output prints the SSH tunnel command" || bad "pair output has no SSH tunnel command"
+grep -q "ssh -L $OPORT:127.0.0.1:$OPORT" "$PAIR_RAW" && ok "pair output prints the SSH tunnel command" || bad "pair output has no SSH tunnel command"
 
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/ssh/host_key"
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/ssh/client_key"
@@ -268,21 +280,23 @@ wait_tcp "$LPORT" || die "SSH tunnel did not open the local port"
 ok "SSH tunnel 127.0.0.1:$LPORT -> sshd:$SSHPORT -> opencode:$OPORT"
 
 TUNNEL_LINK=${LINK/127.0.0.1:$OPORT/127.0.0.1:$LPORT}
-PAIR_CODE=$(curl -sS -o "$WORK/token.json" -w '%{http_code}' "$TUNNEL_LINK" || true)
-if [ "$PAIR_CODE" = "200" ] && python3 - "$WORK/token.json" >"$WORK/token.txt" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-print(data["token"])
-PY
-then
-  TOKEN=$(cat "$WORK/token.txt")
+# Keep the redeemed token in memory only. No token file is ever written.
+PAIR_RESPONSE=$(curl -sS -w $'\n%{http_code}' "$TUNNEL_LINK" || true)
+PAIR_CODE=${PAIR_RESPONSE##*$'\n'}
+PAIR_JSON=${PAIR_RESPONSE%$'\n'*}
+TOKEN=""
+if [ "$PAIR_CODE" = "200" ]; then
+  TOKEN=$(printf '%s' "$PAIR_JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)
+fi
+if [ -n "$TOKEN" ]; then
   ok "pair link redeemed through the tunnel (token accepted as Basic auth password)"
 else
   bad "pair link redemption failed with HTTP $PAIR_CODE"
-  TOKEN=""
 fi
-REUSE_CODE=$(curl -sS -o "$WORK/pair-reuse.json" -w '%{http_code}' "$TUNNEL_LINK" || true)
-if [ "$REUSE_CODE" = "401" ] && grep -q 'expired or already used' "$WORK/pair-reuse.json"; then
+REUSE_RESPONSE=$(curl -sS -w $'\n%{http_code}' "$TUNNEL_LINK" || true)
+REUSE_CODE=${REUSE_RESPONSE##*$'\n'}
+REUSE_JSON=${REUSE_RESPONSE%$'\n'*}
+if [ "$REUSE_CODE" = "401" ] && printf '%s' "$REUSE_JSON" | grep -q 'expired or already used'; then
   ok "pair link is single-use"
 else
   bad "pair link was not rejected on reuse (HTTP $REUSE_CODE)"
@@ -355,7 +369,7 @@ kill "$EVENTS_PID" 2>/dev/null || true
 wait "$EVENTS_PID" 2>/dev/null || true
 EVENTS_PID=""
 
-curl -sS -u "$AUTH" "$BASE/api/session/$SID/message" >"$EVIDENCE/messages.json"
+( cd "$PROJECT" && oe env OPENCODE_PASSWORD="$TOKEN" opencode api --server "$BASE" GET "/api/session/$SID/message" ) >"$EVIDENCE/messages.json" 2>"$EVIDENCE/messages.err" || true
 ( cd "$PROJECT" && oe env OPENCODE_PASSWORD="$TOKEN" opencode session export --server "$BASE" "$SID" ) >"$EVIDENCE/session-export.json" 2>"$EVIDENCE/session-export.err" || true
 python3 - "$EVIDENCE/messages.json" "$EVIDENCE/session-export.json" <<'PY'
 import json, sys
