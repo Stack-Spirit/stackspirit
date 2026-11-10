@@ -281,8 +281,9 @@ pub enum Upgrade {
 
 /// Plans or completes the switch from basic mode to vault-user mode.
 ///
-/// Nothing privileged is ever run: when the vault user is ready the mode file is written,
-/// otherwise the exact command the owner must run is returned.
+/// When the vault user and helper are already ready, every basic secret is moved into the
+/// vault through the passwordless sudo helper and then the mode file is written. Otherwise the
+/// exact command the owner must run is returned and local state is left unchanged.
 pub fn upgrade(deps: &Deps) -> Result<Upgrade, CoreError> {
     let layout = Layout::from_deps(deps);
     upgrade_impl(deps, &layout)
@@ -661,6 +662,16 @@ fn run_status(command: &mut Command) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Shell body that moves every basic-mode secret into the vault directory.
+///
+/// The caller passes the basic and vault directories as `$1` and `$2`. Every step exits
+/// non-zero on failure, so the surrounding `&&` chain stops before the sudoers line is written.
+const MIGRATE_SCRIPT: &str = "for f in \"$1\"/[A-Z]*; do [ -e \"$f\" ] || continue; \
+     n=${f##*/}; mv -f \"$f\" \"$2/$n\" || exit 1; \
+     chown vowp-vault:vowp-vault \"$2/$n\" || exit 1; \
+     chmod 0600 \"$2/$n\" || exit 1; \
+     done";
+
 /// Returns the one command the owner runs to create the vault user and move basic secrets.
 fn upgrade_command(layout: &Layout) -> String {
     let basic = shell_quote(&layout.basic_dir);
@@ -668,14 +679,12 @@ fn upgrade_command(layout: &Layout) -> String {
     let helper = shell_quote(&PathBuf::from(DEFAULT_HELPER));
     let source = shell_quote(&layout.helper);
     let home = shell_quote(&layout.vault_home);
-    let restore = format!("{vault}/secrets");
     format!(
         "sudo useradd --system --home {home} --shell /usr/sbin/nologin vowp-vault \
          && sudo install -d -m 0700 -o vowp-vault -g vowp-vault {vault} \
          && sudo install -d -m 0755 /usr/local/lib/vowp \
          && sudo install -m 0755 -o root -g root {source} {helper} \
-         && sudo sh -c 'for f in {basic}/[A-Z]*; do [ -e \"$f\" ] && mv -f \"$f\" {restore}/; done; \
-         chown vowp-vault:vowp-vault {restore}/* 2>/dev/null || true; chmod 0600 {restore}/* 2>/dev/null || true' \
+         && sudo sh -c '{MIGRATE_SCRIPT}' vowp-migrate {basic} {vault} \
          && echo 'vowp ALL=(vowp-vault) NOPASSWD: {helper}' | sudo tee /etc/sudoers.d/vowp-vault >/dev/null \
          && sudo chmod 0440 /etc/sudoers.d/vowp-vault"
     )
@@ -1070,6 +1079,139 @@ mod tests {
         assert_eq!(
             read_via_helper(&deps, &layout, &name).expect("helper read"),
             Some(value.to_owned())
+        );
+    }
+
+    /// Writes one fake executable used to run the printed upgrade command hermetically.
+    fn fake_tool(dir: &Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("fake tool");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("fake tool mode");
+    }
+
+    /// Installs hermetic fakes for every privileged command in the upgrade hand-off.
+    fn fake_upgrade_tools(dir: &Path) {
+        let sudo = "#!/bin/sh\n\
+                    while [ \"$#\" -gt 0 ]; do\n\
+                    case \"$1\" in\n\
+                    -n) shift ;;\n\
+                    -u) shift 2 ;;\n\
+                    *) break ;;\n\
+                    esac\n\
+                    done\n\
+                    exec \"$@\"\n";
+        fake_tool(dir, "sudo", sudo);
+        fake_tool(dir, "useradd", "#!/bin/sh\nexit 0\n");
+        let install = "#!/bin/sh\n\
+                       make_dir=false\n\
+                       last=\n\
+                       for arg in \"$@\"; do\n\
+                       [ \"$arg\" = \"-d\" ] && make_dir=true\n\
+                       last=$arg\n\
+                       done\n\
+                       if [ \"$make_dir\" = true ] && [ \"$VOWP_TEST_CREATE_VAULT\" = 1 ]; then\n\
+                       case \"$last\" in\n\
+                       \"$VOWP_TEST_ROOT\"/*) mkdir -p \"$last\" ;;\n\
+                       esac\n\
+                       fi\n\
+                       exit 0\n";
+        fake_tool(dir, "install", install);
+        fake_tool(dir, "tee", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
+        fake_tool(dir, "chown", "#!/bin/sh\nexit 0\n");
+        let chmod = "#!/bin/sh\n\
+                     case \"$2\" in\n\
+                     \"$VOWP_TEST_ROOT\"/*) exec /bin/chmod \"$@\" ;;\n\
+                     esac\n\
+                     exit 0\n";
+        fake_tool(dir, "chmod", chmod);
+    }
+
+    /// Runs one shell command with the fake tools and returns its output.
+    fn run_with_fakes(command: &str, bin: &Path, root: &Path, create_vault: bool) -> std::process::Output {
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env("PATH", path)
+            .env("VOWP_TEST_ROOT", root)
+            .env("VOWP_TEST_CREATE_VAULT", if create_vault { "1" } else { "0" })
+            .stdin(Stdio::null())
+            .output()
+            .expect("run command")
+    }
+
+    #[test]
+    fn upgrade_command_moves_basic_secrets_into_the_vault_directory() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with(tmp.path());
+        fs::create_dir_all(&layout.basic_dir).expect("basic dir");
+        fs::write(layout.basic_dir.join("UPGRADE_KEY"), "basic-upgrade-value-1357").expect("basic value");
+        fs::write(layout.basic_dir.join("mode"), "basic\n").expect("mode file");
+        let command = upgrade_command(&layout);
+        let basic = shell_quote(&layout.basic_dir);
+        let vault = shell_quote(&layout.vault_dir());
+        assert!(
+            command.contains(&format!("vowp-migrate {basic} {vault}")),
+            "the move must target the vault directory itself: {command}"
+        );
+        assert!(
+            !command.contains(&format!("{}/secrets", layout.vault_dir().display())),
+            "the vault directory already ends in secrets: {command}"
+        );
+        assert!(
+            !command.contains("|| true"),
+            "a failed move must not be masked: {command}"
+        );
+
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).expect("fake bin");
+        fake_upgrade_tools(&bin);
+
+        let output = run_with_fakes(&command, &bin, tmp.path(), true);
+        assert!(
+            output.status.success(),
+            "the printed command failed: {}\n{command}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !layout.basic_dir.join("UPGRADE_KEY").exists(),
+            "the basic copy must be moved, not copied"
+        );
+        assert!(
+            layout.basic_dir.join("mode").is_file(),
+            "the lowercase mode file must stay behind"
+        );
+        let moved = layout.vault_dir().join("UPGRADE_KEY");
+        assert_eq!(
+            fs::read_to_string(&moved).expect("vault value"),
+            "basic-upgrade-value-1357"
+        );
+        assert_eq!(
+            fs::metadata(&moved).expect("metadata").permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn upgrade_command_fails_loudly_when_the_move_fails() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with(tmp.path());
+        fs::create_dir_all(&layout.basic_dir).expect("basic dir");
+        fs::write(layout.basic_dir.join("UPGRADE_KEY"), "basic-upgrade-value-1357").expect("basic value");
+        let command = upgrade_command(&layout);
+
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).expect("fake bin");
+        fake_upgrade_tools(&bin);
+
+        let output = run_with_fakes(&command, &bin, tmp.path(), false);
+        assert!(
+            !output.status.success(),
+            "a failed move must make the printed command exit non-zero"
+        );
+        assert!(
+            layout.basic_dir.join("UPGRADE_KEY").is_file(),
+            "the failed move leaves the basic copy in place"
         );
     }
 
