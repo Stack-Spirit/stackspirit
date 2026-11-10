@@ -224,21 +224,48 @@ acceptance_sha256_file() {
 # Lexically normalise a path (absolute or relative to the current directory)
 # without resolving symlinks. `acceptance_validate_dest` also checks the
 # physical path, so a symlinked parent cannot escape the allowlist.
+#
+# Parse the whole string rather than a here-string: `read -a` stops at the first
+# newline, which would silently treat the remainder of a control-character path
+# as a different destination. Callers still reject control characters first;
+# this loop keeps the helper itself honest for every component.
 acceptance_normalize_path() {
     local path=$1 part out=
-    local -a parts=()
     case "$path" in
         /*) ;;
         *) path=$PWD/$path ;;
     esac
-    IFS=/ read -r -a parts <<<"$path"
-    for part in "${parts[@]}"; do
+    while [ -n "$path" ]; do
+        part=${path%%/*}
+        case "$path" in
+            */*) path=${path#*/} ;;
+            *) path= ;;
+        esac
         case "$part" in
             ''|.) ;;
             *) out=$out/$part ;;
         esac
     done
     printf '%s\n' "${out:-/}"
+}
+
+# System directories that must never become allowlist roots, even when $HOME or
+# a physical temp path resolves to one. This is defense in depth: a caller with
+# HOME=/etc must not thereby authorize /etc/passwd. The /tmp and /var/tmp trees
+# are the documented temp allowlist and stay valid. A normal user home such as
+# /home/alice is still accepted; only the bare /home root is refused.
+acceptance_unsafe_allowlist_root() {
+    case "${1%/}" in
+        /tmp|/tmp/*|/var/tmp|/var/tmp/*)
+            return 1
+            ;;
+        ''|/|/etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/boot|/boot/*|\
+        /dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/var|/var/*|/opt|/opt/*|\
+        /root|/root/*|/home)
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 # Resolve the deepest existing directory physically, then append the parts that
@@ -271,8 +298,10 @@ acceptance_dest_fail() {
 # Reject destinations that could escape their parent or wipe a system root.
 # The optional --force paths in the fixture/generator scripts delete the
 # destination, so the allowlist is deliberate: only a strict child of /tmp,
-# /var/tmp or $HOME is accepted. That denies /etc, /usr, /bin, /sbin, /boot,
-# /dev, /proc, /sys, /var, /opt, /root, /home and / even with --force.
+# /var/tmp or a non-system $HOME is accepted. That denies /etc, /usr, /bin,
+# /sbin, /boot, /dev, /proc, /sys, /var, /opt, /root, /home and / even with
+# --force. A $HOME that is itself a system directory (for example HOME=/etc) is
+# ignored rather than trusted, so the guard does not depend on a sane HOME.
 # Pass an exit status as the second argument (default 1).
 acceptance_validate_dest() {
     local dest=$1 status=${2:-1}
@@ -309,6 +338,9 @@ acceptance_validate_dest() {
             *)
                 for root in /tmp /var/tmp "$tmp_phys" "$vartmp_phys" "$home" "$home_phys"; do
                     [ -n "$root" ] || continue
+                    if acceptance_unsafe_allowlist_root "$root"; then
+                        continue
+                    fi
                     case "$path" in
                         "${root%/}"/*) allowed=1; break ;;
                     esac

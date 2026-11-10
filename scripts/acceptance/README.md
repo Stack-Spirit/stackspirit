@@ -25,13 +25,15 @@ one-time v0.1 release download), or a real `claude`/`opencode` binary.
 ## Requirements
 
 - Docker with a reachable daemon.
-- `bash`, `ssh`, `ssh-keygen`.
-- For the direct-host recipes and the host-side helper checks: `tmux`, `git`,
-  `tar`, and `sha256sum` (or `shasum`). The home image already contains these;
-  the phone image only carries the SSH client and tmux. Only the direct-host
-  `make-v01-home.sh`/`fixtures/project.sh` path needs them on the host.
-- `curl` or `wget` and `python3` for the v0.1 generator; they are installed in
-  the containers, so normally only the host prerequisites matter.
+- `bash`, `ssh`, `ssh-keygen` on the host.
+- For the direct-host `fixtures/project.sh` recipe: `git`.
+- For the direct-host `make-v01-home.sh` recipe: `tmux`, `git`, `python3`, and
+  `sha256sum` (or `shasum`), plus `tar` and `curl` or `wget` when it downloads
+  a release; with `--binary` only the first four are used. The home image
+  contains these; the phone image is an SSH-client image without them, so run
+  the recipe on the host or in the home container.
+- The self-test's host-side helper check also needs `tmux` and `sha256sum` (or
+  `shasum`) on the host; its container checks use the tools in the images.
 - Network access while building the images (base image and apt packages) and,
   unless you pass `--binary`, while generating a v0.1 home (published release).
 
@@ -252,6 +254,10 @@ home containers; `rig.sh status --name <name>` shows both.
 - The host `~/.vowp`, real HOME and tmux server are never used. The host
   helpers unset `TMUX`/`TMUX_PANE` and write a wrapper that refuses the default
   server before it can be started.
+- Destructive fixture/generator destinations must be strict children of
+  `/tmp`, `/var/tmp` or a non-system `$HOME`. Newlines/control characters and
+  symlinked parents are refused, and a misconfigured HOME (for example
+  `HOME=/etc`) cannot widen the allowlist.
 - tmux refuses a missing `TMUX_TMPDIR`; both the host library and the image
   create the directory first, because tmux silently falls back to the default
   server when it is absent.

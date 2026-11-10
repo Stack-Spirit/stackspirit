@@ -241,6 +241,18 @@ say "checking the destination allowlist and the generator's exit codes"
 dest_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-dest.XXXXXX")
 mkdir -p "$dest_root/fake-home"
 ln -s /etc "$dest_root/etc-link"
+# The historical bypass: the validator truncated this path at the newline and
+# checked only /tmp/.../safe, while rm -rf would follow the symlinked parent.
+# $'...' preserves the trailing newline; $(printf 'safe\n') would strip it and
+# silently turn this into an ordinary symlinked-parent case.
+newline_leaf=$'safe\n'
+mkdir -p "$dest_root/$newline_leaf"
+ln -s /etc "$dest_root/$newline_leaf/link"
+newline_symlink_dest="$dest_root/$newline_leaf/link/verify-target"
+case "$newline_symlink_dest" in
+    *$'\n'*) ;;
+    *) fail "the newline destination fixture lost its newline" ;;
+esac
 real_home=${HOME:-}
 (
     # Use a dedicated home so the good-path assertion also works when the
@@ -250,14 +262,33 @@ real_home=${HOME:-}
     # shellcheck source=../lib.sh
     . "$ACCEPTANCE_DIR/lib.sh"
     newline_dest=$(printf '/tmp/vowp-acceptance\nlock')
+    # The control-character check rejects newline_dest before normalisation, so
+    # assert the normaliser itself keeps the newline. A reverted `read -a <<<`
+    # would silently truncate here even though the validator still rejected it.
+    [ "$(acceptance_normalize_path "$newline_dest")" = "$newline_dest" ] || {
+        printf 'acceptance_normalize_path truncated at a newline\n' >&2
+        exit 1
+    }
     for bad in / /etc /etc/passwd /usr /usr/bin /bin /sbin /boot /dev /proc /sys \
         /var /var/lib /opt /root /root/keep /home /tmp /var/tmp \
-        "$dest_root/etc-link" "$dest_root/etc-link/passwd" "$newline_dest"; do
+        "$dest_root/etc-link" "$dest_root/etc-link/passwd" "$newline_dest" \
+        "$newline_symlink_dest"; do
         if (acceptance_validate_dest "$bad") >/dev/null 2>&1; then
             printf 'accepted unsafe destination: %s\n' "$bad" >&2
             exit 1
         fi
     done
+    # A system directory must not become an allowlist root through HOME.
+    for bad_home in / /etc /usr /bin /sbin /boot /dev /proc /sys /var /opt /root /home; do
+        if (HOME="$bad_home" acceptance_validate_dest "$bad_home/acceptance-target") >/dev/null 2>&1; then
+            printf 'accepted a destination under an unsafe HOME root: %s\n' "$bad_home" >&2
+            exit 1
+        fi
+    done
+    if (HOME=/etc acceptance_validate_dest /etc/passwd) >/dev/null 2>&1; then
+        printf 'accepted /etc/passwd with HOME=/etc\n' >&2
+        exit 1
+    fi
     # The real home itself is unsafe unless it sits under the /tmp allowlist.
     case "$real_home" in
         ""|/tmp/*|/var/tmp/*) ;;
@@ -268,6 +299,11 @@ real_home=${HOME:-}
             fi
             ;;
     esac
+    # A normal real home still authorizes its own children. System roots and
+    # /root are deliberately excluded so the assertion stays host-independent.
+    if [ -n "$real_home" ] && ! acceptance_unsafe_allowlist_root "$real_home"; then
+        (HOME="$real_home" acceptance_validate_dest "$real_home/vowp-acceptance-dest") || exit 1
+    fi
     for good in /tmp/vowp-acceptance-dest /var/tmp/vowp-acceptance-dest \
         "$HOME/vowp-acceptance-dest"; do
         (acceptance_validate_dest "$good") || exit 1
@@ -303,6 +339,35 @@ expect_bad_generator_args "unknown option" --unknown
 expect_bad_generator_args "empty binary" --dest /tmp/unused --binary ""
 expect_bad_generator_args "empty version" --dest /tmp/unused --version ""
 expect_bad_generator_args "zero timeout" --dest /tmp/unused --timeout 0
+
+say "checking the generator turns missing tools into exit 1"
+tool_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-tools.XXXXXX")
+expect_missing_generator_tool() {
+    local tool=$1
+    local dir="$tool_root/$tool"
+    local present rc
+    mkdir -p "$dir"
+    ln -s "$(command -v date)" "$dir/date"
+    ln -s "$(command -v dirname)" "$dir/dirname"
+    # Stub the other required tools: the precheck only asks whether they exist,
+    # so the test does not need git/tar/python3 on the self-test host.
+    for present in git tar python3; do
+        [ "$present" = "$tool" ] && continue
+        printf '#!/bin/sh\nexit 0\n' >"$dir/$present"
+        chmod 0755 "$dir/$present"
+    done
+    if PATH="$dir" /bin/bash "$ACCEPTANCE_DIR/make-v01-home.sh" \
+        --dest "$tool_root/missing-$tool" >/dev/null 2>&1; then
+        fail "make-v01-home.sh ran without $tool"
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] || fail "make-v01-home.sh without $tool exited $rc, not 1"
+    [ ! -e "$tool_root/missing-$tool" ] || fail "make-v01-home.sh wrote a destination without $tool"
+}
+expect_missing_generator_tool git
+expect_missing_generator_tool tar
+rm -rf -- "$tool_root"
 
 # --- build -----------------------------------------------------------------
 
@@ -411,9 +476,40 @@ out=$(bash "$RIG" list) || fail "rig.sh list failed"
 assert_contains "$out" "$sudo_name" "list does not show the running rig"
 out=$(bash "$RIG" logs --name "$sudo_name" --tail 2) || fail "rig.sh logs failed"
 assert_contains "$out" "--- home" "logs do not include the home container"
-out=$(bash "$RIG" ssh --as phone --name "$sudo_name" 'echo phone-key-ok') \
-    || fail "ssh --as phone failed"
+say "checking ssh --as phone selects the phone key, not the owner key"
+owner_comment="vowp-acceptance-$sudo_name-owner"
+docker exec -u vowp "$sudo_home" sh -c '
+set -e
+cd /home/vowp/.ssh
+cp authorized_keys authorized_keys.full
+grep -v -- "$1" authorized_keys.full > authorized_keys.tmp
+cat authorized_keys.tmp > authorized_keys
+rm -f authorized_keys.tmp
+test "$(wc -l < authorized_keys)" -eq 1
+grep -q -- "-phone" authorized_keys
+' sh "$owner_comment" || fail "could not isolate the phone key in authorized_keys"
+if out=$(bash "$RIG" ssh --as phone --name "$sudo_name" 'echo phone-key-ok'); then
+    phone_key_rc=0
+else
+    phone_key_rc=$?
+    out=
+fi
+if bash "$RIG" ssh --as owner --name "$sudo_name" true >/dev/null 2>&1; then
+    owner_key_rc=0
+else
+    owner_key_rc=$?
+fi
+docker exec -u vowp "$sudo_home" sh -c '
+set -e
+cd /home/vowp/.ssh
+cat authorized_keys.full > authorized_keys
+rm -f authorized_keys.full
+' || fail "could not restore the owner key after the phone-key check"
+[ "$phone_key_rc" -eq 0 ] || fail "ssh --as phone failed with only the phone key authorized"
 assert_contains "$out" "phone-key-ok" "ssh --as phone did not use the phone key"
+[ "$owner_key_rc" -ne 0 ] || fail "ssh --as owner still succeeded with the owner key removed"
+bash "$RIG" ssh --as owner --name "$sudo_name" 'echo owner-key-restored' >/dev/null \
+    || fail "the owner key does not work after the phone-key check"
 
 say "creating fixture projects"
 bash "$RIG" fixture --name "$sudo_name" hello /home/vowp/projects/hello \
@@ -442,6 +538,8 @@ test -f /home/vowp/projects/pair/memory-hog/vowp.toml
 cat >/home/vowp/fake-vowp <<"EOS"
 #!/bin/sh
 printf "%s\n" "$*" >> /home/vowp/seed-args
+# Drain stdin: seed-jobs.sh pipes the brief under pipefail, so exiting early
+# can SIGPIPE the writer and stop the loop after one job.
 cat >/dev/null
 EOS
 chmod +x /home/vowp/fake-vowp

@@ -38,7 +38,9 @@
 #
 # Exit status:
 #   0  a v0.1 home with real history exists and manifest.json was written
-#   1  setup, download or supervisor failed (including a missing tool)
+#   1  setup, download or supervisor failed, including a missing checked tool
+#      (git, python3, tar, curl/wget or a SHA-256 utility); other standard
+#      utilities are assumed present
 #   2  bad arguments
 
 set -Eeuo pipefail
@@ -130,6 +132,14 @@ case "$TIMEOUT" in
     ''|*[!0-9]*) bad_arg "--timeout must be a whole number" ;;
 esac
 [ "$TIMEOUT" -ge 1 ] || bad_arg "--timeout must be at least 1"
+
+# Check the tools the generator will need before it touches the destination, so
+# a missing tool is the documented exit 1 rather than an errexit status 127.
+acceptance_require_command git
+acceptance_require_command python3
+if [ -z "$BINARY" ]; then
+    acceptance_require_command tar
+fi
 
 PROJECT_NAME=$(acceptance_slug "$PROJECT_NAME")
 [ -n "$PROJECT_NAME" ] || bad_arg "project name is empty after slugging"
