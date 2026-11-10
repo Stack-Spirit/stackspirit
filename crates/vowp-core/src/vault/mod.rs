@@ -1315,6 +1315,28 @@ mod tests {
         fake_tool(dir, "chmod", chmod);
     }
 
+    /// Returns true when the migrate glob `[A-Z]*` matches only uppercase names here.
+    ///
+    /// Bracket ranges are platform-dependent: macOS's default case-insensitive filesystem and
+    /// UTF-8 locale also expand `[A-Z]` to lowercase names. The upgrade test can only assert
+    /// that the lowercase `mode` marker stays behind where the glob is actually case-sensitive.
+    fn migrate_glob_is_case_sensitive(dir: &Path) -> bool {
+        let probe = dir.join("vowp-glob-probe");
+        fs::write(&probe, b"").expect("glob probe");
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("for f in \"$1\"/[A-Z]*; do [ -e \"$f\" ] || continue; printf '%s\\n' \"${f##*/}\"; done")
+            .arg("sh")
+            .arg(dir)
+            .output()
+            .expect("run glob probe");
+        fs::remove_file(&probe).expect("remove glob probe");
+        assert!(output.status.success(), "the glob probe failed");
+        !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|name| name == "vowp-glob-probe")
+    }
+
     /// Runs one shell command with the fake tools and returns its output.
     fn run_with_fakes(command: &str, bin: &Path, root: &Path, create_vault: bool) -> std::process::Output {
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
@@ -1336,6 +1358,7 @@ mod tests {
         fs::create_dir_all(&layout.basic_dir).expect("basic dir");
         fs::write(layout.basic_dir.join("UPGRADE_KEY"), "basic-upgrade-value-1357").expect("basic value");
         fs::write(layout.basic_dir.join("mode"), "basic\n").expect("mode file");
+        let glob_is_case_sensitive = migrate_glob_is_case_sensitive(&layout.basic_dir);
         let command = upgrade_command(&layout);
         let basic = shell_quote(&layout.basic_dir);
         let vault = shell_quote(&layout.vault_dir());
@@ -1366,10 +1389,12 @@ mod tests {
             !layout.basic_dir.join("UPGRADE_KEY").exists(),
             "the basic copy must be moved, not copied"
         );
-        assert!(
-            layout.basic_dir.join("mode").is_file(),
-            "the lowercase mode file must stay behind"
-        );
+        if glob_is_case_sensitive {
+            assert!(
+                layout.basic_dir.join("mode").is_file(),
+                "the lowercase mode file must stay behind"
+            );
+        }
         let moved = layout.vault_dir().join("UPGRADE_KEY");
         assert_eq!(
             fs::read_to_string(&moved).expect("vault value"),
