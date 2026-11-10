@@ -203,40 +203,112 @@ run_check --index --manifest public-tree-test.txt >/dev/null 2>&1 ||
     fail "the repaired fixture should pass again"
 
 # 6. The public-tree content scrub rewrites the known build-process paragraph
-#    in the index only, is idempotent, and fails when the paragraph is missing.
+#    in the index only, is idempotent, accepts an already-clean file, and fails
+#    on a duplicate or a partial paragraph.
 srepo=$tmp/scrub-repo
 mkdir -p "$srepo/scripts/audit" "$srepo/scripts/release"
 cp "$script_dir/public-tree-scrub.sh" "$script_dir/public-tree-scrub.py" "$srepo/scripts/audit/"
 chmod +x "$srepo/scripts/audit/public-tree-scrub.sh"
-cp "$script_dir/../../scripts/release/version-test.rs" "$srepo/scripts/release/version-test.rs"
 git init -q -b main "$srepo"
 git -C "$srepo" config user.name "Public Scrub Test"
 git -C "$srepo" config user.email "$(printf 'scrub@%s' example.invalid)"
+
+run_scrub() {
+    (cd "$srepo" && scripts/audit/public-tree-scrub.sh --index)
+}
+
+show_staged() {
+    (cd "$srepo" && git show :scripts/release/version-test.rs)
+}
+
+cat > "$srepo/scripts/release/version-test.rs" <<'EOF'
+//! Integration test for the `vowp --version` output.
+//!
+//! The publishable `vowp-cli` package manifest lives at the workspace root (see the comment
+//! in the root `Cargo.toml`), so this test is wired up as the `version` target there. It is
+//! the same check as `crates/vowp-cli/tests/version.rs`, which the packaging job does not own
+//! and therefore cannot update with the release version.
+
+use std::process::Command;
+EOF
 git -C "$srepo" add -A
-git -C "$srepo" commit -qm "scrub fixture"
+git -C "$srepo" commit -qm "scrub fixture with the old paragraph"
 original=$(cat "$srepo/scripts/release/version-test.rs")
-(cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1 ||
-    fail "the scrub should pass on the staged fixture"
-if ! (cd "$srepo" && git show :scripts/release/version-test.rs) |
-    grep -q 'asserts the same version that the root package publishes'; then
+run_scrub >/dev/null 2>&1 || fail "the scrub should rewrite the old paragraph"
+if ! show_staged | grep -q 'asserts the same version that the root package publishes'; then
     fail "the scrub did not write the product paragraph"
 fi
-if (cd "$srepo" && git show :scripts/release/version-test.rs) |
-    grep -q 'packaging job does not own'; then
+if show_staged | grep -q 'packaging job does not own'; then
     fail "the scrub left the build-process paragraph in the index"
 fi
 [ "$(cat "$srepo/scripts/release/version-test.rs")" = "$original" ] ||
     fail "the scrub changed the private working tree"
-(cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1 ||
-    fail "the scrub should be idempotent"
-printf '//! changed\n' > "$srepo/scripts/release/version-test.rs"
-git -C "$srepo" add scripts/release/version-test.rs
-if (cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1; then
-    fail "the scrub should fail when the expected paragraph is missing"
+
+run_scrub >/dev/null 2>&1 ||
+    fail "the scrub should be idempotent on an already-scrubbed file"
+if show_staged | grep -q 'packaging job does not own'; then
+    fail "the idempotent scrub reintroduced the old paragraph"
 fi
-git -C "$srepo" checkout HEAD -- scripts/release/version-test.rs
-(cd "$srepo" && scripts/audit/public-tree-scrub.sh --index) >/dev/null 2>&1 ||
-    fail "the scrub should pass after restoring the fixture"
+
+# A duplicate old paragraph is ambiguous and must fail with the count.
+cat > "$srepo/scripts/release/version-test.rs" <<'EOF'
+//! Integration test for the `vowp --version` output.
+//!
+//! The publishable `vowp-cli` package manifest lives at the workspace root (see the comment
+//! in the root `Cargo.toml`), so this test is wired up as the `version` target there. It is
+//! the same check as `crates/vowp-cli/tests/version.rs`, which the packaging job does not own
+//! and therefore cannot update with the release version.
+//!
+//! The publishable `vowp-cli` package manifest lives at the workspace root (see the comment
+//! in the root `Cargo.toml`), so this test is wired up as the `version` target there. It is
+//! the same check as `crates/vowp-cli/tests/version.rs`, which the packaging job does not own
+//! and therefore cannot update with the release version.
+
+use std::process::Command;
+EOF
+git -C "$srepo" add scripts/release/version-test.rs
+duplicate_out=$tmp/scrub-duplicate.txt
+if run_scrub > "$duplicate_out" 2>&1; then
+    fail "the scrub should fail on a duplicate old paragraph"
+fi
+grep -q 'found 2 copies of the old paragraph' "$duplicate_out" ||
+    fail "the duplicate failure did not report the count"
+
+# A partial old paragraph must fail instead of passing as already clean.
+cat > "$srepo/scripts/release/version-test.rs" <<'EOF'
+//! Integration test for the `vowp --version` output.
+//!
+//! It checks that `vowp --version` succeeds and prints the package version.
+//! and therefore cannot update with the release version.
+
+use std::process::Command;
+EOF
+git -C "$srepo" add scripts/release/version-test.rs
+partial_out=$tmp/scrub-partial.txt
+if run_scrub > "$partial_out" 2>&1; then
+    fail "the scrub should fail on a partial old paragraph"
+fi
+grep -q 'partial paragraph' "$partial_out" ||
+    fail "the partial failure did not identify the paragraph"
+
+# An already-clean file (the paragraph absent, as in the private tree) is a
+# no-op and must still pass.
+cat > "$srepo/scripts/release/version-test.rs" <<'EOF'
+//! Integration test for the `vowp --version` output.
+//!
+//! It checks that `vowp --version` succeeds, prints `vowp <package version>`, and reports
+//! the expected package version `0.1.0`.
+
+use std::process::Command;
+EOF
+git -C "$srepo" add scripts/release/version-test.rs
+clean=$(cat "$srepo/scripts/release/version-test.rs")
+clean_out=$tmp/scrub-clean.txt
+run_scrub > "$clean_out" 2>&1 || fail "the scrub should pass on an already-clean file"
+grep -q 'already clean' "$clean_out" || fail "the already-clean scrub did not report a no-op"
+[ "$(show_staged)" = "$clean" ] || fail "the already-clean scrub changed the index"
+[ "$(cat "$srepo/scripts/release/version-test.rs")" = "$clean" ] ||
+    fail "the already-clean scrub changed the working tree"
 
 # 7. The real manifest carries the owner's prune list and owner exceptions.
 for pruned in AGENTS.md docs/dogfood docs/fresh-user docs/maintainers \
@@ -251,4 +323,4 @@ grep -qx 'require docs/design/job-map.md' "$script_dir/public-tree.txt" ||
 grep -qx 'require THIRD-PARTY-LICENSES.md' "$script_dir/public-tree.txt" ||
     fail "real manifest does not require THIRD-PARTY-LICENSES.md"
 
-echo "self-test: PASS: scanner rules, masking, allowlist, history, public-tree prune and content-scrub checks work."
+echo "self-test: PASS: scanner rules, masking, allowlist, history, public-tree prune and content-scrub idempotence work."

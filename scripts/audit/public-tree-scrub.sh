@@ -10,15 +10,16 @@
 #   scripts/audit/public-tree-scrub.sh --index
 #
 # --index honours GIT_INDEX_FILE, so squash-for-public.sh can scrub the
-# temporary public index before it writes the public commit. A missing or
-# duplicated source paragraph is a failure (exit 1), so a future edit cannot
-# silently leave build-process prose in the public tree. If the target
-# paragraph is already replaced, the script succeeds without changing
-# anything.
+# temporary public index before it writes the public commit. The scrub is
+# idempotent: an already-scrubbed file, or a file whose old paragraph was
+# removed from the private tree, succeeds without changing anything. A missing
+# file, a duplicated paragraph, a mix of old and new text, or a partial
+# paragraph is a failure (exit 1), so a future edit cannot silently leave
+# build-process prose in the public tree.
 #
 # Exit status:
 #   0  the staged tree is scrubbed (or already clean)
-#   1  the expected paragraph is missing or ambiguous
+#   1  the staged file is missing, duplicated, mixed or partial
 #   2  usage error or not a git working tree
 
 set -u
@@ -35,8 +36,8 @@ case "${1:-}" in
 Usage: scripts/audit/public-tree-scrub.sh --index
 
 Rewrites the known build-process prose in the staged public tree. The private
-working tree is not changed. Exit 1 when the expected paragraph is missing or
-ambiguous; exit 2 on a usage error.
+working tree is not changed. An already-clean file is a no-op; exit 1 when the
+staged file is missing, duplicated, mixed or partial; exit 2 on a usage error.
 EOF
         exit 0
         ;;
