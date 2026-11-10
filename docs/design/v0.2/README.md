@@ -1,73 +1,89 @@
-# v0.2 design notes — the API, the window and the handoff
+# v0.2 design notes — one home, many surfaces
 
-Status: current for the commands shown; this directory is design only. It is **not** a release
-schedule and none of it is implemented in v0.1. Each note is one screen: goal, non-goals, the
-existing crates it builds on, open questions and a first-issue-sized slice.
+Status: current for v0.2. **`home-and-surfaces.md` is the normative, implementable specification
+for v0.2** (plan §3–§10): schemas, Rust interfaces, C0 hooks, CLI surface, snapshot schema, named
+tests and open assumptions. The other notes here are either subordinate to it or explicitly
+deferred.
 
-## Shared assumptions
-
-1. **The v0.1 wire types stay stable.** `EventEnvelope` and its payload types, `Job`, `NewJob`,
-   `JobPatch`, `Session`, `Run`, `GateResult`, `Switch`, `Capsule`, `Limit`, `Cost` and
-   `LedgerEntry` are already defined once in `vowp-protocol`; `vowp schema` exports the envelope and
-   the main domain types. v0.2 adds transport types around them; it does not rename or repurpose
-   existing fields.
-2. **The database stays the decision log; files stay the content.** The daemon reads the same
-   `Store` and session logs as the CLI. It is not a second source of truth.
-3. **The daemon is local.** It binds `127.0.0.1` only, uses a per-node token, stores no provider
-   credentials, and keeps the SSH path as the remote-access story.
-4. **Write actions reuse existing core paths.** `vowp-core::requests::Request` already models retry,
-   park, cancel, nudge, restart, replan, fail, inbox answer and loop pause/resume; a switch uses
-   `SessionOps::switch` directly. A browser action should call the same path, not invent a second
-   state machine.
-5. **Blocking core stays blocking.** The v0.1 crates use plain threads and blocking I/O. A new
-   `vowp-daemon` crate should own `axum`/`tokio` and depend on `vowp-core`; the core crates should not
-   grow an async runtime.
-6. **Every proposed endpoint has a fixture test.** Tests use a temporary node home and a fake
-   adapter/SSH, never the operator's `~/.vowp`, network, tmux server or real harnesses.
+v0.2 is one **home** (a VPS) that owns one global DB and one DB per project, one node supervisor,
+all session logs, capacity management, leases and surfaces. People talk to it through the opencode
+and Claude apps, through `vowp mcp`, or through `vowp chat`; a control machine holds only a snapshot
+cache and SSH tunnels. There is no listening HTTP API in v0.2.
 
 ## The notes
 
-| Note | v0.2 item | First issue |
+| Note | Status | What it covers |
 |---|---|---|
-| [`http-api.md`](http-api.md) | Daemon HTTP + SSE API and the stable event/job wire contract. | Read-only `health`, `jobs`, `sessions` and per-session event tail. |
-| [`web-window.md`](web-window.md) | Web/PWA window: nodes, sessions, session view with executor switcher, capsule view, board. | Static shell and read-only board page. |
-| [`phone-board.md`](phone-board.md) | Phone-friendly board on the same API. | Responsive board cards with polling. |
-| [`acp-adapter.md`](acp-adapter.md) | Agent Client Protocol adapter. | ACP update mapping against a fake ACP server. |
-| [`cross-node-sync.md`](cross-node-sync.md) | Cross-node session sync. | `session pull` built on the v0.1 bundle. |
-| [`cost-dashboard.md`](cost-dashboard.md) | Cost dashboard. | JSON endpoint plus a table view. |
+| [`home-and-surfaces.md`](home-and-surfaces.md) | **normative for v0.2** | The whole v0.2 spec: data model + DDL, migration, node supervisor, snapshot/fleet, capacity, remote execution, leases/takeover, app hosts/MCP/chat, control machine, secrets, lifecycle, setup, all new CLI commands, C0 hooks, named tests and open assumptions. |
+| [`cross-node-sync.md`](cross-node-sync.md) | updated for v0.2 | The v0.1 bundle move. v0.2's remote execution (§7.2 of the spec) supersedes the "move a session to another node" slice: the session now stays on the home and only the executor moves. The remaining directory-sync and same-id questions are v0.3. |
+| [`acp-adapter.md`](acp-adapter.md) | deferred, not v0.2 delivery | An Agent Client Protocol adapter behind the existing `Adapter` trait. Design only. |
+| [`cost-dashboard.md`](cost-dashboard.md) | deferred, not v0.2 delivery | A cost dashboard on the v0.3 daemon API. Design only. |
 
-The maintainer-ready issue bodies and labels for the roadmap's "Good first issues" section are tracked with the project's issue tracker, not in this directory.
+The daemon API, the web/PWA window and the phone browser board now live under
+[`../v0.3/`](../v0.3/README.md); the ACP adapter and cost dashboard stay here as deferred design
+notes. v0.2 covers the phone with an SSH app and `vowp chat`, so a browser board is not needed for
+this release.
+
+## Shared assumptions (binding for v0.2)
+
+1. **The home is the only writer.** Control machines, apps and MCP servers send `vowp` commands to
+   the home; they never open a DB file. The one exception is a control machine's own snapshot
+   cache and SSH spool.
+2. **The session log stays v0.1.** `log.jsonl` is append-only, one `EventEnvelope` per line, `seq`
+   gapless, capsules and switch unchanged. v0.2 adds a transport, a lease and app mirrors, not a
+   second session model.
+3. **The database is the decision log; files stay the content.** The global DB and the project DBs
+   are the same `Store` abstraction with one project attached at a time.
+4. **No cross-database foreign keys.** SQLite cannot enforce them across attached files. Ids that
+   name the other DB are plain text, validated by `vowp-store` and repaired by the startup
+   reconcile. The full list is in the spec §3.6.
+5. **No unqualified `inbox`/`ledger`.** Because both schemas had those names, the node-level tables
+   are renamed `node_inbox`/`node_ledger`. The spec withdraws the plan's "v0.1 queries work
+   unchanged" sentence and makes C1 audit every statement; the public `Store` API stays
+   source-compatible.
+6. **Blocking core stays blocking.** No async runtime in `vowp-core`. `vowp mcp`, the secret paste
+   page and the tunnel supervisor use plain threads and `std::net`.
+7. **Tests are hermetic.** A temporary `VOWP_HOME`, a private `TMUX_TMPDIR` **and** `tmux -L
+   <unique>`, unset `TMUX`/`TMUX_PANE`, fake adapters, fake SSH and fake apps. Never the operator's
+   `~/.vowp`, the default tmux server, the network or a real harness.
+8. **Linux and macOS stay green.** Linux-only measurement is `cfg`-gated or faked; every merge
+   keeps the whole workspace passing on both.
 
 ## Dependency order
 
 ```
-protocol schemas (already stable)
-        │
-        ▼
-   http-api.md ──────► web-window.md ──────► phone-board.md
-        │
-        ├────────────► cost-dashboard.md
-        │
-        └────────────► cross-node-sync.md (later slices)
+B1 spec (this directory)
+   │
+   ├─ C0 skeleton ──┬─ C2 node supervisor ── E2 admission ── E3 advisor
+   │                ├─ F1 remote exec ── F2 leases ── F3 chat
+   │                ├─ D1 snapshot/fleet
+   │                ├─ D2 control/tunnels
+   │                ├─ E1 measure
+   │                ├─ G1 vault
+   │                ├─ H1 lifecycle / H2 backup
+   │                └─ F5 app hosts ── F4 orchestrator
+   │                                  └─ F6 mcp
+   └─ C1 store split (parallel with C0; both need B1)
 
-acp-adapter.md (independent after the protocol question is settled)
+I1 setup ── I1b setup verify
 ```
 
-The API comes first because three notes consume it. ACP is independent of the daemon: it is an
-adapter behind the existing `Adapter` trait. Cross-node sync starts with the bundle transport that
-already exists and only later grows a daemon transport.
+C0 freezes every interface; C1 can run in parallel because the store split stays inside
+`vowp-store`. The critical path is B1 → C0/C1 → F1 → F2 → F5/F6 → F4 → I1b → K1 → T1 → J1 → J2.
 
-## Out of scope for all of v0.2
+## Out of scope for v0.2
 
-- Multi-user accounts, quotas, roles and audit.
-- A hosted relay or any public listener.
-- Replacing the CLI or the tmux views.
-- Rewriting the job graph or the supervisor loops.
+- More than one home, replication or a multi-VPS scheduler.
+- A listening HTTP/SSE API, a web window, a phone browser board or an ACP adapter (v0.3).
+- Multi-user accounts, quotas, roles or audit.
 - Windows support or a native desktop app.
+- A VOWP-specific chat app: the product surfaces are the opencode and Claude apps, with `vowp chat`
+  as the fallback.
 
 ## See also
 
-- [`../README.md`](../README.md) — the v0.1 implementation spec index.
+- [`../README.md`](../README.md) — the v0.1 implementation spec index (types, schema, crates).
 - [`../architecture.md`](../architecture.md) — components, on-disk layout and compatibility rules.
-- [`../types.md`](../types.md) — the wire types the API serves.
-- [`../../roadmap.md`](../../roadmap.md) — what ships in v0.1 and what comes later.
+- [`../sessions.md`](../sessions.md) — the log, capsule, switch and bundle rules v0.2 reuses.
+- [`../cli.md`](../cli.md) — every v0.1 command and exit code; v0.2 adds the commands in the spec §12.
+- [`../v0.3/README.md`](../v0.3/README.md) — the daemon, browser and ACP notes moved out of v0.2.
