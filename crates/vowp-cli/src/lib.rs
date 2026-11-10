@@ -209,8 +209,31 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     if let Command::Doctor(args) = &command {
         return cmd::doctor::run(&global, io, args);
     }
+    // Node-scoped commands run before `Ctx::build`: a v0.1 home cannot open its store
+    // until `vowp migrate` (or `vowp up`'s automatic migration) has split it, and the
+    // registry commands need no checkout at all.
+    if let Some(code) = execute_node_scoped(&global, &command, io)? {
+        return Ok(code);
+    }
     let ctx = Ctx::build(&global, io)?;
     cmd::dispatch(&ctx, io, command)
+}
+
+/// Dispatches `up`, `down`, `migrate` and `project` without a project context.
+///
+/// Returns `Ok(None)` for every other command. These four are node-scoped per
+/// `docs/design/v0.2/home-and-surfaces.md` §3.9, §4.5 and §4.6: they must work from
+/// `~/.vowp` itself (the unit's `WorkingDirectory`), on a v0.1 home and on a home with
+/// several projects. [`Ctx::build`] requires a project config and an openable v0.2
+/// database, so none of them may wait for it.
+fn execute_node_scoped(global: &Global, command: &Command, io: &mut dyn IoStreams) -> Result<Option<i32>, CliError> {
+    match command {
+        Command::Up(args) => cmd::up::run_node(global, io, &crate::cli::UpCommand::Up(args.clone())).map(Some),
+        Command::Down(args) => cmd::up::run_node(global, io, &crate::cli::UpCommand::Down(args.clone())).map(Some),
+        Command::Migrate(args) => cmd::migrate::run_node(global, io, args).map(Some),
+        Command::Project(args) => cmd::project::run_node(global, io, args).map(Some),
+        _ => Ok(None),
+    }
 }
 
 /// Reads all of stdin as UTF-8 text.

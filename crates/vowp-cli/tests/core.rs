@@ -318,9 +318,6 @@ fn c0_refuses_frozen_flags_whose_handlers_are_not_implemented() {
     let legacy = env.home_path().join("legacy.db");
     let legacy = legacy.to_str().expect("legacy path");
     let cases: &[&[&str]] = &[
-        &["up", "--no-migrate"],
-        &["loops", "--all"],
-        &["schedule", "--all", "ls"],
         &["chat", "s", "--node", "laptop"],
         &["chat", "s", "--follow"],
         &["chat", "s", "--takeover"],

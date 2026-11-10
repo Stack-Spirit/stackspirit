@@ -19,6 +19,7 @@ use vowp_protocol::{Project, ProjectEntry, ProjectName, ProjectState};
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::session_name_for_project;
 
+use crate::cli::Global;
 use crate::output::{Table, print_json};
 use crate::{CliError, Ctx, IoStreams};
 
@@ -111,6 +112,25 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ProjectArgs) -> Result<i32,
         deps: ctx.deps(),
         json: ctx.json(),
         color: ctx.color(),
+    };
+    dispatch(&registry, io, args)
+}
+
+/// Runs `vowp project` before a project context exists.
+///
+/// Registry commands act on the node, not on the selected checkout: they must work from
+/// any directory, with several registered projects and on a home whose only context is
+/// the node-level `vowp.toml`. Building the node dependencies directly also keeps
+/// `project add` independent of the checkout the caller happens to stand in.
+pub fn run_node(global: &Global, io: &mut dyn IoStreams, args: &ProjectArgs) -> Result<i32, CliError> {
+    let paths = crate::ctx::node_paths(global)?;
+    crate::ctx::require_initialised_home(&paths)?;
+    let deps = crate::node_ctx::home_shell_deps(&paths)?;
+    let registry = Registry {
+        paths: &paths,
+        deps: &deps,
+        json: global.json,
+        color: crate::ctx::color_enabled(global, io),
     };
     dispatch(&registry, io, args)
 }

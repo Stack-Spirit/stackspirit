@@ -11,6 +11,7 @@ use clap::Args;
 use vowp_protocol::VowpConfig;
 use vowp_store::MigrationReport;
 
+use crate::cli::Global;
 use crate::output::{Table, print_json};
 use crate::{CliError, Ctx, IoStreams};
 
@@ -31,6 +32,19 @@ pub struct MigrateArgs {
 /// Runs `vowp migrate` with a project context.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &MigrateArgs) -> Result<i32, CliError> {
     migrate(ctx.paths(), ctx.json(), ctx.color(), io, args)
+}
+
+/// Runs `vowp migrate` before a project context exists.
+///
+/// A v0.1 home cannot be opened through [`Ctx::build`]: the store refuses its schema until
+/// this command has split it. The wrapper is therefore dispatched straight from the node
+/// paths, which is also what lets it run from `~/.vowp` itself (the systemd unit's
+/// `WorkingDirectory`) without a checkout or a `--project`.
+pub fn run_node(global: &Global, io: &mut dyn IoStreams, args: &MigrateArgs) -> Result<i32, CliError> {
+    let paths = crate::ctx::node_paths(global)?;
+    crate::ctx::require_initialised_home(&paths)?;
+    let color = crate::ctx::color_enabled(global, io);
+    migrate(&paths, global.json, color, io, args)
 }
 
 /// Runs one migration mode and prints its report.

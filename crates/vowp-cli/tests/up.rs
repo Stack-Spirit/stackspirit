@@ -622,6 +622,34 @@ fn tmux_layout_created_with_fake_windows() {
     }
 }
 
+#[test]
+fn tmux_home_and_project_layout() {
+    let windows = FakeWindows::new();
+    let cwd = tempfile::tempdir().expect("temp cwd");
+    let program = vec!["vowp".to_owned()];
+    vowp_cli::cmd::up::ensure_home_windows(&windows, &program, Some(cwd.path())).expect("home layout");
+
+    let specs = windows.specs("vowp-home");
+    let names: Vec<&str> = specs.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["board", "capacity"]);
+    for (name, spec) in &specs {
+        assert_eq!(
+            spec.argv,
+            vec!["vowp".to_owned(), "__window".to_owned(), name.clone()],
+            "window {name} runs the node viewer"
+        );
+        assert_eq!(spec.cwd.as_deref(), Some(cwd.path()));
+    }
+
+    // Idempotent: a second call changes nothing.
+    vowp_cli::cmd::up::ensure_home_windows(&windows, &program, Some(cwd.path())).expect("second layout");
+    assert_eq!(windows.specs("vowp-home").len(), 2);
+
+    vowp_cli::cmd::up::ensure_project_windows(&windows, "demo", Some(cwd.path()), &program).expect("project layout");
+    let names: Vec<String> = windows.specs("vowp-demo").into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["board", "supervisor", "planner", "keeper", "inbox"]);
+}
+
 /// Kills the private tmux server when the test ends (also on panic).
 struct TmuxGuard {
     tmux: Tmux,
@@ -1201,6 +1229,92 @@ fn migrate_reports_a_split_or_missing_home_without_writing() {
 }
 
 #[test]
+fn migrate_and_project_dispatch_before_a_project_context() {
+    let env = common::TestEnv::new();
+    let not_a_checkout = env.home_path().join("not-a-checkout");
+    let run = |json: bool, args: &[&str]| {
+        let mut full = vec!["vowp".to_owned()];
+        if json {
+            full.push("--json".to_owned());
+        }
+        full.extend([
+            "--home".to_owned(),
+            env.home_path().display().to_string(),
+            "--project".to_owned(),
+            not_a_checkout.display().to_string(),
+        ]);
+        full.extend(args.iter().map(|value| (*value).to_owned()));
+        let mut io = vowp_cli::BufferIo::new("");
+        let code = vowp_cli::run(full, &mut io);
+        (code, io.stdout(), io.stderr())
+    };
+
+    // `migrate` is home-scoped: a bad `--project` must not stop preflight. A v0.2 home
+    // reaches the store and reports "expected 1" instead of Ctx::build's missing-config
+    // error (exit 3).
+    let (code, _, stderr) = run(false, &["migrate", "--dry-run"]);
+    assert_eq!(code, 2, "migrate must reach the store: {stderr}");
+    assert!(stderr.contains("expected 1"), "{stderr}");
+
+    // Registry commands do not need a checkout either, and they must work with several
+    // registered projects and an unusable `--project`.
+    let (code, stdout, stderr) = run(true, &["project", "ls"]);
+    assert_eq!(code, 0, "project ls must work without a project context: {stderr}");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("project ls json");
+    assert!(
+        entries.iter().any(|entry| entry["name"] == "test"),
+        "the registry is listed: {stdout}"
+    );
+}
+
+#[test]
+fn up_no_migrate_runs_a_node_tick() {
+    let env = common::TestEnv::new();
+    let (code, stdout, stderr) = env.run(&["up", "--no-migrate", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "up --no-migrate must reach the handler: {stderr}");
+    assert!(stdout.contains("tick "), "{stdout}");
+    assert!(env.home_path().join("heartbeat").is_file());
+}
+
+#[test]
+fn loops_and_schedule_all_are_reachable_from_the_cli() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let (code, _, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
+    assert_eq!(code, 0, "{stderr}");
+    // The loop rows are created by the supervisor's first tick for each project.
+    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, value, stderr) = env.run_json(&["loops", "--all"]);
+    assert_eq!(code, 0, "loops --all: {stderr}");
+    let projects: Vec<&str> = value
+        .as_array()
+        .expect("loop array")
+        .iter()
+        .filter_map(|loop_| loop_["project"].as_str())
+        .collect();
+    assert!(
+        projects.contains(&"test") && projects.contains(&"second"),
+        "every project's loops are listed: {value}"
+    );
+
+    let (code, value, stderr) = env.run_json(&["schedule", "--all", "ls"]);
+    assert_eq!(code, 0, "schedule --all ls: {stderr}");
+    let projects: Vec<&str> = value
+        .as_array()
+        .expect("schedule array")
+        .iter()
+        .filter_map(|schedule| schedule["project"].as_str())
+        .collect();
+    assert!(
+        projects.contains(&"test") && projects.contains(&"second"),
+        "every project's schedules are listed: {value}"
+    );
+}
+
+#[test]
 fn up_registers_a_v01_checkout_before_joining_the_node_supervisor() {
     let env = common::TestEnv::new();
     let checkout = git_repo();
@@ -1420,5 +1534,15 @@ fn loops_and_schedule_all_handlers_list_every_project() {
     )
     .expect("schedule --all ls");
     assert_eq!(code, 0);
-    assert_eq!(schedule_io.stdout().trim(), "[]");
+    let schedules: serde_json::Value = serde_json::from_str(&schedule_io.stdout()).expect("schedule json");
+    let projects: Vec<&str> = schedules
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|schedule| schedule["project"].as_str().expect("project"))
+        .collect();
+    assert!(
+        projects.contains(&"test") && projects.contains(&"second"),
+        "{schedules}"
+    );
 }

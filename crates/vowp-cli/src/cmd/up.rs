@@ -23,9 +23,9 @@ use vowp_core::Deps;
 use vowp_core::loops::{NodeSupervisor, NodeTickReport};
 use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
 use vowp_store::{NodePaths, Store, StoreError};
-use vowp_tmux::{LayoutSpec, WindowManager, session_name_for_project};
+use vowp_tmux::{LayoutSpec, TmuxError, WindowManager, WindowSpec, session_name_for_project};
 
-use crate::cli::{DownArgs, UpArgs, UpCommand};
+use crate::cli::{DownArgs, Global, UpArgs, UpCommand};
 use crate::{CliError, Ctx, IoStreams, signals};
 
 /// How long `down` waits for a cooperative stop before reporting a conflict.
@@ -43,13 +43,16 @@ const CHILD_EXIT_WAIT: Duration = Duration::from_secs(6);
 /// Grace after SIGTERM before a direct child is killed with SIGKILL.
 const CHILD_KILL_WAIT: Duration = Duration::from_secs(2);
 
-/// Runs `vowp up` or `vowp down` with a project context.
+/// Runs `vowp up` or `vowp down` before a project context exists.
 ///
-/// The context is built from a checkout in the current directory or from `--project`.
-/// `up` refuses on a configured control machine and registers a checkout that is not yet
-/// in the registry, then starts the one node supervisor for every active project.
-pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
-    let deps = supervisor_deps(ctx);
+/// Both commands are node-scoped: they must work from `~/.vowp` with no checkout, on a
+/// home that still has the v0.1 schema (which [`Ctx::build`] cannot open), and on a home
+/// with several projects. `up` refuses on a configured control machine, migrates the home
+/// and registers a checkout the caller stands in, then starts the one node supervisor for
+/// every active project.
+pub fn run_node(global: &Global, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
+    let paths = crate::ctx::node_paths(global)?;
+    crate::ctx::require_initialised_home(&paths)?;
     match command {
         UpCommand::Up(args) => {
             if crate::node_ctx::is_control_machine()? {
@@ -57,23 +60,51 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32
                     "this is a control machine; the home runs the supervisor".to_owned(),
                 ));
             }
-            run_up(ctx, &deps, io, args)
+            let deps = supervisor_deps(crate::node_ctx::home_deps(&paths)?, &paths);
+            run_up(global, &paths, &deps, io, args)
+        }
+        UpCommand::Down(args) => {
+            let deps = crate::node_ctx::home_shell_deps(&paths)?;
+            run_down(&paths, &deps, global.json, io, args)
+        }
+    }
+}
+
+/// Runs `vowp up` or `vowp down` with a project context.
+///
+/// Kept for in-process callers that already built a [`Ctx`]; the CLI dispatches
+/// node-scoped commands through [`run_node`] so a v0.1 home never reaches [`Ctx::build`].
+pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
+    let deps = supervisor_deps(ctx.deps().clone(), ctx.paths());
+    match command {
+        UpCommand::Up(args) => {
+            if crate::node_ctx::is_control_machine()? {
+                return Err(CliError::Guard(
+                    "this is a control machine; the home runs the supervisor".to_owned(),
+                ));
+            }
+            let global = Global {
+                json: ctx.json(),
+                home: Some(ctx.paths().root().to_path_buf()),
+                project: Some(ctx.project_root().display().to_string()),
+                ..Global::default()
+            };
+            run_up(&global, ctx.paths(), &deps, io, args)
         }
         UpCommand::Down(args) => run_down(ctx.paths(), &deps, ctx.json(), io, args),
     }
 }
 
 /// Registers the selected checkout when `up` is run in one, keeping v0.1 compatibility.
-fn register_checkout_for_up(ctx: &Ctx) -> Result<(), CliError> {
-    let root = ctx.project_root();
-    if ctx.config().project.name.as_str() == vowp_store::RESERVED_NODE_PROJECT || root == ctx.paths().root() {
+fn register_checkout_for_up(paths: &NodePaths, deps: &Deps, checkout: Option<&Path>) -> Result<(), CliError> {
+    let Some(root) = checkout else {
         return Ok(());
-    }
-    let store = Store::open_global(ctx.paths())?;
+    };
+    let store = Store::open_global(paths)?;
     if vowp_core::loops::registry::project_by_path(&store, root)?.is_some() {
         return Ok(());
     }
-    crate::cmd::project::register_checkout(ctx.paths(), ctx.deps(), root, None, None)?;
+    crate::cmd::project::register_checkout(paths, deps, root, None, None)?;
     Ok(())
 }
 
@@ -117,10 +148,58 @@ pub fn ensure_project_windows(
         .map_err(|error| CliError::Core(vowp_core::CoreError::Tmux(error)))
 }
 
-/// Creates `vowp-<project>` for every project that is not archived.
+/// Creates the node-level `vowp-home` session from spec §4.4.
+///
+/// Windows: `board` (the node board) and `capacity` (the `__window capacity` renderer,
+/// still a C0 stub until E2 fills it). The `orchestrator` window is added by F4 when a
+/// default orchestrator exists; v0.2 has no orchestrator registry yet.
+pub fn ensure_home_windows(
+    windows: &dyn WindowManager,
+    program: &[String],
+    cwd: Option<&Path>,
+) -> Result<(), CliError> {
+    let session = "vowp-home";
+    windows.ensure_session(session).map_err(tmux_error)?;
+    for name in ["board", "capacity"] {
+        if windows.window_exists(session, name).map_err(tmux_error)? {
+            continue;
+        }
+        let mut argv = program.to_vec();
+        argv.push("__window".to_owned());
+        argv.push(name.to_owned());
+        let spec = WindowSpec {
+            argv,
+            cwd: cwd.map(Path::to_path_buf),
+            env: Vec::new(),
+        };
+        match windows.new_window(session, name, &spec) {
+            Ok(()) | Err(TmuxError::WindowExists { .. }) => {}
+            Err(error) => return Err(tmux_error(error)),
+        }
+    }
+    // `ensure_session` starts with a tagged scratch window; the fixed layout drops it
+    // exactly like `ensure_layout` does for a project session.
+    if windows.window_exists(session, "scratch").map_err(tmux_error)? {
+        let _ = windows.kill_window(session, "scratch");
+    }
+    Ok(())
+}
+
+/// Maps a tmux failure onto the CLI's typed core error.
+fn tmux_error(error: TmuxError) -> CliError {
+    CliError::Core(vowp_core::CoreError::Tmux(error))
+}
+
+/// Creates `vowp-home` and `vowp-<project>` for every project that is not archived.
 fn ensure_node_windows(paths: &NodePaths, windows: &dyn WindowManager) -> Result<(), CliError> {
     let store = Store::open_global(paths)?;
     let exe = std::env::current_exe()?;
+    let home_program = vec![
+        exe.to_string_lossy().into_owned(),
+        "--home".to_owned(),
+        paths.root().display().to_string(),
+    ];
+    ensure_home_windows(windows, &home_program, Some(paths.root()))?;
     for entry in vowp_core::loops::registry::project_entries(&store)? {
         if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
             continue;
@@ -180,10 +259,15 @@ struct TransitionOutput {
     to: String,
 }
 
-/// Runs `vowp up`.
-fn run_up(ctx: &Ctx, deps: &Deps, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliError> {
-    let paths = ctx.paths();
-    let json = ctx.json();
+/// Runs `vowp up` over an explicit home.
+fn run_up(
+    global: &Global,
+    paths: &NodePaths,
+    deps: &Deps,
+    io: &mut dyn IoStreams,
+    args: &UpArgs,
+) -> Result<i32, CliError> {
+    let json = global.json;
     if let Some(pid) = live_supervisor_pid(paths) {
         return Err(CliError::Conflict(format!(
             "supervisor already running (pid {pid}); `vowp status` shows it"
@@ -203,7 +287,8 @@ fn run_up(ctx: &Ctx, deps: &Deps, io: &mut dyn IoStreams, args: &UpArgs) -> Resu
         }
     }
     crate::node_ctx::ensure_home_project_file(paths)?;
-    register_checkout_for_up(ctx)?;
+    let checkout = crate::ctx::selected_checkout_root(global, paths)?;
+    register_checkout_for_up(paths, deps, checkout.as_deref())?;
     if !args.no_tmux {
         match ensure_node_windows(paths, deps.windows.as_ref()) {
             Ok(()) => {}
@@ -220,15 +305,15 @@ fn run_up(ctx: &Ctx, deps: &Deps, io: &mut dyn IoStreams, args: &UpArgs) -> Resu
     if args.foreground {
         return run_foreground(paths, deps, json, io);
     }
-    run_detached(paths, Some(ctx.project_root()), json, io)
+    run_detached(paths, checkout.as_deref(), json, io)
 }
 
 /// Migrates a v0.1 home before the supervisor opens it.
 ///
 /// The store's `open_global` refuses a version-1 file with [`StoreError::MigrationRequired`];
 /// that is the only signal needed. `allow=false` (the `--no-migrate` path) turns the refusal
-/// into a clear conflict. C0's dispatch guard in `cmd/mod.rs` currently refuses that flag
-/// before this handler; the branch is ready for the owner follow-up that removes the guard.
+/// into a clear conflict, so a unit started with `--no-migrate` on a v0.1 home fails with
+/// `vowp migrate` in the message instead of a raw schema error.
 fn migrate_if_needed(paths: &NodePaths, allow: bool) -> Result<Option<vowp_store::MigrationReport>, CliError> {
     match Store::open_global(paths) {
         Ok(_) => Ok(None),
@@ -247,12 +332,22 @@ fn run_once(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) 
     let result = tick_once(deps);
     remove_lock_if_own(paths, pid);
     let report = result?;
+    print_tick_report(io, &report, json)
+}
 
-    let ok = report.steps.iter().all(|step| step.ok)
-        && report
+/// Prints one node tick and returns the exit code for `up --once`.
+///
+/// A failed node step or a failed project step makes the tick non-zero: `--once` is a
+/// diagnostic run (tests and cron), so a degraded project must not look like success on
+/// the human path while `--json` already reports `ok: false`.
+fn print_tick_report(io: &mut dyn IoStreams, report: &NodeTickReport, json: bool) -> Result<i32, CliError> {
+    let project_steps = || {
+        report
             .projects
-            .values()
-            .all(|project| project.steps.iter().all(|step| step.ok));
+            .iter()
+            .flat_map(|(project, tick)| tick.steps.iter().map(move |step| (project, step)))
+    };
+    let ok = report.steps.iter().all(|step| step.ok) && project_steps().all(|(_, step)| step.ok);
     if json {
         let output = TickOutput {
             at: report.at.as_rfc3339(),
@@ -290,13 +385,16 @@ fn run_once(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) 
         };
         crate::output::print_json(io, &output)?;
     } else {
-        let completed = report.steps.iter().filter(|step| step.ok).count();
+        let node_steps = report.steps.len();
+        let project_step_count = project_steps().count();
+        let completed =
+            report.steps.iter().filter(|step| step.ok).count() + project_steps().filter(|(_, step)| step.ok).count();
         writeln!(
             io.out(),
             "tick {}: {}/{} steps ok, {} project(s), {} dispatched",
             report.at.as_rfc3339(),
             completed,
-            report.steps.len(),
+            node_steps + project_step_count,
             report.projects.len(),
             report
                 .projects
@@ -307,11 +405,14 @@ fn run_once(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams) 
         for step in report.steps.iter().filter(|step| !step.ok) {
             writeln!(io.out(), "  degraded {}: {}", step.name, step.detail)?;
         }
+        for (project, step) in project_steps().filter(|(_, step)| !step.ok) {
+            writeln!(io.out(), "  degraded {project}/{}: {}", step.name, step.detail)?;
+        }
         for (project, detail) in &report.skipped {
             writeln!(io.out(), "  skipped {project}: {detail}")?;
         }
     }
-    Ok(0)
+    Ok(if ok { 0 } else { 1 })
 }
 
 /// Runs the supervisor loop in this process until the stop file appears.
@@ -328,7 +429,13 @@ pub fn run_foreground_with<F>(ctx: &Ctx, io: &mut dyn IoStreams, install: F) -> 
 where
     F: FnOnce(&NodePaths) -> std::io::Result<signals::SignalWatcher>,
 {
-    run_foreground_with_paths(ctx.paths(), &supervisor_deps(ctx), ctx.json(), io, install)
+    run_foreground_with_paths(
+        ctx.paths(),
+        &supervisor_deps(ctx.deps().clone(), ctx.paths()),
+        ctx.json(),
+        io,
+        install,
+    )
 }
 
 /// The foreground loop over an explicit home, dependencies and JSON flag.
@@ -745,8 +852,19 @@ fn send_term(pid: u32) -> Result<(), CliError> {
     }
 }
 
-/// Kills every tagged window in every project session.
+/// Kills every tagged window in the node session and every project session.
 fn kill_windows(paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
+    match deps.windows.list_windows("vowp-home") {
+        Ok(windows) => {
+            for window in windows {
+                if window.tagged {
+                    let _ = deps.windows.kill_window("vowp-home", &window.name);
+                }
+            }
+        }
+        Err(TmuxError::NotInstalled) => {}
+        Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
+    }
     let store = Store::open_global(paths)?;
     for entry in vowp_core::loops::registry::project_entries(&store)? {
         if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
@@ -799,11 +917,10 @@ fn remove_lock(paths: &NodePaths) {
 }
 
 /// Clones the context dependencies and replaces the log with the node's supervisor log.
-fn supervisor_deps(ctx: &Ctx) -> Deps {
-    let mut deps = ctx.deps().clone();
+fn supervisor_deps(mut deps: Deps, paths: &NodePaths) -> Deps {
     deps.log = Arc::new(FileLog::new(
-        ctx.paths().logs_dir().join("supervisor.log"),
-        Arc::clone(&ctx.deps().clock),
+        paths.logs_dir().join("supervisor.log"),
+        Arc::clone(&deps.clock),
     ));
     deps
 }
@@ -846,6 +963,45 @@ impl Log for FileLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_tick_report_surfaces_a_degraded_project_and_fails_the_tick() {
+        use vowp_core::loops::{StepReport, TickReport};
+
+        let at = Timestamp::parse("2026-11-10T10:00:00Z").expect("timestamp");
+        let mut projects = std::collections::BTreeMap::new();
+        projects.insert(
+            ProjectName::parse("demo").expect("project"),
+            TickReport {
+                at,
+                steps: vec![StepReport {
+                    name: "harvest",
+                    ok: false,
+                    detail: "disk full".to_owned(),
+                }],
+                dispatched: Vec::new(),
+                transitions: Vec::new(),
+                merged: Vec::new(),
+            },
+        );
+        let report = NodeTickReport {
+            at,
+            steps: vec![StepReport {
+                name: "sample",
+                ok: true,
+                detail: "host sampled".to_owned(),
+            }],
+            projects,
+            skipped: Vec::new(),
+        };
+
+        let mut io = crate::BufferIo::new("");
+        let code = print_tick_report(&mut io, &report, false).expect("print");
+        assert_eq!(code, 1, "a failed project step must fail `up --once`");
+        let stdout = io.stdout();
+        assert!(stdout.contains("1/2 steps ok"), "{stdout}");
+        assert!(stdout.contains("degraded demo/harvest: disk full"), "{stdout}");
+    }
 
     #[test]
     fn parse_ps_children_skips_zombies_malformed_lines_and_invalid_pids() {

@@ -11,8 +11,8 @@ use vowp_core::deps::{AdapterRegistry, FixedRng, SystemRunner};
 use vowp_core::loops::NodeSupervisor;
 use vowp_core::{Deps, SystemGit};
 use vowp_protocol::{
-    ActiveState, FakeClock, InboxState, Job, JobKind, JobState, MemoryLog, NewJob, NodeName, Project, ProjectName,
-    ProjectState, Role, Timestamp, VowpConfig,
+    ActiveState, Cost, FakeClock, InboxState, Job, JobKind, JobState, MemoryLog, NewJob, NodeName, Project,
+    ProjectName, ProjectState, Role, Run, RunId, RunPurpose, RunRole, Timestamp, VowpConfig,
 };
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -306,6 +306,80 @@ fn broken_project_parks_alone_after_three_failed_ticks() {
     assert!(
         fifth.projects[&broken].steps.iter().any(|step| !step.ok),
         "the underlying failure is still visible"
+    );
+}
+
+#[test]
+fn a_project_added_after_startup_reconciles_cross_db_before_its_first_tick() {
+    let env = NodeEnv::new();
+    env.add_project("alpha", |_| {});
+    let mut supervisor = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
+    supervisor.startup().expect("startup");
+
+    // A project registered while the supervisor runs gets its first tick on the next
+    // pass. That first tick must run the same cross-db reconcile as `startup()`.
+    let beta = env.add_project("beta", |_| {});
+    let store = Store::open_with_project(&env.paths, &beta)
+        .expect("beta store")
+        .with_clock(Arc::new(env.clock.clone()));
+    let finished = Run {
+        id: RunId::new(),
+        job_id: None,
+        session_id: None,
+        role: RunRole::Worker,
+        purpose: RunPurpose::Start,
+        profile: None,
+        rung: 0,
+        executor: None,
+        provider: None,
+        node: env.deps.node.clone(),
+        native_session_id: None,
+        pid: None,
+        window: None,
+        cwd: None,
+        started_at: ts(),
+        ended_at: None,
+        exit_code: None,
+        outcome: None,
+        limit_kind: None,
+        cost: Cost::unknown(),
+        detail: String::new(),
+    };
+    store.insert_run(&finished).expect("run");
+    store
+        .finish_run(
+            &finished.id,
+            &vowp_store::RunFinish {
+                outcome: vowp_protocol::RunOutcome::Crash,
+                exit_code: None,
+                limit_kind: None,
+                cost: Cost::unknown(),
+                native_session_id: None,
+                detail: "test".to_owned(),
+            },
+        )
+        .expect("finish run");
+
+    let report = supervisor.tick().expect("tick");
+    assert!(
+        report.projects.contains_key(&beta),
+        "the new project is ticked: {report:?}"
+    );
+
+    // Cross-db reconcile step 4 adds the missing cost note. Without the reconcile in the
+    // first tick of a project added after `startup()`, the note stays absent.
+    let store = Store::open_with_project(&env.paths, &beta).expect("beta store");
+    let repairs = store
+        .ledger_since(&vowp_store::LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::Note),
+            ..vowp_store::LedgerFilter::default()
+        })
+        .expect("ledger rows");
+    assert!(
+        repairs
+            .iter()
+            .any(|entry| entry.run_id.as_ref() == Some(&finished.id) && entry.summary == "cost missing after crash"),
+        "the cross-db repair note is written before the first L1 tick: {repairs:?}"
     );
 }
 

@@ -57,8 +57,10 @@ impl Ctx {
     /// [`crate::remote::maybe_run`] before this function runs. An uninitialised machine
     /// gets an empty context so `vowp control init` can create the control role.
     ///
-    /// Errors: `NotFound` when an explicit home has no node database, `InvalidInput`
-    /// when no project can be selected, and the config errors of `vowp.toml`.
+    /// Errors: `NotFound` when an explicit home has no node database or a selected
+    /// checkout has no `vowp.toml`, and the config errors of `vowp.toml`. A home with
+    /// zero or several projects and no `--project` builds a fleet context instead of
+    /// failing; [`Ctx::store`] then refuses project-scoped work.
     pub fn build(global: &Global, io: &dyn IoStreams) -> Result<Ctx, CliError> {
         let node = NodeCtx::discover(global)?;
         let control = node.require_control().ok().cloned();
@@ -137,7 +139,7 @@ impl Ctx {
             rng: Arc::new(SystemRng::new()),
         };
 
-        let color = !global.no_color && io.is_tty() && std::env::var_os("NO_COLOR").is_none();
+        let color = color_enabled(global, io);
         Ok(Ctx {
             paths,
             deps,
@@ -260,6 +262,78 @@ pub fn node_paths(global: &Global) -> Result<NodePaths, CliError> {
         Some(home) => Ok(NodePaths::new(home)),
         None => Ok(NodePaths::from_env()?),
     }
+}
+
+/// Returns whether human output may use ANSI colour.
+///
+/// Commands that run before [`Ctx`] exists (and therefore cannot ask the context) use
+/// this instead, so `--no-color`, `NO_COLOR` and a non-TTY behave the same everywhere.
+pub fn color_enabled(global: &Global, io: &dyn IoStreams) -> bool {
+    !global.no_color && io.is_tty() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Refuses a node-scoped command on a machine with no database.
+///
+/// `up`, `down`, `migrate` and `project` dispatch before [`Ctx::build`], because a v0.1
+/// home cannot open its database until it has been migrated. They still keep the v0.1
+/// "run `vowp init` first" error for an empty home.
+pub fn require_initialised_home(paths: &NodePaths) -> Result<(), CliError> {
+    if paths.db_path().is_file() {
+        return Ok(());
+    }
+    Err(CliError::NotFound(
+        "vowp home is not initialised; run `vowp init`".to_owned(),
+    ))
+}
+
+/// Resolves the checkout a node-scoped command should register, if any.
+///
+/// `--project <path>` names a checkout directly; `--project <name>` is looked up in the
+/// registry. Without `--project`, the nearest ancestor with a `vowp.toml` wins. The
+/// reserved `_node` home file is not a project checkout, so it resolves to `None`.
+///
+/// Unlike [`resolve_project_root`] this never falls back to "the only registered
+/// project": `up` runs the node supervisor for every project, so no project selection is
+/// needed and a checkout is only registered when the caller actually stands in one.
+pub fn selected_checkout_root(global: &Global, paths: &NodePaths) -> Result<Option<PathBuf>, CliError> {
+    let candidate = if let Some(value) = &global.project {
+        let candidate = PathBuf::from(value);
+        if candidate.is_dir() {
+            if !candidate.join("vowp.toml").is_file() {
+                return Err(CliError::NotFound(format!(
+                    "no vowp.toml in {}; run `vowp init`",
+                    candidate.display()
+                )));
+            }
+            Some(candidate)
+        } else {
+            let name = ProjectName::parse(value)?;
+            let store = Store::open_global(paths)?;
+            let project = store
+                .project(&name)?
+                .ok_or_else(|| CliError::NotFound(format!("project {name}; run `vowp init`")))?;
+            let root = PathBuf::from(project.path);
+            if !root.join("vowp.toml").is_file() {
+                return Err(CliError::NotFound(format!(
+                    "no vowp.toml in {}; run `vowp init`",
+                    root.display()
+                )));
+            }
+            Some(root)
+        }
+    } else {
+        let cwd = std::env::current_dir()?;
+        find_project_root(&cwd)
+    };
+
+    let Some(root) = candidate else {
+        return Ok(None);
+    };
+    let config = load_project_config(&root.join("vowp.toml"), paths)?;
+    if config.project.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
+        return Ok(None);
+    }
+    Ok(Some(root))
 }
 
 /// Resolves the project root from `--project`, the cwd, or the only registered project.

@@ -2486,7 +2486,16 @@ impl NodeSupervisor {
             };
             if !project.started {
                 match project.inner.startup() {
-                    Ok(_) => project.started = true,
+                    Ok(_) => {
+                        project.started = true;
+                        // §3.8: a project added after `NodeSupervisor::startup` must
+                        // reconcile its cross-file rows before its first L1 tick too.
+                        if let Err(error) = project.inner.store.reconcile_cross_db() {
+                            self.deps
+                                .log
+                                .log(Level::Warn, "node", &format!("cross-db reconcile for {name}: {error}"));
+                        }
+                    }
                     Err(error) => {
                         self.last_failure.insert(name.clone(), error.to_string());
                         skipped.push((name.clone(), error.to_string()));
