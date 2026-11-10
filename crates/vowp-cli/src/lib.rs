@@ -193,6 +193,11 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
             vowp_store::Store::open(&paths)?;
         }
     }
+    // C0: chat's v0.2 flags are frozen but their handler is F3's. Refuse them before the
+    // generic `--node` redirect, which would otherwise silently run the v0.1 chat loop.
+    if cmd::command_needs_v0_2_handler(&command) {
+        return Err(cmd::not_implemented());
+    }
     // Cross-node session export/import/switch stream a bundle instead of forwarding a local
     // id or path to the remote node (cli.md §7.5–§7.6).
     if let Some(code) = cmd::session::maybe_run_remote(&global, io, &command)? {

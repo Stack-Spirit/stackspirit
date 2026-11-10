@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::capacity::CapacitySnapshot;
+pub use crate::capacity::CapacitySnapshot;
 use crate::event::SessionRole;
 use crate::executor::Role;
 use crate::ids::{InboxId, JobId, NodeName, ProjectName, SessionId};

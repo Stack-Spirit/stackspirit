@@ -70,10 +70,12 @@ pub fn begin_turn(_deps: &Deps, _store: &Store, _req: &BeginTurn) -> Result<Turn
 /// Reads remote lines and appends their events to the home session log.
 pub fn ingest_lines(
     _deps: &Deps,
-    _store: &Store,
-    _grant: &IngestGrant,
+    store: &Store,
+    grant: &IngestGrant,
     _reader: &mut dyn BufRead,
     _ack: &mut dyn Write,
 ) -> Result<IngestReport, CoreError> {
+    // C0 hook: a live lease must match the token carried by RemoteLine::Hello (F2 fills).
+    crate::surface::check_lease_with(store, &grant.session, Some(&grant.lease))?;
     Ok(IngestReport::default())
 }

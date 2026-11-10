@@ -228,6 +228,9 @@ pub struct UpArgs {
     /// Do not create the tmux windows.
     #[arg(long)]
     pub no_tmux: bool,
+    /// Do not migrate the home before starting the supervisor.
+    #[arg(long)]
+    pub no_migrate: bool,
     /// Run exactly one supervisor tick and exit.
     #[arg(long)]
     pub once: bool,
@@ -1007,6 +1010,9 @@ pub struct BackupArgs {
     /// Fresh home directory to restore into.
     #[arg(long, value_name = "DIR")]
     pub to_home: Option<PathBuf>,
+    /// Overwrite an existing restore target.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `vowp schema`.

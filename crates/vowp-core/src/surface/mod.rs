@@ -18,6 +18,7 @@ use crate::deps::Deps;
 pub use lease::{AcquireLease, LeaseGuard, check_lease, check_lease_with, new_lease_token};
 pub use mirror::ResumeContext;
 pub use takeover::takeover;
+pub use vowp_protocol::TakeoverReport;
 
 /// Removes leases whose heartbeat is older than the stale window.
 ///

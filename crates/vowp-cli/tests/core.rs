@@ -311,3 +311,33 @@ fn ctx_build_requires_init() {
         Ok(_) => panic!("Ctx::build must fail before init"),
     }
 }
+
+#[test]
+fn c0_refuses_frozen_flags_whose_handlers_are_not_implemented() {
+    let env = common::TestEnv::new();
+    let restore = env.home_path().join("restore-src");
+    let to_home = env.home_path().join("restore-dst");
+    let restore = restore.to_str().expect("restore path");
+    let to_home = to_home.to_str().expect("target path");
+    let cases: &[&[&str]] = &[
+        &["up", "--no-migrate"],
+        &["backup", "--force"],
+        &["backup", "--offsite", "rsync://example.invalid/backup"],
+        &["backup", "--encrypt", "age1example"],
+        &["backup", "--restore", restore, "--to-home", to_home],
+        &["loops", "--all"],
+        &["schedule", "--all", "ls"],
+        &["chat", "s", "--node", "laptop"],
+        &["chat", "s", "--follow"],
+        &["chat", "s", "--takeover"],
+        &["session", "chat", "s", "--follow"],
+    ];
+    for args in cases {
+        let (code, _stdout, stderr) = env.run(args);
+        assert_eq!(code, 1, "{args:?}: {stderr}");
+        assert!(stderr.contains("not implemented in this build"), "{args:?}: {stderr}");
+    }
+    let backups = env.home_path().join("backups");
+    let written = std::fs::read_dir(&backups).map(|entries| entries.count()).unwrap_or(0);
+    assert_eq!(written, 0, "a refused backup must not write a backup file");
+}
