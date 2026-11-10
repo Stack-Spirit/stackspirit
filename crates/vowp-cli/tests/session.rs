@@ -8,7 +8,10 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use vowp_protocol::{Actor, AssistantMessage, EventBody, EventSource, HarnessKind, Timestamp, UserMessage};
+use vowp_protocol::{
+    Actor, AssistantMessage, Cost, EventBody, EventSource, EventType, HarnessKind, RemoteEvent, RemoteLine, StopReason,
+    Timestamp, TurnGrant, UserMessage,
+};
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 
 /// Writes a fake opencode binary that probes successfully and returns one valid capsule.
@@ -481,4 +484,293 @@ fn session_cross_node_export_import_switch_via_fake_ssh() {
         }),
         "{remote_switches:?}"
     );
+}
+
+/// The executor every remote-exec CLI test uses.
+const REMOTE_EXECUTOR: &str = "opencode:deepseek/deepseek-flash#max";
+
+/// Writes a `turn-begin` request, runs it in-process and stores the grant at mode 0600.
+fn begin_remote_turn(env: &common::TestEnv, id: &str, lease: &str, prompt: &str) -> (TurnGrant, std::path::PathBuf) {
+    let request_path = env.project_path().join("turn-request.json");
+    let request = serde_json::json!({
+        "lease": lease,
+        "prompt": prompt,
+        "executor": REMOTE_EXECUTOR,
+        "purpose": "start",
+        "node": "local",
+    });
+    std::fs::write(&request_path, request.to_string()).expect("request");
+    let (code, stdout, stderr) = env.run(&[
+        "session",
+        "turn-begin",
+        id,
+        "--executor",
+        REMOTE_EXECUTOR,
+        "--purpose",
+        "start",
+        "--node",
+        "local",
+        "--request",
+        request_path.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let grant: TurnGrant = serde_json::from_str(&stdout).expect("grant JSON");
+    let grant_path = env.home_path().join("turn-grant.json");
+    std::fs::write(&grant_path, &stdout).expect("grant file");
+    std::fs::set_permissions(&grant_path, std::fs::Permissions::from_mode(0o600)).expect("grant mode");
+    (grant, grant_path)
+}
+
+/// Runs the real `vowp __exec` binary against one grant.
+fn run_exec(env: &common::TestEnv, grant: &Path, spool: Option<&Path>) -> std::process::Output {
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .arg("__exec")
+        .arg("--grant")
+        .arg(grant);
+    if let Some(spool) = spool {
+        command.arg("--spool-dir").arg(spool);
+    }
+    command.output().expect("run __exec")
+}
+
+/// Returns every regular file below `root`.
+fn files_below(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_below(&path));
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    files
+}
+
+#[test]
+fn remote_turn_begin_and_exec_streams_over_local_ingest() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "stream this turn");
+
+    let output = run_exec(&env, &grant_path, None);
+    assert!(
+        output.status.success(),
+        "__exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&grant.run_id.to_string()),
+        "the status document does not name the run"
+    );
+
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
+    let paths = vowp_store::NodePaths::new(env.home_path());
+    let events = SessionLog::open_read(&paths, &session_id)
+        .expect("log")
+        .read_all()
+        .expect("events");
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::AssistantMessage(payload)) if !payload.text.is_empty()
+        )),
+        "no assistant event reached the home log"
+    );
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
+    assert!(run.ended_at.is_some());
+    let session = store.require_session(&session_id).expect("session");
+    assert_eq!(session.state, vowp_protocol::SessionState::Idle);
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=events.len() as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::TurnEnded)
+            .count(),
+        1,
+        "the streamed turn ended more than once"
+    );
+
+    let spool = env.home_path().join("spool").join(&id).join(grant.run_id.to_string());
+    let spool_text = std::fs::read_to_string(spool.join("events.jsonl")).expect("spool");
+    assert!(spool_text.contains("assistant.message"), "{spool_text}");
+    let acked = std::fs::read_to_string(spool.join("acked.json")).expect("acked");
+    assert!(acked.contains("\"summary\": true"), "{acked}");
+}
+
+#[test]
+fn client_crash_resumes_from_spool() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "resume this turn");
+    let spool = env.home_path().join("resume-spool");
+    std::fs::create_dir_all(&spool).expect("spool dir");
+    let ts = Timestamp::parse("2026-11-08T18:00:00Z").expect("timestamp");
+    let event = RemoteLine::Event {
+        event: RemoteEvent {
+            id: vowp_protocol::EventId::new(),
+            ts,
+            event_type: EventType::AssistantMessage,
+            actor: Actor::Assistant,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: Some("deepseek/deepseek-flash".to_owned()),
+                node: Some(vowp_protocol::NodeName::parse("local").expect("node")),
+                native_session_id: None,
+            },
+            payload: serde_json::json!({"text": "resumed from the spool"}),
+            raw: None,
+            replayable: true,
+        },
+    };
+    let summary = RemoteLine::Summary {
+        exit_code: Some(0),
+        outcome: vowp_protocol::RunOutcome::Ok,
+        native_session_id: None,
+        cost: Cost::unknown(),
+        limit: None,
+        result_text: Some("resumed".to_owned()),
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+    };
+    let text = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&event).expect("event"),
+        serde_json::to_string(&summary).expect("summary")
+    );
+    std::fs::write(spool.join("events.jsonl"), text).expect("spool events");
+
+    let output = run_exec(&env, &grant_path, Some(&spool));
+    assert!(
+        output.status.success(),
+        "resume failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
+    let events = SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), &session_id)
+        .expect("log")
+        .read_all()
+        .expect("events");
+    assert!(events.iter().any(|event| matches!(
+        event.body(),
+        Ok(EventBody::AssistantMessage(payload)) if payload.text == "resumed from the spool"
+    )));
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
+}
+
+#[test]
+fn lease_token_never_in_argv_or_logs() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let token = "lease-token-4f9c2b7d-never-log";
+    let (grant, grant_path) = begin_remote_turn(&env, &id, token, "keep the token private");
+    let argv = [
+        "vowp".to_owned(),
+        "--home".to_owned(),
+        env.home_path().display().to_string(),
+        "--project".to_owned(),
+        env.project_path().display().to_string(),
+        "__exec".to_owned(),
+        "--grant".to_owned(),
+        grant_path.display().to_string(),
+    ];
+    assert!(
+        !argv.iter().any(|part| part.contains(token)),
+        "the lease token was placed on argv"
+    );
+    let mode = std::fs::metadata(&grant_path).expect("grant").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the grant file is not mode 0600");
+
+    let output = run_exec(&env, &grant_path, None);
+    assert!(
+        output.status.success(),
+        "__exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for path in files_below(env.home_path()) {
+        if path == grant_path {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(token),
+            "the lease token was written to {}",
+            path.display()
+        );
+    }
+    assert_ne!(grant.lease_token, "");
+}
+
+#[test]
+fn remote_exec_streams_over_fake_ssh() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token", "stream over ssh");
+
+    let bin = tempfile::tempdir().expect("fake bin");
+    let ssh = bin.path().join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nfor last; do :; done\nexec /bin/sh -c \"$last\"\n").expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_vowp"), bin.path().join("vowp")).expect("vowp link");
+    let control = tempfile::tempdir().expect("control home");
+    let pointer = serde_json::json!({
+        "role": "control",
+        "home": "local",
+        "ssh_target": "fake.example",
+        "remote_home": env.home_path().display().to_string(),
+        "created_at": "2026-11-08T18:00:00Z",
+    });
+    std::fs::write(control.path().join("control.json"), pointer.to_string()).expect("control");
+
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+        .env("VOWP_CONTROL_HOME", control.path())
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .arg("__exec")
+        .arg("--grant")
+        .arg(&grant_path)
+        .output()
+        .expect("run __exec over ssh");
+    assert!(
+        output.status.success(),
+        "__exec over ssh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
+    let events = SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), &session_id)
+        .expect("log")
+        .read_all()
+        .expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == EventType::AssistantMessage)
+    );
+    let store = env.store();
+    let run = store.require_run(&grant.run_id).expect("run");
+    assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
 }

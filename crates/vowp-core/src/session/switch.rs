@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
     Actor, AttachAction, CancelToken, CapsuleTrigger, Clock, CostEvent, ErrorEvent, ErrorKind, EventBody, EventSource,
-    Executor, ExecutorRef, HarnessKind, Level, Limit, LimitEvent, LimitRowKind, NodeName, Run, RunId, RunOutcome,
-    RunPurpose, RunRole, Session, SessionExecutor, SessionId, SessionRole, SessionState, StartInput, StopReason,
-    Switch, SwitchEvent, SwitchId, SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted, UserMessage,
+    Executor, ExecutorRef, HarnessKind, Level, Limit, LimitEvent, LimitRowKind, NodeName, ProbeResult, Run, RunId,
+    RunOutcome, RunPurpose, RunRole, Session, SessionExecutor, SessionId, SessionRole, SessionState, StartInput,
+    StopReason, Switch, SwitchEvent, SwitchId, SwitchRequest, SwitchState, Timestamp, TurnEnded, TurnStarted,
+    UserMessage,
 };
 use vowp_store::session_files::{AdapterMapping, add_adapter_mapping};
 use vowp_store::session_log::{AppendedEvent, NewEvent, SessionLog, index_row};
@@ -195,19 +196,19 @@ fn run_switch_inner(
     store.insert_switch(&switch)?;
 
     let result = (|| -> Result<(SessionState, Option<vowp_protocol::CapsuleId>), CoreError> {
-        let target = deps.adapters.get(&req.to.executor);
-        // TODO(sessions.md §5 step 3, remote-node probe): a switch whose `to_node` is not
-        // this node should run `vowp --node <n> doctor --json` and abort when it is not ok.
-        // v0.1 probes only the local AdapterRegistry, so a remote target can currently be
-        // attached without proving its harness is available. This probe is deliberately
-        // skipped in v0.1.
-        let probe = target.as_ref().map(|adapter| adapter.probe());
-        let probe_ok = probe.as_ref().is_some_and(|probe| probe.ok);
-        if !probe_ok {
-            let detail = match probe {
-                Some(probe) => format!("target probe failed: {}", probe.detail),
-                None => "target harness is not installed".to_owned(),
-            };
+        // A local target is probed through its adapter. A remote target is probed over SSH
+        // with `vowp doctor --json`; the local registry cannot see the executor's harness.
+        let probe = match probe_target(deps, &store, &to_node, &req.to.executor) {
+            Ok(probe) => probe,
+            Err(error) => vowp_protocol::ProbeResult {
+                ok: false,
+                version: None,
+                path: None,
+                detail: error.to_string(),
+            },
+        };
+        if !probe.ok {
+            let detail = format!("target probe failed: {}", probe.detail);
             return Err(abort(
                 deps,
                 &store,
@@ -686,6 +687,115 @@ fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
     Err(CoreError::Refused(format!(
         "working directory {cwd} is outside the allow-list"
     )))
+}
+
+/// Probes the switch target: locally through its adapter, remotely through `vowp doctor`.
+///
+/// The remote probe is the sessions.md §5 step 3 check: a switch whose target node is not
+/// this node must prove that the executor's harness is available there before the switch
+/// touches the source. A missing node row or ssh target is a failed probe, not a panic.
+fn probe_target(deps: &Deps, store: &Store, node: &NodeName, executor: &Executor) -> Result<ProbeResult, CoreError> {
+    let row = store.node(node)?;
+    let remote = row.as_ref().is_some_and(|row| !row.is_local);
+    if !remote {
+        return match deps.adapters.get(executor) {
+            Some(adapter) => Ok(adapter.probe()),
+            None => Ok(ProbeResult {
+                ok: false,
+                version: None,
+                path: None,
+                detail: "target harness is not installed".to_owned(),
+            }),
+        };
+    }
+    let row = row.ok_or_else(|| CoreError::NotFound(format!("node {node}")))?;
+    let target = row
+        .ssh_target
+        .as_deref()
+        .ok_or_else(|| CoreError::Invalid(format!("node {node} has no ssh target")))?;
+    let output = deps.cmd.run(&crate::deps::CommandSpec {
+        shell: None,
+        argv: vec![
+            "ssh".to_owned(),
+            "-T".to_owned(),
+            "-o".to_owned(),
+            "BatchMode=yes".to_owned(),
+            "-o".to_owned(),
+            "ConnectTimeout=10".to_owned(),
+            target.to_owned(),
+            "vowp".to_owned(),
+            "doctor".to_owned(),
+            "--json".to_owned(),
+        ],
+        cwd: None,
+        env: Vec::new(),
+        timeout: Duration::from_secs(30),
+    })?;
+    if output.timed_out {
+        return Ok(ProbeResult {
+            ok: false,
+            version: None,
+            path: Some(target.to_owned()),
+            detail: format!("remote probe on {node} timed out"),
+        });
+    }
+    let text = output.text();
+    if output.exit_code != Some(0) {
+        return Ok(ProbeResult {
+            ok: false,
+            version: None,
+            path: Some(target.to_owned()),
+            detail: format!(
+                "remote probe on {node} exited {:?}: {}",
+                output.exit_code,
+                output.tail_lines(3)
+            ),
+        });
+    }
+    match parse_doctor_ok(&text) {
+        Some(true) => Ok(ProbeResult {
+            ok: true,
+            version: None,
+            path: Some(target.to_owned()),
+            detail: format!("remote doctor ok on {node}"),
+        }),
+        Some(false) => Ok(ProbeResult {
+            ok: false,
+            version: None,
+            path: Some(target.to_owned()),
+            detail: format!(
+                "remote doctor reported a failed check on {node}: {}",
+                output.tail_lines(3)
+            ),
+        }),
+        None => Ok(ProbeResult {
+            ok: false,
+            version: None,
+            path: Some(target.to_owned()),
+            detail: format!(
+                "remote doctor printed no readable JSON on {node}: {}",
+                output.tail_lines(3)
+            ),
+        }),
+    }
+}
+
+/// Reads the `ok` field from a `vowp doctor --json` document, ignoring surrounding lines.
+fn parse_doctor_ok(text: &str) -> Option<bool> {
+    let trimmed = text.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return value.get("ok").and_then(serde_json::Value::as_bool);
+    }
+    for line in text.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            return value.get("ok").and_then(serde_json::Value::as_bool);
+        }
+    }
+    None
 }
 
 /// Aborts a switch: error event, state restored, row finished `aborted`.

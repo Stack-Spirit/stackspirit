@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use time::{OffsetDateTime, macros::format_description};
 use vowp_core::session::bundle;
+use vowp_core::session::remote::{BeginTurn, IngestGrant, IngestSession, begin_turn};
 use vowp_core::session::service::SessionService;
 use vowp_protocol::{
     Actor, AttachAction, CancelToken, CapsuleTrigger, EventBody, EventEnvelope, EventSource, Executor, ExecutorRef,
@@ -40,9 +41,8 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SessionCommand) -> Resul
         SessionCommand::Import(args) => import(ctx, io, args),
         SessionCommand::Watch(args) => watch(ctx, io, args),
         SessionCommand::Tail(args) => tail(ctx, io, args),
-        SessionCommand::TurnBegin(_) | SessionCommand::Ingest(_) => {
-            Err(CliError::NotImplemented("not implemented in this build"))
-        }
+        SessionCommand::TurnBegin(args) => turn_begin(ctx, io, args),
+        SessionCommand::Ingest(args) => ingest(ctx, io, args),
         SessionCommand::Lease(args) => crate::cmd::lease::lease(ctx, io, args),
         SessionCommand::Takeover(args) => crate::cmd::lease::takeover(ctx, io, args),
     }
@@ -446,6 +446,116 @@ fn reason_name(reason: SwitchReason) -> &'static str {
         SwitchReason::Failover => "failover",
         SwitchReason::ProbeBack => "probe_back",
         SwitchReason::Takeover => "takeover",
+    }
+}
+
+/// Begins a remote turn and prints its grant.
+fn turn_begin(ctx: &Ctx, io: &mut dyn IoStreams, args: &crate::cli::TurnBeginArgs) -> Result<i32, CliError> {
+    let text = if args.request == "-" {
+        crate::read_stdin(io)?
+    } else {
+        std::fs::read_to_string(&args.request)?
+    };
+    let request: crate::cmd::exec::TurnBeginRequest = serde_json::from_str(&text)
+        .map_err(|error| CliError::Invalid(format!("{}: invalid turn request: {error}", args.request)))?;
+    if let Some(executor) = &request.executor
+        && executor != &args.executor
+    {
+        return Err(CliError::Invalid(format!(
+            "request executor {executor} does not match --executor {}",
+            args.executor
+        )));
+    }
+    if let Some(purpose) = &request.purpose
+        && purpose != &args.purpose
+    {
+        return Err(CliError::Invalid(format!(
+            "request purpose {purpose} does not match --purpose {}",
+            args.purpose
+        )));
+    }
+    if let Some(node) = &request.node
+        && node != &args.node
+    {
+        return Err(CliError::Invalid(format!(
+            "request node {node} does not match --node {}",
+            args.node
+        )));
+    }
+    let store = ctx.store()?;
+    let session = resolve_session(&store, &args.id)?;
+    let executor = Executor::parse(&args.executor)?;
+    let purpose = parse_purpose(&args.purpose)?;
+    let node = NodeName::parse(&args.node)?;
+    let grant = begin_turn(
+        ctx.deps(),
+        &store,
+        &BeginTurn {
+            session: session.id,
+            lease: request.lease,
+            executor: ExecutorRef {
+                executor,
+                node: Some(node.clone()),
+            },
+            purpose,
+            node,
+            prompt: request.prompt,
+        },
+    )?;
+    print_json(io, &grant)?;
+    Ok(0)
+}
+
+/// Ingests remote JSON lines on stdin and writes one ack per line on stdout.
+fn ingest(ctx: &Ctx, io: &mut dyn IoStreams, args: &crate::cli::IngestArgs) -> Result<i32, CliError> {
+    let store = ctx.store()?;
+    let session = resolve_session(&store, &args.id)?;
+    let run = vowp_protocol::RunId::parse(&args.run)?;
+    let grant = IngestGrant {
+        session: session.id,
+        // The token travels in RemoteLine::Hello, never on argv or in `ps`.
+        lease: String::new(),
+        run,
+    };
+    let mut ingest = IngestSession::begin(ctx.deps(), &store, &grant)?;
+    loop {
+        let mut line = String::new();
+        let read = io.input().read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        if ingest.line(&line, io.out())? {
+            break;
+        }
+    }
+    let report = ingest.finish()?;
+    if ctx.json() {
+        print_json(
+            io,
+            &serde_json::json!({
+                "events": report.events,
+                "duplicates": report.duplicates,
+                "done": report.done,
+            }),
+        )?;
+    }
+    Ok(0)
+}
+
+/// Parses a run purpose name.
+fn parse_purpose(value: &str) -> Result<RunPurpose, CliError> {
+    match value {
+        "start" => Ok(RunPurpose::Start),
+        "continue" => Ok(RunPurpose::Continue),
+        "fix" => Ok(RunPurpose::Fix),
+        "verify" => Ok(RunPurpose::Verify),
+        "plan" => Ok(RunPurpose::Plan),
+        "keep" => Ok(RunPurpose::Keep),
+        "capsule" => Ok(RunPurpose::Capsule),
+        "probe" => Ok(RunPurpose::Probe),
+        "merge" => Ok(RunPurpose::Merge),
+        "gate" => Ok(RunPurpose::Gate),
+        other => Err(CliError::Invalid(format!("unknown run purpose: {other}"))),
     }
 }
 

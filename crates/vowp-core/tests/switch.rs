@@ -9,8 +9,8 @@ mod support;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use support::fake_adapter::FakeAdapter;
@@ -19,11 +19,11 @@ use support::signal_child::shell_command;
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::service::SessionService;
 use vowp_core::session::switch::{run_switch, run_switch_with_input};
-use vowp_core::{AdapterRegistry, CoreError, Deps};
+use vowp_core::{AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps};
 use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Clock,
     Cost, EventBody, EventEnvelope, EventId, EventIndexRow, EventSource, EventType, Executor, ExecutorRef, FakeClock,
-    HarnessEvent, HarnessKind, Limit, LimitRowKind, MemoryLog, NodeName, ProbeResult, Run, RunId, RunOutcome,
+    HarnessEvent, HarnessKind, Limit, LimitRowKind, MemoryLog, Node, NodeName, ProbeResult, Run, RunId, RunOutcome,
     RunPurpose, RunRole, RunSummary, SessionId, SessionOps, SessionRole, StartInput, StopReason, SwitchReason,
     SwitchRequest, SwitchState, Timestamp, TurnRequest,
 };
@@ -795,6 +795,97 @@ fn switch_target_probe_fails_stays_on_source() {
             Ok(EventBody::SessionExecutor(payload)) if payload.action == AttachAction::Detach
         )),
         "the source is never detached"
+    );
+}
+
+/// A command runner that answers the remote doctor probe and records its argv.
+struct DoctorRunner {
+    calls: Arc<Mutex<Vec<CommandSpec>>>,
+    output: CommandOutput,
+}
+
+impl CommandRunner for DoctorRunner {
+    fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CoreError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(spec.clone());
+        Ok(self.output.clone())
+    }
+}
+
+#[test]
+fn remote_probe_uses_remote_node_and_switch() {
+    let tmp = tempdir().expect("tempdir");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(DoctorRunner {
+        calls: Arc::clone(&calls),
+        output: CommandOutput {
+            exit_code: Some(0),
+            timed_out: false,
+            output: br#"{"ok":true,"checks":[]}"#.to_vec(),
+            duration: Duration::from_millis(5),
+        },
+    });
+    let mut deps = deps(
+        &tmp,
+        AdapterRegistry::new().with("opencode", Arc::new(capsule_adapter("remote handoff"))),
+    );
+    deps.cmd = runner;
+    let store = deps.open_store().expect("store");
+    let now = store.clock().now();
+    store
+        .upsert_node(&Node {
+            name: NodeName::parse("laptop").expect("node"),
+            ssh_target: Some("laptop.example".to_owned()),
+            is_local: false,
+            capabilities: serde_json::json!({}),
+            last_seen_at: None,
+            created_at: now,
+        })
+        .expect("node row");
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, "remote switch");
+    let request = SwitchRequest {
+        session_id: session.clone(),
+        to: ExecutorRef {
+            executor: claude(),
+            node: Some(NodeName::parse("laptop").expect("node")),
+        },
+        reason: SwitchReason::User,
+        drain_secs: 5,
+    };
+    let switched = run_switch(&deps, &request, &CancelToken::default()).expect("remote switch");
+    assert_eq!(switched.state, SwitchState::Completed);
+    assert_eq!(switched.to_node.to_string(), "laptop");
+
+    let calls = calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(calls.len(), 1, "the remote probe ran once");
+    let argv = &calls[0].argv;
+    assert_eq!(argv[0], "ssh");
+    assert!(argv.iter().any(|part| part == "laptop.example"), "{argv:?}");
+    assert!(
+        argv.windows(2).any(|pair| pair[0] == "doctor" && pair[1] == "--json"),
+        "{argv:?}"
+    );
+    assert_eq!(
+        calls[0].timeout,
+        Duration::from_secs(30),
+        "the probe keeps the documented connect bound"
+    );
+
+    let store = deps.open_store().expect("store");
+    let row = store.require_session(&session).expect("session");
+    assert_eq!(row.executor, Some(claude()));
+    let events = read_events(&deps, &session);
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::SessionExecutor(payload))
+                if payload.action == AttachAction::Attach
+                    && payload.node.to_string() == "laptop"
+        )),
+        "the switch attached the target on the laptop"
     );
 }
 
