@@ -1,0 +1,3 @@
+label,mode,exit,duration_s,job_peak_mib,job_parts_mib,job_anon_mib,harness_peak_mib,build_peak_mib,scope_peak_mib,proc_host_mib,proc_container_mib,proc_combined_mib,job_cpu_s,harness_cpu_s,build_cpu_s,observer_cpu_s,errors
+shim-1-20261110T115443Z,shim,101,120.893,2323.2,2313.9,1198.0,197.9,2128.1,228.8,239.2,2228.3,2467.5,245.26,1.09,243.93,11.09,build command exited 101
+shim-1-20261110T115721Z,shim,101,82.598,2363.5,2354.2,1178.9,197.9,2165.6,229.4,239.8,2353.2,2593.0,206.12,0.87,205.03,5.6,build command exited 101
