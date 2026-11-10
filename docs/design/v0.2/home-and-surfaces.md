@@ -185,7 +185,9 @@ and **`node_ledger`**. The project tables keep the names `inbox` and `ledger`. T
 no table-name collision at all. This spec does **not** claim that v0.1 queries work unchanged:
 every SQL statement in `vowp-store` is reviewed by C1 and each one is assigned to exactly one
 database. The **public `Store` API stays source-compatible**, so the rest of the workspace still
-builds and its tests still pass without edits outside `vowp-store`.
+builds and its tests still pass with only two C1-owned changes outside `vowp-store`: the
+`Deps::open_store` body in `crates/vowp-core/src/deps.rs` and the reserved `_node` literal in
+`crates/vowp-protocol/src/ids.rs` (both in §14.1). No other crate changes.
 
 The complete rule set that replaces the draft's §3 rules 1–3:
 
@@ -1165,10 +1167,10 @@ Consequences (binding):
 - A project-less orchestrator session uses `_node` for its run rows (below); its session, capsule
   and surface rows are global, so no project card is involved.
 - `crates/vowp-core/src/deps.rs` is **C1-owned** for this body. The signature is unchanged, so C0
-  leaves the file untouched and compiles against the v0.1 `Store::open`; C1 changes the one line
-  together with the new `Store` constructors in the same merge. This is the only `vowp-core` file
-  C1 edits, and it is recorded in §14.1. C0 does not edit it (the §13.3 card listed it under C0;
-  §14.1 supersedes that list).
+  leaves the file untouched and compiles against the v0.1 `Store::open`; C1 replaces the body
+  (the ~35-line resolution above, not a one-line call) together with the new `Store` constructors
+  in the same merge. This is the only `vowp-core` file C1 edits, and it is recorded in §14.1. C0
+  does not edit it (the §13.3 card listed it under C0; §14.1 supersedes that list).
 
 The v0.1 core tests below call project-scoped methods on a fresh temporary home and are the
 compatibility gate for this binding. None of them is edited; C1 runs all of them before merging:
@@ -1178,14 +1180,14 @@ compatibility gate for this binding. None of them is edited; C1 runs all of them
 | `vowp-core/tests/deps.rs::deps_open_store_creates_the_node_database` | opens a `Deps` over an empty home | fallback 3 creates `_node`; `vowp.db` exists and `schema_version()` is 1 |
 | `vowp-core/tests/deps.rs::deps_open_store_uses_injected_clock` | `push_request("wake")` after `open_store` | both `open_global` and `open_with_project` get `.with_clock(self.clock.clone())`; the wake row is a node key |
 | `vowp-core/tests/session_run.rs` | project-less sessions, `run_turn` -> `insert_run` | fallback 3 binds `_node`; the run row is written there |
-| `vowp-core/tests/capsule.rs` | project-less capsule sessions | fallback 3 binds `_node`; capsules/ledger rows are written there |
+| `vowp-core/tests/capsule.rs` | project-less capsule sessions | fallback 3 binds `_node`; the project `ledger` rows are written there, while `capsules` stays global |
 | `vowp-core/tests/switch_drain.rs` | `deps.open_store()` -> `insert_run` | fallback 3 binds `_node` |
 | `vowp-core/tests/bundle.rs` | fresh home, `upsert_project(probe-project)`, `insert_job` | `open_store` binds `_node`; `upsert_project` creates `probe-project`'s DB and re-binds the `_node` handle; the later `open_store` calls see exactly one non-reserved project and bind `probe-project` |
 
 This is the fix for the one place where the plan's "the split stays inside `vowp-store`" claim does
 not survive the multi-project correction: the store can only attach one project, so the **caller**
-must say which one, and `config.project.name` is the project the caller already resolved. C1 carries
-the one caller line; no feature job touches `Deps` or the store binding.
+must say which one, and `config.project.name` is the project the caller already resolved. C1 owns
+that caller body; no feature job touches `Deps` or the store binding.
 
 **Reserved `_node` project.** `init`/`setup` create one hidden registry row `_node` with
 `~/.vowp/projects/_node/project.db`. It owns the `runs`/`ledger` rows of project-less sessions (an
@@ -3666,7 +3668,7 @@ below):
 
 ```rust
 SessionCommand::TurnBegin(_) | SessionCommand::Ingest(_) => {
-    Err(CliError::NotImplemented("session turn-begin/ingest".to_owned()))
+    Err(CliError::NotImplemented("session turn-begin/ingest"))
 }
 SessionCommand::Lease(args) => crate::cmd::lease::lease(ctx, io, args),
 SessionCommand::Takeover(args) => crate::cmd::lease::takeover(ctx, io, args),
@@ -3824,11 +3826,17 @@ rewritten by C1 (it tests a cross-project `ON DELETE CASCADE` that no longer exi
 the split backup unit (the legacy `--to *.db` form is a global-only copy by §10.3, so it asserts the
 global rows there and the job/ledger rows in the copied project DB). No other store test assumes
 one DB for two projects. The store-test fixtures that write project-scoped rows without a project
-row in v0.1 (`vowp-store/tests/loops.rs`, `vowp-store/tests/ledger.rs`) add the `upsert_project`
-line that the other fixtures already have; C1 owns those test files. No `vowp-core` or
-`vowp-cli` test outside the §3.8 table needs an edit: their fixtures either `upsert_project`
-(`TestEnv`, `gates_support`, `promote_support`, the scheduler fixture) or rely on the `_node`
-fallback.
+row in v0.1 add the `upsert_project` call the other fixtures already have
+(`vowp-store/tests/loops.rs`), or are rewritten for the one-bound-project rule:
+`vowp-store/tests/ledger.rs` writes `proj`, `alpha` and `beta` on one store, so C1 opens one store
+per project (or writes `node_ledger` with `project = None`) and updates the expected totals.
+`vowp-store/tests/migrate.rs::open_creates_schema_version_1` still asserts the 19 v0.1 tables in
+`vowp.db` and expects `insert_run` to raise an FK error on an unbound store; C1 rewrites it to
+assert the global v2 schema in `vowp.db`, the project v1 schema in a created project DB, and an
+`insert_run` failure that is `NoProject` on the unbound handle. C1 owns all three files. No
+`vowp-core` or `vowp-cli` test outside the §3.8 table needs an edit: their fixtures either
+`upsert_project` (`TestEnv`, `gates_support`, `promote_support`, the scheduler fixture) or rely on
+the `_node` fallback.
 
 **C2 node supervisor**
 `one_supervisor_runs_two_projects_round_robin`, `deps_open_store_uses_the_project_config`,
