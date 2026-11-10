@@ -6,14 +6,15 @@ dummy stdio MCP server.
 
 ```sh
 scripts/spikes/apps/run.sh          # cleans up its temporary directory
-KEEP=1 scripts/spikes/apps/run.sh   # keeps only the redacted evidence; prints its path
+KEEP=1 scripts/spikes/apps/run.sh   # keeps the redacted evidence and non-secret scratch; prints the work path
 ```
 
 `KEEP=1` never retains the raw one-time pair output, the redeemed token, the
 private opencode service state (it contains the server password), the SSH keys
-or the temporary Claude config; those are removed in cleanup. The evidence tree
-only gets a redacted pair transcript (`/auth/connect/<code>`) and the non-secret
-test artifacts.
+or the temporary Claude config; those are removed in cleanup. The kept work
+directory contains the redacted evidence tree and non-secret scratch only; the
+evidence gets a redacted pair transcript (`/auth/connect/<code>`) and the
+non-secret test artifacts.
 
 The script needs `opencode` (v2 CLI with `serve`, `pair`, `api`), `claude` (Claude
 Code), `python3`, `curl`, `ssh`, `ssh-keygen` and `sshd`. It never touches the real

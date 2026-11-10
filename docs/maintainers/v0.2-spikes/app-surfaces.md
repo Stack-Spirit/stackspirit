@@ -442,16 +442,16 @@ tunnel, not a phone SSH app UI.
 KEEP=1 scripts/spikes/apps/run.sh
 ```
 
-The script uses only localhost and temporary state. `KEEP=1` keeps **only the
-redacted evidence** under `/tmp/vowp-s3-apps.*/evidence/` (versions, the
-redacted pair transcript, MCP logs, messages, export, SSE capture and the VOWP
-mapping). In cleanup, even with `KEEP=1`, it removes the raw one-time pair
-output, the redeemed token (never written to a file), the private service state
-(which contains the server password), the SSH keys and the temporary Claude
-config. The evidence's pair transcript contains `/auth/connect/<code>`, not the
-code. It prints `PASS=21 FAIL=0` and `RESULT: PASS` on this host; it exits
-non-zero on any failed check. It does not use tmux at all, so no tmux server is
-touched.
+The script uses only localhost and temporary state. `KEEP=1` keeps the redacted
+evidence under `/tmp/vowp-s3-apps.*/evidence/` (versions, the redacted pair
+transcript, MCP logs, messages, export, SSE capture and the VOWP mapping) plus
+non-secret scratch. In cleanup, even with `KEEP=1`, it removes the raw one-time
+pair output, the redeemed token (never written to a file), the private service
+state (which contains the server password), the SSH keys and the temporary
+Claude config. The evidence's pair transcript contains `/auth/connect/<code>`,
+not the code. It prints `PASS=21 FAIL=0` and `RESULT: PASS` on this host; it
+exits non-zero on any failed check. It does not use tmux at all, so no tmux
+server is touched.
 
 ## 8. Limits
 

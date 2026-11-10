@@ -7,7 +7,7 @@
 #
 # Usage:
 #   scripts/spikes/apps/run.sh            # clean up the temp directory
-#   KEEP=1 scripts/spikes/apps/run.sh     # keep only the redacted evidence
+#   KEEP=1 scripts/spikes/apps/run.sh     # keep the redacted evidence and non-secret scratch
 #
 # KEEP=1 never keeps the raw one-time pair output, the redeemed token, the
 # private opencode service state (it contains the server password) or the SSH
