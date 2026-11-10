@@ -2464,7 +2464,7 @@ impl NodeSupervisor {
         let mut skipped = Vec::new();
         let mut ticked = Vec::new();
         for name in &rotation {
-            let Some(entry) = self.global.project_entry(name)? else {
+            let Some(entry) = super::registry::project_entry(&self.global, name)? else {
                 skipped.push((name.clone(), "not registered".to_owned()));
                 continue;
             };
@@ -2527,7 +2527,7 @@ impl NodeSupervisor {
         self.advance_rotation();
         // Registry entries that never got a supervisor (archived, parked broken at load)
         // are still reported, so the node tick explains why a project is missing.
-        for entry in self.global.list_project_entries()? {
+        for entry in super::registry::project_entries(&self.global)? {
             if entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT
                 || self.projects.contains_key(&entry.name)
                 || skipped.iter().any(|(name, _)| name == &entry.name)
@@ -2552,9 +2552,7 @@ impl NodeSupervisor {
             crate::fleet::write_snapshot(&this.deps, &this.global, now).map(|()| "snapshot written".to_owned())
         }));
 
-        let active: Vec<ProjectName> = self
-            .global
-            .list_project_entries()?
+        let active: Vec<ProjectName> = super::registry::project_entries(&self.global)?
             .into_iter()
             .filter(|entry| {
                 entry.state == ProjectState::Active && entry.name.as_str() != vowp_store::RESERVED_NODE_PROJECT
@@ -2658,7 +2656,7 @@ impl NodeSupervisor {
     /// stopped. A project whose config or database cannot be opened is parked alone with
     /// a node-inbox notice; the other projects keep ticking.
     fn reload_projects(&mut self) -> Result<(), CoreError> {
-        let entries = self.global.list_project_entries()?;
+        let entries = super::registry::project_entries(&self.global)?;
         let mut keep = BTreeSet::new();
         for entry in &entries {
             if entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
@@ -2752,7 +2750,7 @@ impl NodeSupervisor {
 
     /// Parks one project with a `broken:` reason and opens one node-inbox notice.
     fn park_broken(&mut self, name: &ProjectName, reason: &str) -> Result<(), CoreError> {
-        let entry = self.global.project_entry(name)?;
+        let entry = super::registry::project_entry(&self.global, name)?;
         let Some(entry) = entry else {
             return Ok(());
         };
@@ -2767,8 +2765,7 @@ impl NodeSupervisor {
         } else {
             format!("project {name} paused: {reason}")
         };
-        self.global
-            .set_project_state(name, ProjectState::Paused, &format!("broken: {reason}"))?;
+        super::registry::set_project_state(&self.global, name, ProjectState::Paused, &format!("broken: {reason}"))?;
         let title = format!("project {name} paused");
         let already_open = self
             .global

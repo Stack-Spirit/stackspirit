@@ -73,7 +73,13 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Init(_) | Command::Doctor(_) => Err(CliError::Invalid(
             "init and doctor run without a project context".to_owned(),
         )),
-        Command::Up(args) => up::run(ctx, io, &UpCommand::Up(args)),
+        Command::Up(args) => {
+            if args.no_migrate {
+                Err(not_implemented())
+            } else {
+                up::run(ctx, io, &UpCommand::Up(args))
+            }
+        }
         Command::Down(args) => up::run(ctx, io, &UpCommand::Down(args)),
         Command::Status(args) => status::run(ctx, io, &args),
         Command::Board(args) => board::run(ctx, io, &args),
@@ -95,8 +101,20 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Inbox { command } => inbox::run(ctx, io, &command),
         Command::Cost(args) => cost::run(ctx, io, &args),
         Command::Node { command } => node::run(ctx, io, &command),
-        Command::Loops(args) => loops::run(ctx, io, &args),
-        Command::Schedule(args) => schedule::run(ctx, io, &args),
+        Command::Loops(args) => {
+            if args.all {
+                Err(not_implemented())
+            } else {
+                loops::run(ctx, io, &args)
+            }
+        }
+        Command::Schedule(args) => {
+            if args.all {
+                Err(not_implemented())
+            } else {
+                schedule::run(ctx, io, &args)
+            }
+        }
         Command::Promote(args) => promote::run(ctx, io, &PromoteCommand::Promote(args)),
         Command::Rollback(args) => promote::run(ctx, io, &PromoteCommand::Rollback(args)),
         Command::Releases(args) => promote::run(ctx, io, &PromoteCommand::Releases(args)),

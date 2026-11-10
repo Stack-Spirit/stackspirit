@@ -209,20 +209,6 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     if let Command::Doctor(args) = &command {
         return cmd::doctor::run(&global, io, args);
     }
-    // `up` and `down` act on the whole node, not on one project: the home may have no
-    // `vowp.toml` in the current directory and several registered projects.
-    match &command {
-        Command::Up(args) => {
-            return cmd::up::run_home(&global, io, &cli::UpCommand::Up(args.clone()));
-        }
-        Command::Down(args) => {
-            return cmd::up::run_home(&global, io, &cli::UpCommand::Down(args.clone()));
-        }
-        // The registry and the migration act on the global home, not on one project.
-        Command::Project(args) => return cmd::project::run_home(&global, io, args),
-        Command::Migrate(args) => return cmd::migrate::run_home(&global, io, args),
-        _ => {}
-    }
     let ctx = Ctx::build(&global, io)?;
     cmd::dispatch(&ctx, io, command)
 }

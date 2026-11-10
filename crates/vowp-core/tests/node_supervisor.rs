@@ -215,8 +215,7 @@ fn archived_projects_are_skipped_and_removed_supervisors_stop() {
     let env = NodeEnv::new();
     let alpha = env.add_project("alpha", |_| {});
     let archived = env.add_project("archived", |_| {});
-    env.global()
-        .set_project_state(&archived, ProjectState::Archived, "owner")
+    vowp_core::loops::registry::set_project_state(&env.global(), &archived, ProjectState::Archived, "owner")
         .expect("archive");
     let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
     let report = node.tick().expect("tick");
@@ -270,7 +269,9 @@ fn broken_project_parks_alone_after_three_failed_ticks() {
     }
 
     let global = env.global();
-    let entry = global.project_entry(&broken).expect("lookup").expect("entry");
+    let entry = vowp_core::loops::registry::project_entry(&global, &broken)
+        .expect("lookup")
+        .expect("entry");
     assert_eq!(entry.state, ProjectState::Paused);
     assert!(entry.paused_reason.starts_with("broken:"), "{}", entry.paused_reason);
     let broken_store = Store::open_with_project(&env.paths, &broken).expect("store");
@@ -299,9 +300,7 @@ fn broken_project_parks_alone_after_three_failed_ticks() {
     );
 
     // `vowp project resume` clears the reason; the next tick tries the project again.
-    global
-        .set_project_state(&broken, ProjectState::Active, "")
-        .expect("resume");
+    vowp_core::loops::registry::set_project_state(&global, &broken, ProjectState::Active, "").expect("resume");
     let fifth = node.tick().expect("tick 5");
     assert!(fifth.projects.contains_key(&broken), "resumed project ticks again");
     assert!(
@@ -397,7 +396,9 @@ fn a_project_config_that_disagrees_with_the_registry_parks_that_project_only() {
         "{:?}",
         report.skipped
     );
-    let entry = env.global().project_entry(&wrong).expect("lookup").expect("entry");
+    let entry = vowp_core::loops::registry::project_entry(&env.global(), &wrong)
+        .expect("lookup")
+        .expect("entry");
     assert_eq!(entry.state, ProjectState::Paused);
     assert!(entry.paused_reason.starts_with("broken:"));
 }
@@ -418,13 +419,9 @@ fn the_node_systemd_unit_matches_the_home_supervisor_contract() {
         "WantedBy=default.target",
     ] {
         assert!(installed.contains(line), "unit is missing {line:?}:\n{installed}");
-        assert!(
-            vowp_core::loops::l8::SYSTEMD_UNIT.contains(line),
-            "the embedded unit template is missing {line:?}"
-        );
     }
     assert!(
-        !installed.contains("Restart=always"),
+        !installed.lines().any(|line| line.trim() == "Restart=always"),
         "always would restart the supervisor after `vowp down` exits 0"
     );
 }

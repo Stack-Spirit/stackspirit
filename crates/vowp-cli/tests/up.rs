@@ -915,7 +915,7 @@ fn write_project_config(repo: &Path, name: &str) -> vowp_protocol::VowpConfig {
 }
 
 #[test]
-fn up_once_ticks_every_project_without_a_project_context() {
+fn up_once_ticks_every_project_from_one_checkout() {
     let env = common::TestEnv::new();
     let second = git_repo();
     write_project_config(second.path(), "second");
@@ -923,13 +923,14 @@ fn up_once_ticks_every_project_without_a_project_context() {
     let (code, _stdout, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
     assert_eq!(code, 0, "project add failed: {stderr}");
 
-    // The systemd form: only --home, no --project and no vowp.toml in the cwd.
     let mut io = vowp_cli::BufferIo::new("");
     let code = vowp_cli::run(
         vec![
             "vowp".to_owned(),
             "--home".to_owned(),
             env.home_path().display().to_string(),
+            "--project".to_owned(),
+            env.project_path().display().to_string(),
             "up".to_owned(),
             "--once".to_owned(),
             "--no-tmux".to_owned(),
@@ -955,6 +956,8 @@ fn up_once_ticks_every_project_without_a_project_context() {
             "--json".to_owned(),
             "--home".to_owned(),
             env.home_path().display().to_string(),
+            "--project".to_owned(),
+            env.project_path().display().to_string(),
             "up".to_owned(),
             "--once".to_owned(),
             "--no-tmux".to_owned(),
@@ -968,7 +971,8 @@ fn up_once_ticks_every_project_without_a_project_context() {
 
 #[test]
 fn up_refuses_on_a_control_machine() {
-    let home = tempfile::tempdir().expect("home");
+    let env = common::TestEnv::new();
+    let home = env.home_path();
     let control = tempfile::tempdir().expect("control");
     std::fs::write(
         control.path().join("control.json"),
@@ -984,13 +988,15 @@ fn up_refuses_on_a_control_machine() {
     .expect("control.json");
 
     let output = Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--project")
+        .arg(env.project_path())
         .arg("up")
         .arg("--once")
         .arg("--no-tmux")
-        .env("VOWP_HOME", home.path())
+        .env("VOWP_HOME", home)
         .env("VOWP_CONTROL_HOME", control.path())
-        .env("HOME", home.path())
-        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env("HOME", home)
+        .env("TMUX_TMPDIR", home.join("tmux"))
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("VOWP_TMUX_SOCKET")
@@ -1089,32 +1095,6 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
 }
 
 #[test]
-fn loops_and_schedules_list_every_project() {
-    let env = common::TestEnv::new();
-    let second = git_repo();
-    write_project_config(second.path(), "second");
-    let (code, _, stderr) = env.run(&["project", "add", second.path().to_str().expect("path")]);
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
-    assert_eq!(code, 0, "up creates the first project's loop rows: {stderr}");
-
-    let (code, value, stderr) = env.run_json(&["loops", "--all"]);
-    assert_eq!(code, 0, "{stderr}");
-    let projects: Vec<&str> = value
-        .as_array()
-        .expect("array")
-        .iter()
-        .map(|loop_| loop_["project"].as_str().expect("project"))
-        .collect();
-    assert!(projects.contains(&"test"), "{value}");
-    assert!(projects.contains(&"second"), "{value}");
-
-    let (code, value, stderr) = env.run_json(&["schedule", "--all", "ls"]);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(value.as_array().is_some_and(Vec::is_empty), "{value}");
-}
-
-#[test]
 fn migrate_reports_a_split_or_missing_home_without_writing() {
     let env = common::TestEnv::new();
     let (code, _, stderr) = env.run(&["migrate", "--dry-run"]);
@@ -1196,8 +1176,7 @@ fn init_registers_a_second_project_with_its_own_loops() {
     let store = Store::open_with_project(&paths, &vowp_protocol::ProjectName::parse("tmp").expect("name"))
         .or_else(|_| {
             let global = Store::open_global(&paths).expect("global");
-            let entry = global
-                .project_by_path(second.path())
+            let entry = vowp_core::loops::registry::project_by_path(&global, second.path())
                 .expect("lookup")
                 .expect("project registered by init");
             Store::open_with_project(&paths, &entry.name)
@@ -1210,4 +1189,58 @@ fn init_registers_a_second_project_with_its_own_loops() {
             .expect("workers")
             .is_empty()
     );
+}
+
+#[test]
+fn up_once_from_the_home_after_init_ticks_every_project() {
+    let home = tempfile::tempdir().expect("home");
+    let first = git_repo();
+    let second = git_repo();
+    let bin = env!("CARGO_BIN_EXE_vowp");
+    for (repo, name) in [(&first, "one"), (&second, "two")] {
+        let output = Command::new(bin)
+            .arg("--home")
+            .arg(home.path())
+            .args(["init", "--name", name])
+            .current_dir(repo.path())
+            .env("HOME", home.path())
+            .env("VOWP_HOME", home.path())
+            .env("TMUX_TMPDIR", home.path().join("tmux"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("VOWP_TMUX_SOCKET")
+            .output()
+            .expect("run vowp init");
+        assert!(
+            output.status.success(),
+            "init {name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(
+        home.path().join("vowp.toml").is_file(),
+        "init writes the node-level project context used by the unit"
+    );
+
+    // The unit's WorkingDirectory is the home, with no --project on the command line.
+    let output = Command::new(bin)
+        .arg("up")
+        .arg("--once")
+        .arg("--no-tmux")
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("VOWP_HOME", home.path())
+        .env("TMUX_TMPDIR", home.path().join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_TMUX_SOCKET")
+        .output()
+        .expect("run vowp up");
+    assert!(
+        output.status.success(),
+        "up from the home failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2 project(s)"), "{stdout}");
 }

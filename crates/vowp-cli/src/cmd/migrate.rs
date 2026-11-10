@@ -11,7 +11,7 @@ use clap::Args;
 use vowp_store::MigrationReport;
 
 use crate::output::{Table, print_json};
-use crate::{CliError, Ctx, Global, IoStreams};
+use crate::{CliError, Ctx, IoStreams};
 
 /// Arguments for `vowp migrate`.
 #[derive(Debug, Clone, Default, Args)]
@@ -30,13 +30,6 @@ pub struct MigrateArgs {
 /// Runs `vowp migrate` with a project context.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &MigrateArgs) -> Result<i32, CliError> {
     migrate(ctx.paths(), ctx.json(), ctx.color(), io, args)
-}
-
-/// Runs `vowp migrate` without needing a `vowp.toml` in the current directory.
-pub fn run_home(global: &Global, io: &mut dyn IoStreams, args: &MigrateArgs) -> Result<i32, CliError> {
-    let paths = crate::ctx::node_paths(global)?;
-    let color = !global.no_color && io.is_tty() && std::env::var_os("NO_COLOR").is_none();
-    migrate(&paths, global.json, color, io, args)
 }
 
 /// Runs one migration mode and prints its report.

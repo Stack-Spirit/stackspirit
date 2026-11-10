@@ -75,6 +75,22 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, args: &InitArgs) -> Result<i
     }
 
     let paths = crate::ctx::node_paths(global)?;
+    // The node unit runs `vowp up` with its working directory at the home. A small
+    // `vowp.toml` there gives the CLI a valid node project context on a home with any
+    // number of registered projects; `_node` is skipped by the project registry.
+    let home_config_path = paths.root().join("vowp.toml");
+    if !home_config_path.exists() {
+        let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+        let mut home_config = default_config(node_project.clone(), local_offset_minutes())?;
+        home_config.project.path = Some(paths.root().display().to_string());
+        home_config.validate()?;
+        std::fs::create_dir_all(paths.root())?;
+        std::fs::write(
+            &home_config_path,
+            toml::to_string_pretty(&home_config)
+                .map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()))?,
+        )?;
+    }
     let store = Store::open(&paths)?;
     let now = store.clock().now();
     // The reserved `_node` project owns project-less session runs and node-wide history.

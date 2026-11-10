@@ -10,10 +10,11 @@ Type=simple
 # Spec: docs/design/v0.2/home-and-surfaces.md §4.1; heartbeat: docs/design/loops.md §10.
 Environment=VOWP_HOME=%h/.vowp
 ExecStart=%h/.local/bin/vowp up --foreground
+# Not Restart=always: `vowp down` exits 0 and must stay stopped.
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
-WorkingDirectory=%h
+WorkingDirectory=%h/.vowp
 
 [Install]
 WantedBy=default.target

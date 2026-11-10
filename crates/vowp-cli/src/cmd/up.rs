@@ -25,7 +25,7 @@ use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
 use vowp_store::{NodePaths, Store, StoreError};
 use vowp_tmux::{LayoutSpec, WindowManager, session_name_for_project};
 
-use crate::cli::{DownArgs, Global, UpArgs, UpCommand};
+use crate::cli::{DownArgs, UpArgs, UpCommand};
 use crate::{CliError, Ctx, IoStreams, signals};
 
 /// How long `down` waits for a cooperative stop before reporting a conflict.
@@ -43,80 +43,39 @@ const CHILD_EXIT_WAIT: Duration = Duration::from_secs(6);
 /// Grace after SIGTERM before a direct child is killed with SIGKILL.
 const CHILD_KILL_WAIT: Duration = Duration::from_secs(2);
 
-/// Runs `vowp up` or `vowp down` with a project context (the v0.1 entry point).
+/// Runs `vowp up` or `vowp down` with a project context.
+///
+/// The context is built from a checkout in the current directory or from `--project`.
+/// `up` refuses on a configured control machine and registers a checkout that is not yet
+/// in the registry, then starts the one node supervisor for every active project.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
     let deps = supervisor_deps(ctx);
     match command {
-        UpCommand::Up(args) => run_up(ctx.paths(), &deps, ctx.json(), io, args, None),
+        UpCommand::Up(args) => {
+            if crate::node_ctx::is_control_machine()? {
+                return Err(CliError::Guard(
+                    "this is a control machine; the home runs the supervisor".to_owned(),
+                ));
+            }
+            register_checkout_for_up(ctx)?;
+            run_up(ctx.paths(), &deps, ctx.json(), io, args)
+        }
         UpCommand::Down(args) => run_down(ctx.paths(), &deps, ctx.json(), io, args),
     }
 }
 
-/// Runs `vowp up` or `vowp down` without needing a project in the current directory.
-///
-/// This is the systemd path and the path used on a home with several registered
-/// projects. It refuses on a configured control machine, which holds no truth.
-pub fn run_home(global: &Global, io: &mut dyn IoStreams, command: &UpCommand) -> Result<i32, CliError> {
-    let paths = crate::ctx::node_paths(global)?;
-    if global.home.is_none() && crate::node_ctx::is_control_machine()? {
-        return Err(CliError::Guard(
-            "this is a control machine; the home runs the supervisor".to_owned(),
-        ));
-    }
-    let mut deps = match command {
-        UpCommand::Up(_) => crate::node_ctx::home_deps(&paths)?,
-        UpCommand::Down(_) => crate::node_ctx::home_shell_deps(&paths)?,
-    };
-    deps.log = Arc::new(FileLog::new(
-        paths.logs_dir().join("supervisor.log"),
-        Arc::clone(&deps.clock),
-    ));
-    match command {
-        UpCommand::Up(args) => run_up(&paths, &deps, global.json, io, args, Some(global)),
-        UpCommand::Down(args) => run_down(&paths, &deps, global.json, io, args),
-    }
-}
-
-/// Registers the checkout selected by `--project` or the current directory, if one is
-/// present and not yet in the registry.
-///
-/// This keeps the v0.1 promise that `vowp up` in a checkout with a `vowp.toml` registers
-/// that project before it joins the node supervisor.
-fn register_current_checkout(global: &Global, paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
-    let Some(root) = checkout_to_register(global, paths)? else {
-        return Ok(());
-    };
-    let store = Store::open_global(paths)?;
-    if store.project_by_path(&root)?.is_some() {
+/// Registers the selected checkout when `up` is run in one, keeping v0.1 compatibility.
+fn register_checkout_for_up(ctx: &Ctx) -> Result<(), CliError> {
+    let root = ctx.project_root();
+    if ctx.config().project.name.as_str() == vowp_store::RESERVED_NODE_PROJECT || root == ctx.paths().root() {
         return Ok(());
     }
-    crate::cmd::project::register_checkout(paths, deps, &root, None, None)?;
+    let store = Store::open_global(ctx.paths())?;
+    if vowp_core::loops::registry::project_by_path(&store, root)?.is_some() {
+        return Ok(());
+    }
+    crate::cmd::project::register_checkout(ctx.paths(), ctx.deps(), root, None, None)?;
     Ok(())
-}
-
-/// Returns the checkout path that should be registered, when any.
-fn checkout_to_register(global: &Global, paths: &NodePaths) -> Result<Option<PathBuf>, CliError> {
-    if let Some(value) = &global.project {
-        let candidate = PathBuf::from(value);
-        if candidate.is_dir() {
-            let root = std::fs::canonicalize(&candidate).unwrap_or(candidate);
-            if !root.join("vowp.toml").is_file() {
-                return Err(CliError::NotFound(format!(
-                    "no vowp.toml in {}; run `vowp init` there",
-                    root.display()
-                )));
-            }
-            return Ok(Some(root));
-        }
-        let name = ProjectName::parse(value)?;
-        let store = Store::open_global(paths)?;
-        if store.project(&name)?.is_none() {
-            return Err(CliError::NotFound(format!("project {name}")));
-        }
-        return Ok(None);
-    }
-    let cwd = std::env::current_dir()?;
-    Ok(crate::ctx::find_project_root(&cwd))
 }
 
 /// Runs one node tick with the supplied dependencies.
@@ -163,7 +122,7 @@ pub fn ensure_project_windows(
 fn ensure_node_windows(paths: &NodePaths, windows: &dyn WindowManager) -> Result<(), CliError> {
     let store = Store::open_global(paths)?;
     let exe = std::env::current_exe()?;
-    for entry in store.list_project_entries()? {
+    for entry in vowp_core::loops::registry::project_entries(&store)? {
         if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
             continue;
         }
@@ -223,14 +182,7 @@ struct TransitionOutput {
 }
 
 /// Runs `vowp up`.
-fn run_up(
-    paths: &NodePaths,
-    deps: &Deps,
-    json: bool,
-    io: &mut dyn IoStreams,
-    args: &UpArgs,
-    global: Option<&Global>,
-) -> Result<i32, CliError> {
+fn run_up(paths: &NodePaths, deps: &Deps, json: bool, io: &mut dyn IoStreams, args: &UpArgs) -> Result<i32, CliError> {
     if let Some(pid) = live_supervisor_pid(paths) {
         return Err(CliError::Conflict(format!(
             "supervisor already running (pid {pid}); `vowp status` shows it"
@@ -249,10 +201,6 @@ fn run_up(
             )?;
         }
     }
-    if let Some(global) = global {
-        register_current_checkout(global, paths, deps)?;
-    }
-
     if !args.no_tmux {
         match ensure_node_windows(paths, deps.windows.as_ref()) {
             Ok(()) => {}
@@ -791,7 +739,7 @@ fn send_term(pid: u32) -> Result<(), CliError> {
 /// Kills every tagged window in every project session.
 fn kill_windows(paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
     let store = Store::open_global(paths)?;
-    for entry in store.list_project_entries()? {
+    for entry in vowp_core::loops::registry::project_entries(&store)? {
         if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
             continue;
         }

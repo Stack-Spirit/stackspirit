@@ -14,12 +14,13 @@ use std::sync::Arc;
 use serde::Serialize;
 use vowp_core::Deps;
 use vowp_core::loops::prepare_project;
+use vowp_core::loops::registry;
 use vowp_protocol::{Project, ProjectEntry, ProjectName, ProjectState};
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::session_name_for_project;
 
 use crate::output::{Table, print_json};
-use crate::{CliError, Ctx, Global, IoStreams};
+use crate::{CliError, Ctx, IoStreams};
 
 /// Arguments for `vowp project`.
 #[derive(Debug, Clone, clap::Args)]
@@ -110,20 +111,6 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ProjectArgs) -> Result<i32,
         deps: ctx.deps(),
         json: ctx.json(),
         color: ctx.color(),
-    };
-    dispatch(&registry, io, args)
-}
-
-/// Runs `vowp project` without needing a `vowp.toml` in the current directory.
-pub fn run_home(global: &Global, io: &mut dyn IoStreams, args: &ProjectArgs) -> Result<i32, CliError> {
-    let paths = crate::ctx::node_paths(global)?;
-    let deps = crate::node_ctx::home_shell_deps(&paths)?;
-    let color = !global.no_color && io.is_tty() && std::env::var_os("NO_COLOR").is_none();
-    let registry = Registry {
-        paths: &paths,
-        deps: &deps,
-        json: global.json,
-        color,
     };
     dispatch(&registry, io, args)
 }
@@ -226,7 +213,7 @@ pub fn register_checkout(
             false
         }
         None => {
-            if let Some(existing) = store.project_by_path(&root)? {
+            if let Some(existing) = registry::project_by_path(&store, &root)? {
                 return Err(CliError::Conflict(format!(
                     "{} is already registered as project {}",
                     root.display(),
@@ -246,7 +233,7 @@ pub fn register_checkout(
         }
     };
     if let Some(weight) = weight {
-        store.set_project_weight(&project, weight)?;
+        registry::set_project_weight(&store, &project, weight)?;
     }
     Store::create_project_db(paths, &project)?;
     prepare(base, project.clone(), config)?;
@@ -256,8 +243,7 @@ pub fn register_checkout(
 /// Lists the registry.
 fn list(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectLsArgs) -> Result<i32, CliError> {
     let store = Store::open_global(registry.paths)?;
-    let entries: Vec<ProjectEntry> = store
-        .list_project_entries()?
+    let entries: Vec<ProjectEntry> = registry::project_entries(&store)?
         .into_iter()
         .filter(|entry| args.all || entry.name.as_str() != vowp_store::RESERVED_NODE_PROJECT)
         .collect();
@@ -287,7 +273,7 @@ fn pause(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectNameArgs
     if entry.state == ProjectState::Archived {
         return Err(CliError::Conflict(format!("project {name} is archived")));
     }
-    let entry = store.set_project_state(&name, ProjectState::Paused, "owner")?;
+    let entry = registry::set_project_state(&store, &name, ProjectState::Paused, "owner")?;
     print_entry(registry, io, &entry, "paused")?;
     Ok(0)
 }
@@ -302,7 +288,7 @@ fn resume(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectNameArg
             "project {name} is archived and cannot be resumed"
         )));
     }
-    let entry = store.set_project_state(&name, ProjectState::Active, "")?;
+    let entry = registry::set_project_state(&store, &name, ProjectState::Active, "")?;
     print_entry(registry, io, &entry, "resumed")?;
     Ok(0)
 }
@@ -312,7 +298,7 @@ fn archive(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectNameAr
     let store = Store::open_global(registry.paths)?;
     let name = user_project(&args.name)?;
     require_entry(&store, &name)?;
-    let entry = store.set_project_state(&name, ProjectState::Archived, "owner")?;
+    let entry = registry::set_project_state(&store, &name, ProjectState::Archived, "owner")?;
     kill_project_windows(registry, &name)?;
     print_entry(registry, io, &entry, "archived")?;
     Ok(0)
@@ -345,7 +331,7 @@ fn remove(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectRmArgs)
     } else {
         None
     };
-    store.remove_project_record(&name)?;
+    registry::remove_project_record(&store, &name)?;
     kill_project_windows(registry, &name)?;
     if registry.json {
         print_json(
@@ -374,7 +360,7 @@ fn weight(registry: &Registry<'_>, io: &mut dyn IoStreams, args: &ProjectWeightA
     let store = Store::open_global(registry.paths)?;
     let name = user_project(&args.name)?;
     require_entry(&store, &name)?;
-    store.set_project_weight(&name, args.weight)?;
+    registry::set_project_weight(&store, &name, args.weight)?;
     let entry = require_entry(&store, &name)?;
     print_entry(registry, io, &entry, "weight set")?;
     Ok(0)
@@ -404,9 +390,7 @@ fn print_entry(
 
 /// Returns the entry or a not-found error.
 fn require_entry(store: &Store, name: &ProjectName) -> Result<ProjectEntry, CliError> {
-    store
-        .project_entry(name)?
-        .ok_or_else(|| CliError::NotFound(format!("project {name}")))
+    registry::project_entry(store, name)?.ok_or_else(|| CliError::NotFound(format!("project {name}")))
 }
 
 /// Parses a user-supplied project name and refuses the reserved `_node`.
