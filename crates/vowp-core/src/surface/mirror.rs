@@ -37,6 +37,28 @@ pub struct MirrorCursor {
     pub updated_at: Timestamp,
 }
 
+/// Loads the cursor from `mirror.json`, or starts from the beginning when it is absent.
+pub fn read_cursor(path: &std::path::Path) -> Result<MirrorCursor, CoreError> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|error| CoreError::Invalid(format!("mirror.json: {error}")))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(MirrorCursor {
+            last_native_id: None,
+            updated_at: Timestamp::now(),
+        }),
+        Err(source) => Err(CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// Writes the cursor to `mirror.json` with mode 0600.
+pub fn write_cursor(path: &std::path::Path, cursor: &MirrorCursor) -> Result<(), CoreError> {
+    super::native::write_private_json(path, cursor)
+}
+
 /// One mirror pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorReport {
@@ -76,6 +98,7 @@ pub fn mirror_once(
                 cursor: cursor.clone(),
             };
             report.cursor.updated_at = deps.clock.now();
+            *cursor = report.cursor.clone();
             Ok(report)
         }
     }
@@ -151,6 +174,7 @@ pub fn mirror_from_host(
         log.sync()?;
     }
     report.cursor.updated_at = deps.clock.now();
+    *cursor = report.cursor.clone();
     Ok(report)
 }
 
@@ -180,7 +204,9 @@ pub fn resume_context(
 ) -> Result<ResumeContext, CoreError> {
     let session_row = store.require_session(session)?;
     let capsule = store.latest_capsule(session)?;
-    let lease = store.lease(session)?;
+    let lease = store
+        .lease(session)?
+        .filter(|lease| deps.clock.now().since(lease.heartbeat_at) < super::lease::STALE_AFTER);
     let reader = SessionLog::open_read(&deps.paths, session)?;
     let events = reader.read_all()?;
     Ok(ResumeContext {

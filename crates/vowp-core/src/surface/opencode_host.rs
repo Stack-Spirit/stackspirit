@@ -9,6 +9,12 @@
 //!
 //! The HTTP client is deliberately small and blocking: opencode is a loopback service and
 //! the workspace already prefers plain threads over an async runtime.
+//!
+//! The live reader consumes the replayable `/api/session/<id>/event` endpoint on every pass
+//! (the `/api/event` stream is subscription-only and loses events between connections), and
+//! falls back to `/api/event` only when the replayable endpoint is unavailable. Assistant
+//! text parts are coalesced by `assistantMessageID`; `session.usage.updated` carries a
+//! cumulative snapshot, so the mirror writes only each update's delta as cost.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -100,8 +106,9 @@ impl OpencodeHost {
 
     /// Reads the newest transcript entries after `cursor`.
     ///
-    /// The first pass backfills from the session export; later passes consume `/api/event`.
-    /// The mirror's `native_events` map makes overlapping entries harmless.
+    /// The first pass backfills from the session export. Every pass then reads the
+    /// replayable per-session event endpoint, so an event that happened between two passes
+    /// is not lost; `/api/event` is only a fallback for older servers.
     fn read_transcript(&self, handle: &AppHandle, cursor: &MirrorCursor) -> Result<TranscriptBatch, CoreError> {
         let layout = Layout::for_workdir(&handle.workdir);
         let Some(state) = read_host_state(&layout)? else {
@@ -161,17 +168,25 @@ impl OpencodeHost {
         Ok(Vec::new())
     }
 
-    /// Reads one bounded window of the live `/api/event` stream.
+    /// Reads the replayable per-session event endpoint, falling back to `/api/event`.
+    ///
+    /// `after=0` replays the whole session; the mirror's native-id map removes the
+    /// overlap with earlier passes. The live `/api/event` stream is subscription-only, so
+    /// it is used only when the replayable endpoint is not available.
     fn live_events(&self, client: &HttpClient, native: &str) -> Result<Vec<TranscriptEntry>, CoreError> {
-        let events = client.stream_events("/api/event", self.sse_window)?;
-        let mut entries = Vec::new();
-        for event in events {
-            if session_of(&event).is_some_and(|session| session != native) {
-                continue;
+        if super::native::safe_segment(native) {
+            let path = format!("/api/session/{native}/event?after=0");
+            if let Ok((status, events)) = client.request_events(&path, self.sse_window) {
+                if (200..300).contains(&status) {
+                    return Ok(map_events(&events, false));
+                }
             }
-            entries.extend(entries_from_api_event(&event));
         }
-        Ok(entries)
+        let (status, events) = client.request_events("/api/event", self.sse_window)?;
+        if !(200..300).contains(&status) {
+            return Ok(Vec::new());
+        }
+        Ok(map_events(&events, false))
     }
 
     /// Builds a client from the service state in `layout`.
@@ -193,11 +208,12 @@ impl OpencodeHost {
                 source,
             })?;
         if !status.success() {
+            // The log is private; never echo it, in case the client logs the pair link.
             return Err(CoreError::Command(format!(
-                "opencode {} failed: exit {:?}: {}",
+                "opencode {} failed: exit {:?}; see {}",
                 args.join(" "),
                 status.code(),
-                read_tail(&layout.service_log)
+                layout.service_log.display()
             )));
         }
         Ok(())
@@ -418,7 +434,17 @@ impl OpencodeHost {
                         .unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
                     match HttpClient::new(&url, &service.password) {
                         Ok(client) => match client.get_json("/api/session") {
-                            Ok((status, _)) if (200..300).contains(&status) => return Ok(service),
+                            Ok((status, _)) if (200..300).contains(&status) => {
+                                if let Some(version) = &service.version {
+                                    if !version.starts_with("2.") {
+                                        self.run_service_best_effort(layout, &["service", "stop"]);
+                                        return Err(CoreError::Refused(format!(
+                                            "opencode 2.x is required; the service reports {version}"
+                                        )));
+                                    }
+                                }
+                                return Ok(service);
+                            }
                             Ok((status, _)) => last = format!("opencode answered HTTP {status} on /api/session"),
                             Err(error) => last = error.to_string(),
                         },
@@ -519,6 +545,7 @@ struct HostState {
 /// Deliberately not `Debug`: `password` is a secret.
 #[derive(Clone, Deserialize)]
 struct ServiceState {
+    version: Option<String>,
     url: Option<String>,
     pid: Option<u32>,
     port: Option<u16>,
@@ -572,17 +599,6 @@ fn free_port() -> Result<u16, CoreError> {
             path: "127.0.0.1:0".to_owned(),
             source,
         })
-}
-
-/// Reads the last 500 characters of a log file.
-fn read_tail(path: &Path) -> String {
-    let Ok(bytes) = fs::read(path) else {
-        return String::new();
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    let trimmed = text.trim();
-    let chars: Vec<char> = trimmed.chars().collect();
-    chars[chars.len().saturating_sub(500)..].iter().collect()
 }
 
 /// Quotes one shell argument with single quotes.
@@ -666,8 +682,11 @@ impl HttpClient {
         Ok((status, value))
     }
 
-    /// Reads one bounded window of an SSE stream and parses its `data:` payloads.
-    fn stream_events(&self, path: &str, window: Duration) -> Result<Vec<Value>, CoreError> {
+    /// Reads one bounded event response and returns its HTTP status and events.
+    ///
+    /// The body may be SSE (`data:` lines, as `/api/event` and the replayable session
+    /// endpoint stream it) or a JSON array/`{"data": [...]}` object.
+    fn request_events(&self, path: &str, window: Duration) -> Result<(u16, Vec<Value>), CoreError> {
         let mut stream = TcpStream::connect((self.host.as_str(), self.port)).map_err(|source| CoreError::Io {
             path: format!("{}:{}", self.host, self.port),
             source,
@@ -679,7 +698,7 @@ impl HttpClient {
                 source,
             })?;
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: {}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: {}\r\nAccept: text/event-stream, application/json\r\nConnection: close\r\n\r\n",
             self.host, self.port, self.auth
         );
         stream.write_all(request.as_bytes()).map_err(|source| CoreError::Io {
@@ -706,20 +725,9 @@ impl HttpClient {
                 }
             }
         }
+        let status = response_status(&bytes)?;
         let body = sse_body(&bytes);
-        let text = String::from_utf8_lossy(&body);
-        let mut events = Vec::new();
-        for line in text.lines() {
-            let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") else {
-                continue;
-            };
-            if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
-                if value.is_object() {
-                    events.push(value);
-                }
-            }
-        }
-        Ok(events)
+        Ok((status, parse_event_body(&body)))
     }
 }
 
@@ -833,6 +841,52 @@ fn sse_body(bytes: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Reads the HTTP status code from a response.
+fn response_status(bytes: &[u8]) -> Result<u16, CoreError> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or(bytes.len());
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| CoreError::Invalid("event response had no HTTP status".to_owned()))
+}
+
+/// Parses an SSE `data:` body or a JSON event list.
+fn parse_event_body(body: &[u8]) -> Vec<Value> {
+    let text = String::from_utf8_lossy(body);
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
+            if value.is_object() {
+                events.push(value);
+            }
+        }
+    }
+    if !events.is_empty() {
+        return events;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(text.trim()) else {
+        return Vec::new();
+    };
+    if let Some(array) = value.as_array() {
+        return array.iter().filter(|item| item.is_object()).cloned().collect();
+    }
+    value
+        .get("data")
+        .or_else(|| value.get("events"))
+        .and_then(Value::as_array)
+        .map(|array| array.iter().filter(|item| item.is_object()).cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Parses `http://host:port[/…]` and refuses anything but loopback.
 fn loopback_address(url: &str) -> Result<(String, u16), CoreError> {
     let rest = url
@@ -889,6 +943,11 @@ fn after_cursor(entries: Vec<TranscriptEntry>, cursor: &MirrorCursor) -> Vec<Tra
 }
 
 /// Parses an opencode message list or export into transcript entries.
+///
+/// The real v2.0.28 export (`session-export.json`) and message list
+/// (`/api/session/<id>/message`) carry a user message's text at the top level and an
+/// assistant message's text in `content`, with `cost` and `tokens` at the message level.
+/// The message list is newest-first, so entries are sorted by the app's timestamp.
 pub fn parse_message_list(value: &Value) -> Vec<TranscriptEntry> {
     let messages = value
         .get("messages")
@@ -898,8 +957,14 @@ pub fn parse_message_list(value: &Value) -> Vec<TranscriptEntry> {
     let Some(messages) = messages else {
         return Vec::new();
     };
+    let mut ordered: Vec<(i64, usize, &Value)> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message_created(message), index, message))
+        .collect();
+    ordered.sort_by_key(|(created, index, _)| (*created, *index));
     let mut entries = Vec::new();
-    for (index, message) in messages.iter().enumerate() {
+    for (_, index, message) in ordered {
         push_message(message, index, &mut entries);
     }
     entries
@@ -933,68 +998,397 @@ fn push_message(message: &Value, index: usize, entries: &mut Vec<TranscriptEntry
         .unwrap_or_default();
     let ts = message_timestamp(message);
     let model = message_model(message);
-    let session = message
-        .get("sessionID")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            message
-                .get("info")
-                .and_then(|info| info.get("sessionID"))
-                .and_then(Value::as_str)
-        })
-        .map(str::to_owned);
+    let session = message_session(message);
     let content = message
         .get("content")
         .or_else(|| message.get("parts"))
         .or_else(|| message.get("info").and_then(|info| info.get("content")));
     match role {
         "user" => {
+            // Real v2.0.28 user messages use a top-level `text`; older shapes use content.
+            let text = message
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| content.and_then(collect_text))
+                .unwrap_or_default();
+            if !text.is_empty() {
+                entries.push(simple_entry(
+                    format!("user:{id}"),
+                    TranscriptKind::UserMessage,
+                    ts,
+                    text,
+                    &model,
+                    &session,
+                ));
+            }
             if let Some(content) = content {
-                push_parts(content, &id, ts, &model, &session, true, entries);
+                push_tool_parts(content, ts, &model, &session, entries);
             }
         }
         "assistant" => {
             if let Some(content) = content {
-                push_parts(content, &id, ts, &model, &session, false, entries);
+                if let Some(text) = collect_text(content) {
+                    entries.push(simple_entry(
+                        format!("assistant:{id}"),
+                        TranscriptKind::AssistantMessage,
+                        ts,
+                        text,
+                        &model,
+                        &session,
+                    ));
+                }
+                push_tool_parts(content, ts, &model, &session, entries);
             }
-            if let Some(usage) = message
-                .get("usage")
-                .or_else(|| message.get("tokens"))
-                .or_else(|| message.get("info").and_then(|info| info.get("usage")))
-            {
-                entries.push(cost_from_usage(format!("{id}#usage"), ts, &model, &session, usage));
+            let tokens_value = message.get("tokens").or_else(|| message.get("usage"));
+            if tokens_value.is_some() || message.get("cost").is_some() {
+                let tokens = tokens_value.map(tokens_from_value).unwrap_or_default();
+                let usd = message
+                    .get("cost")
+                    .and_then(Value::as_f64)
+                    .or_else(|| tokens_value.and_then(|value| value.get("cost")).and_then(Value::as_f64));
+                entries.push(cost_entry(format!("cost:{id}"), ts, &model, &session, tokens, usd));
             }
         }
         _ => {}
     }
 }
 
-/// Maps a message content value (string or part array) into entries.
-#[allow(clippy::too_many_arguments)]
-fn push_parts(
+/// Maps a live event list, coalescing all `session.text.ended` parts by assistant message.
+///
+/// `flush_end` is true for one-shot callers: pending text is emitted even when the slice
+/// does not reach an execution end. The live host passes false, so a mid-turn window never
+/// writes a partial assistant message.
+pub fn entries_from_api_events(events: &[Value]) -> Vec<TranscriptEntry> {
+    map_events(events, true)
+}
+
+/// Maps one live `/api/event` payload to canonical transcript entries.
+pub fn entries_from_api_event(event: &Value) -> Vec<TranscriptEntry> {
+    map_events(std::slice::from_ref(event), true)
+}
+
+/// One assistant message whose text parts are still being collected.
+#[derive(Debug)]
+struct PendingAssistant {
+    ts: Timestamp,
+    parts: Vec<(u64, String)>,
+    model: Option<String>,
+    session: Option<String>,
+}
+
+/// Maps live events in order, coalescing assistant text and computing usage deltas.
+fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut out = Vec::new();
+    let mut pending: BTreeMap<String, PendingAssistant> = BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut completed: BTreeSet<String> = BTreeSet::new();
+    let mut last_assistant: Option<String> = None;
+    let mut previous_tokens = vowp_protocol::Tokens::default();
+    let mut previous_usd = 0.0;
+    let mut usage_seen = false;
+
+    for event in events {
+        let Some(kind) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let data = event.get("data").unwrap_or(&Value::Null);
+        let ts = event_timestamp(event);
+        let marker = event_marker(event, data);
+        let session = session_of(event);
+        let model = data
+            .get("model")
+            .and_then(model_name)
+            .or_else(|| data.get("modelID").and_then(Value::as_str).map(str::to_owned));
+        match kind {
+            "session.inbox.enqueued" => {
+                let item = data.get("item").unwrap_or(&Value::Null);
+                if item.get("type").and_then(Value::as_str) != Some("user") {
+                    continue;
+                }
+                let text = item
+                    .pointer("/payload/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    continue;
+                }
+                let id = data
+                    .get("inboxID")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("id").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| marker.clone());
+                out.push(simple_entry(
+                    format!("user:{id}"),
+                    TranscriptKind::UserMessage,
+                    ts,
+                    text.to_owned(),
+                    &model,
+                    &session,
+                ));
+            }
+            "session.execution.started" => {
+                last_assistant = None;
+                out.push(TranscriptEntry {
+                    native_id: format!("turn-start:{marker}"),
+                    kind: TranscriptKind::TurnStarted,
+                    ts,
+                    text: None,
+                    tool: None,
+                    input: None,
+                    output: None,
+                    path: None,
+                    call_id: None,
+                    model,
+                    native_session: session,
+                    ok: None,
+                    tokens: None,
+                    usd: None,
+                });
+            }
+            "session.text.ended" => {
+                let Some(id) = data.get("assistantMessageID").and_then(Value::as_str) else {
+                    continue;
+                };
+                let text = data.get("text").and_then(Value::as_str).unwrap_or_default();
+                if text.is_empty() {
+                    continue;
+                }
+                let ordinal = data.get("ordinal").and_then(Value::as_u64).unwrap_or(0);
+                let pending_message = pending.entry(id.to_owned()).or_insert_with(|| {
+                    order.push(id.to_owned());
+                    PendingAssistant {
+                        ts,
+                        parts: Vec::new(),
+                        model: model.clone(),
+                        session: session.clone(),
+                    }
+                });
+                pending_message.parts.push((ordinal, text.to_owned()));
+                if pending_message.model.is_none() {
+                    pending_message.model.clone_from(&model);
+                }
+                if pending_message.session.is_none() {
+                    pending_message.session.clone_from(&session);
+                }
+                last_assistant = Some(id.to_owned());
+            }
+            "session.step.started" => {
+                let Some(id) = data.get("assistantMessageID").and_then(Value::as_str) else {
+                    continue;
+                };
+                last_assistant = Some(id.to_owned());
+                if let Some(pending_message) = pending.get_mut(id) {
+                    if pending_message.model.is_none() {
+                        pending_message.model.clone_from(&model);
+                    }
+                    if pending_message.session.is_none() {
+                        pending_message.session.clone_from(&session);
+                    }
+                }
+            }
+            "session.step.ended" => {
+                let Some(id) = data.get("assistantMessageID").and_then(Value::as_str) else {
+                    continue;
+                };
+                last_assistant = Some(id.to_owned());
+                completed.insert(id.to_owned());
+                flush_ready(&mut out, &mut pending, &mut order, &mut completed, false);
+            }
+            "session.tool.called" => {
+                let call_id = data.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                out.push(TranscriptEntry {
+                    native_id: format!("tool-call:{call_id}"),
+                    kind: TranscriptKind::ToolCall,
+                    ts,
+                    text: None,
+                    tool: data
+                        .get("name")
+                        .or_else(|| data.get("tool"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    input: Some(data.get("input").cloned().unwrap_or(Value::Null)),
+                    output: None,
+                    path: None,
+                    call_id: Some(call_id),
+                    model,
+                    native_session: session,
+                    ok: None,
+                    tokens: None,
+                    usd: None,
+                });
+            }
+            "session.tool.success" | "session.tool.failed" => {
+                let call_id = data.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                let ok = kind == "session.tool.success";
+                let output = if ok {
+                    text_value(data.get("content"))
+                } else {
+                    data.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                };
+                out.push(TranscriptEntry {
+                    native_id: format!("tool-result:{call_id}"),
+                    kind: TranscriptKind::ToolResult,
+                    ts,
+                    text: None,
+                    tool: None,
+                    input: None,
+                    output,
+                    path: None,
+                    call_id: Some(call_id),
+                    model,
+                    native_session: session,
+                    ok: Some(ok),
+                    tokens: None,
+                    usd: None,
+                });
+            }
+            "session.usage.updated" => {
+                let usage = data.get("tokens").or_else(|| data.get("usage")).unwrap_or(data);
+                let tokens = tokens_from_value(usage);
+                let usd = data
+                    .get("cost")
+                    .and_then(Value::as_f64)
+                    .or_else(|| usage.get("cost").and_then(Value::as_f64));
+                // `session.usage.updated` is a cumulative session snapshot (S3), so write
+                // the delta for each update and key it by the assistant message it follows.
+                let delta = if usage_seen {
+                    tokens_delta(&tokens, &previous_tokens)
+                } else {
+                    tokens
+                };
+                let delta_usd = if usage_seen {
+                    usd.map(|usd| (usd - previous_usd).max(0.0))
+                } else {
+                    usd
+                };
+                let native_id = last_assistant
+                    .clone()
+                    .map(|id| format!("cost:{id}"))
+                    .unwrap_or_else(|| format!("cost:usage:{marker}"));
+                out.push(cost_entry(native_id, ts, &model, &session, delta, delta_usd));
+                previous_tokens = tokens;
+                if let Some(usd) = usd {
+                    previous_usd = usd;
+                }
+                usage_seen = true;
+            }
+            "session.execution.succeeded" | "session.execution.interrupted" | "session.execution.failed" => {
+                flush_ready(&mut out, &mut pending, &mut order, &mut completed, true);
+                if kind.ends_with("failed") {
+                    let message = data
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("session execution failed")
+                        .to_owned();
+                    out.push(error_entry(format!("error:{marker}"), ts, message, &model, &session));
+                }
+                let outcome = if kind.ends_with("interrupted") {
+                    "interrupted"
+                } else if kind.ends_with("failed") {
+                    "failed"
+                } else {
+                    "succeeded"
+                };
+                out.push(turn_end_entry(
+                    format!("turn-end:{marker}"),
+                    ts,
+                    outcome,
+                    &model,
+                    &session,
+                ));
+            }
+            "session.step.failed" => {
+                let message = data
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("step failed")
+                    .to_owned();
+                out.push(error_entry(format!("error:{marker}"), ts, message, &model, &session));
+            }
+            "session.model.selected" => {
+                let selected = data
+                    .get("model")
+                    .and_then(model_name)
+                    .or_else(|| data.get("modelID").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".to_owned());
+                out.push(simple_entry(
+                    format!("model:{marker}"),
+                    TranscriptKind::Note,
+                    ts,
+                    format!("app selected model {selected}"),
+                    &model,
+                    &session,
+                ));
+            }
+            _ => {}
+        }
+    }
+    if flush_end {
+        flush_ready(&mut out, &mut pending, &mut order, &mut completed, true);
+    }
+    out
+}
+
+/// Emits the pending assistant messages whose ids are complete (or all of them).
+fn flush_ready(
+    out: &mut Vec<TranscriptEntry>,
+    pending: &mut std::collections::BTreeMap<String, PendingAssistant>,
+    order: &mut Vec<String>,
+    completed: &mut std::collections::BTreeSet<String>,
+    all: bool,
+) {
+    let ready: Vec<String> = order
+        .iter()
+        .filter(|id| all || completed.contains(*id))
+        .cloned()
+        .collect();
+    for id in ready {
+        if let Some(message) = pending.remove(&id) {
+            if let Some(entry) = pending_entry(&id, message) {
+                out.push(entry);
+            }
+        }
+        order.retain(|candidate| candidate != &id);
+        completed.remove(&id);
+    }
+}
+
+/// Builds the single coalesced assistant message for one app-side message id.
+fn pending_entry(id: &str, mut message: PendingAssistant) -> Option<TranscriptEntry> {
+    message.parts.sort_by_key(|(ordinal, _)| *ordinal);
+    let text = message
+        .parts
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return None;
+    }
+    Some(simple_entry(
+        format!("assistant:{id}"),
+        TranscriptKind::AssistantMessage,
+        message.ts,
+        text,
+        &message.model,
+        &message.session,
+    ))
+}
+
+/// Adds tool calls and tool results from a message content array.
+fn push_tool_parts(
     content: &Value,
-    message_id: &str,
     ts: Timestamp,
     model: &Option<String>,
     session: &Option<String>,
-    user: bool,
     entries: &mut Vec<TranscriptEntry>,
 ) {
-    if let Some(text) = content.as_str() {
-        entries.push(simple_entry(
-            message_id.to_owned(),
-            if user {
-                TranscriptKind::UserMessage
-            } else {
-                TranscriptKind::AssistantMessage
-            },
-            ts,
-            text.to_owned(),
-            model,
-            session,
-        ));
-        return;
-    }
     let Some(parts) = content.as_array() else {
         return;
     };
@@ -1003,25 +1397,8 @@ fn push_parts(
             .get("id")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("{message_id}#{index}"));
-        let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
-        match part_type {
-            "text" => {
-                if let Some(text) = part.get("text").and_then(Value::as_str) {
-                    entries.push(simple_entry(
-                        part_id,
-                        if user {
-                            TranscriptKind::UserMessage
-                        } else {
-                            TranscriptKind::AssistantMessage
-                        },
-                        ts,
-                        text.to_owned(),
-                        model,
-                        session,
-                    ));
-                }
-            }
+            .unwrap_or_else(|| format!("part-{index}"));
+        match part.get("type").and_then(Value::as_str).unwrap_or_default() {
             "tool_use" | "tool" => {
                 let call_id = part
                     .get("id")
@@ -1044,9 +1421,9 @@ fn push_parts(
                         .or_else(|| part.get("tool"))
                         .and_then(Value::as_str)
                         .map(str::to_owned),
+                    path: None,
                     input: Some(input),
                     output: None,
-                    path: None,
                     call_id: Some(call_id),
                     model: model.clone(),
                     native_session: session.clone(),
@@ -1063,7 +1440,7 @@ fn push_parts(
                     .unwrap_or(&part_id)
                     .to_owned();
                 entries.push(TranscriptEntry {
-                    native_id: format!("tool-result:{part_id}"),
+                    native_id: format!("tool-result:{call_id}"),
                     kind: TranscriptKind::ToolResult,
                     ts,
                     text: None,
@@ -1084,252 +1461,20 @@ fn push_parts(
     }
 }
 
-/// Builds a message entry.
-fn simple_entry(
-    native_id: String,
-    kind: TranscriptKind,
-    ts: Timestamp,
-    text: String,
-    model: &Option<String>,
-    session: &Option<String>,
-) -> TranscriptEntry {
-    TranscriptEntry {
-        native_id,
-        kind,
-        ts,
-        text: Some(text),
-        tool: None,
-        input: None,
-        output: None,
-        path: None,
-        call_id: None,
-        model: model.clone(),
-        native_session: session.clone(),
-        ok: None,
-        tokens: None,
-        usd: None,
+/// Joins the text blocks of a content value into one message.
+fn collect_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return if text.is_empty() { None } else { Some(text.to_owned()) };
     }
-}
-
-/// Maps one live `/api/event` payload to canonical transcript entries.
-pub fn entries_from_api_event(event: &Value) -> Vec<TranscriptEntry> {
-    let Some(kind) = event.get("type").and_then(Value::as_str) else {
-        return Vec::new();
-    };
-    let data = event.get("data").unwrap_or(&Value::Null);
-    let ts = event_timestamp(event);
-    let session = session_of(event);
-    let model = data
-        .get("model")
-        .and_then(model_name)
-        .or_else(|| data.get("modelID").and_then(Value::as_str).map(str::to_owned));
-    let seq = data
-        .get("seq")
-        .and_then(Value::as_u64)
-        .or_else(|| event.get("seq").and_then(Value::as_u64));
-    let marker = seq
-        .map(|seq| seq.to_string())
-        .or_else(|| data.get("id").and_then(Value::as_str).map(str::to_owned))
-        .unwrap_or_else(|| ts.to_string());
-    match kind {
-        "session.inbox.enqueued" => {
-            let item = data.get("item").unwrap_or(&Value::Null);
-            if item.get("type").and_then(Value::as_str) != Some("user") {
-                return Vec::new();
-            }
-            let text = item
-                .pointer("/payload/text")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if text.is_empty() {
-                return Vec::new();
-            }
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("user:{marker}"));
-            vec![simple_entry(
-                id,
-                TranscriptKind::UserMessage,
-                ts,
-                text.to_owned(),
-                &model,
-                &session,
-            )]
-        }
-        "session.execution.started" => vec![TranscriptEntry {
-            native_id: format!("turn-start:{marker}"),
-            kind: TranscriptKind::TurnStarted,
-            ts,
-            text: None,
-            tool: None,
-            input: None,
-            output: None,
-            path: None,
-            call_id: None,
-            model,
-            native_session: session,
-            ok: None,
-            tokens: None,
-            usd: None,
-        }],
-        "session.text.ended" => {
-            let text = data.get("text").and_then(Value::as_str).unwrap_or_default();
-            if text.is_empty() {
-                return Vec::new();
-            }
-            let id = data
-                .get("assistantMessageID")
-                .and_then(Value::as_str)
-                .or_else(|| data.get("id").and_then(Value::as_str))
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("assistant:{marker}"));
-            vec![simple_entry(
-                id,
-                TranscriptKind::AssistantMessage,
-                ts,
-                text.to_owned(),
-                &model,
-                &session,
-            )]
-        }
-        "session.tool.called" => {
-            let call_id = data.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
-            vec![TranscriptEntry {
-                native_id: format!("tool-call:{call_id}"),
-                kind: TranscriptKind::ToolCall,
-                ts,
-                text: None,
-                tool: data
-                    .get("name")
-                    .or_else(|| data.get("tool"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                input: Some(data.get("input").cloned().unwrap_or(Value::Null)),
-                output: None,
-                path: None,
-                call_id: Some(call_id),
-                model,
-                native_session: session,
-                ok: None,
-                tokens: None,
-                usd: None,
-            }]
-        }
-        "session.tool.success" | "session.tool.failed" => {
-            let call_id = data.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
-            let ok = kind == "session.tool.success";
-            let output = if ok {
-                text_value(data.get("content"))
-            } else {
-                data.pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            };
-            vec![TranscriptEntry {
-                native_id: format!("tool-result:{marker}"),
-                kind: TranscriptKind::ToolResult,
-                ts,
-                text: None,
-                tool: None,
-                input: None,
-                output,
-                path: None,
-                call_id: Some(call_id),
-                model,
-                native_session: session,
-                ok: Some(ok),
-                tokens: None,
-                usd: None,
-            }]
-        }
-        "session.usage.updated" => {
-            let usage = data.get("tokens").or_else(|| data.get("usage")).unwrap_or(data);
-            let mut entry = cost_from_usage(format!("cost:{marker}"), ts, &model, &session, usage);
-            entry.usd = data.get("cost").and_then(Value::as_f64);
-            vec![entry]
-        }
-        "session.execution.succeeded" | "session.execution.interrupted" => {
-            let outcome = if kind.ends_with("interrupted") {
-                "interrupted"
-            } else {
-                "succeeded"
-            };
-            vec![turn_end_entry(
-                format!("turn-end:{marker}"),
-                ts,
-                outcome,
-                &model,
-                &session,
-            )]
-        }
-        "session.execution.failed" => {
-            let message = data
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("session execution failed")
-                .to_owned();
-            vec![
-                TranscriptEntry {
-                    native_id: format!("error:{marker}"),
-                    kind: TranscriptKind::Error,
-                    ts,
-                    text: Some(message),
-                    tool: None,
-                    input: None,
-                    output: None,
-                    path: None,
-                    call_id: None,
-                    model: model.clone(),
-                    native_session: session.clone(),
-                    ok: None,
-                    tokens: None,
-                    usd: None,
-                },
-                turn_end_entry(format!("turn-end:{marker}"), ts, "failed", &model, &session),
-            ]
-        }
-        "session.step.failed" => {
-            let message = data
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("step failed")
-                .to_owned();
-            vec![TranscriptEntry {
-                native_id: format!("step-error:{marker}"),
-                kind: TranscriptKind::Error,
-                ts,
-                text: Some(message),
-                tool: None,
-                input: None,
-                output: None,
-                path: None,
-                call_id: None,
-                model,
-                native_session: session,
-                ok: None,
-                tokens: None,
-                usd: None,
-            }]
-        }
-        "session.model.selected" => {
-            let selected = data
-                .get("model")
-                .and_then(model_name)
-                .or_else(|| data.get("modelID").and_then(Value::as_str).map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned());
-            vec![simple_entry(
-                format!("model:{marker}"),
-                TranscriptKind::Note,
-                ts,
-                format!("app selected model {selected}"),
-                &model,
-                &session,
-            )]
-        }
-        _ => Vec::new(),
-    }
+    let parts: Vec<String> = content
+        .as_array()?
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if parts.is_empty() { None } else { Some(parts.join("\n")) }
 }
 
 /// Builds a turn-end entry.
@@ -1358,27 +1503,41 @@ fn turn_end_entry(
     }
 }
 
-/// Builds a cost entry from a usage object.
-fn cost_from_usage(
+/// Builds an error entry.
+fn error_entry(
+    native_id: String,
+    ts: Timestamp,
+    message: String,
+    model: &Option<String>,
+    session: &Option<String>,
+) -> TranscriptEntry {
+    TranscriptEntry {
+        native_id,
+        kind: TranscriptKind::Error,
+        ts,
+        text: Some(message),
+        tool: None,
+        input: None,
+        output: None,
+        path: None,
+        call_id: None,
+        model: model.clone(),
+        native_session: session.clone(),
+        ok: None,
+        tokens: None,
+        usd: None,
+    }
+}
+
+/// Builds a cost entry from explicit tokens and USD.
+fn cost_entry(
     native_id: String,
     ts: Timestamp,
     model: &Option<String>,
     session: &Option<String>,
-    usage: &Value,
+    tokens: vowp_protocol::Tokens,
+    usd: Option<f64>,
 ) -> TranscriptEntry {
-    let tokens = vowp_protocol::Tokens {
-        input: u64_field(usage, &["input", "input_tokens", "inputTokens"]),
-        output: u64_field(usage, &["output", "output_tokens", "outputTokens"]),
-        reasoning: u64_field(usage, &["reasoning", "reasoning_tokens", "reasoningTokens"]),
-        cache_read: usage
-            .pointer("/cache/read")
-            .and_then(Value::as_u64)
-            .unwrap_or_else(|| u64_field(usage, &["cache_read", "cacheReadInputTokens"])),
-        cache_write: usage
-            .pointer("/cache/write")
-            .and_then(Value::as_u64)
-            .unwrap_or_else(|| u64_field(usage, &["cache_write", "cacheCreationInputTokens"])),
-    };
     TranscriptEntry {
         native_id,
         kind: TranscriptKind::Cost,
@@ -1393,7 +1552,62 @@ fn cost_from_usage(
         native_session: session.clone(),
         ok: None,
         tokens: Some(tokens),
-        usd: usage.get("cost").and_then(Value::as_f64),
+        usd,
+    }
+}
+
+/// Builds a simple text entry.
+fn simple_entry(
+    native_id: String,
+    kind: TranscriptKind,
+    ts: Timestamp,
+    text: String,
+    model: &Option<String>,
+    session: &Option<String>,
+) -> TranscriptEntry {
+    TranscriptEntry {
+        native_id,
+        kind,
+        ts,
+        text: Some(text),
+        tool: None,
+        input: None,
+        output: None,
+        path: None,
+        call_id: None,
+        model: model.clone(),
+        native_session: session.clone(),
+        ok: None,
+        tokens: None,
+        usd: None,
+    }
+}
+
+/// Reads tokens from a usage object, including the nested `cache` shape.
+fn tokens_from_value(value: &Value) -> vowp_protocol::Tokens {
+    vowp_protocol::Tokens {
+        input: u64_field(value, &["input", "input_tokens", "inputTokens"]),
+        output: u64_field(value, &["output", "output_tokens", "outputTokens"]),
+        reasoning: u64_field(value, &["reasoning", "reasoning_tokens", "reasoningTokens"]),
+        cache_read: value
+            .pointer("/cache/read")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| u64_field(value, &["cache_read", "cacheReadInputTokens"])),
+        cache_write: value
+            .pointer("/cache/write")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| u64_field(value, &["cache_write", "cacheCreationInputTokens"])),
+    }
+}
+
+/// Subtracts one cumulative token snapshot from the next.
+fn tokens_delta(current: &vowp_protocol::Tokens, previous: &vowp_protocol::Tokens) -> vowp_protocol::Tokens {
+    vowp_protocol::Tokens {
+        input: current.input.saturating_sub(previous.input),
+        output: current.output.saturating_sub(previous.output),
+        reasoning: current.reasoning.saturating_sub(previous.reasoning),
+        cache_read: current.cache_read.saturating_sub(previous.cache_read),
+        cache_write: current.cache_write.saturating_sub(previous.cache_write),
     }
 }
 
@@ -1405,6 +1619,18 @@ fn u64_field(value: &Value, names: &[&str]) -> u64 {
         }
     }
     0
+}
+
+/// Returns a stable marker for one event: the durable sequence when present, else the id.
+fn event_marker(event: &Value, data: &Value) -> String {
+    event
+        .pointer("/durable/seq")
+        .and_then(Value::as_u64)
+        .or_else(|| data.pointer("/durable/seq").and_then(Value::as_u64))
+        .map(|seq| format!("seq:{seq}"))
+        .or_else(|| event.get("id").and_then(Value::as_str).map(|id| format!("id:{id}")))
+        .or_else(|| data.get("id").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| event_timestamp(event).to_string())
 }
 
 /// Returns an event's session id.
@@ -1435,6 +1661,30 @@ fn message_timestamp(message: &Value) -> Timestamp {
         .or_else(|| message.pointer("/info/time/created").and_then(Value::as_i64))
         .map(Timestamp::from_unix_millis)
         .unwrap_or_else(Timestamp::now)
+}
+
+/// Reads a message timestamp as Unix milliseconds for stable sorting.
+fn message_created(message: &Value) -> i64 {
+    message
+        .pointer("/time/created")
+        .and_then(Value::as_i64)
+        .or_else(|| message.get("created").and_then(Value::as_i64))
+        .or_else(|| message.pointer("/info/time/created").and_then(Value::as_i64))
+        .unwrap_or(i64::MAX)
+}
+
+/// Reads the app-side session id from a message.
+fn message_session(message: &Value) -> Option<String> {
+    message
+        .get("sessionID")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            message
+                .get("info")
+                .and_then(|info| info.get("sessionID"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
 }
 
 /// Reads a message model name.

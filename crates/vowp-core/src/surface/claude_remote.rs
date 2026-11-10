@@ -1,20 +1,25 @@
 //! The Claude Code Remote Control app host.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5. Remote Control needs a claude.ai
-//! subscription login on the home; an API key is not enough. The login probe checks only
-//! that the login file exists and never reads its contents. Without a login every operation
-//! that needs the app is refused with the exact setup message from the spec, and the
-//! transcript reader falls back to the Claude Code transcript importer.
+//! subscription login on the home; an API key is not enough. The login probe asks Claude
+//! Code's own `auth status` command and reads its `loggedIn` flag; it never reads a login or
+//! credential file. A fresh home where `claude auth status` reports
+//! `{"loggedIn": false, "authMethod": "none"}` is refused, even though Claude has created a
+//! `.claude.json` there. Without a login every operation that needs the app is refused with
+//! the exact setup message from the spec, and the transcript reader uses the Claude Code
+//! transcript importer.
 
 use std::fs::OpenOptions;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{JoinInstructions, OrchestratorApp, Timestamp};
+
+use vowp_adapters::proc::{Signal, signal_group};
 
 use crate::CoreError;
 use crate::session::importer::{find_latest_transcript, scan_file};
@@ -73,19 +78,37 @@ impl ClaudeRemoteHost {
         self
     }
 
-    /// Returns true when a claude.ai login file exists; the file is never opened.
+    /// Returns true when Claude Code reports a claude.ai login.
+    ///
+    /// The probe runs `claude auth status` and reads only its `loggedIn`/`authMethod`
+    /// metadata. It never opens the login or credential files, and a missing binary, a
+    /// failed command or an unrecognised response counts as no login.
     pub fn login_present(&self) -> bool {
-        let Some(root) = self.config_root() else {
+        let mut command = Command::new(&self.binary);
+        command
+            .args(["auth", "status"])
+            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(root) = &self.config_dir {
+            command.env("CLAUDE_CONFIG_DIR", root);
+        }
+        let Ok(output) = command.output() else {
             return false;
         };
-        let mut candidates = vec![root.join(".claude.json"), root.join(".credentials.json")];
-        let explicit = self.config_dir.is_some() || std::env::var_os("CLAUDE_CONFIG_DIR").is_some();
-        if !explicit {
-            if let Some(home) = root.parent() {
-                candidates.push(home.join(".claude.json"));
-            }
+        if !output.status.success() {
+            return false;
         }
-        candidates.iter().any(|path| path.is_file())
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            return false;
+        };
+        let logged_in = value.get("loggedIn").and_then(serde_json::Value::as_bool) == Some(true);
+        let method = value
+            .get("authMethod")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        logged_in && !method.eq_ignore_ascii_case("none") && !method.eq_ignore_ascii_case("api_key")
     }
 
     /// Returns the Claude config root (`CLAUDE_CONFIG_DIR` or `$HOME/.claude`).
@@ -224,7 +247,7 @@ impl AppHost for ClaudeRemoteHost {
                 vowp_session: req.session.to_string(),
             },
         ) {
-            stop_pid(pid);
+            stop_remote(pid);
             return Err(error);
         }
         Ok(AppHandle {
@@ -240,9 +263,9 @@ impl AppHost for ClaudeRemoteHost {
         let (host_json, _) = Self::paths(&handle.workdir);
         let state = read_host_state(&host_json)?;
         if let Some(state) = &state {
-            stop_pid(state.pid);
+            stop_remote(state.pid);
         } else if process_alive(handle.pid) {
-            stop_pid(handle.pid);
+            stop_remote(handle.pid);
         }
         remove_private(&host_json);
         Ok(())
@@ -289,6 +312,23 @@ impl AppHost for ClaudeRemoteHost {
     fn transcript_since(&self, handle: &AppHandle, cursor: &MirrorCursor) -> Result<TranscriptBatch, CoreError> {
         self.read_transcript(handle, cursor)
     }
+}
+
+/// Stops the Remote Control process group, falling back to a single-pid stop.
+fn stop_remote(pid: u32) {
+    if !process_alive(pid) {
+        return;
+    }
+    let _ = signal_group(pid, Signal::Term);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = signal_group(pid, Signal::Kill);
+    stop_pid(pid);
 }
 
 /// What `host.json` records while Remote Control runs (mode 0600).

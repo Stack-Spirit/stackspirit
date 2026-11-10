@@ -62,7 +62,7 @@ impl FakeOpencode {
                 "id": "msg_user_1",
                 "sessionID": "ses_fake",
                 "type": "user",
-                "content": "hello",
+                "text": "hello",
                 "time": {"created": 1_700_000_000_000_i64}
             }),
             json!({
@@ -70,8 +70,9 @@ impl FakeOpencode {
                 "sessionID": "ses_fake",
                 "type": "assistant",
                 "content": [{"type": "text", "text": "hi there"}],
-                "model": {"modelID": "fake-model"},
-                "usage": {"input": 3, "output": 5},
+                "model": {"id": "fake-model"},
+                "cost": 0.25,
+                "tokens": {"input": 3, "output": 5},
                 "time": {"created": 1_700_000_001_000_i64}
             }),
         ]));
@@ -229,6 +230,10 @@ fn handle(
             .to_string();
             respond(&mut stream, 200, "application/json", &body);
         }
+        ("GET", "/api/session/ses_fake/event") => {
+            let body = json!({"data": events.lock().expect("events").clone()}).to_string();
+            respond(&mut stream, 200, "application/json", &body);
+        }
         ("GET", "/api/event") => {
             let mut body = String::new();
             for event in events.lock().expect("events").iter() {
@@ -310,7 +315,7 @@ fn empty_cursor() -> MirrorCursor {
     }
 }
 
-fn fake_opencode_script(port: u16) -> String {
+fn fake_opencode_script(port: u16, version: &str) -> String {
     format!(
         r#"#!/bin/sh
 set -e
@@ -324,7 +329,7 @@ case "$1" in
         nohup sleep 60 >/dev/null 2>&1 &
         pid=$!
         printf '%s\n' "$pid" > "$state/fake.pid"
-        printf '{{"id":"fake","version":"2.0.28","url":"http://127.0.0.1:{port}","pid":%s,"password":"{password}"}}\n' "$pid" > "$state/service.json"
+        printf '{{"id":"fake","version":"{version}","url":"http://127.0.0.1:{port}","pid":%s,"password":"{password}"}}\n' "$pid" > "$state/service.json"
         exit 0 ;;
       stop)
         if [ -f "$state/fake.pid" ]; then
@@ -355,7 +360,7 @@ fn opencode_host_starts_and_stops_with_fake_server() {
     let tmp = tempdir().expect("temp dir");
     let fake = FakeOpencode::start();
     let script = tmp.path().join("opencode");
-    write_script(&script, &fake_opencode_script(fake.port()));
+    write_script(&script, &fake_opencode_script(fake.port(), "2.0.28"));
     let host = OpencodeHost::new(&script).with_startup(Duration::from_secs(5));
     let request = host_request(&tmp, Some(fake.port()));
     std::fs::create_dir_all(&request.workdir).expect("orchestrator dir");
@@ -424,6 +429,7 @@ fn opencode_v2_service_pair_basic_auth() {
     );
 
     let first = host.transcript_since(&handle, &empty_cursor()).expect("backfill");
+    assert_eq!(first.entries.len(), 3, "{:?}", first.entries);
     assert!(
         first.entries.iter().any(|entry| entry.text.as_deref() == Some("hello")),
         "backfill missed the user message: {:?}",
@@ -437,6 +443,14 @@ fn opencode_v2_service_pair_basic_auth() {
         "backfill missed the assistant message: {:?}",
         first.entries
     );
+    let cost = first
+        .entries
+        .iter()
+        .find(|entry| entry.kind == vowp_core::surface::native::TranscriptKind::Cost)
+        .expect("backfill cost");
+    assert_eq!(cost.usd, Some(0.25));
+    assert_eq!(cost.tokens.expect("tokens").input, 3);
+    assert_eq!(first.cursor.last_native_id.as_deref(), Some("cost:msg_assistant_1"));
     assert!(
         fake.seen_paths()
             .iter()
@@ -446,19 +460,49 @@ fn opencode_v2_service_pair_basic_auth() {
     );
 
     fake.push_event(json!({
-        "type": "session.text.ended",
+        "id": "evt_start", "type": "session.execution.started",
         "created": 1_700_000_002_000_i64,
-        "data": {"sessionID": "ses_fake", "assistantMessageID": "msg_assistant_2", "text": "next"}
+        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 1}
     }));
-    let mut cursor = first.cursor.clone();
-    cursor.last_native_id = Some("turn-end:7".to_owned());
+    fake.push_event(json!({
+        "id": "evt_text", "type": "session.text.ended",
+        "created": 1_700_000_002_100_i64,
+        "data": {"sessionID": "ses_fake", "assistantMessageID": "msg_assistant_2", "ordinal": 0, "text": "next"},
+        "durable": {"seq": 2}
+    }));
+    fake.push_event(json!({
+        "id": "evt_step", "type": "session.step.ended",
+        "created": 1_700_000_002_200_i64,
+        "data": {"sessionID": "ses_fake", "assistantMessageID": "msg_assistant_2", "cost": 0.0, "tokens": {"input": 1, "output": 1}},
+        "durable": {"seq": 3}
+    }));
+    fake.push_event(json!({
+        "id": "evt_end", "type": "session.execution.succeeded",
+        "created": 1_700_000_002_300_i64,
+        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 4}
+    }));
+    let cursor = first.cursor.clone();
     let second = host.transcript_since(&handle, &cursor).expect("live events");
-    assert_eq!(second.entries.len(), 1, "{:?}", second.entries);
-    assert_eq!(second.entries[0].text.as_deref(), Some("next"));
     assert!(
-        fake.seen_paths().iter().any(|path| path == "/api/event"),
-        "live pass did not read /api/event: {:?}",
+        second.entries.iter().any(|entry| entry.text.as_deref() == Some("next")),
+        "live pass missed the assistant message: {:?}",
+        second.entries
+    );
+    assert!(second.cursor.last_native_id != first.cursor.last_native_id);
+    assert!(
         fake.seen_paths()
+            .iter()
+            .any(|path| path.starts_with("/api/session/ses_fake/event")),
+        "live pass did not read the replayable session events: {:?}",
+        fake.seen_paths()
+    );
+    assert_eq!(
+        fake.seen_paths()
+            .iter()
+            .filter(|path| *path == "/api/experimental/session/ses_fake/export")
+            .count(),
+        1,
+        "the second pass backfilled again instead of using its cursor"
     );
 
     // A wrong token is rejected with HTTP 401; health reports it instead of pretending.
@@ -475,11 +519,46 @@ fn opencode_v2_service_pair_basic_auth() {
 }
 
 #[test]
+fn opencode_refuses_non_v2_service() {
+    let tmp = tempdir().expect("temp dir");
+    let fake = FakeOpencode::start();
+    let script = tmp.path().join("opencode");
+    write_script(&script, &fake_opencode_script(fake.port(), "1.9.0"));
+    let host = OpencodeHost::new(&script).with_startup(Duration::from_secs(5));
+    let request = host_request(&tmp, Some(fake.port()));
+    std::fs::create_dir_all(&request.workdir).expect("orchestrator dir");
+
+    let error = host.start(&request).expect_err("a v1 service must be refused");
+    assert!(
+        matches!(error, CoreError::Refused(ref message) if message.contains("2.x")),
+        "{error:?}"
+    );
+    assert!(!request.workdir.join("host.json").exists());
+}
+
+#[test]
 fn claude_remote_refuses_without_login() {
     let tmp = tempdir().expect("temp dir");
     let config = tmp.path().join("claude-config");
     std::fs::create_dir_all(&config).expect("claude config dir");
-    let host = ClaudeRemoteHost::new("/bin/true").with_config_dir(&config);
+    let script = tmp.path().join("claude");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  printf '%s\n' '{"loggedIn": false, "authMethod": "none"}'
+  exit 0
+fi
+exit 1
+"#,
+    );
+    // Claude creates .claude.json on a fresh home even when logged out; it is not a login.
+    std::fs::write(config.join(".claude.json"), b"").expect("non-login config file");
+    let host = ClaudeRemoteHost::new(&script).with_config_dir(&config);
+    assert!(
+        !host.login_present(),
+        "a logged-out .claude.json must not count as a login"
+    );
     let request = host_request(&tmp, None);
 
     let error = host.start(&request).expect_err("start without login must refuse");
@@ -504,9 +583,17 @@ fn claude_remote_starts_with_fake_login() {
     let tmp = tempdir().expect("temp dir");
     let config = tmp.path().join("claude-config");
     std::fs::create_dir_all(&config).expect("claude config dir");
-    std::fs::write(config.join(".claude.json"), b"").expect("fake login marker");
     let script = tmp.path().join("claude");
-    write_script(&script, "#!/bin/sh\nexec sleep 60\n");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  printf '%s\n' '{"loggedIn": true, "authMethod": "oauth_token"}'
+  exit 0
+fi
+exec sleep 60
+"#,
+    );
     let host = ClaudeRemoteHost::new(&script)
         .with_config_dir(&config)
         .with_spawn_check(Duration::from_millis(300));
@@ -527,6 +614,32 @@ fn claude_remote_starts_with_fake_login() {
     host.stop(&handle).expect("stop remote control");
     assert!(!process_alive(handle.pid));
     assert!(!request.workdir.join("host.json").exists());
+}
+
+#[test]
+fn claude_remote_refuses_api_key_login() {
+    let tmp = tempdir().expect("temp dir");
+    let config = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&config).expect("claude config dir");
+    let script = tmp.path().join("claude");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  printf '%s\n' '{"loggedIn": true, "authMethod": "api_key"}'
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let host = ClaudeRemoteHost::new(&script).with_config_dir(&config);
+    assert!(!host.login_present(), "an API key is not a claude.ai login");
+    let request = host_request(&tmp, None);
+    let error = host.start(&request).expect_err("API-key login must refuse");
+    assert!(
+        matches!(error, CoreError::Refused(ref message) if message == NO_LOGIN),
+        "{error:?}"
+    );
 }
 
 #[test]

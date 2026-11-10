@@ -5,6 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,12 +19,16 @@ use support::fake_git::FakeGit;
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::importer::{import_file, scan_file};
 use vowp_core::session::service::SessionService;
-use vowp_core::surface::mirror::{MirrorCursor, mirror_from_host, resume_context};
+use vowp_core::surface::mirror::{
+    MirrorCursor, mirror_from_host, mirror_once, read_cursor, resume_context, write_cursor,
+};
 use vowp_core::surface::native::{
     AppHandle, AppHost, HostHealth, HostRequest, TranscriptBatch, TranscriptEntry, TranscriptKind,
 };
 use vowp_core::surface::new_lease_token;
-use vowp_core::surface::opencode_host::{OpencodeHost, entries_from_api_event, parse_message_list};
+use vowp_core::surface::opencode_host::{
+    OpencodeHost, entries_from_api_event, entries_from_api_events, parse_message_list,
+};
 use vowp_core::{AdapterRegistry, Deps};
 use vowp_protocol::{
     Actor, AssistantMessage, CAPSULE_VERSION, Capsule, CapsuleId, CapsuleState, CapsuleTelemetry, CapsuleTrigger,
@@ -107,6 +112,13 @@ fn event_count(deps: &Deps, session: &SessionId) -> usize {
         .read_all()
         .expect("read all")
         .len()
+}
+
+fn events_of(deps: &Deps, session: &SessionId) -> Vec<vowp_protocol::EventEnvelope> {
+    SessionLog::open_read(&deps.paths, session)
+        .expect("read log")
+        .read_all()
+        .expect("read all")
 }
 
 fn empty_cursor() -> MirrorCursor {
@@ -232,41 +244,54 @@ fn opencode_mirror_maps_messages_to_events() {
     let deps = deps(&tmp, &clock);
     let store = deps.open_store().expect("store");
     let session = create_session(&deps, &tmp);
+    // The real v2.0.28 export: user text is top-level, assistant work is in `content`, and
+    // cost/tokens sit at message level.
     let export = json!({
         "info": {"id": "ses_app"},
         "messages": [
             {
-                "id": "m1", "type": "user", "sessionID": "ses_app", "content": "hello",
+                "id": "m1", "type": "user", "text": "hello",
                 "time": {"created": 1_700_000_000_000_i64}
             },
             {
-                "id": "m2", "type": "assistant", "sessionID": "ses_app",
+                "id": "m2", "type": "assistant",
                 "content": [
                     {"type": "text", "text": "hi"},
                     {"type": "tool_use", "id": "call-1", "name": "read", "input": {"path": "a.rs"}}
                 ],
-                "model": {"modelID": "fake-model"},
-                "usage": {"input": 3, "output": 4, "cost": 0.25},
+                "model": {"id": "fake-model"},
+                "cost": 0.25,
+                "tokens": {"input": 3, "output": 4, "reasoning": 0, "cache": {"read": 0, "write": 0}},
                 "time": {"created": 1_700_000_001_000_i64}
             },
             {
-                "id": "m3", "type": "user", "sessionID": "ses_app",
-                "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "done"}]
-            }
+                "id": "m3", "type": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "done"}],
+                "time": {"created": 1_700_000_002_000_i64}
+            },
+            {"id": "idle1", "type": "idle", "time": {"created": 1_700_000_003_000_i64}}
         ]
     });
     let entries = parse_message_list(&export);
-    assert!(entries.len() >= 4, "{entries:?}");
+    assert_eq!(entries.len(), 5, "{entries:?}");
+    assert_eq!(entries[0].kind, TranscriptKind::UserMessage);
+    assert_eq!(entries[0].text.as_deref(), Some("hello"));
+    assert_eq!(entries[1].kind, TranscriptKind::AssistantMessage);
+    assert_eq!(entries[1].text.as_deref(), Some("hi"));
+    assert_eq!(entries[2].kind, TranscriptKind::ToolCall);
+    assert_eq!(entries[3].kind, TranscriptKind::Cost);
+    assert_eq!(entries[3].usd, Some(0.25));
+    let tokens = entries[3].tokens.expect("tokens");
+    assert_eq!(entries[4].kind, TranscriptKind::ToolResult);
+    assert_eq!((tokens.input, tokens.output), (3, 4));
+
     let host = FakeHost::new(OrchestratorApp::Opencode, entries);
     let handle = handle(OrchestratorApp::Opencode, tmp.path());
     let mut cursor = empty_cursor();
     let report = mirror_from_host(&deps, &store, &session, &host, &handle, &mut cursor).expect("mirror");
     assert_eq!(report.events, 5, "user, assistant text, tool call, tool result, cost");
 
-    let events = SessionLog::open_read(&deps.paths, &session)
-        .expect("read log")
-        .read_all()
-        .expect("read all");
+    let events = events_of(&deps, &session);
     let bodies: Vec<EventType> = events.iter().map(|event| event.event_type).collect();
     assert!(bodies.contains(&EventType::UserMessage));
     assert!(bodies.contains(&EventType::AssistantMessage));
@@ -312,34 +337,141 @@ fn opencode_mirror_maps_messages_to_events() {
 }
 
 #[test]
+fn opencode_s3_export_shape_keeps_user_messages_and_cost() {
+    // Trimmed copy of the recorded v2.0.28 `session-export.json`: user text is top-level,
+    // assistant content is in `content`, cost/tokens are at message level, and non-content
+    // messages (`idle`, `model-switched`) are skipped.
+    let export = json!({
+        "info": {"id": "ses_e3a86c119ffe1iZkxI5m5oSi1V"},
+        "messages": [
+            {
+                "id": "msg_user_1", "time": {"created": 1794314420736_i64},
+                "text": "turn one from the desktop side", "type": "user"
+            },
+            {
+                "id": "msg_assistant_1",
+                "time": {"created": 1794314420770_i64, "streamed": 1794314420793_i64, "completed": 1794314420796_i64},
+                "type": "assistant", "agent": "build",
+                "model": {"id": "fake-model", "providerID": "fake"},
+                "content": [{"type": "text", "text": "hello from the fake local model"}],
+                "finish": "stop", "rawFinish": "stop",
+                "cost": 0,
+                "tokens": {"input": 10, "output": 8, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+            },
+            {"id": "msg_idle_1", "time": {"created": 1794314420800_i64}, "type": "idle", "outcome": "succeeded"},
+            {"id": "msg_switch", "time": {"created": 1794314421495_i64}, "type": "model-switched", "model": {"id": "fake-model", "providerID": "fake"}},
+            {
+                "id": "msg_user_2", "time": {"created": 1794314421521_i64},
+                "text": "\"turn two from the phone\"", "files": [], "type": "user"
+            },
+            {
+                "id": "msg_assistant_2",
+                "time": {"created": 1794314421546_i64, "streamed": 1794314421567_i64, "completed": 1794314421568_i64},
+                "type": "assistant", "agent": "build",
+                "model": {"id": "fake-model", "providerID": "fake", "variant": "default"},
+                "content": [{"type": "text", "text": "hello from the fake local model"}],
+                "finish": "stop", "rawFinish": "stop",
+                "cost": 0,
+                "tokens": {"input": 10, "output": 8, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+            }
+        ]
+    });
+    let entries = parse_message_list(&export);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.kind == TranscriptKind::UserMessage)
+            .count(),
+        2,
+        "the real export's user messages were dropped: {entries:?}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.kind == TranscriptKind::AssistantMessage)
+            .count(),
+        2
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.kind == TranscriptKind::Cost)
+            .count(),
+        2
+    );
+    assert_eq!(entries[0].text.as_deref(), Some("turn one from the desktop side"));
+    let cost = entries
+        .iter()
+        .find(|entry| entry.kind == TranscriptKind::Cost)
+        .expect("cost");
+    assert_eq!(cost.usd, Some(0.0));
+    let tokens = cost.tokens.expect("tokens");
+    assert_eq!((tokens.input, tokens.output), (10, 8));
+}
+
+#[test]
+fn opencode_message_list_is_sorted_chronologically() {
+    let list = json!({
+        "data": [
+            {"id": "a1", "type": "assistant", "content": [{"type": "text", "text": "later"}], "time": {"created": 2000}},
+            {"id": "u1", "type": "user", "text": "earlier", "time": {"created": 1000}}
+        ]
+    });
+    let entries = parse_message_list(&list);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0].kind, TranscriptKind::UserMessage);
+    assert_eq!(entries[1].kind, TranscriptKind::AssistantMessage);
+}
+
+#[test]
 fn mirror_reads_api_event_and_backfills_export() {
     let tmp = tempdir().expect("temp dir");
     let server = MiniOpencode::start();
     let workdir = tmp.path().join("orchestrator");
     std::fs::create_dir_all(&workdir).expect("orchestrator dir");
     write_state(&workdir, &server.url());
-    server.push_event(json!({
-        "type": "session.execution.started",
-        "created": 1_700_000_003_000_i64,
-        "data": {"sessionID": "ses_fake", "seq": 1}
-    }));
-    server.push_event(json!({
-        "type": "session.text.ended",
-        "created": 1_700_000_004_000_i64,
-        "data": {"sessionID": "ses_fake", "assistantMessageID": "m_live", "text": "live"}
-    }));
-    server.push_event(json!({
-        "type": "session.execution.succeeded",
-        "created": 1_700_000_005_000_i64,
-        "data": {"sessionID": "ses_fake", "seq": 2}
-    }));
+    server.set_events(vec![
+        json!({
+            "id": "evt_u1", "created": 1_700_000_000_000_i64, "type": "session.inbox.enqueued",
+            "data": {
+                "inboxID": "m1", "sessionID": "ses_fake",
+                "item": {"type": "user", "payload": {"text": "hello"}}
+            },
+            "durable": {"seq": 1}
+        }),
+        json!({
+            "id": "evt_t1", "created": 1_700_000_000_500_i64, "type": "session.execution.started",
+            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 2}
+        }),
+        json!({
+            "id": "evt_a1", "created": 1_700_000_001_000_i64, "type": "session.text.ended",
+            "data": {"sessionID": "ses_fake", "assistantMessageID": "m2", "ordinal": 0, "text": "hi"},
+            "durable": {"seq": 3}
+        }),
+        json!({
+            "id": "evt_s1", "created": 1_700_000_001_100_i64, "type": "session.step.ended",
+            "data": {
+                "sessionID": "ses_fake", "assistantMessageID": "m2", "cost": 0.25,
+                "tokens": {"input": 3, "output": 4}
+            },
+            "durable": {"seq": 4}
+        }),
+        json!({
+            "id": "evt_usage1", "created": 1_700_000_001_150_i64, "type": "session.usage.updated",
+            "data": {"sessionID": "ses_fake", "cost": 0.25, "tokens": {"input": 3, "output": 4}}
+        }),
+        json!({
+            "id": "evt_e1", "created": 1_700_000_001_200_i64, "type": "session.execution.succeeded",
+            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 5}
+        }),
+    ]);
 
     let clock = FakeClock::at(ts());
     let deps = deps(&tmp, &clock);
     let store = deps.open_store().expect("store");
     let session = create_session(&deps, &tmp);
     let host = OpencodeHost::default();
-    let handle = AppHandle {
+    let host_handle = AppHandle {
         kind: OrchestratorApp::Opencode,
         pid: 4242,
         port: Some(server.port()),
@@ -347,18 +479,39 @@ fn mirror_reads_api_event_and_backfills_export() {
         workdir: workdir.clone(),
     };
     let mut cursor = empty_cursor();
-    let first = mirror_from_host(&deps, &store, &session, &host, &handle, &mut cursor).expect("first mirror");
-    // Two backfilled messages plus the three live events.
+    let first = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("first mirror");
+    // The backfill writes user, assistant and cost; the live pass adds the turn boundaries.
+    // The overlapping user/assistant/cost entries have the same native id and are written once.
     assert_eq!(first.events, 5, "{:?}", first);
-    let events = SessionLog::open_read(&deps.paths, &session)
-        .expect("read log")
-        .read_all()
-        .expect("read all");
-    let kinds: Vec<EventType> = events.iter().map(|event| event.event_type).collect();
-    assert!(kinds.contains(&EventType::UserMessage));
-    assert!(kinds.contains(&EventType::AssistantMessage));
-    assert!(kinds.contains(&EventType::TurnStarted));
-    assert!(kinds.contains(&EventType::TurnEnded));
+    assert_eq!(cursor.last_native_id, first.cursor.last_native_id);
+    assert!(cursor.last_native_id.is_some());
+    let events = events_of(&deps, &session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::UserMessage)
+            .count(),
+        1,
+        "the overlapping user message was duplicated"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::AssistantMessage)
+            .count(),
+        1,
+        "the overlapping assistant message was duplicated"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::Cost)
+            .count(),
+        1,
+        "the overlapping cost was duplicated"
+    );
+    assert!(events.iter().any(|event| event.event_type == EventType::TurnStarted));
+    assert!(events.iter().any(|event| event.event_type == EventType::TurnEnded));
     assert!(
         server
             .seen()
@@ -368,46 +521,93 @@ fn mirror_reads_api_event_and_backfills_export() {
         server.seen()
     );
     assert!(
-        server.seen().iter().any(|path| path == "/api/event"),
-        "live pass did not read /api/event: {:?}",
+        server
+            .seen()
+            .iter()
+            .any(|path| path.starts_with("/api/session/ses_fake/event")),
+        "live pass did not read the replayable session events: {:?}",
         server.seen()
     );
 
-    server.push_event(json!({
-        "type": "session.text.ended",
-        "created": 1_700_000_006_000_i64,
-        "data": {"sessionID": "ses_fake", "assistantMessageID": "m_live_2", "text": "later"}
-    }));
-    let second = mirror_from_host(&deps, &store, &session, &host, &handle, &mut cursor).expect("second mirror");
-    assert_eq!(second.events, 1, "{:?}", second);
-    let events = SessionLog::open_read(&deps.paths, &session)
-        .expect("read log")
-        .read_all()
-        .expect("read all");
+    // The next turn happens entirely between passes. A subscription-only `/api/event`
+    // would lose it; the replayable endpoint must recover it without re-reading export.
+    let mut next = server.events();
+    next.extend([
+        json!({
+            "id": "evt_u2", "created": 1_700_000_002_000_i64, "type": "session.inbox.enqueued",
+            "data": {
+                "inboxID": "m4", "sessionID": "ses_fake",
+                "item": {"type": "user", "payload": {"text": "again"}}
+            },
+            "durable": {"seq": 6}
+        }),
+        json!({
+            "id": "evt_t2", "created": 1_700_000_002_100_i64, "type": "session.execution.started",
+            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 7}
+        }),
+        json!({
+            "id": "evt_a2", "created": 1_700_000_002_200_i64, "type": "session.text.ended",
+            "data": {"sessionID": "ses_fake", "assistantMessageID": "m5", "ordinal": 0, "text": "later"},
+            "durable": {"seq": 8}
+        }),
+        json!({
+            "id": "evt_s2", "created": 1_700_000_002_300_i64, "type": "session.step.ended",
+            "data": {
+                "sessionID": "ses_fake", "assistantMessageID": "m5", "cost": 0.0,
+                "tokens": {"input": 1, "output": 1}
+            },
+            "durable": {"seq": 9}
+        }),
+        json!({
+            "id": "evt_usage2", "created": 1_700_000_002_350_i64, "type": "session.usage.updated",
+            "data": {"sessionID": "ses_fake", "cost": 0.25, "tokens": {"input": 4, "output": 5}}
+        }),
+        json!({
+            "id": "evt_e2", "created": 1_700_000_002_400_i64, "type": "session.execution.succeeded",
+            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 10}
+        }),
+    ]);
+    server.set_events(next);
+    let second = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("second mirror");
+    assert!(second.events >= 5, "{:?}", second);
+    assert!(cursor.last_native_id != first.cursor.last_native_id);
     assert!(
-        events
+        events_of(&deps, &session)
             .iter()
             .any(|event| matches!(event.body(), Ok(EventBody::AssistantMessage(message)) if message.text == "later")),
-        "the later live message was not appended"
+        "the event that happened between passes was lost"
+    );
+    assert_eq!(
+        server
+            .seen()
+            .iter()
+            .filter(|path| path.as_str() == "/api/experimental/session/ses_fake/export")
+            .count(),
+        1,
+        "the second pass backfilled again instead of using its cursor"
     );
 }
 
 #[test]
 fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
     let user = json!({
+        "id": "evt_user",
         "type": "session.inbox.enqueued",
         "created": 1_700_000_000_000_i64,
         "data": {
-            "sessionID": "ses_app", "seq": 1,
+            "inboxID": "item_1", "sessionID": "ses_app", "seq": 1,
             "item": {"id": "item_1", "type": "user", "payload": {"text": "go"}}
-        }
+        },
+        "durable": {"seq": 1}
     });
     let entries = entries_from_api_event(&user);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, TranscriptKind::UserMessage);
     assert_eq!(entries[0].text.as_deref(), Some("go"));
+    assert_eq!(entries[0].native_id, "user:item_1");
 
     let tool = json!({
+        "id": "evt_tool",
         "type": "session.tool.called",
         "created": 1_700_000_001_000_i64,
         "data": {"sessionID": "ses_app", "seq": 2, "id": "call_1", "name": "read", "input": {"path": "a"}}
@@ -415,9 +615,11 @@ fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
     let entries = entries_from_api_event(&tool);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, TranscriptKind::ToolCall);
+    assert_eq!(entries[0].native_id, "tool-call:call_1");
     assert_eq!(entries[0].call_id.as_deref(), Some("call_1"));
 
     let failed = json!({
+        "id": "evt_tool_failed",
         "type": "session.tool.failed",
         "created": 1_700_000_002_000_i64,
         "data": {"sessionID": "ses_app", "seq": 3, "id": "call_1", "error": {"message": "boom"}}
@@ -425,24 +627,102 @@ fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
     let entries = entries_from_api_event(&failed);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, TranscriptKind::ToolResult);
+    assert_eq!(entries[0].native_id, "tool-result:call_1");
     assert_eq!(entries[0].ok, Some(false));
     assert_eq!(entries[0].output.as_deref(), Some("boom"));
 
-    let usage = json!({
-        "type": "session.usage.updated",
-        "created": 1_700_000_003_000_i64,
-        "data": {"sessionID": "ses_app", "tokens": {"input": 7, "output": 2}, "cost": 0.5}
-    });
-    let entries = entries_from_api_event(&usage);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].kind, TranscriptKind::Cost);
-    assert_eq!(entries[0].tokens.expect("tokens").input, 7);
-    assert_eq!(entries[0].usd, Some(0.5));
+    // Two text.ended parts of one assistant message coalesce; the step cost is per message.
+    let turn = [
+        json!({
+            "id": "evt_start", "type": "session.execution.started",
+            "created": 1_700_000_003_000_i64,
+            "data": {"sessionID": "ses_app"}, "durable": {"seq": 4}
+        }),
+        json!({
+            "id": "evt_text0", "type": "session.text.ended",
+            "created": 1_700_000_003_100_i64,
+            "data": {"sessionID": "ses_app", "assistantMessageID": "a1", "ordinal": 0, "text": "part one"},
+            "durable": {"seq": 5}
+        }),
+        json!({
+            "id": "evt_text1", "type": "session.text.ended",
+            "created": 1_700_000_003_200_i64,
+            "data": {"sessionID": "ses_app", "assistantMessageID": "a1", "ordinal": 1, "text": "part two"},
+            "durable": {"seq": 6}
+        }),
+        json!({
+            "id": "evt_step", "type": "session.step.ended",
+            "created": 1_700_000_003_300_i64,
+            "data": {
+                "sessionID": "ses_app", "assistantMessageID": "a1", "cost": 0.5,
+                "tokens": {"input": 7, "output": 2}
+            },
+            "durable": {"seq": 7}
+        }),
+        json!({
+            "id": "evt_usage", "type": "session.usage.updated",
+            "created": 1_700_000_003_350_i64,
+            "data": {
+                "sessionID": "ses_app", "cost": 0.5,
+                "tokens": {"input": 7, "output": 2}
+            }
+        }),
+        json!({
+            "id": "evt_done", "type": "session.execution.succeeded",
+            "created": 1_700_000_003_400_i64,
+            "data": {"sessionID": "ses_app"}, "durable": {"seq": 8}
+        }),
+    ];
+    let entries = entries_from_api_events(&turn);
+    let messages: Vec<&TranscriptEntry> = entries
+        .iter()
+        .filter(|entry| entry.kind == TranscriptKind::AssistantMessage)
+        .collect();
+    assert_eq!(messages.len(), 1, "{entries:?}");
+    assert_eq!(messages[0].native_id, "assistant:a1");
+    assert_eq!(messages[0].text.as_deref(), Some("part one\npart two"));
+    let costs: Vec<&TranscriptEntry> = entries
+        .iter()
+        .filter(|entry| entry.kind == TranscriptKind::Cost)
+        .collect();
+    assert_eq!(costs.len(), 1, "{entries:?}");
+    assert_eq!(costs[0].native_id, "cost:a1");
+    assert_eq!(costs[0].usd, Some(0.5));
+    assert_eq!(costs[0].tokens.expect("tokens").input, 7);
+    assert!(entries.iter().any(|entry| entry.kind == TranscriptKind::TurnStarted));
+    assert!(entries.iter().any(|entry| entry.kind == TranscriptKind::TurnEnded));
+
+    // A usage snapshot is cumulative; two snapshots produce two delta costs when no step
+    // cost exists.
+    let usage = [
+        json!({
+            "id": "evt_usage1", "type": "session.usage.updated",
+            "created": 1_700_000_004_000_i64,
+            "data": {"sessionID": "ses_app", "cost": 0.1, "tokens": {"input": 10, "output": 8}}
+        }),
+        json!({
+            "id": "evt_usage2", "type": "session.usage.updated",
+            "created": 1_700_000_004_100_i64,
+            "data": {"sessionID": "ses_app", "cost": 0.3, "tokens": {"input": 20, "output": 16}}
+        }),
+    ];
+    let entries = entries_from_api_events(&usage);
+    let costs: Vec<&TranscriptEntry> = entries
+        .iter()
+        .filter(|entry| entry.kind == TranscriptKind::Cost)
+        .collect();
+    assert_eq!(costs.len(), 2, "{entries:?}");
+    assert_eq!(costs[1].tokens.expect("tokens").input, 10);
+    assert_eq!(costs[1].tokens.expect("tokens").output, 8);
+    let usd = costs[1].usd.expect("usd");
+    assert!((usd - 0.2).abs() < 1e-9, "{usd}");
 
     let execution = json!({
+        "id": "evt_failed",
         "type": "session.execution.failed",
-        "created": 1_700_000_004_000_i64,
-        "data": {"sessionID": "ses_app", "seq": 4, "error": {"message": "model failed"}}
+        "created": 1_700_000_005_000_i64,
+        "data": {"sessionID": "ses_app", "seq": 9, "error": {"message": "model failed"}},
+        "durable": {"seq": 9}
     });
     let entries = entries_from_api_event(&execution);
     assert_eq!(entries.len(), 2, "{entries:?}");
@@ -452,15 +732,16 @@ fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
 
     let streaming = json!({
         "type": "session.text.delta",
-        "created": 1_700_000_005_000_i64,
+        "created": 1_700_000_006_000_i64,
         "data": {"sessionID": "ses_app", "text": "partial"}
     });
     assert!(entries_from_api_event(&streaming).is_empty());
 
     let selected = json!({
         "type": "session.model.selected",
-        "created": 1_700_000_006_000_i64,
-        "data": {"sessionID": "ses_app", "seq": 5, "model": {"modelID": "other-model"}}
+        "created": 1_700_000_007_000_i64,
+        "data": {"sessionID": "ses_app", "seq": 10, "model": {"id": "other-model"}},
+        "durable": {"seq": 10}
     });
     let entries = entries_from_api_event(&selected);
     assert_eq!(entries.len(), 1);
@@ -487,27 +768,23 @@ fn mirror_is_incremental_and_idempotent() {
     let first = mirror_from_host(&deps, &store, &session, &host, &handle, &mut cursor).expect("first");
     assert_eq!(first.events, 2);
     assert_eq!(first.duplicates, 0);
+    assert_eq!(cursor.last_native_id.as_deref(), Some("a1"));
     let after_first = event_count(&deps, &session);
     assert_eq!(after_first, 3, "session.created plus two entries");
 
     // A caller that lost its cursor re-reads the same entries; the native map skips them.
+    // The caller's cursor is still advanced so the next save is not stale.
     let mut fresh = empty_cursor();
     let second = mirror_from_host(&deps, &store, &session, &host, &handle, &mut fresh).expect("second");
     assert_eq!(second.events, 0);
     assert_eq!(second.duplicates, 2);
+    assert_eq!(fresh.last_native_id.as_deref(), Some("a1"));
     assert_eq!(event_count(&deps, &session), after_first);
     assert_eq!(
         store
             .native_event(&session, HarnessKind::Opencode, "a1")
             .expect("native event"),
-        Some(
-            SessionLog::open_read(&deps.paths, &session)
-                .expect("read")
-                .read_all()
-                .expect("read all")[2]
-                .id
-                .clone()
-        )
+        Some(events_of(&deps, &session)[2].id.clone())
     );
 
     host.push(entry("a2", TranscriptKind::AssistantMessage, Some("again")));
@@ -516,6 +793,36 @@ fn mirror_is_incremental_and_idempotent() {
     assert_eq!(third.events, 1);
     assert_eq!(event_count(&deps, &session), after_first + 1);
     assert_eq!(third.cursor.last_native_id.as_deref(), Some("a2"));
+    assert_eq!(third_cursor.last_native_id.as_deref(), Some("a2"));
+
+    // A chat surface has no app transcript, but the spec's `mirror_once` still updates the
+    // caller's cursor so a caller can save it unconditionally.
+    let chat_handle = AppHandle {
+        kind: OrchestratorApp::Chat,
+        pid: 1,
+        port: None,
+        started_at: ts(),
+        workdir: tmp.path().to_path_buf(),
+    };
+    let mut chat_cursor = empty_cursor();
+    let report = mirror_once(&deps, &store, &session, &chat_handle, &mut chat_cursor).expect("chat mirror");
+    assert_eq!(chat_cursor.last_native_id, report.cursor.last_native_id);
+}
+
+#[test]
+fn mirror_cursor_roundtrips_through_mirror_json() {
+    let tmp = tempdir().expect("temp dir");
+    let path = tmp.path().join("orchestrator").join("mirror.json");
+    let missing = read_cursor(&path).expect("missing cursor");
+    assert!(missing.last_native_id.is_none());
+    let cursor = MirrorCursor {
+        last_native_id: Some("assistant:m1".to_owned()),
+        updated_at: ts(),
+    };
+    write_cursor(&path, &cursor).expect("write cursor");
+    assert_eq!(read_cursor(&path).expect("read cursor"), cursor);
+    let mode = std::fs::metadata(&path).expect("cursor metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]
@@ -720,9 +1027,29 @@ fn resume_context_builds_capsule_and_tail() {
     assert!(none.tail.is_empty());
     let all = resume_context(&deps, &store, &session, 10).expect("all turns");
     assert!(all.tail.len() >= 8, "{:?}", all.tail);
+
+    // A lease whose heartbeat is older than the stale window is not handed to the next app.
+    let stale = Timestamp::parse("2026-11-10T11:50:00Z").expect("stale timestamp");
+    store
+        .take_lease(&Lease {
+            session_id: session.clone(),
+            surface_id: None,
+            surface_kind: SurfaceKind::Mirror,
+            node: local(),
+            holder: "stale".to_owned(),
+            token: new_lease_token(),
+            acquired_at: stale,
+            heartbeat_at: stale,
+        })
+        .expect("stale lease");
+    let context = resume_context(&deps, &store, &session, 1).expect("stale resume context");
+    assert!(context.lease.is_none(), "a stale lease was handed to the next app");
 }
 
 /// A loopback opencode fake for the mirror tests.
+///
+/// `/api/event` is deliberately empty: the real stream is subscription-only and would lose
+/// an event that happened between passes. Only the replayable session endpoint can serve it.
 struct MiniOpencode {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<String>>>,
@@ -737,16 +1064,31 @@ impl MiniOpencode {
         listener.set_nonblocking(true).expect("nonblocking mini opencode");
         let addr = listener.local_addr().expect("mini address");
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let messages = Arc::new(Mutex::new(vec![
+            json!({
+                "id": "m1", "type": "user", "text": "hello",
+                "time": {"created": 1_700_000_000_000_i64}
+            }),
+            json!({
+                "id": "m2", "type": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+                "model": {"id": "fake-model"},
+                "cost": 0.25,
+                "tokens": {"input": 3, "output": 4},
+                "time": {"created": 1_700_000_001_000_i64}
+            }),
+        ]));
         let events = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = {
             let seen = Arc::clone(&seen);
+            let messages = Arc::clone(&messages);
             let events = Arc::clone(&events);
             let shutdown = Arc::clone(&shutdown);
             thread::spawn(move || {
                 while !shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => mini_handle(stream, &seen, &events),
+                        Ok((stream, _)) => mini_handle(stream, &seen, &messages, &events),
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5));
                         }
@@ -772,8 +1114,12 @@ impl MiniOpencode {
         format!("http://127.0.0.1:{}", self.port())
     }
 
-    fn push_event(&self, event: Value) {
-        self.events.lock().expect("events").push(event);
+    fn set_events(&self, events: Vec<Value>) {
+        *self.events.lock().expect("events") = events;
+    }
+
+    fn events(&self) -> Vec<Value> {
+        self.events.lock().expect("events").clone()
     }
 
     fn seen(&self) -> Vec<String> {
@@ -791,7 +1137,12 @@ impl Drop for MiniOpencode {
     }
 }
 
-fn mini_handle(mut stream: TcpStream, seen: &Arc<Mutex<Vec<String>>>, events: &Arc<Mutex<Vec<Value>>>) {
+fn mini_handle(
+    mut stream: TcpStream,
+    seen: &Arc<Mutex<Vec<String>>>,
+    messages: &Arc<Mutex<Vec<Value>>>,
+    events: &Arc<Mutex<Vec<Value>>>,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut raw = Vec::new();
     let mut chunk = [0u8; 2048];
@@ -813,38 +1164,34 @@ fn mini_handle(mut stream: TcpStream, seen: &Arc<Mutex<Vec<String>>>, events: &A
         .to_owned();
     seen.lock().expect("seen").push(path.clone());
     let route = path.split('?').next().unwrap_or(&path);
-    let (content_type, body) = match route {
-        "/api/session" => ("application/json", json!({"data": [{"id": "ses_fake"}]}).to_string()),
+    let (status, content_type, body) = match route {
+        "/api/session" => (
+            200,
+            "application/json",
+            json!({"data": [{"id": "ses_fake"}]}).to_string(),
+        ),
+        "/api/session/ses_fake/message" => (
+            200,
+            "application/json",
+            json!({"data": messages.lock().expect("messages").clone()}).to_string(),
+        ),
         "/api/experimental/session/ses_fake/export" => (
+            200,
             "application/json",
             json!({
                 "info": {"id": "ses_fake"},
-                "messages": [
-                    {
-                        "id": "m_user", "type": "user", "sessionID": "ses_fake", "content": "question",
-                        "time": {"created": 1_700_000_000_000_i64}
-                    },
-                    {
-                        "id": "m_answer", "type": "assistant", "sessionID": "ses_fake",
-                        "content": [{"type": "text", "text": "answer"}],
-                        "time": {"created": 1_700_000_001_000_i64}
-                    }
-                ]
+                "messages": messages.lock().expect("messages").clone()
             })
             .to_string(),
         ),
-        "/api/event" => {
-            let mut body = String::new();
-            for event in events.lock().expect("events").iter() {
-                body.push_str("data: ");
-                body.push_str(&event.to_string());
-                body.push_str("\n\n");
-            }
-            ("text/event-stream", body)
-        }
-        _ => ("application/json", "{\"error\":\"not found\"}".to_owned()),
+        "/api/session/ses_fake/event" => (
+            200,
+            "application/json",
+            json!({"data": events.lock().expect("events").clone()}).to_string(),
+        ),
+        "/api/event" => (200, "text/event-stream", String::new()),
+        _ => (404, "application/json", "{\"error\":\"not found\"}".to_owned()),
     };
-    let status = if route.starts_with("/api/") { 200 } else { 404 };
     let response = format!(
         "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -857,7 +1204,7 @@ fn write_state(workdir: &Path, url: &str) {
     std::fs::create_dir_all(&state).expect("state dir");
     std::fs::write(
         state.join("service.json"),
-        json!({"id": "fake", "url": url, "pid": 4242, "password": "password"}).to_string(),
+        json!({"id": "fake", "version": "2.0.28", "url": url, "pid": 4242, "password": "password"}).to_string(),
     )
     .expect("service.json");
     std::fs::write(
