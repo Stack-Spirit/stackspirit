@@ -1,7 +1,9 @@
 //! The per-command context: node paths, parsed config, dependencies and rendering flags.
 //!
 //! Spec: `docs/design/crates/vowp-cli.md` §1–§2. [`Ctx::build`] never creates the node home:
-//! commands other than `init` fail with `not found` and the hint to run `vowp init`.
+//! a missing explicit home fails with `not found` and the hint to run `vowp init`, while a
+//! control machine builds a context over `~/.vowp-control` and an uninitialised machine
+//! builds an empty one so `vowp control init` can create the role.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use vowp_store::{NodePaths, Store};
 use vowp_tmux::{Tmux, WindowManager};
 
 use crate::cli::Global;
+use crate::node_ctx::{ControlHome, NodeCtx, NodeRole};
 use crate::{CliError, IoStreams};
 
 /// The keys a `[loops.<name>]` table may contain, matching `vowp_protocol::config`.
@@ -40,30 +43,81 @@ pub struct Ctx {
     project_root: PathBuf,
     json: bool,
     color: bool,
+    role: NodeRole,
+    control: Option<ControlHome>,
+    project_selected: bool,
 }
 
 impl Ctx {
     /// Builds the context from the global flags without creating the node home.
     ///
-    /// Errors: `NotFound` when the node database or project config is missing,
-    /// `InvalidInput` when no project can be selected.
+    /// A home keeps the v0.1 behaviour. A control machine gets a context bound to its
+    /// `~/.vowp-control` directory so local commands (`control`, `tunnel`, `node`) work
+    /// without a database; every other command is routed to the home by
+    /// [`crate::remote::maybe_run`] before this function runs. An uninitialised machine
+    /// gets an empty context so `vowp control init` can create the control role.
+    ///
+    /// Errors: `NotFound` when an explicit home has no node database, `InvalidInput`
+    /// when no project can be selected, and the config errors of `vowp.toml`.
     pub fn build(global: &Global, io: &dyn IoStreams) -> Result<Ctx, CliError> {
-        let paths = node_paths(global)?;
-        if !paths.db_path().is_file() {
-            return Err(CliError::NotFound(
-                "vowp home is not initialised; run `vowp init`".to_owned(),
-            ));
-        }
-        let project_root = resolve_project_root(global, &paths)?;
-        let config_path = project_root.join("vowp.toml");
-        if !config_path.is_file() {
-            return Err(CliError::NotFound(format!(
-                "project config {}; run `vowp init`",
-                config_path.display()
-            )));
-        }
-        let config = Arc::new(load_project_config(&config_path, &paths)?);
-        let project = config.project.name.clone();
+        let node = NodeCtx::discover(global)?;
+        let control = node.require_control().ok().cloned();
+        let (role, paths) = match &control {
+            Some(control) => (NodeRole::Control, NodePaths::new(&control.root)),
+            None => {
+                let paths = node_paths(global)?;
+                let role = if paths.db_path().is_file() {
+                    NodeRole::Home
+                } else {
+                    NodeRole::Uninitialised
+                };
+                (role, paths)
+            }
+        };
+        let (config, project, project_root, project_selected) = match role {
+            NodeRole::Home => match resolve_project_root(global, &paths) {
+                Ok(project_root) => {
+                    let config_path = project_root.join("vowp.toml");
+                    if !config_path.is_file() {
+                        return Err(CliError::NotFound(format!(
+                            "project config {}; run `vowp init`",
+                            config_path.display()
+                        )));
+                    }
+                    let config = load_project_config(&config_path, &paths)?;
+                    let project = config.project.name.clone();
+                    (config, project, project_root, true)
+                }
+                Err(error) if global.project.is_none() && is_missing_project(&error) => {
+                    // Fleet commands (status, board, fleet, capacity, gc, backup) do not
+                    // need a project. A home with zero or several projects still gets a
+                    // context; `Ctx::store` refuses project-scoped work until one is chosen.
+                    let config = fleet_config(&paths)?;
+                    let project = ProjectName::parse("_node")?;
+                    (config, project, paths.root().to_path_buf(), false)
+                }
+                Err(error) => return Err(error),
+            },
+            NodeRole::Control => {
+                let control = control
+                    .as_ref()
+                    .ok_or_else(|| CliError::Guard("this machine is not a control machine".to_owned()))?;
+                let config = placeholder_config(&control.config.home)?;
+                let project = ProjectName::parse("_node")?;
+                (config, project, control.root.clone(), false)
+            }
+            NodeRole::Uninitialised => {
+                if global.home.is_some() {
+                    return Err(CliError::NotFound(
+                        "vowp home is not initialised; run `vowp init`".to_owned(),
+                    ));
+                }
+                let config = placeholder_config("home")?;
+                let project = ProjectName::parse("_node")?;
+                (config, project, paths.root().to_path_buf(), false)
+            }
+        };
+        let config = Arc::new(config);
         let node_name = config.node.name.clone();
 
         let cmd: Arc<dyn vowp_core::CommandRunner> = Arc::new(SystemRunner);
@@ -91,12 +145,25 @@ impl Ctx {
             project_root,
             json: global.json,
             color,
+            role,
+            control,
+            project_selected,
         })
     }
 
     /// Returns the node paths.
     pub fn paths(&self) -> &NodePaths {
         &self.paths
+    }
+
+    /// Returns the role discovered for this machine.
+    pub fn role(&self) -> NodeRole {
+        self.role
+    }
+
+    /// Returns the control configuration, when this is a control machine.
+    pub fn control(&self) -> Option<&ControlHome> {
+        self.control.as_ref()
     }
 
     /// Returns the injected dependencies.
@@ -125,8 +192,22 @@ impl Ctx {
     }
 
     /// Opens a fresh store connection.
+    ///
+    /// Only a home holds a database. A control machine and an uninitialised machine
+    /// return a `NotFound` instead of creating a database in the wrong directory.
     pub fn store(&self) -> Result<Store, CliError> {
-        Ok(self.deps.open_store()?)
+        match self.role {
+            NodeRole::Home if self.project_selected => Ok(self.deps.open_store()?),
+            NodeRole::Home => Err(CliError::Invalid(
+                "no project selected; pass --project <name> or run `vowp init`".to_owned(),
+            )),
+            NodeRole::Control => Err(CliError::NotFound(
+                "this is a control machine; the home holds the database".to_owned(),
+            )),
+            NodeRole::Uninitialised => Err(CliError::NotFound(
+                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
+            )),
+        }
     }
 
     /// Returns whether `--json` was passed.
@@ -264,6 +345,46 @@ fn process_alive(pid: u32) -> bool {
         Ok(output) => String::from_utf8_lossy(&output.stderr).contains("not permitted"),
         Err(_) => false,
     }
+}
+
+/// Returns whether a project-resolution error means "no project can be selected".
+fn is_missing_project(error: &CliError) -> bool {
+    match error {
+        CliError::Invalid(message) => message.starts_with("no project") || message.starts_with("several projects"),
+        _ => false,
+    }
+}
+
+/// Builds a fleet context config from the node file only.
+///
+/// Fleet commands (`status`, `board`, `fleet`, `capacity`, `gc`, `backup`) must work on a
+/// home from any directory. They load the node-wide `config.toml` and use the reserved
+/// `_node` project name; project-scoped work is refused by [`Ctx::store`] until a project
+/// is selected.
+fn fleet_config(paths: &NodePaths) -> Result<VowpConfig, CliError> {
+    let mut config: VowpConfig = toml::from_str("[project]\nname = \"_node\"\n")
+        .map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()))?;
+    let node_file_path = paths.root().join("config.toml");
+    if node_file_path.is_file() {
+        let node_text = std::fs::read_to_string(&node_file_path)?;
+        let node_file = NodeFile::from_toml(&node_text)?;
+        config = config.with_node_defaults(&node_file);
+    }
+    Ok(config)
+}
+
+/// Builds the minimal config a non-home context needs.
+///
+/// Control and uninitialised machines have no `vowp.toml` to load. The placeholder only
+/// supplies the node name and a valid project identity; no command that uses it may open
+/// a store, which [`Ctx::store`] enforces.
+fn placeholder_config(node_name: &str) -> Result<VowpConfig, CliError> {
+    let name = match vowp_protocol::NodeName::parse(node_name) {
+        Ok(name) => name,
+        Err(_) => vowp_protocol::NodeName::parse("home")?,
+    };
+    let text = format!("[project]\nname = \"_node\"\n\n[node]\nname = \"{}\"\n", name.as_str());
+    toml::from_str(&text).map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()).into())
 }
 
 /// Reads and validates `vowp.toml`, merging `~/.vowp/config.toml` defaults first.

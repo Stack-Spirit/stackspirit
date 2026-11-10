@@ -1,11 +1,29 @@
 //! `--node` tests: pure ssh argv construction and the exit-7 remote failure path.
+//!
+//! The control-machine tests live in `control.rs`; the package's explicit `[[test]]` table
+//! cannot be edited by this job, so that file is compiled as a module of this target.
+
+#[path = "control.rs"]
+mod control;
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use vowp_cli::remote::build_ssh_argv;
+use vowp_cli::remote::{build_ssh_argv, strip_home_flag};
 use vowp_protocol::{Node, NodeName};
 use vowp_store::{NodePaths, Store};
+
+#[test]
+fn strip_home_flag_removes_both_forms() {
+    let args = vec![
+        "--home".to_owned(),
+        "/tmp/local".to_owned(),
+        "--json".to_owned(),
+        "--home=/tmp/other".to_owned(),
+        "status".to_owned(),
+    ];
+    assert_eq!(strip_home_flag(&args), vec!["--json".to_owned(), "status".to_owned()]);
+}
 
 #[test]
 fn node_ssh_argv_quoting() {
