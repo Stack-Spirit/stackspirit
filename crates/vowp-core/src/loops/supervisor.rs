@@ -217,6 +217,11 @@ impl Supervisor {
         report
             .steps
             .push(self.step("heartbeat", |this| this.step_heartbeat(now)));
+        if let Err(error) = self.update_loop_rows(now, &report.steps) {
+            self.deps
+                .log
+                .log(Level::Error, "l1", &format!("cannot update loop rows: {error}"));
+        }
         self.record_tick(&report, now);
         Ok(report)
     }
@@ -229,6 +234,13 @@ impl Supervisor {
     /// written once by [`NodeSupervisor`].
     pub(crate) fn tick_project(&mut self, mode: ProjectTickMode, now: Timestamp) -> Result<TickReport, CoreError> {
         let report = self.tick_steps(mode, now)?;
+        // L2–L7 and L9 come from this project's steps. L8 is node-wide: the node
+        // supervisor records it from the node heartbeat after every project has ticked.
+        if let Err(error) = self.update_loop_rows(now, &report.steps) {
+            self.deps
+                .log
+                .log(Level::Error, "l1", &format!("cannot update loop rows: {error}"));
+        }
         self.record_tick(&report, now);
         Ok(report)
     }
@@ -258,12 +270,6 @@ impl Supervisor {
                 steps.push(self.step("schedules", |this| this.step_schedules(now)));
             }
         }
-        if let Err(error) = self.update_loop_rows(now, &steps) {
-            self.deps
-                .log
-                .log(Level::Error, "l1", &format!("cannot update loop rows: {error}"));
-        }
-
         Ok(TickReport {
             at: now,
             steps,
@@ -1640,6 +1646,23 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Records this project's L8 row from the node-level heartbeat result.
+    ///
+    /// The heartbeat file is written once per node, after every project has ticked; a
+    /// project pass therefore has no `heartbeat` step of its own. The node supervisor
+    /// calls this for each project so `l8-watchdog` still shows the real run time.
+    pub(crate) fn record_heartbeat(&self, now: Timestamp, ok: bool, detail: &str) -> Result<(), CoreError> {
+        let Some(loop_) = self.store.loop_("l8-watchdog")? else {
+            return Ok(());
+        };
+        if loop_.state == ActiveState::Paused {
+            return Ok(());
+        }
+        self.store
+            .record_loop_run("l8-watchdog", now, loop_.next_run_at, detail, ok)?;
+        Ok(())
+    }
+
     /// Step 11: fire due schedules.
     fn step_schedules(&mut self, now: Timestamp) -> Result<String, CoreError> {
         if !self.loop_active("l9-schedules") {
@@ -2598,11 +2621,24 @@ impl NodeSupervisor {
             });
         }
 
-        steps.push(self.node_step("heartbeat", |this| {
+        let heartbeat = self.node_step("heartbeat", |this| {
             l8_watchdog::write_heartbeat(&this.deps)?;
             this.global.kv_set("supervisor_pid", &std::process::id().to_string())?;
             Ok("heartbeat written".to_owned())
-        }));
+        });
+        // The heartbeat is one node-wide step, but every project has an `l8-watchdog`
+        // row. Record the node result in each project DB after the file is written, so
+        // `vowp loops --all` shows the same run time as `l1-supervisor`.
+        for project in self.projects.values() {
+            if let Err(error) = project.inner.record_heartbeat(now, heartbeat.ok, &heartbeat.detail) {
+                self.deps.log.log(
+                    Level::Error,
+                    "node",
+                    &format!("cannot record the L8 row for {}: {error}", project.project),
+                );
+            }
+        }
+        steps.push(heartbeat);
 
         Ok(NodeTickReport {
             at: now,

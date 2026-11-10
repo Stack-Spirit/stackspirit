@@ -417,6 +417,27 @@ fn projects_do_not_shadow_each_others_databases() {
 }
 
 #[test]
+fn node_tick_updates_every_projects_l8_watchdog_row() {
+    let env = NodeEnv::new();
+    let alpha = env.add_project("alpha", |_| {});
+    let beta = env.add_project("beta", |_| {});
+    let mut supervisor = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
+    supervisor.startup().expect("startup");
+
+    supervisor.tick().expect("tick");
+
+    for project in [&alpha, &beta] {
+        let store = Store::open_with_project(&env.paths, project).expect("project store");
+        let row = store.loop_("l8-watchdog").expect("loop lookup").expect("loop row");
+        assert!(
+            row.last_run_at.is_some(),
+            "{project}'s L8 row records the node heartbeat: {row:?}"
+        );
+        assert_eq!(row.last_status, "heartbeat written", "{project}: {row:?}");
+    }
+}
+
+#[test]
 fn one_active_project_keeps_the_v01_board_and_node_heartbeat() {
     let env = NodeEnv::new();
     env.add_project("solo", |_| {});

@@ -46,6 +46,32 @@ fn tick_step_failure_does_not_abort_tick() {
 }
 
 #[test]
+fn tick_updates_the_l8_watchdog_row() {
+    let node = TestNode::new();
+    let store = node.store();
+    let mut supervisor = node.supervisor();
+    assert!(
+        store
+            .loop_("l8-watchdog")
+            .expect("loop lookup")
+            .expect("loop row")
+            .last_run_at
+            .is_none(),
+        "the fresh loop row has not run yet"
+    );
+
+    supervisor.tick().expect("tick");
+
+    let row = store.loop_("l8-watchdog").expect("loop lookup").expect("loop row");
+    assert!(
+        row.last_run_at.is_some(),
+        "the heartbeat step records the L8 run: {row:?}"
+    );
+    assert_eq!(row.last_status, "heartbeat written", "{row:?}");
+    assert_eq!(row.fail_streak, 0, "{row:?}");
+}
+
+#[test]
 fn tick_does_not_block_on_slow_gate() {
     let adapter = Arc::new(ScriptAdapter::always(
         vowp_protocol::HarnessKind::Opencode,
