@@ -239,18 +239,35 @@ rm -rf -- "$guard_root"
 
 say "checking the destination allowlist and the generator's exit codes"
 dest_root=$(mktemp -d "${TMPDIR:-/tmp}/vowp-acceptance-dest.XXXXXX")
+mkdir -p "$dest_root/fake-home"
 ln -s /etc "$dest_root/etc-link"
+real_home=${HOME:-}
 (
+    # Use a dedicated home so the good-path assertion also works when the
+    # self-test itself runs as root (the validator refuses /root).
+    HOME="$dest_root/fake-home"
+    export HOME
     # shellcheck source=../lib.sh
     . "$ACCEPTANCE_DIR/lib.sh"
+    newline_dest=$(printf '/tmp/vowp-acceptance\nlock')
     for bad in / /etc /etc/passwd /usr /usr/bin /bin /sbin /boot /dev /proc /sys \
-        /var /var/lib /opt /root /root/keep /home /tmp /var/tmp "$HOME" "$HOME/" \
-        "$dest_root/etc-link" "$dest_root/etc-link/passwd"; do
+        /var /var/lib /opt /root /root/keep /home /tmp /var/tmp \
+        "$dest_root/etc-link" "$dest_root/etc-link/passwd" "$newline_dest"; do
         if (acceptance_validate_dest "$bad") >/dev/null 2>&1; then
             printf 'accepted unsafe destination: %s\n' "$bad" >&2
             exit 1
         fi
     done
+    # The real home itself is unsafe unless it sits under the /tmp allowlist.
+    case "$real_home" in
+        ""|/tmp/*|/var/tmp/*) ;;
+        *)
+            if (HOME="$real_home" acceptance_validate_dest "$real_home") >/dev/null 2>&1; then
+                printf 'accepted the real home as a destination: %s\n' "$real_home" >&2
+                exit 1
+            fi
+            ;;
+    esac
     for good in /tmp/vowp-acceptance-dest /var/tmp/vowp-acceptance-dest \
         "$HOME/vowp-acceptance-dest"; do
         (acceptance_validate_dest "$good") || exit 1
@@ -269,15 +286,23 @@ if bash "$ACCEPTANCE_DIR/make-v01-home.sh" --help >/dev/null 2>&1; then
 else
     fail "make-v01-home.sh --help did not exit 0"
 fi
-for bad_args in "--jobs nope --dest /tmp/unused" "--dest" "--unknown"; do
-    # shellcheck disable=SC2086
-    if bash "$ACCEPTANCE_DIR/make-v01-home.sh" $bad_args >/dev/null 2>&1; then
-        fail "make-v01-home.sh accepted bad arguments: $bad_args"
+expect_bad_generator_args() {
+    local label=$1
+    local rc
+    shift
+    if bash "$ACCEPTANCE_DIR/make-v01-home.sh" "$@" >/dev/null 2>&1; then
+        fail "make-v01-home.sh accepted bad arguments: $label"
     else
-        status=$?
+        rc=$?
     fi
-    [ "$status" -eq 2 ] || fail "make-v01-home.sh bad arguments exited $status, not 2: $bad_args"
-done
+    [ "$rc" -eq 2 ] || fail "make-v01-home.sh bad arguments exited $rc, not 2: $label"
+}
+expect_bad_generator_args "non-numeric jobs" --jobs nope --dest /tmp/unused
+expect_bad_generator_args "missing dest value" --dest
+expect_bad_generator_args "unknown option" --unknown
+expect_bad_generator_args "empty binary" --dest /tmp/unused --binary ""
+expect_bad_generator_args "empty version" --dest /tmp/unused --version ""
+expect_bad_generator_args "zero timeout" --dest /tmp/unused --timeout 0
 
 # --- build -----------------------------------------------------------------
 
@@ -417,14 +442,15 @@ test -f /home/vowp/projects/pair/memory-hog/vowp.toml
 cat >/home/vowp/fake-vowp <<"EOS"
 #!/bin/sh
 printf "%s\n" "$*" >> /home/vowp/seed-args
+cat >/dev/null
 EOS
 chmod +x /home/vowp/fake-vowp
 rm -f /home/vowp/seed-args
 cd /home/vowp/projects/hello
-VOWP=/home/vowp/fake-vowp .acceptance/seed-jobs.sh 2 fixture >/dev/null
-test "$(wc -l < /home/vowp/seed-args)" -eq 2
+VOWP=/home/vowp/fake-vowp .acceptance/seed-jobs.sh 4 fixture >/dev/null
+test "$(wc -l < /home/vowp/seed-args)" -eq 4
 grep -q -- "--id fixture-1" /home/vowp/seed-args
-grep -q -- "--id fixture-2" /home/vowp/seed-args
+grep -q -- "--id fixture-4" /home/vowp/seed-args
 ' || fail "seed-jobs.sh did not add the expected jobs"
 
 say "running the memory-hog worker once and checking its peak RSS"

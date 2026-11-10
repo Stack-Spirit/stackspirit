@@ -83,21 +83,25 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --dest)
             [ "$#" -ge 2 ] || bad_arg "--dest needs a directory"
+            [ -n "$2" ] || bad_arg "--dest needs a non-empty directory"
             DEST=$2
             shift 2
             ;;
         --binary)
             [ "$#" -ge 2 ] || bad_arg "--binary needs a path"
+            [ -n "$2" ] || bad_arg "--binary needs a non-empty path"
             BINARY=$2
             shift 2
             ;;
         --version)
             [ "$#" -ge 2 ] || bad_arg "--version needs a value"
+            [ -n "$2" ] || bad_arg "--version needs a non-empty value"
             VERSION=$2
             shift 2
             ;;
         --name)
             [ "$#" -ge 2 ] || bad_arg "--name needs a value"
+            [ -n "$2" ] || bad_arg "--name needs a non-empty value"
             PROJECT_NAME=$2
             shift 2
             ;;
@@ -125,6 +129,7 @@ esac
 case "$TIMEOUT" in
     ''|*[!0-9]*) bad_arg "--timeout must be a whole number" ;;
 esac
+[ "$TIMEOUT" -ge 1 ] || bad_arg "--timeout must be at least 1"
 
 PROJECT_NAME=$(acceptance_slug "$PROJECT_NAME")
 [ -n "$PROJECT_NAME" ] || bad_arg "project name is empty after slugging"

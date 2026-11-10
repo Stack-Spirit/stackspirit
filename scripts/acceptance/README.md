@@ -27,9 +27,9 @@ one-time v0.1 release download), or a real `claude`/`opencode` binary.
 - Docker with a reachable daemon.
 - `bash`, `ssh`, `ssh-keygen`.
 - For the direct-host recipes and the host-side helper checks: `tmux`, `git`,
-  `tar`, and `sha256sum` (or `shasum`). The container images already contain
-  these, so only the direct-host `make-v01-home.sh`/`fixtures/project.sh` path
-  needs them on the host.
+  `tar`, and `sha256sum` (or `shasum`). The home image already contains these;
+  the phone image only carries the SSH client and tmux. Only the direct-host
+  `make-v01-home.sh`/`fixtures/project.sh` path needs them on the host.
 - `curl` or `wget` and `python3` for the v0.1 generator; they are installed in
   the containers, so normally only the host prerequisites matter.
 - Network access while building the images (base image and apt packages) and,

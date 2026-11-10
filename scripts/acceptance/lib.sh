@@ -287,6 +287,11 @@ acceptance_validate_dest() {
             acceptance_dest_fail "$status" "destination must not contain '..': '$dest'"
             ;;
     esac
+    case "$dest" in
+        *[[:cntrl:]]*)
+            acceptance_dest_fail "$status" "destination must not contain control characters"
+            ;;
+    esac
     lex=$(acceptance_normalize_path "$dest")
     phys=$(acceptance_physical_path "$lex")
     home=${HOME:-}
