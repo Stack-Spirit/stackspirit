@@ -954,20 +954,22 @@ impl Store {
     /// In-memory global + one lazily attached in-memory project DB (tests).
     pub fn open_memory() -> Result<Store, StoreError>;
     pub fn project(&self) -> Option<&ProjectName>;
-    /// Compatibility accessor: the bound project's `PRAGMA user_version` (1) when bound, else the
-    /// global version (2). The v0.1 tests (`vowp-core/tests/deps.rs`, `vowp-cli/tests/maint.rs`)
-    /// assert 1, so this stays their answer.
+    /// Compatibility accessor: always 1 (`PROJECT_SCHEMA_VERSION`) for a bound handle and for an
+    /// unbound global handle, matching v0.1's "schema 1". The v0.1 tests
+    /// (`vowp-core/tests/deps.rs`, `vowp-cli/tests/maint.rs`) assert 1 and stay untouched.
     pub fn schema_version(&self) -> Result<i64, StoreError>;
-    /// The global file's `PRAGMA user_version` (2). `vowp doctor` and `vowp migrate` print this.
+    /// The global file's real `PRAGMA user_version` (2). `vowp doctor` and `vowp migrate` use this.
     pub fn global_schema_version(&self) -> Result<i64, StoreError>;
+    /// The bound project's real `PRAGMA user_version` (1).
     pub fn project_schema_version(&self) -> Result<i64, StoreError>;
     /// Runs at supervisor startup and after a crash. Repairs half-done cross-file pairs.
     pub fn reconcile_cross_db(&self) -> Result<CrossDbReconcile, StoreError>;
 }
 
-`schema_version()` is the compatibility shim described above: a `Deps`-bound handle reports the
-project's 1, a global handle reports 2. This keeps the existing core/CLI tests green without editing
-them; new code that means the global file calls `global_schema_version()`. `vowp doctor` prints both
+`schema_version()` is the compatibility shim: it reports **1** for both a bound project and an
+unbound global handle. It is deliberately not the global file's value; new code that means the
+global file calls `global_schema_version()` (2). This keeps `vowp-core/tests/deps.rs` and
+`vowp-cli/tests/maint.rs` green without editing them; `vowp doctor` prints both
 (`global 2, project 1`).
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1070,7 +1072,21 @@ The v0.1 `Deps` struct does not change and its existing struct literals in tests
 ```rust
 impl Deps {
     /// Opens the global DB plus the project named by `config.project.name`.
+    ///
+    /// Fresh-home/test compatibility: when the registry has no real project (only `_node` or
+    /// nothing), this returns `Store::open_global` and the v0.1
+    /// `deps_open_store_creates_the_node_database` test only checks that `vowp.db` exists and
+    /// reports schema 1. Once any project is registered, the project DB must exist and is opened;
+    /// a missing one is an error that `vowp project add` repairs.
     pub fn open_store(&self) -> Result<Store, CoreError> {
+        let global = Store::open_global(&self.paths)?;
+        let no_real_project = global
+            .list_project_entries()?
+            .iter()
+            .all(|p| p.name.as_str() == "_node");
+        if no_real_project {
+            return Ok(global);
+        }
         Ok(Store::open_with_project(&self.paths, &self.config.project.name)?)
     }
 }
@@ -1085,6 +1101,9 @@ Consequences (binding):
   right project DB with no signature change.
 - `Ctx::store()` in the CLI uses `Store::open_with_project(paths, &self.project)`; fleet commands
   open the global handle explicitly.
+- `vowp reindex` after `vowp.db` is deleted uses the same fresh-home fallback: it opens the new
+  global DB, rebuilds `sessions`/`session_events` from `sessions/*/log.jsonl`, and needs no project
+  DB. The v0.1 `reindex_after_db_delete_via_cli` test keeps passing.
 - `vowp init` and `vowp project add` register the project, call
   `Store::create_project_db(paths, new_project)`, then open
   `Store::open_with_project(paths, new_project)` for the loop rows, worker slots and DB checks. A
@@ -1125,8 +1144,10 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
 1. **Preflight.** Open the v0.1 DB (`user_version=1`, project tables present) with a raw connection.
    Refuse if `~/.vowp/supervisor.lock` names a live pid, if `PRAGMA integrity_check` is not `ok`,
    or if `journal_mode` is not WAL. Read `projects`; every project row is split into its own DB.
-   The **primary project** is the one with the most jobs (ties: lexicographically first); node-scoped
-   rows with no project column (`workers`, runs with `job_id IS NULL`) go there. Refuse if a job,
+   The **primary project** is the one with the most jobs (ties: lexicographically first); runs with
+   `job_id IS NULL` (planner/keeper/capsule/probe/gate history) go there. Workers do **not** go to
+   the primary by default: step 6 assigns each worker to its job's project and reports unassignable
+   rows. Refuse if a job,
    loop, schedule, inbox or release names a project that has no registry row, if an inbox
    `job_id` does not resolve to a `jobs` row (it would become a job-bearing `node_inbox` item with
    no project), or if an edge's two jobs are in different projects (v0.1 never wrote those; report
@@ -1575,18 +1596,9 @@ pub struct SessionSurfaceCard {
     pub last_event_at: Timestamp,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct SurfaceRef {
-    pub surface_id: SurfaceId,
-    pub kind: SurfaceKind,
-    pub holder: String,
-    pub node: NodeName,
-    pub acquired_at: Timestamp,
-    pub heartbeat_at: Timestamp,
-}
 ```
 
-`CapacitySnapshot` is defined in §6.3; `OrchestratorCard` and `JoinInstructions` in §7.6;
+`CapacitySnapshot` is defined in §6.3; `SurfaceRef` is defined in `surface.rs` (§7.3) and used by the session card; `OrchestratorCard` and `JoinInstructions` in §7.6;
 `SurfaceId`/`SurfaceKind`/`Lease` in §7.3.
 
 ### 5.3 What each card contains (binding order)
@@ -2265,6 +2277,16 @@ pub struct Lease {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SurfaceRef {
+    pub surface_id: SurfaceId,
+    pub kind: SurfaceKind,
+    pub holder: String,
+    pub node: NodeName,
+    pub acquired_at: Timestamp,
+    pub heartbeat_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LeaseStatus {
     pub held: bool,
     pub holder: Option<String>,
@@ -2898,6 +2920,11 @@ vowp backup --restore <dir> --to-home <dir> [--force]
 - `--encrypt` runs the external `age` binary; gzip uses the external `gzip`; offsite copy uses the
   external `rsync`/`git`. No new Rust dependency is added for these. A missing binary is a clear
   exit 5 with the command it needs, never a silent unencrypted copy.
+- The legacy single-file form (`--to *.db`) still writes the **global** DB only, including
+  `projects`. Opening it with `Store::open_path` gives an unbound global handle;
+  `Store::schema_version()` reports the compatibility 1 while `global_schema_version()` reports 2,
+  and `list_projects()` returns the registered projects. This is what keeps
+  `crates/vowp-cli/tests/maint.rs::backup_creates_openable_db` green without editing it.
 - `secrets/` is never backed up in plain text; the manifest says it was skipped, and `--encrypt`
   does not change that rule (a secret is restored by `vowp secret set`, not from a backup).
 - Restore writes a fresh home, runs `integrity_check` and the migration row-count checks, and
@@ -3172,6 +3199,8 @@ a passing test. Everything in this section is binding for C0 and for the feature
 - `vowp-protocol/src/catalog.rs` — `CatalogClass`, `CatalogEntry`, `GcReport`, `GcClassReport`,
   `BackupReport`, `BackupFile`, `CatalogFilter`.
 - `vowp-protocol/src/vault.rs` — `SecretName`, `SecretInfo`, `VaultMode`, `SecretRequest`.
+- `vowp-protocol/src/ops.rs` — control-plane DTOs shared by CLI, MCP and core: `FleetStatus`,
+  `FleetQueueRow`, `Tunnel`, `MigrationReport`, `MigrationCount`.
 - `vowp-protocol/src/lib.rs` — `pub mod` lines and re-exports.
 - `vowp-protocol/src/event.rs` — `SessionRole::Orchestrator` and `SwitchReason::Takeover`
   (additive; update the wire-name tests). Both enums are defined in `event.rs` (lines around 40
@@ -3184,16 +3213,18 @@ Core-only helper types have explicit homes: `SamplerHandle` in `capacity/sampler
 `UsageQuery`/`EstimateKey` are store types in `vowp-store/src/repo_capacity.rs`. They are declared
 by C0 as stubs and filled by E1/E2/E3/C1.
 
-All new types derive `Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema`; enums use
-`#[serde(rename_all = "snake_case")]`; timestamps are `Timestamp`. No new dependency is needed.
+All new **wire** types derive `Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema`; enums
+use `#[serde(rename_all = "snake_case")]`; timestamps are `Timestamp`. Internal decision/context
+types (`AdmitRequest`, `AdmitDecision`, `SamplerHandle`, `ProcFs`, `RunScope`, `AcquireLease`) derive
+only the traits they need; they are not JSON payloads. No new dependency is needed.
 This includes every `--json` payload named in §12: `FleetStatus`, `FleetQueueRow`, `CapacityReport`,
 `CapacityTarget`, `CapacityAdvice`, `GcReport`, `GcClassReport`, `BackupReport`, `BackupFile`,
 `MigrationReport`, `MigrationCount`, `ProjectEntry`, `Tunnel`, `LeaseStatus`, `OrchestratorCard`,
 `SecretInfo`, `SecretRequest` and `TakeoverReport` (the last lives in `surface.rs`, not core, so it
 can derive the wire traits).
 
-`vowp-protocol/src/lib.rs` gains `pub mod capacity; pub mod catalog; pub mod snapshot; pub mod
-surface; pub mod vault;` and re-exports the common types at the crate root (the CLI and core use
+`vowp-protocol/src/lib.rs` gains `pub mod capacity; pub mod catalog; pub mod ops; pub mod snapshot;
+pub mod surface; pub mod vault;` and re-exports the common types at the crate root (the CLI and core use
 `vowp_protocol::Snapshot` etc.). `vowp-core/src/lib.rs` gains `pub mod capacity; pub mod fleet; pub
 mod lifecycle; pub mod surface; pub mod vault;` plus re-exports; `vowp-core/src/session/mod.rs`
 gains `pub mod remote;`. C0 owns these `lib.rs`/`mod.rs` lines so later jobs never edit them.
@@ -3482,6 +3513,8 @@ every flag is declared. C0 adds, in the same commit as the stubs:
 
 - the new top-level commands `project`, `fleet`, `capacity`, `secret`, `gc`, `tunnel`, `setup`,
   `control`, `orchestrator`, `migrate`, `exec` (hidden `__exec`) and `mcp`;
+- the hidden `__vault-exec` and `__vault-admin` variants (handlers in `cmd/secret.rs`, G1); they
+  are not help-listed and are not in `V0_2_COMMANDS`;
 - the hidden `SessionCommand` variants `TurnBegin` and `Ingest` (handlers in `cmd/session.rs`, F1)
   and `Lease` and `Takeover` (handlers in the new `cmd/lease.rs`, F2);
 - the new/changed flags on existing commands: `ChatArgs` (`--executor/--node/--follow/--takeover`),
@@ -3557,13 +3590,13 @@ by `remote::build_ssh_argv` with the private quoting helper.
 
 The two additive enum variants are in `crates/vowp-protocol/src/event.rs`:
 `SessionRole::Orchestrator` and `SwitchReason::Takeover`. They require updating exhaustive matches
-in `vowp-core` and tests. C0 owns the `event.rs` edit but must also update the match arms that the
-compiler points at, even when the file is not in its `owns`; this is the one allowed exception,
-recorded in the C0 report: the alternative is a workspace that does not compile. The new arms are
-behaviour-preserving (`Orchestrator` behaves like `User` for session selection; `Takeover` maps to
-the existing takeover switch path and is rejected by `session switch` unless the surface holds the
-lease). Known exhaustive sites: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator` to
-the `Worker | User` arm).
+in `vowp-core` and tests. C0 owns both the `event.rs` edit and
+`crates/vowp-core/src/session/switch.rs` (recorded in §14.1), so it updates the match arms that the
+compiler points at without crossing its `owns`. The new arms are behaviour-preserving
+(`Orchestrator` behaves like `User` for session selection; `Takeover` maps to the existing takeover
+switch path and is rejected by `session switch` unless the surface holds the lease). Known
+exhaustive site: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator` to the
+`Worker | User` arm).
 
 ---
 
@@ -3598,12 +3631,14 @@ edit one of these paths silently.
 
 | Path | Owner | Why |
 |---|---|---|
-| `crates/vowp-cli/src/cli.rs` | C0 | Every new top-level variant and every changed `*Args` flag, including the hidden `SessionCommand::{TurnBegin,Ingest,Lease,Takeover}`; F1/F2/F3 only fill handlers. |
+| `crates/vowp-cli/src/cli.rs` | C0 | Every new top-level variant and every changed `*Args` flag, including the hidden `SessionCommand::{TurnBegin,Ingest,Lease,Takeover}`, `__vault-exec` and `__vault-admin`; F1/F2/F3/G1 only fill handlers. |
 | `crates/vowp-cli/src/cmd/mod.rs` | C0 | Declares `schema`, `lease` and the other new modules. |
 | `crates/vowp-cli/src/cmd/schema.rs` | C0 stub, D1 fills | `vowp schema snapshot`; moved out of `cmd/maint.rs` so H2 and D1 do not share a file. |
 | `crates/vowp-protocol/src/schema.rs` | C0 | `all_schemas()` must include `Snapshot` and the new types. |
+| `crates/vowp-protocol/src/ops.rs` | C0 | `FleetStatus`, `FleetQueueRow`, `Tunnel`, `MigrationReport`, `MigrationCount`; one module home for the control-plane DTOs. |
 | `crates/vowp-protocol/src/event.rs` | C0 | `SessionRole::Orchestrator` and `SwitchReason::Takeover` are defined here, not in `session.rs`. |
 | `crates/vowp-core/src/deps.rs` | C0 | The `open_store()` project binding in §3.8; no `Deps` field change. |
+| `crates/vowp-core/src/session/switch.rs` | C0 | The exhaustive `SessionRole::Orchestrator` match arm required by the additive enum; without it the workspace cannot compile after C0. |
 | `crates/vowp-cli/src/cmd/init.rs` | C2 | `init` creates the project DB and `_node`, and registers the project. |
 | `crates/vowp-cli/src/cmd/loops.rs` | C2 | Loop rows are per project; `--all` and the project selection. |
 | `crates/vowp-cli/src/cmd/schedule.rs` | C2 | Schedules are per project; `--all` and the project selection. |
@@ -3822,6 +3857,14 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
 17. **Session content backup is mandatory.** The plan's `vowp backup` sentence mentions the DBs and
     capsules; this spec adds `sessions/<id>/log.jsonl`, blobs and adapters because a DB-only restore
     loses every conversation. This is a clarification, not a new feature.
+18. **Vault admin helper names.** The plan writes the write path as `vowp __vault-exec store|rm
+    NAME`; this spec freezes `vowp __vault-admin set|rm NAME` (and keeps `__vault-exec` read-only
+    for injection). The behaviour is the same; G1's card and C0's CLI freeze must use the spec
+    names. This is recorded because it is an interface change, not a cosmetic rename.
+19. **C0 stub exit code.** The card says stubs exit 2; the current
+    `crates/vowp-cli/src/errors.rs` maps `NotImplemented` to `ErrorKind::Internal`/exit 1 and
+    `crates/vowp-cli/tests/core.rs` asserts that. This spec follows the code and freezes exit 1 so
+    C0 needs no unowned edit. The card text must be amended to 1.
 
 ### 16.1 Questions for the owner (none block this spec)
 

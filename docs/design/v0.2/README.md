@@ -8,7 +8,8 @@ deferred.
 v0.2 is one **home** (a VPS) that owns one global DB and one DB per project, one node supervisor,
 all session logs, capacity management, leases and surfaces. People talk to it through the opencode
 and Claude apps, through `vowp mcp`, or through `vowp chat`; a control machine holds only a snapshot
-cache and SSH tunnels. There is no listening HTTP API in v0.2.
+cache and SSH tunnels. There is no public HTTP/SSE API or public port in v0.2; the only listener is
+the loopback-only secret paste page (and the app server joined through an SSH tunnel).
 
 ## The notes
 
