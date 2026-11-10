@@ -1,10 +1,9 @@
 //! Takeover of a session from another surface.
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.3.
 //!
-//! The lease row moves first, so the old surface is cut off immediately and its writes
-//! are refused while the old turn drains. The takeover notice is published in-process
-//! before the drain, which is what lets `session ingest` push `IngestAck::LeaseRevoked`
-//! within the two-second budget. When the session already has an executor, the existing
+//! The lease row moves first, so the old surface is cut off immediately: its ingest
+//! writer compares its token with the shared row on every line/heartbeat and emits
+//! `IngestAck::LeaseRevoked`. When the session already has an executor, the existing
 //! switch protocol drains the old run, interrupts it after five seconds, writes a capsule
 //! and seeds the new surface. A session that has never attached an executor gets the note
 //! only, because a switch has no valid target.
@@ -13,13 +12,12 @@ use vowp_protocol::{
     ExecutorRef, Lease, SessionId, Surface, SwitchReason, SwitchRequest, TakeoverReport, Timestamp, new_lease_token,
 };
 use vowp_store::Store;
-use vowp_store::session_log::SessionLog;
 
 use crate::CoreError;
 use crate::deps::Deps;
 use crate::session::service::SessionService;
 
-use super::lease::{LeaseRevocation, append_note, clock_time, publish_revocation, surface_kind_name};
+use super::lease::{append_note, clock_time, surface_kind_name};
 
 /// How long a takeover lets the old surface's turn drain before interrupting it.
 pub const TAKEOVER_DRAIN_SECS: u64 = 5;
@@ -32,12 +30,26 @@ pub fn takeover(
     target: &Surface,
     now: Timestamp,
 ) -> Result<TakeoverReport, CoreError> {
+    Ok(takeover_inner(deps, store, session, target, now)?.0)
+}
+
+/// Takes the session over and also returns the inserted lease.
+///
+/// [`crate::surface::LeaseGuard::acquire`] uses the returned row instead of re-reading the
+/// lease afterwards, which would let a second concurrent takeover make the guard adopt
+/// another surface's token.
+pub(crate) fn takeover_inner(
+    deps: &Deps,
+    store: &Store,
+    session: &SessionId,
+    target: &Surface,
+    now: Timestamp,
+) -> Result<(TakeoverReport, Lease), CoreError> {
     let row = store
         .session(session)?
         .ok_or_else(|| CoreError::NotFound(format!("session {session}")))?;
     store.upsert_surface(target)?;
 
-    let last_seq = SessionLog::open_read(&deps.paths, session)?.last_seq()?;
     let previous = store.lease(session)?;
     let lease = Lease {
         session_id: session.clone(),
@@ -63,21 +75,15 @@ pub fn takeover(
                 target.holder
             ),
         )?;
-        return Ok(TakeoverReport {
-            previous: None,
-            drained: false,
-            capsule_id: None,
-        });
+        return Ok((
+            TakeoverReport {
+                previous: None,
+                drained: false,
+                capsule_id: None,
+            },
+            lease,
+        ));
     };
-
-    // The notice must reach the old ingest writer before the drain, not after it.
-    publish_revocation(LeaseRevocation {
-        session: session.clone(),
-        by: target.holder.clone(),
-        reason: "session taken over".to_owned(),
-        at: now,
-        last_seq,
-    });
 
     let active = row.state == vowp_protocol::SessionState::Running
         || store
@@ -107,8 +113,9 @@ pub fn takeover(
         capsule_id = switched.capsule_id;
     }
 
-    // The note is written after the switch: during an active turn the runner owns the
-    // single-writer log lock, and the switch releases it before this point.
+    // The note is written after the switch: during an active turn the runner or ingest
+    // writer owns the single-writer log lock; the switch and the revocation release it
+    // before this point.
     append_note(
         deps,
         store,
@@ -120,11 +127,14 @@ pub fn takeover(
         ),
     )?;
 
-    Ok(TakeoverReport {
-        previous: Some(previous.holder),
-        drained,
-        capsule_id,
-    })
+    Ok((
+        TakeoverReport {
+            previous: Some(previous.holder),
+            drained,
+            capsule_id,
+        },
+        lease,
+    ))
 }
 
 /// Returns a short human notice for a takeover, used by chat and tests.

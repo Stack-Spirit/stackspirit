@@ -11,16 +11,14 @@ use std::time::{Duration, Instant};
 use support::fake_adapter::FakeAdapter;
 use support::fake_git::FakeGit;
 use tempfile::{TempDir, tempdir};
+use vowp_core::session::remote::{IngestGrant, IngestSession};
 use vowp_core::session::service::SessionService;
-use vowp_core::surface::lease::{
-    AcquireLease, HEARTBEAT_INTERVAL, LeaseGuard, STALE_AFTER, check_lease_with, clear_revocation, revocation_ack,
-    wait_for_revocation,
-};
+use vowp_core::surface::lease::{AcquireLease, HEARTBEAT_INTERVAL, LeaseGuard, STALE_AFTER, check_lease_with};
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
-    Actor, AssistantMessage, Clock, EventBody, EventSource, EventType, Executor, FakeClock, HarnessKind, IngestAck,
-    MemoryLog, NewSession, NodeName, SessionId, SessionRole, SessionState, Surface, SurfaceId, SurfaceKind,
-    SwitchReason, Timestamp,
+    Actor, AssistantMessage, Clock, Cost, EventBody, EventSource, EventType, Executor, FakeClock, HarnessKind,
+    IngestAck, MemoryLog, NewSession, NodeName, RemoteLine, Run, RunId, RunPurpose, RunRole, SessionId, SessionRole,
+    SessionState, Surface, SurfaceId, SurfaceKind, SwitchReason, Timestamp,
 };
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_store::{NodePaths, Store, StoreError};
@@ -160,6 +158,43 @@ fn token_of(store: &Store, session: &SessionId) -> String {
     store.lease(session).expect("lease").expect("held lease").token
 }
 
+fn open_run(session: &SessionId) -> Run {
+    Run {
+        id: RunId::new(),
+        job_id: None,
+        session_id: Some(session.clone()),
+        role: RunRole::Worker,
+        purpose: RunPurpose::Start,
+        profile: None,
+        rung: 0,
+        executor: Some(opencode()),
+        provider: Some("deepseek".to_owned()),
+        node: local(),
+        native_session_id: None,
+        pid: None,
+        window: None,
+        cwd: None,
+        started_at: ts(),
+        ended_at: None,
+        exit_code: None,
+        outcome: None,
+        limit_kind: None,
+        cost: Cost::unknown(),
+        detail: String::new(),
+    }
+}
+
+fn frame_line(frame: &RemoteLine) -> String {
+    format!("{}\n", serde_json::to_string(frame).expect("frame JSON"))
+}
+
+fn parse_acks(bytes: &[u8]) -> Vec<IngestAck> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("ack JSON"))
+        .collect()
+}
+
 #[test]
 fn lease_acquire_is_one_holder() {
     let tmp = tempdir().expect("tempdir");
@@ -291,7 +326,6 @@ fn takeover_cuts_old_surface_within_two_seconds() {
         check_lease_with(&store, &session, Some(&token_of(&store, &session))).is_ok(),
         "the new surface holds the live lease"
     );
-    clear_revocation(&session);
 }
 
 #[test]
@@ -300,27 +334,69 @@ fn lease_revoked_is_pushed_within_2s() {
     let clock = FakeClock::at(ts());
     let deps = deps(&tmp, &clock);
     let service = SessionService::new(deps.clone());
-    let session = create_session(&service, &tmp, None);
+    let session = create_session(&service, &tmp, Some(opencode()));
     let store = deps.open_store().expect("store");
     let old = surface(SurfaceKind::Chat, "laptop", ts());
-    let _guard = acquire(&deps, &store, &session, &old).expect("old lease");
+    let guard = acquire(&deps, &store, &session, &old).expect("old lease");
+    let old_token = guard.token().to_owned();
+    store
+        .set_session_state(&session, SessionState::Running, Some(&opencode()))
+        .expect("mark running");
+    let run = open_run(&session);
+    store.insert_run(&run).expect("run row");
+    let mut ingest = IngestSession::begin(
+        &deps,
+        &store,
+        &IngestGrant {
+            session: session.clone(),
+            lease: String::new(),
+            run: run.id.clone(),
+        },
+    )
+    .expect("ingest");
+    let mut acks = Vec::new();
+    let hello = RemoteLine::Hello {
+        session_id: session.clone(),
+        run_id: run.id.clone(),
+        executor: opencode().to_string(),
+        node: local(),
+        spool_id: "test-spool".to_owned(),
+        lease: old_token.clone(),
+    };
+    assert!(!ingest.line(&frame_line(&hello), &mut acks).expect("hello"));
 
-    let wait_session = session.clone();
-    let waiter = std::thread::spawn(move || {
-        let started = Instant::now();
-        let notice = wait_for_revocation(&wait_session, Duration::from_secs(2));
-        (notice, started.elapsed())
+    // The takeover command is a separate process in production; the shared lease row is
+    // the only signal. Run it on another thread with its own store handle.
+    let child_deps = deps.clone();
+    let child_session = session.clone();
+    let child_clock = clock.clone();
+    let phone = surface(SurfaceKind::Chat, "phone", clock.now());
+    let started = Instant::now();
+    let takeover_thread = std::thread::spawn(move || {
+        let store = child_deps.open_store().expect("child store");
+        vowp_core::takeover(&child_deps, &store, &child_session, &phone, child_clock.now())
     });
-    std::thread::sleep(Duration::from_millis(100));
-    let phone = surface(SurfaceKind::Opencode, "phone", clock.now());
-    let _report = vowp_core::takeover(&deps, &store, &session, &phone, clock.now()).expect("takeover");
+    let moved = Instant::now() + Duration::from_secs(2);
+    loop {
+        let lease = store.lease(&session).expect("lease");
+        if lease.as_ref().is_some_and(|lease| lease.holder == "phone") {
+            break;
+        }
+        assert!(Instant::now() < moved, "the lease did not move within two seconds");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
-    let (notice, elapsed) = waiter.join().expect("waiter");
-    let notice = notice.expect("revocation notice within the timeout");
-    assert_eq!(notice.by, "phone");
-    assert_eq!(notice.session, session);
-    assert!(elapsed < Duration::from_secs(2), "notice took {elapsed:?}");
-    match revocation_ack(&notice) {
+    // The next heartbeat is the old ingest's poll of the shared row.
+    let heartbeat = RemoteLine::Heartbeat { at: clock.now() };
+    assert!(
+        ingest.line(&frame_line(&heartbeat), &mut acks).expect("heartbeat"),
+        "a revoked ingest stops reading"
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "LeaseRevoked took {elapsed:?}");
+    let parsed = parse_acks(&acks);
+    assert_eq!(parsed.len(), 1, "exactly one lease-revoked acknowledgement");
+    match &parsed[0] {
         IngestAck::LeaseRevoked {
             by,
             reason,
@@ -329,12 +405,23 @@ fn lease_revoked_is_pushed_within_2s() {
         } => {
             assert_eq!(by, "phone");
             assert_eq!(reason, "session taken over");
-            assert_eq!(at, notice.at);
-            assert_eq!(last_seq, notice.last_seq);
+            assert_eq!(*at, ts());
+            assert!(*last_seq >= 1, "last_seq names the last appended event");
         }
         other => panic!("expected LeaseRevoked, got {other:?}"),
     }
-    clear_revocation(&session);
+    let before = read_events(&deps, &session).len();
+    assert!(
+        ingest
+            .line(&frame_line(&RemoteLine::Heartbeat { at: clock.now() }), &mut acks)
+            .expect("second heartbeat")
+    );
+    assert_eq!(read_events(&deps, &session).len(), before, "no event after revocation");
+
+    // Release the ingest log writer so the switch drain can finish and write the note.
+    ingest.finish().expect("finish ingest");
+    let report = takeover_thread.join().expect("takeover thread").expect("takeover");
+    assert!(report.drained);
 }
 
 #[test]
@@ -352,8 +439,37 @@ fn takeover_drains_and_writes_capsule() {
         .set_session_state(&session, SessionState::Running, Some(&opencode()))
         .expect("mark running");
 
+    let child_deps = deps.clone();
+    let child_session = session.clone();
+    let child_clock = clock.clone();
     let phone = surface(SurfaceKind::Chat, "phone", clock.now());
-    let report = vowp_core::takeover(&deps, &store, &session, &phone, clock.now()).expect("takeover");
+    let takeover_thread = std::thread::spawn(move || {
+        let store = child_deps.open_store().expect("child store");
+        vowp_core::takeover(&child_deps, &store, &child_session, &phone, child_clock.now())
+    });
+
+    // A live takeover cuts the old token off while the switch drain is still running.
+    let cutoff = Instant::now();
+    loop {
+        match check_lease_with(&store, &session, Some(&old_token)) {
+            Err(_) => break,
+            Ok(()) => {
+                assert!(
+                    cutoff.elapsed() < Duration::from_secs(2),
+                    "the old token was still valid after {:?}",
+                    cutoff.elapsed()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    assert!(
+        cutoff.elapsed() < Duration::from_secs(2),
+        "the cut-off took {:?}",
+        cutoff.elapsed()
+    );
+
+    let report = takeover_thread.join().expect("takeover thread").expect("takeover");
 
     assert!(report.drained, "a running turn is drained before the handoff");
     let capsule = report.capsule_id.expect("switch writes a capsule");
@@ -385,7 +501,6 @@ fn takeover_drains_and_writes_capsule() {
         check_lease_with(&store, &session, Some(&old_token)).is_err(),
         "the old surface is read-only after the drain"
     );
-    clear_revocation(&session);
 }
 
 #[test]
@@ -421,7 +536,6 @@ fn takeover_before_first_executor_writes_note_only() {
         notes.iter().any(|note| note.starts_with("taken over by phone at ")),
         "the note records the takeover: {notes:?}"
     );
-    clear_revocation(&session);
 }
 
 #[test]
@@ -458,7 +572,6 @@ fn follow_mode_prints_new_events_and_refuses_writes() {
         "follow mode cannot write"
     );
     assert!(check_lease_with(&store, &session, Some(&token_of(&store, &session))).is_ok());
-    clear_revocation(&session);
 }
 
 #[test]
@@ -516,4 +629,84 @@ fn lease_sweep_drops_dead_surface() {
         vowp_core::surface::sweep_leases(&deps, &store, clock.now()).expect("second sweep"),
         0
     );
+}
+
+#[test]
+fn lease_sweep_does_not_drop_a_heartbeated_lease() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+    let target = surface(SurfaceKind::Chat, "laptop", ts());
+    let _guard = acquire(&deps, &store, &session, &target).expect("lease");
+
+    clock.advance(STALE_AFTER + Duration::from_secs(1));
+    let before = clock.now().minus(STALE_AFTER);
+    let stale = store.stale_leases(before).expect("stale snapshot");
+    assert_eq!(stale.len(), 1, "the row is stale at the snapshot");
+    let token = stale[0].token.clone();
+
+    // A heartbeat between the SELECT and the DELETE must keep the lease.
+    assert!(store.heartbeat_lease(&session, &token, clock.now()).expect("heartbeat"));
+    assert!(
+        !store
+            .release_stale_lease(&session, &token, before)
+            .expect("conditional release"),
+        "the conditional delete must not remove a refreshed lease"
+    );
+    assert!(store.lease(&session).expect("lease").is_some());
+    assert_eq!(
+        vowp_core::surface::sweep_leases(&deps, &store, clock.now()).expect("sweep"),
+        0,
+        "a fresh heartbeat is not stale"
+    );
+}
+
+#[test]
+fn surface_store_crud_and_lease_token_checks() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+    let target = surface(SurfaceKind::Chat, "laptop", ts());
+    let guard = acquire(&deps, &store, &session, &target).expect("lease");
+    let token = guard.token().to_owned();
+
+    let stored = store.surface(&target.id).expect("surface").expect("row");
+    assert_eq!(stored.holder, "laptop");
+    assert_eq!(stored.kind, SurfaceKind::Chat);
+    assert_eq!(stored.node, local());
+
+    assert!(
+        !store
+            .heartbeat_lease(&session, "wrong-token", ts())
+            .expect("wrong heartbeat")
+    );
+    assert!(!store.release_lease(&session, "wrong-token").expect("wrong release"));
+    assert!(
+        store.lease(&session).expect("lease").is_some(),
+        "a wrong token changes nothing"
+    );
+    assert!(
+        store
+            .heartbeat_lease(&session, &token, clock.now())
+            .expect("right heartbeat")
+    );
+
+    assert!(store.delete_surface(&target.id).expect("delete surface"));
+    assert!(store.surface(&target.id).expect("surface").is_none());
+    assert!(
+        store
+            .lease(&session)
+            .expect("lease")
+            .expect("held")
+            .surface_id
+            .is_none(),
+        "deleting the surface clears the lease reference"
+    );
+    assert!(!store.delete_surface(&target.id).expect("delete again"));
 }

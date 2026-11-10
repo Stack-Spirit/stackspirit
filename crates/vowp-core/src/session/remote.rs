@@ -293,6 +293,7 @@ pub struct IngestSession<'a> {
     grant: IngestGrant,
     log: SessionLog,
     hello: Option<String>,
+    lease_seen: bool,
     done: bool,
     events: u64,
     duplicates: u64,
@@ -320,6 +321,7 @@ impl<'a> IngestSession<'a> {
             grant: grant.clone(),
             log,
             hello: None,
+            lease_seen: false,
             done: false,
             events: 0,
             duplicates: 0,
@@ -332,6 +334,9 @@ impl<'a> IngestSession<'a> {
     /// A line without a trailing newline is a torn transport tail and is ignored.
     pub fn line(&mut self, line: &str, ack: &mut dyn Write) -> Result<bool, CoreError> {
         if self.done {
+            return Ok(true);
+        }
+        if self.hello.is_some() && self.check_revocation(ack)? {
             return Ok(true);
         }
         if !line.ends_with('\n') {
@@ -384,6 +389,7 @@ impl<'a> IngestSession<'a> {
                     return Err(CoreError::Refused("lease token does not match the grant".to_owned()));
                 }
                 crate::surface::check_lease_with(self.store, &self.grant.session, Some(&lease))?;
+                self.lease_seen = self.store.lease(&self.grant.session)?.is_some();
                 self.hello = Some(lease);
                 Ok(false)
             }
@@ -452,6 +458,29 @@ impl<'a> IngestSession<'a> {
             ));
         }
         Ok(())
+    }
+
+    /// Writes `LeaseRevoked` and stops when the shared lease row no longer carries the
+    /// token from the hello frame.
+    ///
+    /// This is the cross-process push: the takeover command (and the sweep) changes the
+    /// lease row, which `vowp session ingest` reads here on every line and one-second
+    /// heartbeat. A lease that was absent at hello is a job session and stays accepted.
+    fn check_revocation(&mut self, ack: &mut dyn Write) -> Result<bool, CoreError> {
+        if !self.lease_seen {
+            return Ok(false);
+        }
+        let Some(token) = self.hello.as_deref() else {
+            return Ok(false);
+        };
+        let Some(frame) =
+            crate::surface::lease::revocation_ack_for(self.store, &self.grant.session, token, self.log.last_seq())?
+        else {
+            return Ok(false);
+        };
+        write_ack(ack, &frame)?;
+        self.done = true;
+        Ok(true)
     }
 
     /// Appends one remote event or acknowledges its existing id.

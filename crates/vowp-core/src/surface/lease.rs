@@ -6,14 +6,13 @@
 //! seconds. A lease whose heartbeat is older than sixty seconds is stale and may be
 //! replaced without asking the owner; a live lease needs an explicit takeover.
 //!
-//! A takeover publishes a [`LeaseRevocation`] in-process before the (possibly slow)
-//! drain starts, so an ingest writer can push `IngestAck::LeaseRevoked` immediately
-//! instead of waiting for its next lease check.
+//! The lease row is also the cross-process takeover signal: a takeover replaces the
+//! token, and the old surface's ingest writer compares its token with the row on every
+//! line and heartbeat. A token mismatch produces [`IngestAck::LeaseRevoked`] through
+//! [`revocation_ack_for`], so no process-local channel is needed.
 
-use std::collections::HashMap;
-use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use time::{OffsetDateTime, UtcOffset, macros::format_description};
 use vowp_protocol::{
@@ -63,7 +62,7 @@ impl LeaseGuard {
         store.upsert_surface(&req.surface)?;
 
         let existing = store.lease(&req.session)?;
-        if let Some(previous) = &existing
+        let token = if let Some(previous) = &existing
             && now.since(previous.heartbeat_at) < STALE_AFTER
         {
             if !req.takeover {
@@ -72,7 +71,9 @@ impl LeaseGuard {
                     previous,
                 ))));
             }
-            super::takeover::takeover(deps, store, &req.session, &req.surface, now)?;
+            super::takeover::takeover_inner(deps, store, &req.session, &req.surface, now)?
+                .1
+                .token
         } else {
             let lease = Lease {
                 session_id: req.session.clone(),
@@ -95,11 +96,14 @@ impl LeaseGuard {
                             &req.session,
                             format!("stale surface {} replaced", previous.holder),
                         )?;
+                        lease.token
                     } else if req.takeover {
                         // Put the live row back and run the full takeover path so the
                         // old surface gets the switch, capsule and revocation notice.
                         store.take_lease(&previous)?;
-                        super::takeover::takeover(deps, store, &req.session, &req.surface, now)?;
+                        super::takeover::takeover_inner(deps, store, &req.session, &req.surface, now)?
+                            .1
+                            .token
                     } else {
                         store.take_lease(&previous)?;
                         return Err(CoreError::Store(StoreError::Conflict(held_text(
@@ -108,23 +112,22 @@ impl LeaseGuard {
                         ))));
                     }
                 }
-                None => append_note(
-                    deps,
-                    store,
-                    &req.session,
-                    format!(
-                        "surface {} ({}) attached",
-                        surface_kind_name(req.surface.kind),
-                        req.surface.holder
-                    ),
-                )?,
+                None => {
+                    append_note(
+                        deps,
+                        store,
+                        &req.session,
+                        format!(
+                            "surface {} ({}) attached",
+                            surface_kind_name(req.surface.kind),
+                            req.surface.holder
+                        ),
+                    )?;
+                    lease.token
+                }
             }
-        }
+        };
 
-        let lease = store
-            .lease(&req.session)?
-            .ok_or_else(|| CoreError::NotFound(format!("lease for session {}", req.session)))?;
-        let token = lease.token.clone();
         let thread = start_heartbeat(deps, req.session.clone(), token.clone());
         Ok(LeaseGuard {
             deps: deps.clone(),
@@ -186,109 +189,56 @@ pub fn check_lease_with(store: &Store, session: &SessionId, token: Option<&str>)
     }
 }
 
-/// One takeover notice waiting for the active ingest writer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeaseRevocation {
-    /// Session whose lease moved.
-    pub session: SessionId,
-    /// New holder, human-visible.
-    pub by: String,
-    /// Why the lease moved.
-    pub reason: String,
-    /// When the takeover committed.
-    pub at: Timestamp,
-    /// Last sequence the home had appended when the lease moved.
-    pub last_seq: u64,
-}
-
-/// In-process revocation board shared by takeover and the ingest writer.
-struct RevocationBoard {
-    entries: Mutex<HashMap<String, LeaseRevocation>>,
-    changed: Condvar,
-}
-
-/// Returns the process-wide revocation board.
-fn revocation_board() -> &'static RevocationBoard {
-    static BOARD: OnceLock<RevocationBoard> = OnceLock::new();
-    BOARD.get_or_init(|| RevocationBoard {
-        entries: Mutex::new(HashMap::new()),
-        changed: Condvar::new(),
-    })
-}
-
-/// Publishes a takeover notice and wakes every waiter.
-pub(crate) fn publish_revocation(notice: LeaseRevocation) {
-    let board = revocation_board();
-    let mut entries = board.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    entries.insert(notice.session.as_str().to_owned(), notice);
-    board.changed.notify_all();
-}
-
-/// Returns the latest takeover notice for `session`, when one was published.
-pub fn revocation(session: &SessionId) -> Option<LeaseRevocation> {
-    let board = revocation_board();
-    let entries = board.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    entries.get(session.as_str()).cloned()
-}
-
-/// Waits up to `timeout` for a takeover notice for `session`.
+/// Returns the `LeaseRevoked` acknowledgement for an ingest writer whose token no longer
+/// matches the live lease row.
 ///
-/// The ingest writer calls this instead of polling SQLite for every event. A timeout
-/// returns `None`; the caller keeps its normal lease check as the safety net.
-pub fn wait_for_revocation(session: &SessionId, timeout: Duration) -> Option<LeaseRevocation> {
-    let board = revocation_board();
-    let deadline = Instant::now() + timeout;
-    let mut entries = board.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    loop {
-        if let Some(notice) = entries.get(session.as_str()) {
-            return Some(notice.clone());
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return None;
-        }
-        let waited = board
-            .changed
-            .wait_timeout(entries, deadline.saturating_duration_since(now))
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries = waited.0;
+/// The lease row is the shared cross-process state: a takeover replaces its token, the
+/// stale sweep deletes it, and an ingest process in another process sees either change
+/// when it calls this on every line/heartbeat. `None` means the token is still current.
+pub fn revocation_ack_for(
+    store: &Store,
+    session: &SessionId,
+    token: &str,
+    last_seq: u64,
+) -> Result<Option<IngestAck>, CoreError> {
+    match store.lease(session)? {
+        Some(lease) if lease.token == token => Ok(None),
+        Some(lease) => Ok(Some(IngestAck::LeaseRevoked {
+            reason: "session taken over".to_owned(),
+            by: lease.holder,
+            at: lease.acquired_at,
+            last_seq,
+        })),
+        None => Ok(Some(IngestAck::LeaseRevoked {
+            reason: "lease released".to_owned(),
+            by: "none".to_owned(),
+            at: store.clock().now(),
+            last_seq,
+        })),
     }
-}
-
-/// Removes one takeover notice; tests use it to keep the process-wide board clean.
-pub fn clear_revocation(session: &SessionId) -> Option<LeaseRevocation> {
-    let board = revocation_board();
-    let mut entries = board.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    entries.remove(session.as_str())
 }
 
 /// Removes leases whose heartbeat is older than [`STALE_AFTER`].
 ///
 /// Returns how many rows were deleted. The sweep is the node tick's safety net for a
-/// surface that died without calling [`LeaseGuard::release`]; a live surface heartbeats
-/// every five seconds, so it is never touched.
-pub fn sweep_leases(_deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, CoreError> {
+/// surface that died without calling [`LeaseGuard::release`]; the conditional delete
+/// re-checks `heartbeat_at`, so a lease refreshed after the stale snapshot survives.
+pub fn sweep_leases(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, CoreError> {
     let before = now.minus(STALE_AFTER);
     let mut dropped = 0_u32;
     for lease in store.stale_leases(before)? {
-        if store.release_lease(&lease.session_id, &lease.token)? {
+        if store.release_stale_lease(&lease.session_id, &lease.token, before)? {
             dropped = dropped.saturating_add(1);
         }
     }
-    Ok(dropped)
-}
-
-/// Returns the acknowledgement an active ingest writer should push to the old surface.
-///
-/// The client already understands `IngestAck::LeaseRevoked`; the ingest loop only needs
-/// to wait on [`wait_for_revocation`] and write this value on the same stdout stream.
-pub fn revocation_ack(notice: &LeaseRevocation) -> IngestAck {
-    IngestAck::LeaseRevoked {
-        reason: notice.reason.clone(),
-        by: notice.by.clone(),
-        at: notice.at,
-        last_seq: notice.last_seq,
+    if dropped > 0 {
+        deps.log.log(
+            vowp_protocol::Level::Info,
+            "surface",
+            &format!("swept {dropped} stale lease(s)"),
+        );
     }
+    Ok(dropped)
 }
 
 /// Appends one free-form note event and indexes it.
@@ -337,10 +287,9 @@ pub(crate) fn clock_time(ts: Timestamp, tz_offset_minutes: i32) -> String {
 /// Returns the read-only refusal text for a lease held by another surface.
 fn read_only_notice(lease: &Lease) -> String {
     format!(
-        "this surface is read-only; taken over by {} ({}) at {}",
+        "this surface is read-only; taken over by {} ({})",
         lease.holder,
-        surface_kind_name(lease.surface_kind),
-        clock_time(lease.acquired_at, 0)
+        surface_kind_name(lease.surface_kind)
     )
 }
 

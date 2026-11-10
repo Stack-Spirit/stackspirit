@@ -256,6 +256,20 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Deletes a lease only when it is still stale at `before`.
+    ///
+    /// The heartbeat predicate is part of the same DELETE, so a heartbeat committed
+    /// between `stale_leases` and this call keeps the lease. The sweep must use this
+    /// method rather than `release_lease`, which matches only `session_id` and `token`.
+    pub fn release_stale_lease(&self, session: &SessionId, token: &str, before: Timestamp) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "DELETE FROM main.leases
+             WHERE session_id = ?1 AND token = ?2 AND heartbeat_at < ?3",
+            params![session.as_str(), token, ts_to_text(before)],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Lists leases whose heartbeat is older than `before`, oldest first.
     pub fn stale_leases(&self, before: Timestamp) -> Result<Vec<Lease>, StoreError> {
         let mut statement = self.conn.prepare(&format!(

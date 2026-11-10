@@ -1,4 +1,4 @@
-//! Surfaces and leases. C0 keeps every lease check a no-op; F2 fills the behaviour.
+//! Surfaces and leases: one live lease per session, heartbeat, takeover and stale sweep.
 
 pub mod claude_remote;
 pub mod follow;
