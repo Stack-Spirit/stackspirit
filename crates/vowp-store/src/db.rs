@@ -444,6 +444,42 @@ impl Store {
         result
     }
 
+    /// Writes an online SQLite backup of the bound project database to `to`.
+    ///
+    /// [`Store::backup`] backs up `main`; a project database lives in the attached
+    /// `project` schema. This uses SQLite's online backup API on that schema, so a
+    /// concurrent writer or WAL checkpoint cannot tear the copy. The destination is
+    /// replaced atomically through a temporary file in the same directory.
+    pub fn backup_project(&self, to: &Path) -> Result<(), StoreError> {
+        if self.bound_project().is_none() {
+            return Err(StoreError::NoProject);
+        }
+        let parent = match to.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        if !parent.is_dir() {
+            return Err(StoreError::io(
+                parent.display(),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "backup parent directory does not exist"),
+            ));
+        }
+        let file_name = to
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project.db".to_owned());
+        let tmp = parent.join(format!(".{file_name}.tmp-{}", ulid::Ulid::generate()));
+        let result = (|| {
+            self.conn.backup("project", &tmp, None)?;
+            std::fs::rename(&tmp, to).map_err(|err| StoreError::io(to.display(), err))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    }
+
     /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check` on every attached file.
     pub fn integrity_check(&self) -> Result<(), StoreError> {
         for schema in self.attached_schemas() {
