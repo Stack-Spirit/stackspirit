@@ -18,8 +18,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
-use vowp_adapters::proc::resolve_binary;
 use vowp_protocol::{BuildMode, ProjectName, RunId, RunUsage, Timestamp, UsageSource};
 use vowp_store::Store;
 
@@ -37,9 +35,6 @@ const CLOCK_TICKS: f64 = 100.0;
 
 /// A unit counter keeps transient systemd scopes unique within one process.
 static UNIT_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Cached result of the one-time systemd user-scope capability probe.
-static SYSTEMD_SCOPE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// One sampled scope measurement.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -958,31 +953,10 @@ fn sanitize_unit(text: &str) -> String {
     sanitized.trim_matches('-').to_owned()
 }
 
-/// Returns true when a transient `systemd-run --user --scope` is usable.
+/// Returns true when a transient `systemd-run --user --scope` can be created and observed.
+///
+/// The adapter owns the one cached probe so that core scope measurement and adapter sidecars
+/// agree on whether the cgroup path is usable.
 fn systemd_scope_available() -> bool {
-    *SYSTEMD_SCOPE.get_or_init(|| {
-        if std::env::var("VOWP_DISABLE_CGROUP_SCOPES").is_ok_and(|value| value == "1") {
-            return false;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            return false;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if resolve_binary("systemd-run").is_none() {
-                return false;
-            }
-            let unit = format!(
-                "vowp-probe-{}-{}",
-                std::process::id(),
-                UNIT_COUNTER.fetch_add(1, Ordering::Relaxed)
-            );
-            let output = Command::new("systemd-run")
-                .args(["--user", "--scope", "--quiet", "--unit", &unit, "--", "true"])
-                .stdin(Stdio::null())
-                .output();
-            output.is_ok_and(|output| output.status.success())
-        }
-    })
+    vowp_adapters::proc::cgroup_scopes_available()
 }

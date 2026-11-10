@@ -6,6 +6,7 @@
 //! joins both readers and then calls [`StreamParser::finish`]. Signals go to the whole group
 //! through `/bin/kill`; there is no `unsafe` code.
 
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
@@ -15,7 +16,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -42,6 +45,7 @@ pub const DEFAULT_PEAK_RSS_BYTES: u64 = 1_500_000_000;
 pub const DEFAULT_MEAN_CPU_CORES: f64 = 1.0;
 
 /// Counter that keeps transient scope unit names unique within one process.
+#[cfg(target_os = "linux")]
 static UNIT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Cached result of the one-time systemd user-scope probe.
@@ -156,15 +160,18 @@ impl MeterData {
 
 /// Samples a process tree and, when available, its cgroup for one adapter run.
 struct ProcMeter {
+    #[cfg(target_os = "linux")]
     root_pid: u32,
     started_at: Timestamp,
     started: Instant,
+    #[cfg(target_os = "linux")]
     last_cpu: BTreeMap<u32, u64>,
     peak_rss: u64,
     anon: u64,
     file: u64,
     cpu_ticks: u64,
     max_cores: f64,
+    #[cfg(target_os = "linux")]
     last_sample: Instant,
     cgroup: Option<CgroupMeter>,
 }
@@ -174,15 +181,18 @@ impl ProcMeter {
     fn new(root_pid: u32, scope_dir: Option<&Path>) -> Self {
         let cgroup = scope_dir.and_then(|dir| CgroupMeter::attach(root_pid, dir));
         Self {
+            #[cfg(target_os = "linux")]
             root_pid,
             started_at: Timestamp::now(),
             started: Instant::now(),
+            #[cfg(target_os = "linux")]
             last_cpu: BTreeMap::new(),
             peak_rss: 0,
             anon: 0,
             file: 0,
             cpu_ticks: 0,
             max_cores: 0.0,
+            #[cfg(target_os = "linux")]
             last_sample: Instant::now(),
             cgroup,
         }
@@ -392,6 +402,12 @@ impl CgroupMeter {
         if !systemd_scope_available() {
             return None;
         }
+        Self::attach_scope(root_pid, dir)
+    }
+
+    /// Creates the transient scope and moves `root_pid` into it.
+    #[cfg(target_os = "linux")]
+    fn attach_scope(root_pid: u32, dir: &Path) -> Option<Self> {
         let unit = format!(
             "vowp-usage-{}-{}",
             root_pid,
@@ -625,27 +641,64 @@ fn systemd_scope_available() -> bool {
         if std::env::var("VOWP_DISABLE_CGROUP_SCOPES").is_ok_and(|value| value == "1") {
             return false;
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            return false;
-        }
         #[cfg(target_os = "linux")]
         {
-            if resolve_binary("systemd-run").is_none() {
-                return false;
-            }
-            let unit = format!(
-                "vowp-usage-probe-{}-{}",
-                std::process::id(),
-                UNIT_COUNTER.fetch_add(1, Ordering::Relaxed)
-            );
-            let output = Command::new("systemd-run")
-                .args(["--user", "--scope", "--quiet", "--unit", &unit, "--", "true"])
-                .stdin(Stdio::null())
-                .output();
-            output.is_ok_and(|output| output.status.success())
+            probe_cgroup_scope()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
         }
     })
+}
+
+/// Creates one real scope around a throwaway child and checks that its cgroup is observable.
+///
+/// `systemd-run --user --scope true` is not enough: it can succeed where the scope's cgroup
+/// files are unreadable or where this process may not move the run child into it. The probe
+/// runs the same attach path and requires at least one non-empty measurement.
+#[cfg(target_os = "linux")]
+fn probe_cgroup_scope() -> bool {
+    if resolve_binary("systemd-run").is_none() {
+        return false;
+    }
+    let dir = std::env::temp_dir().join(format!("vowp-scope-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let mut child = match Command::new("sh")
+        .args(["-c", "exec sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return false;
+        }
+    };
+    let supported = match CgroupMeter::attach_scope(child.id(), &dir) {
+        Some(mut meter) => {
+            let mut observable = false;
+            for _ in 0..20 {
+                let data = meter.sample();
+                if data.peak_rss_bytes > 0 || data.cpu_usec > 0 {
+                    observable = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            meter.stop();
+            observable
+        }
+        None => false,
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    supported
 }
 
 /// Reads the direct children of `pid` on Linux.

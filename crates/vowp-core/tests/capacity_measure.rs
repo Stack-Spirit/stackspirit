@@ -541,6 +541,11 @@ fn run_usage_written_for_adapter_and_gate() {
             UsageSource::Cgroup,
             "adapter did not use the preferred cgroup scope: {usage:?}"
         );
+    } else {
+        assert!(
+            matches!(usage.source, UsageSource::ProcTree | UsageSource::Default),
+            "adapter reported an unexpected source without a cgroup scope: {usage:?}"
+        );
     }
     assert!(!sidecar.exists());
 
