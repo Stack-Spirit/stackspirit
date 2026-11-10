@@ -213,7 +213,7 @@ pub fn register_checkout(
 
     let store = Store::open_global(paths)?;
     let now = store.clock().now();
-    let mut config_json = serde_json::to_value(&config).map_err(vowp_protocol::ProtocolError::from)?;
+    let config_json = serde_json::to_value(&config).map_err(vowp_protocol::ProtocolError::from)?;
     let created = match store.project(&project)? {
         Some(existing) => {
             if !same_path(&existing.path, &root) {
@@ -222,14 +222,9 @@ pub fn register_checkout(
                     existing.path
                 )));
             }
-            // Re-adding the same checkout is idempotent for the registry: a fresh
-            // `vowp.toml` must not reset a pause, archive or owner-chosen weight.
-            if registry::project_entry(&store, &project)?.is_some()
-                && let Some(meta) = existing.config.get("vowp_registry")
-                && let Some(object) = config_json.as_object_mut()
-            {
-                object.insert("vowp_registry".to_owned(), meta.clone());
-            }
+            // `upsert_project` refreshes the checkout columns but leaves the registry
+            // columns (state, weight, pause reason, archive time) untouched, so re-adding
+            // the same checkout keeps a pause, archive or owner-chosen weight.
             store.upsert_project(&Project {
                 name: project.clone(),
                 path: root.display().to_string(),

@@ -15,8 +15,8 @@ use vowp_core::deps::SystemRng;
 use vowp_core::{AdapterRegistry, CommandRunner, Deps, SystemGit, SystemRunner};
 use vowp_protocol::{
     Adapter, AdapterCapabilities, AdapterError, AdapterRun, Cost, Executor, HarnessConfig, HarnessEvent, HarnessKind,
-    JobKind, JobState, NewJob, Node, NullLog, ProbeResult, Project, Role, RunOutcome, RunSummary, StartInput,
-    StopReason, SystemClock, Timestamp,
+    JobKind, JobState, NewJob, Node, NullLog, ProbeResult, Project, ProjectName, ProjectState, Role, RunOutcome,
+    RunSummary, StartInput, StopReason, SystemClock, Timestamp,
 };
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -942,6 +942,23 @@ fn write_project_config(repo: &Path, name: &str) -> vowp_protocol::VowpConfig {
     config
 }
 
+/// Reads one real registry row from the node store.
+fn registry_entry(env: &common::TestEnv, name: &str) -> Option<vowp_protocol::ProjectEntry> {
+    env.store()
+        .project_entry(&ProjectName::parse(name).expect("project name"))
+        .expect("registry row")
+}
+
+/// Reads one project card from the `snapshot.json` written by `up`.
+fn snapshot_card(env: &common::TestEnv, name: &str) -> vowp_protocol::ProjectSnapshot {
+    let snapshot = vowp_core::fleet::read_snapshot(&NodePaths::new(env.home_path())).expect("snapshot.json");
+    snapshot
+        .projects
+        .into_iter()
+        .find(|card| card.name.as_str() == name)
+        .expect("project card")
+}
+
 #[test]
 fn up_once_ticks_every_project_from_one_checkout() {
     let env = common::TestEnv::new();
@@ -1083,11 +1100,27 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     let (code, value, stderr) = env.run_json(&["project", "weight", "second", "42"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["weight"], 42, "{value}");
+    assert_eq!(
+        registry_entry(&env, "second").expect("registry row").weight,
+        42,
+        "the weight lives in the real projects.weight column"
+    );
 
     let (code, value, stderr) = env.run_json(&["project", "pause", "second"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["state"], "paused", "{value}");
     assert_eq!(value["paused_reason"], "owner", "{value}");
+    let entry = registry_entry(&env, "second").expect("registry row");
+    assert_eq!(entry.state, ProjectState::Paused);
+    assert_eq!(entry.paused_reason, "owner");
+
+    // The snapshot reads the same columns: a paused project must not look active.
+    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "{stderr}");
+    let card = snapshot_card(&env, "second");
+    assert_eq!(card.state, ProjectState::Paused, "{card:?}");
+    assert_eq!(card.paused_reason, "owner", "{card:?}");
+    assert_eq!(card.weight, 42, "{card:?}");
 
     // Re-adding the same checkout is idempotent for the registry state and weight.
     let (code, value, stderr) = env.run_json(&["project", "add", &second_path]);
@@ -1095,16 +1128,31 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     assert_eq!(value["state"], "paused", "{value}");
     assert_eq!(value["weight"], 42, "{value}");
     assert_eq!(value["paused_reason"], "owner", "{value}");
+    let entry = registry_entry(&env, "second").expect("registry row");
+    assert_eq!(entry.state, ProjectState::Paused);
+    assert_eq!(entry.weight, 42);
 
     let (code, value, stderr) = env.run_json(&["project", "resume", "second"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["state"], "active", "{value}");
     assert_eq!(value["paused_reason"], "", "{value}");
+    assert_eq!(
+        registry_entry(&env, "second").expect("registry row").state,
+        ProjectState::Active
+    );
 
     let (code, value, stderr) = env.run_json(&["project", "archive", "second"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["state"], "archived", "{value}");
     assert!(value["archived_at"].is_string(), "{value}");
+    let entry = registry_entry(&env, "second").expect("registry row");
+    assert_eq!(entry.state, ProjectState::Archived);
+    assert!(entry.archived_at.is_some(), "{entry:?}");
+
+    // The archived state is visible to the fleet snapshot too.
+    let (code, _, stderr) = env.run(&["up", "--once", "--no-tmux"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(snapshot_card(&env, "second").state, ProjectState::Archived);
     let (code, _, stderr) = env.run(&["project", "resume", "second"]);
     assert_eq!(code, 4, "archived cannot be resumed: {stderr}");
 
@@ -1114,6 +1162,17 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["name"], "second", "{value}");
     assert_eq!(value["removed"], true, "{value}");
+    assert!(
+        registry_entry(&env, "second").is_none(),
+        "rm deletes the real registry row, not just a JSON marker"
+    );
+    assert!(
+        env.store()
+            .project(&ProjectName::parse("second").expect("name"))
+            .expect("project lookup")
+            .is_none(),
+        "the projects row is gone"
+    );
     let archive_path = value["archive_path"].as_str().expect("archive path");
     assert!(Path::new(archive_path).is_dir(), "{archive_path}");
 
@@ -1130,7 +1189,7 @@ fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     let (code, _, stderr) = env.run(&["project", "pause", "_node"]);
     assert_eq!(code, 2, "the reserved project is refused: {stderr}");
 
-    // A removed project can be re-added: the registry marker is replaced by the new row.
+    // A removed project can be re-added: `rm` deleted the row, so this is a fresh one.
     let (code, value, stderr) = env.run_json(&["project", "add", &second_path]);
     assert_eq!(code, 0, "re-add after rm: {stderr}");
     assert_eq!(value["name"], "second", "{value}");

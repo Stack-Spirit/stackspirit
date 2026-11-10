@@ -26,190 +26,61 @@ use vowp_store::{SessionFilter, StateChange, Store};
 /// `config_json` under a reserved key. Every reader (project commands, the node supervisor,
 /// `project ls`) goes through this module, so the behaviour is consistent. Removing a
 /// project marks the row; the row itself remains for the session text that names it.
+/// The project registry, backed by the real `main.projects` columns.
+///
+/// These helpers are thin views over [`vowp_store::Store`]'s `ProjectEntry` API
+/// (`project_entry`, `list_project_entries`, `project_by_path`, `set_project_state`,
+/// `set_project_weight`, `remove_project_record`). The state, weight, pause reason and
+/// archive timestamp live in their own columns and are the same rows the fleet snapshot
+/// reads; there is no second copy in `config_json`.
 pub mod registry {
-    use serde::{Deserialize, Serialize};
-    use serde_json::json;
-    use vowp_protocol::{Project, ProjectEntry, ProjectName, ProjectState, Timestamp};
+    use std::path::Path;
+
+    use vowp_protocol::{ProjectEntry, ProjectName, ProjectState};
     use vowp_store::Store;
 
     use crate::CoreError;
 
-    /// Reserved key inside `projects.config_json`.
-    const META: &str = "vowp_registry";
-
-    /// Registry fields that are not part of the v0.1 `Project` shape.
-    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-    struct Meta {
-        #[serde(default = "default_state")]
-        state: String,
-        #[serde(default = "default_weight")]
-        weight: u8,
-        #[serde(default)]
-        paused_reason: String,
-        #[serde(default)]
-        archived_at: Option<Timestamp>,
-        #[serde(default)]
-        removed: bool,
-    }
-
-    /// Default state for a row written by `vowp init` or a v0.1 migration.
-    fn default_state() -> String {
-        "active".to_owned()
-    }
-
-    /// Default fairness weight.
-    fn default_weight() -> u8 {
-        1
-    }
-
-    /// Returns the registry metadata stored on one project row.
-    fn meta_of(project: &Project) -> Meta {
-        project
-            .config
-            .get(META)
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
-    }
-
-    /// Converts one `projects` row into its registry view.
-    fn entry_of(project: &Project) -> ProjectEntry {
-        let meta = meta_of(project);
-        ProjectEntry {
-            name: project.name.clone(),
-            path: project.path.clone(),
-            remote_url: project.remote_url.clone(),
-            default_branch: project.default_branch.clone(),
-            state: state_from_text(&meta.state),
-            weight: meta.weight.clamp(1, 100),
-            paused_reason: meta.paused_reason,
-            archived_at: meta.archived_at,
-            created_at: project.created_at,
-            updated_at: project.updated_at,
-        }
-    }
-
-    /// Maps a registry state onto its stable text.
-    fn state_to_text(state: ProjectState) -> &'static str {
-        match state {
-            ProjectState::Active => "active",
-            ProjectState::Paused => "paused",
-            ProjectState::Archived => "archived",
-        }
-    }
-
-    /// Maps stored text onto [`ProjectState`]; unknown text is active.
-    fn state_from_text(text: &str) -> ProjectState {
-        match text {
-            "paused" => ProjectState::Paused,
-            "archived" => ProjectState::Archived,
-            _ => ProjectState::Active,
-        }
-    }
-
-    /// Stores metadata back in `config_json` and touches `updated_at`.
-    fn write_meta(store: &Store, mut project: Project, meta: &Meta) -> Result<(), CoreError> {
-        if !project.config.is_object() {
-            project.config = json!({});
-        }
-        let value = serde_json::to_value(meta).map_err(|error| CoreError::Invalid(error.to_string()))?;
-        project
-            .config
-            .as_object_mut()
-            .ok_or_else(|| CoreError::Invalid("project config is not an object".to_owned()))?
-            .insert(META.to_owned(), value);
-        project.updated_at = store.clock().now();
-        store.upsert_project(&project)?;
-        Ok(())
-    }
-
-    /// Returns one live registry entry, or `None` when it is absent or removed.
+    /// Returns one registry entry, or `None` when the row does not exist.
     pub fn project_entry(store: &Store, name: &ProjectName) -> Result<Option<ProjectEntry>, CoreError> {
-        let Some(project) = store.project(name)? else {
-            return Ok(None);
-        };
-        let meta = meta_of(&project);
-        if meta.removed {
-            return Ok(None);
-        }
-        Ok(Some(entry_of(&project)))
+        Ok(store.project_entry(name)?)
     }
 
-    /// Lists live registry entries, ordered by name.
+    /// Lists every registry entry, ordered by name.
     pub fn project_entries(store: &Store) -> Result<Vec<ProjectEntry>, CoreError> {
-        let mut entries = Vec::new();
-        for project in store.list_projects()? {
-            if !meta_of(&project).removed {
-                entries.push(entry_of(&project));
-            }
-        }
-        Ok(entries)
+        Ok(store.list_project_entries()?)
     }
 
-    /// Returns the live entry whose checkout is `path`.
-    pub fn project_by_path(store: &Store, path: &std::path::Path) -> Result<Option<ProjectEntry>, CoreError> {
-        for entry in project_entries(store)? {
-            let candidate = std::path::Path::new(&entry.path);
-            if candidate == path
-                || std::fs::canonicalize(candidate)
-                    .ok()
-                    .zip(std::fs::canonicalize(path).ok())
-                    .is_some_and(|(left, right)| left == right)
-            {
-                return Ok(Some(entry));
-            }
-        }
-        Ok(None)
+    /// Returns the entry whose recorded checkout path is `path`.
+    pub fn project_by_path(store: &Store, path: &Path) -> Result<Option<ProjectEntry>, CoreError> {
+        Ok(store.project_by_path(path)?)
     }
 
-    /// Sets one project's state and paused reason.
+    /// Sets one project's state and paused reason in its registry row.
     pub fn set_project_state(
         store: &Store,
         name: &ProjectName,
         state: ProjectState,
         reason: &str,
     ) -> Result<ProjectEntry, CoreError> {
-        let project = store
-            .project(name)?
-            .ok_or_else(|| CoreError::NotFound(format!("project {name}")))?;
-        let mut meta = meta_of(&project);
-        meta.state = state_to_text(state).to_owned();
-        meta.paused_reason = reason.to_owned();
-        meta.archived_at = (state == ProjectState::Archived).then(|| store.clock().now());
-        meta.removed = false;
-        write_meta(store, project, &meta)?;
-        project_entry(store, name)?.ok_or_else(|| CoreError::NotFound(format!("project {name}")))
+        Ok(store.set_project_state(name, state, reason)?)
     }
 
     /// Sets one project's fairness weight (`1..=100`).
     pub fn set_project_weight(store: &Store, name: &ProjectName, weight: u8) -> Result<(), CoreError> {
-        if !(1..=100).contains(&weight) {
-            return Err(CoreError::Invalid(format!(
-                "project weight must be 1..=100, got {weight}"
-            )));
-        }
-        let project = store
-            .project(name)?
-            .ok_or_else(|| CoreError::NotFound(format!("project {name}")))?;
-        let mut meta = meta_of(&project);
-        meta.weight = weight;
-        write_meta(store, project, &meta)
+        store.set_project_weight(name, weight)?;
+        Ok(())
     }
 
-    /// Marks one project removed. The row stays so session text keeps its name.
+    /// Removes one project's registry row, keeping its database and history.
     pub fn remove_project_record(store: &Store, name: &ProjectName) -> Result<(), CoreError> {
         if name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
             return Err(CoreError::Invalid(
                 "cannot remove the reserved _node project".to_owned(),
             ));
         }
-        let project = store
-            .project(name)?
-            .ok_or_else(|| CoreError::NotFound(format!("project {name}")))?;
-        let mut meta = meta_of(&project);
-        meta.removed = true;
-        meta.paused_reason = "removed".to_owned();
-        write_meta(store, project, &meta)
+        store.remove_project_record(name)?;
+        Ok(())
     }
 }
 
