@@ -48,6 +48,10 @@ pub const FILES: &[FrameworkFile] = &[
         content: include_str!("../../../framework/skills/vowp-keeper/SKILL.md"),
     },
     FrameworkFile {
+        target: ".claude/skills/vowp-capacity-advisor/SKILL.md",
+        content: include_str!("../../../framework/skills/vowp-capacity-advisor/SKILL.md"),
+    },
+    FrameworkFile {
         target: "opencode.jsonc",
         content: include_str!("../../../framework/opencode/opencode.jsonc"),
     },
@@ -59,5 +63,21 @@ pub fn brief_template_body() -> &'static str {
     match content.match_indices("---").nth(1) {
         Some((end, _)) => content[end + 3..].trim_start_matches(['\r', '\n']),
         None => content,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FILES;
+
+    #[test]
+    fn capacity_advisor_skill_is_embedded() {
+        let skill = FILES
+            .iter()
+            .find(|file| file.target == ".claude/skills/vowp-capacity-advisor/SKILL.md")
+            .expect("the capacity advisor skill is installed by vowp init");
+        assert!(skill.content.contains("name: vowp-capacity-advisor"));
+        assert!(skill.content.contains("vowp capacity set --target"));
+        assert!(skill.content.contains("never change"));
     }
 }
