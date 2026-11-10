@@ -149,8 +149,9 @@ The generator:
    version, job states, table row counts, session logs and run files;
 4. runs the real v0.1 supervisor with the fake harness until every job is
    `done`, then `vowp down --force`;
-5. uses only `<dest>/runtime` for `HOME`, `TMPDIR`, `TMUX_TMPDIR` and the tmux
-   socket wrapper.
+5. uses `<dest>/runtime` for its own `HOME`, `TMPDIR` and tmux wrapper; the
+   v0.1 binary's own `Tmux::for_home` uses `<dest>/home/tmux`, which the
+   generator also kills on exit.
 
 The project path is recorded in the v0.1 database, so use the generated
 directory in place. For migration, point the v0.2 binary at the same home:

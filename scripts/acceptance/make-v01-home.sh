@@ -153,9 +153,19 @@ stop_supervisor() {
     (cd "$PROJECT_DIR" 2>/dev/null && "$BINARY" --home "$HOME_DIR" down --force >/dev/null 2>&1) || true
 }
 
+# v0.1's Tmux::for_home puts its socket under <home>/tmux, not the runtime
+# directory used by this generator's own wrapper. Kill that private server too.
+kill_v01_tmux() {
+    [ -n "${VOWP_ACCEPTANCE_TMUX_SOCKET:-}" ] || return 0
+    [ -d "$HOME_DIR/tmux" ] || return 0
+    TMUX_TMPDIR="$HOME_DIR/tmux" tmux -L "$VOWP_ACCEPTANCE_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
+}
+
 cleanup() {
     status=$?
     stop_supervisor
+    kill_v01_tmux
+    rm -rf -- "$HOME_DIR/tmux" 2>/dev/null || true
     acceptance_kill_private_tmux
     if [ "$status" -ne 0 ]; then
         say "failed after $(( $(date +%s) - STARTED_AT ))s; partial output kept at $DEST" >&2
@@ -449,6 +459,8 @@ done
 say "jobs finished: $final_states"
 stop_supervisor
 sleep 1
+kill_v01_tmux
+rm -rf -- "$HOME_DIR/tmux" 2>/dev/null || true
 acceptance_kill_private_tmux
 
 # --- manifest --------------------------------------------------------------
