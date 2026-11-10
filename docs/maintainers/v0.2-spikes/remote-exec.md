@@ -319,5 +319,8 @@ Expected: `status=ok`, `reconnects=2`, `resent=2`, `duplicate_acks=1`, verifier 
   fallback still completed every turn. F1 should treat master death as expected and covered.
 - The `--lease <token>` argv question is a recommendation, not an owner decision: the plan names
   that flag, but a token in `ps` is avoidable with the `hello` frame.
+- The shared host filesystem filled during the first repo-wide gate run: clippy failed in `ld` with
+  signal 7 before emitting any lint. The same command passed on rerun once the target was built
+  (`evidence/gate-clippy.txt`); this is an environment failure, not a code change.
 - Hermetic tests are portable. The live script is Linux-oriented (`/usr/sbin/sshd`); macOS can run
   the hermetic suite, and the workspace's cargo gates do not depend on this directory.

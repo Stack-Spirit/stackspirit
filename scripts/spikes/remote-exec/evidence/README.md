@@ -9,3 +9,4 @@ no operator paths, hostnames, keys or secrets.
 | `fault-injection.json` | the 200-event / three-cut scenario in the parent README | Summary, verifier output and the three cuts. |
 | `client-resume.json` | the 120-event killed-client scenario | First process, resumed process and verifier output. |
 | `live-check.json` | `scripts/spikes/remote-exec/run.sh --live --out ...` | Private-loopback-sshd handshake, stream, reconnect and lease-notice measurements. |
+| `gate-clippy.txt` | `cargo clippy --workspace --all-targets -- -D warnings` | Rerun evidence after the first gate attempt hit a full-disk linker error. |
