@@ -78,7 +78,7 @@ fn register_project(paths: &NodePaths, config: &vowp_protocol::VowpConfig, proje
         .expect("project");
 }
 
-/// A recorded empty v0.1 home, base64 of a zero-run encoded SQLite file.
+/// A recorded empty v0.1 home, hex of a zero-run encoded SQLite file.
 ///
 /// It is the v0.1 schema in `docs/design/schema.sql` with no project rows (so it stays
 /// small and does not bake in a host path). `rusqlite` is not a direct dependency of this
