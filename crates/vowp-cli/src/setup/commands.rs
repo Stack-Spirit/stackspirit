@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use serde::Serialize;
 use vowp_protocol::{
     Node, NodeConfig, NodeFile, NodeName, OnCreditsExhausted, OnQuota, Profile, Project, ProjectName, ProviderConfig,
-    SecretName, Timestamp, VowpConfig,
+    SecretName, Snapshot, Timestamp, VowpConfig,
 };
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::quote::shell_quote;
@@ -354,9 +354,7 @@ pub fn run_control(
                     .to_owned(),
             )
         })?;
-    if target.trim().is_empty() {
-        return Err(CliError::Invalid("ssh target must not be empty".to_owned()));
-    }
+    super::validate_ssh_target(&target)?;
     let name = args
         .name
         .clone()
@@ -366,7 +364,7 @@ pub fn run_control(
     let name = NodeName::parse(&name)?.to_string();
 
     let mut runner = SshRunner::new(target.clone());
-    let probe = probe(&mut runner, &[])?;
+    let mut probe = probe(&mut runner, &[])?;
     // `setup home` may have created the home under the vowp user, not the SSH login
     // user. A recorded state or an existing control config is authoritative; the probe
     // fallback is only for the first control run without a home record, and it uses the
@@ -382,6 +380,28 @@ pub fn run_control(
                 .map(|config| config.remote_home.clone())
         })
         .unwrap_or_else(|| format!("{}/.vowp", probe.effective_home().trim_end_matches('/')));
+    // The per-user binary is authoritative; a non-login SSH PATH often omits
+    // `~/.local/bin`, which must not make an installed home look uninstalled.
+    let trimmed_home = remote_home.trim_end_matches('/');
+    let home_dir = trimmed_home.strip_suffix("/.vowp").unwrap_or(trimmed_home);
+    let installed_binary = format!("{home_dir}/.local/bin/vowp");
+    let version_argv = as_user(
+        &probe.user,
+        probe.effective_user(),
+        &probe.effective_home(),
+        vec![installed_binary.clone(), "--version".to_owned()],
+    );
+    let version_output = runner.run(&version_argv, None)?;
+    if version_output.success()
+        && let Some(version) = version_output
+            .stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .and_then(|line| line.trim().strip_prefix("vowp "))
+    {
+        probe.vowp_version = Some(version.to_owned());
+        probe.vowp_path = Some(installed_binary);
+    }
     let plan = control_plan(&target, &name, &probe, &remote_home);
     if !args.apply {
         if ctx.json() {
@@ -500,15 +520,13 @@ pub fn run_control(
         status: "ok".to_owned(),
         detail: "no supervisor is installed on a control machine".to_owned(),
     });
-    let snapshot = remote::cached_snapshot(&root)?;
-    checks.push(SetupCheck {
-        name: "control.snapshot".to_owned(),
-        status: if snapshot.is_some() { "ok" } else { "warn" }.to_owned(),
-        detail: match snapshot {
-            Some(cached) => format!("snapshot cache as of {}", cached.fetched_at.as_rfc3339()),
-            None => "empty until `vowp fleet status --refresh` reaches the home".to_owned(),
-        },
-    });
+    checks.push(update_control_snapshot(
+        &mut runner,
+        &probe,
+        &root,
+        &remote_home,
+        &mut changed,
+    )?);
     checks.push(SetupCheck {
         name: "control.home".to_owned(),
         status: if probe.vowp_version.is_some() { "ok" } else { "warn" }.to_owned(),
@@ -517,7 +535,7 @@ pub fn run_control(
                 "{} reports vowp {} at {}",
                 target,
                 probe.vowp_version.as_deref().unwrap_or("unknown"),
-                probe.home
+                probe.vowp_path.as_deref().unwrap_or(&probe.home)
             )
         } else {
             format!("{target} does not report a vowp version yet; finish `setup home` first")
@@ -1078,6 +1096,9 @@ impl Executor {
         self.phase = "home".to_owned();
         let vowp_home = format!("{}/.vowp", self.remote_home);
         let db = format!("{vowp_home}/vowp.db");
+        let config_path = format!("{vowp_home}/config.toml");
+        let project_config_path = format!("{vowp_home}/vowp.toml");
+        let node_db = format!("{vowp_home}/projects/_node/project.db");
         let existed = self
             .remote(
                 vec![
@@ -1087,6 +1108,18 @@ impl Executor {
                 ],
                 None,
             )?
+            .success();
+        let config_existed = self
+            .remote(vec!["test".to_owned(), "-f".to_owned(), config_path.clone()], None)?
+            .success();
+        let project_config_existed = self
+            .remote(
+                vec!["test".to_owned(), "-f".to_owned(), project_config_path.clone()],
+                None,
+            )?
+            .success();
+        let node_db_existed = self
+            .remote(vec!["test".to_owned(), "-f".to_owned(), node_db.clone()], None)?
             .success();
         let mut init = vec![
             self.vowp_bin.clone(),
@@ -1129,6 +1162,15 @@ impl Executor {
         } else {
             self.check("home.database", "ok", "the global database is present");
         }
+        for (path, existed) in [
+            (config_path, config_existed),
+            (project_config_path, project_config_existed),
+            (node_db, node_db_existed),
+        ] {
+            if !existed {
+                self.changed.push(path);
+            }
+        }
 
         let doctor = self.remote(
             vec![
@@ -1146,7 +1188,7 @@ impl Executor {
             self.check(
                 "home.doctor",
                 "warn",
-                format!("vowp doctor has warnings or failures: {}", doctor.detail()),
+                format!("vowp doctor has warnings or failures: {}", doctor_detail(&doctor)),
             );
         }
         Ok(None)
@@ -1192,7 +1234,10 @@ impl Executor {
                 );
             } else {
                 let enabled = self.remote(systemctl_argv("is-enabled vowp.service"), None)?;
-                if !enabled.success() {
+                let active = self.remote(systemctl_argv("is-active vowp.service"), None)?;
+                if !enabled.success() || !active.success() {
+                    // `is-enabled` is not enough: after `vowp down` the unit stays enabled
+                    // but inactive, so a rerun must start it again.
                     let started = self.remote(systemctl_argv("enable --now vowp.service"), None)?;
                     if started.success() {
                         self.changed.push("systemd:vowp.service".to_owned());
@@ -1205,7 +1250,7 @@ impl Executor {
                         );
                     }
                 } else {
-                    self.check("service.enabled", "ok", "vowp.service is enabled");
+                    self.check("service.enabled", "ok", "vowp.service is enabled and active");
                 }
             }
         }
@@ -1379,15 +1424,12 @@ impl Executor {
         let repositories = self.answers.repositories.clone();
         for repository in &repositories {
             let repo = repository.trim_end_matches('/');
-            let check = self.remote(
-                vec![
-                    "sh".to_owned(),
-                    "-c".to_owned(),
-                    format!("test -d {} && test -f {}/vowp.toml", shell_quote(repo), repo),
-                ],
+            let directory = self.remote(vec!["test".to_owned(), "-d".to_owned(), repo.to_owned()], None)?;
+            let manifest = self.remote(
+                vec!["test".to_owned(), "-f".to_owned(), format!("{repo}/vowp.toml")],
                 None,
             )?;
-            if !check.success() {
+            if !directory.success() || !manifest.success() {
                 self.check("projects", "fail", format!("{repo} is not a checkout with vowp.toml"));
                 return Ok(Some(SetupHandoff {
                     phase: "projects".to_owned(),
@@ -1423,6 +1465,111 @@ impl Executor {
         }
         Ok(None)
     }
+}
+
+/// Returns a useful failing-check summary from `vowp doctor --json`.
+fn doctor_detail(output: &CommandOutput) -> String {
+    if !output.stderr.trim().is_empty() {
+        return output.detail();
+    }
+    if let Ok(document) = serde_json::from_str::<serde_json::Value>(&output.stdout)
+        && let Some(checks) = document.get("checks").and_then(serde_json::Value::as_array)
+    {
+        let failures = checks
+            .iter()
+            .filter(|check| check.get("status").and_then(serde_json::Value::as_str) != Some("ok"))
+            .filter_map(|check| {
+                let name = check.get("name")?.as_str()?;
+                let status = check.get("status")?.as_str()?;
+                let detail = check.get("detail").and_then(serde_json::Value::as_str).unwrap_or("");
+                Some(format!("{name} ({status}): {detail}"))
+            })
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            return failures.join("; ");
+        }
+    }
+    output.detail()
+}
+
+/// Fetches the home snapshot and writes the control cache when it changed.
+///
+/// The cache is intentionally left alone when the home has no snapshot yet or when the
+/// fetched document equals the cached one; that keeps a second `setup control --apply`
+/// idempotent.
+fn update_control_snapshot(
+    runner: &mut dyn SetupRunner,
+    probe: &Probe,
+    root: &std::path::Path,
+    remote_home: &str,
+    changed: &mut Vec<String>,
+) -> Result<SetupCheck, CliError> {
+    let existing = remote::cached_snapshot(root)?;
+    let snapshot_path = format!("{}/snapshot.json", remote_home.trim_end_matches('/'));
+    let argv = as_user(
+        &probe.user,
+        probe.effective_user(),
+        &probe.effective_home(),
+        vec!["cat".to_owned(), snapshot_path],
+    );
+    let output = runner.run(&argv, None)?;
+    if !output.success() {
+        return Ok(SetupCheck {
+            name: "control.snapshot".to_owned(),
+            status: if existing.is_some() { "ok" } else { "warn" }.to_owned(),
+            detail: match existing {
+                Some(cached) => format!(
+                    "kept the cache as of {}; the home has no snapshot.json yet",
+                    cached.fetched_at.as_rfc3339()
+                ),
+                None => "empty until the home writes snapshot.json".to_owned(),
+            },
+        });
+    }
+    let snapshot: Snapshot = match serde_json::from_str(&output.stdout) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return Ok(SetupCheck {
+                name: "control.snapshot".to_owned(),
+                status: if existing.is_some() { "ok" } else { "warn" }.to_owned(),
+                detail: match existing {
+                    Some(cached) => format!(
+                        "kept the cache as of {}; the home snapshot is invalid: {error}",
+                        cached.fetched_at.as_rfc3339()
+                    ),
+                    None => format!("the home snapshot is invalid: {error}"),
+                },
+            });
+        }
+    };
+    if let Some(cached) = &existing
+        && cached.snapshot == snapshot
+        && root.join("snapshot.meta.json").is_file()
+    {
+        return Ok(SetupCheck {
+            name: "control.snapshot".to_owned(),
+            status: "ok".to_owned(),
+            detail: format!("snapshot cache as of {}", cached.fetched_at.as_rfc3339()),
+        });
+    }
+    let fetched_at = Timestamp::now();
+    let snapshot_bytes = serde_json::to_vec_pretty(&snapshot).map_err(vowp_protocol::ProtocolError::from)?;
+    if write_if_changed(&root.join("snapshot.json"), &snapshot_bytes)? {
+        changed.push(root.join("snapshot.json").display().to_string());
+    }
+    let meta = remote::SnapshotMeta {
+        fetched_at: Some(fetched_at),
+        source: Some("remote".to_owned()),
+    };
+    let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(vowp_protocol::ProtocolError::from)?;
+    if write_if_changed(&root.join("snapshot.meta.json"), &meta_bytes)? {
+        changed.push(root.join("snapshot.meta.json").display().to_string());
+    }
+    Ok(SetupCheck {
+        name: "control.snapshot".to_owned(),
+        status: "ok".to_owned(),
+        detail: format!("snapshot cache as of {}", fetched_at.as_rfc3339()),
+    })
 }
 
 /// Prints one outcome document; JSON is one object, text is the owner summary.

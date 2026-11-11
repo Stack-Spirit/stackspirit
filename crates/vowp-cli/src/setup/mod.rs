@@ -67,15 +67,26 @@ pub struct SetupAnswers {
     pub github_remote: bool,
 }
 
+/// Rejects an SSH target that ssh would parse as an option instead of a destination.
+pub fn validate_ssh_target(target: &str) -> Result<(), CliError> {
+    if target.trim().is_empty() {
+        return Err(CliError::Invalid("ssh target must not be empty".to_owned()));
+    }
+    if target.starts_with('-') {
+        return Err(CliError::Invalid(
+            "ssh target must not start with '-' (it would be an ssh option)".to_owned(),
+        ));
+    }
+    if target.chars().any(char::is_control) {
+        return Err(CliError::Invalid("ssh target contains a control character".to_owned()));
+    }
+    Ok(())
+}
+
 impl SetupAnswers {
     /// Validates every value and rejects a value that would not be a plain argv entry.
     pub fn validate(&self) -> Result<(), CliError> {
-        if self.target.trim().is_empty() {
-            return Err(CliError::Invalid("ssh target must not be empty".to_owned()));
-        }
-        if self.target.chars().any(char::is_control) {
-            return Err(CliError::Invalid("ssh target contains a control character".to_owned()));
-        }
+        validate_ssh_target(&self.target)?;
         validate_version(&self.version)?;
         for repository in &self.repositories {
             if repository.trim().is_empty() || repository.chars().any(char::is_control) {
@@ -523,6 +534,8 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
             .to_owned(),
     ])];
     service_commands.push(transit(commands::systemctl_argv("daemon-reload")));
+    service_commands.push(transit(commands::systemctl_argv("is-enabled vowp.service")));
+    service_commands.push(transit(commands::systemctl_argv("is-active vowp.service")));
     service_commands.push(transit(commands::systemctl_argv("enable --now vowp.service")));
     service_commands.push(if effective_user == probe.user {
         vec![
@@ -608,10 +621,13 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
     let mut project_files = Vec::new();
     for repository in &answers.repositories {
         let repo = repository.trim_end_matches('/');
+        // Each path is one argv element; no shell sees it, so spaces and metacharacters
+        // cannot change the command that runs on the home.
+        project_commands.push(transit(vec!["test".to_owned(), "-d".to_owned(), repo.to_owned()]));
         project_commands.push(transit(vec![
-            "sh".to_owned(),
-            "-c".to_owned(),
-            format!("test -d {} && test -f {}/vowp.toml", shell_quote(repo), repo),
+            "test".to_owned(),
+            "-f".to_owned(),
+            format!("{repo}/vowp.toml"),
         ]));
         project_commands.push(transit(vec![
             vowp_bin.clone(),
@@ -680,17 +696,22 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
 
 /// Builds the plan `setup control` prints.
 pub fn control_plan(target: &str, name: &str, probe: &Probe, remote_home: &str) -> SetupPlan {
+    let snapshot_path = format!("{}/snapshot.json", remote_home.trim_end_matches('/'));
     SetupPlan {
         target: target.to_owned(),
         version: probe.vowp_version.clone().unwrap_or_else(|| "unknown".to_owned()),
         phases: vec![SetupPhase {
             id: "control".to_owned(),
-            title: "Write the control home, spool, node mirror and tunnel table".to_owned(),
-            commands: vec![vec![
-                "sh".to_owned(),
-                "-c".to_owned(),
-                commands::PROBE_SCRIPT.to_owned(),
-            ]],
+            title: "Write the control home, spool, node mirror, snapshot cache and tunnel table".to_owned(),
+            commands: vec![
+                vec!["sh".to_owned(), "-c".to_owned(), commands::PROBE_SCRIPT.to_owned()],
+                as_user(
+                    &probe.user,
+                    probe.effective_user(),
+                    &probe.effective_home(),
+                    vec!["cat".to_owned(), snapshot_path],
+                ),
+            ],
             files: vec![
                 "~/.vowp-control/control.json".to_owned(),
                 "~/.vowp-control/spool/".to_owned(),
@@ -698,9 +719,17 @@ pub fn control_plan(target: &str, name: &str, probe: &Probe, remote_home: &str) 
                 "~/.vowp-control/surfaces.json".to_owned(),
                 "~/.vowp-control/tunnels.json".to_owned(),
                 "~/.vowp-control/setup.json".to_owned(),
+                "~/.vowp-control/snapshot.json".to_owned(),
+                "~/.vowp-control/snapshot.meta.json".to_owned(),
                 format!("{remote_home} (on the home)"),
             ],
-            requires: vec!["network".to_owned(), "ssh-key-login".to_owned()],
+            requires: {
+                let mut requires = vec!["network".to_owned(), "ssh-key-login".to_owned()];
+                if probe.effective_user() != probe.user {
+                    requires.push("sudo".to_owned());
+                }
+                requires
+            },
             idempotent: true,
         }],
         handoffs: vec![SetupHandoff {

@@ -71,6 +71,7 @@ exec sh -c "$last"
     fn write_tools(&self, _sudo_mode: &str) {
         let log = &self.tools_log;
         let state = self.bin.path().join("systemctl-enabled");
+        let active = self.bin.path().join("systemctl-active");
         let user_state = self.bin.path().join("user-created");
         let useradd_log = self.bin.path().join("useradd.log");
         let sudo_log = self.bin.path().join("sudo.log");
@@ -98,12 +99,20 @@ exec "$@"
 printf 'systemctl %s\n' "$*" >> TOOLS_LOG
 case "${1:-} ${2:-}" in
   '--user is-enabled') [ -f SYSTEMCTL_STATE ] && exit 0 || exit 1 ;;
-  '--user enable') touch SYSTEMCTL_STATE; exit 0 ;;
+  '--user is-active') [ -f SYSTEMCTL_ACTIVE ] && exit 0 || exit 3 ;;
+  '--user enable')
+    touch SYSTEMCTL_STATE
+    case " $* " in *" --now "*) touch SYSTEMCTL_ACTIVE ;; esac
+    exit 0
+    ;;
+  '--user start') touch SYSTEMCTL_ACTIVE; exit 0 ;;
+  '--user stop') rm -f SYSTEMCTL_ACTIVE; exit 0 ;;
   *) exit 0 ;;
 esac
 "#
         .replace("TOOLS_LOG", &shell_path(log))
-        .replace("SYSTEMCTL_STATE", &shell_path(&state));
+        .replace("SYSTEMCTL_STATE", &shell_path(&state))
+        .replace("SYSTEMCTL_ACTIVE", &shell_path(&active));
         write_exec(&self.remote_bin.path().join("systemctl"), &systemctl);
         write_exec(
             &self.remote_bin.path().join("loginctl"),
@@ -153,6 +162,31 @@ exit 2
             &self.remote_bin.path().join("df"),
             "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\nprintf '/dev/fake 100000000 1000 99999000 1%% /\\n'\n",
         );
+    }
+
+    /// Sets the fake systemd enabled/active state for the user unit.
+    fn write_service_state(&self, enabled: bool, active: bool) {
+        for (path, present) in [
+            (self.bin.path().join("systemctl-enabled"), enabled),
+            (self.bin.path().join("systemctl-active"), active),
+        ] {
+            if present {
+                std::fs::write(&path, b"").expect("write service state");
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    /// Writes the snapshot document the control phase fetches from the home.
+    fn write_remote_snapshot(&self, root: &Path) {
+        std::fs::create_dir_all(root).expect("snapshot root");
+        let snapshot = test_snapshot();
+        std::fs::write(
+            root.join("snapshot.json"),
+            serde_json::to_vec_pretty(&snapshot).expect("snapshot json"),
+        )
+        .expect("remote snapshot");
     }
 
     /// Creates the vault layout the fake `vowp-vault` helper probes.
@@ -389,6 +423,30 @@ fn phase<'a>(plan: &'a Value, id: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing phase {id}: {plan}"))
 }
 
+/// Returns the minimal valid snapshot a real home writes for the control cache.
+fn test_snapshot() -> vowp_protocol::Snapshot {
+    let now = vowp_protocol::Timestamp::now();
+    vowp_protocol::Snapshot {
+        schema: vowp_protocol::SNAPSHOT_FORMAT.to_owned(),
+        version: vowp_protocol::SNAPSHOT_VERSION,
+        sequence: 1,
+        generated_at: now,
+        home: vowp_protocol::NodeName::parse("fresh-vps").expect("home name"),
+        supervisor: vowp_protocol::SupervisorSnapshot {
+            running: true,
+            last_tick: Some(now),
+            tick_secs: 60,
+            ..vowp_protocol::SupervisorSnapshot::default()
+        },
+        projects: Vec::new(),
+        capacity: vowp_protocol::CapacitySnapshot::default(),
+        limits: Vec::new(),
+        inbox: Vec::new(),
+        sessions: Vec::new(),
+        orchestrators: Vec::new(),
+    }
+}
+
 #[test]
 fn setup_plan_lists_every_phase_command_and_file() {
     let machine = Machine::new();
@@ -540,6 +598,28 @@ fn setup_plan_lists_every_phase_command_and_file() {
 }
 
 #[test]
+fn setup_rejects_an_ssh_target_that_looks_like_an_option() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+
+    let output = machine.run(&["--json", "setup", "plan", "--target=-oProxyCommand=bad"]);
+    assert!(!output.status.success(), "an option-shaped target must be refused");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("must not start with '-'"), "unexpected error: {text}");
+    assert!(
+        machine.log().is_empty(),
+        "the target must be validated before ssh runs: {}",
+        machine.log()
+    );
+}
+
+#[test]
 fn setup_plan_changes_nothing() {
     let machine = Machine::new();
     machine.write_ssh();
@@ -655,6 +735,65 @@ fn setup_home_is_idempotent() {
         outcome["changed"].as_array().expect("changed"),
         &Vec::<Value>::new(),
         "a second run must not redo finished work: {outcome}"
+    );
+}
+
+#[test]
+fn setup_home_starts_an_enabled_but_inactive_unit() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+    machine.write_service_state(true, false);
+
+    let output = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--apply",
+            "--yes",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome = json(&output);
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    let log = machine.tools_log();
+    let active = log
+        .find("systemctl --user is-active vowp.service")
+        .unwrap_or_else(|| panic!("missing is-active call: {log}"));
+    let started = log
+        .find("systemctl --user enable --now vowp.service")
+        .unwrap_or_else(|| panic!("an enabled but inactive unit must be started: {log}"));
+    assert!(active < started, "check activity before starting: {log}");
+    let check = outcome["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"] == "service.enabled")
+        .expect("service.enabled check");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("started vowp.service"),
+        "{check}"
+    );
+    assert!(
+        outcome["changed"]
+            .as_array()
+            .expect("changed")
+            .iter()
+            .any(|path| path == "systemd:vowp.service"),
+        "{outcome}"
     );
 }
 
@@ -908,6 +1047,115 @@ fn setup_home_registers_projects_and_is_idempotent() {
         outcome["changed"].as_array().expect("changed"),
         &Vec::<Value>::new(),
         "a project re-add must not report a change: {outcome}"
+    );
+}
+
+#[test]
+fn setup_home_registers_a_path_with_spaces_and_shell_metacharacters() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+    let repo = machine.remote.path().join("projects/my app; touch pwned; true");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .arg(&repo)
+            .status()
+            .expect("git init")
+            .success()
+    );
+    let mut config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+    config.project.name = vowp_protocol::ProjectName::parse("app").expect("project name");
+    config.project.path = Some(repo.display().to_string());
+    config.project.push = false;
+    std::fs::write(
+        repo.join("vowp.toml"),
+        toml::to_string_pretty(&config).expect("config toml"),
+    )
+    .expect("vowp.toml");
+
+    let args = [
+        "--json",
+        "setup",
+        "home",
+        "--target",
+        "fake.example",
+        "--repository",
+        repo.to_str().expect("repo path"),
+        "--apply",
+        "--yes",
+    ];
+    let plan = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "plan",
+            "--target",
+            "fake.example",
+            "--repository",
+            repo.to_str().expect("repo path"),
+        ],
+    );
+    assert!(
+        plan.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&plan.stdout),
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan = json(&plan);
+    let commands = phase(&plan, "projects")["commands"]
+        .as_array()
+        .expect("project commands");
+    assert!(
+        commands.iter().any(|command| {
+            command[0].as_str() == Some("test")
+                && command[1].as_str() == Some("-d")
+                && command[2].as_str() == repo.to_str()
+        }),
+        "the plan must pass the directory as one argv element: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|command| {
+            command[0].as_str() == Some("test")
+                && command[1].as_str() == Some("-f")
+                && command[2].as_str() == Some(format!("{}/vowp.toml", repo.display()).as_str())
+        }),
+        "the plan must pass the manifest as one argv element: {commands:?}"
+    );
+    assert!(
+        !serde_json::to_string(commands)
+            .expect("commands json")
+            .contains("\"sh\""),
+        "the plan must not put a project path through a shell: {commands:?}"
+    );
+
+    let output = machine.run_with_sudo("password", &args);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome = json(&output);
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    assert!(
+        !machine.remote.path().join("pwned").exists(),
+        "a project path must never execute a shell fragment"
+    );
+    assert!(
+        machine.remote.path().join(".vowp/projects/app/project.db").is_file(),
+        "the repository with a space must be registered"
+    );
+    assert!(
+        outcome["changed"]
+            .as_array()
+            .expect("changed")
+            .iter()
+            .any(|path| path.as_str().unwrap_or_default() == repo.to_str().unwrap()),
+        "{outcome}"
     );
 }
 
@@ -1394,6 +1642,7 @@ fn setup_control_writes_control_home() {
         "stderr: {}",
         String::from_utf8_lossy(&home.stderr)
     );
+    machine.write_remote_snapshot(&machine.remote.path().join(".vowp"));
 
     let output = machine.run(&["--json", "setup", "control", "--apply"]);
     assert!(
@@ -1410,6 +1659,29 @@ fn setup_control_writes_control_home() {
     assert!(control.join("tunnels.json").is_file());
     assert!(control.join("nodes.json").is_file());
     assert!(control.join("setup.json").is_file());
+    assert!(
+        control.join("snapshot.json").is_file(),
+        "control must fetch the home snapshot into the cache"
+    );
+    assert!(
+        control.join("snapshot.meta.json").is_file(),
+        "the cache needs its fetch time"
+    );
+    let snapshot_check = outcome["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"] == "control.snapshot")
+        .expect("control.snapshot check");
+    assert_eq!(snapshot_check["status"], "ok", "{snapshot_check}");
+    assert!(
+        outcome["changed"]
+            .as_array()
+            .expect("changed")
+            .iter()
+            .any(|path| path.as_str().unwrap_or_default().ends_with("snapshot.json")),
+        "the first control run must report the new cache: {outcome}"
+    );
     let config: Value =
         serde_json::from_str(&std::fs::read_to_string(control.join("control.json")).expect("control.json"))
             .expect("control JSON");
@@ -1436,6 +1708,39 @@ fn setup_control_writes_control_home() {
         outcome["changed"].as_array().expect("changed"),
         &Vec::<Value>::new(),
         "a second control run must not rewrite the same files: {outcome}"
+    );
+}
+
+#[test]
+fn setup_control_plan_lists_the_snapshot_cache_and_changes_nothing() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+
+    let output = machine.run(&["--json", "setup", "control", "--target", "fake.example"]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan = json(&output);
+    let files = phase(&plan, "control")["files"]
+        .as_array()
+        .expect("control files")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for wanted in ["snapshot.json", "snapshot.meta.json"] {
+        assert!(
+            files.iter().any(|file| file.ends_with(wanted)),
+            "the control plan must list {wanted}: {files:?}"
+        );
+    }
+    assert!(
+        !machine.control.path().join("control.json").exists(),
+        "setup control without --apply must not write the control home"
     );
 }
 
