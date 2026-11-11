@@ -159,7 +159,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &SetupArgs) -> Result<i32, C
             commands::run_home(ctx, io, &answers, home.apply, home.yes)
         }
         SetupCommand::Control(control) => commands::run_control(ctx, io, control),
-        SetupCommand::Verify(_) => Err(crate::cmd::not_implemented()),
+        SetupCommand::Verify(args) => crate::setup::verify::run(ctx, io, args),
         SetupCommand::HomeInit(init) => commands::run_home_init(ctx, io, init),
     }
 }

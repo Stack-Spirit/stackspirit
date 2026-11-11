@@ -1,8 +1,9 @@
-//! Tests for `vowp setup verify` fixture checks.
+//! Tests for `vowp setup verify`.
 //!
-//! Every check runs in a temporary node home with real git and a fake opencode script.
-//! Nothing reads the real `~/.vowp`, the default tmux server, the network or a real
-//! harness.
+//! Every test builds a real temporary home with `vowp init`, real git and a fake opencode
+//! script. The fixture project is registered in that home, so the checks exercise the
+//! configured store, project database and merge queue. Nothing reads the real `~/.vowp`,
+//! the default tmux server, the network or a real harness.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +16,7 @@ use tempfile::TempDir;
 use vowp_protocol::{
     CapacitySnapshot, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SupervisorSnapshot, Timestamp,
 };
+use vowp_store::{NodePaths, Store};
 
 /// Returns the `vowp` binary Cargo built for this package.
 fn vowp_binary() -> PathBuf {
@@ -29,7 +31,7 @@ fn vowp_binary() -> PathBuf {
         .join("vowp")
 }
 
-/// Builds the real `vowp` binary once so the chat check can run the same code a user runs.
+/// Builds the real `vowp` binary once so the checks run the same code a user runs.
 fn ensure_vowp_binary() {
     static BUILD: Once = Once::new();
     BUILD.call_once(|| {
@@ -41,6 +43,99 @@ fn ensure_vowp_binary() {
             .expect("run cargo build --bin vowp");
         assert!(status.success(), "cargo build --bin vowp failed");
     });
+}
+
+/// One temporary home and project, built by the real CLI.
+struct TestHome {
+    temp: TempDir,
+    home: PathBuf,
+    project: PathBuf,
+    tmux: PathBuf,
+}
+
+impl TestHome {
+    /// Creates the git checkout and runs `vowp init` against the temporary home.
+    fn new(name: &str) -> Self {
+        ensure_vowp_binary();
+        let temp = TempDir::new().expect("temp home");
+        let home = temp.path().join("home/.vowp");
+        let project = temp.path().join("project");
+        let tmux = temp.path().join("tmux");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::create_dir_all(&tmux).expect("private tmux dir");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["checkout", "--quiet", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=setup verify",
+                "-c",
+                "user.email=setup@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture base",
+            ],
+        ] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(&project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+        let init = Self::command_for(&temp, &home, &project, &tmux)
+            .args(["init", "--name", name, "--no-framework"])
+            .output()
+            .expect("run vowp init");
+        assert!(
+            init.status.success(),
+            "vowp init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        Self {
+            temp,
+            home,
+            project,
+            tmux,
+        }
+    }
+
+    /// Builds a child command isolated to this home.
+    fn command_for(temp: &TempDir, home: &Path, project: &Path, tmux: &Path) -> Command {
+        let mut command = Command::new(vowp_binary());
+        command
+            .arg("--home")
+            .arg(home)
+            .current_dir(project)
+            .env("HOME", temp.path())
+            .env("TMUX_TMPDIR", tmux)
+            .env("NO_COLOR", "1")
+            .env("VOWP_CONTROL_HOME", temp.path().join("no-control"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("VOWP_HOME");
+        command
+    }
+
+    /// Returns a child command isolated to this home.
+    fn command(&self) -> Command {
+        Self::command_for(&self.temp, &self.home, &self.project, &self.tmux)
+    }
+
+    /// Builds an in-process context for this home.
+    fn ctx(&self) -> Ctx {
+        let global = Global {
+            json: true,
+            home: Some(self.home.clone()),
+            project: Some(self.project.display().to_string()),
+            ..Global::default()
+        };
+        let io = BufferIo::new("");
+        Ctx::build(&global, &io).expect("build home context")
+    }
 }
 
 /// Returns a minimal but valid home snapshot.
@@ -97,13 +192,25 @@ fn write_control_home(root: &Path, home: &str, fetched_at: Timestamp) {
 
 #[test]
 fn setup_verify_fixture_job_merges() {
-    let check = verify::fixture_job_merges().expect("fixture job check");
+    let env = TestHome::new("setup-verify-fixture");
+    let ctx = env.ctx();
+    let check = verify::fixture_job_merges(&ctx).expect("fixture job check");
     assert_eq!(check.status, "ok", "{}", check.detail);
     assert_eq!(check.name, "fixture.job_merge");
     assert!(
         check.detail.contains("merged into main"),
         "the check must prove the merge, not only a done state: {}",
         check.detail
+    );
+    let projects = Store::open_global(&NodePaths::new(&env.home))
+        .expect("open home")
+        .list_projects()
+        .expect("list projects");
+    assert!(
+        !projects
+            .iter()
+            .any(|project| project.name.as_str().starts_with("setup-verify-job-")),
+        "fixture project was left registered: {projects:?}"
     );
 }
 
@@ -170,8 +277,9 @@ fn setup_verify_snapshot_rejects_a_different_home() {
 
 #[test]
 fn setup_verify_orchestrator_answers_chat() {
-    ensure_vowp_binary();
-    let check = verify::orchestrator_answers_chat().expect("orchestrator chat check");
+    let env = TestHome::new("setup-verify-chat");
+    let ctx = env.ctx();
+    let check = verify::orchestrator_answers_chat(&ctx).expect("orchestrator chat check");
     assert_eq!(check.status, "ok", "{}", check.detail);
     assert_eq!(check.name, "orchestrator.chat");
     assert!(
@@ -188,65 +296,9 @@ fn setup_verify_orchestrator_answers_chat() {
 
 #[test]
 fn setup_verify_run_reports_every_check() {
-    ensure_vowp_binary();
-    let temp = TempDir::new().expect("temp home");
-    let home = temp.path().join("home/.vowp");
-    let project = temp.path().join("project");
-    let tmux = temp.path().join("tmux");
-    std::fs::create_dir_all(&project).expect("project dir");
-    std::fs::create_dir_all(&tmux).expect("private tmux dir");
-    for args in [
-        vec!["init", "--quiet"],
-        vec!["checkout", "--quiet", "-b", "main"],
-        vec![
-            "-c",
-            "user.name=setup verify",
-            "-c",
-            "user.email=setup@example.invalid",
-            "commit",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "fixture base",
-        ],
-    ] {
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(&project)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    let init = Command::new(vowp_binary())
-        .arg("--home")
-        .arg(&home)
-        .args(["init", "--name", "setup-verify-run", "--no-framework"])
-        .current_dir(&project)
-        .env("HOME", temp.path())
-        .env("TMUX_TMPDIR", &tmux)
-        .env("NO_COLOR", "1")
-        .env("VOWP_CONTROL_HOME", temp.path().join("no-control"))
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("VOWP_HOME")
-        .output()
-        .expect("run vowp init");
-    assert!(
-        init.status.success(),
-        "vowp init failed: {}",
-        String::from_utf8_lossy(&init.stderr)
-    );
-
-    let global = Global {
-        json: true,
-        home: Some(home),
-        project: Some(project.display().to_string()),
-        ..Global::default()
-    };
+    let env = TestHome::new("setup-verify-run");
+    let ctx = env.ctx();
     let mut io = BufferIo::new("");
-    let ctx = Ctx::build(&global, &io).expect("build home context");
     let code = verify::run(&ctx, &mut io, &SetupVerifyArgs::default()).expect("run setup verify");
     let stdout = io.stdout();
     assert_eq!(code, 0, "{stdout}");
@@ -265,4 +317,185 @@ fn setup_verify_run_reports_every_check() {
     assert_eq!(by_name("orchestrator.chat")["status"], "ok", "{outcome}");
     assert_eq!(by_name("gc.dry_run")["status"], "ok", "{outcome}");
     assert_ne!(by_name("control.snapshot")["status"], "fail", "{outcome}");
+    assert!(
+        env.home.join("snapshot.json").is_file(),
+        "verify must write a fresh home snapshot"
+    );
+}
+
+#[test]
+fn setup_verify_cli_runs_every_check() {
+    let env = TestHome::new("setup-verify-cli");
+    let output = env
+        .command()
+        .args(["--json", "setup", "verify"])
+        .output()
+        .expect("run vowp setup verify");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "setup verify failed: {stdout}\n{stderr}");
+    let outcome: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}"));
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    let checks = outcome["checks"].as_array().expect("checks array");
+    let by_name = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("missing check {name}: {outcome}"))
+    };
+    assert_eq!(by_name("fixture.job_merge")["status"], "ok", "{outcome}");
+    assert_eq!(by_name("orchestrator.chat")["status"], "ok", "{outcome}");
+    assert_ne!(by_name("control.snapshot")["status"], "fail", "{outcome}");
+}
+
+/// Creates a remote home and installs the per-user `vowp` wrapper setup home would install.
+fn init_remote_home(root: &Path) -> (PathBuf, PathBuf) {
+    let home = root.join(".vowp");
+    let project = root.join("project");
+    let tmux = root.join("tmux");
+    std::fs::create_dir_all(&project).expect("remote project");
+    std::fs::create_dir_all(&tmux).expect("remote tmux");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["checkout", "--quiet", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=setup verify",
+            "-c",
+            "user.email=setup@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "remote base",
+        ],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&project)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    let init = Command::new(vowp_binary())
+        .arg("--home")
+        .arg(&home)
+        .args(["init", "--name", "remote-fixture", "--no-framework"])
+        .current_dir(&project)
+        .env("HOME", root)
+        .env("TMUX_TMPDIR", &tmux)
+        .env("NO_COLOR", "1")
+        .env("VOWP_CONTROL_HOME", root.join("no-control"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_HOME")
+        .output()
+        .expect("run remote vowp init");
+    assert!(
+        init.status.success(),
+        "remote vowp init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let binary = root.join(".local/bin/vowp");
+    std::fs::create_dir_all(binary.parent().expect("binary dir")).expect("install dir");
+    std::fs::write(
+        &binary,
+        format!("#!/bin/sh\nexec '{}' \"$@\"\n", vowp_binary().display()),
+    )
+    .expect("write remote vowp");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod remote vowp");
+    }
+    (home, project)
+}
+
+#[test]
+fn setup_verify_control_runs_the_checks_on_the_home() {
+    ensure_vowp_binary();
+    let control = TempDir::new().expect("control home");
+    let remote = TempDir::new().expect("remote home");
+    let (remote_home, _remote_project) = init_remote_home(remote.path());
+    let control_root = control.path().join("control");
+    let bin = control.path().join("bin");
+    let tmux = control.path().join("tmux");
+    std::fs::create_dir_all(&control_root).expect("control dir");
+    std::fs::create_dir_all(&bin).expect("fake bin");
+    std::fs::create_dir_all(&tmux).expect("control tmux");
+    let config = serde_json::json!({
+        "role": "control",
+        "home": "remote-fixture",
+        "ssh_target": "fake.example",
+        "remote_home": remote_home.display().to_string(),
+        "created_at": Timestamp::now(),
+    });
+    std::fs::write(
+        control_root.join("control.json"),
+        serde_json::to_vec_pretty(&config).expect("control json"),
+    )
+    .expect("control.json");
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        r#"#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+HOME="$FAKE_REMOTE_HOME"
+VOWP_HOME="$FAKE_REMOTE_HOME/.vowp"
+export HOME VOWP_HOME
+unset VOWP_CONTROL_HOME
+exec sh -c "$last"
+"#,
+    )
+    .expect("write fake ssh");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
+    }
+
+    let output = Command::new(vowp_binary())
+        .args(["--json", "setup", "verify"])
+        .env("HOME", control.path())
+        .env("VOWP_CONTROL_HOME", &control_root)
+        .env("TMUX_TMPDIR", &tmux)
+        .env("NO_COLOR", "1")
+        .env("FAKE_REMOTE_HOME", remote.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_HOME")
+        .output()
+        .expect("run control setup verify");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "control setup verify failed: {stdout}\n{stderr}"
+    );
+    let outcome: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}"));
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    let checks = outcome["checks"].as_array().expect("checks array");
+    let by_name = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("missing check {name}: {outcome}"))
+    };
+    assert_eq!(by_name("fixture.job_merge")["status"], "ok", "{outcome}");
+    assert_eq!(by_name("orchestrator.chat")["status"], "ok", "{outcome}");
+    assert_eq!(by_name("control.snapshot")["status"], "ok", "{outcome}");
+    assert!(
+        control_root.join("snapshot.json").is_file(),
+        "the control machine must cache the fetched home snapshot"
+    );
+    assert!(
+        remote_home.join("snapshot.json").is_file(),
+        "the home checks must write a fresh snapshot on the home"
+    );
 }

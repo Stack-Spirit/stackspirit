@@ -1,16 +1,18 @@
 //! `vowp setup verify`: the fixture checks run after `setup home` and `setup control`.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §11.2. Verify answers three questions:
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §11.2. On the home, verify runs:
 //!
-//! 1. does a fixture job run one fake turn, pass its gate and merge through the real
-//!    merge queue;
-//! 2. is the home snapshot readable from the control machine, with an `as of` time;
-//! 3. does an orchestrator session answer through `vowp chat`.
+//! 1. a read-only gc dry run;
+//! 2. a fixture project through one fake harness turn, its gate and the real merge queue;
+//! 3. a fresh `snapshot.json` written from the home's own store;
+//! 4. an orchestrator chat session that answers through `vowp chat`.
 //!
-//! The first and third checks run in their own temporary node home, with a fake harness
-//! script, so they never read or write the owner's projects, database or tmux server.
-//! The gc dry run is read-only. The snapshot check is the only check that reads the
-//! control directory.
+//! On a control machine the same checks run on the home over SSH, using the installed
+//! `vowp setup verify --json`, and the control machine then fetches the home's fresh
+//! snapshot and writes its cache. The fixture project is registered in the real home
+//! under a unique archived name, uses the real home database and git, and is removed on
+//! every exit path. Only tmux windows are faked; the fixture never attaches to a tmux
+//! server.
 
 use std::fs;
 use std::io::Write as _;
@@ -20,45 +22,47 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use vowp_core::deps::SystemRng;
+use vowp_core::Deps;
 use vowp_core::lifecycle::{GcOptions, gc};
 use vowp_core::loops::Supervisor;
 use vowp_core::surface::orchestrator::{NewOrchestrator, Orchestrator};
-use vowp_core::{AdapterRegistry, Deps, SystemGit, SystemRunner};
 use vowp_protocol::{
-    Clock, EventBody, Gate, HarnessConfig, JobId, JobKind, JobState, MemoryLog, NewJob, Node, NodeName,
-    OrchestratorApp, Project, ProjectName, Role, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SystemClock, Timestamp,
-    VowpConfig,
+    EventBody, Gate, HarnessConfig, JobId, JobKind, JobState, NewJob, Node, OrchestratorApp, Project, ProjectName,
+    ProjectState, Role, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, Timestamp, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePaths, SessionFilter, Store};
 use vowp_tmux::fake::FakeWindows;
 
-use super::{SetupCheck, SetupOutcome, print_outcome};
 use crate::cmd::setup::SetupVerifyArgs;
+use crate::node_ctx::{ControlHome, NodeRole};
+use crate::setup::commands::{SshRunner, probe};
 use crate::{CliError, Ctx, IoStreams};
 
+use super::{SetupCheck, SetupOutcome, as_user, print_outcome};
+use crate::setup::SetupRunner;
+
 /// The fake harness reply used by the chat check.
-const CHAT_REPLY: &str = "setup verify orchestrator answered";
+const CHAT_REPLY: &str = "setup verify orchestrated answer";
 
 /// The fixture job id.
 const FIXTURE_JOB: &str = "setup-verify";
 
-/// A unique scratch directory removed when it goes out of scope.
+/// A unique resident of the home's temporary verification area.
 struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
-    /// Creates a private scratch directory under the system temporary directory.
-    fn new(label: &str) -> Result<Self, CliError> {
+    /// Creates a uniquely named directory under the home.
+    fn new(root: &Path, label: &str) -> Result<Self, CliError> {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| CliError::Invalid(format!("system clock before 1970: {error}")))?
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "vowp-setup-verify-{label}-{}-{nanos}-{}",
+        let path = root.join(format!(
+            "setup-verify-{label}-{}-{nanos}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -73,27 +77,37 @@ impl Drop for Scratch {
     }
 }
 
-/// One isolated node home, project checkout and its injected dependencies.
+/// Removes one directory when it goes out of scope.
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// One fixture project registered in the configured home.
 ///
-/// The harness is a shell script that emits the opencode event shape the adapter reads.
-/// The fixture job version also writes and commits one file, so a merge that does no
-/// work cannot make the check pass.
+/// The project is archived while it exists so a running node supervisor never ticks it.
+/// The fixture's own `Supervisor` drives it through the real project store and merge
+/// queue. Dropping the fixture removes its sessions, project row, database and checkout.
 struct Fixture {
-    scratch: Scratch,
+    _scratch: Scratch,
     paths: NodePaths,
     project: ProjectName,
+    root: PathBuf,
     repo: PathBuf,
-    store: Store,
     deps: Deps,
-    log: Arc<MemoryLog>,
 }
 
 impl Fixture {
-    /// Builds a temporary home, git checkout, bare origin and store.
-    fn new(label: &str, reply: &str, commit_file: bool) -> Result<Self, CliError> {
-        let scratch = Scratch::new(label)?;
-        let repo = scratch.path.join("project");
-        let origin = scratch.path.join("origin.git");
+    /// Registers a temporary project in `base`'s home and builds its dependencies.
+    fn new(base: &Deps, label: &str, reply: &str, commit_file: bool) -> Result<Self, CliError> {
+        let scratch = Scratch::new(&base.paths.root().join("setup-verify"), label)?;
+        let project = ProjectName::parse(&format!("setup-verify-{label}-{}", unique_suffix()))?;
+        let root = scratch.path.clone();
+        let repo = root.join("project");
+        let origin = root.join("origin.git");
         fs::create_dir_all(&repo)?;
         git(&repo, &["init", "--quiet"])?;
         git(&repo, &["checkout", "--quiet", "-b", "main"])?;
@@ -111,18 +125,15 @@ impl Fixture {
                 "fixture base",
             ],
         )?;
-        git(&scratch.path, &["init", "--quiet", "--bare", "origin.git"])?;
-        let origin_text = origin.display().to_string();
-        git(&repo, &["remote", "add", "origin", &origin_text])?;
+        git(&root, &["init", "--quiet", "--bare", "origin.git"])?;
+        git(&repo, &["remote", "add", "origin", &origin.display().to_string()])?;
         git(&repo, &["push", "--quiet", "-u", "origin", "main"])?;
 
-        let harness = scratch.path.join("fake-opencode");
+        let harness = root.join("fake-opencode");
         write_exec(&harness, &harness_script(reply, commit_file))?;
 
         let mut config = VowpConfig::with_defaults_for_tests();
-        let project = ProjectName::parse("setup-verify")?;
-        let node_name = NodeName::parse("setup-verify")?;
-        config.node.name = node_name.clone();
+        config.node.name = base.node.clone();
         config.node.tick_secs = 1;
         config.node.max_workers = 1;
         config.node.max_verifiers = 1;
@@ -131,8 +142,8 @@ impl Fixture {
         config.project.remote = "origin".to_owned();
         config.project.default_branch = "main".to_owned();
         config.project.push = false;
-        config.project.worktree_root = Some(scratch.path.join("worktrees").display().to_string());
-        config.node.cwd_allow.push(scratch.path.display().to_string());
+        config.project.worktree_root = Some(root.join("worktrees").display().to_string());
+        config.node.cwd_allow.push(root.display().to_string());
         config.harnesses.insert(
             "opencode".to_owned(),
             HarnessConfig {
@@ -163,18 +174,18 @@ impl Fixture {
         )?;
         git(&repo, &["push", "--quiet", "origin", "main"])?;
 
-        let paths = NodePaths::new(scratch.path.join(".vowp"));
-        paths.ensure()?;
-        let now = SystemClock.now();
-        let global = Store::open_global(&paths)?;
-        global.upsert_node(&Node {
-            name: node_name.clone(),
-            ssh_target: None,
-            is_local: true,
-            capabilities: serde_json::json!({"vowp": env!("CARGO_PKG_VERSION")}),
-            last_seen_at: Some(now),
-            created_at: now,
-        })?;
+        let now = base.clock.now();
+        let global = Store::open_global(&base.paths)?;
+        if global.local_node()?.is_none() {
+            global.upsert_node(&Node {
+                name: base.node.clone(),
+                ssh_target: None,
+                is_local: true,
+                capabilities: serde_json::json!({"vowp": env!("CARGO_PKG_VERSION")}),
+                last_seen_at: Some(now),
+                created_at: now,
+            })?;
+        }
         global.upsert_project(&Project {
             name: project.clone(),
             path: repo.display().to_string(),
@@ -184,60 +195,67 @@ impl Fixture {
             created_at: now,
             updated_at: now,
         })?;
-        Store::create_project_db(&paths, &project)?;
-        let store = Store::open(&paths).map_err(vowp_core::CoreError::from)?;
+        global.set_project_state(&project, ProjectState::Archived, "")?;
+        Store::create_project_db(&base.paths, &project)?;
+        drop(global);
 
-        let command: Arc<dyn vowp_core::CommandRunner> = Arc::new(SystemRunner);
-        let adapters = AdapterRegistry::from_config(&config)?;
-        let log = Arc::new(MemoryLog::new());
+        let adapters = vowp_core::AdapterRegistry::from_config(&config)?;
         let deps = Deps {
-            paths: paths.clone(),
+            paths: base.paths.clone(),
             config: Arc::new(config),
-            node: node_name,
-            clock: Arc::new(SystemClock),
-            log: log.clone(),
+            node: base.node.clone(),
+            clock: base.clock.clone(),
+            log: base.log.clone(),
             adapters: Arc::new(adapters),
             windows: Arc::new(FakeWindows::new()),
-            git: Arc::new(SystemGit::new(Arc::clone(&command))),
-            cmd: command,
-            rng: Arc::new(SystemRng::new()),
+            git: base.git.clone(),
+            cmd: base.cmd.clone(),
+            rng: base.rng.clone(),
         };
         Ok(Self {
-            scratch,
-            paths,
+            _scratch: scratch,
+            paths: base.paths.clone(),
             project,
+            root,
             repo,
-            store,
             deps,
-            log,
         })
-    }
-
-    /// Returns the scratch root used as the fake machine's `HOME`.
-    fn home(&self) -> &Path {
-        &self.scratch.path
     }
 }
 
-/// Runs one check and turns a setup error into a failed check instead of aborting.
-fn push_check(checks: &mut Vec<SetupCheck>, name: &str, result: Result<SetupCheck, CliError>) {
-    match result {
-        Ok(check) => checks.push(check),
-        Err(error) => checks.push(SetupCheck {
-            name: name.to_owned(),
-            status: "fail".to_owned(),
-            detail: error.to_string(),
-        }),
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Ok(store) = Store::open_with_project(&self.paths, &self.project)
+            && let Ok(sessions) = store.list_sessions(&SessionFilter {
+                project: Some(self.project.clone()),
+                ..SessionFilter::default()
+            })
+        {
+            for session in sessions {
+                let _ = fs::remove_dir_all(self.paths.session_dir(&session.id));
+            }
+        }
+        if let Ok(global) = Store::open_global(&self.paths) {
+            let _ = global.remove_project_record(&self.project);
+        }
+        let _ = fs::remove_dir_all(self.paths.project_dir(&self.project));
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
 /// Runs `vowp setup verify` and returns 1 when any check failed.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, _args: &SetupVerifyArgs) -> Result<i32, CliError> {
-    let mut checks = Vec::new();
-    push_check(&mut checks, "gc.dry_run", gc_dry_run(ctx));
-    push_check(&mut checks, "fixture.job_merge", fixture_job_merges());
-    push_check(&mut checks, "control.snapshot", snapshot_check(ctx));
-    push_check(&mut checks, "orchestrator.chat", orchestrator_answers_chat());
+    let checks = if let Some(control) = ctx.control() {
+        control_checks(control)
+    } else if ctx.role() == NodeRole::Home {
+        home_checks(ctx)
+    } else {
+        vec![check(
+            "home.checks",
+            "fail",
+            "vowp home is not initialised; run `vowp setup home` and `vowp setup control` first",
+        )]
+    };
 
     let failed = checks.iter().any(|check| check.status == "fail");
     let outcome = SetupOutcome {
@@ -255,15 +273,82 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, _args: &SetupVerifyArgs) -> Result
     Ok(if failed { 1 } else { 0 })
 }
 
-/// Runs the read-only gc report the setup contract prints first.
-pub fn gc_dry_run(ctx: &Ctx) -> Result<SetupCheck, CliError> {
-    if ctx.control().is_some() {
-        return Ok(check(
-            "gc.dry_run",
-            "warn",
-            "the gc dry run reads the home database; run it on the home or inspect the cached snapshot",
-        ));
+/// Runs the checks on the home that holds the store.
+fn home_checks(ctx: &Ctx) -> Vec<SetupCheck> {
+    let mut checks = Vec::new();
+    push_check(&mut checks, "gc.dry_run", gc_dry_run(ctx));
+    push_check(&mut checks, "fixture.job_merge", fixture_job_merges(ctx));
+    push_check(&mut checks, "control.snapshot", snapshot_check(ctx));
+    push_check(&mut checks, "orchestrator.chat", orchestrator_answers_chat(ctx));
+    checks
+}
+
+/// Runs the home checks over SSH and adds the live control-side snapshot.
+fn control_checks(control: &ControlHome) -> Vec<SetupCheck> {
+    let mut checks = Vec::new();
+    let mut remote = match remote_home_checks(control) {
+        Ok(outcome) => outcome.checks,
+        Err(error) => {
+            let detail = error.to_string();
+            for name in ["gc.dry_run", "fixture.job_merge", "orchestrator.chat"] {
+                checks.push(check(name, "fail", format!("home checks failed: {detail}")));
+            }
+            checks.push(check(
+                "control.snapshot",
+                "fail",
+                format!("home checks failed: {detail}"),
+            ));
+            return checks;
+        }
+    };
+    for name in ["gc.dry_run", "fixture.job_merge"] {
+        checks.push(take_check(&mut remote, name));
     }
+    push_check(&mut checks, "control.snapshot", snapshot_from_control(control));
+    checks.push(take_check(&mut remote, "orchestrator.chat"));
+    checks
+}
+
+/// Removes one named check, or returns a failing placeholder when it is missing.
+fn take_check(checks: &mut Vec<SetupCheck>, name: &str) -> SetupCheck {
+    let Some(index) = checks.iter().position(|check| check.name == name) else {
+        return check(name, "fail", "the home did not report this check");
+    };
+    checks.remove(index)
+}
+
+/// Runs `vowp setup verify --json` on the configured home.
+fn remote_home_checks(control: &ControlHome) -> Result<SetupOutcome, CliError> {
+    let mut runner = SshRunner::new(control.config.ssh_target.clone());
+    let probe = probe(&mut runner, &[])?;
+    let binary = remote_vowp_binary(&control.config.remote_home);
+    let argv = as_user(
+        &probe.user,
+        probe.effective_user(),
+        &probe.effective_home(),
+        vec![
+            binary,
+            "--home".to_owned(),
+            control.config.remote_home.clone(),
+            "setup".to_owned(),
+            "verify".to_owned(),
+            "--json".to_owned(),
+        ],
+    );
+    let output = runner.run(&argv, None)?;
+    serde_json::from_str(&output.stdout)
+        .map_err(|error| CliError::Remote(format!("the home returned an invalid setup verify document: {error}")))
+}
+
+/// Returns the per-user binary `setup home` installs on the home.
+fn remote_vowp_binary(remote_home: &str) -> String {
+    let trimmed = remote_home.trim_end_matches('/');
+    let home = trimmed.strip_suffix("/.vowp").unwrap_or(trimmed);
+    format!("{home}/.local/bin/vowp")
+}
+
+/// Runs the read-only gc report.
+pub fn gc_dry_run(ctx: &Ctx) -> Result<SetupCheck, CliError> {
     let store = ctx.fleet_store()?;
     let report = gc(ctx.deps(), &store, &GcOptions::default())?;
     let files: u64 = report.classes.iter().map(|class| class.files).sum();
@@ -287,13 +372,14 @@ pub fn gc_dry_run(ctx: &Ctx) -> Result<SetupCheck, CliError> {
     ))
 }
 
-/// Runs a fixture job through one fake turn, its gate and the real merge queue.
-pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
-    let fixture = Fixture::new("job", "setup verify fixture answered", true)?;
+/// Runs a fixture job through one fake turn, its gate and the real merge queue on `ctx`'s home.
+pub fn fixture_job_merges(ctx: &Ctx) -> Result<SetupCheck, CliError> {
+    let fixture = Fixture::new(ctx.deps(), "job", "setup verify fixture answered", true)?;
+    let store = fixture.deps.open_store()?;
     let job_id = JobId::parse(FIXTURE_JOB)?;
     let mut supervisor = Supervisor::new(fixture.deps.clone(), fixture.project.clone())?;
     supervisor.startup()?;
-    fixture.store.insert_job(
+    store.insert_job(
         &fixture.project,
         &NewJob {
             id: job_id.clone(),
@@ -315,11 +401,11 @@ pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let _ = supervisor.tick();
-        let job = fixture.store.require_job(&job_id)?;
+        let job = store.require_job(&job_id)?;
         match job.state {
             JobState::Done => break,
             JobState::Failed | JobState::Parked | JobState::Cancelled | JobState::Replanned => {
-                let last_run = fixture.store.last_run_of_job(&job_id)?;
+                let last_run = store.last_run_of_job(&job_id)?;
                 return Ok(check(
                     "fixture.job_merge",
                     "fail",
@@ -341,25 +427,18 @@ pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
             _ => {}
         }
         if Instant::now() >= deadline {
-            let last_run = fixture.store.last_run_of_job(&job_id)?;
-            let log = fixture
-                .log
-                .lines()
-                .last()
-                .map(|(level, target, message)| format!("{} {target}: {message}", level.as_str()))
-                .unwrap_or_default();
+            let last_run = store.last_run_of_job(&job_id)?;
             return Ok(check(
                 "fixture.job_merge",
                 "fail",
                 format!(
-                    "fixture job did not merge within 120s (last state {}; continues {}; last run {}; log {})",
+                    "fixture job did not merge within 120s (last state {}; continues {}; last run {})",
                     job.state.as_str(),
                     job.continues,
                     last_run
                         .as_ref()
                         .map(|run| format!("{:?}: {}", run.outcome, first_line(&run.detail, "")))
-                        .unwrap_or_else(|| "none".to_owned()),
-                    if log.is_empty() { "empty" } else { &log }
+                        .unwrap_or_else(|| "none".to_owned())
                 ),
             ));
         }
@@ -381,21 +460,27 @@ pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
     Ok(check(
         "fixture.job_merge",
         "ok",
-        format!("fixture job {} merged into main at {}", job_id, fixture.repo.display()),
+        format!(
+            "fixture job {} merged into main on home {} (project {})",
+            job_id,
+            fixture.paths.root().display(),
+            fixture.project
+        ),
     ))
 }
 
-/// Creates an orchestrator chat session and sends it one turn through `vowp chat`.
-pub fn orchestrator_answers_chat() -> Result<SetupCheck, CliError> {
-    let fixture = Fixture::new("chat", CHAT_REPLY, false)?;
+/// Creates an orchestrator chat session on `ctx`'s home and sends it one turn through `vowp chat`.
+pub fn orchestrator_answers_chat(ctx: &Ctx) -> Result<SetupCheck, CliError> {
+    let fixture = Fixture::new(ctx.deps(), "chat", CHAT_REPLY, false)?;
     let orchestrator = Orchestrator::new(fixture.deps.clone());
     let info = orchestrator.create(&NewOrchestrator {
-        name: "setup-verify".to_owned(),
+        name: format!("setup-verify-{}", unique_suffix()),
         project: Some(fixture.project.clone()),
         app: OrchestratorApp::Chat,
         executor: None,
         force: false,
     })?;
+    let _orchestrator_dir = RemoveDir(info.dir.clone());
 
     let binary = vowp_binary()?;
     let mut command = Command::new(&binary);
@@ -407,14 +492,14 @@ pub fn orchestrator_answers_chat() -> Result<SetupCheck, CliError> {
         .arg("--no-color")
         .arg("chat")
         .arg(info.session.as_str())
-        .current_dir(fixture.home())
-        .env("HOME", fixture.home())
-        .env("TMUX_TMPDIR", fixture.home().join("tmux"))
+        .current_dir(fixture.root.as_path())
+        .env("HOME", &fixture.root)
+        .env("TMUX_TMPDIR", fixture.root.join("tmux"))
         .env("NO_COLOR", "1")
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("VOWP_CONTROL_HOME");
-    fs::create_dir_all(fixture.home().join("tmux"))?;
+    fs::create_dir_all(fixture.root.join("tmux"))?;
     let output = run_with_input(command, "hello\n/quit\n")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -458,26 +543,62 @@ pub fn orchestrator_answers_chat() -> Result<SetupCheck, CliError> {
         "orchestrator.chat",
         "ok",
         format!(
-            "orchestrator {} answered through `vowp chat` in session {}",
-            info.card.name, info.session
+            "orchestrator {} answered through `vowp chat` in session {} on home {}",
+            info.card.name,
+            info.session,
+            fixture.paths.root().display()
         ),
     ))
 }
 
-/// Reads the snapshot cache written by `setup control`, or reports a failing check.
+/// Writes a fresh home snapshot, then checks that a control machine can read one.
 pub fn snapshot_check(ctx: &Ctx) -> Result<SetupCheck, CliError> {
-    match ctx.control() {
-        Some(control) => snapshot_readable_from_control(&control.root),
-        None if ctx.role() == crate::node_ctx::NodeRole::Home => snapshot_readable_from_home(ctx),
-        None => Ok(check(
-            "control.snapshot",
-            "fail",
-            "vowp home is not initialised; run `vowp setup home` and `vowp setup control` first",
-        )),
-    }
+    let store = ctx.fleet_store()?;
+    vowp_core::fleet::write_snapshot(ctx.deps(), &store, ctx.clock().now())?;
+    let snapshot = vowp_core::fleet::read_snapshot(ctx.paths())?;
+    let mut result = validate_snapshot(&snapshot, Timestamp::now(), "home snapshot")?;
+    result.status = "warn".to_owned();
+    result.detail = format!(
+        "{}; no control machine is configured on this machine, so readability from a control machine was not verified",
+        result.detail
+    );
+    Ok(result)
 }
 
-/// Checks the control cache written by `setup control --apply`.
+/// Fetches the home snapshot over SSH and writes the control cache.
+fn snapshot_from_control(control: &ControlHome) -> Result<SetupCheck, CliError> {
+    let mut runner = SshRunner::new(control.config.ssh_target.clone());
+    let probe = probe(&mut runner, &[])?;
+    let path = format!("{}/snapshot.json", control.config.remote_home.trim_end_matches('/'));
+    let argv = as_user(
+        &probe.user,
+        probe.effective_user(),
+        &probe.effective_home(),
+        vec!["cat".to_owned(), path],
+    );
+    let output = runner.run(&argv, None)?;
+    if !output.success() {
+        return Ok(check(
+            "control.snapshot",
+            "fail",
+            format!(
+                "the home snapshot is not readable from the control machine: {}",
+                first_line(&output.stderr, &output.stdout)
+            ),
+        ));
+    }
+    let snapshot: Snapshot = serde_json::from_str(&output.stdout)
+        .map_err(|error| CliError::Remote(format!("the home returned an invalid snapshot: {error}")))?;
+    let fetched_at = Timestamp::now();
+    let snapshot_bytes = serde_json::to_vec_pretty(&snapshot).map_err(vowp_protocol::ProtocolError::from)?;
+    crate::remote::write_private(&control.root.join("snapshot.json"), &snapshot_bytes)?;
+    let meta = serde_json::json!({"fetched_at": fetched_at, "source": "remote"});
+    let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(vowp_protocol::ProtocolError::from)?;
+    crate::remote::write_private(&control.root.join("snapshot.meta.json"), &meta_bytes)?;
+    validate_snapshot(&snapshot, fetched_at, "remote")
+}
+
+/// Reads the snapshot cache written by `setup control --apply`.
 pub fn snapshot_readable_from_control(root: &Path) -> Result<SetupCheck, CliError> {
     let Some(cached) = crate::remote::cached_snapshot(root)? else {
         return Ok(check(
@@ -504,25 +625,6 @@ pub fn snapshot_readable_from_control(root: &Path) -> Result<SetupCheck, CliErro
     validate_snapshot(&cached.snapshot, cached.fetched_at, "control cache")
 }
 
-/// Checks a snapshot that exists on the home when no control machine is configured.
-fn snapshot_readable_from_home(ctx: &Ctx) -> Result<SetupCheck, CliError> {
-    if !ctx.paths().root().join("snapshot.json").is_file() {
-        return Ok(check(
-            "control.snapshot",
-            "warn",
-            "no control machine is configured and the home has no snapshot.json yet; the control check was not verified",
-        ));
-    }
-    let snapshot = vowp_core::fleet::read_snapshot(ctx.paths())?;
-    let mut result = validate_snapshot(&snapshot, snapshot.generated_at, "home snapshot")?;
-    result.status = "warn".to_owned();
-    result.detail = format!(
-        "{}; no control machine is configured, so readability from a control machine was not verified",
-        result.detail
-    );
-    Ok(result)
-}
-
 /// Validates the snapshot document and returns an `ok` check with its `as of` time.
 fn validate_snapshot(snapshot: &Snapshot, fetched_at: Timestamp, source: &str) -> Result<SetupCheck, CliError> {
     if snapshot.schema != SNAPSHOT_FORMAT || snapshot.version != SNAPSHOT_VERSION {
@@ -545,6 +647,18 @@ fn validate_snapshot(snapshot: &Snapshot, fetched_at: Timestamp, source: &str) -
             snapshot.projects.len()
         ),
     ))
+}
+
+/// Runs one check and turns a setup error into a failed check instead of aborting.
+fn push_check(checks: &mut Vec<SetupCheck>, name: &str, result: Result<SetupCheck, CliError>) {
+    match result {
+        Ok(check) => checks.push(check),
+        Err(error) => checks.push(SetupCheck {
+            name: name.to_owned(),
+            status: "fail".to_owned(),
+            detail: error.to_string(),
+        }),
+    }
 }
 
 /// Builds one check row.
@@ -572,6 +686,21 @@ fn write_exec(path: &Path, body: &str) -> Result<(), CliError> {
     fs::write(path, body)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     Ok(())
+}
+
+/// Returns a unique lower-case slug suffix.
+fn unique_suffix() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let value = u64::try_from(nanos).unwrap_or(u64::MAX);
+    format!(
+        "{:x}-{}",
+        value ^ u64::from(std::process::id()),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Returns the fake opencode script.
@@ -661,12 +790,11 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output, CliError>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(error) = stdin.write_all(input.as_bytes()) {
-            if error.kind() != std::io::ErrorKind::BrokenPipe {
-                return Err(CliError::Io(error));
-            }
-        }
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(input.as_bytes())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(CliError::Io(error));
     }
     child.wait_with_output().map_err(CliError::Io)
 }
