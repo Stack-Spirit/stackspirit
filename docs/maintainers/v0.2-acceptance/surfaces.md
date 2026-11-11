@@ -26,12 +26,13 @@ not affected.
 
 - Date: 2026-11-11 (UTC).
 - Worktree: `job/v2-t3-surfaces`. The acceptance runs used the binary built at
-  `3c57f7c`; the final branch is rebased onto `1b7a9b8`. The delta
-  `3c57f7c..1b7a9b8` touches only capacity admission/supervisor tests and code
-  (`crates/vowp-cli/tests/capacity.rs`, `crates/vowp-core/src/capacity/**`,
-  `crates/vowp-core/src/fleet/mod.rs`,
-  `crates/vowp-core/src/loops/supervisor.rs` and their tests), no surface,
-  lease, session or remote-ingest code.
+  `3c57f7c`; the final branch is rebased onto `ef3765c`. The delta
+  `3c57f7c..ef3765c` is capacity admission/supervisor work plus the F4
+  orchestrator follow-ups (`crates/vowp-core/src/surface/orchestrator.rs`,
+  `crates/vowp-core/src/loops/supervisor.rs`, `crates/vowp-cli/src/framework.rs`
+  and their tests). The orchestrator changes are why the owner-device re-run
+  should use the final build; the surface/lease/remote-ingest paths in tests 4b,
+  4c and 5 are unchanged.
 - Binary under test: `cargo build -p vowp-cli --bin vowp`; it reports
   `vowp 0.1.0` (the package version during the v0.2 pre-release), SHA-256
   `320916762ddf7ed636c2bb2eaa1ed56ff1d8dedc49e9ef95cb82151f1463973c`.
