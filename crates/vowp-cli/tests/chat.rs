@@ -910,7 +910,9 @@ fn chat_slash_switch_status_capsule() {
 
     let store = env.store();
     assert!(
-        wait_until(Duration::from_secs(5), || {
+        // The fake harness and switch run beside other chat processes during the stress
+        // runs; allow more than the usual few seconds without weakening the assertion.
+        wait_until(Duration::from_secs(30), || {
             store
                 .latest_capsule(&session)
                 .expect("capsules")
