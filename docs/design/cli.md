@@ -356,7 +356,8 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 | `vowp reindex [--session <id>]` | rebuilds `sessions`, `session_events`, `session_natives`, `capsules` rows from `sessions/*/log.jsonl`; prints counts. Safe while the supervisor runs. |
 | `vowp backup …` | see §6.8. |
 | `vowp schema [<type>]` | with no arg lists the JSON-Schema type names; with a name prints that schema (types.md §14). `snapshot` is the v0.2 snapshot schema. Still needs an initialised home in this build. |
-| `vowp --version` / `vowp version` | `vowp 0.2.0 (<git sha>) schema 1` |
+| `vowp --version` | prints `vowp 0.2.0` (the binary version only). |
+| `vowp version` | prints `vowp 0.2.0 (<git sha>) schema 1`. |
 | `vowp __window <board\|capacity\|supervisor\|planner\|keeper\|inbox\|job> [<id>]` | hidden; what tmux windows run (renders the board or capacity screen, tails `supervisor.log`, tails the planner/keeper session, lists the inbox, tails a job session). Read-only. |
 | `vowp __exec --grant <file> [--spool-dir <dir>]` | hidden remote-executor client (sessions.md §9). |
 | `vowp __vault-exec --env <NAME> -- <cmd…>` · `vowp __vault-admin probe` · `vowp __vault-admin set\|rm <NAME>` | hidden vault-user helper; `probe` takes no name and checks the helper context and vault directory, `set` reads the value from stdin, never argv. In basic mode `__vault-exec` is a plain exec. |

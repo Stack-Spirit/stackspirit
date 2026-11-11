@@ -90,7 +90,7 @@ Every workspace package and the npm package must say `0.2.0`; historical
 release notes and acceptance records may mention earlier versions.
 
 ```bash
-set -o pipefail
+set -euo pipefail
 
 cargo metadata --no-deps --format-version 1 |
   python3 -c 'import json, sys
