@@ -1,0 +1,61 @@
+schedules = []
+
+[node]
+name = "local"
+max_workers = 4
+max_verifiers = 2
+tick_secs = 60
+cwd_allow = []
+tz_offset_minutes = 60
+
+[project]
+name = "vowp"
+remote = "origin"
+default_branch = "main"
+check_cmds = []
+lock_files = ["Cargo.lock"]
+always_allowed = ["Cargo.lock"]
+push = true
+
+[profiles.keeper]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.planner]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.verifier]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.worker]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[providers]
+
+[providers.deepseek]
+max_concurrent = 2
+
+[harnesses]
+
+[harnesses.opencode]
+binary = "/home/dev/.opencode-v2/bin/opencode"
+
+[env]
+
+[gates]
+
+[loops]
+
+[capsule]
+min_interval_secs = 120
+max_input_chars = 200000
+tail_turns = 2
+
+[merge]
+rebase = true
+check_cmds = []
+timeout_secs = 2700
+secret_scan = true
