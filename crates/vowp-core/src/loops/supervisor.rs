@@ -2475,6 +2475,14 @@ impl NodeSupervisor {
                 }
             })
         }));
+        steps.push(self.node_step("advice", |this| {
+            crate::capacity::advisor::advise_tick(&this.deps, &this.global, now).map(|advice| {
+                advice.map_or_else(
+                    || "no advice due".to_owned(),
+                    |advice| format!("advice {} ({} workers)", advice.id, advice.proposed_target),
+                )
+            })
+        }));
         steps.push(self.node_step("leases", |this| {
             crate::surface::sweep_leases(&this.deps, &this.global, now).map(|count| format!("{count} lease(s) swept"))
         }));

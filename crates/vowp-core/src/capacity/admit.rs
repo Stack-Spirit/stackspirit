@@ -290,14 +290,15 @@ impl CapacityManager {
 
     /// Produces one capacity advice row, when the advisor decides to.
     ///
-    /// The advice turn is E3's card; E2 keeps the C0 no-op so the interface stays stable.
+    /// This is the per-trigger API; [`super::advisor::advise_tick`] is the node supervisor's
+    /// one-call entry point for the timer and the four events.
     pub fn advise(
         &self,
-        _store: &Store,
-        _now: Timestamp,
-        _trigger: AdviceTrigger,
+        store: &Store,
+        now: Timestamp,
+        trigger: AdviceTrigger,
     ) -> Result<Option<CapacityAdvice>, CoreError> {
-        Ok(None)
+        super::advisor::maybe_advise(&self.deps, store, now, trigger)
     }
 
     /// Recomputes every pooled usage estimate.

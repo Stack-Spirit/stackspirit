@@ -9,11 +9,12 @@
 //!
 //! The corresponding framework skill is `framework/skills/vowp-capacity-advisor/SKILL.md`.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use vowp_protocol::{
-    AdviceState, CapacityAdvice, CapacityReport, InboxId, InboxItem, InboxKind, InboxState, SampleSource, TargetMode,
-    Timestamp,
+    AdviceState, CapacityAdvice, CapacityReport, InboxId, InboxItem, InboxKind, InboxState, JobState, ProjectState,
+    SampleSource, TargetMode, Timestamp,
 };
 use vowp_store::Store;
 
@@ -26,8 +27,20 @@ use super::targets::{MAX_TARGET, MIN_TARGET};
 /// The shortest gap between two timer-driven advice turns.
 pub const ADVICE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
+/// How far back an OOM kill still counts as an advice event before the first advice.
+const OOM_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Key holding the timestamp of the last advice row this node wrote.
 const LAST_ADVICE_KEY: &str = "capacity:advice_at";
+
+/// Key holding the project names seen by the last advice turn.
+const PROJECTS_KEY: &str = "capacity:advice_projects";
+
+/// Key holding whether the brake was active at the last advice turn.
+const BRAKE_KEY: &str = "capacity:advice_brake";
+
+/// Key holding the instant the node became idle.
+const IDLE_KEY: &str = "capacity:advice_idle_since";
 
 /// Why the advisor is considering a new target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,12 +72,46 @@ pub fn maybe_advise(
     now: Timestamp,
     trigger: AdviceTrigger,
 ) -> Result<Option<CapacityAdvice>, CoreError> {
+    maybe_advise_with_report(deps, store, now, trigger, None)
+}
+
+/// Runs one node-level advice check, choosing the timer or one of the four events.
+///
+/// This is the supervisor's entry point: one call per node tick. The timer itself is
+/// rate-limited by [`maybe_advise`]; the event comparisons are kept here so the supervisor
+/// only needs the one call.
+pub fn advise_tick(deps: &Deps, store: &Store, now: Timestamp) -> Result<Option<CapacityAdvice>, CoreError> {
+    let report = CapacityManager::new(deps.clone()).report(store, now)?;
+    let trigger = choose_trigger(store, now, &report)?;
+    let advice = maybe_advise_with_report(deps, store, now, trigger, Some(report.clone()))?;
+    if advice.is_some() {
+        update_markers(store, now, trigger, &report)?;
+    }
+    Ok(advice)
+}
+
+/// Writes one proposal unless the trigger is not due or the owner is already applying one.
+fn maybe_advise_with_report(
+    deps: &Deps,
+    store: &Store,
+    now: Timestamp,
+    trigger: AdviceTrigger,
+    report: Option<CapacityReport>,
+) -> Result<Option<CapacityAdvice>, CoreError> {
     reconcile_dismissed_advice(store, now)?;
     if !is_due(store, now, trigger)? {
         return Ok(None);
     }
+    if pending_apply(store, now)? {
+        // The owner answered `apply`; wait for `vowp capacity set` instead of replacing
+        // the proposal with a new one before the target changes.
+        return Ok(None);
+    }
 
-    let report = CapacityManager::new(deps.clone()).report(store, now)?;
+    let report = match report {
+        Some(report) => report,
+        None => CapacityManager::new(deps.clone()).report(store, now)?,
+    };
     if trigger == AdviceTrigger::Idle && report.running.runs > 0 {
         // The caller reported idle, but a run is open now. A target proposal would be
         // based on the wrong picture; wait for the next turn.
@@ -85,8 +132,9 @@ pub fn maybe_advise(
         report.target.target_workers.clamp(MIN_TARGET, MAX_TARGET)
     };
 
+    close_superseded_advice(store, now)?;
     let reasons = build_reasons(&report, trigger, measured, advised);
-    let expected_effect = expected_effect(&report, proposed);
+    let expected_effect = expected_effect(&report, proposed, measured);
     let inbox_id = InboxId::new();
     let advice = CapacityAdvice {
         id: ulid::Ulid::generate().to_string(),
@@ -106,7 +154,7 @@ pub fn maybe_advise(
         project: None,
         job_id: None,
         kind: InboxKind::Decision,
-        title: format!("Capacity: {proposed} workers (advised {proposed})"),
+        title: format!("Capacity: {proposed} workers (advised {advised})"),
         body: inbox_body(&advice, &report, trigger),
         options: vec!["apply".to_owned(), "keep".to_owned()],
         state: InboxState::Open,
@@ -123,6 +171,197 @@ pub fn maybe_advise(
         Ok(())
     })?;
     Ok(Some(advice))
+}
+
+/// Chooses the event or timer trigger for one node tick.
+///
+/// Precedence is OOM, brake, new project, sustained idle, timer. A trigger that is not
+/// chosen keeps its marker so the next tick sees it again.
+fn choose_trigger(store: &Store, now: Timestamp, report: &CapacityReport) -> Result<AdviceTrigger, CoreError> {
+    let since = last_advice_at(store)?.unwrap_or_else(|| now.minus(OOM_LOOKBACK));
+    let oom = store
+        .run_usage_for_group(
+            &vowp_store::repo_capacity::UsageQuery {
+                since: Some(since),
+                ..vowp_store::repo_capacity::UsageQuery::default()
+            },
+            u32::MAX,
+        )?
+        .iter()
+        .any(|row| row.oom_killed);
+    if oom {
+        return Ok(AdviceTrigger::Oom);
+    }
+
+    let brake_was = store.kv_get(BRAKE_KEY)?.as_deref() == Some("1");
+    if report.brakes.active && !brake_was {
+        return Ok(AdviceTrigger::Brake);
+    }
+    if !report.brakes.active && brake_was {
+        // Record the clear even when no advice turn is due, so the next trip is an event.
+        store.kv_set(BRAKE_KEY, "0")?;
+    }
+
+    let current = project_names(store)?;
+    match read_project_marker(store)? {
+        Some(previous) => {
+            if current.iter().any(|name| !previous.contains(name)) {
+                return Ok(AdviceTrigger::NewProject);
+            }
+        }
+        // The first turn adopts the existing projects without calling them new.
+        None => store.kv_set(PROJECTS_KEY, &project_marker_json(&current)?)?,
+    }
+
+    if report.running.runs == 0 && report.waiting.is_empty() && !has_pending_work(store)? {
+        match read_idle_since(store)? {
+            Some(since) if now.since(since) >= ADVICE_INTERVAL => return Ok(AdviceTrigger::Idle),
+            Some(_) => {}
+            None => store.kv_set(IDLE_KEY, &now.as_rfc3339())?,
+        }
+    } else {
+        let _ = store.kv_delete(IDLE_KEY);
+    }
+    Ok(AdviceTrigger::Timer)
+}
+
+/// Updates the event markers after a turn that wrote advice.
+fn update_markers(
+    store: &Store,
+    now: Timestamp,
+    trigger: AdviceTrigger,
+    report: &CapacityReport,
+) -> Result<(), CoreError> {
+    if !report.brakes.active || trigger == AdviceTrigger::Brake {
+        store.kv_set(BRAKE_KEY, if report.brakes.active { "1" } else { "0" })?;
+    }
+    if trigger == AdviceTrigger::Idle {
+        store.kv_set(IDLE_KEY, &now.as_rfc3339())?;
+    }
+    let current = project_names(store)?;
+    let pending_new =
+        read_project_marker(store)?.is_some_and(|previous| current.iter().any(|name| !previous.contains(name)));
+    if trigger == AdviceTrigger::NewProject || !pending_new {
+        store.kv_set(PROJECTS_KEY, &project_marker_json(&current)?)?;
+    }
+    Ok(())
+}
+
+/// Returns whether the owner answered `apply` recently and the target has not changed yet.
+fn pending_apply(store: &Store, now: Timestamp) -> Result<bool, CoreError> {
+    let Some(advice) = store.latest_open_advice()? else {
+        return Ok(false);
+    };
+    let Some(inbox_id) = advice.inbox_id.as_ref() else {
+        return Ok(false);
+    };
+    let Some(item) = store.inbox_item(inbox_id)? else {
+        return Ok(false);
+    };
+    if item.state != InboxState::Answered {
+        return Ok(false);
+    }
+    let applies = item
+        .answer
+        .as_deref()
+        .is_some_and(|answer| answer.trim().eq_ignore_ascii_case("apply"));
+    if !applies {
+        return Ok(false);
+    }
+    let since = item.answered_at.unwrap_or(item.created_at);
+    Ok(now.since(since) < ADVICE_INTERVAL)
+}
+
+/// Closes every older proposal so a node has at most one open advice row.
+///
+/// The previous inbox item is dismissed too, so the owner sees one `Capacity:` decision
+/// instead of a growing stack. An advice whose item the owner answered `apply` is kept by
+/// [`pending_apply`] and is not closed here.
+fn close_superseded_advice(store: &Store, now: Timestamp) -> Result<(), CoreError> {
+    while let Some(advice) = store.latest_open_advice()? {
+        if let Some(inbox_id) = advice.inbox_id.as_ref()
+            && let Some(item) = store.inbox_item(inbox_id)?
+            && item.state == InboxState::Open
+        {
+            // A concurrent answer can make this a conflict; the advice still closes.
+            let _ = store.dismiss_inbox(inbox_id, "supervisor");
+        }
+        store.finish_capacity_advice(&advice.id, AdviceState::Dismissed, "supervisor", now)?;
+    }
+    Ok(())
+}
+
+/// Returns whether any project has a pending or ready job.
+fn has_pending_work(store: &Store) -> Result<bool, CoreError> {
+    let filter = vowp_store::JobFilter {
+        states: vec![JobState::Pending, JobState::Ready],
+        ..vowp_store::JobFilter::default()
+    };
+    if let Some(paths) = store.paths() {
+        for entry in store.list_project_entries()? {
+            if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
+                continue;
+            }
+            match Store::open_read_only(paths, Some(&entry.name)) {
+                Ok(project_store) => {
+                    if !project_store.list_jobs(&filter)?.is_empty() {
+                        return Ok(true);
+                    }
+                }
+                // An unreadable project might have work; never call the node idle then.
+                Err(_) => return Ok(true),
+            }
+        }
+        return Ok(false);
+    }
+    if store.bound_project().is_some() {
+        return Ok(!store.list_jobs(&filter)?.is_empty());
+    }
+    Ok(false)
+}
+
+/// Returns the names of every non-archived, non-reserved project.
+fn project_names(store: &Store) -> Result<BTreeSet<String>, CoreError> {
+    let mut names = BTreeSet::new();
+    for entry in store.list_project_entries()? {
+        if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
+            continue;
+        }
+        names.insert(entry.name.as_str().to_owned());
+    }
+    Ok(names)
+}
+
+/// Reads the project-name marker, if the first advice turn has already run.
+fn read_project_marker(store: &Store) -> Result<Option<BTreeSet<String>>, CoreError> {
+    let Some(text) = store.kv_get(PROJECTS_KEY)? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_str(&text).unwrap_or_default()))
+}
+
+/// Serializes the project-name marker.
+fn project_marker_json(names: &BTreeSet<String>) -> Result<String, CoreError> {
+    serde_json::to_string(names).map_err(|error| CoreError::Invalid(format!("capacity project marker: {error}")))
+}
+
+/// Reads the instant the node became idle.
+fn read_idle_since(store: &Store) -> Result<Option<Timestamp>, CoreError> {
+    Ok(store.kv_get(IDLE_KEY)?.and_then(|text| Timestamp::parse(&text).ok()))
+}
+
+/// Returns the timestamp of the newest advice row, open or closed.
+///
+/// The `kv` marker is the durable record; the open row is a second source after a direct
+/// store write in a test or in a follow-up tool.
+fn last_advice_at(store: &Store) -> Result<Option<Timestamp>, CoreError> {
+    let mut last = store
+        .kv_get(LAST_ADVICE_KEY)?
+        .and_then(|text| Timestamp::parse(&text).ok());
+    if let Some(open) = store.latest_open_advice()? {
+        last = Some(last.map_or(open.created_at, |last| last.max(open.created_at)));
+    }
+    Ok(last)
 }
 
 /// Marks the newest open advice dismissed when its inbox item was kept or removed.
@@ -171,13 +410,7 @@ fn is_due(store: &Store, now: Timestamp, trigger: AdviceTrigger) -> Result<bool,
     if trigger != AdviceTrigger::Timer {
         return Ok(true);
     }
-    let mut last = store
-        .kv_get(LAST_ADVICE_KEY)?
-        .and_then(|text| Timestamp::parse(&text).ok());
-    if let Some(open) = store.latest_open_advice()? {
-        last = Some(last.map_or(open.created_at, |last| last.max(open.created_at)));
-    }
-    Ok(last.is_none_or(|last| now.since(last) >= ADVICE_INTERVAL))
+    Ok(last_advice_at(store)?.is_none_or(|last| now.since(last) >= ADVICE_INTERVAL))
 }
 
 /// Builds the human-readable reasons stored on the advice row.
@@ -277,7 +510,12 @@ fn build_reasons(report: &CapacityReport, trigger: AdviceTrigger, measured: bool
 }
 
 /// Returns one sentence describing what applying the proposal changes.
-fn expected_effect(report: &CapacityReport, proposed: u32) -> String {
+fn expected_effect(report: &CapacityReport, proposed: u32, measured: bool) -> String {
+    if !measured {
+        return format!(
+            "Keep the target at {proposed} worker(s) because this host has no measured sample; no RAM or CPU fit is claimed. Every run still passes the brake, provider and per-run checks."
+        );
+    }
     let current = report.target.target_workers;
     let mut effect = if proposed > current {
         format!(

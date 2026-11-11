@@ -10,13 +10,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::tempdir;
-use vowp_core::capacity::advisor::ADVICE_INTERVAL;
+use vowp_core::capacity::advisor::{ADVICE_INTERVAL, advise_tick};
 use vowp_core::capacity::{self, CapacityManager};
+use vowp_core::loops::NodeSupervisor;
 use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
-    AdviceState, CapacityTarget, EstimateSource, FakeClock, HarnessKind, HostSample, InboxKind, InboxState, Job, JobId,
-    JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, SampleSource, TargetMode, Timestamp,
-    UsageEstimate, VowpConfig,
+    AdviceState, BuildMode, CapacityTarget, EstimateSource, FakeClock, HarnessKind, HostSample, InboxKind, InboxState,
+    Job, JobId, JobKind, MemoryLog, NewJob, NodeName, Project, ProjectName, Role, RunId, RunRole, RunUsage,
+    SampleSource, TargetMode, Timestamp, UsageEstimate, UsageSource, VowpConfig,
 };
 use vowp_store::{NodePaths, Store};
 
@@ -107,6 +108,13 @@ fn healthy_sample(at: Timestamp) -> HostSample {
     sample(at, 8 * GIB, 6 * GIB, Some(4.0))
 }
 
+fn sample_at(at: Timestamp, mem_available: u64, pressure: f64) -> HostSample {
+    let mut sample = healthy_sample(at);
+    sample.mem_available_bytes = mem_available;
+    sample.pressure_mem_avg10 = Some(pressure);
+    sample
+}
+
 fn seed_estimate(store: &Store, project: &ProjectName, ram_p90: u64, cpu_p90: f64) {
     store
         .upsert_usage_estimate(&UsageEstimate {
@@ -123,6 +131,36 @@ fn seed_estimate(store: &Store, project: &ProjectName, ram_p90: u64, cpu_p90: f6
             duration_p50_ms: 1_000,
             duration_p90_ms: 2_000,
             source: EstimateSource::Measured,
+        })
+        .unwrap();
+}
+
+fn seed_oom_usage(store: &Store, project: &ProjectName, at: Timestamp) {
+    store
+        .upsert_run_usage(&RunUsage {
+            run_id: RunId::new(),
+            project: project.clone(),
+            job_id: None,
+            job_kind: Some(JobKind::Build),
+            role: RunRole::Worker,
+            harness: Some(HarnessKind::Opencode),
+            model: Some("deepseek/deepseek-flash".to_owned()),
+            provider: Some("deepseek".to_owned()),
+            node: NodeName::parse("local").unwrap(),
+            started_at: at,
+            ended_at: at.plus(Duration::from_secs(1)),
+            duration_ms: 1_000,
+            peak_rss_bytes: 2 * GIB,
+            anon_peak_bytes: Some(GIB),
+            file_peak_bytes: None,
+            kernel_peak_bytes: None,
+            cpu_usec: 1_000_000,
+            mean_cpu_cores: 1.0,
+            max_cpu_cores: 2.0,
+            build_mode: BuildMode::Unknown,
+            source: UsageSource::ProcTree,
+            oom_killed: true,
+            exit_code: None,
         })
         .unwrap();
 }
@@ -211,6 +249,22 @@ fn advisor_never_changes_target_itself() {
     let (_tmp, deps, store, project, _job) = fixture();
     store.insert_host_sample(&healthy_sample(now())).unwrap();
     seed_estimate(&store, &project, GIB, 1.0);
+    assert_eq!(
+        store.latest_capacity_target().unwrap(),
+        None,
+        "the fixture starts with no target history"
+    );
+
+    let first = capacity::maybe_advise(&deps, &store, now(), capacity::AdviceTrigger::Timer)
+        .unwrap()
+        .expect("advice");
+    assert_eq!(first.state, AdviceState::Open);
+    assert_eq!(
+        store.latest_capacity_target().unwrap(),
+        None,
+        "the first advice must not create a target row"
+    );
+
     let owner_target = CapacityTarget {
         mode: TargetMode::Fixed,
         target_workers: 8,
@@ -220,7 +274,7 @@ fn advisor_never_changes_target_itself() {
         set_at: now(),
         reason: "burst".to_owned(),
     };
-    store.insert_capacity_target(&owner_target).unwrap();
+    let owner_id = store.insert_capacity_target(&owner_target).unwrap();
     let before = store.latest_capacity_target().unwrap().expect("owner target");
 
     let advice = capacity::maybe_advise(
@@ -237,7 +291,26 @@ fn advisor_never_changes_target_itself() {
     assert_eq!(
         store.latest_capacity_target().unwrap().expect("target row remains"),
         before,
-        "the advisor must not write a target row or change the owner's number"
+        "the advisor must not change the owner's number"
+    );
+
+    // A probe row's id proves no hidden target row was written between the owner row and
+    // the probe. The advisor's row would have used the next id.
+    let probe_id = store
+        .insert_capacity_target(&CapacityTarget {
+            mode: TargetMode::Auto,
+            target_workers: 1,
+            advised_workers: Some(1),
+            is_override: false,
+            set_by: "test".to_owned(),
+            set_at: now().plus(Duration::from_secs(2)),
+            reason: "probe".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(
+        probe_id,
+        owner_id + 1,
+        "the advisor must not write a capacity_targets row"
     );
 }
 
@@ -258,6 +331,22 @@ fn advisor_applies_only_after_owner_yes() {
         store.latest_capacity_target().unwrap(),
         None,
         "answering apply is not a target change"
+    );
+    assert!(
+        capacity::maybe_advise(
+            &deps,
+            &store,
+            now().plus(Duration::from_secs(1)),
+            capacity::AdviceTrigger::Brake,
+        )
+        .unwrap()
+        .is_none(),
+        "an in-flight apply must not be replaced or applied by a later turn"
+    );
+    assert_eq!(
+        store.latest_capacity_target().unwrap(),
+        None,
+        "the later turn must not apply the proposal"
     );
 
     let manager = CapacityManager::new(deps.clone());
@@ -420,5 +509,215 @@ fn advisor_keeps_the_owner_target_without_a_measured_host() {
         advice.reasons.iter().any(|reason| reason.contains("fallback sample")),
         "reasons: {:?}",
         advice.reasons
+    );
+    assert!(
+        advice.expected_effect.contains("no measured sample"),
+        "effect must not claim a measured fit: {}",
+        advice.expected_effect
+    );
+    let inbox_id = advice.inbox_id.clone().expect("linked item");
+    let item = store.inbox_item(&inbox_id).unwrap().expect("inbox item");
+    assert_eq!(
+        item.title, "Capacity: 8 workers (advised 1)",
+        "the parenthetical must be the measured advice, not the proposal"
+    );
+}
+
+#[test]
+fn advisor_keeps_one_open_advice() {
+    let (_tmp, deps, store, project, _job) = fixture();
+    store.insert_host_sample(&healthy_sample(now())).unwrap();
+    seed_estimate(&store, &project, GIB, 1.0);
+
+    let first = capacity::maybe_advise(&deps, &store, now(), capacity::AdviceTrigger::Timer)
+        .unwrap()
+        .expect("first advice");
+    let second = capacity::maybe_advise(
+        &deps,
+        &store,
+        now().plus(Duration::from_secs(1)),
+        capacity::AdviceTrigger::NewProject,
+    )
+    .unwrap()
+    .expect("second advice");
+
+    let stored_first = store.capacity_advice(&first.id).unwrap().expect("first row");
+    assert_eq!(stored_first.state, AdviceState::Dismissed);
+    let first_inbox = first.inbox_id.clone().expect("first item");
+    assert_eq!(
+        store.inbox_item(&first_inbox).unwrap().expect("first item").state,
+        InboxState::Dismissed,
+        "the superseded item must not stay open"
+    );
+    assert_eq!(
+        store.latest_open_advice().unwrap().expect("one open advice").id,
+        second.id
+    );
+}
+
+#[test]
+fn advisor_tick_chooses_the_timer_and_new_project() {
+    let (_tmp, deps, store, project, _job) = fixture();
+    store.insert_host_sample(&healthy_sample(now())).unwrap();
+    seed_estimate(&store, &project, GIB, 1.0);
+
+    let first = advise_tick(&deps, &store, now()).unwrap().expect("timer advice");
+    assert!(
+        first
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("scheduled review")),
+        "reasons: {:?}",
+        first.reasons
+    );
+    assert!(
+        advise_tick(&deps, &store, now().plus(Duration::from_secs(1)))
+            .unwrap()
+            .is_none(),
+        "no event and no timer gap means no turn"
+    );
+
+    let second_project = ProjectName::parse("second").unwrap();
+    register_project(&store, &second_project);
+    let advice = advise_tick(&deps, &store, now().plus(Duration::from_secs(2)))
+        .unwrap()
+        .expect("new project advice");
+    assert!(
+        advice
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("event: a project was registered")),
+        "reasons: {:?}",
+        advice.reasons
+    );
+}
+
+#[test]
+fn advisor_tick_chooses_brake_and_oom() {
+    let (_tmp, deps, store, project, _job) = fixture();
+    store.insert_host_sample(&sample_at(now(), 6 * GIB, 14.2)).unwrap();
+    store
+        .insert_host_sample(&sample_at(now().plus(Duration::from_secs(1)), 6 * GIB, 15.0))
+        .unwrap();
+    seed_estimate(&store, &project, GIB, 1.0);
+
+    let brake = advise_tick(&deps, &store, now().plus(Duration::from_secs(1)))
+        .unwrap()
+        .expect("brake advice");
+    assert!(
+        brake
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("event: a capacity brake was reported")),
+        "reasons: {:?}",
+        brake.reasons
+    );
+
+    // Two clean samples clear the brake; a fresh OOM row is then the next event.
+    store
+        .insert_host_sample(&healthy_sample(now().plus(Duration::from_secs(2))))
+        .unwrap();
+    store
+        .insert_host_sample(&healthy_sample(now().plus(Duration::from_secs(3))))
+        .unwrap();
+    seed_oom_usage(&store, &project, now().plus(Duration::from_secs(4)));
+    let oom = advise_tick(&deps, &store, now().plus(Duration::from_secs(5)))
+        .unwrap()
+        .expect("oom advice");
+    assert!(
+        oom.reasons
+            .iter()
+            .any(|reason| reason.starts_with("event: a run was OOM-killed")),
+        "reasons: {:?}",
+        oom.reasons
+    );
+}
+
+#[test]
+fn advisor_tick_chooses_sustained_idle() {
+    let (_tmp, deps, store, project, job) = fixture();
+    store.insert_host_sample(&healthy_sample(now())).unwrap();
+    seed_estimate(&store, &project, GIB, 1.0);
+    store.delete_job(&job.id).unwrap();
+    store
+        .kv_set(
+            "capacity:advice_idle_since",
+            &now().minus(ADVICE_INTERVAL + Duration::from_secs(1)).as_rfc3339(),
+        )
+        .unwrap();
+
+    let advice = advise_tick(&deps, &store, now()).unwrap().expect("idle advice");
+    assert!(
+        advice
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("event: the node stayed idle")),
+        "reasons: {:?}",
+        advice.reasons
+    );
+}
+
+#[test]
+fn manager_advise_delegates_to_the_advisor() {
+    let (_tmp, deps, store, project, _job) = fixture();
+    store.insert_host_sample(&healthy_sample(now())).unwrap();
+    seed_estimate(&store, &project, GIB, 1.0);
+
+    let advice = CapacityManager::new(deps.clone())
+        .advise(&store, now(), capacity::AdviceTrigger::Timer)
+        .unwrap()
+        .expect("the manager delegates to the advisor");
+    assert_eq!(advice.proposed_target, 3);
+    assert_eq!(
+        store.capacity_advice(&advice.id).unwrap().expect("advice row").state,
+        AdviceState::Open
+    );
+}
+
+#[test]
+fn node_supervisor_tick_writes_capacity_advice() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(project_root.join(".vowp/jobs")).unwrap();
+    let project = ProjectName::parse("test").unwrap();
+    let mut config = VowpConfig::with_defaults_for_tests();
+    config.project.name = project.clone();
+    config.project.path = Some(project_root.display().to_string());
+    config.project.worktree_root = Some(tmp.path().join("worktrees").display().to_string());
+    std::fs::write(project_root.join("vowp.toml"), toml::to_string_pretty(&config).unwrap()).unwrap();
+
+    let store = store_at(&root);
+    store
+        .upsert_project(&Project {
+            name: project.clone(),
+            path: project_root.display().to_string(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: now(),
+            updated_at: now(),
+        })
+        .unwrap();
+    let deps = test_deps(&root, &project);
+
+    let mut supervisor = NodeSupervisor::new(deps.clone()).expect("node supervisor");
+    let report = supervisor.tick().expect("tick");
+    assert!(
+        report.steps.iter().any(|step| step.name == "advice" && step.ok),
+        "advice step: {:?}",
+        report.steps
+    );
+    assert!(
+        store.latest_open_advice().unwrap().is_some(),
+        "a node tick must write a Capacity advice row"
+    );
+    assert!(
+        store
+            .list_inbox(Some(InboxState::Open))
+            .unwrap()
+            .iter()
+            .any(|item| item.title.starts_with("Capacity:")),
+        "a node tick must write the Capacity inbox item"
     );
 }
