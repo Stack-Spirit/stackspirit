@@ -492,8 +492,11 @@ fn placeholder_config(node_name: &str) -> Result<VowpConfig, CliError> {
 /// Reads and validates `vowp.toml`, merging `~/.vowp/config.toml` defaults first.
 ///
 /// `VowpConfig::from_toml` validates before callers can merge node defaults, so the CLI does
-/// the documented order itself: parse, merge, validate. Unknown keys inside `[loops.*]`
-/// are rejected here because the flattened `LoopBounds` cannot use `deny_unknown_fields`.
+/// the documented order itself: parse, merge, default, validate. An omitted
+/// `[project].path` defaults to the directory containing `vowp.toml`, so relative harness
+/// mappings resolve under the project checkout instead of the caller's cwd. Unknown keys
+/// inside `[loops.*]` are rejected here because the flattened `LoopBounds` cannot use
+/// `deny_unknown_fields`.
 pub fn load_project_config(path: &Path, paths: &NodePaths) -> Result<VowpConfig, CliError> {
     let text = std::fs::read_to_string(path)?;
     reject_unknown_loop_keys(&text)?;
@@ -505,6 +508,9 @@ pub fn load_project_config(path: &Path, paths: &NodePaths) -> Result<VowpConfig,
         let node_text = std::fs::read_to_string(&node_file_path)?;
         let node_file = NodeFile::from_toml(&node_text)?;
         config = config.with_node_defaults(&node_file);
+    }
+    if config.project.path.is_none() {
+        config.project.path = path.parent().map(|parent| parent.display().to_string());
     }
     config.validate()?;
     Ok(config)
@@ -531,6 +537,17 @@ fn reject_unknown_loop_keys(text: &str) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+// The package root is the workspace root, so Cargo does not auto-discover the
+// `crates/vowp-cli/tests/` directory. Compile the owned integration-style suite as a
+// library test instead; the shared root `Cargo.toml` stays untouched. The alias makes the
+// file's `vowp_cli::` paths work in both this module and a future `[[test]]` target.
+#[cfg(test)]
+mod project_path_tests {
+    use crate as vowp_cli;
+
+    include!("../tests/project_path.rs");
 }
 
 #[cfg(test)]
