@@ -13,12 +13,17 @@
 #
 # Loopback is an IPv4 address but names the local machine, not a private host.
 ipv4|*|127.0.0.1|Loopback address, public by definition and used in the security docs.
+# 0.0.0.0 is the wildcard bind address, not a host or an owner address.
+ipv4|*|0.0.0.0|Wildcard bind address in a test fixture and the v0.2 design example.
 
 # Conventional placeholder homes used by tests and documentation. These are
 # not accounts on any machine.
 home_path|*|/home/user|Conventional placeholder path, not a real account.
 home_path|*|/Users/me|Conventional placeholder path, not a real account.
 home_path|*|/home/you|Conventional placeholder path in install documentation.
+home_path|*|/home/vowp|The dedicated home service account used by setup and the docs.
+home_path|*|/home/vowp-vault|The dedicated vault helper account used by vault mode.
+home_path|*|/home/fake|Placeholder for a fake test user, not a real account.
 
 # Reserved example domains from RFC 2606 / RFC 6761, used only by tests,
 # examples and fake harnesses. They cannot receive mail.
@@ -30,6 +35,9 @@ email|*|hello@example.invalid|Reserved .invalid example domain in an example.
 email|*|fake@example.invalid|Reserved .invalid example domain in a fake harness.
 email|*|fresh@example.invalid|Reserved .invalid example domain in a fresh-user test.
 email|*|dogfood@example.invalid|Reserved .invalid example domain in the dogfood harness.
+email|*|setup@example.invalid|Reserved .invalid example domain in the setup tests.
+email|*|vowp@example.invalid|Reserved .invalid example domain in a CLI test fixture.
+email|*|vowp@home.example|The reserved .example TLD in the v0.2 design example.
 
 # False positives from the hostname rule: Rust method names and a test path
 # that end in `.local`, not DNS names.

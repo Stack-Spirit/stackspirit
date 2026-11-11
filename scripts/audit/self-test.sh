@@ -57,6 +57,8 @@ printf 'TOKEN=%s\n' "not-a-real-value" > "$repo/.env"
 printf 'fake key placeholder\n' > "$repo/keys/id_rsa"
 dd if=/dev/zero of="$repo/big.bin" bs=1024 count=1100 2>/dev/null
 printf 'loopback 127.0.0.1\nplaceholder /home/user/project\nreserved test@example.invalid\n' > "$repo/benign.txt"
+# Rust field access such as `args.local_port` must not be mistaken for a host.
+printf 'fn probe() { let _ = args.local_port; let _ = self.local.path(); let _ = listener.local_addr(); }\n' > "$repo/benign.rs"
 
 git -C "$repo" add -A
 git -C "$repo" commit -qm "synthetic secrets"
@@ -114,6 +116,37 @@ run_scan --history > "$history_out" 2>&1 || fail "history should be informationa
 grep -q 'history findings are informational' "$history_out" || fail "no informational history message"
 if run_scan --history --strict-history >/dev/null 2>&1; then
     fail "history should fail with --strict-history"
+fi
+
+# 4b. --public-tree scans only the paths that would ship. A finding under a
+#     manifest prune entry is skipped; a finding in a shipping path is fatal.
+mkdir -p "$repo/private" "$repo/keep"
+printf 'private %s/private\n' "$home_path" > "$repo/private/bad.txt"
+printf 'private %s\n' "$ip" > "$repo/keep/bad.txt"
+rm -f "$repo/bad-allowlist.txt"
+cat > "$repo/scan-manifest.txt" <<'EOF'
+prune scripts/audit
+prune private
+EOF
+git -C "$repo" add -A
+git -C "$repo" commit -qm "add public-tree scan fixture"
+public_out=$tmp/public-tree-scan.txt
+if run_scan --public-tree --manifest scan-manifest.txt > "$public_out" 2>&1; then
+    fail "a shipping-path finding should fail --public-tree"
+fi
+grep -q 'keep/bad.txt' "$public_out" || fail "--public-tree did not report the shipping-path finding"
+if grep -q 'private/bad.txt' "$public_out"; then
+    fail "--public-tree reported a finding under a pruned path"
+fi
+if grep -q 'benign.rs.*private_host' "$public_out"; then
+    fail "Rust field access was reported as a private host"
+fi
+git -C "$repo" rm -q keep/bad.txt
+git -C "$repo" commit -qm "remove the shipping-path finding"
+public_pass=$tmp/public-tree-pass.txt
+if ! run_scan --public-tree --manifest scan-manifest.txt > "$public_pass" 2>&1; then
+    cat "$public_pass" >&2
+    fail "--public-tree should pass when only pruned paths have findings"
 fi
 
 # 5. The public-tree checker rejects pruned and disallowed paths and reports
@@ -310,9 +343,73 @@ grep -q 'already clean' "$clean_out" || fail "the already-clean scrub did not re
 [ "$(cat "$srepo/scripts/release/version-test.rs")" = "$clean" ] ||
     fail "the already-clean scrub changed the working tree"
 
+# 6b. The build-marker scan finds job ids, private trailers, pruned paths and
+#     build-diary wording, skips pruned paths, and accepts the product trailer.
+mrepo=$tmp/marker-repo
+mkdir -p "$mrepo/scripts/audit" "$mrepo/docs" "$mrepo/docs/maintainers"
+cp "$script_dir/public-tree-markers.sh" "$mrepo/scripts/audit/"
+chmod +x "$mrepo/scripts/audit/public-tree-markers.sh"
+cat > "$mrepo/scripts/audit/public-tree.txt" <<'EOF'
+allow docs
+allow scripts
+prune scripts/audit
+prune docs/maintainers
+require docs/keep.md
+EOF
+printf 'AI-Assisted: <model> via VOWP\nA normal product document.\n' > "$mrepo/docs/keep.md"
+printf 'job v2-b1-spec\nAI-Assisted: deepseek/deepseek-flash via vowp-night\nsee docs/maintainers/private.md\nmerged 2026-11-10\n' > "$mrepo/docs/bad.md"
+printf 'pruned notes: vowp-night v2-g1-vault scripts/audit/\n' > "$mrepo/scripts/audit/notes.md"
+git init -q -b main "$mrepo"
+git -C "$mrepo" config user.name "Marker Test"
+git -C "$mrepo" config user.email "$(printf 'marker@%s' example.invalid)"
+git -C "$mrepo" add -A
+git -C "$mrepo" commit -qm "marker fixture"
+
+run_markers() {
+    (cd "$mrepo" && scripts/audit/public-tree-markers.sh "$@")
+}
+
+marker_summary=$tmp/marker-summary.txt
+if run_markers --worktree --summary > "$marker_summary" 2>&1; then
+    fail "build markers in a shipping path should fail"
+fi
+for category in ai_trailer build_diary job_id private_path; do
+    grep -q "  $category" "$marker_summary" || fail "marker category not reported: $category"
+done
+if grep -q 'scripts/audit/notes.md' "$marker_summary"; then
+    fail "the marker scan reported a pruned path"
+fi
+marker_out=$tmp/marker-full.txt
+if run_markers --worktree > "$marker_out" 2>&1; then
+    fail "the full marker scan should fail too"
+fi
+grep -q 'docs/bad.md:.*job v2-b1-spec' "$marker_out" || fail "the job id was not reported"
+grep -q 'docs/bad.md:.*via vowp-night' "$marker_out" || fail "the private trailer was not reported"
+grep -q 'docs/bad.md:.*docs/maintainers/private.md' "$marker_out" || fail "the private path was not reported"
+if grep -q 'docs/keep.md' "$marker_out"; then
+    fail "the product AI-Assisted trailer was reported as private"
+fi
+if run_markers --index --summary >/dev/null 2>&1; then
+    fail "the staged marker scan should fail"
+fi
+
+# A clean revision passes; the script lives outside that fixture, so its own
+# pattern text is not part of the scanned tree.
+mclean=$tmp/marker-clean
+mkdir -p "$mclean/docs"
+printf 'AI-Assisted: <model> via VOWP\nA normal product document.\n' > "$mclean/docs/keep.md"
+git init -q -b main "$mclean"
+git -C "$mclean" config user.name "Marker Test"
+git -C "$mclean" config user.email "$(printf 'marker@%s' example.invalid)"
+git -C "$mclean" add -A
+git -C "$mclean" commit -qm "clean marker fixture"
+"$script_dir/public-tree-markers.sh" --root "$mclean" --rev HEAD >/dev/null 2>&1 ||
+    fail "a clean revision should pass the marker scan"
+
 # 7. The real manifest carries the owner's prune list and owner exceptions.
 for pruned in AGENTS.md docs/dogfood docs/fresh-user docs/maintainers \
-    docs/release/0.1.0-rc.1.md scripts/audit scripts/dogfood scripts/fresh-user site; do
+    docs/release/0.1.0-rc.1.md scripts/acceptance scripts/audit scripts/dogfood \
+    scripts/fresh-user scripts/spikes site; do
     if ! grep -qx "prune $pruned" "$script_dir/public-tree.txt" &&
         ! grep -qx "prune $pruned/" "$script_dir/public-tree.txt"; then
         fail "real manifest does not prune: $pruned"
@@ -320,7 +417,11 @@ for pruned in AGENTS.md docs/dogfood docs/fresh-user docs/maintainers \
 done
 grep -qx 'require docs/design/job-map.md' "$script_dir/public-tree.txt" ||
     fail "real manifest does not require docs/design/job-map.md"
+grep -qx 'require docs/design/v0.2/' "$script_dir/public-tree.txt" ||
+    fail "real manifest does not require docs/design/v0.2/"
+grep -qx 'require docs/setup/' "$script_dir/public-tree.txt" ||
+    fail "real manifest does not require docs/setup/"
 grep -qx 'require THIRD-PARTY-LICENSES.md' "$script_dir/public-tree.txt" ||
     fail "real manifest does not require THIRD-PARTY-LICENSES.md"
 
-echo "self-test: PASS: scanner rules, masking, allowlist, history, public-tree prune and content-scrub idempotence work."
+echo "self-test: PASS: scanner rules, masking, allowlist, history, public-tree prune, build markers and content-scrub idempotence work."

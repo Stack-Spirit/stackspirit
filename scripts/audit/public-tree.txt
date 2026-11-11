@@ -45,9 +45,11 @@ prune docs/dogfood/
 prune docs/fresh-user/
 prune docs/maintainers/
 prune docs/release/0.1.0-rc.1.md
+prune scripts/acceptance/
 prune scripts/audit/
 prune scripts/dogfood/
 prune scripts/fresh-user/
+prune scripts/spikes/
 prune site/
 
 # --- required product paths -------------------------------------------------
@@ -71,12 +73,15 @@ require crates/
 require docs/concepts/
 require docs/design/
 require docs/design/job-map.md
+require docs/design/v0.2/
 require docs/guides/
+require docs/guides/phone.md
 require docs/guides/quickstart.md
 require docs/reference/
 require docs/release/0.1.0.md
 require docs/roadmap.md
 require docs/security.md
+require docs/setup/
 require docs/tests/
 require docs/troubleshooting.md
 require examples/

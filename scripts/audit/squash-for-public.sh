@@ -44,7 +44,8 @@ Usage: scripts/audit/squash-for-public.sh [--force]
 
 Creates the orphan branch `public-main` with one commit of the current tree,
 after:
-  1. scripts/audit/scan.sh --worktree passes;
+  1. scripts/audit/scan.sh --public-tree passes (private prune paths are not
+     part of the candidate; the staged tree is scanned again in step 7);
   2. cargo fmt --all -- --check passes;
   3. cargo clippy --workspace --all-targets -- -D warnings passes;
   4. cargo test --workspace passes;
@@ -52,7 +53,8 @@ after:
      applies the public-tree content scrub, contains every required product
      path and keeps only allowed top-level entries (scripts/audit/public-tree-check.sh --index);
   6. scripts/audit/public-tree-check.sh --rev public-main passes;
-  7. scripts/audit/scan.sh --rev public-main passes.
+  7. scripts/audit/scan.sh --rev public-main passes;
+  8. scripts/audit/public-tree-markers.sh --rev public-main passes.
 
 The staged tree is built in a temporary index, so the private checkout is not
 changed. The script never pushes. It prints the exact commands for the owner.
@@ -106,8 +108,8 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/vowp-public.XXXXXX") || fail "cannot create a temporary directory"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
-echo "squash: scanning the working tree"
-scripts/audit/scan.sh --worktree || fail "the working tree still has a non-allowlisted finding"
+echo "squash: scanning the public paths in the working tree"
+scripts/audit/scan.sh --public-tree || fail "the public paths still have a non-allowlisted finding"
 
 echo "squash: checking formatting"
 cargo fmt --all -- --check || fail "cargo fmt --all -- --check failed"
@@ -167,6 +169,8 @@ committer=$(git log -1 --format='%cn <%ce>' "$branch")
 echo "squash: checking the new tree"
 scripts/audit/public-tree-check.sh --rev "$branch" --manifest "$manifest" || fail "$branch does not match the manifest; it was left in place for inspection"
 scripts/audit/scan.sh --rev "$branch" || fail "$branch still has a non-allowlisted finding; it was left in place for inspection"
+echo "squash: checking the new tree for private build markers"
+scripts/audit/public-tree-markers.sh --rev "$branch" || fail "$branch still has private build markers; it was left in place for inspection"
 
 echo
 echo "squash: $branch is ready: 1 commit, author $identity"

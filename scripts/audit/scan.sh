@@ -10,6 +10,7 @@
 # Usage:
 #   scripts/audit/scan.sh                  # working tree + all history
 #   scripts/audit/scan.sh --worktree       # working tree only (fatal findings)
+#   scripts/audit/scan.sh --public-tree    # public paths in the working tree
 #   scripts/audit/scan.sh --rev <commit>   # one tree (fatal findings)
 #   scripts/audit/scan.sh --history        # all history (informational)
 #   scripts/audit/scan.sh --summary        # counts only, no individual lines
@@ -36,8 +37,10 @@ root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P) || exit 2
 cd "$root" || { echo "scan: cannot enter repository root" >&2; exit 2; }
 
 allowlist="$script_dir/allowlist.txt"
+manifest="$script_dir/public-tree.txt"
 max_blob=${AUDIT_MAX_BLOB_BYTES:-1048576}
 mode=all
+public=0
 strict_history=0
 summary=0
 rev=
@@ -48,6 +51,8 @@ Usage: scripts/audit/scan.sh [options]
 
 Scopes (default: --all):
   --worktree         scan tracked files in the working tree only
+  --public-tree      scan the working-tree paths that would ship: every prune
+                     path in the public-tree manifest is skipped
   --history          scan every commit reachable from git rev-list --all
   --rev <commit>     scan one commit's tree only (fatal findings)
   --all              working tree + history (the default)
@@ -56,6 +61,8 @@ Options:
   --summary          print category counts instead of each finding
   --strict-history   treat history findings as fatal as well
   --allowlist <f>    use another allowlist file
+  --manifest <f>     public-tree manifest for --public-tree
+                     (default: scripts/audit/public-tree.txt)
   --max-blob-bytes N flag tracked blobs larger than N bytes (default 1048576)
   -h, --help         show this help
 
@@ -74,6 +81,11 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --worktree|--no-history)
             mode=worktree
+            shift
+            ;;
+        --public-tree)
+            mode=worktree
+            public=1
             shift
             ;;
         --history)
@@ -103,6 +115,11 @@ while [ "$#" -gt 0 ]; do
             allowlist=$2
             shift 2
             ;;
+        --manifest)
+            [ "$#" -ge 2 ] || die "--manifest needs a file"
+            manifest=$2
+            shift 2
+            ;;
         --max-blob-bytes)
             [ "$#" -ge 2 ] || die "--max-blob-bytes needs a number"
             max_blob=$2
@@ -126,6 +143,11 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git working tr
 [ -f "$allowlist" ] || die "allowlist not found: $allowlist"
 [ -r "$allowlist" ] || die "allowlist is not readable: $allowlist"
 
+if [ "$public" -eq 1 ]; then
+    [ -f "$manifest" ] || die "manifest not found: $manifest"
+    [ -r "$manifest" ] || die "manifest is not readable: $manifest"
+fi
+
 if [ "$mode" = rev ]; then
     rev=$(git rev-parse --verify "$rev^{commit}" 2>/dev/null) || die "not a commit: $rev"
 fi
@@ -141,6 +163,24 @@ RE_COMBINED="$RE_IP|$RE_HOME|$RE_EMAIL|$RE_TOKEN|$RE_HOST|$RE_SSH"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/vowp-audit.XXXXXX") || die "cannot create a temporary directory"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+: > "$tmp/counts"
+: > "$tmp/prune"
+if [ "$public" -eq 1 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*)
+                continue
+                ;;
+        esac
+        set -- $line
+        [ "$#" -ge 2 ] && [ "$1" = prune ] || continue
+        path=${2%/}
+        [ -n "$path" ] && printf '%s\n' "$path" >> "$tmp/prune"
+    done < "$manifest"
+    prune_count=$(wc -l < "$tmp/prune" | tr -d ' ')
+    printf 'scan: public-tree: skipping %s pruned path(s) from %s\n' "$prune_count" "$manifest"
+fi
 
 # Rule names and regexes for AWK, one per line as name<TAB>regex.
 {
@@ -174,6 +214,19 @@ function allowed(rule, path, value,  key) {
     return key in allow
 }
 
+function is_pruned(path,  i, p) {
+    if (!public) {
+        return 0
+    }
+    for (i = 1; i <= prune_count; i++) {
+        p = prune_path[i]
+        if (path == p || index(path, p "/") == 1) {
+            return 1
+        }
+    }
+    return 0
+}
+
 BEGIN {
     while ((getline line < allowfile) > 0) {
         if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) {
@@ -197,6 +250,15 @@ BEGIN {
         allow[rule SUBSEP path SUBSEP value] = 1
     }
     close(allowfile)
+
+    while ((getline line < prunefile) > 0) {
+        if (line == "") {
+            continue
+        }
+        prune_count++
+        prune_path[prune_count] = line
+    }
+    close(prunefile)
 
     while ((getline line < rulesfile) > 0) {
         tab = index(line, "\t")
@@ -248,6 +310,10 @@ BEGIN {
         text = substr(rest, k + 1)
     }
 
+    if (scope == "worktree" && is_pruned(path)) {
+        next
+    }
+
     for (r = 1; r <= rule_count; r++) {
         rule = rule_name[r]
         regex = rule_re[r]
@@ -256,6 +322,12 @@ BEGIN {
             value = substr(remaining, RSTART, RLENGTH)
             remaining = substr(remaining, RSTART + RLENGTH)
             if (value == "") {
+                continue
+            }
+            # `args.local_port`, `listener.local_addr()` and `self.local.path()`
+            # are Rust field access, not hostnames. A real hostname is followed
+            # by a delimiter (quote, colon, slash, whitespace or end of line).
+            if (rule == "private_host" && remaining ~ /^[A-Za-z0-9_.]/) {
                 continue
             }
             if (rule == "email" && value ~ /@users\.noreply\.github\.com$/) {
@@ -294,6 +366,8 @@ scan_content() {
         -v commit="$label" \
         -v allowfile="$allowlist" \
         -v rulesfile="$tmp/rules" \
+        -v prunefile="$tmp/prune" \
+        -v public="$public" \
         -v countfile="$tmp/counts" \
         -v summary="$summary" \
         -f "$tmp/scan.awk"
@@ -301,6 +375,21 @@ scan_content() {
     if [ "$status" -eq 2 ]; then
         exit 2
     fi
+}
+
+# True when --public-tree is active and `path` is under a manifest prune entry.
+is_pruned_path() {
+    [ "$public" -eq 1 ] || return 1
+    path=$1
+    while IFS= read -r pruned; do
+        [ -n "$pruned" ] || continue
+        case "$path" in
+            "$pruned"|"$pruned"/*)
+                return 0
+                ;;
+        esac
+    done < "$tmp/prune"
+    return 1
 }
 
 # True for a tracked path whose name is a secret-bearing file.
@@ -375,6 +464,9 @@ scan_paths() {
     fi
     while IFS= read -r path; do
         [ -n "$path" ] || continue
+        if is_pruned_path "$path"; then
+            continue
+        fi
         if is_secret_path "$path"; then
             report_path_finding "$scope" "$label" "$path" secret_path
         fi
@@ -400,6 +492,9 @@ scan_worktree_blobs() {
     git ls-files -s > "$tmp/ls-files" 2>/dev/null || true
     while read -r file_mode file_sha file_stage file_path; do
         [ -n "$file_path" ] || continue
+        if is_pruned_path "$file_path"; then
+            continue
+        fi
         file_size=$(git cat-file -s "$file_sha" 2>/dev/null || printf '0')
         case "$file_size" in
             ''|*[!0-9]*) file_size=0 ;;
