@@ -18,66 +18,6 @@ use vowp_protocol::{
 };
 use vowp_store::{SessionFilter, StateChange, Store};
 
-/// The project-registry view used by the node supervisor and `vowp project`.
-///
-/// The registry is backed by the real `main.projects` columns.
-///
-/// These helpers are thin views over [`vowp_store::Store`]'s `ProjectEntry` API
-/// (`project_entry`, `list_project_entries`, `project_by_path`, `set_project_state`,
-/// `set_project_weight`, `remove_project_record`). The state, weight, pause reason and
-/// archive timestamp live in their own columns and are the same rows the fleet snapshot
-/// reads; there is no second copy in `config_json`.
-pub mod registry {
-    use std::path::Path;
-
-    use vowp_protocol::{ProjectEntry, ProjectName, ProjectState};
-    use vowp_store::Store;
-
-    use crate::CoreError;
-
-    /// Returns one registry entry, or `None` when the row does not exist.
-    pub fn project_entry(store: &Store, name: &ProjectName) -> Result<Option<ProjectEntry>, CoreError> {
-        Ok(store.project_entry(name)?)
-    }
-
-    /// Lists every registry entry, ordered by name.
-    pub fn project_entries(store: &Store) -> Result<Vec<ProjectEntry>, CoreError> {
-        Ok(store.list_project_entries()?)
-    }
-
-    /// Returns the entry whose recorded checkout path is `path`.
-    pub fn project_by_path(store: &Store, path: &Path) -> Result<Option<ProjectEntry>, CoreError> {
-        Ok(store.project_by_path(path)?)
-    }
-
-    /// Sets one project's state and paused reason in its registry row.
-    pub fn set_project_state(
-        store: &Store,
-        name: &ProjectName,
-        state: ProjectState,
-        reason: &str,
-    ) -> Result<ProjectEntry, CoreError> {
-        Ok(store.set_project_state(name, state, reason)?)
-    }
-
-    /// Sets one project's fairness weight (`1..=100`).
-    pub fn set_project_weight(store: &Store, name: &ProjectName, weight: u8) -> Result<(), CoreError> {
-        store.set_project_weight(name, weight)?;
-        Ok(())
-    }
-
-    /// Removes one project's registry row, keeping its database and history.
-    pub fn remove_project_record(store: &Store, name: &ProjectName) -> Result<(), CoreError> {
-        if name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
-            return Err(CoreError::Invalid(
-                "cannot remove the reserved _node project".to_owned(),
-            ));
-        }
-        store.remove_project_record(name)?;
-        Ok(())
-    }
-}
-
 use crate::CoreError;
 use crate::deps::Deps;
 
@@ -93,6 +33,7 @@ pub mod l8_watchdog;
 pub mod merge_queue;
 pub mod prompts;
 pub mod reconcile;
+pub mod registry;
 pub mod runner;
 pub mod supervisor;
 

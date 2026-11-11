@@ -77,9 +77,14 @@ fn register_project(paths: &NodePaths, config: &vowp_protocol::VowpConfig, proje
         .expect("project");
 }
 
-/// Polls `predicate` for up to five seconds.
+/// Polls `predicate` for up to thirty seconds.
+///
+/// Supervisor startup opens the store, creates the tmux layout and runs its first tick,
+/// and the full workspace runs these tests beside other heavy test binaries. Five seconds
+/// was too tight under that load; the extra headroom does not hide a stuck supervisor
+/// because the predicate still has to become true.
 fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if predicate() {
             return true;
@@ -1257,9 +1262,10 @@ fn init_registers_through_project_add_and_refuses_registry_conflicts() {
         .iter()
         .find(|entry| entry["name"] == "shared")
         .expect("shared project");
+    let registered = Path::new(shared["path"].as_str().expect("registered path"));
     assert_eq!(
-        shared["path"],
-        first.path().display().to_string(),
+        registered.canonicalize().expect("registered checkout canonicalises"),
+        first.path().canonicalize().expect("first checkout canonicalises"),
         "the registry still points at the first checkout"
     );
 
@@ -1539,7 +1545,8 @@ fn init_registers_a_second_project_with_its_own_loops() {
     let store = Store::open_with_project(&paths, &vowp_protocol::ProjectName::parse("tmp").expect("name"))
         .or_else(|_| {
             let global = Store::open_global(&paths).expect("global");
-            let entry = vowp_core::loops::registry::project_by_path(&global, second.path())
+            let second_root = second.path().canonicalize().expect("second checkout canonicalises");
+            let entry = vowp_core::loops::registry::project_by_path(&global, &second_root)
                 .expect("lookup")
                 .expect("project registered by init");
             Store::open_with_project(&paths, &entry.name)
@@ -1552,6 +1559,59 @@ fn init_registers_a_second_project_with_its_own_loops() {
             .expect("workers")
             .is_empty()
     );
+}
+
+#[test]
+fn project_by_path_canonicalizes_symlinked_checkouts() {
+    use std::os::unix::fs::symlink;
+
+    let env = common::TestEnv::new();
+    let paths = NodePaths::new(env.home_path());
+
+    // Register through the real checkout and find it through a symlinked path.
+    let real = git_repo();
+    write_project_config(real.path(), "real");
+    let real_link = env.home_path().join("real-checkout-link");
+    symlink(real.path(), &real_link).expect("symlink to the real checkout");
+    let (code, _, stderr) = env.run(&["project", "add", real.path().to_str().expect("real path")]);
+    assert_eq!(code, 0, "add through the real path failed: {stderr}");
+    let global = Store::open_global(&paths).expect("global store");
+    let entry = vowp_core::loops::registry::project_by_path(&global, &real_link)
+        .expect("lookup through the symlink")
+        .expect("the symlinked lookup finds the checkout registered by its real path");
+    assert_eq!(entry.name.as_str(), "real");
+
+    // Register through the symlink and find it through the real checkout path.
+    let linked = git_repo();
+    write_project_config(linked.path(), "linked");
+    let linked_link = env.home_path().join("linked-checkout-link");
+    symlink(linked.path(), &linked_link).expect("symlink to the linked checkout");
+    let (code, _, stderr) = env.run(&["project", "add", linked_link.to_str().expect("link path")]);
+    assert_eq!(code, 0, "add through the symlink failed: {stderr}");
+    let global = Store::open_global(&paths).expect("global store");
+    let entry = vowp_core::loops::registry::project_by_path(&global, linked.path())
+        .expect("lookup through the real path")
+        .expect("the real lookup finds the checkout registered through its symlink");
+    assert_eq!(entry.name.as_str(), "linked");
+
+    // A vanished checkout cannot be canonicalised; its lexical path still resolves.
+    let gone = env.home_path().join("checkout-that-is-gone");
+    let now = global.clock().now();
+    global
+        .upsert_project(&Project {
+            name: ProjectName::parse("gone").expect("project name"),
+            path: gone.display().to_string(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("gone project row");
+    let entry = vowp_core::loops::registry::project_by_path(&global, &gone)
+        .expect("lexical lookup")
+        .expect("a vanished checkout still resolves by its lexical path");
+    assert_eq!(entry.name.as_str(), "gone");
 }
 
 #[test]
