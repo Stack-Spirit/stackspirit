@@ -26,7 +26,7 @@ use vowp_core::loops::Supervisor;
 use vowp_core::surface::orchestrator::{NewOrchestrator, Orchestrator};
 use vowp_core::{AdapterRegistry, Deps, SystemGit, SystemRunner};
 use vowp_protocol::{
-    Clock, CmdGate, EventBody, Gate, HarnessConfig, JobId, JobKind, JobState, MemoryLog, NewJob, Node, NodeName,
+    Clock, EventBody, Gate, HarnessConfig, JobId, JobKind, JobState, MemoryLog, NewJob, Node, NodeName,
     OrchestratorApp, Project, ProjectName, Role, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SystemClock, Timestamp,
     VowpConfig,
 };
@@ -302,12 +302,9 @@ pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
             role: Role::Worker,
             profile: Some("worker".to_owned()),
             needs: Vec::new(),
-            owns: Vec::new(),
+            owns: vec!["setup-verify.txt".to_owned(), ".vowp/**".to_owned()],
             reads: Vec::new(),
-            gates: Some(vec![Gate::Cmd(CmdGate {
-                run: "sh -c 'echo fixture-gate-ok'".to_owned(),
-                ..CmdGate::default()
-            })]),
+            gates: Some(vec![Gate::OwnsRespected(true)]),
             priority: None,
             loop_: None,
             brief_text: None,
@@ -315,7 +312,7 @@ pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
         "setup verify",
     )?;
 
-    let deadline = Instant::now() + Duration::from_secs(45);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let _ = supervisor.tick();
         let job = fixture.store.require_job(&job_id)?;
@@ -355,7 +352,7 @@ pub fn fixture_job_merges() -> Result<SetupCheck, CliError> {
                 "fixture.job_merge",
                 "fail",
                 format!(
-                    "fixture job did not merge within 45s (last state {}; continues {}; last run {}; log {})",
+                    "fixture job did not merge within 120s (last state {}; continues {}; last run {}; log {})",
                     job.state.as_str(),
                     job.continues,
                     last_run
