@@ -27,9 +27,10 @@ reports a false `user/login` hand-off even though the apply checks as `vowp` and
 passes. The literal README prompt URL still returns **404** on 2026-11-11 because the
 `v0.2.0` tag and release are not published yet (J2 is later); the run used the same
 contract file from the tested checkout and a loopback release mirror, described under
-[What was simulated](#what-was-simulated). The VM is **not deleted**: the verify-1 check
-on 2026-11-11 still found `vowp-t1-fresh-1112` `RUNNING` with its boot disk `READY`;
-deletion is pending orchestrator action (open item 8).
+[What was simulated](#what-was-simulated). The orchestrator deleted the VM and its boot
+disk on 2026-11-11 (delete operation at 13:12 UTC); both `gcloud compute instances list`
+and `gcloud compute disks list` returned no items. This job did not delete it (see
+[Deletion](#deletion-orchestrator)).
 
 ## Environment
 
@@ -153,10 +154,10 @@ H=/home/vowp/.vowp
    `europe-north1-b`, in the same region. The run used the real image, sshd, sudo,
    systemd and network; only the harness identities, the public release URL and the
    fixture project were simulated as described above. This job was instructed not to
-   delete the VM and has not deleted it; deletion is pending orchestrator action, with
-   its boot disk, after this report. The orchestrator verifies both
-   `gcloud compute instances list` and `gcloud compute disks list` are empty (see
-   [Deletion](#deletion-orchestrator)).
+   delete the VM and did not delete it. The orchestrator deleted it with its boot disk
+   on 2026-11-11 (delete operation at 13:12 UTC) and verified both
+   `gcloud compute instances list` and `gcloud compute disks list` returned no items
+   (see [Deletion](#deletion-orchestrator)).
 4. **Real-VM fixture mistake.** The fixture that created the fake `opencode` sign-in
    used `install -d` with `-o vowp`, which left `/home/vowp/.local` and
    `.local/share` owned by root. The first install attempt after the workaround
@@ -685,10 +686,9 @@ verify checks, which use the absolute path.
 
 ### Deletion (orchestrator)
 
-This job was instructed not to delete the VM and has not deleted it. The instance and
-its boot disk were still present at verification; **deletion is pending orchestrator
-action**. The orchestrator must delete the VM with its boot disk and verify both lists
-are empty:
+The orchestrator deleted the VM and its boot disk on 2026-11-11 (delete operation at
+13:12 UTC). Both `gcloud compute instances list` and `gcloud compute disks list`
+returned no items. This job did not delete it; these are the orchestrator's commands:
 
 ```sh
 gcloud compute instances delete vowp-t1-fresh-1112 \
@@ -787,12 +787,11 @@ gcloud compute disks list --filter='name=vowp-t1-fresh-1112'
    probe's harness-login check as the effective user (through the same sudo transition
    the apply uses) when the effective user differs. This is cosmetic for the apply but
    makes the plan misleading on the default GCE home mode.
-8. **Operational handoff, not a product defect: VM deletion is pending.** This job was
-   instructed not to delete the VM and has not deleted it; the instance and its boot
-   disk were still present at verification. The orchestrator must delete
-   `vowp-t1-fresh-1112` with its boot disk and verify both
-   `gcloud compute instances list` and `gcloud compute disks list` are empty (commands
-   in [Deletion](#deletion-orchestrator)).
+
+The orchestrator has since deleted `vowp-t1-fresh-1112` and its boot disk (delete
+operation at 13:12 UTC on 2026-11-11); both `gcloud compute instances list` and
+`gcloud compute disks list` returned no items. This job did not delete it (see
+[Deletion](#deletion-orchestrator)).
 
 ## How to reproduce
 
@@ -905,9 +904,9 @@ sudo -u vowp -H bash /usr/local/share/vowp-acceptance/scripts/fixtures/project.s
 ```
 
 The second run reproduces `sh: 22: cd: can't cd to .`; `sudo chmod 0755 /home/dev`
-and a third run complete. The idempotent re-run starts the systemd unit. VM deletion is
-pending orchestrator action; the orchestrator deletes it with its boot disk after the
-report:
+and a third run complete. The idempotent re-run starts the systemd unit. For the
+recorded run the orchestrator deleted the VM and its boot disk after the report and
+verified both lists were empty:
 
 ```sh
 gcloud compute instances delete <vm> --zone=europe-north1-b --delete-disks=boot --quiet
