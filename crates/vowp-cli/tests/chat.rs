@@ -13,7 +13,7 @@ use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vowp_cli::chat::{ChatOptions, capture_follow_start};
+use vowp_cli::chat::{ChatOptions, capture_follow_start, revoked_switch_follow};
 use vowp_cli::{BufferIo, Ctx};
 use vowp_core::surface::follow::follow_to;
 use vowp_protocol::{
@@ -476,6 +476,70 @@ fn chat_follow_captures_the_start_sequence_before_the_lease_release() {
         "the follower skipped an event indexed during the release window: {text}"
     );
     assert!(text.contains("indexed during the release window"), "{text}");
+}
+
+#[test]
+fn chat_switch_revoked_lease_follows_from_the_pre_release_sequence() {
+    let env = common::TestEnv::new();
+    configure(&env, "hello");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let store = env.store();
+    let before = store.require_session(&session).expect("session").last_seq;
+    let paths = NodePaths::new(env.home_path());
+    let log = SessionLog::open(&paths, &session, Arc::new(SystemClock)).expect("writer");
+
+    let global = env.global(false);
+    let mut io = BufferIo::new("");
+    let ctx = Ctx::build(&global, &io).expect("build context");
+
+    // The closure stands in for releasing the stale guard. The event indexed here is
+    // visible after the switch captured its start but before it starts following.
+    let mut release_window_event = None;
+    revoked_switch_follow(&ctx, &mut io, &store, &session, || {
+        let event = log
+            .append(NewEvent {
+                actor: Actor::System,
+                source: EventSource {
+                    harness: HarnessKind::Vowp,
+                    model: None,
+                    node: Some(NodeName::parse("local").expect("node")),
+                    native_session_id: None,
+                },
+                body: EventBody::Note(Note {
+                    text: "indexed during the revoked switch release window".to_owned(),
+                }),
+                raw: None,
+                ts: None,
+            })
+            .expect("append release-window note");
+        store.index_event(&index_row(&event)).expect("index event");
+        log.sync().expect("sync log");
+        release_window_event = Some(event);
+        Ok(())
+    })
+    .expect("revoked switch follows");
+
+    let event = release_window_event.expect("release-window event");
+    assert!(
+        event.envelope.seq > before,
+        "the release-window event must be newer than the pre-release sequence: event {} before {before}",
+        event.envelope.seq
+    );
+    let stdout = io.stdout();
+    let stderr = io.stderr();
+    assert!(
+        stdout.contains(&format!("#{} note", event.envelope.seq)),
+        "the switch fallback skipped an event indexed during the release window: {stdout}"
+    );
+    assert!(
+        stdout.contains("indexed during the revoked switch release window"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("This surface is read-only (follow mode)."),
+        "the switch fallback must keep the read-only notice: {stderr}"
+    );
 }
 
 #[test]

@@ -296,6 +296,32 @@ pub fn capture_follow_start(
     Ok(start_seq)
 }
 
+/// Follows a session read-only after `/switch` found its lease revoked.
+///
+/// The stale guard is released before following, but the start sequence must be captured
+/// first: an event indexed while the guard is being released belongs to the follower's
+/// window and must be printed. Reading `last_seq` afterwards would advance it past that
+/// event and silently skip it.
+///
+/// `release` is injected so the ordering is testable without a live lease.
+pub fn revoked_switch_follow(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    store: &Store,
+    session: &SessionId,
+    release: impl FnOnce() -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    let start_seq = capture_follow_start(store, session, release)?;
+    let current = store.require_session(session)?;
+    writeln!(
+        io.err(),
+        "{}",
+        read_only_notice(store, &current, ctx.tz_offset_minutes())?
+    )?;
+    follow_mode(ctx, io, store, &current, start_seq)?;
+    Ok(())
+}
+
 /// Handles one slash command; returns whether the chat loop should continue.
 fn slash_command(
     ctx: &Ctx,
@@ -325,14 +351,8 @@ fn slash_command(
                 return Ok(false);
             };
             if check_lease_with(store, &session.id, Some(&token)).is_err() {
-                release_guard(guard)?;
-                let current = store.require_session(&session.id)?;
-                writeln!(
-                    io.err(),
-                    "{}",
-                    read_only_notice(store, &current, ctx.tz_offset_minutes())?
-                )?;
-                return follow_mode(ctx, io, store, &current, current.last_seq).map(|_| false);
+                revoked_switch_follow(ctx, io, store, &session.id, || release_guard(guard))?;
+                return Ok(false);
             }
             let Some(target) = parts.next() else {
                 writeln!(io.err(), "usage: /switch <executor> [--node n]")?;
