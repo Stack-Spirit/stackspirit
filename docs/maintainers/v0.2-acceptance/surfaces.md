@@ -20,14 +20,14 @@ native session, the app→chat lease move with capsule and old-tool refusal, the
 chat fallback mid-turn drain, and a combined app/lease move mid-turn. A fresh
 re-check on 2026-11-11 confirmed the orchestrator join text and pair-link URL
 shape, and that the old surface's `vowp mcp` write is refused **82 ms** after a
-lease move (well inside the 2 s bound). Test 5 was re-run twice on the
-acceptance rig with the real `vowp` CLI: the original run pinned `project.path`
-while the defect below was open, and the follow-up run used current `main`
-after the fix with the fixture's stock `vowp.toml`, which has no
-`project.path`. In both runs a real SSH connection was killed after three
-spooled events, the executor reconnected and replayed 12 events, and the home
-log has 19 contiguous events with 12 unique assistant lines and no gap or
-duplicate.
+lease move (well inside the 2 s bound). The test-5 record has three runs. The
+earlier `t3` run (whose home-side wrapper dropped `--project`) recorded the kill
+at three spooled events and a 19-event home log with 12 unique assistant lines.
+The `t3final` run used the real `--project` path with `project.path` pinned; it
+recorded two SSH connections, 13 spool events and the same 19-event/12-assistant
+end state, but no kill point. The follow-up `t3follow` run used current `main`
+after the fix with the fixture's stock `vowp.toml`, which has no `project.path`;
+it recorded its own kill at three spooled events and the same end state.
 
 The T3 work found one product defect that affects remote execution: an
 explicit `--project <name>` failed with `io: No such file or directory` when
@@ -172,8 +172,10 @@ the owner join is still pending.
   private XDG tree under the orchestrator directory and a local fake
   OpenAI-compatible model on `127.0.0.1`; no provider key, real model, public
   port or real `~/.vowp` was used.
-- Test 5 originally ran in the T0 rig on `t3final`: home container
-  `vowp-acceptance-t3final-home` (image `vowp-acceptance/vps:sudo`,
+- Test 5's earlier `t3` run used `/home/vowp/acceptance/t3/home` and ssh target
+  `t3home`; its drop log is cited below. The fresh `t3final` run used home
+  container `vowp-acceptance-t3final-home` (image
+  `vowp-acceptance/vps:sudo`,
   `sha256:3c19867d4d633df0ca5f0dda7fa06300e69816a3857c1488be05184c915011ab`,
   Ubuntu 24.04), temporary home `/home/vowp/acceptance/t3final/home`,
   `TMUX_TMPDIR` `/home/vowp/.acceptance/tmux` and socket
@@ -185,9 +187,9 @@ the owner join is still pending.
   phone client (that client was used only for earlier surface-shape checks;
   the owner phone click-through is pending). The host home, host `~/.vowp`,
   host tmux server, network and real harnesses were never used.
-- Both rigs were removed after the evidence was collected with
-  `bash scripts/acceptance/rig.sh down --name <rig>` (`t3final` and
-  `t3follow`; containers, network and generated keys removed).
+- The `t3final` and `t3follow` rigs were removed after the evidence was
+  collected with `bash scripts/acceptance/rig.sh down --name <rig>`;
+  containers, network and generated keys were removed.
 
 `V` below is the built `vowp` and `$ROOT` is a private temporary directory:
 
@@ -441,10 +443,11 @@ orchestrator t3join (opencode, running) session 01M74P8Z6AST9MARPFCY1KDC5R
 ```
 
 The matching `opencode pair` output, reproduced with the one-time code
-redacted. The temporary raw evidence file that held the code during
-verification (under the worker's `/tmp/opencode/t3-final/join` evidence tree)
-has since been deleted; the committed record never contained the code, and it
-is not reproduced here:
+redacted. The temporary raw evidence file that held the code during the
+original verification (under the worker's `/tmp/opencode/t3-final/join`
+evidence tree) was deleted while preparing this follow-up record; it is gone
+now. The committed record never contained the code, and it is not reproduced
+here:
 
 ```text
 Open a link to connect. Links work once and expire in 5 minutes.
@@ -504,15 +507,17 @@ printf 't3 fake answer: %s\n' "$(printf '%s' "$prompt" | head -n 1)"
 
 ### Setup
 
-Test 5 was run twice on the T0 rig. The original fresh run (`t3final`,
-2026-11-11) used the then-current `ef3765c`-based binary and pinned the
-documented `project.path` field in the throwaway fixture because the
-`--project <name>` defect was still open. The follow-up acceptance run
-(`t3follow`, 2026-11-11) used the current-`main` binary after
-`f-project-path-default` (`50e63b5`, with `b78ae83` registering its test
-target) and the fixture's stock `vowp.toml`, which has no `project.path`. The
-commands below are the `t3follow` run; the earlier run used the same shape with
-the removed `sed` line.
+The acceptance record has two full fresh runs on the T0 rig, `t3final` and
+`t3follow`, plus the earlier `t3` run. The earlier `t3` run used a home-side
+wrapper that dropped `--project`; its recorded `DROP at spool_lines=3` is cited
+below. The `t3final` run (2026-11-11) used the then-current `ef3765c`-based
+binary and pinned the documented `project.path` field in the throwaway fixture
+because the `--project <name>` defect was still open; it did not record its
+kill point. The follow-up acceptance run (`t3follow`, 2026-11-11) used the
+current-`main` binary after `f-project-path-default` (`50e63b5`, with
+`b78ae83` registering its test target) and the fixture's stock `vowp.toml`,
+which has no `project.path`. The commands below are the `t3follow` run; the
+`t3final` run used the same shape with the removed `sed` line.
 
 The home was a temporary VOWP home with one fixture project (`t3ssh`, a T0
 `hello` fixture) and a surface-only node named `laptop`. Start it with the T0
@@ -621,12 +626,21 @@ before finishing. A separate client-crash resume would print `resumed:true`.
 
 The follow-up evidence is in `/tmp/opencode/t3follow/evidence`: `drop.txt` (the
 drop log, exit, connection count and status above), `ssh.log` (both `session
-ingest --project t3ssh` invocations), `home-check.txt` and `spool-check.txt`.
-The earlier `t3final` run produced the same result. Its drop log with the
-`DROP at spool_lines=3` line is `/tmp/opencode/t3-evidence/test5-drop.txt`;
-`/tmp/opencode/t3-final/test5-drop.txt` contains only the status document and
-does not contain the drop line, so it is not evidence for that detail.
-`/tmp/opencode/t3-final/test5-check.txt` is the earlier home-log check.
+ingest --project t3ssh` invocations), `home-check.txt`, `spool-check.txt` and
+`home-setup.txt` (the project lookup without `project.path`).
+
+The earlier `t3` run is the source of the other recorded drop line:
+`/tmp/opencode/t3-evidence/test5-drop.txt` has `DROP at spool_lines=3`; its
+`test5-ssh.log` names `t3home` and `/home/vowp/acceptance/t3/home`; its run id
+is `01M74F9VPZYTJHESGW1HNJMRFR`; and its `test5-check.txt` records assistant
+text `ssh drop line NN`.
+
+The later `t3final` run has no recorded drop line anywhere under
+`/tmp/opencode/t3-final`. Its `/tmp/opencode/t3-final/test5-drop.txt` records
+two SSH connections and 13 spool events with run id
+`01M74PFYDZX0Q5QN9VYAG65SM7`; `test5-check.txt` records 19 home events and
+assistant text `t3 slow line NN`; its ssh wrapper log names `t3finalhome`. The
+kill point is not claimed for that run.
 
 The home log and the executor spool agree exactly:
 
@@ -674,8 +688,9 @@ test cli_project_name_resolves_relative_mapping_outside_checkout ... ok
 test result: ok. 2 passed; 0 failed
 ```
 
-This replaces the earlier T3 run's home-side wrapper that dropped the
-`--project` flag: both runs use the real flag and the real ingest path.
+This replaces the earlier `t3` run's home-side wrapper that dropped the
+`--project` flag: the `t3final` and `t3follow` runs use the real flag and the
+real ingest path.
 
 ## Open items and followup dispositions
 
@@ -743,9 +758,10 @@ disposed of in this record:
    §12.3/§7.6 without "exactly".
 4. **Test-5 drop artifact:** the follow-up run's drop log is
    `/tmp/opencode/t3follow/evidence/drop.txt`; the earlier
-   `/tmp/opencode/t3-evidence/test5-drop.txt` has the `DROP at spool_lines=3`
-   line, and `/tmp/opencode/t3-final/test5-drop.txt` is cited only as the
-   status document it is.
+   `/tmp/opencode/t3-evidence/test5-drop.txt` is the `t3` run's
+   `DROP at spool_lines=3` record. The `t3final` run is limited to its recorded
+   end state (two connections, 13 spool events, 19 home events) because no drop
+   line was recorded for it.
 5. **Test-5 project path:** test 5 now passes on the `t3follow` rig without
    `project.path` after `f-project-path-default` (`50e63b5`, with `b78ae83`
    registering its test); the setup and evidence are recorded above.
