@@ -4,56 +4,174 @@ This is the acceptance record for §13.5 tests **4 (surfaces, app changes and th
 `vowp chat` fallback)** and **5 (SSH drop during a laptop-executor turn)**. It is
 the T3 card `v2-t3-surfaces`.
 
-**Result on the tested build: test 4 is PARTIAL. The real opencode desktop web
-UI (the renderer the Mac desktop app loads) and the `opencode mini` terminal UI
-over a real SSH PTY share one live session and see each other's turns. The move
-to `vowp chat` with a capsule, the old app's VOWP write refusal, and a combined
-mid-turn lease move with a running turn drained and continued all pass. But the
-card requires the owner's physical Mac desktop app and phone; this Linux worker
-has neither, so those device click-throughs were not performed. They are the
-only missing part of test 4 and the reason the job report is blocked. Test 5
-passes with one workaround: a real SSH connection was killed mid-turn, the
-executor spooled 12 events, reconnected and replayed them with no gap or
-duplicate.**
+**Result on the tested build: test 4 PASSES on every path this worker can
+automate, and test 5 PASSES. The two physical owner-device click-throughs — the
+opencode desktop app on the owner's Mac and the same live session on the
+owner's phone over SSH — were NOT RUN. The planner deferred them to the owner
+on 2026-11-11 (the "Owner-device scope" decision), and the keeper does not
+waive owner acceptance. They are recorded in [PENDING OWNER
+ACCEPTANCE](#pending-owner-acceptance) with the exact commands, the expected
+result and "not run"; they are not a failure of the automated scope and no
+longer block this card. The Claude Remote Control join is a further owner
+check and is also pending.**
+
+The automated test 4 evidence covers the two real opencode UIs sharing one live
+native session, the app→chat lease move with capsule and old-tool refusal, the
+chat fallback mid-turn drain, and a combined app/lease move mid-turn. A fresh
+re-check on 2026-11-11 confirmed the orchestrator join text and pair-link URL
+shape, and that the old surface's `vowp mcp` write is refused **82 ms** after a
+lease move (well inside the 2 s bound). Test 5 was re-run on the acceptance rig
+with the real `vowp` CLI: a real SSH connection was killed after three spooled
+events, the executor reconnected and replayed 12 events, and the home log has
+19 contiguous events with 12 unique assistant lines and no gap or duplicate.
 
 The run also found one product defect that affects remote execution: an explicit
-`--project <name>` fails with `io: No such file or directory` unless the command
-runs inside the checkout. `__exec` always sends the project name to the home, so
-test 5 needed the workaround in open item 2; the spool/replay behaviour itself is
-not affected.
+`--project <name>` fails with `io: No such file or directory` when the project's
+`vowp.toml` has no `project.path` and the command runs outside the checkout.
+`__exec` always sends the project name to the home, so the T3 test pinned the
+documented `project.path` field in the throwaway fixture to exercise the real
+CLI path. The defect still reproduces without it and remains a follow-up job
+(open item 2); the spool/replay behaviour itself is not affected.
+
+## PENDING OWNER ACCEPTANCE
+
+These are the owner checks. The two physical-device click-throughs were
+deferred by the planner on 2026-11-11; the Claude Remote Control join is the
+separate 5-minute owner test from §16.3. None was run: this Linux worker has no
+Mac, no phone and no logged-in Tailscale path to either device. The owner
+should use the final build from this branch (the automated app-UI run used
+`3c57f7c`; the final branch is based on `origin/main` `ef3765c`, whose surface,
+lease and remote-ingest code is unchanged).
+
+### 1. opencode desktop app on the Mac
+
+Commands (the same block `vowp orchestrator new` prints, with the real paths,
+port and session substituted):
+
+```sh
+# On the home, from a registered project checkout (or add --project <project>):
+vowp orchestrator new --name t3 --app opencode \
+    --executor opencode:deepseek/deepseek-flash#max
+
+# On the control machine (the Mac):
+vowp tunnel open t3 --remote-port <port>
+
+# On the home:
+cd ~/.vowp/orchestrators/t3 && \
+  XDG_STATE_HOME=~/.vowp/orchestrators/t3/.opencode/state opencode pair
+
+# Open the printed one-time
+# http://127.0.0.1:<port>/auth/connect/<code> link in the opencode desktop
+# app, replacing its port with the tunnel's local port.
+```
+
+Expected result: the orchestrator project opens in the Mac desktop app; sending
+`owner mac turn` from its composer appears in the live session, and the phone
+check below sees that turn and its reply. The join block printed by
+`orchestrator new` is the authority for the concrete port, session id and
+directory.
+
+**Not run.**
+
+### 2. The same live session on the phone over SSH
+
+Command (from the printed `phone:` line):
+
+```sh
+ssh -t <home-ssh-target> \
+  'cd <orchestrator-directory> && \
+   opencode --server http://127.0.0.1:<port> --session <native-session>'
+```
+
+Expected result: the terminal UI opens on the same native session; the turn
+sent from the Mac is visible; sending `owner phone turn` makes it appear in the
+Mac desktop app and in the session message list. This is the phone's SSH app
+path, not a browser or a VOWP-specific app.
+
+**Not run.**
+
+### 3. A real-app move to another app mid-turn
+
+With the Mac opencode app holding the lease and streaming a turn:
+
+```sh
+printf 'continue after the app move\n' | vowp chat <session> --takeover
+
+# The old app's write-tool call (same shape as 4b; use the orchestrator's
+# real surface id and lease.token):
+vowp mcp --session <session> --surface <old-surface> \
+    --token-file <orchestrator>/lease.token <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capacity_set","arguments":{"target":2,"reason":"owner mid-turn check"}}}
+EOF
+```
+
+Expected result: the old app's next `vowp mcp` write tool call is refused within
+**2 s** with exactly
+`refused: Taken over by <holder> at <HH:MM>. This surface is now read-only (follow mode).`;
+the old turn drains and ends `interrupted`; a capsule is written; the new
+`vowp chat` turn starts with `note: handoff` and a capsule id. The automated
+4b–4d checks below prove the same mechanics with a scripted client and the fake
+CLI executor; this owner check proves the real app's window and write path.
+
+**Not run.**
+
+### 4. Claude Remote Control (the separate 5-minute owner test)
+
+Command (from a registered project checkout, or add `--project <project>`;
+a claude.ai login is required and an API key is not enough):
+
+```sh
+vowp orchestrator new --name claude-t3 --app claude-code
+```
+
+Expected result: `orchestrator claude-t3 (claude-code, running) ...` with join
+instructions for `https://claude.ai/code` and the Claude mobile app; a message
+sent from the desktop app appears in the mobile app on the same Remote Control
+session.
+
+**Not run.** The test home has no claude.ai login, so the login gate was
+verified instead:
+
+```text
+$ vowp orchestrator new --name t3join-claude --app claude-code
+vowp: refused: Claude Remote Control needs a claude.ai login on the home
+$ echo $?
+5
+```
+
+`vowp orchestrator ls` records that orchestrator as `degraded` with the
+fallback join text, exactly as §16.13 describes. This is the honest refusal
+path; the owner join is still pending.
 
 ## Environment
 
 - Date: 2026-11-11 (UTC).
-- Worktree: `job/v2-t3-surfaces`. The acceptance runs used the binary built at
-  `3c57f7c`; the final branch is rebased onto `ef3765c`. The delta
-  `3c57f7c..ef3765c` is capacity admission/supervisor work plus the F4
-  orchestrator follow-ups (`crates/vowp-core/src/surface/orchestrator.rs`,
-  `crates/vowp-core/src/loops/supervisor.rs`, `crates/vowp-cli/src/framework.rs`
-  and their tests). The orchestrator changes are why the owner-device re-run
-  should use the final build; the surface/lease/remote-ingest paths in tests 4b,
-  4c and 5 are unchanged.
-- Binary under test: `cargo build -p vowp-cli --bin vowp`; it reports
-  `vowp 0.1.0` (the package version during the v0.2 pre-release), SHA-256
+- Worktree: `job/v2-t3-surfaces`, based on `origin/main` `ef3765c`.
+- The app-UI evidence was collected with the binary at `3c57f7c`:
+  `cargo build -p vowp-cli --bin vowp`, `vowp 0.1.0`, SHA-256
   `320916762ddf7ed636c2bb2eaa1ed56ff1d8dedc49e9ef95cb82151f1463973c`.
+- The fresh join, lease-refusal and test-5 re-check ran on the final code
+  (`ef3765c` plus this docs-only branch): `vowp 0.1.0`, SHA-256
+  `5bc6e07eb5a78ce4c20d76da9a12e06aab6d543e81793416709566b8d47c990b`.
 - opencode: `opencode v2.0.28` (the version the S3 spike pinned). OpenSSH
   `9.6p1`.
 - Test 4 ran on the Linux build host with a private `HOME`, `XDG_*` tree,
-  `VOWP_HOME`, `TMUX_TMPDIR` and tmux socket. The opencode service used a private
-  XDG tree under the orchestrator directory and a local fake OpenAI-compatible
-  model on `127.0.0.1`; no provider key, real model, public port or real
-  `~/.vowp` was used.
-- Test 5 ran in the T0 rig: home container `vowp-acceptance-t3-home` (image
-  `vowp-acceptance/vps:sudo`, `sha256:3c19867d4d633df0ca5f0dda7fa06300e69816a3857c1488be05184c915011ab`,
-  Ubuntu 24.04). The home was a temporary `/home/vowp/acceptance/t3/home`;
+  `VOWP_HOME`, `TMUX_TMPDIR` and tmux socket. The opencode service used a
+  private XDG tree under the orchestrator directory and a local fake
+  OpenAI-compatible model on `127.0.0.1`; no provider key, real model, public
+  port or real `~/.vowp` was used.
+- Test 5 ran in the T0 rig: home container `vowp-acceptance-t3final-home`
+  (image `vowp-acceptance/vps:sudo`, `sha256:3c19867d4d633df0ca5f0dda7fa06300e69816a3857c1488be05184c915011ab`,
+  Ubuntu 24.04). The home was a temporary `/home/vowp/acceptance/t3final/home`;
   `TMUX_TMPDIR` was `/home/vowp/.acceptance/tmux` and the socket was
-  `vowp-acceptance-t3`. The laptop executor for test 5 was the build host, not
-  the rig's disposable phone client (the phone client was used only for the
-  earlier surface-shape checks). The host home, host `~/.vowp`, host tmux
-  server, network and real harnesses were never used.
+  `vowp-acceptance-t3final`. The laptop executor for test 5 was the build host,
+  not the rig's disposable phone client (that client was used only for earlier
+  surface-shape checks; the owner phone click-through is pending). The host
+  home, host `~/.vowp`, host tmux server, network and real harnesses were never
+  used.
 - The rig was removed after the evidence was collected with
-  `bash scripts/acceptance/rig.sh down --name t3` (exit 0; containers, network
-  and generated keys removed).
+  `bash scripts/acceptance/rig.sh down --name t3final` (exit 0; containers,
+  network and generated keys removed).
 
 `V` below is the built `vowp` and `$ROOT` is a private temporary directory:
 
@@ -66,17 +184,19 @@ export VOWP_HOME="$ROOT/home" VOWP_ACCEPTANCE_TMUX_SOCKET=t3
 export PATH="$ROOT/bin:$PATH"
 ```
 
-## Test 4 — surfaces: PARTIAL (real app UIs pass; owner Mac/phone not run)
+## Test 4 — surfaces: PASS (automated scope); owner devices pending
 
 ### 4a — one live opencode session in the desktop UI and the phone terminal UI
 
 The desktop side is the opencode desktop web UI opened through the one-time
-pair link in Chromium; this is the same renderer the Mac desktop app loads. The
-phone side is `opencode mini` in an interactive SSH PTY through the same tunnel,
-which is what a phone SSH app displays. Both are the real app UIs, not the
-HTTP/CLI equivalent, and both drove the same live native session. Physical Mac
-and phone hardware was not available, so the device-specific click-through
-remains a non-blocking owner follow-up.
+pair link in Chromium; this is **expected** to be the same web UI the Mac
+desktop app loads, but that is an assumption, not something this Linux worker
+verified. The phone side is `opencode mini` in an interactive SSH PTY through
+the same tunnel, which is what a phone SSH app displays. Both are the real app
+UIs, not the HTTP/CLI equivalent, and both drove the same live native session.
+Physical Mac and phone hardware were not available, so the device-specific
+click-through is covered by the PENDING OWNER ACCEPTANCE section above; it is
+not a failure of the transport or UI evidence below.
 
 A real opencode orchestrator was created with the VOWP host. The project is a
 throwaway git checkout; the opencode host reads a loopback fake model from its
@@ -94,10 +214,10 @@ $V orchestrator new --name t3 --app opencode \
 The fake-model configuration is the one recorded in the
 [S3 app-surface spike](../v0.2-spikes/app-surfaces.md) (provider `fake`,
 model `fake-model`, loopback `127.0.0.1`). The chat checks in 4b and 4c used a
-second throwaway T0 `hello` fixture registered as `t3app`. Its fake CLI harness was extended in the temporary
-fixture only to answer the capsule writer with a valid `CapsuleDraft` and to
-stream 12 lines for a prompt containing `T3 SLOW TURN`; it never calls a model
-or the network.
+second throwaway T0 `hello` fixture registered as `t3app`. Its fake CLI harness
+was extended in the temporary fixture only to answer the capsule writer with a
+valid `CapsuleDraft` and to stream 12 lines for a prompt containing
+`T3 SLOW TURN`; it never calls a model or the network.
 
 `orchestrator new` started an opencode 2.0.28 managed service under
 `$VOWP_HOME/orchestrators/t3/.opencode`, acquired the opencode surface lease and
@@ -115,9 +235,10 @@ orchestrator t3 (opencode, running) session 01M74EYV7C769RRX56WE4XAH4A
 The quoted join block is from the initial host run on port 45489; the UI run
 resumed the orchestrator on port 39169, and the commands below use `$PORT` for
 the actual port. The server was loopback-only, and `opencode pair` printed the
-one-time link and the matching `ssh -L` command. A private sshd was started on `127.0.0.1`; the
-pair link was opened through the tunnel in Chromium (the desktop UI), and the
-same tunnel carried an interactive `opencode mini` terminal UI over SSH:
+one-time link and the matching `ssh -L` command. A private sshd was started on
+`127.0.0.1`; the pair link was opened through the tunnel in Chromium (the
+desktop UI), and the same tunnel carried an interactive `opencode mini`
+terminal UI over SSH:
 
 ```sh
 ssh -N -L "127.0.0.1:$LPORT:127.0.0.1:$PORT" -p "$SSHPORT" "$USER@127.0.0.1"
@@ -234,7 +355,9 @@ changes even though the executor string stays `cli:acceptance-hello`; no model
 switch is claimed for this sub-check. The old executor is the deterministic
 fake CLI harness (the real opencode desktop app itself is the owner check), but
 the lease, MCP write gate, drain, switch and capsule are the production VOWP
-paths.
+paths. The old surface id `01M74MIDOLDSURFACE00000000` in the scripted MCP call
+is **synthetic**: it represents the old app, while the lease, token file, MCP
+gate, takeover, drain and capsule are the production paths.
 
 The old app surface acquired the lease and began a slow turn through the same
 `turn-begin`/`__exec` transport every surface uses:
@@ -283,14 +406,55 @@ RESULT: PASS
 The old run ends `interrupted`; the new turn is turn 2 with `note: handoff`
 and its 12 fake-harness lines. The old `__exec` exited **75** with the exact
 notice. This closes the mid-turn mechanics; the remaining device/form-factor
-click-through is the blocking owner follow-up.
+click-through is covered by the PENDING OWNER ACCEPTANCE section above.
+
+### 4e — fresh join, pair-link output and write-gate re-check (2026-11-11)
+
+The final code was re-checked directly, without the old evidence:
+
+```text
+$ vowp orchestrator new --name t3join --app opencode \
+    --executor opencode:deepseek/deepseek-flash#max
+orchestrator t3join (opencode, running) session 01M74P8Z6AST9MARPFCY1KDC5R
+  directory: /tmp/opencode/t3-final/join/home/orchestrators/t3join
+  desktop: 1. On the control machine: vowp tunnel open 't3join' --remote-port 42357
+2. On the home: cd '/tmp/.../orchestrators/t3join' && XDG_STATE_HOME='/tmp/.../orchestrators/t3join/.opencode/state' 'opencode' pair
+3. Open the one-time link it prints (5 minutes, single use) in the opencode desktop app, replacing its port with the tunnel's local port.
+  phone: ssh -t <home-ssh-target> 'cd '\''/tmp/.../orchestrators/t3join'\'' && '\''opencode'\'' --server http://127.0.0.1:42357 --session '\''ses_e369b6f0bffegVAA5j8EjVipuZ'\'''
+  chat: vowp chat 01M74P8Z6AST9MARPFCY1KDC5R
+```
+
+The matching `opencode pair` output (code redacted; the link was not logged):
+
+```text
+Open a link to connect. Links work once and expire in 5 minutes.
+
+  http://127.0.0.1:42357/auth/connect/<code>
+
+Over SSH? Forward the port, then open the link on your machine:
+  ssh -L 42357:127.0.0.1:42357 <host>
+```
+
+A `vowp mcp` `capacity_set` call succeeded while the old opencode-kind lease
+was held, then a `vowp chat --takeover` moved the lease to the chat surface.
+The same MCP call then failed in **82 ms** with exactly:
+
+```text
+refused: Taken over by acceptance-local at 06:56. This surface is now read-only (follow mode).
+```
+
+The capsule step is not claimed for this short re-check (the first throwaway
+fixture used here did not implement the capsule writer); 4b and 4d above are
+the recorded capsule and drain evidence. The join text, one-time URL shape,
+lease move and old-write refusal are all real VOWP paths and match the printed
+blocks.
 
 ### Temporary fake harness used by 4b–4d
 
-This is the throwaway fixture harness, also kept as
-`test4-fake-worker.sh` in the evidence directory. It streams 12 lines for a
-prompt containing `T3 SLOW TURN` and answers the capsule writer with a valid
-`CapsuleDraft`; it never calls a model or the network.
+This is the throwaway fixture harness, also kept as `test4-fake-worker.sh` in
+the evidence directory. It streams 12 lines for a prompt containing
+`T3 SLOW TURN` and answers the capsule writer with a valid `CapsuleDraft`; it
+never calls a model or the network.
 
 ```sh
 #!/usr/bin/env bash
@@ -321,14 +485,46 @@ printf 't3 fake answer: %s\n' "$(printf '%s' "$prompt" | head -n 1)"
 ### Setup
 
 The home container was a temporary VOWP home with one fixture project
-(`t3ssh`, the T0 `hello` fixture) and a surface-only node named `laptop`.
-Start it with the T0 rig; inside the home container these commands use the
-home's `vowp` and `H`:
+(`t3ssh`, a T0 `hello` fixture) and a surface-only node named `laptop`. Start it
+with the T0 rig; inside the home container these commands use the home's
+`vowp` and `H`:
 
 ```sh
-bash scripts/acceptance/rig.sh up --name t3 --variant sudo --no-build
+bash scripts/acceptance/rig.sh up --name t3final --variant sudo --no-build
+# Copy the built binary into the home and put it on the SSH PATH; the
+# `session ingest` child invokes `vowp` by name.
+docker cp target/debug/vowp vowp-acceptance-t3final-home:/home/vowp/vowp
+docker exec -u root vowp-acceptance-t3final-home sh -lc \
+  'cp /home/vowp/vowp /usr/local/bin/vowp && chmod 0755 /usr/local/bin/vowp'
 # inside the home container:
-H=/home/vowp/acceptance/t3/home
+H=/home/vowp/acceptance/t3final/home
+```
+
+The fixture is created with the T0 generator, then its `vowp.toml` pins the
+documented main-checkout field so the real `--project <name>` path works from
+outside the checkout:
+
+```sh
+bash /opt/vowp-acceptance/fixtures/project.sh hello \
+    /home/vowp/projects/t3ssh --name t3ssh
+# In the throwaway fixture only: add the main checkout path to [project].
+sed -i '/^\[project\]/a path = "/home/vowp/projects/t3ssh"' \
+    /home/vowp/projects/t3ssh/vowp.toml
+# Install the streaming fake harness used by the turn (test4-fake-worker.sh).
+cp <evidence>/test4-fake-worker.sh \
+    /home/vowp/projects/t3ssh/.acceptance/bin/fake-worker
+chmod 0755 /home/vowp/projects/t3ssh/.acceptance/bin/fake-worker
+```
+
+The home is initialised in a throwaway repository, then the fixture is
+registered:
+
+```sh
+mkdir -p /home/vowp/initproj && cd /home/vowp/initproj
+git init -q -b main && printf 't3 final home\n' > README.md
+git add README.md && git -c user.name=t3 -c user.email=t3@example.invalid commit -qm init
+vowp --home "$H" init --name t3final-home --no-framework
+vowp --home "$H" project add /home/vowp/projects/t3ssh
 vowp --home "$H" node add laptop -
 ```
 
@@ -337,35 +533,40 @@ private tmux directory and a private `VOWP_CONTROL_HOME` whose `control.json`
 named the rig's SSH target and the home path:
 
 ```json
-{"role":"control","home":"vowp-home","ssh_target":"t3home",
- "remote_home":"/home/vowp/acceptance/t3/home","created_at":"..."}
+{"role":"control","home":"vowp-home","ssh_target":"t3finalhome",
+ "remote_home":"/home/vowp/acceptance/t3final/home","created_at":"..."}
 ```
 
-The home created a session with the fake CLI executor, acquired an executor
-lease, and wrote the `turn-begin` grant (the grant file was mode 0600; its token
-is never printed here):
+For the test only, an `ssh` wrapper on the laptop's `PATH` maps the
+`t3finalhome` alias to the rig's loopback port and generated owner key; it does
+not change the VOWP CLI or the ingest path. The home created a session with the
+fake CLI executor, acquired an executor lease, and wrote the `turn-begin` grant
+(the grant file was mode 0600; its token is never printed here):
 
 ```sh
 # inside the home container
 SID=$(vowp --home "$H" --project t3ssh --json session new \
-        --title "t3 ssh drop" --executor cli:acceptance-hello \
+        --title "t3final ssh drop" --executor cli:acceptance-hello \
         --cwd /home/vowp/projects/t3ssh | jq -r .id)
 TOKEN=$(vowp --home "$H" --project t3ssh session lease "$SID" \
           --acquire opencode --holder laptop --node laptop)
-# request.json carries {lease, prompt, executor, purpose, node, cwd}; cwd is the
-# laptop checkout, not the home checkout.
+# request.json carries {lease, prompt: "T3 SLOW TURN", executor, purpose, node, cwd};
+# cwd is the laptop checkout, not the home checkout.
 vowp --home "$H" --project t3ssh --json session turn-begin "$SID" \
    --executor cli:acceptance-hello --purpose start --node laptop \
    --request request.json > grant.json
 # copy grant.json (mode 0600) to the laptop, then run the executor there:
-vowp --home <laptop-home> --project <laptop-fixture> __exec \
+vowp --home <laptop-home> --project <laptop-checkout> __exec \
    --grant grant.json --spool-dir <laptop-spool>
 ```
 
 The fake harness streamed 12 lines with 0.35 s between lines. On the laptop,
 `vowp __exec` ran the harness and opened a real SSH connection to the home's
 `vowp session ingest`; the executor-side spool was a private directory on the
-laptop.
+laptop. The home's `session ingest` is invoked as `vowp --home <remote-home>
+--project t3ssh session ingest ...` by the real `__exec`, so this run exercises
+the project-name path (the throwaway fixture's `project.path` is what keeps the
+relative harness mapping resolvable from the home directory).
 
 ### The drop and replay
 
@@ -374,12 +575,12 @@ boundary. `__exec` reconnected on the next event and replayed from the first
 unacknowledged frame. The two SSH connections are visible in the wrapper log:
 
 ```text
-DROP at spool_lines=3 ssh_pid=2267754
+DROP at spool_lines=3
 EXEC_EXIT=0
 SSH_CONNECTIONS=2
 {"ack_window":64,"done":true,"resumed":false,
- "run_id":"01M74F9VPZYTJHESGW1HNJMRFR",
- "session_id":"01M74F9VF199RWA8TWRT78QP2C"}
+ "run_id":"01M74PFYDZX0Q5QN9VYAG65SM7",
+ "session_id":"01M74PFYA4VGXH2MFVNEYTCT6Q"}
 ```
 
 `resumed:false` means this was a fresh `__exec` process, not that the killed
@@ -389,13 +590,16 @@ before finishing. A separate client-crash resume would print `resumed:true`.
 The home log and the executor spool agree exactly:
 
 ```text
-session 01M74F9VF199RWA8TWRT78QP2C state idle last_seq 19 executor cli:acceptance-hello
-events 19 assistant_messages 12
-first ['ssh drop line 01', 'ssh drop line 02', 'ssh drop line 03']
-last  ['ssh drop line 10', 'ssh drop line 11', 'ssh drop line 12']
+home events 19
+types: assistant.message 12, note 1, session.created 1,
+       session.executor 2, turn.ended 1, turn.started 1, user.message 1
+seqs 1..19 contiguous true
+assistant 12 unique 12
+first 't3 slow line 01' last 't3 slow line 12'
 RESULT: PASS
 
-spool_events 12 summary 1 acked_events 12 summary_acked True
+spool_events 13 (12 events + summary) summary 1 acked_events 12
+summary_acked true
 RESULT: PASS
 ```
 
@@ -407,54 +611,49 @@ killed connection and nothing was applied twice.
 
 ### The project-lookup workaround
 
-The first attempt failed before the harness started because
+The first T3 attempt failed before the harness started because
 `$V --home "$H" --project t3ssh session ...` exits 1 with
 `{"error":{"kind":"io","message":"io: No such file or directory (os error 2)"}}`
-when run outside the checkout, while the same command without `--project` from
-inside the checkout works. `__exec` always sends `--project <name>` to the
-home, so test 5 used a throwaway `vowp` wrapper on the home that dropped the
-flag and ran from `/home/vowp/projects/t3ssh`. This is a product defect, not a
-rig or fixture issue; see open item 2.
+when run outside the checkout and the project has no `project.path`, while the
+same command without `--project` from inside the checkout works. `__exec` always
+sends `--project <name>` to the home, so this fresh run pins `project.path` in
+the throwaway fixture. The defect is a product issue, not a rig or fixture
+issue; see open item 2. This replaces the earlier T3 run's home-side wrapper
+that dropped the `--project` flag: the fresh run uses the real flag and the real
+ingest path.
 
 ## Open items
 
-1. **Owner-device click-through — the reason test 4 is PARTIAL/blocked.** The
-   real opencode desktop UI, the interactive terminal UI over SSH, the MCP write
-   refusal, the drain and the capsule all passed with opencode 2.0.28 and the
-   production VOWP paths. The Linux worker had no Mac or phone hardware, so
-   these device-specific click-throughs remain for the owner (about 5 minutes):
-   - On the Mac: `vowp tunnel open t3 --remote-port <port>` and the printed
-     `opencode pair` link; open the orchestrator project, send one message, and
-     confirm the phone sees it.
-   - On the phone: `ssh -t <home> 'cd <orchestrator> && opencode --server
-     http://127.0.0.1:<port> --session <native>'` (the terminal UI); send one
-     message and confirm the Mac sees it.
-   - Claude Code Remote Control is the separate 5-minute owner test recorded by
-     S3/§16.3. It needs a claude.ai login on the home; the run had none, so it
-     is not part of this card's pass.
+1. **PENDING OWNER ACCEPTANCE — the owner checks above.** They were deferred
+   to the owner by the planner on 2026-11-11 (the two device click-throughs) or
+   are the separate §16.3 Claude test; they are not waived and are not a
+   failure of the automated scope. The exact commands and expected results are
+   in the section above. The owner should use the final build.
 
-2. **Fix job: explicit `--project <name>` fails outside the checkout.**
-   On the test home with project `t3ssh` registered at
+2. **Fix job: explicit `--project <name>` fails outside the checkout when the
+   project config has no `project.path`.**
+   On a test home with project `t3ssh` registered at
    `/home/vowp/projects/t3ssh`:
 
    ```sh
    cd /home/vowp
-   vowp --home /home/vowp/acceptance/t3/home --project t3ssh --json session ls
+   vowp --home /home/vowp/acceptance/t3final/home --project t3ssh --json session ls
    # {"error":{"hint":null,"kind":"io","message":"io: No such file or directory (os error 2)"}}
 
    cd /home/vowp/projects/t3ssh
-   vowp --home /home/vowp/acceptance/t3/home --json session ls
+   vowp --home /home/vowp/acceptance/t3final/home --json session ls
    # exits 0 and lists the session
    ```
 
    This makes `vowp session ingest --project <name>` fail when `__exec` reaches
-   the home over SSH, so a laptop-executor turn cannot run without the
-   workaround above. The failure is the relative harness mapping resolved
-   against the current directory in `crates/vowp-core/src/deps.rs`
-   (`mapping_path` / `config.project.path`); the other fix is to set
-   `config.project.path` from the resolved checkout in
-   `crates/vowp-cli/src/ctx.rs`. This was recorded by T2 as a related
-   `project add` symptom; T3 shows it also breaks the remote-ingest path.
+   the home over SSH unless the project pins `project.path`, so a
+   laptop-executor turn cannot run without a workaround. The failure is the
+   relative harness mapping resolved against the current directory in
+   `crates/vowp-core/src/deps.rs` (`mapping_path` / `config.project.path`); the
+   other fix is to set `config.project.path` from the resolved checkout in
+   `crates/vowp-cli/src/ctx.rs`. T2 recorded a related `project add` symptom;
+   T3 shows it also breaks the remote-ingest path. This doc only records the
+   defect; the fix is an `f-*` follow-up outside T3's ownership.
 
 3. **opencode MCP model exposure remains the §16.20 open assumption.** The
    project-local `opencode.json` registers `vowp mcp` and a scripted MCP client
@@ -477,11 +676,14 @@ rig or fixture issue; see open item 2.
   check the old MCP write succeeds, take over with a second `vowp chat` surface
   while the turn is streaming, and verify the old `__exec` exits 75, the old
   MCP write refuses, the capsule is written and the new turn starts with the
-  handoff message. The owner Mac/phone click-through is still required.
+  handoff message. The owner Mac/phone click-through and the Claude Remote
+  Control join are the PENDING OWNER ACCEPTANCE items above.
 - Test 5: use the T0 rig's `vps:sudo` home, a temporary home and fixture
-  project, a surface-only `laptop` node, and a private SSH alias; kill the
-  executor's SSH child after the spool has three events and check the home log
-  for contiguous sequence numbers and exactly one copy of every event.
+  project with `project.path` pinned, a surface-only `laptop` node, and a
+  private SSH alias; kill the executor's SSH child after the spool has three
+  events and check the home log for contiguous sequence numbers and exactly one
+  copy of every event. The real `__exec` → `vowp session ingest --project
+  t3ssh` path is used.
 
 ## Gate status
 
