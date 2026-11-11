@@ -53,7 +53,7 @@ fn version_prints_binary_git_and_schema() {
     let (code, value, stderr) = env.run_json(&["version"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["schema"], 1);
-    assert!(value["version"].as_str().unwrap_or_default().starts_with("0.1"));
+    assert_eq!(value["version"].as_str().unwrap_or_default(), env!("CARGO_PKG_VERSION"));
 }
 
 #[test]
