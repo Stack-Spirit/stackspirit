@@ -94,9 +94,10 @@ rustc --version
 ```
 
 Install and sign in to the harness with its own tooling. A harness that needs a provider key reads it
-from the environment exactly as it does outside VOWP; put the value in the environment or the
-harness's own store, never in `vowp.toml`. VOWP stores secret values only in its secret store and
-refers to them by name; see [Secrets](#secrets) and the [security model](../security.md#secrets).
+from the environment exactly as it does outside VOWP; put the value in the environment, the
+harness's own store, or a VOWP secret named in `env_pass`, never in `vowp.toml`. VOWP stores the
+values it manages in its secret store and can also forward a listed `env_pass` name from the process
+environment; see [Secrets](#secrets) and the [security model](../security.md#secrets).
 
 ## Register projects
 
@@ -210,7 +211,8 @@ All four roles must have a profile. Points to check:
 - **Providers.** Use the provider key from the executor: `claude` for Claude Code, the text before the
   first `/` for opencode, the mapping name for a generic CLI.
 - **Secrets.** Put values in the secret store or the environment, not in `vowp.toml`. `env_pass` lists
-  the names to inject into the harness child process.
+  the names to inject into the harness child process; VOWP takes the store value when set and
+  otherwise forwards the environment value.
 - **Costs.** If a harness reports usage without a cost, add
   `[providers.<your-provider>.prices."<your-model>"]` with current per-million-token prices.
   Without it, VOWP reports the cost as `unknown` rather than guessing.
@@ -254,9 +256,10 @@ vowp up --once                   # exactly one node tick, then exit
 ```
 
 There is **one supervisor for every active project**. `up` creates a `vowp-home` tmux session with
-`board` and `capacity`, plus one `vowp-<project>` session per active project. `--once` is useful as a
-smoke test; it runs the node steps, every project in round-robin order and the snapshot write. `up`
-exits 4 if a supervisor already holds the node lock; `vowp status` shows the pid.
+`board` and `capacity`, plus one `vowp-<project>` session for every non-archived project (including
+paused ones). `--once` is useful as a smoke test; it runs the node steps, every project in
+round-robin order and the snapshot write. `up` exits 4 if a supervisor already holds the node lock;
+`vowp status` shows the pid.
 
 `up` runs the v0.1-to-v0.2 migration automatically for an old home, after taking a backup. Pass
 `--no-migrate` only when you intentionally want the refusal instead. The migration refuses while a
@@ -363,7 +366,8 @@ vowp secret upgrade             # prints the one sudo command that creates the v
 
 On a control machine, `secret set/ls/rm/upgrade` route to the home over SSH; `secret request` opens a
 local tunnel so the browser sees a control-machine loopback URL. A harness receives only the names
-listed in `env_pass`; VOWP injects the values into that child's environment.
+listed in `env_pass`; VOWP injects those names into that child's environment, from the secret store
+when set and otherwise from the process environment.
 
 Redaction is partial and timed. Event payloads and `raw` appended by the session service or the
 remote ingest path are redacted before writing, as is the snapshot; a capsule is redacted after the

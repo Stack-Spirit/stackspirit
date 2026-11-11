@@ -33,7 +33,7 @@ pre-release builds are not supported.
 | Prompts, tool output, file contents | Session logs, blobs, run mirrors under `~/.vowp` | They often contain sensitive code or data. |
 | The global and project databases | `~/.vowp/vowp.db`, `~/.vowp/projects/<name>/project.db` | Jobs, decisions, leases and the audit trail. |
 | Provider spend | Harness accounts, the secret store, environment variables | A runaway loop costs money. |
-| Secret values | `~/.vowp/secrets/` (basic mode) or `/home/vowp-vault/secrets/` (vault mode) | They unlock providers and deploy targets. |
+| Secret values | `~/.vowp/secrets/` (basic mode), `/home/vowp-vault/secrets/` (vault mode) or the service environment | They unlock providers and deploy targets. |
 | Harness logins | Claude Code/opencode's own storage | VOWP must never read or copy them. |
 | The control cache and tunnels | `~/.vowp-control/` | Snapshot content, spooled events and local forward records. |
 | App config and opencode pair links | `~/.vowp/orchestrators/<name>/` | They grant access to the session and its tools. |
@@ -42,9 +42,11 @@ Trust boundaries:
 
 - The **user** trusts the home to run only the configured executors, within the configured
   directories, and to stop at a human approval before public actions.
-- The **home** is authoritative. A control machine, an app or an MCP server never opens a database
-  file; every write is a `vowp` command on the home (directly or over SSH). The one exception is the
-  control machine's own snapshot cache, spool, surface state and tunnel table.
+- The **home** is authoritative. A control machine and the apps and MCP instance on it never open a
+  VOWP database file; every VOWP write goes to the home (over SSH or through the home's MCP server).
+  On the home, the `vowp mcp` server is a `vowp` process: it reads and writes the home database
+  directly, and every write tool checks the session lease. The one exception on a control machine is
+  its own snapshot cache, spool, surface state and tunnel table.
 - VOWP **trusts the harness** to be the authenticated client it is; it does not implement a second
   login or token flow. Harness logins stay under the harness's control.
 - VOWP **does not trust repository content or tool output**. A README, an issue body or a test fixture
@@ -58,9 +60,9 @@ Trust boundaries:
 | Rule | Enforcement |
 |---|---|
 | **One writer per session** | `sessions/<id>/log.jsonl` is appended only on the home, by the session service or the hidden `session ingest` path. `seq` has no gaps or duplicates; ingest is idempotent by event id. |
-| **The home is authoritative** | Control machines, apps and MCP servers never write a DB file. They route commands to the home. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
+| **The home is authoritative** | A control machine and the apps and MCP instance on it never write a VOWP DB file; their commands route to the home. On the home, the `vowp mcp` server reads and writes the home database directly, and every write tool checks the session lease. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
 | **No public listener** | The supervisor opens no public HTTP, SSE or API port. The opencode app host and the one-time secret paste page listen on loopback only, and a control machine reaches both through an SSH tunnel; the secret vector is one-time. Claude Remote Control opens no local port: it connects outbound to claude.ai from the home. |
-| **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. `vowp doctor` reports presence by name and never calls the network. Secret values live only in the secret store (see [Secrets](#secrets)). This covers configuration and argv, not every stored byte: exact-value redaction covers the session-service and remote-ingest event paths and the snapshot, but `supervisor.log`, gate evidence, ledger rows, the switch turn path and the `session watch` importer are written unredacted and can hold a value a command printed (see [Redaction](#redaction)). |
+| **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. VOWP stores the values it manages in the secret store, and a listed `env_pass` name may also be forwarded from the process environment (see [Secrets](#secrets)). `vowp doctor` reports presence by name and never calls the network. This covers configuration and argv, not every stored byte: exact-value redaction covers the session-service and remote-ingest event paths and the snapshot, but `supervisor.log`, gate evidence, ledger rows, the switch turn path and the `session watch` importer are written unredacted and can hold a value a command printed (see [Redaction](#redaction)). |
 | **Stock binaries only** | Adapters spawn `claude`, `opencode` or a configured CLI exactly as a user would. No client spoofing, no "sign in with Claude" inside VOWP, no token forwarding. The optional `session watch` importer reads transcript JSONL read-only; it does not read auth files. |
 | **cwd allow-list** | Before a run, the session layer checks that the working directory is inside the job worktree, the project path, the worktree root or `[node].cwd_allow`. Anything else is refused. |
 | **Worktree isolation** | One worktree per job on branch `job/<id>`. The `owns_respected` gate checks the diff and uncommitted files against the job's globs; dispatch-time locks prevent overlapping owners from running together. |
@@ -122,10 +124,11 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 
 ### Injection
 
-- A harness run's `env_pass` is a list of **names**. `vault::env_for` resolves exactly those names for
-  that harness and returns `(name, value)` pairs to the adapter. A missing name is a warning, not a
-  hard failure. This is the only injection path today: the promoter runs `[env.*]` deploy/probe
-  commands with no added secret environment.
+- A harness run's `env_pass` is a list of **names**. VOWP resolves each name from the secret store
+  when a value is set there, and otherwise forwards it from the process environment of the machine
+  running the turn; the home session service and the remote `__exec` path both do this. A name that
+  cannot be resolved is a warning on the home path and an error on a remote surface. The promoter
+  still runs `[env.*]` deploy/probe commands with no added secret environment.
 - `__vault-exec` is the hidden read/inject helper: `__vault-exec --env NAME -- <cmd…>` reads only
   `NAME` and execs the command with that one variable set. In vault mode the sudoers line chooses
   `vowp-vault`; the helper has no `--user` flag and cannot run an arbitrary command outside the one it
@@ -367,7 +370,8 @@ Be explicit about the limits:
 - [ ] Keep `~/.vowp` and `~/.vowp-control` out of shared backups and out of any repository.
 - [ ] Open no public port. Reach the opencode app host and the secret page through `vowp tunnel` only;
       Claude Remote Control uses an outbound connection to claude.ai and no tunnel.
-- [ ] Put provider values in the secret store, never in `vowp.toml`, a command argument or a chat.
+- [ ] Put provider values in the secret store or the service environment; never in `vowp.toml`, a
+      command argument or a chat.
 - [ ] Prefer vault mode; if you use basic mode, accept that the runtime user owns the files and say so
       in the setup report.
 - [ ] Review `[node].cwd_allow`; keep it as small as the work requires.
