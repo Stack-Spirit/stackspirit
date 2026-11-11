@@ -346,7 +346,7 @@ fn supervisor_snapshot(deps: &Deps, store: &Store, fail_streak: u32) -> Result<S
     })
 }
 
-/// Reads the `_node` supervisor loop's fail streak when C2 has created it.
+/// Reads the `_node` supervisor loop's fail streak when it exists.
 ///
 /// Until the node supervisor exists this is `None`; the caller then uses the current
 /// project's `l1-supervisor` row (or the first readable project's row).

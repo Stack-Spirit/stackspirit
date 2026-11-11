@@ -1,7 +1,7 @@
 //! Capacity measurement, admission, brakes, targets, fairness and advice.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6 and §13.2. C0 creates the module and
-//! its compiling stubs; E1/E2/E3 fill the bodies.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6 and §13.2. The module measures host
+//! capacity, admits jobs, applies brakes, sets targets, orders projects fairly and advises.
 
 pub mod admit;
 pub mod advisor;

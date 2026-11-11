@@ -6,13 +6,13 @@
 //! `vowp-vault`. Both are mode 0600. The mode file is `<VOWP_HOME>/secrets/mode`.
 //!
 //! Metadata lives in the global `secret_index` table: name, last four characters and
-//! timestamps. Values never enter the database. Rows left by the first G1 implementation in
-//! the `kv` table under `secret:<NAME>` are migrated into `secret_index` on first access.
+//! timestamps. Values never enter the database. Rows left by the earlier vault implementation
+//! in the `kv` table under `secret:<NAME>` are migrated into `secret_index` on first access.
 //!
 //! Tests and packaging may override `VOWP_VAULT_HOME`, `VOWP_VAULT_SUDO` and
 //! `VOWP_VAULT_HELPER`. Production uses `/home/vowp-vault`, `sudo` and the running binary.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and §13.2. G1 fills the module.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and §13.2.
 
 pub mod request;
 

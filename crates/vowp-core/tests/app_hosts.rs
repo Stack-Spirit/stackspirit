@@ -2,7 +2,7 @@
 //! fake `opencode`/`claude` scripts and a loopback HTTP fake. No real app, no real
 //! `~/.vowp`, no default tmux server and no external network.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5 and the F5 named tests in §15.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5 and the app-host tests in §15.
 
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};

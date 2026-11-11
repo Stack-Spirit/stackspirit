@@ -1,4 +1,5 @@
-//! The app-host trait and its shared types. F5 fills the hosts; tests use a fake.
+//! The app-host trait and its shared types. The opencode and Claude Code hosts implement
+//! it; tests use a fake.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5. One [`AppHost`] runs one app
 //! (opencode or Claude Code) for an orchestrator and exposes its transcript as

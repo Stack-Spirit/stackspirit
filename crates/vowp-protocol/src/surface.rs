@@ -1,7 +1,7 @@
 //! Surfaces, leases, remote execution lines and orchestrator cards.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.2–§7.6 and §13.1. C0 freezes the
-//! wire shapes; F1/F2/F4/F5 fill the lease, remote-ingest and app-host behaviour.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.2–§7.6 and §13.1. The wire shapes are
+//! fixed here; leases, remote ingest and app hosts build on them.
 
 use std::fmt;
 

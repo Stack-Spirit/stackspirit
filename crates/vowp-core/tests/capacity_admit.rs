@@ -1,5 +1,5 @@
-//! E2 capacity admission, brakes, targets and fairness tests.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6 and the E2 test list in §15.
+//! Capacity admission, brakes, targets and fairness tests.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6 and the capacity admission test list in §15.
 
 use std::path::Path;
 use std::sync::Arc;

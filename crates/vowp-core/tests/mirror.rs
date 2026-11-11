@@ -1,7 +1,7 @@
 //! Transcript mirror and resume-context tests. Hermetic: a temporary node home, a fake
 //! clock, a file-backed fake host and a loopback HTTP fake for the opencode API.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5 and the F5 named tests in §15.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5 and the transcript mirror tests in §15.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

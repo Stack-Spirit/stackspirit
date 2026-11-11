@@ -1,7 +1,7 @@
 //! The versioned `snapshot.json` document and the project registry view.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §5 and §13.1. C0 freezes the shapes; D1
-//! builds and writes the snapshot every tick.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §5 and §13.1. The snapshot shape is fixed
+//! here; the node supervisor builds and writes the snapshot every tick.
 
 use std::collections::BTreeMap;
 

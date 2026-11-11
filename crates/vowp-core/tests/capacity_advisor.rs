@@ -1,6 +1,6 @@
-//! E3 capacity advisor tests.
+//! Capacity advisor tests.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.4 and the E3 test list in §15. Every
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.4 and the capacity advisor test list in §15. Every
 //! test uses a temporary node home, a fake clock and fake adapters; nothing reads the real
 //! `~/.vowp`, the network or a real harness.
 

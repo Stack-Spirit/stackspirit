@@ -14,7 +14,7 @@ use crate::convert::{corrupt, ts_from_text, ts_to_text};
 use crate::db::Store;
 use crate::error::StoreError;
 
-/// Prefix of the legacy `kv` rows written by the first G1 vault implementation.
+/// Prefix of the legacy `kv` rows written by the earlier vault implementation.
 const LEGACY_KV_PREFIX: &str = "secret:";
 
 /// Column list shared by every `secret_index` query.

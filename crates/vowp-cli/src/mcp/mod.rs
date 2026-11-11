@@ -92,7 +92,7 @@ fn handle_request(backend: &Backend<'_>, request: &jsonrpc::Request) -> Option<V
             })
         }
         // Claude Code sends this probe before initialize. A valid empty capability is
-        // friendlier than -32601 and is accepted by the clients S3 tested.
+        // friendlier than -32601 and is accepted by the MCP clients we tested.
         "server/discover" => json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},

@@ -1,5 +1,5 @@
 //! `snapshot.json` and the fleet snapshot cards.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §5 and §15 (D1 named tests).
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §5 and the snapshot tests in §15.
 
 mod support;
 

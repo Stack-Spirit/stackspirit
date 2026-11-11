@@ -1,6 +1,6 @@
 //! Surface lease and takeover tests. Hermetic: a temporary node home, a fake clock, fake
 //! adapters and no harness process. Spec: `docs/design/v0.2/home-and-surfaces.md` §7.3
-//! and the F2 named tests in §15.
+//! and the surface lease tests in §15.
 
 mod support;
 

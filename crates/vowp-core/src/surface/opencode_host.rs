@@ -1,7 +1,6 @@
 //! The opencode app host: the managed v2 service, its pair link and its transcript.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5 and the S3 spike
-//! (`docs/maintainers/v0.2-spikes/app-surfaces.md`). The host runs opencode v2 as a managed
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5. The host runs opencode v2 as a managed
 //! user service under a **private** `XDG_STATE_HOME`/`XDG_DATA_HOME` below the orchestrator
 //! directory, binds `127.0.0.1` only, and talks to the server with HTTP Basic
 //! `opencode:<token>`. The pair link is printed on demand by `opencode pair`; this module
@@ -180,8 +179,8 @@ impl OpencodeHost {
 
     /// Reads the target session's events from the listener spool.
     ///
-    /// The global `/api/event` stream covers every location and is subscription-only (S3
-    /// and the 2.0.28 route description: events during a disconnection are missed). A
+    /// The global `/api/event` stream covers every location and is subscription-only (the
+    /// 2.0.28 route description: events during a disconnection are missed). A
     /// background listener keeps the subscription open from host start and appends every
     /// event to a private spool, so a pass cannot lose an event that happened between passes.
     /// The spool is filtered to this app session before mapping, so another session's
@@ -1467,7 +1466,7 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     .get("cost")
                     .and_then(Value::as_f64)
                     .or_else(|| usage.get("cost").and_then(Value::as_f64));
-                // `session.usage.updated` is a cumulative session snapshot (S3), so write
+                // `session.usage.updated` is a cumulative session snapshot, so write
                 // the delta for each update and key it by the assistant message it follows.
                 let delta = if usage_seen {
                     tokens_delta(&tokens, &previous_tokens)

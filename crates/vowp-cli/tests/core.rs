@@ -327,7 +327,7 @@ fn c0_chat_flags_are_no_longer_frozen() {
         assert!(stderr.contains("session nope00"), "{args:?}: {stderr}");
         assert!(
             !stderr.contains("not implemented in this build"),
-            "{args:?} was still refused by C0: {stderr}"
+            "{args:?} was still refused as not implemented: {stderr}"
         );
     }
 

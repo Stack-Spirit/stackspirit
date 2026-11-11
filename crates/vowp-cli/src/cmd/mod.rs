@@ -40,17 +40,17 @@ pub mod tunnel;
 pub mod up;
 pub mod window;
 
-/// Returns the shared C0 stub error: the command exists but is not implemented in this build.
+/// Returns the shared not-implemented error: the command exists but is not implemented in this build.
 pub(crate) fn not_implemented() -> CliError {
     CliError::NotImplemented("not implemented in this build")
 }
 
-/// Returns whether `command` still uses a C0 frozen-flag guard.
+/// Returns whether `command` still uses a frozen-flag guard.
 ///
-/// Chat's v0.2 flags are implemented by F3 and are no longer refused here. The remaining
-/// frozen flags (`up --no-migrate`, `loops --all`, `schedule --all`) are handled by their
-/// own handlers; this hook stays so the pre-dispatch check in `lib.rs` keeps a single
-/// documented entry point.
+/// Chat's v0.2 flags are no longer refused here. The remaining frozen flags
+/// (`up --no-migrate`, `loops --all`, `schedule --all`) are handled by their own handlers;
+/// this hook stays so the pre-dispatch check in `lib.rs` keeps a single documented entry
+/// point.
 pub(crate) fn command_needs_v0_2_handler(_command: &Command) -> bool {
     false
 }

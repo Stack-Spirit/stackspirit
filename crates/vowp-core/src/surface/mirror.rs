@@ -152,7 +152,7 @@ pub fn mirror_from_host(
         if log.is_none() {
             log = Some(SessionLog::open(&deps.paths, session, deps.clock.clone())?);
         }
-        // C0 hook: exact-value redaction before the log line exists (G1 fills).
+        // Redact exact values before the log line is written.
         let appended = log
             .as_ref()
             .ok_or_else(|| CoreError::Invalid("session log was not opened".to_owned()))?

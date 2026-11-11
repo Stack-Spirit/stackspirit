@@ -3,7 +3,7 @@
 // Every test uses a temporary node home and project, a scripted stdio client and never
 // touches the real `~/.vowp`, the default tmux server, the network or a real harness.
 //
-// The crate root lists every test target explicitly and F6 does not own `Cargo.toml`, so
+// The crate root lists every test target explicitly and this module does not own `Cargo.toml`, so
 // `src/mcp/tests.rs` includes this same file as a lib unit-test module. The fixture below
 // is deliberately self-contained so both compilation modes see the same tests.
 

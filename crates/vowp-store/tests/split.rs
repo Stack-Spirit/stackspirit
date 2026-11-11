@@ -1,5 +1,5 @@
 //! Global + per-project store split tests.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.1–§3.8 and §15 (C1).
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.1–§3.8 and §15.
 
 use std::sync::Arc;
 use std::time::Duration;

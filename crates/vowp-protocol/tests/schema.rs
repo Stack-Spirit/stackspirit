@@ -26,7 +26,7 @@ use vowp_protocol::run::{Run, Worker};
 use vowp_protocol::schema::{all_schemas, schema_for_name};
 use vowp_protocol::session::{Session, Switch};
 
-/// The type names rule 12 of the crate spec requires, plus the v0.2 C0 documents.
+/// The type names rule 12 of the crate spec requires, plus the v0.2 documents.
 const LISTED_TYPES: &[&str] = &[
     "EventEnvelope",
     "Capsule",

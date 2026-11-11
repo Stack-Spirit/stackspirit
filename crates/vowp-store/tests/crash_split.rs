@@ -1,5 +1,5 @@
 //! Real child-process crash injection for the global/project write order.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.7 and §15 (C1).
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.7 and §15.
 
 use std::collections::HashSet;
 use std::path::Path;

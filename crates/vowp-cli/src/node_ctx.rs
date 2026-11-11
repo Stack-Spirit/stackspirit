@@ -1,4 +1,4 @@
-//! Node role discovery: home, control machine or uninitialised. C0 creates the types; C2/D2 fill it.
+//! Node role discovery: home, control machine or uninitialised.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §8.1–§8.2 and §13.6.
 
@@ -191,8 +191,8 @@ impl NodeCtx {
 
     /// Routes one command to the home and returns its JSON stdout.
     ///
-    /// D2 (control home) fills the SSH transport; the frozen signature is kept here so
-    /// the control commands can be written against it without touching this file again.
+    /// The control-home SSH transport is not implemented in this build; the signature stays
+    /// here so the control commands can be written against it without touching this file.
     pub fn route_json(&self, _args: &[String]) -> Result<String, CliError> {
         Err(CliError::NotImplemented("not implemented in this build"))
     }

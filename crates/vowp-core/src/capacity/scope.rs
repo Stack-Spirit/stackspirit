@@ -1,8 +1,7 @@
 //! Per-run resource scopes: a cgroup v2 user scope when available, `/proc` tree walk otherwise.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.1 and S1
-//! (`docs/maintainers/v0.2-spikes/capacity.md`). The cgroup path is preferred; the process
-//! tree is the fallback when the user manager or cgroup delegation is unavailable.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.1. The cgroup path is preferred; the
+//! process tree is the fallback when the user manager or cgroup delegation is unavailable.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;

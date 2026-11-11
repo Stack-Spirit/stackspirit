@@ -859,7 +859,7 @@ fn remote_summary_writes_run_usage() {
     assert_eq!(recorded["cpu_usec"], usage.cpu_usec);
     assert_eq!(recorded["source"], "proc_tree");
 
-    // E1's store API is the observable result: the remote summary writes a real row.
+    // The store row is the observable result: the remote summary writes a real row.
     let typed = store
         .run_usage(&grant.run_id)
         .expect("read run_usage")

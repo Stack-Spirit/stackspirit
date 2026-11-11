@@ -104,7 +104,7 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
     }
     // The cwd belongs to the executor node; `__exec` runs there and checks its own paths.
     // The home must not reject a valid remote cwd because the laptop uses another root.
-    // C0 hook: a live lease must match the token presented by the surface (F2 fills).
+    // A live lease must match the token presented by the surface.
     crate::surface::check_lease_with(store, &req.session, Some(&req.lease))?;
 
     let executor = req.executor.executor.clone();
@@ -260,7 +260,7 @@ pub fn begin_turn(deps: &Deps, store: &Store, req: &BeginTurn) -> Result<TurnGra
 ///
 /// `grant.lease` is the token the caller expects; an empty value accepts the token carried
 /// by the first `RemoteLine::Hello` (the CLI never receives it on argv). Every event is
-/// checked through the C0 lease hook, so F2 can enforce a live lease without touching this
+/// checked through the lease hook, so a live lease is enforced without touching this
 /// transport.
 pub fn ingest_lines(
     deps: &Deps,
@@ -762,7 +762,7 @@ impl<'a> IngestSession<'a> {
         let usage_value = serde_json::to_value(&usage).unwrap_or(serde_json::Value::Null);
         self.record_cost_ledger(&run, &cost, &usage_value, outcome)?;
         crate::capacity::usage::record(self.store, &usage)?;
-        // C0 hook: redact the home-side copy of the report and raw mirror (G1 fills).
+        // Redact the home-side copy of the report and raw mirror.
         let _ = crate::vault::redact_job_artifacts(self.deps, self.store, run.job_id.as_ref());
         write_ack(
             ack,
@@ -892,7 +892,7 @@ fn append_event(
     native: Option<String>,
 ) -> Result<AppendedEvent, CoreError> {
     let appended = log.append(
-        // C0 hook: exact-value redaction before the log line exists (G1 fills).
+        // Redact exact values before the log line is written.
         crate::vault::redact_event(
             deps,
             NewEvent {
@@ -913,7 +913,7 @@ fn append_event(
     Ok(appended)
 }
 
-/// Builds the `RunUsage` row a summary carries, defaulting to E1's conservative row.
+/// Builds the `RunUsage` row a summary carries, defaulting to a conservative row.
 fn remote_usage_row(
     deps: &Deps,
     session: &Session,

@@ -165,8 +165,8 @@ pub fn ensure_project_windows(
 /// Creates the node-level `vowp-home` session from spec §4.4.
 ///
 /// Windows: `board` (the node board) and `capacity` (the `__window capacity` renderer,
-/// still a C0 stub until E2 fills it). The `orchestrator` window is added by F4 when a
-/// default orchestrator exists; v0.2 has no orchestrator registry yet.
+/// still a stub in this build). The `orchestrator` window is added only when a default
+/// orchestrator exists; v0.2 has no orchestrator registry yet.
 pub fn ensure_home_windows(
     windows: &dyn WindowManager,
     program: &[String],

@@ -5,9 +5,9 @@
 //! archived project directories); `vowp gc` merges these rows with the classes it derives from
 //! the database and reports the union by path.
 //!
-//! H1 also keeps a few small lifecycle helpers here for tables that belong to other feature
-//! repositories. They are deliberately named `lifecycle_*` so E1's `repo_capacity.rs` can add its
-//! natural `insert_host_sample`/`prune_host_samples` names without a collision.
+//! The store also keeps a few small lifecycle helpers here for tables that belong to other
+//! feature repositories. They are deliberately named `lifecycle_*` so `repo_capacity.rs` can use
+//! its natural `insert_host_sample`/`prune_host_samples` names without a collision.
 
 use rusqlite::{OptionalExtension, Row, params};
 use vowp_protocol::{CatalogClass, CatalogEntry, CatalogFilter, HostSample, ProjectName, SessionId, Timestamp};
@@ -234,8 +234,8 @@ impl Store {
 
     /// Inserts one host sample and returns its row id.
     ///
-    /// This is the lifecycle-side writer used by the gc tests until E1's sampler lands. The
-    /// sampler will own the production insert path in `repo_capacity.rs`.
+    /// This is the lifecycle-side writer used by the gc tests. The production insert path
+    /// lives in `repo_capacity.rs`.
     pub fn lifecycle_insert_host_sample(&self, sample: &HostSample) -> Result<i64, StoreError> {
         self.conn.execute(
             "INSERT INTO main.host_samples (

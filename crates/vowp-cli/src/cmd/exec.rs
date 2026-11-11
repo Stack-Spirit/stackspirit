@@ -237,8 +237,8 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
             ));
         }
     };
-    // C0 hook: redact the executor-side report and raw mirror before the summary leaves
-    // this machine (G1 fills). The grant carries no job id, so this redacts node artifacts.
+    // Redact the executor-side report and raw mirror before the summary leaves this machine.
+    // The grant carries no job id, so this redacts node artifacts.
     if let Ok(store) = ctx.store() {
         let _ = vowp_core::vault::redact_job_artifacts(ctx.deps(), &store, None);
     }

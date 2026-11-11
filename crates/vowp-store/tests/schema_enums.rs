@@ -291,7 +291,7 @@ fn schema_matches_enums() {
         SessionRole::Verifier,
         SessionRole::User,
     ]);
-    // C0 adds the additive `SessionRole::Orchestrator` variant; the schema already has it.
+    // The schema includes the additive `SessionRole::Orchestrator` variant.
     session_roles.insert("orchestrator".to_owned());
     check("sessions", "role", session_roles);
     check(
@@ -315,7 +315,7 @@ fn schema_matches_enums() {
         SwitchReason::Failover,
         SwitchReason::ProbeBack,
     ]);
-    // C0 adds the additive `SwitchReason::Takeover` variant; the schema already has it.
+    // The schema includes the additive `SwitchReason::Takeover` variant.
     switch_reasons.insert("takeover".to_owned());
     check("switches", "reason", switch_reasons);
     check(

@@ -1,5 +1,5 @@
 //! v0.1 → v0.2 migration tests.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.9 and §15 (C1).
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §3.9 and §15.
 
 use std::path::Path;
 

@@ -1,4 +1,4 @@
-//! H1 lifecycle tests: classification, dry run, guarded apply, compaction, samples, worktrees,
+//! Lifecycle tests: classification, dry run, guarded apply, compaction, samples, worktrees,
 //! the nightly schedule and the 50 MB / 14-day run-output rules.
 //!
 //! Every test uses a temporary `VOWP_HOME`, a temporary project checkout and its own git
@@ -666,7 +666,7 @@ fn compacted_session_tail_and_export_are_explicit() {
 
     // The authoritative log is gone, but the index and capsule survive so `session show
     // --capsule` and `session export` can still explain the history. The user-facing "session
-    // compacted to capsule <id>" wording lives in F3's `cmd/session.rs`, outside H1's paths.
+    // compacted to capsule <id>" wording lives in `cmd/session.rs`.
     assert!(!node.paths.log_path(&closed).exists());
     assert!(SessionLog::open_read(&node.paths, &closed).is_err());
     assert!(store.require_session(&closed).is_ok());

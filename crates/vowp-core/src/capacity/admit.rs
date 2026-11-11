@@ -443,7 +443,7 @@ impl CapacityManager {
         Ok(running)
     }
 
-    /// Collects jobs whose note carries the E2 waiting line.
+    /// Collects jobs whose note carries a `waiting:` line.
     fn waiting_jobs(&self, store: &Store, now: Timestamp) -> Result<Vec<WaitingJob>, CoreError> {
         let mut waiting = Vec::new();
         for (project, job) in all_jobs(store)? {

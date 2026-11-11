@@ -1,5 +1,5 @@
-//! E1 capacity measurement tests: sampler, scopes, usage rows and estimates.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.1 and the E1 test list in §15.
+//! Capacity measurement tests: sampler, scopes, usage rows and estimates.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.1 and the capacity test list in §15.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

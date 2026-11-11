@@ -1569,7 +1569,7 @@ fn up_once_ticks_every_project_from_one_checkout() {
     assert!(env.home_path().join("heartbeat").is_file());
     assert!(
         !env.home_path().join("board.json").exists(),
-        "two active projects defer the node board to D1"
+        "two active projects defer the node board"
     );
 
     let mut io = vowp_cli::BufferIo::new("");

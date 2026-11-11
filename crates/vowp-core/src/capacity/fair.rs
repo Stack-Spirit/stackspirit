@@ -10,7 +10,7 @@ use vowp_protocol::{ProjectEntry, ProjectName};
 /// Higher weights come first. Inside one weight the project admitted least recently (the
 /// one after `last` in the current rotation) comes first, which round-robins equal projects
 /// each tick instead of letting one of them keep the front slot forever.
-#[allow(clippy::ptr_arg)] // The C0 signature is part of the frozen capacity API.
+#[allow(clippy::ptr_arg)] // The signature is part of the public capacity API.
 pub fn order(projects: &mut Vec<ProjectEntry>, last: Option<&ProjectName>) {
     projects.sort_by(|left, right| right.weight.cmp(&left.weight).then_with(|| left.name.cmp(&right.name)));
 

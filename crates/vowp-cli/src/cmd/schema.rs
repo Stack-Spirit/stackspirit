@@ -1,7 +1,7 @@
 //! `vowp schema` — exported JSON Schemas, including the v0.2 snapshot.
 //!
 //! The v0.1 listing and type lookup keep working unchanged. `snapshot` selects the
-//! versioned [`vowp_protocol::Snapshot`] schema added by C0; D1 owns later changes.
+//! versioned [`vowp_protocol::Snapshot`] schema.
 
 use crate::cli::SchemaArgs;
 use crate::output::print_json;

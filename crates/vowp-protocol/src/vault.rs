@@ -1,7 +1,7 @@
 //! Secret names, metadata and the one-time request document.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and §13.1. Values are never part of
-//! these types; G1 fills storage, injection and redaction.
+//! these types; storage, injection and redaction live in `vowp-core`.
 
 use std::fmt;
 

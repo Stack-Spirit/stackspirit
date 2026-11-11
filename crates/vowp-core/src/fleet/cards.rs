@@ -228,7 +228,7 @@ fn blocked_reason(job: &Job) -> String {
 
 /// Returns a job's admission/brake reason when its note carries one.
 ///
-/// E2 writes the whole `waiting: RAM 1.2 GB short` line to `jobs.note`; the card carries
+/// The capacity manager writes the whole `waiting: RAM 1.2 GB short` line to `jobs.note`; the card carries
 /// that line verbatim (redacted) so the orchestrator sees the same text.
 fn waiting_reason(redactor: &Redactor, job: &Job) -> Option<String> {
     let reason = job.note.trim();

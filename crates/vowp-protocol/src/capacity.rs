@@ -1,7 +1,7 @@
 //! Capacity types: measured host samples, per-run usage and admission decisions.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.1–§6.5 and §13.1. C0 freezes the
-//! wire shapes here; E1/E2/E3 fill the sampler, admission, brakes, targets and advice.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §6.1–§6.5 and §13.1. The wire shapes are
+//! fixed here; the sampler, admission, brakes, targets and advice live in `vowp-core`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

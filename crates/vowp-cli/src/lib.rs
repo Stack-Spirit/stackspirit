@@ -193,8 +193,8 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
             vowp_store::Store::open(&paths)?;
         }
     }
-    // C0: chat's v0.2 flags are frozen but their handler is F3's. Refuse them before the
-    // generic `--node` redirect, which would otherwise silently run the v0.1 chat loop.
+    // Refuse a command that still needs a v0.2 handler before the generic `--node` redirect,
+    // which would otherwise silently run the v0.1 chat loop.
     if cmd::command_needs_v0_2_handler(&command) {
         return Err(cmd::not_implemented());
     }

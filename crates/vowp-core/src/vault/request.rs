@@ -4,7 +4,7 @@
 //! exactly one POST. The page is reachable through an SSH tunnel; there is no TLS because the
 //! listener is loopback-only. It expires after [`REQUEST_TTL`].
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §9.2 and §9.4. G1 fills this module.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §9.2 and §9.4.
 
 use std::fs::File;
 use std::io::{Read, Write};

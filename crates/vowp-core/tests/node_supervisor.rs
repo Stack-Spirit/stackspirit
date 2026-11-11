@@ -545,7 +545,10 @@ fn two_active_projects_defer_the_node_board_but_still_heartbeat() {
     let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
     let report = node.tick().expect("tick");
     assert_eq!(report.projects.len(), 2);
-    assert!(!env.paths.root().join("board.json").exists(), "D1 owns the node board");
+    assert!(
+        !env.paths.root().join("board.json").exists(),
+        "the node board is deferred while projects are active"
+    );
     assert!(env.paths.root().join("heartbeat").is_file());
     assert!(!env.log.contains("board failed"), "{:?}", env.log.lines());
 }

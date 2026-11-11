@@ -1328,7 +1328,7 @@ impl Supervisor {
         let mut dispatched = 0;
         for choice in choices {
             let job = self.store.require_job(&choice.job_id)?;
-            // C0 hook: capacity admission. C0 returns true (admit); E2 fills dispatch::admit.
+            // Ask capacity admission before dispatch; a job that must wait stays queued.
             if !dispatch::admit(&self.deps, &self.store, &job)? {
                 continue;
             }

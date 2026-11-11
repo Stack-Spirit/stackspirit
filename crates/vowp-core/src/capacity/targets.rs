@@ -44,7 +44,7 @@ pub fn current(store: &Store) -> Result<CapacityTarget, CoreError> {
 /// Returns the current worker target, letting the caller supply the provider cap.
 ///
 /// The `deps`-aware overload exists because the configured provider `max_concurrent` values
-/// are not stored in the database; the exported [`current`] keeps the C0 signature.
+/// are not stored in the database; the exported [`current`] keeps its original signature.
 pub fn current_for(deps: &Deps, store: &Store, now: Timestamp) -> Result<CapacityTarget, CoreError> {
     let provider_cap = deps
         .config
@@ -191,7 +191,7 @@ fn latest_sample(store: &Store, now: Timestamp) -> Result<Option<vowp_protocol::
 /// Returns the pooled p90 RAM/CPU estimate used by the auto target.
 ///
 /// The most conservative stored p90 wins: a node target must fit the largest common run,
-/// and an empty estimate table falls back to the compiled E1 default.
+/// and an empty estimate table falls back to the compiled default.
 fn pooled_estimate(store: &Store) -> Result<(u64, f64), CoreError> {
     let estimates = store.list_usage_estimates(None)?;
     let mut measured = estimates.iter().filter(|estimate| estimate.samples > 0).peekable();

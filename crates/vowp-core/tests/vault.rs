@@ -1,5 +1,5 @@
 //! Secret vault integration tests: storage, injection, redaction and the one-time page.
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and the G1 card.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and the vault tests in §15.
 
 mod support;
 
@@ -477,7 +477,7 @@ fn redact_job_artifacts_redacts_report_and_run_mirror() {
         .insert_job(
             &project_name,
             &NewJob {
-                id: JobId::parse("v2-g1-vault").expect("job id"),
+                id: JobId::parse("vault-check").expect("job id"),
                 title: "vault test".to_owned(),
                 kind: JobKind::Build,
                 role: Role::Worker,

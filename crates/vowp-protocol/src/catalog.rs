@@ -1,7 +1,7 @@
 //! Lifecycle catalog types: the file classes used by `vowp gc` and `vowp backup`.
 //!
-//! Spec: `docs/design/v0.2/home-and-surfaces.md` §10 and §13.1. C0 freezes the shapes;
-//! H1/H2 fill classification, garbage collection and backup.
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §10 and §13.1. The shapes are fixed here;
+//! classification, garbage collection and backup build on them.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
