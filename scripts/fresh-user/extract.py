@@ -4,15 +4,18 @@
 The plan is a bash script with one timed step per documented command. Commands
 are read from fenced `sh` blocks in:
 
-  * README.md, section "Quickstart (from source)"
-  * docs/guides/install.md, sections "Prerequisites" .. "Verify the node"
-  * docs/guides/quickstart.md, sections 0 .. 5
+  * README.md, section "Getting started"
+  * docs/guides/install.md, section "Build and install by hand"
+  * docs/guides/quickstart.md, sections 1 .. 7
   * examples/hello-vowp/README.md, the main "Run it" command
 
-Nothing is copied by hand: if a documented command changes, the test runs the
-new command. If a section or block disappears, extraction fails loudly so the
-two cannot drift apart silently. Commands explicitly marked ``# (planned)`` in
-the quickstart guide are skipped and logged (they need a planner model turn).
+The container has no systemd user manager, SSH client or harness login, so the
+plan follows the manual build and the local quickstart; the setup path and the
+install prerequisite checks run elsewhere. Nothing is copied by hand: if a
+documented command changes, the test runs the new command. If a section or
+block disappears, extraction fails loudly so the two cannot drift apart
+silently. Commands explicitly marked ``# (planned)`` in the quickstart guide
+are skipped and logged (they need a planner model turn).
 
 Usage:
     extract.py --root REPO --out PLAN.sh [--manifest PLAN.json]
@@ -36,21 +39,22 @@ README_PROJECT = "readme"
 # (file, heading without markup, working directory, honour `# (planned)`,
 #  optional substring that every selected block must contain)
 SELECTIONS: list[tuple[str, str, str, bool, str | None]] = [
-    # The README builds from the checkout, then initialises a separate demo
-    # project. Split the section so each command runs in the documented place.
-    ("README.md", "Quickstart (from source)", REPO, False, "cargo "),
-    ("README.md", "Quickstart (from source)", README_PROJECT, False, "vowp init"),
-    ("docs/guides/install.md", "Prerequisites", REPO, False, None),
-    ("docs/guides/install.md", "Build from source", REPO, False, None),
-    ("docs/guides/install.md", "Put vowp on your PATH", REPO, False, None),
-    ("docs/guides/install.md", "Prepare a project repository", INSTALL, False, None),
-    ("docs/guides/install.md", "Verify the node", INSTALL, False, None),
-    ("docs/guides/quickstart.md", "0. Build and install", REPO, True, None),
-    ("docs/guides/quickstart.md", "1. Choose a repository", QUICKSTART, True, None),
-    ("docs/guides/quickstart.md", "2. Initialise the project", QUICKSTART, True, None),
-    ("docs/guides/quickstart.md", "3. Check the node", QUICKSTART, True, None),
-    ("docs/guides/quickstart.md", "4. Add a first job", QUICKSTART, True, None),
-    ("docs/guides/quickstart.md", "5. Inspect the graph", QUICKSTART, True, None),
+    # The manual build installs the binary the rest of the plan uses.
+    ("docs/guides/install.md", "Build and install by hand", REPO, False, None),
+    # The quickstart numbers its sections; run them in the order a reader
+    # follows rather than the order the numbers appear in the file.
+    ("docs/guides/quickstart.md", "2. Register a project", QUICKSTART, True, "vowp init"),
+    ("docs/guides/quickstart.md", "2. Register a project", QUICKSTART, True, "git commit"),
+    ("docs/guides/quickstart.md", "1. Check the home", QUICKSTART, True, None),
+    ("docs/guides/quickstart.md", "4. See the fleet", QUICKSTART, True, "vowp status"),
+    ("docs/guides/quickstart.md", "5. Add a first job", QUICKSTART, True, "vowp job add"),
+    ("docs/guides/quickstart.md", "7. Stop cleanly", QUICKSTART, True, None),
+    # The README is still the v0.1 quickstart, which K1 owns. Run its build,
+    # project and supervisor steps last so its `vowp up` does not overlap the
+    # quickstart's supervisor.
+    ("README.md", "Getting started", REPO, False, "cargo "),
+    ("README.md", "Getting started", README_PROJECT, False, "vowp init"),
+    ("README.md", "Getting started", README_PROJECT, False, "git add"),
     ("examples/hello-vowp/README.md", "Run it", REPO, False, None),
 ]
 
@@ -207,16 +211,27 @@ def command_label(text: str) -> str:
 
 
 def substitute(rel: str, text: str) -> tuple[str, str]:
-    """Replace a documented placeholder with the test's concrete path.
+    """Replace a documented placeholder with the test's concrete value.
 
-    Only the documented, deliberately generic path is replaced. Anything else
-    runs exactly as written.
+    Only the placeholders the selected sections deliberately use are replaced.
+    Anything else runs exactly as written.
     """
     if rel == "docs/guides/quickstart.md":
-        match = re.fullmatch(r"cd\s+/path/to/my-project\s*", text.strip())
-        if match:
-            return 'cd "$QUICKSTART_PROJECT"', "documented placeholder /path/to/my-project -> demo checkout"
-    return text, ""
+        replacements = {
+            "<your-repo>": "$QUICKSTART_PROJECT",
+            "<your-project>": "quickstart-project",
+        }
+    elif rel == "README.md":
+        replacements = {"<your-project>": "readme-project"}
+    else:
+        replacements = {}
+
+    note = ""
+    for placeholder, value in replacements.items():
+        if placeholder in text:
+            text = text.replace(placeholder, value)
+            note = f"documented placeholder {placeholder} -> {value}"
+    return text, note
 
 
 def build_plan(root: Path) -> Plan:
@@ -330,10 +345,10 @@ def emit(plan: Plan, out: Path) -> None:
         'QUICKSTART_PROJECT="$WORK/quickstart/my-project"',
         'LOG_DIR="$WORK/logs"',
         'TIMINGS="$WORK/timings.tsv"',
-        'export CARGO_TARGET_DIR="$WORK/target"',
+        'export CARGO_TARGET_DIR="$FRESH_REPO/target"',
         'export TMUX_TMPDIR="$WORK/tmux"',
         'export CARGO_TERM_COLOR=never',
-        'export PATH="/work/fake-bin:$PATH"',
+        'export PATH="$HOME/.local/bin:/work/fake-bin:$PATH"',
         'unset TMUX TMUX_PANE 2>/dev/null || true',
         "",
         'mkdir -p "$WORK" "$LOG_DIR" "$TMUX_TMPDIR"',
@@ -418,7 +433,7 @@ def emit(plan: Plan, out: Path) -> None:
     ]
 
     first_success: int | None = None
-    version_pattern = r"^vowp 0\.1\.0-dev$"
+    version_pattern = r"^vowp [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?( |$)"
     for step in plan.steps:
         variable = cwd_var[step.cwd]
         lines.append(f"# {step.doc}")
@@ -452,7 +467,7 @@ def emit(plan: Plan, out: Path) -> None:
         if re.search(r"\bvowp\b.*--version$", command) or command.endswith("-- --version"):
             lines.append(
                 f"check_log {step.number} {shq(version_pattern)} "
-                f"{shq(step.doc)} 'vowp prints the documented version 0.1.0-dev'"
+                f"{shq(step.doc)} 'vowp prints its version'"
             )
             lines.append("")
         if re.match(r"vowp init --name ", command):
