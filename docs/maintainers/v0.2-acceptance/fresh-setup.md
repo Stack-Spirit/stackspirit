@@ -11,11 +11,12 @@ a real harness pasting the README prompt. That real-harness step was not run and
 an owner/release check (open item 3). The Docker rig covers the sudo and no-sudo
 variants; the one real Google Cloud VM run goes from an empty Ubuntu 24.04 image to a
 working home, control machine and `setup verify`, with the supervisor running under the
-real systemd user manager and vault-user secret mode. The user-creation path still needs
-the accepted one-line workaround for a product defect: `setup home` fails its install
-phase when the SSH login user's home is not traversable by the target user (open item 1).
-The VM run reproduced that failure on a real GCE image (`sh: 22: cd: can't cd to .`) and
-then passed after `chmod 0755` on the test login home.
+real systemd user manager and vault-user secret mode. The user-creation path needed the
+accepted one-line workaround for a product defect at the tested build: `setup home`
+failed its install phase when the SSH login user's home was not traversable by the
+target user (open item 1). The VM run reproduced that failure on a real GCE image
+(`sh: 22: cd: can't cd to .`) and then passed after `chmod 0755` on the test login home.
+f-setup-home-traversal (`1864d68`) has since fixed the defect.
 
 Three new real-VM observations are open items: `vowp fleet status|queue|inbox` on a
 control machine call a bare `vowp` on the home, which a non-login SSH PATH does not
@@ -56,7 +57,7 @@ and `gcloud compute disks list` returned no items. This job did not delete it (s
   `188c1b4ed3f9f0a63d58dbf6cd760b64464ace89e896e51cfe724ea14c99094f`. Among the
   setup sources, the plan/home/control/install sources are byte-identical between
   `a0d0aee` and `e41459f`; within them only `setup/verify.rs` and its tests changed.
-  The full `a0d0aee..e41459f` diff also changes docs and `Cargo.toml`.
+  The full `a0d0aee..e41459f` diff also changes docs, `Cargo.toml` and `CHANGELOG.md`.
 - Real-VM binary under test: a fresh `0.2.0` build of `a191c02`. The acceptance copy
   was `git archive HEAD` into a temporary tree with the workspace version and the
   inter-crate version pins changed from `0.1.0` to `0.2.0` (the J2 bump); the product
@@ -300,7 +301,7 @@ repeated from an empty rig with the rebased `0.2.0` build. `setup plan`,
 snapshot was as of `2026-11-11T11:02:09.574Z`, and the orchestrator chat session was
 `01M754BCYJGY2E93X6K88WSCF2`. Among the setup sources, the plan/home/control/install
 sources are identical between `a0d0aee` and `e41459f`; the repeat covers the changed
-verify code (the full diff also changes docs and `Cargo.toml`).
+verify code (the full diff also changes docs, `Cargo.toml` and `CHANGELOG.md`).
 
 ## Test 1b — sudo rig, user-creation path: one product defect, then PASS
 
@@ -332,8 +333,9 @@ sudo -u vowp -H env VOWP_HOME=/home/vowp/.vowp \
 
 The SSH session starts in the login user's home (`/home/owner`), and the `sudo`
 transition keeps that directory. `install.sh` computes its own directory with
-`SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)` (`scripts/install.sh:22`);
-with `$0` = `sh` this is `cd .`, and `vowp` cannot traverse a 0750 home. The same
+`SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)` (`scripts/install.sh:22` at
+`a191c02`/`e41459f`; the line is now a comment after `1864d68`); with `$0` = `sh` this
+is `cd .`, and `vowp` cannot traverse a 0750 home. The same
 failure occurs from `/root` (mode 0700), which is the common case when a fresh cloud
 image is first reached as root. The reproduction on the rig was:
 
@@ -357,10 +359,11 @@ The control and `setup verify` also exited **0** with the same four `ok` checks.
 isolates the failure to the install-phase working directory, not to user creation,
 the archive, the database or the control side.
 
-**Open item 1 is the fix.** A robust fix is to give every remote setup command an
-explicit working directory (for example `cd <effective_home> && exec ...` in the
-`as_user`/`Executor::remote` path) or to make `install.sh` not `cd` when it is piped to
-`sh`. The acceptance workaround is not a product fix.
+**Open item 1 is fixed after the tested build.** The f-setup-home-traversal fix
+(`1864d68`) gives the remote installer an explicit traversable working directory
+(`cd / && ...` before the install command) and makes `install.sh` skip its
+`SCRIPT_DIR`/`REPO_ROOT` lookup when `$0` is `sh`. The acceptance workaround was not a
+product fix.
 
 ## Test 1c — no-sudo rig with `claude-code` and a secret hand-off: PASS
 
@@ -498,9 +501,9 @@ The same `setup home --apply --yes` then exited **7**:
 vowp: remote: installing vowp failed: sh: 22: cd: can't cd to .
 ```
 
-This is the real-GCE reproduction of open item 1. The SSH session starts in the login
-user's 0750 home; the `sudo -u vowp` transition keeps that directory; `install.sh`
-computes its own directory with
+This is the real-GCE reproduction of open item 1 at the tested build. The SSH session
+starts in the login user's 0750 home; the `sudo -u vowp` transition keeps that
+directory; `install.sh` computes its own directory with
 `SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)`, which is `cd .` when the
 script is piped to `sh`, and `vowp` cannot traverse `/home/dev`. The acceptance
 workaround was the same one used in test 1b:
@@ -727,14 +730,16 @@ gcloud compute disks list --filter='name=vowp-t1-fresh-1112'
 
 ## Open items
 
-1. **Fix job: `setup home` install fails when the login home is not traversable by the
-   target user.** Exact failure and cause are in test 1b; test 1d reproduced it on the
-   real GCE image with `sh: 22: cd: can't cd to .`. Suggested owner paths are
-   `crates/vowp-cli/src/setup/commands.rs` (run remote commands in the effective home,
-   or wrap the install command with `cd <effective_home>`), and/or
-   `scripts/install.sh` (do not `cd` when `$0` is `sh`). This is a release blocker for
-   the common root-login and 0750-home cases; both the Docker and the VM runs only
-   continued after `chmod 0755` on the test login home. A follow-up fix job owns this.
+1. **Fixed after the tested build: `setup home` install failed when the login home was
+   not traversable by the target user.** Exact failure and cause are in test 1b; test 1d
+   reproduced it on the real GCE image with `sh: 22: cd: can't cd to .` at the tested
+   build (`a191c02`/`e41459f`), where `scripts/install.sh:22` was
+   `SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)`; that line is now a
+   comment. f-setup-home-traversal (`1864d68`) fixed it by running the remote installer
+   from `/` and by making `install.sh` skip its `SCRIPT_DIR`/`REPO_ROOT` lookup when
+   `$0` is `sh`. At the tested build this was a release blocker for the common
+   root-login and 0750-home cases; both the Docker and the VM runs only continued after
+   `chmod 0755` on the test login home.
 2. **Release gate: the literal README prompt is not followable until J2.** On
    2026-11-11 the prompt's `raw.githubusercontent.com/.../v0.2.0/...` and the
    `v0.2.0` release both return 404 from the control VPS and from the VM. The contract
