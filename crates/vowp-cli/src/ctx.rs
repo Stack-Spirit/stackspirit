@@ -539,17 +539,6 @@ fn reject_unknown_loop_keys(text: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-// The package root is the workspace root, so Cargo does not auto-discover the
-// `crates/vowp-cli/tests/` directory. Compile the owned integration-style suite as a
-// library test instead; the shared root `Cargo.toml` stays untouched. The alias makes the
-// file's `vowp_cli::` paths work in both this module and a future `[[test]]` target.
-#[cfg(test)]
-mod project_path_tests {
-    use crate as vowp_cli;
-
-    include!("../tests/project_path.rs");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

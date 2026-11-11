@@ -104,6 +104,10 @@ name = "maint"
 path = "crates/vowp-cli/tests/maint.rs"
 
 [[test]]
+name = "project_path"
+path = "crates/vowp-cli/tests/project_path.rs"
+
+[[test]]
 name = "promote"
 path = "crates/vowp-cli/tests/promote.rs"
 
