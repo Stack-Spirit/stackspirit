@@ -140,8 +140,13 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 - every event payload and `raw` before `SessionLog::append`;
 - a capsule body after the writer returns and before the caller sees it;
 - job artifacts after each turn (`report.md` and the run raw mirror);
-- the serialized snapshot before writing;
-- gate evidence and ledger `detail_json` before insert.
+- the serialized snapshot before writing.
+
+It is **not** applied to gate command evidence or ledger `detail_json` today: the gate runner inserts
+`GateResult.evidence` and the ledger writer appends `detail` directly. A command gate or ledger row
+that prints an injected value can therefore store it in plain text. Avoid commands that echo secret
+values, and treat gate evidence and ledger rows as sensitive. This is a known gap tracked as a
+follow-up; do not rely on event/snapshot redaction to cover those rows.
 
 The redactor never logs a value or its prefix; it logs only the name. The `secret_scan` gate stays and
 runs on the public tree.
@@ -211,8 +216,10 @@ are your responsibility.
 - **Timeouts and process groups.** Command gates have timeouts and kill the process group, not just the
   immediate child, so a shell cannot leave an orphan running; harness runs are stopped through the
   adapter's interrupt/stop path.
-- **Capacity never kills work.** Admission and brakes stop new runs; they do not signal an existing
-  run. The only interrupts are the switch/takeover path and `vowp down`.
+- **Capacity never kills work.** Admission and brakes stop new runs; capacity itself does not signal
+  an existing run. Other paths can stop a run: switch/takeover, `vowp down`, `vowp job park` and
+  `vowp job cancel`, and stall detection or a keeper restart. Those are explicit operator, keeper or
+  lifecycle actions, not capacity decisions.
 - **No real home/network in tests.** The test suite uses temp directories, a private tmux socket **and**
   a private `TMUX_TMPDIR`, fake harness scripts and recorded fixtures. Running `cargo test` is safe
   with a live tmux server: the tests remove `TMUX`, pass a private `-L` socket (`vowp-<hash>` derived

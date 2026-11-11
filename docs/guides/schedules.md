@@ -42,7 +42,7 @@ cron or an interval under 60 seconds exits 2.
 
 ```sh
 vowp schedule ls
-vowp schedule ls --all
+vowp schedule --all ls
 vowp schedule pause daily-backup
 vowp schedule resume daily-backup
 vowp schedule rm daily-backup

@@ -331,7 +331,7 @@ the report.
   cron fields; six-field cron with seconds is rejected.
 - `tz` is `UTC` or a fixed offset such as `+02:00`; IANA names are not supported.
 - Schedules are per project. With several projects and no selected checkout, pass `--project`; use
-  `vowp schedule ls --all` to see every project's rows.
+  `vowp schedule --all ls` to see every project's rows.
 - A schedule that was missed while the node was down fires once with `run_once`, or records a skip with
   `skip`. It never replays every missed occurrence.
 - A paused schedule does not fire; `vowp schedule resume <name>` enables it. `vowp loops` shows the L9

@@ -189,7 +189,7 @@ action three times without new evidence stops and escalates rather than spinning
 
 ## Schedules
 
-Schedules are per-project rows; see the [schedules guide](schedules.md). `vowp schedule ls --all`
+Schedules are per-project rows; see the [schedules guide](schedules.md). `vowp schedule --all ls`
 lists every project's rows. A schedule can create a job, trigger a loop or run a command. Missed runs
 while the node was down either run once (`run_once`) or are skipped (`skip`); they never replay N
 times. The supervisor creates the nightly `gc-nightly` interval schedule in each project the first
