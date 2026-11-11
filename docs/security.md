@@ -169,8 +169,11 @@ redaction to cover it.
 
 The redactor never logs a value or its prefix; it logs only the name. The `secret_scan` gate scans the
 changed paths and added lines of a job diff, and the merge queue scans its rebased candidate when
-`[merge].secret_scan` is on (the default). Neither is a public-tree audit; the separate public-tree
-scanner is `scripts/audit/scan.sh`.
+`[merge].secret_scan` is on (the default). Neither is a public-tree audit: before a public release,
+the maintainers run a separate scan over the squashed candidate for credentials, absolute home paths,
+private hostnames, SSH targets and large blobs, with an allowlist for legitimate matches. That scan is
+part of the release process; it is not part of the product and does not run in the user's own
+repository.
 
 ### The honest limit
 
