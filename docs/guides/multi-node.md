@@ -59,8 +59,8 @@ On a control machine:
 
 - project, fleet, capacity, job, inbox, secret and session commands default to the home; the CLI
   sends them over SSH and returns the home's exit code;
-- `vowp status` and `vowp fleet status` read the cached snapshot first and print an `as of` time when
-  the home is unreachable;
+- `vowp status` and `vowp fleet status` try the home over SSH first; only when SSH fails do they print
+  the cached snapshot with an `as of` time. A successful `fleet status` refreshes that cache;
 - `fleet status --refresh` requires SSH; `fleet status --cached` never opens SSH;
 - writes (`project add/pause`, `inbox answer`, `job add/pause/retry`, `capacity set`, ...) always go
   to the home; they never succeed against the cache;

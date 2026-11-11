@@ -29,6 +29,7 @@ clear notice and continues read-only, so two devices cannot silently interleave 
 ## List and inspect
 
 ```sh
+# from the project checkout, or add --project <name> to each command
 vowp session ls
 vowp session show <id>
 vowp session show <id> --events 20
@@ -38,7 +39,9 @@ vowp session tail <id> --pretty
 vowp session tail <id> --follow --from 120
 ```
 
-`session ls` prints `ID TITLE EXECUTOR NODE STATE LAST UPDATED EVENTS`. `session show` prints metadata
+On a home with several projects and no selected checkout, these commands need `--project <name>`;
+without it the command exits 2 and asks for a project. `session ls` prints
+`ID TITLE EXECUTOR NODE STATE LAST UPDATED EVENTS`. `session show` prints metadata
 and the executor history. `--events <N>` prints the last N events, `--lineage` includes the switch
 lineage, and `--capsule` includes the last capsule. `session tail` prints JSONL by default or one
 pretty line per event (`HH:MM:SS #seq type summary`); `--follow` polls the log every 200 ms. This is

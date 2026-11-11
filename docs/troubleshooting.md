@@ -214,7 +214,8 @@ harness is installed and the executor string parses. For a remote target, run
 `vowp --node <n> doctor` yourself before switching.
 
 **Opening a session asks "Active on laptop … Take over?"** Another surface holds the lease. Answer `y`
-or pass `--takeover`; without it, the chat stays read-only. Non-TTY input defaults to no and exits 4.
+or pass `--takeover`; declining exits 4. To read without taking the lease, pass `--follow` (or use
+`/follow` in chat): that is the read-only mode. Non-TTY input defaults to no and exits 4.
 
 **A surface says "This surface is read-only".** Another surface took the lease. Use `/takeover` or
 `--takeover` to take it back, or `/follow` to keep reading. The old surface keeps printing new events

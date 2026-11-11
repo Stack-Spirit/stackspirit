@@ -159,7 +159,7 @@ The install script does not run `vowp init` for you. Run it once per checkout, o
 
 | Path | Contents |
 |---|---|
-| `~/.vowp/vowp.db` | The global database: nodes, the project registry, sessions, surfaces, leases, capacity, limits, catalog and the snapshots. |
+| `~/.vowp/vowp.db` | The global database: nodes, the project registry, sessions, surfaces, leases, capacity, limits and the catalog. The fleet snapshot is a separate file. |
 | `~/.vowp/projects/<name>/project.db` | One database per project: jobs, edges, runs, gates, workers, loops, schedules, inbox, ledger and releases. |
 | `~/.vowp/sessions/<id>/log.jsonl` | Authoritative conversation content. Append-only; never edited by hand. |
 | `~/.vowp/snapshot.json` | Last fleet snapshot, written every tick. |
