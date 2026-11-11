@@ -4,14 +4,18 @@ This is the acceptance record for §13.5 test **1 (a fresh Linux machine set up 
 by the README prompt, first on the Docker rig and then on one Google Cloud VM)**. It is
 the T1 card `v2-t1-fresh-setup`.
 
-**Result on the tested build: both halves of test 1 pass.** The Docker rig covers the
-sudo and no-sudo variants; the one real Google Cloud VM run goes from an empty Ubuntu
-24.04 image to a working home, control machine and `setup verify`, with the supervisor
-running under the real systemd user manager and vault-user secret mode. The user-creation
-path still needs the accepted one-line workaround for a product defect: `setup home`
-fails its install phase when the SSH login user's home is not traversable by the target
-user (open item 1). The VM run reproduced that failure on a real GCE image
-(`sh: 22: cd: can't cd to .`) and then passed after `chmod 0755` on the test login home.
+**Result on the tested build: both test-1 setup halves pass — the Docker rigs and the
+real GCE VM each go from an empty machine to a working home, control machine and
+`setup verify`.** This is a qualification, not the literal §13.5 step: neither run used
+a real harness pasting the README prompt. That real-harness step was not run and remains
+an owner/release check (open item 3). The Docker rig covers the sudo and no-sudo
+variants; the one real Google Cloud VM run goes from an empty Ubuntu 24.04 image to a
+working home, control machine and `setup verify`, with the supervisor running under the
+real systemd user manager and vault-user secret mode. The user-creation path still needs
+the accepted one-line workaround for a product defect: `setup home` fails its install
+phase when the SSH login user's home is not traversable by the target user (open item 1).
+The VM run reproduced that failure on a real GCE image (`sh: 22: cd: can't cd to .`) and
+then passed after `chmod 0755` on the test login home.
 
 Three new real-VM observations are open items: `vowp fleet status|queue|inbox` on a
 control machine call a bare `vowp` on the home, which a non-login SSH PATH does not
@@ -23,8 +27,9 @@ reports a false `user/login` hand-off even though the apply checks as `vowp` and
 passes. The literal README prompt URL still returns **404** on 2026-11-11 because the
 `v0.2.0` tag and release are not published yet (J2 is later); the run used the same
 contract file from the tested checkout and a loopback release mirror, described under
-[What was simulated](#what-was-simulated). The VM was left running for the
-orchestrator's same-day deletion; this job was instructed not to delete it.
+[What was simulated](#what-was-simulated). The VM is **not deleted**: the verify-1 check
+on 2026-11-11 still found `vowp-t1-fresh-1112` `RUNNING` with its boot disk `READY`;
+deletion is pending orchestrator action (open item 8).
 
 ## Environment
 
@@ -47,9 +52,10 @@ orchestrator's same-day deletion; this job was instructed not to delete it.
   The clean sudo run was repeated after the branch was rebased onto `e41459f` (the
   f-i1b verify fix); the rebased binary is
   `565400f10d549e5153d69e55b0bd87d104d10b4592eb8f02e9d093366afb2d74`, its archive
-  `188c1b4ed3f9f0a63d58dbf6cd760b64464ace89e896e51cfe724ea14c99094f`. The
-  plan/home/control/install sources are byte-identical between `a0d0aee` and
-  `e41459f`; only `setup/verify.rs` and its tests changed.
+  `188c1b4ed3f9f0a63d58dbf6cd760b64464ace89e896e51cfe724ea14c99094f`. Among the
+  setup sources, the plan/home/control/install sources are byte-identical between
+  `a0d0aee` and `e41459f`; within them only `setup/verify.rs` and its tests changed.
+  The full `a0d0aee..e41459f` diff also changes docs and `Cargo.toml`.
 - Real-VM binary under test: a fresh `0.2.0` build of `a191c02`. The acceptance copy
   was `git archive HEAD` into a temporary tree with the workspace version and the
   inter-crate version pins changed from `0.1.0` to `0.2.0` (the J2 bump); the product
@@ -147,9 +153,10 @@ H=/home/vowp/.vowp
    `europe-north1-b`, in the same region. The run used the real image, sshd, sudo,
    systemd and network; only the harness identities, the public release URL and the
    fixture project were simulated as described above. This job was instructed not to
-   delete the VM; the orchestrator deletes it after the report with its boot disk and
-   verifies both `gcloud compute instances list` and `gcloud compute disks list` are
-   empty (see [Deletion](#deletion-orchestrator)).
+   delete the VM and has not deleted it; deletion is pending orchestrator action, with
+   its boot disk, after this report. The orchestrator verifies both
+   `gcloud compute instances list` and `gcloud compute disks list` are empty (see
+   [Deletion](#deletion-orchestrator)).
 4. **Real-VM fixture mistake.** The fixture that created the fake `opencode` sign-in
    used `install -d` with `-o vowp`, which left `/home/vowp/.local` and
    `.local/share` owned by root. The first install attempt after the workaround
@@ -164,8 +171,9 @@ Rig `t1-sudo2`: login as `vowp`, the image's dedicated user, with passwordless s
 available. This is the case where the owner already created the unprivileged account
 and the setup only has to use it. The home started with no VOWP and no `~/.vowp`.
 
-The run used the contract's five answers listed here (home target, harness, repositories,
-GitHub remote, control machine) and ran the read-only plan twice (text and `--json`):
+The run answered the contract's home-target, harness, repository and control-machine
+questions; the GitHub-remote answer was **no**. It ran the read-only plan twice (text
+and `--json`):
 
 ```sh
 $CONTROL/.local/bin/vowp setup plan --target t1-home2 --version 0.2.0 \
@@ -177,8 +185,10 @@ $CONTROL/.local/bin/vowp setup plan --target t1-home2 --version 0.2.0 \
 ```
 
 Both exited **0**. The text plan printed the eight phases, their commands, files,
-`requires` and idempotency, and two hand-offs (the approval and the optional GitHub
-remote). The `--json` document had exactly the four documented top-level fields:
+`requires` and idempotency, and only one hand-off (the approval); the optional GitHub
+remote hand-off is absent because the answer was no. The `--json` document had exactly
+the four documented top-level fields, and its `handoffs` array held only the
+`preflight/approval` entry:
 
 ```text
 sudo2-plan.json top-level: ['handoffs', 'phases', 'target', 'version']
@@ -287,8 +297,9 @@ repeated from an empty rig with the rebased `0.2.0` build. `setup plan`,
 `setup home --apply --yes`, `setup control --apply` and `setup verify` all exited
 **0**; the install verified the rebased archive SHA-256 `188c1b4e...`, the verify
 snapshot was as of `2026-11-11T11:02:09.574Z`, and the orchestrator chat session was
-`01M754BCYJGY2E93X6K88WSCF2`. The plan/home/control/install sources are identical
-between `a0d0aee` and `e41459f`; the repeat covers the changed verify code.
+`01M754BCYJGY2E93X6K88WSCF2`. Among the setup sources, the plan/home/control/install
+sources are identical between `a0d0aee` and `e41459f`; the repeat covers the changed
+verify code (the full diff also changes docs and `Cargo.toml`).
 
 ## Test 1b — sudo rig, user-creation path: one product defect, then PASS
 
@@ -299,8 +310,10 @@ re-owned to the recreated UID after `useradd` (what `useradd --create-home` woul
 a fresh machine). This is the primary path the contract describes for a VPS where the
 owner logs in as root or as their own sudo user.
 
-The plan and approval were the same as 1a. The first `setup home --apply --yes` ran the
-preflight, created the `vowp` user and copied the login key, then failed at install:
+The plan matched 1a's eight phases and used the same single approval, but it also
+printed the `projects/owner-answer` GitHub-remote hand-off because this run's
+GitHub-remote answer was yes (`sudo-plan.txt`). The first `setup home --apply --yes` ran
+the preflight, created the `vowp` user and copied the login key, then failed at install:
 
 ```text
 $ ... vowp setup home --target t1-home --version 0.2.0 ... --apply --yes
@@ -318,10 +331,10 @@ sudo -u vowp -H env VOWP_HOME=/home/vowp/.vowp \
 
 The SSH session starts in the login user's home (`/home/owner`), and the `sudo`
 transition keeps that directory. `install.sh` computes its own directory with
-`SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)`; with `$0` = `sh` this is `cd .`, and
-`vowp` cannot traverse a 0750 home. The same failure occurs from `/root` (mode 0700),
-which is the common case when a fresh cloud image is first reached as root. The
-reproduction on the rig was:
+`SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)` (`scripts/install.sh:22`);
+with `$0` = `sh` this is `cd .`, and `vowp` cannot traverse a 0750 home. The same
+failure occurs from `/root` (mode 0700), which is the common case when a fresh cloud
+image is first reached as root. The reproduction on the rig was:
 
 ```text
 $ ls -ld /home/owner
@@ -486,7 +499,8 @@ vowp: remote: installing vowp failed: sh: 22: cd: can't cd to .
 
 This is the real-GCE reproduction of open item 1. The SSH session starts in the login
 user's 0750 home; the `sudo -u vowp` transition keeps that directory; `install.sh`
-computes its own directory with `cd -- "$(dirname -- "$0")"`, which is `cd .` when the
+computes its own directory with
+`SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)`, which is `cd .` when the
 script is piped to `sh`, and `vowp` cannot traverse `/home/dev`. The acceptance
 workaround was the same one used in test 1b:
 
@@ -671,8 +685,10 @@ verify checks, which use the absolute path.
 
 ### Deletion (orchestrator)
 
-This job was instructed not to delete the VM. The orchestrator deletes it the same day
-with its boot disk and verifies both lists are empty:
+This job was instructed not to delete the VM and has not deleted it. The instance and
+its boot disk were still present at verification; **deletion is pending orchestrator
+action**. The orchestrator must delete the VM with its boot disk and verify both lists
+are empty:
 
 ```sh
 gcloud compute instances delete vowp-t1-fresh-1112 \
@@ -771,16 +787,20 @@ gcloud compute disks list --filter='name=vowp-t1-fresh-1112'
    probe's harness-login check as the effective user (through the same sudo transition
    the apply uses) when the effective user differs. This is cosmetic for the apply but
    makes the plan misleading on the default GCE home mode.
-8. **Operational handoff, not a product defect: VM deletion.** This job was instructed
-   not to delete the VM. The orchestrator deletes `vowp-t1-fresh-1112` with its boot
-   disk the same day and verifies both `gcloud compute instances list` and
-   `gcloud compute disks list` are empty (commands in [Deletion](#deletion-orchestrator)).
+8. **Operational handoff, not a product defect: VM deletion is pending.** This job was
+   instructed not to delete the VM and has not deleted it; the instance and its boot
+   disk were still present at verification. The orchestrator must delete
+   `vowp-t1-fresh-1112` with its boot disk and verify both
+   `gcloud compute instances list` and `gcloud compute disks list` are empty (commands
+   in [Deletion](#deletion-orchestrator)).
 
 ## How to reproduce
 
-On a fresh `vps:sudo` rig, use the image's `vowp` user (or create a login user, set its
-home to 0755, and remove the image's `vowp` account to exercise creation), seed fake
-harness binaries and login markers, and prepare the local release mirror:
+On a fresh `vps:sudo` rig (`bash scripts/acceptance/rig.sh up --name <name> --variant
+sudo`; `--variant` belongs to `rig.sh up`, not to `vowp setup`), use the image's `vowp`
+user (or create a login user, set its home to 0755, and remove the image's `vowp`
+account to exercise creation), seed fake harness binaries and login markers, and prepare
+the local release mirror:
 
 ```sh
 # Inside the home container, as root:
@@ -795,16 +815,18 @@ python3 -m http.server 18080 --bind 127.0.0.1 --directory /home/acceptance-relea
 The `curl` shim serves the tested `install.sh` for the raw URL with its default
 `RELEASE_BASE_URL` pointed at `http://localhost:18080`; all other URLs go to
 `/usr/bin/curl`. Then on a clean control home with a private SSH config/alias for the
-rig port:
+rig port, use the installed absolute path (`~/.local/bin` is not on a non-login SSH
+PATH):
 
 ```sh
-vowp setup plan --target <alias> --version 0.2.0 --name <home> \
+V=$HOME/.local/bin/vowp
+"$V" setup plan --target <alias> --version 0.2.0 --name <home> \
   --repository /home/vowp/projects/hello --harness opencode --provider deepseek
-vowp setup home --target <alias> --version 0.2.0 --name <home> \
+"$V" setup home --target <alias> --version 0.2.0 --name <home> \
   --repository /home/vowp/projects/hello --harness opencode --provider deepseek \
   --apply --yes
-vowp setup control --apply
-vowp setup verify
+"$V" setup control --apply
+"$V" setup verify
 ```
 
 ### Real GCE VM (the recorded run)
@@ -883,8 +905,9 @@ sudo -u vowp -H bash /usr/local/share/vowp-acceptance/scripts/fixtures/project.s
 ```
 
 The second run reproduces `sh: 22: cd: can't cd to .`; `sudo chmod 0755 /home/dev`
-and a third run complete. The idempotent re-run starts the systemd unit. Delete the VM
-after the report:
+and a third run complete. The idempotent re-run starts the systemd unit. VM deletion is
+pending orchestrator action; the orchestrator deletes it with its boot disk after the
+report:
 
 ```sh
 gcloud compute instances delete <vm> --zone=europe-north1-b --delete-disks=boot --quiet
@@ -894,12 +917,13 @@ gcloud compute disks list --filter="name=<vm>"
 
 Both lists must be empty. Never leave a monthly plan or an undeleted boot disk.
 
-For the no-sudo variant, use `--variant no-sudo`, log in as `vowp`, replace the
-harness/provider answers with `claude-code`/`anthropic`, and add
-`--secret ANTHROPIC_API_KEY`; expect exit 5 at the vault hand-off, enter a dummy value
-through the hidden prompt, and re-run the same command. The rig's `fixtures/project.sh`
-creates the `hello` checkout and its local origin. Delete the rigs with
-`bash scripts/acceptance/rig.sh down --name <name>`.
+For the no-sudo variant, start the rig with `bash scripts/acceptance/rig.sh up
+--name <name> --variant no-sudo` (`--variant` is a `rig.sh up` flag, not a `vowp setup`
+flag), log in as `vowp`, replace the harness/provider answers with
+`claude-code`/`anthropic`, and add `--secret ANTHROPIC_API_KEY`; expect exit 5 at the
+vault hand-off, enter a dummy value through the hidden prompt, and re-run the same
+command. The rig's `fixtures/project.sh` creates the `hello` checkout and its local
+origin. Delete the rigs with `bash scripts/acceptance/rig.sh down --name <name>`.
 
 ## Gate status
 
