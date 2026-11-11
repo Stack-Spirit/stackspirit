@@ -13,7 +13,7 @@ use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vowp_cli::chat::ChatOptions;
+use vowp_cli::chat::{ChatOptions, capture_follow_start};
 use vowp_cli::{BufferIo, Ctx};
 use vowp_core::surface::follow::follow_to;
 use vowp_protocol::{
@@ -415,6 +415,67 @@ fn chat_follow_command_releases_the_lease_and_prints_new_events() {
         !stderr.contains("Taken over by local"),
         "a released lease must not look like a self-takeover: {stderr}"
     );
+}
+
+#[test]
+fn chat_follow_captures_the_start_sequence_before_the_lease_release() {
+    let env = common::TestEnv::new();
+    configure(&env, "hello");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let store = env.store();
+    let before = store.require_session(&session).expect("session").last_seq;
+    let paths = NodePaths::new(env.home_path());
+    let log = SessionLog::open(&paths, &session, Arc::new(SystemClock)).expect("writer");
+
+    // The closure stands in for the lease release. An event indexed here becomes
+    // visible after the start sequence is captured but before the follower starts.
+    let mut release_window_event = None;
+    let start = capture_follow_start(&store, &session, || {
+        let event = log
+            .append(NewEvent {
+                actor: Actor::System,
+                source: EventSource {
+                    harness: HarnessKind::Vowp,
+                    model: None,
+                    node: Some(NodeName::parse("local").expect("node")),
+                    native_session_id: None,
+                },
+                body: EventBody::Note(Note {
+                    text: "indexed during the release window".to_owned(),
+                }),
+                raw: None,
+                ts: None,
+            })
+            .expect("append release-window note");
+        store.index_event(&index_row(&event)).expect("index event");
+        log.sync().expect("sync log");
+        release_window_event = Some(event);
+        Ok(())
+    })
+    .expect("capture follow start");
+
+    let event = release_window_event.expect("release-window event");
+    assert_eq!(
+        start, before,
+        "the follower must start from the pre-release sequence, not the post-release row"
+    );
+    assert!(
+        event.envelope.seq > start,
+        "the release-window event must be newer than the captured start: event {} start {start}",
+        event.envelope.seq
+    );
+
+    let cancel = CancelToken::default();
+    cancel.cancel();
+    let mut out = Vec::new();
+    follow_to(&store, &session, start, &cancel, &mut out).expect("follow");
+    let text = String::from_utf8(out).expect("utf8");
+    assert!(
+        text.contains(&format!("#{} note", event.envelope.seq)),
+        "the follower skipped an event indexed during the release window: {text}"
+    );
+    assert!(text.contains("indexed during the release window"), "{text}");
 }
 
 #[test]

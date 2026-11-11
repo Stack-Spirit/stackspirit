@@ -279,6 +279,23 @@ fn release_guard(guard: &mut Option<LeaseGuard>) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Captures the follow start sequence and then releases the lease.
+///
+/// The sequence must be read before `release`: an event indexed while the lease is being
+/// released belongs to the follower's window and must be printed. Reading the session
+/// afterwards would advance `last_seq` past that event and silently skip it.
+///
+/// `release` is injected so the ordering is testable without a live lease.
+pub fn capture_follow_start(
+    store: &Store,
+    session: &SessionId,
+    release: impl FnOnce() -> Result<(), CliError>,
+) -> Result<u64, CliError> {
+    let start_seq = store.require_session(session)?.last_seq;
+    release()?;
+    Ok(start_seq)
+}
+
 /// Handles one slash command; returns whether the chat loop should continue.
 fn slash_command(
     ctx: &Ctx,
@@ -374,7 +391,7 @@ fn slash_command(
             Ok(true)
         }
         "follow" => {
-            release_guard(guard)?;
+            let start_seq = capture_follow_start(store, &session.id, || release_guard(guard))?;
             writeln!(
                 io.out(),
                 "following session {} read-only; press Ctrl-C to stop",
@@ -382,7 +399,7 @@ fn slash_command(
             )?;
             let current = store.require_session(&session.id)?;
             *session = current.clone();
-            follow_mode(ctx, io, store, &current, current.last_seq).map(|_| false)
+            follow_mode(ctx, io, store, &current, start_seq).map(|_| false)
         }
         "capsule" => {
             let Some(token) = guard.as_ref().map(|held| held.token().to_owned()) else {
