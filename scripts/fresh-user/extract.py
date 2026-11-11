@@ -5,7 +5,7 @@ The plan is a bash script with one timed step per documented command. Commands
 are read from fenced `sh` blocks in:
 
   * docs/guides/install.md, section "Build and install by hand"
-  * docs/guides/quickstart.md, sections 1 .. 7
+  * docs/guides/quickstart.md, sections 1, 2, 4, 5 and 7
   * examples/hello-vowp/README.md, the main "Run it" command
 
 The v0.2 README and the setup contract are prose-only; they have no fenced
