@@ -2,7 +2,8 @@
 #
 # This image intentionally contains no VOWP binary and no build cache: the test
 # compiles the checkout itself, exactly as a new user would. Only the base Rust
-# toolchain, git and tmux are provided (the README quickstart prerequisites).
+# toolchain, git and tmux are provided, which is what the selected manual-build
+# and quickstart commands need.
 FROM rust:1-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \

@@ -4,9 +4,8 @@
 copies this checkout in without `target/` or `.git`, and runs the documented
 commands from:
 
-- `README.md`, section **Quickstart (from source)**;
-- `docs/guides/install.md`, sections **Prerequisites** through **Verify the node**;
-- `docs/guides/quickstart.md`, sections 0 through 5;
+- `docs/guides/install.md`, section **Build and install by hand**;
+- `docs/guides/quickstart.md`, sections 1, 2, 4, 5 and 7;
 - `examples/hello-vowp/README.md`, the main **Run it** command.
 
 The commands are extracted from the fenced `sh` blocks at run time by
@@ -19,6 +18,9 @@ them. A missing section or block is an extraction error, not a silent skip.
 bash scripts/fresh-user/run.sh
 ```
 
+`bash scripts/fresh-user/run.sh --help` prints the header and options without
+starting Docker.
+
 Requirements: `docker` with a reachable daemon, and `python3` on the host. The
 container is the official `rust:1-slim-bookworm` image plus `git` and `tmux`.
 It starts with no VOWP binary and no build cache. `run.sh` prepares the Docker
@@ -27,8 +29,9 @@ through `run.sh` rather than pointing `docker build` at this directory.
 
 Every command is one timed step. The script stops at the first non-zero exit and
 prints the document and line the command came from. It also checks the outputs
-the docs promise: `vowp 0.1.0-dev`, the `vowp init` summary line, `doctor: ok`,
-and the hello-vowp example's final "all three jobs reached done".
+the docs promise: `vowp` followed by a semantic version (currently
+`vowp 0.1.0`), the `vowp init` summary line, `doctor: ok`, and the hello-vowp
+example's final "all three jobs reached done".
 
 The container gets no host environment and no secrets. Two fake harnesses
 (`fake-bin/claude` and `fake-bin/opencode`) answer only `--version`, because the
@@ -50,8 +53,8 @@ remain; that is shared build cache, not test state.
 ## What is deliberately skipped
 
 `extract.py` skips commands the docs themselves mark `# (planned)` in the
-quickstart guide (currently only `vowp plan --dry-run`, which needs a planner
-model turn). The optional `KEEP=1` inspection variant of the hello-vowp example
-is also skipped; the main `FAKE=1` command is the one that runs.
+quickstart guide; there are none in the current guide. The optional `KEEP=1`
+inspection blocks of the hello-vowp example are also skipped; the main `FAKE=1`
+command is the one that runs.
 
 `docs/fresh-user/REPORT.md` records the deviations found by the last run.

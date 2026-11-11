@@ -2,7 +2,7 @@
 # scripts/fresh-user/run.sh - follow the VOWP docs as a new user in a clean container.
 #
 # The script:
-#   1. extracts the documented commands from README.md, docs/guides/install.md,
+#   1. extracts the documented commands from docs/guides/install.md,
 #      docs/guides/quickstart.md and examples/hello-vowp/README.md;
 #   2. builds a clean Rust image with that checkout (no target/, no .git) and
 #      no VOWP binary;
@@ -16,6 +16,7 @@
 #
 # Usage:
 #   bash scripts/fresh-user/run.sh
+#   bash scripts/fresh-user/run.sh --help
 #
 # Variables:
 #   FRESH_USER_IMAGE=tag   image tag to use (default: vowp-fresh-user:local)
@@ -26,6 +27,23 @@
 # documented-output check passed.
 
 set -euo pipefail
+
+usage() {
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        echo "fresh-user: unknown argument: $1 (try --help)" >&2
+        exit 2
+        ;;
+esac
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH='' cd -- "$here/../.." && pwd)

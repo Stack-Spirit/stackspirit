@@ -8,15 +8,16 @@ are read from fenced `sh` blocks in:
   * docs/guides/quickstart.md, sections 1, 2, 4, 5 and 7
   * examples/hello-vowp/README.md, the main "Run it" command
 
-The v0.2 README and the setup contract are prose-only; they have no fenced
-`sh` blocks, so they are not selected. The container has no systemd user
-manager, SSH client or harness login, so the plan follows the manual build and
-the local quickstart; the setup path and the install prerequisite checks run
-elsewhere. Nothing is copied by hand: if a documented command changes, the
-test runs the new command. If a section or block disappears, extraction fails
-loudly so the two cannot drift apart silently. Commands explicitly marked
-``# (planned)`` in the quickstart guide are skipped and logged (they need a
-planner model turn).
+The setup contract (`docs/setup/agent-setup.md`) does have fenced `sh` blocks,
+but that path installs and checks a real home over SSH with a signed-in
+harness. The fresh-user container has no SSH client, systemd user manager or
+harness login, so the plan follows the manual build and the local quickstart
+instead; the setup path and the install prerequisite checks run elsewhere.
+Nothing is copied by hand: if a documented command changes, the test runs the
+new command. If a section or block disappears, extraction fails loudly so the
+two cannot drift apart silently. Commands explicitly marked ``# (planned)``
+in the quickstart guide are skipped and logged (they need a planner model
+turn).
 
 Usage:
     extract.py --root REPO --out PLAN.sh [--manifest PLAN.json]
@@ -40,8 +41,9 @@ QUICKSTART = "quickstart"
 SELECTIONS: list[tuple[str, str, str, bool, str | None]] = [
     # The manual build installs the binary the rest of the plan uses.
     ("docs/guides/install.md", "Build and install by hand", REPO, False, None),
-    # The quickstart numbers its sections; run them in the order a reader
-    # follows rather than the order the numbers appear in the file.
+    # The quickstart numbers its sections, but the plan runs them in dependency
+    # order: register the project (section 2) before checking the home
+    # (section 1), because doctor and fleet status inspect the registered home.
     ("docs/guides/quickstart.md", "2. Register a project", QUICKSTART, True, "vowp init"),
     ("docs/guides/quickstart.md", "2. Register a project", QUICKSTART, True, "git commit"),
     ("docs/guides/quickstart.md", "1. Check the home", QUICKSTART, True, None),
