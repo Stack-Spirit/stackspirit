@@ -17,6 +17,9 @@ use vowp_protocol::{
 };
 use vowp_store::{NodePaths, Store};
 
+#[path = "../../vowp-cli/tests/capacity.rs"]
+mod capacity_cli;
+
 const NOW_TEXT: &str = "2026-11-10T12:00:00Z";
 const GIB: u64 = 1024 * 1024 * 1024;
 
