@@ -23,7 +23,7 @@ use vowp_core::Deps;
 use vowp_core::loops::{NodeReconcileReport, NodeSupervisor, NodeTickReport};
 use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
 use vowp_store::{MigrationReport, NodePaths, Store, StoreError};
-use vowp_tmux::{LayoutSpec, Tmux, TmuxError, WindowManager, WindowSpec, session_name_for_project};
+use vowp_tmux::{LayoutSpec, TmuxError, WindowManager, WindowSpec, session_name_for_project};
 
 use crate::cli::{DownArgs, Global, UpArgs, UpCommand};
 use crate::{CliError, Ctx, IoStreams, signals};
@@ -911,27 +911,27 @@ fn kill_windows(paths: &NodePaths, deps: &Deps) -> Result<(), CliError> {
         if entry.state == ProjectState::Archived || entry.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
             continue;
         }
-        kill_project_session(&Tmux::for_home(paths.root()), &entry.name)?;
+        kill_project_session(deps, &entry.name)?;
     }
     Ok(())
 }
 
 /// Kills the tagged windows and the session of one project.
-fn kill_project_session(tmux: &Tmux, project: &ProjectName) -> Result<(), CliError> {
+fn kill_project_session(deps: &Deps, project: &ProjectName) -> Result<(), CliError> {
     let session = session_name_for_project(project.as_str());
-    match tmux.kill_session(&session) {
+    match deps.windows.kill_session(&session) {
         Ok(()) | Err(TmuxError::NotInstalled) => return Ok(()),
         Err(TmuxError::NotTagged { .. } | TmuxError::Refused(_)) => {}
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     }
-    let windows = match tmux.list_windows(&session) {
+    let windows = match deps.windows.list_windows(&session) {
         Ok(windows) => windows,
         Err(TmuxError::NotInstalled) => return Ok(()),
         Err(error) => return Err(CliError::Core(vowp_core::CoreError::Tmux(error))),
     };
     for window in windows {
         if window.tagged {
-            let _ = tmux.kill_window(&session, &window.name);
+            let _ = deps.windows.kill_window(&session, &window.name);
         }
     }
     Ok(())
