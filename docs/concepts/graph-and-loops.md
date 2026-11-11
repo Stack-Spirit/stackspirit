@@ -101,9 +101,10 @@ These commands are implemented today, including the supervisor commands (`vowp u
 2. **Ownership locks.** No two running jobs may have overlapping `owns` globs. Conflicts wait. A fix job
    and the job it fixes are treated as one holder, so the fix does not deadlock the original.
 3. **Measured capacity, provider concurrency and fairness.** The node capacity manager checks the brake,
-   the provider limit, the worker target, RAM, CPU and disk before a run starts; a wait leaves the job
-   `ready` with a reason. Project weight and least-recently-admitted order projects when capacity is
-   scarce. `[node].max_workers` (default 4) is a preference for the advised target, not a hard cap;
+   the provider limit, the worker target, RAM, CPU and disk before a worker, verifier, planner or keeper
+   run starts; a wait leaves the job `ready` with a reason. The merge queue is not admitted through this
+   path. Project weight and least-recently-admitted order projects when capacity is scarce.
+   `[node].max_workers` (default 4) is a preference for the advised target, not a hard cap;
    `max_verifiers` (default 2) bounds the verifier share. `[providers.<p>].max_concurrent` bounds each
    provider and is lowered after rate limits. See [capacity](capacity.md).
 4. **One worktree per job** on branch `job/<id>`. Workers run in that worktree. Verify, fix and merge jobs

@@ -2,13 +2,11 @@
 
 VOWP creates databases, session logs, blobs, run mirrors, worktrees, backups and samples. The lifecycle
 model answers one question for every file: **what is it, and may it ever be deleted?** The answer is a
-class. Four classes are permanent by construction; five are disposable and collected by `gc --apply`.
+class. Four classes are permanent by construction; five are disposable and collected by vowp `gc --apply`.
 
-> **Status: current.** Classes, `gc`, closed-session compaction, backup/restore and the nightly GC
-> schedule are implemented on `main`. The binding specification is
+> **Status: current.** Classes, vowp `gc`, closed-session compaction, backup/restore and the nightly
+> GC schedule are implemented on `main`. The binding specification is
 > [`docs/design/v0.2/home-and-surfaces.md`](../design/v0.2/home-and-surfaces.md) §10.
-
-Commands below are `vowp` subcommands; the binary prefix is omitted for readability.
 
 ## Classes
 
@@ -21,7 +19,7 @@ Commands below are `vowp` subcommands; the binary prefix is omitted for readabil
 | **closed session** | `log.jsonl` and blobs of an idle session whose job is done, or an explicitly closed session | Kept 30 days after the last update, then compacted to a capsule and summary | `sessions.state='closed'` or a done job |
 | **run output** | `runs/*.jsonl`, `*.stderr` | 14 days; gzip after 1 day | `runs/` and the run rows |
 | **worktree** | a job worktree | Removed after merge; a failed, cancelled or replanned job's worktree is kept 7 days | job state and worktree path |
-| **sample** | `host_samples` | 24 hours at full rate, 30 days as one-minute averages | the table |
+| **sample** | `host_samples` | 5-second rows kept for 24 hours; no automatic one-minute rollup | the table |
 | **cache** | disposable `tmp/` files | 24 hours | `tmp/` |
 
 The classification is **derived from database state wherever possible**, so no registration hook is
@@ -35,8 +33,9 @@ to the closed-session class.
 
 ## `gc`
 
-`gc` is a dry run by default. It lists files per class, their bytes and a five-path sample, and changes
-nothing. `gc --apply` deletes only the five disposable classes once their expiry has passed:
+vowp `gc` is a dry run by default. It lists files per class, their bytes and a five-path sample, and
+changes nothing. vowp `gc --apply` deletes only the five disposable classes once their expiry has
+passed:
 
 - **closed sessions:** compact first, then remove the full log and blobs;
 - **run output:** gzip after one day and delete after fourteen;
@@ -48,9 +47,9 @@ It never deletes production, truth, open work or secrets, even if a catalog row 
 also refuses a path that escapes the home. The `--class` filter narrows a pass to one class, and
 `--json` prints the report. `--now` exists for tests and takes an RFC 3339 instant.
 
-A nightly L9 schedule, `gc-nightly`, runs `gc --apply` every 24 hours for each project. The supervisor
+A nightly L9 schedule, `gc-nightly`, runs vowp `gc --apply` every 24 hours for each project. The supervisor
 creates the schedule once per project if it is missing. The same tick enforces the 50 MB raw run-output
-cap; `gc --apply` forces a cap scan as well.
+cap; vowp `gc --apply` forces a cap scan as well.
 
 The report has one row per class and the totals:
 
@@ -79,20 +78,21 @@ When a session is closed and 30 days have passed since its last update, compacti
    index is the history;
 4. deletes `log.jsonl`, `blobs/` and `.lock`.
 
-After compaction, `session tail` and `session show --events` exit 3 with a message pointing at
-`session show --capsule`. `session show --capsule`, `session resume` and `session export` keep working;
+After compaction, vowp `session tail` and vowp `session show --events` exit 3 with a message pointing
+at vowp `session show --capsule`. vowp `session show --capsule` and vowp `session export` keep working;
 export writes the capsule with an empty event tail and says so. There is no full-log replay after
-compaction, which is the point of the class. `reindex` skips a session with no log and reports it; it
-never deletes the row.
+compaction, which is the point of the class. vowp `reindex` skips a session with no log and reports
+it; it never deletes the row.
 
 ### Run output
 
 Raw harness output is useful for debugging and is not conversation content. VOWP keeps it bounded:
 
-- a completed run file is capped at 50 MB; older bytes are trimmed from the front;
-- after one day, `gc --apply` gzips it in place and keeps the `.gz` name plus a catalog row;
+- a completed file is capped at 50 MB and keeps its last 50 MB, starting at a line boundary;
+- after one day, vowp `gc --apply` gzips it in place and keeps the `.gz` name plus a catalog row;
 - after fourteen days it is deleted;
-- a file belonging to an open run is never touched.
+- an oversized in-flight file is truncated to zero in place, so the writer keeps the same inode and
+  the canonical session log is unaffected.
 
 ### Worktrees
 
@@ -104,10 +104,11 @@ the main checkout is refused.
 
 ### Samples and cache
 
-Full-rate host samples are kept for 24 hours and replaced by one-minute averages for 30 days. This is
-what lets the capacity report show a recent host picture without keeping a 5-second row forever.
-Disposable files under `tmp/` expire after 24 hours; the snapshot writer uses that directory for its
-atomic rename, so a live file is not a cache candidate until it is old.
+Host samples are written every 5 seconds and kept for 24 hours. The pruner also knows how to retain
+one-minute rows for 30 days if such rows exist, but the sampler does not create them in this build; a
+minute rollup is still a follow-up. Disposable files under `tmp/` expire after 24 hours; the snapshot
+writer uses that directory for its atomic rename, so a live file is not a cache candidate until it is
+old.
 
 ## Backup
 
@@ -123,12 +124,10 @@ directory backup contains:
 
 Without the session content a restore would keep the index rows but lose every conversation, so it is
 never optional. Secrets are never included; the manifest records that they were skipped and restore
-tells the owner to set them again with `secret set`.
+tells the owner to set them again with vowp `secret set`.
 
-```text
-backup [--to <path|rsync-target|git-remote>] [--offsite <target>] [--encrypt <age-recipient>] [--json]
-backup --restore <dir> --to-home <fresh-home> [--force]
-```
+- vowp `backup [--to <path|rsync-target|git-remote>] [--offsite <target>] [--encrypt <age-recipient>] [--json]`
+- vowp `backup --restore <dir> --to-home <fresh-home> [--force]`
 
 - With no destination, the backup goes to `~/.vowp/backups/<UTC timestamp>/`. Backups in that default
   directory are rotated: the newest backup per day is a daily candidate, the newest daily candidate per
@@ -147,14 +146,14 @@ backup test and still opens as an unbound global handle; it is not a full home b
 
 ## Migration and the archive
 
-`migrate` (also run automatically by `vowp up` unless `--no-migrate`) splits a v0.1 home into the global
+vowp `migrate` (also run automatically by `vowp up` unless `--no-migrate`) splits a v0.1 home into the global
 database and one database per project. It writes a pre-migration backup first, refuses to run while a
 supervisor is up, verifies row counts per table and records the result in `migration.json` while the
-operation is in flight. `migrate --dry-run` reports what would change; `migrate --rollback <backup>`
+operation is in flight. vowp `migrate --dry-run` reports what would change; vowp `migrate --rollback <backup>`
 restores the pre-migration backup instead of migrating. A failed or interrupted migration is
 reconciled on the next startup; it does not leave two half-live databases.
 
-`project rm <name> --yes` archives the project directory under
+vowp `project rm <name> --yes` archives the project directory under
 `~/.vowp/archive/projects/<name>-<timestamp>/` and removes the registry row. The archive is truth and
 is never deleted by GC. Production catalog rows that mention the project are kept.
 
@@ -169,7 +168,7 @@ is never deleted by GC. Production catalog rows that mention the project are kep
 | Closed session log and blobs | 30 days after close | compact to capsule + summary |
 | Raw run output | 14 days | gzip after 1 day, delete after 14 |
 | Failed/cancelled/replanned worktree | 7 days after the terminal state | remove worktree, keep branch |
-| Host samples | 24 h full rate | 30 days as one-minute averages |
+| Host samples | 24 hours (5-second rows) | prune; no minute rollup yet |
 | Disposable temp/cache | 24 hours | delete |
 | Backups in the default directory | 7 daily + 4 weekly | rotate |
 

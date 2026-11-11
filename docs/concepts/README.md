@@ -9,7 +9,7 @@ implementation on `main`; every command shown is implemented. The binding specif
 | [Overview](overview.md) | The vocabulary, the home and control machine, the components and where state lives. |
 | [Home and surfaces](home-and-surfaces.md) | One supervisor for many projects, leases, takeover, remote execution, app hosts, orchestrators and MCP. |
 | [Capacity](capacity.md) | Measured host and run usage, admission, brakes, targets and the advisor. |
-| [Data lifecycle](data-lifecycle.md) | Classes, `gc`, closed-session compaction, backup, restore and migration. |
+| [Data lifecycle](data-lifecycle.md) | Classes, garbage collection, closed-session compaction, backup, restore and migration. |
 | [Graph and loops](graph-and-loops.md) | Jobs, edges, states, gates, L1–L9 and the merge queue. |
 | [Sessions and switching](sessions-and-switching.md) | Event logs, capsules, surfaces, executors and handoff. |
 | [Providers and failover](providers-and-failover.md) | Profile ladders, node-wide limits and cost receipts. |

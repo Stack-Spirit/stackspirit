@@ -149,7 +149,6 @@ directory.
 │                              limits, capacity, catalog, node inbox and ledger
 ├─ projects/<name>/project.db  one DB per project: jobs, edges, runs, gates, loops,
 │                              schedules, project inbox and ledger, releases
-├─ projects/<name>/.lock       project DB writer lock (best effort; WAL is the real guard)
 ├─ sessions/<sessionId>/
 │    ├─ log.jsonl              authoritative append-only event log
 │    ├─ blobs/<sha256>         spilled tool output and attachments
@@ -159,9 +158,9 @@ directory.
 ├─ orchestrators/<name>/       project-local app config, lease token and host state
 ├─ secrets/                    basic-mode secret files (0700/0600); never backed up
 ├─ snapshot.json               node read model, rewritten atomically every tick
-├─ board.json                  v0.1 compatibility copy for a single active project
+├─ board.json                  v0.1 copy for one active project (or the only paused one)
 ├─ migration.json              present only while a v0.1 → v0.2 migration is in flight
-├─ archive/projects/<name>-<ts>/  `project rm` archive
+├─ archive/projects/<name>-<ts>/  vowp `project rm` archive
 ├─ runs/<runId>.jsonl          raw harness stdout (debug only)
 ├─ logs/supervisor.log         structured loop log
 ├─ releases.log                append-only promotion and rollback history
@@ -199,15 +198,16 @@ see [data lifecycle](data-lifecycle.md).
   parked alone.
 - The global + per-project database split, the v0.1 → v0.2 migration, and a per-project archive
   directory.
-- `snapshot.json`, `schema snapshot`, and `fleet status/queue/inbox/capacity`.
+- `snapshot.json`, vowp `schema snapshot`, and vowp `fleet status`, `fleet queue`, `fleet inbox` and
+  `fleet capacity`.
 - Measured capacity: host sampling, per-run usage, estimates, admission, brakes, owner targets and an
   advisor that only proposes.
 - Sessions on every surface: leases, takeover, follow mode, remote execution with a durable spool,
   opencode and Claude app hosts, the MCP server, `vowp chat` and orchestrator sessions.
-- Control machines: `control init`, snapshot cache, SSH tunnels, and phone access with an SSH app.
+- Control machines: vowp `control init`, snapshot cache, SSH tunnels, and phone access with an SSH app.
 - Secrets in basic or vault-user mode, injected by name and redacted by exact value.
-- Lifecycle classes, `gc`, closed-session compaction, backup/restore and the nightly GC schedule.
-- AI-first setup: `setup plan`, `setup home`, `setup control` and `setup verify`.
+- Lifecycle classes, vowp `gc`, closed-session compaction, backup/restore and the nightly GC schedule.
+- AI-first setup: vowp `setup plan`, vowp `setup home` and vowp `setup control`.
 
 ## What is deliberately deferred
 

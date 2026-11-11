@@ -8,8 +8,6 @@ one log on the home; only the surface holding the lease can write to it.
 > **Status: current.** The commands and behaviour on this page are implemented on `main`. The binding
 > specification is [`docs/design/v0.2/home-and-surfaces.md`](../design/v0.2/home-and-surfaces.md).
 
-Commands below are `vowp` subcommands; the binary prefix is omitted for readability.
-
 ## The home owns the truth
 
 The home is normally a Linux VPS that stays on. It owns:
@@ -45,13 +43,13 @@ registry commands are:
 
 | Command | What it does |
 |---|---|
-| `project add <path> [--name] [--weight]` | Registers an existing checkout. Idempotent for the same path and name; does not start a supervisor. |
-| `project ls [--all]` | Lists projects with state, weight, path and update time. The reserved `_node` project is hidden unless `--all`. |
-| `project pause <name>` | Stops new dispatch. Running work finishes on the maintenance tick. |
-| `project resume <name>` | Returns a paused project to `active`. An archived project is refused. |
-| `project archive <name>` | Stops all ticks for the project and keeps its database. |
-| `project rm <name> --yes` | Archives the project directory under `~/.vowp/archive/projects/` and removes the registry row. It refuses while the project is running and for `_node`. |
-| `project weight <name> <1-100>` | Sets the fairness weight used when capacity is scarce. |
+| vowp `project add <path> [--name] [--weight]` | Registers an existing checkout. Idempotent for the same path and name; does not start a supervisor. |
+| vowp `project ls [--all]` | Lists projects with state, weight, path and update time. The reserved `_node` project is hidden unless `--all`. |
+| vowp `project pause <name>` | Stops new dispatch. Running work finishes on the maintenance tick. |
+| vowp `project resume <name>` | Returns a paused project to `active`. An archived project is refused. |
+| vowp `project archive <name>` | Stops all ticks for the project and keeps its database. |
+| vowp `project rm <name> --yes` | Archives the project directory under `~/.vowp/archive/projects/` and removes the registry row. It refuses while the project is running and for `_node`. |
+| vowp `project weight <name> <1-100>` | Sets the fairness weight used when capacity is scarce. |
 
 A paused project still gets maintenance work — requests, reconcile, harvest, stalls, state changes,
 gates, verify, merge and the board — but no dispatch, triggers or work-creating schedules. An archived
@@ -72,7 +70,7 @@ Each tick does a node pass, then every active project's L1–L9 steps in round-r
 1. global             apply drained requests, refresh provider limits
 2. projects           each active project in round-robin order, each isolated by catch_unwind
 3. snapshot           write snapshot.json after the project steps
-4. board              write board.json only when exactly one non-reserved project is active
+4. board              write board.json for one active project, or the only paused project
 5. heartbeat          update ~/.vowp/heartbeat and the supervisor pid
 ```
 
@@ -92,17 +90,20 @@ windows; it never sends keystrokes, never respawns a pane and never reads screen
 
 | Session | Windows |
 |---|---|
-| `vowp-home` | `board` (every project), `capacity`, `orchestrator` |
+| `vowp-home` | `board` (every project), `capacity` |
 | `vowp-<project>` | `board`, `supervisor`, `planner`, `keeper`, `inbox`, `job-<id>` |
 
-When tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach` attaches to the tmux
-session, or falls back to tailing a session log.
+When tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach` attaches to the
+project's board window; `vowp attach <job-id>` attaches to that job's window, or tails the job's
+latest session log when tmux is unavailable.
 
 ## The control machine
 
 A control machine is a laptop, desktop or phone that talks to the home. It runs no supervisor, no
-loops, no graph and no worktrees. `control init <ssh-target>` creates `~/.vowp-control/` with
-`control.json` (mode 0600), the node registry mirror, the snapshot cache and the spool directory.
+loops, no graph and no worktrees. vowp `control init <ssh-target>` creates `~/.vowp-control/` with
+`control.json` (mode 0600), `nodes.json`, `surfaces.json`, `tunnels.json` and the `spool/` directory.
+The snapshot cache (`snapshot.json` and `snapshot.meta.json`) is filled later by vowp `fleet status` or
+vowp `setup control`.
 
 Routing is deterministic:
 
@@ -114,22 +115,22 @@ Routing is deterministic:
 
 On a control machine:
 
-- reads such as `fleet status`, `fleet queue`, `fleet inbox`, `capacity show` and `project ls` are sent
-  to the home over `ssh -o BatchMode=yes`; the remote exit code is returned unchanged (an SSH failure
-  is exit 7);
-- writes such as `project add`, `inbox answer`, `capacity set`, `job add` and `job pause` always go to
-  the home; a write never succeeds against the cache;
-- `fleet status` caches the home's `snapshot.json` and prints `as of HH:MM` when the home is
+- reads such as vowp `fleet status`, vowp `fleet queue`, vowp `fleet inbox`, vowp `capacity show`
+  and vowp `project ls` are sent to the home over `ssh -o BatchMode=yes`; the remote exit code is
+  returned unchanged (an SSH failure is exit 7);
+- writes such as vowp `project add`, vowp `inbox answer`, vowp `capacity set`, vowp `job add` and
+  vowp `job park` always go to the home; a write never succeeds against the cache;
+- vowp `fleet status` caches the home's `snapshot.json` and prints `as of HH:MM` when the home is
   unreachable; `--refresh` requires SSH and `--cached` never opens a connection;
 - `vowp up`, `vowp down` and `vowp board` refuse because they need local truth.
 
-A path given to `project add` is a path **on the home**, not on the control machine.
+A path given to vowp `project add` is a path **on the home**, not on the control machine.
 
 ### Tunnels and the phone
 
-`tunnel open <name> --remote-port <n> [--local-port <n>]` starts a managed
+vowp `tunnel open <name> --remote-port <n> [--local-port <n>]` starts a managed
 `ssh -L 127.0.0.1:<local>:127.0.0.1:<remote>` forward, records its pid and ports in `tunnels.json`
-(0600), and prints the chosen local port. `tunnel ls` prunes dead records and `tunnel close <name>`
+(0600), and prints the chosen local port. vowp `tunnel ls` prunes dead records and vowp `tunnel close <name>`
 stops one. A tunnel is opened from the machine that will use it; the home refuses `tunnel` because a
 forward there would point at itself.
 
@@ -141,7 +142,7 @@ VOWP app to install, no browser board and no public port.
 Every tick the supervisor writes `~/.vowp/snapshot.json` to a temporary file, fsyncs it and renames it
 into place, so a reader never sees a partial document. The schema is `vowp-snapshot/1`, and
 `vowp schema snapshot` prints its JSON Schema. The snapshot is derived: deleting it loses nothing, and
-`fleet status` recomputes from the databases when the file is missing or older than three ticks.
+vowp `fleet status` recomputes from the databases when the file is missing or older than three ticks.
 
 The snapshot carries:
 
@@ -156,12 +157,12 @@ Read commands:
 
 | Command | What it shows |
 |---|---|
-| `fleet status [--refresh] [--cached]` | The node summary and snapshot wrapper. On a control machine it can fall back to the cache. |
-| `fleet queue [--project] [--state]` | Every queued job with its waiting reason. |
-| `fleet inbox [--project] [--all]` | Node and project inbox items, oldest first. |
-| `fleet capacity` | Alias of `capacity show`. |
-| `status` | The compact v0.1-compatible status plus the home and project rows. |
-| `board [--once]` | The refreshing terminal board. With one project the output stays byte-compatible with v0.1. |
+| vowp `fleet status [--refresh] [--cached]` | The node summary and snapshot wrapper. On a control machine it can fall back to the cache. |
+| vowp `fleet queue [--project] [--state]` | Every queued job with its waiting reason. |
+| vowp `fleet inbox [--project] [--all]` | Node and project inbox items, oldest first. |
+| vowp `fleet capacity` | Alias of vowp `capacity show`. |
+| vowp `status` | The compact v0.1-compatible status plus the home and project rows. |
+| vowp `board [--once]` | The refreshing terminal board. With one project the output stays byte-compatible with v0.1. |
 
 The snapshot never contains a secret value, a lease token or a full event payload. Titles, job ids and
 questions are included; bodies are truncated. The registered checkout path is included, so treat the
@@ -220,10 +221,10 @@ A turn may run on the surface's own machine instead of the home. The home remain
    the command line;
 2. the home writes the framing events and a `runs` row, then returns a grant with the run id, prompt,
    executor, node, environment **names**, lease token and tail sequence;
-3. the client runs `__exec --grant <file>` on its own machine; the grant file is mode 0600 and the
+3. the client runs vowp `__exec --grant <file>` on its own machine; the grant file is mode 0600 and the
    token is never in argv or `ps`;
 4. the adapter writes every event to a local spool **before** sending it, then streams JSON lines to
-   `session ingest` over SSH;
+   vowp `session ingest` over SSH;
 5. ingest assigns the sequence, appends with the supplied event id, indexes it, heartbeats the lease and
    acknowledges the event. A duplicate id is acknowledged, not appended; the same id with different
    content is a conflict;
@@ -232,7 +233,7 @@ A turn may run on the surface's own machine instead of the home. The home remain
 
 The executor node owns its harness binary and any secret it injects; the home never sends a secret
 value over the wire, only environment-variable names. The run row and snapshot name the executor node.
-A laptop that dials the home is registered once with `node add <name> -`; the home never dials it.
+A laptop that dials the home is registered once with vowp `node add <name> -`; the home never dials it.
 
 ## App surfaces and orchestrators
 
@@ -250,8 +251,9 @@ An orchestrator can run inside an opencode server on the home:
 - the desktop joins through `ssh -L` and the pair link; the phone runs the opencode terminal against the
   same server over SSH.
 
-No public port is opened and no owner hostname is stored on the home; join instructions use
-placeholders and the control machine prints the concrete command.
+No public port is opened and no owner hostname is stored on the home. The join instructions keep
+generic placeholders such as `<home-ssh-target>` and `<port>`; run them on the control machine, whose
+vowp `tunnel` command already knows the configured home target.
 
 ### Claude Code
 
@@ -263,7 +265,7 @@ claude-code` records a degraded orchestrator instead of pretending the host is r
 ### Orchestrator sessions
 
 An orchestrator is an ordinary session with role `orchestrator`, either fleet-wide or bound to one
-project. `orchestrator new [--name] [--project] --app opencode|claude-code|chat [--executor]`:
+project. vowp `orchestrator new [--name] [--project] --app opencode|claude-code|chat [--executor]`:
 
 1. creates `~/.vowp/orchestrators/<name>/` — never the user's global app config;
 2. creates the session locally with the app's configuration and a short instructions template
@@ -273,11 +275,11 @@ project. `orchestrator new [--name] [--project] --app opencode|claude-code|chat 
 5. starts the app host where the app supports one, acquires the lease and prints join instructions for
    the desktop, the phone and `vowp chat`.
 
-`orchestrator ls` lists cards; `orchestrator stop` stops the host and releases the lease (the session
-stays); `orchestrator resume` starts it again. The node supervisor calls `resume_all` at startup, so a
-home restart brings running orchestrators back. A host that cannot start is marked `degraded` and does
-not fail node startup. `--app chat` creates no background host: its join command starts the chat
-surface directly.
+vowp `orchestrator ls` lists cards; vowp `orchestrator stop` stops the host and releases the lease (the session
+stays); vowp `orchestrator resume` starts it again. The node supervisor does not resume orchestrators by
+itself after a home restart: run vowp `orchestrator resume <name>` for the ones you want back. A host that
+cannot start is marked `degraded` and does not fail the command. `--app chat` creates no background
+host: its join command starts the chat surface directly.
 
 The instructions template tells the orchestrator to read the snapshot, report plainly with times,
 propose before acting, apply only after the owner's yes, never open a database or read a secret, and
@@ -293,7 +295,7 @@ and the lease, so the new app continues with the full picture.
 
 ## MCP tools
 
-`mcp --session <id> --surface <id> --token-file <path>` is a stdio MCP server with plain threads
+vowp `mcp --session <id> --surface <id> --token-file <path>` is a stdio MCP server with plain threads
 and no async runtime. It gives an app typed tools instead of shell parsing:
 
 | Read | Write |
@@ -317,8 +319,8 @@ approval; `vowp chat` is the tool-free fallback. Do not claim a tool call that d
 | `vowp chat` | yes | turn input and slash commands | required |
 | opencode app via MCP | yes | MCP write tools only | required; checked on every call |
 | Claude app via MCP | yes | MCP write tools only | same |
-| `fleet`, `status`, `capacity`, `project` CLI | yes | writes go to the home | no session lease |
-| `session ingest` | yes | event append for one run | token in the grant |
+| fleet, status, capacity and project CLI families | yes | writes go to the home | no session lease |
+| vowp `session ingest` | yes | event append for one run | token in the grant |
 | `vowp session tail --follow` | yes | no | not required |
 
 A surface cannot close another vendor's window. The cut-off is enforced where the power is: the lease
@@ -331,11 +333,11 @@ VOWP refers to a secret by **name** only. No command takes a value as an argumen
 - **Vault-user mode** (when a separate `vowp-vault` user and the one sudoers line exist) stores files
   under `/home/vowp-vault/secrets/<NAME>` mode 0600.
 - **Basic mode** (no sudo or no vault user) stores them under `~/.vowp/secrets/<NAME>` mode 0600 and
-  says so in `doctor` and on the board.
+  says so in vowp `doctor` and on the board.
 
-`secret set` reads from a hidden prompt; `secret ls` shows names and the last four characters;
-`secret rm` deletes; `secret upgrade` prints the one sudo command that moves basic-mode files to the
-vault user; `secret request` starts a one-time page on `127.0.0.1` with a 10-minute expiry and returns
+vowp `secret set` reads from a hidden prompt; vowp `secret ls` shows names and the last four characters;
+vowp `secret rm` deletes; vowp `secret upgrade` prints the one sudo command that moves basic-mode files to the
+vault user; vowp `secret request` starts a one-time page on `127.0.0.1` with a 10-minute expiry and returns
 only the name, URL and expiry. After the paste the result reports the last four characters; the value
 is never returned. Through a tunnel this gives a desktop owner a safe place to paste a value without
 putting it in a chat.
@@ -351,22 +353,19 @@ make a secret unreadable to code that is given it. Secrets are never included in
 
 ## Setup and a first day
 
-The AI-first setup path is `setup plan`, `setup home --apply`, `setup control --apply` and
-`setup verify`. The plan lists every phase, command and file before anything changes; a human hand-off
-stops the run with exit 5 instead of working around it. A typical first day on a new home looks like:
+The AI-first setup path is vowp `setup plan`, vowp `setup home --apply` and vowp
+`setup control --apply`. The plan lists every phase, command and file before anything changes; a human
+hand-off stops the run with exit 5 instead of working around it. A typical first day on a new home
+looks like:
 
-```text
-setup plan --target <user@home>
-setup home --target <user@home> --apply --yes
-# on the control machine
-control init <user@home>
-project add /srv/app
-orchestrator new --project app --app opencode
-fleet status
-```
+- vowp `setup plan --target <user@home>`
+- vowp `setup home --target <user@home> --apply --yes`
+- on the control machine: vowp `control init <user@home>`, vowp `project add /srv/app` and
+  vowp `orchestrator new --project app --app opencode`
+- vowp `fleet status`
 
-The desktop joins through the `join.desktop` instructions printed by `orchestrator new`; the phone uses
-`join.phone`; `join.chat` is the fallback. Setup never asks for a secret value in the chat.
+The desktop joins through the `join.desktop` instructions printed by vowp `orchestrator new`; the
+phone uses `join.phone`; `join.chat` is the fallback. Setup never asks for a secret value in the chat.
 
 ## Limits of v0.2
 

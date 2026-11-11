@@ -16,15 +16,16 @@ sessions as attachments:
 | Layer | Authority |
 |---|---|
 | `~/.vowp/sessions/<id>/log.jsonl` | Canonical conversation content. Append-only, one event per line. |
-| `~/.vowp/vowp.db` (`sessions`, `session_events`, `session_natives`, `capsules`, `surfaces`, `leases`) | Rebuildable index for queries and the board; the lease is the write right. |
+| `~/.vowp/vowp.db` (`sessions`, `session_events`, `session_natives`, `capsules`) | Rebuildable index for session history and the board. |
+| `~/.vowp/vowp.db` (`surfaces`, `leases`) | Live surface and lease state; not rebuilt from the logs. |
 | `sessions/<id>/adapters.json` | Harness-side session ids per node, append-only. |
 | `sessions/<id>/blobs/<sha256>` | Content-addressed tool output, diffs and attachments. |
 | `sessions/<id>/capsules/*.json` | Handoff documents. |
 | `~/.vowp/orchestrators/<name>/` | Project-local app config, lease token and host state for an orchestrator. |
 
-Deleting `vowp.db` loses no conversation content; `vowp reindex` rebuilds the index from the logs.
-Copying a session directory to another node makes it readable there after a reindex. The origin session
-is never modified by an import.
+Deleting `vowp.db` loses no conversation content; `vowp reindex` rebuilds the session index from the
+logs. Live surface and lease rows are recreated as surfaces reconnect. Copying a session directory to
+another node makes it readable there after a reindex. The origin session is never modified by an import.
 
 ## One log, many surfaces
 
@@ -217,10 +218,10 @@ session while the home remains the only writer:
 1. the surface asks the home to begin a turn; the lease token is in a request document, not on the
    command line;
 2. the home writes the framing events and a `runs` row with the executor node, then returns a grant;
-3. the client runs `__exec --grant <file>` on its own machine; the grant file is mode 0600 and the
+3. the client runs vowp `__exec --grant <file>` on its own machine; the grant file is mode 0600 and the
    token is never in argv or `ps`;
 4. the adapter writes every event to a local spool **before** sending it, then streams JSON lines to
-   `session ingest` over SSH;
+   vowp `session ingest` over SSH;
 5. ingest assigns the sequence, appends with the supplied event id, indexes it, heartbeats the lease and
    acknowledges the event. A duplicate id is acknowledged, not appended; the same id with different
    content is a conflict;
@@ -228,7 +229,7 @@ session while the home remains the only writer:
    drop. The spool survives a killed client, not only a killed SSH connection.
 
 The executor node owns its harness binary and any secret it injects; the home sends environment-variable
-names, never values. A laptop that dials the home is registered once with `node add <name> -`; the home
+names, never values. A laptop that dials the home is registered once with vowp `node add <name> -`; the home
 never dials it.
 
 ## Export and import
@@ -258,7 +259,6 @@ project. All windows are views:
 |---|---|---|
 | `vowp-home` | `board` | The node board with every project. |
 | `vowp-home` | `capacity` | The capacity report, redrawn on a TTY. |
-| `vowp-home` | `orchestrator` | The default orchestrator session, when one exists. |
 | `vowp-<project>` | `board` | The project dashboard. |
 | `vowp-<project>` | `supervisor` | `~/.vowp/logs/supervisor.log`. |
 | `vowp-<project>` | `planner`, `keeper` | The planner/keeper session tails. |

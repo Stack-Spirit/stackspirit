@@ -12,8 +12,6 @@ Capacity is not a spending budget and it never kills a running job. Cost is repo
 > implemented on `main`. The binding specification is
 > [`docs/design/v0.2/home-and-surfaces.md`](../design/v0.2/home-and-surfaces.md) §6.
 
-Commands below are `vowp` subcommands; the binary prefix is omitted for readability.
-
 ## The three layers
 
 ```text
@@ -45,14 +43,16 @@ While the supervisor runs, one sampler thread reads the host every 5 seconds and
 - memory, CPU and I/O pressure (`avg10`) when `/proc/pressure/*` exists;
 - the sample source, `proc` or `fallback`.
 
-On macOS or a minimal container without `/proc`, the sampler writes what `sysctl` and `statvfs` can
-provide and marks the sample `fallback`. Admission then skips the RAM and CPU checks and uses the
-owner's fixed target when one is set, otherwise 1. The disk check still runs, and the board and
-`capacity show` print `capacity: fallback (no /proc), target <n>` so the degradation is visible. Auto
-capacity never silently claims a measured number on such a host.
+On macOS or a minimal container without `/proc`, the sampler marks the sample `fallback`: memory and
+load stay zero, CPU count comes from `available_parallelism()`, disk free from the portable `df -Pk`
+read, and cgroup values are absent unless those files exist. Admission then skips the RAM and CPU
+checks and uses the owner's fixed target when one is set, otherwise 1. The disk check still runs, and
+the board and vowp `capacity show` print `capacity: fallback (no /proc), target <n>` so the degradation is
+visible. Auto capacity never silently claims a measured number on such a host.
 
-Full-rate samples are kept for 24 hours; one-minute averages are kept for 30 days. The GC pass prunes
-expired rows (see [data lifecycle](data-lifecycle.md)).
+Samples are written every 5 seconds and kept for 24 hours. The pruner can also retain one-minute rows
+for 30 days if they exist, but the sampler does not create them in this build; a minute rollup is still
+a follow-up. The GC pass prunes expired rows (see [data lifecycle](data-lifecycle.md)).
 
 ### Per-run usage
 
@@ -88,8 +88,9 @@ the source is `measured`, `pooled` or `default`.
 
 ## Admit
 
-Before any worker, verifier, planner, keeper or merge run starts, the capacity manager answers
-`Admit` or `Wait(reason)`. The checks are deterministic and run in this order:
+Before any worker, verifier, planner or keeper run starts, the capacity manager answers `Admit` or
+`Wait(reason)`. The merge queue is not admitted through this path; it starts when a job reaches
+`merging`. The checks are deterministic and run in this order:
 
 1. **Brake.** An active brake returns its first reason.
 2. **Provider.** If the run's provider has an active limit, wait.
@@ -134,7 +135,7 @@ trips on measured conditions and clears after two clean samples:
 | `disk_low` | Free disk on the home or worktree filesystem is below 5 GiB for two samples. |
 | `provider` | Every configured provider has an active limit. |
 
-The board and `capacity show` print the active reason and its start time, for example
+The board and vowp `capacity show` print the active reason and its start time, for example
 `brake: memory pressure (avg10 14.2)`. A kernel OOM kill is recorded on the run, the job is parked with
 a node-inbox notice, and its estimate's p90 is raised for the next admission. The run itself is not
 retried by the brake; the normal job retry path decides.
@@ -159,33 +160,33 @@ snapshot.
 
 ### `fixed`
 
-`capacity set --target N` writes the owner's number. `N` above the advice requires `--override`; without
+vowp `capacity set --target N` writes the owner's number. `N` above the advice requires `--override`; without
 it the command exits 5 and prints the advised number. A fixed target is shown as
 `owner override: 8 (advised 5)` and the RAM, CPU, disk and brake checks still apply.
 
 ### Advice
 
 Every 30 minutes, and on events (a new project, a brake trip, an OOM kill, sustained idle), the capacity
-advisor reads the same report as `capacity report --json` and writes:
+advisor reads the same report as vowp `capacity report --json` and writes:
 
 - one `capacity_advice` row with the current and proposed target, mode, reasons and expected effect;
 - one node-inbox `decision` item titled `Capacity: <n> workers (advised <a>)` with the options
   `apply` and `keep`.
 
 The advisor **never changes the target itself**. Applying a proposal is the owner's
-`capacity set --target N`, through the CLI or the `capacity_set` MCP tool. The tool records the actor.
+vowp `capacity set --target N`, through the CLI or the `capacity_set` MCP tool. The tool records the actor.
 This is a tested property, not a convention.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `capacity show [--json]` | The current report: host, running, target/advice, brake, reserves and top estimates. |
-| `capacity report [--json] [--since <duration\|date>] [--limit <n>]` | The same report, filtered for the advisor or a human review. |
-| `capacity set --target <n> [--mode auto\|fixed] [--override] [--reason <text>] [--by <actor>]` | Writes one target history row. `--mode fixed` is the default and requires `--target`; `--mode auto` ignores the number and recomputes. |
-| `fleet capacity [--json]` | Alias of `capacity show`. |
+| vowp `capacity show [--json]` | The current report: host, running, target/advice, brake, reserves and top estimates. |
+| vowp `capacity report [--json] [--since <duration\|date>] [--limit <n>]` | The same report, filtered for the advisor or a human review. |
+| vowp `capacity set --target <n> [--mode auto\|fixed] [--override] [--reason <text>] [--by <actor>]` | Writes one target history row. `--mode fixed` is the default and requires `--target`; `--mode auto` ignores the number and recomputes. |
+| vowp `fleet capacity [--json]` | Alias of vowp `capacity show`. |
 
-`capacity show` prints `host`, `target`, `running`, `brake`, `reserve`, `estimates` and `waiting`. The
+vowp `capacity show` prints `host`, `target`, `running`, `brake`, `reserve`, `estimates` and `waiting`. The
 JSON document is the same `CapacityReport` the advisor reads, so a script does not have to scrape the
 human output.
 
@@ -193,13 +194,13 @@ The `capacity` tmux window on `vowp-home` renders the same body and redraws on a
 
 ## Reading a wait
 
-A job that is not starting is not necessarily broken. Read `fleet queue` or `fleet status`:
+A job that is not starting is not necessarily broken. Read vowp `fleet queue` or vowp `fleet status`:
 
 | Reason | What it means | What to do |
 |---|---|---|
 | `RAM 1.2 GB short` | The next p90 would eat the reserve. | Wait, reduce the target, or add memory. |
 | `CPU 1.20 core(s) short` | The CPU quota would exceed 85 %. | Wait or add CPU. |
-| `disk 3.4 GB free; minimum is 5.0 GB` | The home or worktrees are nearly full. | Run `gc`, clear space, or move worktrees. |
+| `disk 3.4 GB free; minimum is 5.0 GB` | The home or worktrees are nearly full. | Run vowp `gc`, clear space, or move worktrees. |
 | `provider <name> limited: …` | The provider has a quota, rate or auth limit. | Wait for the reset, or fix auth/credits. |
 | `N worker(s) running; target is M` | The target is reached. | Wait, or raise the target if the machine can take it. |
 | `brake: memory pressure …` | The machine is under pressure. | Let it clear; do not force more runs. |
