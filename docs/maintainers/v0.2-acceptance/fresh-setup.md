@@ -249,6 +249,10 @@ $ sudo -u vowp sh -c "pwd; cd ."
 sh: 1: cd: can't cd to .
 ```
 
+A disposable `vps:sudo` container check from root confirmed the same failure without the
+test user: `/root` is mode 0700, and `sudo -u vowp sh -c "cd ."` from `/root` exits 2
+with `sh: 1: cd: can't cd to .`.
+
 For the acceptance run the login home was made traversable (`chmod 0755 /home/owner`,
 a normal home mode), and the same command was re-run. It then exited **0**; the
 remaining checks were ok, including `install.version: installed vowp 0.2.0`,
