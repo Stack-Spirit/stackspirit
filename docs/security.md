@@ -60,7 +60,7 @@ Trust boundaries:
 | **One writer per session** | `sessions/<id>/log.jsonl` is appended only on the home, by the session service or the hidden `session ingest` path. `seq` has no gaps or duplicates; ingest is idempotent by event id. |
 | **The home is authoritative** | Control machines, apps and MCP servers never write a DB file. They route commands to the home. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
 | **No public listener** | The supervisor opens no public HTTP, SSE or API port. The only listeners are loopback: an app host such as the opencode server, and the one-time secret paste page. Both are reached through an SSH tunnel; the vector is one-time and loopback-only. |
-| **No credentials in config or logs** | `vowp.toml`, `vowp.db`, logs, reports and the snapshot hold no token values. `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. `vowp doctor` reports presence by name and never calls the network. Secret values live only in the secret store (see [Secrets](#secrets)). |
+| **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. `vowp doctor` reports presence by name and never calls the network. Secret values live only in the secret store (see [Secrets](#secrets)). This covers configuration and argv, not every stored byte: exact-value redaction covers the session-service and remote-ingest event paths and the snapshot, but `supervisor.log`, gate evidence, ledger rows, the switch turn path and the `session watch` importer are written unredacted and can hold a value a command printed (see [Redaction](#redaction)). |
 | **Stock binaries only** | Adapters spawn `claude`, `opencode` or a configured CLI exactly as a user would. No client spoofing, no "sign in with Claude" inside VOWP, no token forwarding. The optional `session watch` importer reads transcript JSONL read-only; it does not read auth files. |
 | **cwd allow-list** | Before a run, the session layer checks that the working directory is inside the job worktree, the project path, the worktree root or `[node].cwd_allow`. Anything else is refused. |
 | **Worktree isolation** | One worktree per job on branch `job/<id>`. The `owns_respected` gate checks the diff and uncommitted files against the job's globs; dispatch-time locks prevent overlapping owners from running together. |
@@ -141,14 +141,17 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 `vault::Redactor` loads the exact values (longest first) and replaces every exact occurrence with
 `[REDACTED:<NAME>]`. The coverage and timing are:
 
-- every event payload and `raw` before `SessionLog::append`;
+- every event payload and `raw` appended by the session service or the remote ingest path, before
+  `SessionLog::append`;
 - the serialized snapshot before writing;
 - a capsule body after the writer returns and before the caller sees it;
 - the job report and latest run mirror after each turn finishes.
 
-It is **not** applied to the supervisor log, gate command evidence or ledger `detail_json`: the
-supervisor log writer appends directly, the gate runner inserts `GateResult.evidence` directly and the
-ledger writer appends `detail` directly. A supervisor line, command gate or ledger row that prints an
+It is **not** applied to the supervisor log, gate command evidence, ledger `detail_json`, the
+`session switch` turn path or the `session watch` importer: the supervisor log writer appends
+directly, the gate runner inserts `GateResult.evidence` directly, the ledger writer appends `detail`
+directly, and those two session paths write the harness event and imported transcript `raw` without
+`redact_event`. A supervisor line, command gate, ledger row or event on those paths that contains an
 injected value can therefore store it in plain text. The report and run mirror are raw during the
 turn and only rewritten when it ends. Avoid commands that echo secret values, and treat all of these
 files as sensitive. This is a known gap tracked as a follow-up; do not rely on event/snapshot
@@ -164,8 +167,12 @@ mode the design keeps the secret files outside the runtime user's readable tree 
 configured names. In basic mode it does not separate them: the secret file is owned by the same user
 as the harness, so a harness that reads `~/.vowp/secrets/<NAME>` can recover the value. Neither mode
 encrypts the store at rest, and neither can make a secret unreadable to code that is given it. VOWP
-still keeps values out of configuration, database rows, canonical transcripts and git; redaction is
-the backstop for exact injected values in the places listed above.
+keeps values out of configuration and git, and redacts exact injected values on the session-service
+and remote-ingest event paths, in the snapshot, in capsules and in the finished report and run
+mirror. It does **not** keep them out of every database row or every log: the supervisor log, gate
+command evidence, ledger `detail_json`, the switch turn path and the `session watch` importer are
+written without redaction. Treat the databases and the home as sensitive. Redaction is a backstop
+for the places listed above, not a guarantee.
 
 Also be explicit about the edges:
 

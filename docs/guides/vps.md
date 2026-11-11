@@ -338,7 +338,7 @@ from the home, and every internal command runs with `-L <socket>` and
 - Do not point `TMUX_TMPDIR` at a shared directory such as `/tmp` for VOWP. Let VOWP use its home.
 - If you write scripts or tests, use a unique `tmux -L <unique>` socket **and** a private
   `TMUX_TMPDIR` created before the first tmux command. See
-  [Contributing](../../CONTRIBUTING.md#run-the-test-suite-safely).
+  [Contributing](../../CONTRIBUTING.md#checks-before-a-pull-request).
 
 This keeps the supervisor away from any interactive tmux session you or another user may have.
 
@@ -363,20 +363,23 @@ On a control machine, `secret set/ls/rm/upgrade` route to the home over SSH; `se
 local tunnel so the browser sees a control-machine loopback URL. A harness receives only the names
 listed in `env_pass`; VOWP injects the values into that child's environment.
 
-Redaction is partial and timed. Event payloads and the snapshot are redacted before writing; a capsule
-is redacted after the writer returns; the job report and latest run mirror are redacted after each
-turn finishes. Supervisor logs, gate command evidence and ledger detail rows are written unredacted
-today, and a report or run mirror is still raw while the turn is running. Treat the home as sensitive
-and avoid commands that print secret values.
+Redaction is partial and timed. Event payloads and `raw` appended by the session service or the
+remote ingest path are redacted before writing, as is the snapshot; a capsule is redacted after the
+writer returns; the job report and latest run mirror are redacted after each turn finishes.
+Supervisor logs, gate command evidence, ledger detail rows, the switch turn path and the
+`session watch` importer are written unredacted today, and a report or run mirror is still raw while
+the turn is running. Treat the home and its databases as sensitive; avoid commands that print secret
+values.
 
 The honest limit: any agent that can run arbitrary code in a process that holds a secret can print
 it. **Basic mode does not separate the value from the agent's user**: `~/.vowp/secrets/<NAME>` is mode
 0600 but owned by the runtime user, and a harness spawned as that user can read it. **Vault mode is
 the mode that separates them**: the file lives under `vowp-vault` and the runtime user cannot read it;
 only the helper injects the configured names. Neither mode encrypts the file at rest. VOWP keeps
-values out of configuration, database rows, canonical transcripts and git, but it cannot make a
-secret unreadable to code that is given it. Harness logins stay under the harness's own control. The
-full statement is in the [security model](../security.md#secrets).
+values out of configuration and git, and redacts exact injected values on the event paths above, but
+it does not keep them out of every database row or every log and cannot make a secret unreadable to
+code that is given it. Harness logins stay under the harness's own control. The full statement is in
+the [security model](../security.md#secrets).
 
 ## Back up and collect garbage
 
