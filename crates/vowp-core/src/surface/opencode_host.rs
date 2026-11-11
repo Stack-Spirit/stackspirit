@@ -47,6 +47,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long one HTTP request may take.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How many times an idempotent request is sent before a stalled response is reported.
+const HTTP_ATTEMPTS: usize = 2;
+
 /// How long one `/api/event` read may take after the request is sent.
 const SSE_WINDOW: Duration = Duration::from_millis(750);
 
@@ -757,7 +760,33 @@ impl HttpClient {
     }
 
     /// Sends a request and reads the whole response.
+    ///
+    /// A GET is retried once: a loopback read can time out before the first byte arrives on
+    /// a loaded machine, and a health probe must not report that as a protocol failure. A
+    /// POST is never retried because the server may already have created the session its
+    /// response names.
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String), CoreError> {
+        let payload = match body {
+            Some(body) => serde_json::to_vec(body).map_err(|error| CoreError::Invalid(error.to_string()))?,
+            None => Vec::new(),
+        };
+        let attempts = if method.eq_ignore_ascii_case("GET") {
+            HTTP_ATTEMPTS
+        } else {
+            1
+        };
+        let mut last = CoreError::Invalid("opencode sent no HTTP response".to_owned());
+        for _ in 0..attempts {
+            match self.exchange(method, path, body.is_some(), &payload) {
+                Ok(response) => return Ok(response),
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
+    }
+
+    /// Performs one request attempt and parses its response.
+    fn exchange(&self, method: &str, path: &str, with_body: bool, payload: &[u8]) -> Result<(u16, String), CoreError> {
         let mut stream = TcpStream::connect((self.host.as_str(), self.port)).map_err(|source| CoreError::Io {
             path: format!("{}:{}", self.host, self.port),
             source,
@@ -768,15 +797,11 @@ impl HttpClient {
                 path: format!("{}:{}", self.host, self.port),
                 source,
             })?;
-        let payload = match body {
-            Some(body) => serde_json::to_vec(body).map_err(|error| CoreError::Invalid(error.to_string()))?,
-            None => Vec::new(),
-        };
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: {}\r\nAccept: application/json\r\nConnection: close\r\n",
             self.host, self.port, self.auth
         );
-        if body.is_some() {
+        if with_body {
             request.push_str("Content-Type: application/json\r\n");
             request.push_str(&format!("Content-Length: {}\r\n", payload.len()));
         }
@@ -786,7 +811,7 @@ impl HttpClient {
             source,
         })?;
         if !payload.is_empty() {
-            stream.write_all(&payload).map_err(|source| CoreError::Io {
+            stream.write_all(payload).map_err(|source| CoreError::Io {
                 path: format!("{}:{}", self.host, self.port),
                 source,
             })?;
@@ -886,6 +911,9 @@ impl HttpClient {
 }
 
 /// Reads until EOF, a read timeout or `timeout` overall.
+///
+/// A signal can interrupt a loopback read under parallel tests; that is retried inside the
+/// deadline instead of surfacing as a failed health check.
 fn read_to_end(stream: &mut TcpStream, timeout: Duration) -> Result<Vec<u8>, CoreError> {
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
@@ -894,6 +922,7 @@ fn read_to_end(stream: &mut TcpStream, timeout: Duration) -> Result<Vec<u8>, Cor
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error)
                 if matches!(
                     error.kind(),

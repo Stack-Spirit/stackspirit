@@ -9,7 +9,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -266,6 +266,91 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) 
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// Reads one request so the server's later close is a FIN, not a reset for unread input.
+fn read_request(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => raw.extend_from_slice(&chunk[..read]),
+            Err(_) => break,
+        }
+        if let Some(end) = find_header_end(&raw) {
+            let head = String::from_utf8_lossy(&raw[..end]);
+            if raw.len() >= end + 4 + content_length(&head) {
+                break;
+            }
+        }
+    }
+}
+
+/// A loopback server that runs `script` for each accepted connection.
+///
+/// The script gets the connection and its zero-based attempt number. It runs inline on the
+/// accept thread, so a script that sleeps also keeps later connections waiting in the
+/// listener backlog; that is how a first health attempt can outlive the client timeout.
+struct ScriptedServer {
+    addr: SocketAddr,
+    accepted: Arc<AtomicUsize>,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ScriptedServer {
+    fn start(mut script: impl FnMut(TcpStream, usize) + Send + 'static) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind scripted server");
+        listener.set_nonblocking(true).expect("nonblocking scripted server");
+        let addr = listener.local_addr().expect("scripted server address");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let accepted = Arc::clone(&accepted);
+            let shutdown = Arc::clone(&shutdown);
+            thread::spawn(move || {
+                while !shutdown.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let attempt = accepted.fetch_add(1, Ordering::SeqCst);
+                            read_request(&mut stream);
+                            script(stream, attempt);
+                        }
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+        };
+        Self {
+            addr,
+            accepted,
+            shutdown,
+            thread: Some(thread),
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.addr.port())
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ScriptedServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn write_service_state(workdir: &Path, url: &str, password: &str) {
@@ -623,6 +708,89 @@ fn opencode_v2_service_pair_basic_auth() {
     let health = retry_transient(|| host.health(&handle)).expect("health with public URL");
     assert!(!health.ok);
     assert!(health.detail.contains("127.0.0.1"), "{}", health.detail);
+}
+
+#[test]
+fn opencode_health_retries_an_empty_first_response() {
+    let tmp = tempdir().expect("temp dir");
+    let fake = ScriptedServer::start(|stream, attempt| {
+        if attempt == 0 {
+            // Stall past the client's three-second read timeout without writing a byte,
+            // matching the macOS CI failure where the first health read saw no response.
+            thread::sleep(Duration::from_millis(3_500));
+            drop(stream);
+        } else {
+            let mut stream = stream;
+            respond(&mut stream, 401, "application/json", "{\"error\":\"unauthorized\"}");
+        }
+    });
+    let workdir = tmp.path().join("orchestrator");
+    std::fs::create_dir_all(&workdir).expect("orchestrator dir");
+    write_service_state(&workdir, &fake.url(), PASSWORD);
+    let host = OpencodeHost::default();
+    let handle = handle_for(&workdir);
+
+    let health = retry_transient(|| host.health(&handle)).expect("health must not error on an empty response");
+
+    assert!(!health.ok, "a 401 must be unhealthy: {}", health.detail);
+    assert!(health.detail.contains("401"), "{}", health.detail);
+    assert_eq!(
+        fake.accepted(),
+        2,
+        "health did not retry the empty response exactly once"
+    );
+}
+
+#[test]
+fn opencode_health_retries_a_short_first_response() {
+    let tmp = tempdir().expect("temp dir");
+    let fake = ScriptedServer::start(|mut stream, attempt| {
+        if attempt == 0 {
+            // A first read that returns only part of the status line must not become a
+            // permanent "answered without HTTP headers" health failure.
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Le");
+        } else {
+            respond(&mut stream, 401, "application/json", "{\"error\":\"unauthorized\"}");
+        }
+    });
+    let workdir = tmp.path().join("orchestrator");
+    std::fs::create_dir_all(&workdir).expect("orchestrator dir");
+    write_service_state(&workdir, &fake.url(), PASSWORD);
+    let host = OpencodeHost::default();
+    let handle = handle_for(&workdir);
+
+    let health = retry_transient(|| host.health(&handle)).expect("health must not error on a short response");
+
+    assert!(!health.ok, "a 401 must be unhealthy: {}", health.detail);
+    assert!(health.detail.contains("401"), "{}", health.detail);
+    assert_eq!(
+        fake.accepted(),
+        2,
+        "health did not retry the short response exactly once"
+    );
+}
+
+#[test]
+fn opencode_health_reports_a_headerless_server() {
+    let tmp = tempdir().expect("temp dir");
+    // Every connection closes without a byte of response. A genuine protocol failure must
+    // stay visible after the one retry instead of becoming a silent success.
+    let fake = ScriptedServer::start(|stream, _| drop(stream));
+    let workdir = tmp.path().join("orchestrator");
+    std::fs::create_dir_all(&workdir).expect("orchestrator dir");
+    write_service_state(&workdir, &fake.url(), PASSWORD);
+    let host = OpencodeHost::default();
+    let handle = handle_for(&workdir);
+
+    let health = retry_transient(|| host.health(&handle)).expect("health");
+
+    assert!(!health.ok, "a headerless server must not look healthy");
+    assert!(
+        health.detail.contains("without HTTP headers"),
+        "the protocol failure lost its detail: {}",
+        health.detail
+    );
+    assert_eq!(fake.accepted(), 2, "a GET must be retried exactly once");
 }
 
 #[test]
