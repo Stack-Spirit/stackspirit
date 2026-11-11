@@ -1102,7 +1102,9 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
         worker_service.run_turn(turn(&worker_session, opencode(), "long running turn"), &worker_cancel)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // The worker thread inserts its run row asynchronously. Under parallel test load
+    // that can take longer than a couple of seconds, so poll generously but boundedly.
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut active_run = None;
     while Instant::now() < deadline {
         let open = store.open_runs().expect("open runs");
@@ -1115,7 +1117,7 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let active_run = active_run.expect("the service run is active");
+    let active_run = active_run.expect("the service run is active within 10s");
 
     // The fake child writes `ready` only after both traps are installed. Wait for it
     // before the switch can reach its signal phase; otherwise a fast fake clock can
