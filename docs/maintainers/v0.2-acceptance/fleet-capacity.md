@@ -399,3 +399,21 @@ The evidence files from this run were kept outside the repository in the contain
 `t2-worker-runs.txt`, `t3-capacity-before.json`, `t3-set-refused.json`,
 `t3-set-override.json`, `t3-capacity-brake.json`, `t3-queue-brake.json`,
 `t3-hog-run-usage.txt`, `t3-hog-runs-final.txt` and `t3-advisor-*`.
+
+## Gate status on the rebased tree
+
+The first merge-queue attempt on the rebased branch failed `cargo test --workspace` in
+`vowp-core --test switch`; the merge log was truncated to the test binary line and did
+not contain the panic. The test and the full suite pass on the same rebased tree:
+
+```text
+cargo fmt --all -- --check                              exit 0
+cargo clippy --workspace --all-targets -- -D warnings   exit 0
+cargo test -p vowp-core --test switch                   17 passed; 0 failed
+cargo test --workspace                                  exit 0
+```
+
+The shared host had been disk-full and heavily loaded during the earlier runs (the same
+conditions produced `database or disk is full` and timing-test failures in this
+worktree), so the merge-queue failure is recorded as an environment flake, not an
+acceptance failure. This card changes only this document.
