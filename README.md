@@ -16,11 +16,13 @@ and follow it exactly. Ask me only what it tells you to ask, show me the full pl
 and run it after I approve. Never ask me to paste a secret into this chat.
 ```
 
-The harness reads the [setup contract](docs/setup/agent-setup.md), asks five questions in one
-message, prints the whole plan without changing anything, and runs it after one approval. It stops
-for the human hand-offs — a printed sudo command (only if one is needed), a harness sign-in, a secret
-entered through the hidden prompt or a one-time link — and then runs the verification. The setup
-commands do the real work, so the result does not depend on which harness runs the prompt.
+The harness reads the [setup contract](docs/setup/agent-setup.md), installs the pinned CLI locally if
+it is missing, asks five questions in one message, shows the whole plan without changing the home,
+and runs it after one approval. The local per-user CLI install is the only change before that
+approval, and the harness tells you about it in the question message. It stops for the human
+hand-offs — a printed sudo command (only if one is needed), a harness sign-in, a secret entered
+through the hidden prompt or a one-time link — and then runs the verification. The setup commands do
+the real work, so the result does not depend on which harness runs the prompt.
 
 What you need before you paste it:
 
@@ -28,8 +30,9 @@ What you need before you paste it:
   a non-root `vowp` user when passwordless sudo is available; otherwise it runs as the SSH user.
 - **A harness:** Claude Code or opencode installed and signed in **on the home**, with its own login
   flow. VOWP drives the documented headless interface and never reads the login.
-- **A control machine:** this computer, Linux or macOS with `ssh`. It holds only a snapshot cache and
-  tunnels. A phone can join later with an SSH app and the owner's key.
+- **A control machine:** this computer, Linux or macOS with `ssh`. It holds only derived state: a
+  snapshot cache, an event spool and its tunnel records. A phone can join later with an SSH app and
+  the owner's key.
 - **A repository, optionally:** an existing checkout on the home with a `vowp.toml`, or no project
   yet. Setup registers repositories; it does not clone or rewrite them.
 

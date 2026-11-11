@@ -180,10 +180,13 @@ vowp setup plan --target <ssh-target> ...      # text for the owner
 vowp setup plan --target <ssh-target> ... --json
 ```
 
-`plan` opens read-only SSH probes on the home. It reports the OS and architecture, the login user and
-home, free disk, whether `git`, `tmux`, `curl`, `systemctl`, `loginctl`, the harnesses and `vowp` are
-present, the sudo mode, and whether the chosen harnesses appear signed in. It writes nothing. A
-missing `vowp` on the home is the install phase, not an error.
+`plan` opens read-only SSH probes on the home. The probes check the OS and architecture, the login
+user and home, free disk, whether `git`, `tmux`, `curl`, `systemctl`, `loginctl`, the harnesses and
+`vowp` are present, the sudo mode, and whether the chosen harnesses appear signed in. The command
+prints only the plan: it does not print a separate probe report. A failed requirement becomes a
+hand-off in that plan (for example install `git`, sign in to a harness or free disk space); the probe
+values are not otherwise echoed. It writes nothing. A missing `vowp` on the home is the install
+phase, not an error.
 
 What the plan contains:
 
@@ -193,6 +196,9 @@ What the plan contains:
   `secret:<NAME>` (name only), `ssh-key-login` and `owner-answer:<question>`;
 - whether each phase is idempotent;
 - the hand-offs it expects, including the approval hand-off.
+
+The `--json` document has exactly four top-level fields: `target`, `version`, `phases` and
+`handoffs`. The text form prints the same content, phase by phase.
 
 ### 4.3 Check the plan against the owner's answers
 
