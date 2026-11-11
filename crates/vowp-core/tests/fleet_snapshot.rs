@@ -769,6 +769,11 @@ fn capacity_card_uses_the_configured_target_and_provider_brake() {
     assert_eq!(snapshot.capacity.target.mode, TargetMode::Fixed);
     assert_eq!(snapshot.capacity.target.target_workers, 2);
     assert_eq!(snapshot.capacity.target.set_by, "owner");
+    assert_eq!(
+        snapshot.capacity.target.advised_workers,
+        Some(2),
+        "the configured provider cap seeds the advised target, which the store-only helper cannot see"
+    );
     assert!(
         snapshot.capacity.brake.active,
         "the configured provider limit must appear in the snapshot"

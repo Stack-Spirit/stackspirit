@@ -5,14 +5,7 @@ mod common;
 #[test]
 fn capacity_set_json_writes_the_target() {
     let env = common::TestEnv::new();
-    let (code, value, stderr) = env.run_json(&[
-        "capacity",
-        "set",
-        "--target",
-        "2",
-        "--reason",
-        "two workers",
-    ]);
+    let (code, value, stderr) = env.run_json(&["capacity", "set", "--target", "2", "--reason", "two workers"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(value["mode"], "fixed");
     assert_eq!(value["target_workers"], 2);
@@ -41,10 +34,7 @@ fn capacity_set_above_advice_refuses_with_exit_5() {
         "the refusal names the advice: {stderr}"
     );
     assert!(
-        env.store()
-            .latest_capacity_target()
-            .expect("target query")
-            .is_none(),
+        env.store().latest_capacity_target().expect("target query").is_none(),
         "a refused write must not change the target"
     );
 

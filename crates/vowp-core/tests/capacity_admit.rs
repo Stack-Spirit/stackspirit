@@ -813,6 +813,9 @@ fn fallback_sample_skips_ram_and_cpu_admission() {
     fallback.source = SampleSource::Fallback;
     fallback.mem_total_bytes = 0;
     fallback.mem_available_bytes = 0;
+    // A quota this small would fail the CPU rule on a measured sample; the fallback path
+    // must skip both RAM and CPU, not just the zeroed memory fields.
+    fallback.cpu_quota_cores = Some(0.01);
     store.insert_host_sample(&fallback).unwrap();
 
     let manager = CapacityManager::new(deps.clone());
@@ -820,7 +823,7 @@ fn fallback_sample_skips_ram_and_cpu_admission() {
     assert_eq!(
         decision,
         AdmitDecision::Admit,
-        "a host without /proc must not turn the zeroed memory fields into a RAM wait"
+        "a host without /proc must not turn the zeroed memory fields or tiny quota into a wait"
     );
 }
 

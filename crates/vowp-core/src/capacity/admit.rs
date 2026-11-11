@@ -340,11 +340,12 @@ impl CapacityManager {
         estimates::recompute(store, now)
     }
 
-    /// Refreshes the admission side effects once per dispatch pass.
+    /// Refreshes the admission side effects before one dispatch pass.
     ///
-    /// C2's node tick calls the free `capacity::sample` hook, not this manager, so the E2
-    /// maintenance work (estimate refresh, OOM handling, auto-target history and worker
-    /// slots) is driven from the admission gate instead. It is cheap once throttled.
+    /// The node tick already calls [`CapacityManager::sample`] for estimates, OOM handling,
+    /// auto-target history and worker slots. An admission can land between ticks, so this
+    /// repeats that maintenance on the dispatch path and keeps the estimate recompute
+    /// throttled to once a minute.
     fn maintain(&self, store: &Store, now: Timestamp) -> Result<(), CoreError> {
         self.refresh_estimates(store, now)?;
         self.handle_oom_kills(store, now)?;
