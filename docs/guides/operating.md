@@ -62,8 +62,10 @@ prints the cached answer with an `as of` time and `stale` marker. `fleet queue` 
 with their waiting reason (`waiting: RAM 1.2 GB short`, `waiting: provider deepseek 429`), and
 `fleet inbox` aggregates open node and project items.
 
-`board` is the refreshing view for the selected project; `board --once` prints one frame. The
-`vowp-home` tmux session has `board` and `capacity` windows; each project has its own session.
+`vowp board` is the refreshing view. With one project registered and selected it prints the v0.1 project
+board; with several projects, or no project selected, it prints the fleet board with a project column.
+`board --once` prints one frame. The `vowp-home` tmux session has `board` and `capacity` windows; each
+project has its own session.
 
 ## Projects
 

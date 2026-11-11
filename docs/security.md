@@ -166,8 +166,10 @@ turn and only rewritten when it ends. Avoid commands that echo secret values, an
 files as sensitive. This is a known gap tracked as a follow-up; do not rely on event/snapshot
 redaction to cover it.
 
-The redactor never logs a value or its prefix; it logs only the name. The `secret_scan` gate stays and
-runs on the public tree.
+The redactor never logs a value or its prefix; it logs only the name. The `secret_scan` gate scans the
+changed paths and added lines of a job diff, and the merge queue scans its rebased candidate when
+`[merge].secret_scan` is on (the default). Neither is a public-tree audit; the separate public-tree
+scanner is `scripts/audit/scan.sh`.
 
 ### The honest limit
 
