@@ -121,6 +121,10 @@ exit 0
         .replace("USER_STATE", &shell_path(&user_state));
         write_exec(&self.remote_bin.path().join("useradd"), &useradd);
         let id = r#"#!/bin/sh
+if [ "${1:-}" = "-un" ] && [ "${FAKE_LOGIN_USER:-}" = "root" ]; then
+  printf 'root\n'
+  exit 0
+fi
 if [ "${1:-}" = "-u" ] && [ "${2:-}" = "vowp" ]; then
   [ -f USER_STATE ] && { printf '1001\n'; exit 0; } || exit 1
 fi
@@ -140,6 +144,14 @@ exit 2
         write_exec(
             &self.remote_bin.path().join("hostname"),
             "#!/bin/sh\nprintf 'fresh-vps\\n'\n",
+        );
+        write_exec(
+            &self.remote_bin.path().join("uname"),
+            "#!/bin/sh\ncase \"${1:-}\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  *) printf 'Linux\\n' ;;\nesac\n",
+        );
+        write_exec(
+            &self.remote_bin.path().join("df"),
+            "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\nprintf '/dev/fake 100000000 1000 99999000 1%% /\\n'\n",
         );
     }
 
@@ -1178,10 +1190,100 @@ fn setup_home_installs_the_per_user_binary_when_only_path_vowp_exists() {
     );
     let unit = std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/vowp.service")).expect("unit");
     assert!(unit.contains("ExecStart=%h/.local/bin/vowp"), "{unit}");
+    let log = machine.log();
+    assert!(
+        !log.contains("--no-watchdog"),
+        "the executed install must match the plan: {log}"
+    );
+    assert!(
+        log.contains("--no-service --no-cron"),
+        "the executed install must match the plan: {log}"
+    );
     assert!(
         installed.is_file(),
         "the unit's ExecStart target must exist: {}",
         installed.display()
+    );
+}
+
+#[test]
+fn setup_home_treats_root_without_sudo_as_no_sudo() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+
+    // Mount the fake remote as a root login whose sudo is not passwordless. The code
+    // path is the same as a machine with no sudo binary.
+    let plan = machine
+        .command()
+        .env("FAKE_LOGIN_USER", "root")
+        .env("FAKE_SUDO_MODE", "password")
+        .args(["--json", "setup", "plan", "--target", "fake.example"])
+        .output()
+        .expect("run setup plan");
+    assert!(
+        plan.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&plan.stdout),
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan = json(&plan);
+    let commands = plan["phases"]
+        .as_array()
+        .expect("phases")
+        .iter()
+        .map(|phase| phase["commands"].to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !commands.contains("\"sudo\""),
+        "a root no-sudo plan must not wrap commands in sudo: {commands}"
+    );
+
+    let output = machine
+        .command()
+        .env("FAKE_LOGIN_USER", "root")
+        .env("FAKE_SUDO_MODE", "password")
+        .args([
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--apply",
+            "--yes",
+        ])
+        .output()
+        .expect("run setup home");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome = json(&output);
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    let user = outcome["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"] == "user.mode")
+        .expect("user.mode check");
+    assert!(
+        user["detail"].as_str().unwrap_or_default().contains("no-sudo mode"),
+        "{user}"
+    );
+    assert!(user["detail"].as_str().unwrap_or_default().contains("root"), "{user}");
+    assert!(machine.useradd_log().is_empty(), "root/no-sudo must not create vowp");
+    assert!(
+        !machine.log().contains("'sudo' '-u'"),
+        "root/no-sudo must not switch users: {}",
+        machine.log()
+    );
+    assert!(
+        machine.remote.path().join(".vowp/vowp.db").is_file(),
+        "the home must be created as the current user"
     );
 }
 

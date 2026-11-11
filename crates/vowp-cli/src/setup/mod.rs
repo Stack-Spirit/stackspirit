@@ -278,7 +278,7 @@ impl Probe {
 
     /// Returns the user setup will run as after the user phase.
     pub fn effective_user(&self) -> &str {
-        if self.user == "vowp" || self.user == "root" || self.sudo == SudoMode::Passwordless {
+        if self.user == "vowp" || self.sudo == SudoMode::Passwordless {
             "vowp"
         } else {
             &self.user

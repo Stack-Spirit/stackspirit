@@ -909,7 +909,7 @@ impl Executor {
             self.check("user.mode", "ok", "working as the dedicated vowp user");
             return Ok(None);
         }
-        if self.probe.sudo != SudoMode::Passwordless && self.login_user != "root" {
+        if self.probe.sudo != SudoMode::Passwordless {
             self.effective_user = self.login_user.clone();
             self.remote_home = self.probe.home.clone();
             let mode = if self.probe.sudo == SudoMode::Password {
@@ -1024,7 +1024,7 @@ impl Executor {
             self.answers.version
         );
         let script = format!(
-            "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron --no-watchdog",
+            "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron",
             shell_quote(&url),
             shell_quote(&self.answers.version)
         );
