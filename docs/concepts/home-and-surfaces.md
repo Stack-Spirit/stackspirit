@@ -49,7 +49,7 @@ registry commands are:
 | vowp `project resume <name>` | Returns a paused project to `active`. An archived project is refused. |
 | vowp `project archive <name>` | Stops all ticks for the project and keeps its database. |
 | vowp `project rm <name> --yes` | Archives the project directory under `~/.vowp/archive/projects/` and removes the registry row. It refuses while the project is running and for `_node`. |
-| vowp `project weight <name> <1-100>` | Sets the fairness weight used when capacity is scarce. |
+| vowp `project weight <name> <1-100>` | Sets the stored fairness weight. It is shown in project output, but weighted dispatch is not wired into this build. |
 
 A paused project still gets maintenance work — requests, reconcile, harvest, stalls, state changes,
 gates, verify, merge and the board — but no dispatch, triggers or work-creating schedules. An archived
@@ -67,16 +67,17 @@ Each tick does a node pass, then every active project's L1–L9 steps in round-r
 
 ```text
 0. node sample        capacity sample, stale-lease sweep, lifecycle tick
-1. global             apply drained requests, refresh provider limits
+1. global             apply drained node requests
 2. projects           each active project in round-robin order, each isolated by catch_unwind
 3. snapshot           write snapshot.json after the project steps
 4. board              write board.json for one active project, or the only paused project
 5. heartbeat          update ~/.vowp/heartbeat and the supervisor pid
 ```
 
-The round-robin start offset advances every tick, so no project is always first. Within a project, job
-priority decides dispatch order; between projects, the fairness weight and the least-recently-admitted
-project decide who gets scarce capacity.
+The round-robin start offset advances every tick, so no project is always first. Projects are ticked in
+name order with that moving offset; every active project gets one L1 tick per node tick. Within a project,
+job priority decides dispatch order. The stored project weight is reported but does not change dispatch
+order in this build.
 
 `vowp up --once` runs startup plus exactly one node tick, which is useful for a cron check and for
 tests. `vowp down` writes the stop file and waits; `--force` signals the supervisor and
@@ -185,7 +186,8 @@ When another surface holds a live lease, opening the session asks before taking 
 1. atomically replaces the lease row and appends a `note` event;
 2. pushes a `LeaseRevoked` notice on the old surface's ingest stream, so it stops writing immediately;
 3. drains a running turn for up to five seconds, then interrupts it;
-4. writes a capsule and, if the executor changed, records a `switch` with reason `takeover`;
+4. writes a capsule and, when the session already has an executor, records a `switch` with reason
+   `takeover` (a pre-attach session gets only the note);
 5. leaves the old surface in **follow mode**, reading new events but refusing every write.
 
 The old surface prints the notice and keeps showing new events:
@@ -257,10 +259,11 @@ vowp `tunnel` command already knows the configured home target.
 
 ### Claude Code
 
-Claude Remote Control starts only when a claude.ai login already exists on the home. VOWP probes for
-the login directory and never reads it. The project-local `.mcp.json` needs a one-time owner approval;
-until then `claude mcp list` reports `Pending approval`. Without a login, `orchestrator new --app
-claude-code` records a degraded orchestrator instead of pretending the host is running.
+Claude Remote Control starts only when a claude.ai login already exists on the home. VOWP runs
+`claude auth status` and reads only its `loggedIn`/`authMethod` metadata; it never opens login or
+credential files. The project-local `.mcp.json` needs a one-time owner approval; until then
+`claude mcp list` reports `Pending approval`. Without a login, `orchestrator new --app claude-code`
+records a degraded orchestrator and exits non-zero instead of pretending the host is running.
 
 ### Orchestrator sessions
 
@@ -278,8 +281,10 @@ project. vowp `orchestrator new [--name] [--project] --app opencode|claude-code|
 vowp `orchestrator ls` lists cards; vowp `orchestrator stop` stops the host and releases the lease (the session
 stays); vowp `orchestrator resume` starts it again. The node supervisor does not resume orchestrators by
 itself after a home restart: run vowp `orchestrator resume <name>` for the ones you want back. A host that
-cannot start is marked `degraded` and does not fail the command. `--app chat` creates no background
-host: its join command starts the chat surface directly.
+cannot start is recorded as `degraded`, releases the lease and returns the host error (a non-zero
+exit); the session and state file remain, and vowp `orchestrator resume` can retry once the host is
+available.
+`--app chat` creates no background host: its join command starts the chat surface directly.
 
 The instructions template tells the orchestrator to read the snapshot, report plainly with times,
 propose before acting, apply only after the owner's yes, never open a database or read a secret, and

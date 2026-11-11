@@ -47,8 +47,8 @@ On macOS or a minimal container without `/proc`, the sampler marks the sample `f
 load stay zero, CPU count comes from `available_parallelism()`, disk free from the portable `df -Pk`
 read, and cgroup values are absent unless those files exist. Admission then skips the RAM and CPU
 checks and uses the owner's fixed target when one is set, otherwise 1. The disk check still runs, and
-the board and vowp `capacity show` print `capacity: fallback (no /proc), target <n>` so the degradation is
-visible. Auto capacity never silently claims a measured number on such a host.
+vowp `capacity show` prints `capacity: fallback (no /proc), target <n>` so the degradation is visible.
+Auto capacity never silently claims a measured number on such a host.
 
 Samples are written every 5 seconds and kept for 24 hours. The pruner can also retain one-minute rows
 for 30 days if they exist, but the sampler does not create them in this build; a minute rollup is still
@@ -88,9 +88,10 @@ the source is `measured`, `pooled` or `default`.
 
 ## Admit
 
-Before any worker, verifier, planner or keeper run starts, the capacity manager answers `Admit` or
-`Wait(reason)`. The merge queue is not admitted through this path; it starts when a job reaches
-`merging`. The checks are deterministic and run in this order:
+Before a job is dispatched — including its worker, verifier or fix run — the capacity manager answers
+`Admit` or `Wait(reason)`. Planner and keeper turns start when due and are not admitted through this
+path. The merge queue also bypasses it; it starts when a job reaches `merging`. The checks are
+deterministic and run in this order:
 
 1. **Brake.** An active brake returns its first reason.
 2. **Provider.** If the run's provider has an active limit, wait.
@@ -110,14 +111,11 @@ the node's capacity from its own runs alone.
 
 ### Fairness
 
-Fairness is ordering, not a veto. When several projects have ready jobs and capacity is scarce, the
-supervisor orders candidates by:
-
-1. project weight, highest first;
-2. the project admitted least recently;
-3. job priority inside the project, highest first, then age.
-
-The round-robin start offset rotates every tick, so no project is permanently first. `max_workers` in
+Every active project gets one L1 tick per node tick, in project-name order, with the start offset
+advancing each tick, so no project is permanently first and none is skipped. Within a project, ready
+jobs dispatch by priority and then age. The stored `project weight` is shown in project and snapshot
+output, but weighted or least-recently-admitted ordering is not wired into the supervisor in this
+build; every project still gets its turn. `max_workers` in
 `vowp.toml` is a preference, not a cap: it seeds the advisor's suggestion and the worker-slot
 bookkeeping, but admission uses the capacity target and the measured checks. When the target rises
 above the configured preference, the supervisor grows the worker rows so the board still shows a slot
@@ -135,7 +133,7 @@ trips on measured conditions and clears after two clean samples:
 | `disk_low` | Free disk on the home or worktree filesystem is below 5 GiB for two samples. |
 | `provider` | Every configured provider has an active limit. |
 
-The board and vowp `capacity show` print the active reason and its start time, for example
+vowp `capacity show` prints the active reason and its start time, for example
 `brake: memory pressure (avg10 14.2)`. A kernel OOM kill is recorded on the run, the job is parked with
 a node-inbox notice, and its estimate's p90 is raised for the next admission. The run itself is not
 retried by the brake; the normal job retry path decides.

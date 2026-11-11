@@ -100,13 +100,14 @@ These commands are implemented today, including the supervisor commands (`vowp u
 1. **Only `ready` jobs are dispatched**, by priority and then age, after capacity admission succeeds.
 2. **Ownership locks.** No two running jobs may have overlapping `owns` globs. Conflicts wait. A fix job
    and the job it fixes are treated as one holder, so the fix does not deadlock the original.
-3. **Measured capacity, provider concurrency and fairness.** The node capacity manager checks the brake,
-   the provider limit, the worker target, RAM, CPU and disk before a worker, verifier, planner or keeper
-   run starts; a wait leaves the job `ready` with a reason. The merge queue is not admitted through this
-   path. Project weight and least-recently-admitted order projects when capacity is scarce.
-   `[node].max_workers` (default 4) is a preference for the advised target, not a hard cap;
-   `max_verifiers` (default 2) bounds the verifier share. `[providers.<p>].max_concurrent` bounds each
-   provider and is lowered after rate limits. See [capacity](capacity.md).
+3. **Measured capacity, provider concurrency and ordering.** The node capacity manager checks the brake,
+   the provider limit, the worker target, RAM, CPU and disk before a job is dispatched; a wait leaves the
+   job `ready` with a reason. Planner and keeper turns start when due outside this path, and the merge
+   queue bypasses it. Projects are ticked in name order with a rotating start offset; the stored project
+   weight is reported but does not change ordering in this build. Within a project, priority and then age
+   order ready jobs. `[node].max_workers` (default 4) is a preference for the advised target, not a hard
+   cap; `max_verifiers` (default 2) bounds the verifier share. `[providers.<p>].max_concurrent` bounds
+   each provider and is lowered after rate limits. See [capacity](capacity.md).
 4. **One worktree per job** on branch `job/<id>`. Workers run in that worktree. Verify, fix and merge jobs
    reuse the original's worktree and branch.
 5. **Single writer to the default branch.** Only the supervisor's merge queue writes and pushes the

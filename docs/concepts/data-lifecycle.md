@@ -76,7 +76,8 @@ When a session is closed and 30 days have passed since its last update, compacti
    event count;
 3. sets `sessions.compacted_at` and keeps the `sessions`, `session_events` and `capsules` rows — the
    index is the history;
-4. deletes `log.jsonl`, `blobs/` and `.lock`.
+4. deletes `log.jsonl`, `.lock` and the session's blobs, except blobs referenced by passing gate
+   evidence (truth).
 
 After compaction, vowp `session tail` and vowp `session show --events` exit 3 with a message pointing
 at vowp `session show --capsule`. vowp `session show --capsule` and vowp `session export` keep working;
@@ -93,6 +94,9 @@ Raw harness output is useful for debugging and is not conversation content. VOWP
 - after fourteen days it is deleted;
 - an oversized in-flight file is truncated to zero in place, so the writer keeps the same inode and
   the canonical session log is unaffected.
+
+The gzip step uses the external `gzip` binary; a failure is reported in the GC report rather than
+silently leaving the file uncompressed.
 
 ### Worktrees
 
@@ -134,8 +138,8 @@ tells the owner to set them again with vowp `secret set`.
   ISO week is a weekly candidate, and the union of the newest 7 daily and 4 weekly backups is kept.
 - `--to` may be a directory, a `.db` file (legacy single global-DB copy), an `user@host:path`, an
   `rsync://` target or a git remote. `--offsite` is an explicit alias for an offsite target.
-- `--encrypt` runs the external `age` binary. A missing `age`, `rsync`, `git` or `gzip` is a clear exit
-  5 naming the binary it needs; VOWP never silently writes an unencrypted copy.
+- `--encrypt` runs the external `age` binary. A missing `age`, `rsync` or `git` is a clear exit 5 naming
+  the binary it needs; VOWP never silently writes an unencrypted copy.
 - `--restore` stages into a sibling directory of `--to-home`, verifies every hash and row count, runs
   `integrity_check`, and only then swaps the verified home into place. It refuses to overwrite an
   existing home without `--force` and refuses to restore over the home that is serving the command.
