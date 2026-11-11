@@ -545,9 +545,17 @@ fn mirror_reads_api_event_and_backfills_export() {
         "data": {"sessionID": "ses_fake"}, "durable": {"seq": 7}
     }));
     server.push_event(json!({
+        "id": "evt_step2", "created": 1_700_000_002_150_i64, "type": "session.step.started",
+        "data": {
+            "sessionID": "ses_fake", "assistantMessageID": "m5",
+            "model": {"id": "fake-model", "providerID": "fake"}
+        },
+        "durable": {"seq": 8}
+    }));
+    server.push_event(json!({
         "id": "evt_a2", "created": 1_700_000_002_200_i64, "type": "session.text.ended",
         "data": {"sessionID": "ses_fake", "assistantMessageID": "m5", "ordinal": 0, "text": "later"},
-        "durable": {"seq": 8}
+        "durable": {"seq": 9}
     }));
     server.push_event(json!({
         "id": "evt_s2", "created": 1_700_000_002_250_i64, "type": "session.step.ended",
@@ -563,7 +571,7 @@ fn mirror_reads_api_event_and_backfills_export() {
     }));
     server.push_event(json!({
         "id": "evt_e2", "created": 1_700_000_002_400_i64, "type": "session.execution.succeeded",
-        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 10}
+        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 11}
     }));
 
     let pending = wait_for_text(&host, &host_handle, &cursor, "later");
@@ -573,11 +581,24 @@ fn mirror_reads_api_event_and_backfills_export() {
     );
     let third = mirror_from_host(&deps, &store, &session, &host, &host_handle, &mut cursor).expect("third mirror");
     assert!(third.events >= 4, "{third:?}");
-    assert!(
-        events_of(&deps, &session)
-            .iter()
-            .any(|event| matches!(event.body(), Ok(EventBody::AssistantMessage(message)) if message.text == "later")),
-        "the between-pass turn was not written to the session log"
+    let events = events_of(&deps, &session);
+    let later = events
+        .iter()
+        .find(|event| matches!(event.body(), Ok(EventBody::AssistantMessage(message)) if message.text == "later"))
+        .expect("the between-pass turn was not written to the session log");
+    assert_eq!(
+        later.source.model.as_deref(),
+        Some("fake-model"),
+        "the live assistant lost the step's model"
+    );
+    let later_cost = events
+        .iter()
+        .find(|event| matches!(event.body(), Ok(EventBody::Cost(cost)) if cost.cost.tokens.input == 1))
+        .expect("the live cost was not written");
+    assert_eq!(
+        later_cost.source.model.as_deref(),
+        Some("fake-model"),
+        "the live cost lost the step's model"
     );
     assert_eq!(
         server
@@ -606,9 +627,17 @@ fn first_turn_events() -> Vec<Value> {
             "data": {"sessionID": "ses_fake"}, "durable": {"seq": 2}
         }),
         json!({
+            "id": "evt_step1", "created": 1_700_000_000_700_i64, "type": "session.step.started",
+            "data": {
+                "sessionID": "ses_fake", "assistantMessageID": "m2",
+                "model": {"id": "fake-model", "providerID": "fake"}
+            },
+            "durable": {"seq": 3}
+        }),
+        json!({
             "id": "evt_a1", "created": 1_700_000_001_000_i64, "type": "session.text.ended",
             "data": {"sessionID": "ses_fake", "assistantMessageID": "m2", "ordinal": 0, "text": "hi"},
-            "durable": {"seq": 3}
+            "durable": {"seq": 4}
         }),
         json!({
             "id": "evt_s1", "created": 1_700_000_001_100_i64, "type": "session.step.ended",
@@ -616,7 +645,7 @@ fn first_turn_events() -> Vec<Value> {
                 "sessionID": "ses_fake", "assistantMessageID": "m2", "cost": 0.25,
                 "tokens": {"input": 3, "output": 4}
             },
-            "durable": {"seq": 4}
+            "durable": {"seq": 5}
         }),
         json!({
             "id": "evt_usage1", "created": 1_700_000_001_150_i64, "type": "session.usage.updated",
@@ -624,7 +653,7 @@ fn first_turn_events() -> Vec<Value> {
         }),
         json!({
             "id": "evt_e1", "created": 1_700_000_001_200_i64, "type": "session.execution.succeeded",
-            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 5}
+            "data": {"sessionID": "ses_fake"}, "durable": {"seq": 6}
         }),
     ]
 }
@@ -706,7 +735,16 @@ fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
         json!({
             "id": "evt_start", "type": "session.execution.started",
             "created": 1_700_000_003_000_i64,
-            "data": {"sessionID": "ses_app"}, "durable": {"seq": 4}
+            "data": {"sessionID": "ses_app"}, "durable": {"seq": 3}
+        }),
+        json!({
+            "id": "evt_step0", "type": "session.step.started",
+            "created": 1_700_000_003_050_i64,
+            "data": {
+                "sessionID": "ses_app", "assistantMessageID": "a1",
+                "model": {"id": "fake-model", "providerID": "fake"}
+            },
+            "durable": {"seq": 4}
         }),
         json!({
             "id": "evt_text0", "type": "session.text.ended",
@@ -751,6 +789,7 @@ fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
     assert_eq!(messages.len(), 1, "{entries:?}");
     assert_eq!(messages[0].native_id, "assistant:a1");
     assert_eq!(messages[0].text.as_deref(), Some("part one\npart two"));
+    assert_eq!(messages[0].model.as_deref(), Some("fake-model"));
     let costs: Vec<&TranscriptEntry> = entries
         .iter()
         .filter(|entry| entry.kind == TranscriptKind::Cost)
@@ -758,6 +797,7 @@ fn opencode_api_event_mapping_covers_tools_cost_and_errors() {
     assert_eq!(costs.len(), 1, "{entries:?}");
     assert_eq!(costs[0].native_id, "cost:a1");
     assert_eq!(costs[0].usd, Some(0.5));
+    assert_eq!(costs[0].model.as_deref(), Some("fake-model"));
     assert_eq!(costs[0].tokens.expect("tokens").input, 7);
     assert!(entries.iter().any(|entry| entry.kind == TranscriptKind::TurnStarted));
     assert!(entries.iter().any(|entry| entry.kind == TranscriptKind::TurnEnded));

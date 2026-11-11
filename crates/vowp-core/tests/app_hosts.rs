@@ -473,21 +473,30 @@ fn opencode_v2_service_pair_basic_auth() {
         "data": {"sessionID": "ses_fake"}, "durable": {"seq": 1}
     }));
     fake.push_event(json!({
+        "id": "evt_step_start", "type": "session.step.started",
+        "created": 1_700_000_002_050_i64,
+        "data": {
+            "sessionID": "ses_fake", "assistantMessageID": "msg_assistant_2",
+            "model": {"id": "fake-model", "providerID": "fake"}
+        },
+        "durable": {"seq": 2}
+    }));
+    fake.push_event(json!({
         "id": "evt_text", "type": "session.text.ended",
         "created": 1_700_000_002_100_i64,
         "data": {"sessionID": "ses_fake", "assistantMessageID": "msg_assistant_2", "ordinal": 0, "text": "next"},
-        "durable": {"seq": 2}
+        "durable": {"seq": 3}
     }));
     fake.push_event(json!({
         "id": "evt_step", "type": "session.step.ended",
         "created": 1_700_000_002_200_i64,
         "data": {"sessionID": "ses_fake", "assistantMessageID": "msg_assistant_2", "cost": 0.0, "tokens": {"input": 1, "output": 1}},
-        "durable": {"seq": 3}
+        "durable": {"seq": 4}
     }));
     fake.push_event(json!({
         "id": "evt_end", "type": "session.execution.succeeded",
         "created": 1_700_000_002_300_i64,
-        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 4}
+        "data": {"sessionID": "ses_fake"}, "durable": {"seq": 5}
     }));
     fake.push_event(json!({
         "id": "evt_foreign", "type": "session.inbox.enqueued",
@@ -499,10 +508,15 @@ fn opencode_v2_service_pair_basic_auth() {
         "durable": {"seq": 100}
     }));
     let second = wait_for_text(&host, &handle, &first.cursor, "next");
-    assert!(
-        second.entries.iter().any(|entry| entry.text.as_deref() == Some("next")),
-        "live pass missed the assistant message: {:?}",
-        second.entries
+    let next = second
+        .entries
+        .iter()
+        .find(|entry| entry.text.as_deref() == Some("next"))
+        .expect("live pass missed the assistant message");
+    assert_eq!(
+        next.model.as_deref(),
+        Some("fake-model"),
+        "the live assistant lost the step's model"
     );
     assert!(
         !second

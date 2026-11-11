@@ -1238,6 +1238,8 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
     let mut order: Vec<String> = Vec::new();
     let mut completed: BTreeSet<String> = BTreeSet::new();
     let mut last_assistant: Option<String> = None;
+    let mut last_model: Option<String> = None;
+    let mut step_models: BTreeMap<String, String> = BTreeMap::new();
     let mut previous_tokens = vowp_protocol::Tokens::default();
     let mut previous_usd = 0.0;
     let mut usage_seen = false;
@@ -1284,6 +1286,7 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
             }
             "session.execution.started" => {
                 last_assistant = None;
+                last_model = None;
                 out.push(TranscriptEntry {
                     native_id: format!("turn-start:{marker}"),
                     kind: TranscriptKind::TurnStarted,
@@ -1310,18 +1313,25 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     continue;
                 }
                 let ordinal = data.get("ordinal").and_then(Value::as_u64).unwrap_or(0);
+                let entry_model = model
+                    .clone()
+                    .or_else(|| step_models.get(id).cloned())
+                    .or_else(|| last_model.clone());
                 let pending_message = pending.entry(id.to_owned()).or_insert_with(|| {
                     order.push(id.to_owned());
                     PendingAssistant {
                         ts,
                         parts: Vec::new(),
-                        model: model.clone(),
+                        model: entry_model.clone(),
                         session: session.clone(),
                     }
                 });
                 pending_message.parts.push((ordinal, text.to_owned()));
                 if pending_message.model.is_none() {
-                    pending_message.model.clone_from(&model);
+                    pending_message.model.clone_from(&entry_model);
+                }
+                if pending_message.model.is_some() {
+                    last_model.clone_from(&pending_message.model);
                 }
                 if pending_message.session.is_none() {
                     pending_message.session.clone_from(&session);
@@ -1333,13 +1343,31 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     continue;
                 };
                 last_assistant = Some(id.to_owned());
-                if let Some(pending_message) = pending.get_mut(id) {
-                    if pending_message.model.is_none() {
-                        pending_message.model.clone_from(&model);
+                if let Some(step_model) = &model {
+                    step_models.insert(id.to_owned(), step_model.clone());
+                    last_model = Some(step_model.clone());
+                }
+                let entry_model = model
+                    .clone()
+                    .or_else(|| step_models.get(id).cloned())
+                    .or_else(|| last_model.clone());
+                let pending_message = pending.entry(id.to_owned()).or_insert_with(|| {
+                    order.push(id.to_owned());
+                    PendingAssistant {
+                        ts,
+                        parts: Vec::new(),
+                        model: entry_model.clone(),
+                        session: session.clone(),
                     }
-                    if pending_message.session.is_none() {
-                        pending_message.session.clone_from(&session);
-                    }
+                });
+                if pending_message.model.is_none() {
+                    pending_message.model.clone_from(&entry_model);
+                }
+                if pending_message.model.is_some() {
+                    last_model.clone_from(&pending_message.model);
+                }
+                if pending_message.session.is_none() {
+                    pending_message.session.clone_from(&session);
                 }
             }
             "session.step.ended" => {
@@ -1347,6 +1375,9 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     continue;
                 };
                 last_assistant = Some(id.to_owned());
+                if let Some(step_model) = step_models.get(id) {
+                    last_model = Some(step_model.clone());
+                }
                 completed.insert(id.to_owned());
                 flush_ready(&mut out, &mut pending, &mut order, &mut completed, false);
             }
@@ -1366,7 +1397,7 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     output: None,
                     path: None,
                     call_id: Some(call_id),
-                    model,
+                    model: model.clone().or_else(|| last_model.clone()),
                     native_session: session,
                     ok: None,
                     tokens: None,
@@ -1393,7 +1424,7 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     output,
                     path: None,
                     call_id: Some(call_id),
-                    model,
+                    model: model.clone().or_else(|| last_model.clone()),
                     native_session: session,
                     ok: Some(ok),
                     tokens: None,
@@ -1423,7 +1454,8 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     .clone()
                     .map(|id| format!("cost:{id}"))
                     .unwrap_or_else(|| format!("cost:usage:{marker}"));
-                out.push(cost_entry(native_id, ts, &model, &session, delta, delta_usd));
+                let entry_model = model.clone().or_else(|| last_model.clone());
+                out.push(cost_entry(native_id, ts, &entry_model, &session, delta, delta_usd));
                 previous_tokens = tokens;
                 if let Some(usd) = usd {
                     previous_usd = usd;
@@ -1438,7 +1470,14 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                         .and_then(Value::as_str)
                         .unwrap_or("session execution failed")
                         .to_owned();
-                    out.push(error_entry(format!("error:{marker}"), ts, message, &model, &session));
+                    let entry_model = model.clone().or_else(|| last_model.clone());
+                    out.push(error_entry(
+                        format!("error:{marker}"),
+                        ts,
+                        message,
+                        &entry_model,
+                        &session,
+                    ));
                 }
                 let outcome = if kind.ends_with("interrupted") {
                     "interrupted"
@@ -1447,11 +1486,12 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                 } else {
                     "succeeded"
                 };
+                let entry_model = model.clone().or_else(|| last_model.clone());
                 out.push(turn_end_entry(
                     format!("turn-end:{marker}"),
                     ts,
                     outcome,
-                    &model,
+                    &entry_model,
                     &session,
                 ));
             }
@@ -1461,7 +1501,14 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     .and_then(Value::as_str)
                     .unwrap_or("step failed")
                     .to_owned();
-                out.push(error_entry(format!("error:{marker}"), ts, message, &model, &session));
+                let entry_model = model.clone().or_else(|| last_model.clone());
+                out.push(error_entry(
+                    format!("error:{marker}"),
+                    ts,
+                    message,
+                    &entry_model,
+                    &session,
+                ));
             }
             "session.model.selected" => {
                 let selected = data
@@ -1469,6 +1516,7 @@ fn map_events(events: &[Value], flush_end: bool) -> Vec<TranscriptEntry> {
                     .and_then(model_name)
                     .or_else(|| data.get("modelID").and_then(Value::as_str).map(str::to_owned))
                     .unwrap_or_else(|| "unknown".to_owned());
+                last_model = Some(selected.clone());
                 out.push(simple_entry(
                     format!("model:{marker}"),
                     TranscriptKind::Note,
