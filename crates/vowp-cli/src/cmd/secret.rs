@@ -7,7 +7,7 @@
 
 use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -277,6 +277,9 @@ fn request_secret(ctx: &Ctx, io: &mut dyn IoStreams, args: &SecretRequestArgs) -
 /// The action a signal takes after echo is restored; production exits the process.
 type ExitAction = Arc<dyn Fn(i32) + Send + Sync>;
 
+/// Runs one `stty` mode change; tests replace it with an in-process action.
+type EchoAction = Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
+
 /// Restores terminal echo on every return path, including SIGINT and SIGTERM.
 ///
 /// The signal watcher records the signal before it takes the terminal lock, runs `stty echo`
@@ -302,24 +305,21 @@ impl EchoGuard {
 
     /// Builds a guard with an explicit `stty` program and exit action (used by tests).
     fn hide_with(stty: &Path, exit: impl Fn(i32) + Send + Sync + 'static) -> Result<Self, CliError> {
-        Self::hide_with_hook(stty, exit, |_| {})
+        Self::hide_with_terminal(Arc::new(EchoTerminal::new(stty)), exit)
     }
 
-    /// Installs the watcher, reports it to `hook`, then hides echo.
+    /// Installs the watcher and hides echo through `terminal`.
     ///
-    /// `hook` runs after the watcher exists and before the hide starts. Tests use it to
-    /// simulate a signal that arrives while the hide is in flight; production passes a no-op.
-    fn hide_with_hook(
-        stty: &Path,
+    /// Tests construct `terminal` with an in-process echo action so the hide can be held at
+    /// the `stty -echo` point without a real signal or a shell script.
+    fn hide_with_terminal(
+        terminal: Arc<EchoTerminal>,
         exit: impl Fn(i32) + Send + Sync + 'static,
-        hook: impl FnOnce(&Arc<EchoTerminal>),
     ) -> Result<Self, CliError> {
-        let terminal = Arc::new(EchoTerminal::new(stty));
         let exit: ExitAction = Arc::new(exit);
         let watcher = SignalRestore::install(Arc::clone(&terminal), Arc::clone(&exit)).map_err(|error| {
             CliError::Guard(format!("could not install the terminal echo restore handler: {error}"))
         })?;
-        hook(&terminal);
         if let Err(error) = terminal.set(false) {
             drop(watcher);
             return Err(CliError::Guard(format!("could not hide terminal echo: {error}")));
@@ -365,7 +365,7 @@ impl Drop for EchoGuard {
 
 /// One terminal's echo state, serialised between the prompt and the signal watcher.
 struct EchoTerminal {
-    stty: PathBuf,
+    apply: EchoAction,
     lock: Mutex<()>,
     signalled: AtomicI32,
 }
@@ -373,17 +373,28 @@ struct EchoTerminal {
 impl EchoTerminal {
     /// Names the `stty` program this terminal is changed through.
     fn new(stty: &Path) -> Self {
+        let stty = stty.to_path_buf();
+        Self::with_action(move |enable| set_echo(&stty, enable))
+    }
+
+    /// Builds a terminal around an explicit echo action.
+    fn with_action(apply: impl Fn(bool) -> Result<(), String> + Send + Sync + 'static) -> Self {
         Self {
-            stty: stty.to_path_buf(),
+            apply: Arc::new(apply),
             lock: Mutex::new(()),
             signalled: AtomicI32::new(0),
         }
     }
 
-    /// Runs `stty` with one echo mode while holding the shared lock.
+    /// Runs the echo action with one mode while holding the shared lock.
     fn set(&self, enable: bool) -> Result<(), String> {
         let _guard = self.lock();
-        set_echo(&self.stty, enable)
+        self.set_locked(enable)
+    }
+
+    /// Runs the echo action while the caller already holds the terminal lock.
+    fn set_locked(&self, enable: bool) -> Result<(), String> {
+        (self.apply)(enable)
     }
 
     /// Takes the terminal lock, recovering from a poisoned lock.
@@ -413,7 +424,7 @@ impl EchoTerminal {
     /// between the restore and the exit.
     fn restore_then(&self, after: impl FnOnce()) -> Result<(), String> {
         let _guard = self.lock();
-        set_echo(&self.stty, true)?;
+        self.set_locked(true)?;
         after();
         Ok(())
     }
@@ -466,7 +477,7 @@ impl SignalRestore {
                 for signal in signals.forever() {
                     terminal.note_signal(signal);
                     let _guard = terminal.lock();
-                    match set_echo(&terminal.stty, true) {
+                    match terminal.set_locked(true) {
                         Ok(()) => exit(128 + signal),
                         Err(error) => {
                             eprintln!("vowp: {error}; terminal echo may still be disabled");
@@ -493,76 +504,68 @@ impl Drop for SignalRestore {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
-    /// Installs a fake `stty` that records each mode argument and exits with `code`.
-    fn fake_stty(dir: &Path, code: i32) -> (PathBuf, PathBuf) {
-        let log = dir.join("stty.log");
-        let script = dir.join("stty");
-        let body = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {code}\n", log.display());
-        fs::write(&script, body).expect("fake stty");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("fake stty mode");
-        (script, log)
+    /// Appends one mode line to a test log.
+    fn append(log: &Path, line: &str) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .map_err(|error| format!("open {}: {error}", log.display()))?;
+        writeln!(file, "{line}").map_err(|error| format!("write {}: {error}", log.display()))
     }
 
-    /// Installs a fake `stty` whose `-echo` records `start` and then blocks briefly.
-    fn slow_stty(dir: &Path) -> (PathBuf, PathBuf) {
-        let log = dir.join("stty.log");
-        let script = dir.join("stty");
-        let body = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = \"-echo\" ]; then\n\
-             printf 'start\\n' >> '{log}'\n\
-             sleep 0.3\n\
-             fi\n\
-             printf '%s\\n' \"$*\" >> '{log}'\n\
-             exit 0\n",
-            log = log.display()
-        );
-        fs::write(&script, body).expect("slow stty");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("slow stty mode");
-        (script, log)
+    /// Builds an in-process fake `stty` that records each mode.
+    ///
+    /// `fail` makes `-echo` return an error. `release` makes `-echo` first record `start` and
+    /// then wait for that file, so a test can deliver a signal while the hide is in flight.
+    fn logging_terminal(log: &Path, fail: bool, release: Option<PathBuf>) -> EchoTerminal {
+        let log = log.to_path_buf();
+        EchoTerminal::with_action(move |enable| {
+            if let Some(release) = release.as_deref() {
+                if !enable {
+                    append(&log, "start")?;
+                    wait_for_file(release)?;
+                }
+            }
+            append(&log, if enable { "echo" } else { "-echo" })?;
+            if fail && !enable {
+                Err("fake stty failed".to_owned())
+            } else {
+                Ok(())
+            }
+        })
     }
 
-    /// Installs a fake `stty` whose `-echo` waits for `release` after recording `start`.
-    fn blocking_stty(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
-        let log = dir.join("stty.log");
-        let release = dir.join("stty.release");
-        let script = dir.join("stty");
-        let body = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = \"-echo\" ]; then\n\
-             printf 'start\\n' >> '{log}'\n\
-             i=0\n\
-             while [ ! -e '{release}' ] && [ \"$i\" -lt 500 ]; do\n\
-             sleep 0.01\n\
-             i=$((i + 1))\n\
-             done\n\
-             fi\n\
-             printf '%s\\n' \"$*\" >> '{log}'\n\
-             exit 0\n",
-            log = log.display(),
-            release = release.display()
-        );
-        fs::write(&script, body).expect("blocking stty");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("blocking stty mode");
-        (script, log, release)
+    /// Waits until `path` exists, failing after five seconds.
+    fn wait_for_file(path: &Path) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            if Instant::now() >= deadline {
+                return Err(format!("timed out waiting for {}", path.display()));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 
     /// Runs the ignored child that hides echo, raises `signal`, and must exit through the watcher.
-    fn run_signal_child(stty: &Path, signal: i32) -> std::process::Output {
+    fn run_signal_child(log: &Path, signal: i32) -> std::process::Output {
         Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", "cmd::secret::tests::echo_guard_signal_child", "--ignored"])
-            .env("VOWP_TEST_ECHO_STTY", stty)
+            .env("VOWP_TEST_ECHO_LOG", log)
             .env("VOWP_TEST_ECHO_SIGNAL", signal.to_string())
             .output()
             .expect("run the signal child")
     }
 
-    /// Returns the arguments the fake `stty` recorded.
+    /// Returns the modes the fake `stty` recorded.
     fn logged(log: &Path) -> Vec<String> {
         fs::read_to_string(log)
             .unwrap_or_default()
@@ -574,10 +577,11 @@ mod tests {
     #[test]
     fn echo_guard_restores_echo_when_dropped() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (stty, log) = fake_stty(tmp.path(), 0);
+        let log = tmp.path().join("echo.log");
+        let terminal = Arc::new(logging_terminal(&log, false, None));
 
         {
-            let _guard = EchoGuard::hide_with(&stty, |_| {}).expect("hide echo");
+            let _guard = EchoGuard::hide_with_terminal(terminal, |_| {}).expect("hide echo");
             assert_eq!(logged(&log), vec!["-echo"], "echo must be off while the prompt is open");
         }
 
@@ -587,9 +591,10 @@ mod tests {
     #[test]
     fn echo_guard_refuses_when_stty_cannot_disable_echo() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (stty, log) = fake_stty(tmp.path(), 1);
+        let log = tmp.path().join("echo.log");
+        let terminal = Arc::new(logging_terminal(&log, true, None));
 
-        let error = match EchoGuard::hide_with(&stty, |_| {}) {
+        let error = match EchoGuard::hide_with_terminal(terminal, |_| {}) {
             Ok(_) => panic!("a failing stty must be a hard error"),
             Err(error) => error,
         };
@@ -601,23 +606,24 @@ mod tests {
     #[test]
     #[ignore = "child process for the echo guard signal tests"]
     fn echo_guard_signal_child() {
-        let stty = std::env::var("VOWP_TEST_ECHO_STTY").expect("parent passes a fake stty path");
+        let log = PathBuf::from(std::env::var("VOWP_TEST_ECHO_LOG").expect("parent passes an echo log path"));
         let signal = std::env::var("VOWP_TEST_ECHO_SIGNAL")
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(SIGINT);
-        let _guard = EchoGuard::hide_with(Path::new(&stty), |code| std::process::exit(code)).expect("hide echo");
+        let terminal = Arc::new(logging_terminal(&log, false, None));
+        let _guard = EchoGuard::hide_with_terminal(terminal, |code| std::process::exit(code)).expect("hide echo");
         signal_hook::low_level::raise(signal).expect("raise signal");
-        thread::sleep(std::time::Duration::from_secs(5));
+        thread::sleep(Duration::from_secs(5));
         panic!("signal {signal} did not restore echo and exit");
     }
 
     #[test]
     fn echo_guard_restores_echo_on_sigint() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (stty, log) = fake_stty(tmp.path(), 0);
+        let log = tmp.path().join("echo.log");
 
-        let output = run_signal_child(&stty, SIGINT);
+        let output = run_signal_child(&log, SIGINT);
 
         assert_eq!(
             output.status.code(),
@@ -635,9 +641,9 @@ mod tests {
     #[test]
     fn echo_guard_restores_echo_on_sigterm() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (stty, log) = fake_stty(tmp.path(), 0);
+        let log = tmp.path().join("echo.log");
 
-        let output = run_signal_child(&stty, SIGTERM);
+        let output = run_signal_child(&log, SIGTERM);
 
         assert_eq!(
             output.status.code(),
@@ -654,44 +660,56 @@ mod tests {
 
     #[test]
     fn echo_guard_restores_echo_when_a_signal_arrives_during_hide() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (stty, log, release) = blocking_stty(tmp.path());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let terminal = Arc::new(EchoTerminal::with_action({
+            let calls = Arc::clone(&calls);
+            let started_tx = Arc::clone(&started_tx);
+            let release_rx = Arc::clone(&release_rx);
+            move |enable| {
+                calls.lock().expect("record echo call").push(enable);
+                if !enable {
+                    let started = started_tx
+                        .lock()
+                        .expect("start sender")
+                        .take()
+                        .expect("the hide starts once");
+                    started
+                        .send(())
+                        .map_err(|_| "test dropped the start receiver".to_owned())?;
+                    let release = release_rx
+                        .lock()
+                        .expect("release receiver")
+                        .take()
+                        .expect("the hide is released once");
+                    release
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|_| "test did not release the hide".to_owned())?;
+                }
+                Ok(())
+            }
+        }));
         let status = Arc::new(AtomicI32::new(0));
         let recorded = Arc::clone(&status);
-        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+        let signaler = {
+            let terminal = Arc::clone(&terminal);
+            thread::spawn(move || {
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the hide must start");
+                terminal.note_signal(SIGINT);
+                release_tx.send(()).expect("release the hide");
+            })
+        };
 
-        let result = EchoGuard::hide_with_hook(
-            &stty,
-            move |code| {
-                recorded.store(code, Ordering::SeqCst);
-            },
-            {
-                let log = log.clone();
-                let release = release.clone();
-                move |terminal| {
-                    let terminal = Arc::clone(terminal);
-                    let joiner = thread::spawn(move || {
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                        while !logged(&log).iter().any(|line| line == "start") {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "timed out waiting for stty -echo to start"
-                            );
-                            thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                        terminal.note_signal(SIGINT);
-                        fs::write(&release, b"go").expect("release the fake stty");
-                    });
-                    handle_tx.send(joiner).expect("send the joiner");
-                }
-            },
-        );
+        let result = EchoGuard::hide_with_terminal(terminal, move |code| {
+            recorded.store(code, Ordering::SeqCst);
+        });
 
-        handle_rx
-            .recv()
-            .expect("the hook must spawn the signal thread")
-            .join()
-            .expect("signal thread");
+        signaler.join().expect("signal thread");
         assert!(result.is_err(), "a signalled hide must not return a live guard");
         assert_eq!(
             status.load(Ordering::SeqCst),
@@ -699,41 +717,42 @@ mod tests {
             "the interrupted hide must exit with 128 + SIGINT"
         );
         assert_eq!(
-            logged(&log),
-            vec!["start", "-echo", "echo"],
-            "the restore must wait for the in-flight stty -echo and then run"
+            *calls.lock().expect("echo calls"),
+            vec![false, true],
+            "the hide must finish before the restore runs"
         );
     }
 
     #[test]
     #[ignore = "child process for echo_guard_waits_for_hide_before_restoring"]
     fn echo_guard_signal_during_hide_child() {
-        let stty = std::env::var("VOWP_TEST_ECHO_STTY").expect("parent passes a fake stty path");
-        let log = PathBuf::from(std::env::var("VOWP_TEST_ECHO_LOG").expect("parent passes a log path"));
-        let raiser = thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                if logged(&log).iter().any(|line| line == "start") {
-                    signal_hook::low_level::raise(SIGINT).expect("raise SIGINT");
-                    return;
+        let log = PathBuf::from(std::env::var("VOWP_TEST_ECHO_LOG").expect("parent passes an echo log path"));
+        let release = PathBuf::from(std::env::var("VOWP_TEST_ECHO_RELEASE").expect("parent passes a release path"));
+        let raiser = {
+            let log = log.clone();
+            let release = release.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !logged(&log).iter().any(|line| line == "start") {
+                    assert!(Instant::now() < deadline, "timed out waiting for the hide to start");
+                    thread::sleep(Duration::from_millis(5));
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "timed out waiting for the hide to start"
-                );
-                thread::sleep(std::time::Duration::from_millis(5));
-            }
-        });
-        let _guard = EchoGuard::hide_with(Path::new(&stty), |code| std::process::exit(code)).expect("hide echo");
+                signal_hook::low_level::raise(SIGINT).expect("raise SIGINT");
+                fs::write(&release, b"go").expect("release the hide");
+            })
+        };
+        let terminal = Arc::new(logging_terminal(&log, false, Some(release)));
+        let _guard = EchoGuard::hide_with_terminal(terminal, |code| std::process::exit(code)).expect("hide echo");
         let _ = raiser.join();
-        thread::sleep(std::time::Duration::from_secs(5));
+        thread::sleep(Duration::from_secs(5));
         panic!("the SIGINT path did not end the process");
     }
 
     #[test]
     fn echo_guard_waits_for_hide_before_restoring() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (stty, log) = slow_stty(tmp.path());
+        let log = tmp.path().join("echo.log");
+        let release = tmp.path().join("release");
 
         let output = Command::new(std::env::current_exe().expect("test binary"))
             .args([
@@ -741,8 +760,8 @@ mod tests {
                 "cmd::secret::tests::echo_guard_signal_during_hide_child",
                 "--ignored",
             ])
-            .env("VOWP_TEST_ECHO_STTY", &stty)
             .env("VOWP_TEST_ECHO_LOG", &log)
+            .env("VOWP_TEST_ECHO_RELEASE", &release)
             .output()
             .expect("run the hide-race child");
 
