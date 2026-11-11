@@ -1063,9 +1063,17 @@ impl<'a> Backend<'a> {
         }
 
         let capsule = global.latest_capsule(&session)?;
-        let start = capsule.as_ref().map(|capsule| capsule.at_seq).unwrap_or(0);
         let tail = match SessionLog::open_read(self.ctx.paths(), &session) {
-            Ok(reader) => reader.read_from(start, Some(limit))?,
+            Ok(reader) => match capsule.as_ref() {
+                // The capsule covers events through `at_seq`; return the last `limit`
+                // events after it, not the first ones.
+                Some(capsule) => {
+                    let mut events = reader.read_from(capsule.at_seq, None)?;
+                    let keep_from = events.len().saturating_sub(limit);
+                    events.split_off(keep_from)
+                }
+                None => reader.tail(limit)?,
+            },
             Err(StoreError::NotFound { .. }) => Vec::new(),
             Err(error) => return Err(error.into()),
         };

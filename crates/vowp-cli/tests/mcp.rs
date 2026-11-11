@@ -15,9 +15,11 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use vowp_cli::BufferIo;
 use vowp_protocol::{
-    Job, JobId, JobKind, Lease, NewJob, Node, NodeName, Project, Role, SessionId, Surface, SurfaceId, SurfaceKind,
+    Actor, Capsule, CapsuleState, CapsuleTrigger, EventBody, EventSource, Executor, ExecutorRef, HarnessKind, Job,
+    JobId, JobKind, Lease, NewJob, Node, NodeName, Note, Project, Role, SessionId, Surface, SurfaceId, SurfaceKind,
     Timestamp, VowpConfig,
 };
+use vowp_store::session_log::{NewEvent, SessionLog};
 use vowp_store::{LedgerFilter, NodePaths, Store};
 
 /// One temporary node home and project.
@@ -252,6 +254,60 @@ fn token_file(env: &TestEnv, token: &str) -> PathBuf {
     let path = env.home_path().join("lease.token");
     std::fs::write(&path, format!("{token}\n")).expect("token file");
     path
+}
+
+/// Appends `count` note events to the session log and returns the last sequence number.
+fn append_note_events(env: &TestEnv, session: &str, count: usize) -> u64 {
+    let id = SessionId::parse(session).expect("session id");
+    let paths = NodePaths::new(env.home_path());
+    let log = SessionLog::open(&paths, &id, std::sync::Arc::new(vowp_protocol::SystemClock)).expect("open log");
+    for index in 0..count {
+        log.append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(NodeName::parse("local").expect("node")),
+                native_session_id: None,
+            },
+            body: EventBody::Note(Note {
+                text: format!("mcp resume event {index}"),
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append note event");
+    }
+    let last = log.last_seq();
+    log.sync().expect("sync log");
+    last
+}
+
+/// Inserts a manual capsule row covering the session events through `at_seq`.
+fn insert_resume_capsule(env: &TestEnv, session: &str, at_seq: u64) {
+    let capsule = Capsule {
+        version: vowp_protocol::CAPSULE_VERSION,
+        capsule_id: vowp_protocol::CapsuleId::new(),
+        session_id: SessionId::parse(session).expect("session id"),
+        created_at: Timestamp::now(),
+        at_seq,
+        trigger: CapsuleTrigger::Manual,
+        from: ExecutorRef {
+            executor: Executor::parse("opencode:deepseek/deepseek-flash").expect("executor"),
+            node: Some(NodeName::parse("local").expect("node")),
+        },
+        intent: "resume test".to_owned(),
+        constraints: Vec::new(),
+        decisions: Vec::new(),
+        state: CapsuleState::default(),
+        files: Vec::new(),
+        gotchas: Vec::new(),
+        open_questions: Vec::new(),
+        telemetry: Default::default(),
+    };
+    env.store()
+        .insert_capsule(&capsule, "resume-test-capsule.json")
+        .expect("insert capsule");
 }
 
 /// Returns the built `vowp` binary, including when this file runs as a lib unit test.
@@ -699,6 +755,72 @@ fn mcp_session_resume_returns_context_and_keeps_token_private() {
     );
     let text = result["result"]["content"][0]["text"].as_str().unwrap_or_default();
     assert!(!text.contains(&right), "resume must not return the lease token: {text}");
+}
+
+#[test]
+fn mcp_session_resume_returns_the_last_events() {
+    let env = TestEnv::new();
+    let session = create_session(&env);
+    let right = lease_token("right");
+    take_lease(&env, &session, &right, "laptop");
+    let token = token_file(&env, &right);
+    let last = append_note_events(&env, &session, 12);
+    assert!(last > 5, "the fixture needs more events than the limit: {last}");
+
+    let input = format!("{}\n", tool_call(1, "session_resume", json!({"limit": 5})));
+    let (code, stdout, stderr) = run_mcp(&env, &session, "surf-test", &token, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let context = tool_text(result);
+    let seqs = context["tail"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resume tail must be an array: {context}"))
+        .iter()
+        .map(|event| event["seq"].as_u64().unwrap_or_else(|| panic!("event without seq: {event}")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seqs,
+        (last - 4..=last).collect::<Vec<_>>(),
+        "resume must return the newest events, not the oldest: {context}"
+    );
+}
+
+#[test]
+fn mcp_session_resume_returns_the_last_events_after_a_capsule() {
+    let env = TestEnv::new();
+    let session = create_session(&env);
+    let right = lease_token("right");
+    take_lease(&env, &session, &right, "laptop");
+    let token = token_file(&env, &right);
+    let at_seq = append_note_events(&env, &session, 3);
+    insert_resume_capsule(&env, &session, at_seq);
+    let last = append_note_events(&env, &session, 9);
+    assert!(last > at_seq + 5, "the fixture needs more tail events than the limit");
+
+    let input = format!("{}\n", tool_call(1, "session_resume", json!({"limit": 4})));
+    let (code, stdout, stderr) = run_mcp(&env, &session, "surf-test", &token, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let context = tool_text(result);
+    let seqs = context["tail"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resume tail must be an array: {context}"))
+        .iter()
+        .map(|event| event["seq"].as_u64().unwrap_or_else(|| panic!("event without seq: {event}")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seqs,
+        (last - 3..=last).collect::<Vec<_>>(),
+        "resume must return the newest events after the capsule: {context}"
+    );
+    assert!(
+        seqs.iter().all(|seq| *seq > at_seq),
+        "resume must not repeat events the capsule already covers: {context}"
+    );
 }
 
 #[test]
