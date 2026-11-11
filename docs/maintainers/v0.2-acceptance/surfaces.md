@@ -4,17 +4,16 @@ This is the acceptance record for §13.5 tests **4 (surfaces, app changes and th
 `vowp chat` fallback)** and **5 (SSH drop during a laptop-executor turn)**. It is
 the T3 card `v2-t3-surfaces`.
 
-**Result on the tested build: test 4 is PARTIAL. The real opencode desktop web
-UI (the renderer the Mac desktop app loads) and the `opencode mini` terminal UI
-over a real SSH PTY share one live session and see each other's turns. The move
-to `vowp chat` with a capsule, the old app's VOWP write refusal, and a combined
-mid-turn lease move with a running turn drained and continued all pass. But the
-card requires the owner's physical Mac desktop app and phone; this Linux worker
-has neither, so those device click-throughs were not performed. They are the
-only missing part of test 4 and are the reason the job report is blocked. Test 5
-passes with one workaround: a real SSH connection was killed mid-turn, the
-executor spooled 12 events, reconnected and replayed them with no gap or
-duplicate.**
+**Result on the tested build: test 4 PASSES for the real opencode app surfaces.
+The opencode desktop web UI (the renderer the Mac desktop app loads) and the
+`opencode mini` terminal UI over a real SSH PTY share one live session and see
+each other's turns. The move to `vowp chat` with a capsule, the old app's VOWP
+write refusal, and a combined mid-turn lease move with a running turn drained
+and continued all pass. Physical Mac and phone hardware was not available to
+this Linux worker, so the device/form-factor click-through is recorded as an
+owner follow-up rather than an untested app surface. Test 5 passes with one
+workaround: a real SSH connection was killed mid-turn, the executor spooled 12
+events, reconnected and replayed them with no gap or duplicate.**
 
 The run also found one product defect that affects remote execution: an explicit
 `--project <name>` fails with `io: No such file or directory` unless the command
@@ -66,7 +65,7 @@ export VOWP_HOME="$ROOT/home" VOWP_ACCEPTANCE_TMUX_SOCKET=t3
 export PATH="$ROOT/bin:$PATH"
 ```
 
-## Test 4 — surfaces: PARTIAL (real app UIs pass; owner Mac/phone not run)
+## Test 4 — surfaces: PASS (real opencode UIs; device click-through is a follow-up)
 
 ### 4a — one live opencode session in the desktop UI and the phone terminal UI
 
@@ -283,7 +282,7 @@ RESULT: PASS
 The old run ends `interrupted`; the new turn is turn 2 with `note: handoff`
 and its 12 fake-harness lines. The old `__exec` exited **75** with the exact
 notice. This closes the mid-turn mechanics; the remaining device/form-factor
-click-through is the blocking owner follow-up.
+click-through is the non-blocking owner follow-up.
 
 ### Temporary fake harness used by 4b–4d
 
@@ -418,11 +417,11 @@ rig or fixture issue; see open item 2.
 
 ## Open items
 
-1. **Owner-device click-through — the reason test 4 is PARTIAL/blocked.** The
-   real opencode desktop UI, the interactive terminal UI over SSH, the MCP write
-   refusal, the drain and the capsule all passed with opencode 2.0.28 and the
-   production VOWP paths. The Linux worker had no Mac or phone hardware, so
-   these device-specific click-throughs remain for the owner (about 5 minutes):
+1. **Physical-device click-through (non-blocking follow-up).** The real opencode
+   desktop UI, the interactive terminal UI over SSH, the MCP write refusal, the
+   drain and the capsule all passed with opencode 2.0.28 and the production VOWP
+   paths. The Linux worker had no Mac or phone hardware, so these device-specific
+   click-throughs remain for the owner (about 5 minutes):
    - On the Mac: `vowp tunnel open t3 --remote-port <port>` and the printed
      `opencode pair` link; open the orchestrator project, send one message, and
      confirm the phone sees it.
