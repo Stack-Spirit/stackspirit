@@ -781,6 +781,7 @@ fn bundle_import_redacts_inline_text_and_json_blob_secrets() {
     })
     .to_string();
     let text_blob = format!("plain text before {secret} after");
+    let stable_blob = "unchanged text without any secret";
     let binary = vec![0_u8, 0xff, 0x80, 0x01];
     let json_ref = BlobRef {
         sha256: sha256_hex(json_blob.as_bytes()),
@@ -792,6 +793,7 @@ fn bundle_import_redacts_inline_text_and_json_blob_secrets() {
         bytes: text_blob.len() as u64,
         preview: text_blob.chars().take(vowp_protocol::BLOB_PREVIEW_CHARS).collect(),
     };
+    let stable_sha256 = sha256_hex(stable_blob.as_bytes());
     let binary_sha256 = sha256_hex(&binary);
 
     let mut exported = bundle::export(&deps, &session, 20).expect("export");
@@ -802,6 +804,9 @@ fn bundle_import_redacts_inline_text_and_json_blob_secrets() {
     exported
         .blobs_inline
         .insert(text_ref.sha256.clone(), base64_encode(text_blob.as_bytes()));
+    exported
+        .blobs_inline
+        .insert(stable_sha256.clone(), base64_encode(stable_blob.as_bytes()));
     exported
         .blobs_inline
         .insert(binary_sha256.clone(), base64_encode(&binary));
@@ -821,7 +826,14 @@ fn bundle_import_redacts_inline_text_and_json_blob_secrets() {
         exported.session.last_seq + 2,
         EventBody::UserMessage(vowp_protocol::UserMessage {
             text: "see the attached notes".to_owned(),
-            attachments: vec![text_ref.clone()],
+            attachments: vec![
+                text_ref.clone(),
+                BlobRef {
+                    sha256: stable_sha256.clone(),
+                    bytes: stable_blob.len() as u64,
+                    preview: stable_blob.to_owned(),
+                },
+            ],
             note: None,
         }),
     ));
@@ -860,6 +872,10 @@ fn bundle_import_redacts_inline_text_and_json_blob_secrets() {
         stored.blobs_inline.contains_key(&binary_sha256),
         "the binary blob keeps its digest"
     );
+    assert!(
+        stored.blobs_inline.contains_key(&stable_sha256),
+        "a text blob without a secret keeps its digest"
+    );
 
     let blobs = BlobStore::new(deps.paths.blobs_dir(&child));
     let mut saw_json = false;
@@ -889,6 +905,10 @@ fn bundle_import_redacts_inline_text_and_json_blob_secrets() {
     assert!(saw_json, "the JSON blob is redacted through its string values");
     assert!(saw_text, "the plain-text blob is redacted as text");
     assert_eq!(blobs.get(&binary_sha256).expect("binary blob"), binary);
+    assert_eq!(
+        blobs.get(&stable_sha256).expect("stable blob"),
+        stable_blob.as_bytes().to_vec()
+    );
     assert!(
         !blobs.exists(&json_ref.sha256) && !blobs.exists(&text_ref.sha256),
         "the raw blobs never enter the child store"
