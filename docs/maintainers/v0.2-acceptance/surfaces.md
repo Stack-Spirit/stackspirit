@@ -4,17 +4,17 @@ This is the acceptance record for §13.5 tests **4 (surfaces, app changes and th
 `vowp chat` fallback)** and **5 (SSH drop during a laptop-executor turn)**. It is
 the T3 card `v2-t3-surfaces`.
 
-**Result on the tested build: test 4 PASSES for the real opencode app surfaces.
-The opencode desktop web UI (the UI the Mac desktop app loads) and the
-`opencode mini` terminal UI over a real SSH PTY shared one live session: each
-sent a message and saw the other's turn and reply. The move to `vowp chat` with
-a capsule, the old app's VOWP write refusal, and a combined mid-turn lease move
-with a running turn drained and continued all pass. Physical Mac and phone
-hardware was not available to this Linux worker, so the device/form-factor
-click-through remains a non-blocking owner follow-up, not an untested app
-surface. Test 5 passes with one workaround: a real SSH connection was killed
-mid-turn, the executor spooled 12 events, reconnected and replayed them with no
-gap or duplicate.**
+**Result on the tested build: test 4 is PARTIAL. The real opencode desktop web
+UI (the renderer the Mac desktop app loads) and the `opencode mini` terminal UI
+over a real SSH PTY share one live session and see each other's turns. The move
+to `vowp chat` with a capsule, the old app's VOWP write refusal, and a combined
+mid-turn lease move with a running turn drained and continued all pass. But the
+card requires the owner's physical Mac desktop app and phone; this Linux worker
+has neither, so those device click-throughs were not performed. They are the
+only missing part of test 4 and are the reason the job report is blocked. Test 5
+passes with one workaround: a real SSH connection was killed mid-turn, the
+executor spooled 12 events, reconnected and replayed them with no gap or
+duplicate.**
 
 The run also found one product defect that affects remote execution: an explicit
 `--project <name>` fails with `io: No such file or directory` unless the command
@@ -44,11 +44,12 @@ not affected.
   `~/.vowp` was used.
 - Test 5 ran in the T0 rig: home container `vowp-acceptance-t3-home` (image
   `vowp-acceptance/vps:sudo`, `sha256:3c19867d4d633df0ca5f0dda7fa06300e69816a3857c1488be05184c915011ab`,
-  Ubuntu 24.04) and the disposable phone client. The home was a temporary
-  `/home/vowp/acceptance/t3/home`; `TMUX_TMPDIR` was
-  `/home/vowp/.acceptance/tmux` and the socket was `vowp-acceptance-t3`. The host
-  home, host `~/.vowp`, host tmux server, network and real harnesses were never
-  used.
+  Ubuntu 24.04). The home was a temporary `/home/vowp/acceptance/t3/home`;
+  `TMUX_TMPDIR` was `/home/vowp/.acceptance/tmux` and the socket was
+  `vowp-acceptance-t3`. The laptop executor for test 5 was the build host, not
+  the rig's disposable phone client (the phone client was used only for the
+  earlier surface-shape checks). The host home, host `~/.vowp`, host tmux
+  server, network and real harnesses were never used.
 - The rig was removed after the evidence was collected with
   `bash scripts/acceptance/rig.sh down --name t3` (exit 0; containers, network
   and generated keys removed).
@@ -64,7 +65,7 @@ export VOWP_HOME="$ROOT/home" VOWP_ACCEPTANCE_TMUX_SOCKET=t3
 export PATH="$ROOT/bin:$PATH"
 ```
 
-## Test 4 — surfaces: PASS (real opencode UIs; physical devices are a follow-up)
+## Test 4 — surfaces: PARTIAL (real app UIs pass; owner Mac/phone not run)
 
 ### 4a — one live opencode session in the desktop UI and the phone terminal UI
 
@@ -110,8 +111,10 @@ orchestrator t3 (opencode, running) session 01M74EYV7C769RRX56WE4XAH4A
   chat:    vowp chat 01M74EYV7C769RRX56WE4XAH4A
 ```
 
-The server was loopback-only, and `opencode pair` printed the one-time link and
-the matching `ssh -L` command. A private sshd was started on `127.0.0.1`; the
+The quoted join block is from the initial host run on port 45489; the UI run
+resumed the orchestrator on port 39169, and the commands below use `$PORT` for
+the actual port. The server was loopback-only, and `opencode pair` printed the
+one-time link and the matching `ssh -L` command. A private sshd was started on `127.0.0.1`; the
 pair link was opened through the tunnel in Chromium (the desktop UI), and the
 same tunnel carried an interactive `opencode mini` terminal UI over SSH:
 
@@ -220,15 +223,17 @@ Taken over by acceptance-local at 04:52. This surface is now read-only (follow m
 All sequence numbers were contiguous (`1..29`), so the mid-turn move did not
 leave a gap or duplicate in the session log.
 
-### 4d — combined app/model move while a turn is running
+### 4d — combined app/lease move while a turn is running
 
 This is the card's combined clause: an old surface kind `opencode` holds the
 lease and has a real VOWP run in flight; the old app's VOWP write tool is used;
 a new `vowp chat` surface takes over mid-turn; the old run drains and is
-interrupted; a capsule is written; the new app continues from it. The old
-executor is the deterministic fake CLI harness (the real opencode desktop app
-itself is the owner check), but the lease, MCP write gate, drain, switch and
-capsule are the production VOWP paths.
+interrupted; a capsule is written; the new app continues from it. The app
+changes even though the executor string stays `cli:acceptance-hello`; no model
+switch is claimed for this sub-check. The old executor is the deterministic
+fake CLI harness (the real opencode desktop app itself is the owner check), but
+the lease, MCP write gate, drain, switch and capsule are the production VOWP
+paths.
 
 The old app surface acquired the lease and began a slow turn through the same
 `turn-begin`/`__exec` transport every surface uses:
@@ -277,7 +282,38 @@ RESULT: PASS
 The old run ends `interrupted`; the new turn is turn 2 with `note: handoff`
 and its 12 fake-harness lines. The old `__exec` exited **75** with the exact
 notice. This closes the mid-turn mechanics; the remaining device/form-factor
-click-through is the non-blocking owner follow-up.
+click-through is the blocking owner follow-up.
+
+### Temporary fake harness used by 4b–4d
+
+This is the throwaway fixture harness, also kept as
+`test4-fake-worker.sh` in the evidence directory. It streams 12 lines for a
+prompt containing `T3 SLOW TURN` and answers the capsule writer with a valid
+`CapsuleDraft`; it never calls a model or the network.
+
+```sh
+#!/usr/bin/env bash
+set -Eeuo pipefail
+prompt=$(cat)
+case "$prompt" in
+  "You are the handoff writer for a software-engineering session."*)
+    cat <<'JSON'
+{"intent":"Continue the T3 surfaces acceptance conversation.","constraints":["Do not invent facts"],"decisions":[{"what":"move to the chat fallback","why":"the owner switched apps"}],"state":{"done":["the app surfaces shared one session"],"in_progress":["continue in the new surface"],"blocked":[],"next_steps":["answer the next message"]},"files":[],"gotchas":["the old app is read-only after takeover"],"open_questions":[]}
+JSON
+    exit 0
+    ;;
+esac
+case "$prompt" in
+  *"T3 SLOW TURN"*)
+    for i in $(seq 1 12); do
+      printf 't3 slow line %02d\n' "$i"
+      sleep 0.35
+    done
+    exit 0
+    ;;
+esac
+printf 't3 fake answer: %s\n' "$(printf '%s' "$prompt" | head -n 1)"
+```
 
 ## Test 5 — SSH drop during a laptop-executor turn: PASS
 
@@ -345,6 +381,10 @@ SSH_CONNECTIONS=2
  "session_id":"01M74F9VF199RWA8TWRT78QP2C"}
 ```
 
+`resumed:false` means this was a fresh `__exec` process, not that the killed
+connection was ignored: the same process reconnected and replayed its spool
+before finishing. A separate client-crash resume would print `resumed:true`.
+
 The home log and the executor spool agree exactly:
 
 ```text
@@ -377,19 +417,20 @@ rig or fixture issue; see open item 2.
 
 ## Open items
 
-1. **Physical-device follow-up (non-blocking).** The real opencode desktop UI,
-   the interactive terminal UI over SSH, the MCP write refusal, the drain and
-   the capsule all passed with opencode 2.0.28 and the production VOWP paths.
-   The Linux worker had no Mac or phone hardware, so these device-specific
-   click-throughs remain for the owner (about 5 minutes):
+1. **Owner-device click-through — the reason test 4 is PARTIAL/blocked.** The
+   real opencode desktop UI, the interactive terminal UI over SSH, the MCP write
+   refusal, the drain and the capsule all passed with opencode 2.0.28 and the
+   production VOWP paths. The Linux worker had no Mac or phone hardware, so
+   these device-specific click-throughs remain for the owner (about 5 minutes):
    - On the Mac: `vowp tunnel open t3 --remote-port <port>` and the printed
      `opencode pair` link; open the orchestrator project, send one message, and
      confirm the phone sees it.
    - On the phone: `ssh -t <home> 'cd <orchestrator> && opencode --server
      http://127.0.0.1:<port> --session <native>'` (the terminal UI); send one
      message and confirm the Mac sees it.
-   - Optional: Claude Code Remote Control from the Claude desktop/mobile apps.
-     This needs a claude.ai login on the home; the run had none, as S3 recorded.
+   - Claude Code Remote Control is the separate 5-minute owner test recorded by
+     S3/§16.3. It needs a claude.ai login on the home; the run had none, so it
+     is not part of this card's pass.
 
 2. **Fix job: explicit `--project <name>` fails outside the checkout.**
    On the test home with project `t3ssh` registered at
