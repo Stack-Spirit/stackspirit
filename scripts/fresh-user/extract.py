@@ -4,18 +4,19 @@
 The plan is a bash script with one timed step per documented command. Commands
 are read from fenced `sh` blocks in:
 
-  * README.md, section "Getting started"
   * docs/guides/install.md, section "Build and install by hand"
   * docs/guides/quickstart.md, sections 1 .. 7
   * examples/hello-vowp/README.md, the main "Run it" command
 
-The container has no systemd user manager, SSH client or harness login, so the
-plan follows the manual build and the local quickstart; the setup path and the
-install prerequisite checks run elsewhere. Nothing is copied by hand: if a
-documented command changes, the test runs the new command. If a section or
-block disappears, extraction fails loudly so the two cannot drift apart
-silently. Commands explicitly marked ``# (planned)`` in the quickstart guide
-are skipped and logged (they need a planner model turn).
+The v0.2 README and the setup contract are prose-only; they have no fenced
+`sh` blocks, so they are not selected. The container has no systemd user
+manager, SSH client or harness login, so the plan follows the manual build and
+the local quickstart; the setup path and the install prerequisite checks run
+elsewhere. Nothing is copied by hand: if a documented command changes, the
+test runs the new command. If a section or block disappears, extraction fails
+loudly so the two cannot drift apart silently. Commands explicitly marked
+``# (planned)`` in the quickstart guide are skipped and logged (they need a
+planner model turn).
 
 Usage:
     extract.py --root REPO --out PLAN.sh [--manifest PLAN.json]
@@ -32,9 +33,7 @@ from pathlib import Path
 
 # Working-directory symbols. The generated script defines the real paths.
 REPO = "repo"
-INSTALL = "install"
 QUICKSTART = "quickstart"
-README_PROJECT = "readme"
 
 # (file, heading without markup, working directory, honour `# (planned)`,
 #  optional substring that every selected block must contain)
@@ -49,12 +48,6 @@ SELECTIONS: list[tuple[str, str, str, bool, str | None]] = [
     ("docs/guides/quickstart.md", "4. See the fleet", QUICKSTART, True, "vowp status"),
     ("docs/guides/quickstart.md", "5. Add a first job", QUICKSTART, True, "vowp job add"),
     ("docs/guides/quickstart.md", "7. Stop cleanly", QUICKSTART, True, None),
-    # The README is still the v0.1 quickstart, which K1 owns. Run its build,
-    # project and supervisor steps last so its `vowp up` does not overlap the
-    # quickstart's supervisor.
-    ("README.md", "Getting started", REPO, False, "cargo "),
-    ("README.md", "Getting started", README_PROJECT, False, "vowp init"),
-    ("README.md", "Getting started", README_PROJECT, False, "git add"),
     ("examples/hello-vowp/README.md", "Run it", REPO, False, None),
 ]
 
@@ -221,8 +214,6 @@ def substitute(rel: str, text: str) -> tuple[str, str]:
             "<your-repo>": "$QUICKSTART_PROJECT",
             "<your-project>": "quickstart-project",
         }
-    elif rel == "README.md":
-        replacements = {"<your-project>": "readme-project"}
     else:
         replacements = {}
 
@@ -328,9 +319,7 @@ def emit(plan: Plan, out: Path) -> None:
     """Write the bash plan script."""
     cwd_var = {
         REPO: "FRESH_REPO",
-        INSTALL: "INSTALL_PROJECT",
         QUICKSTART: "QUICKSTART_PROJECT",
-        README_PROJECT: "README_PROJECT",
     }
     lines: list[str] = [
         "#!/usr/bin/env bash",
@@ -340,8 +329,6 @@ def emit(plan: Plan, out: Path) -> None:
         "",
         'FRESH_REPO=${FRESH_REPO:-/work/vowp}',
         'WORK=${FRESH_WORK:-/work/fresh}',
-        'README_PROJECT="$WORK/readme/hello-vowp"',
-        'INSTALL_PROJECT="$WORK/install/my-project"',
         'QUICKSTART_PROJECT="$WORK/quickstart/my-project"',
         'LOG_DIR="$WORK/logs"',
         'TIMINGS="$WORK/timings.tsv"',
@@ -354,8 +341,8 @@ def emit(plan: Plan, out: Path) -> None:
         'mkdir -p "$WORK" "$LOG_DIR" "$TMUX_TMPDIR"',
         ': > "$TIMINGS"',
         "",
-        '# A fresh user has a normal git identity; the demo repositories it creates',
-        '# need one for their first (empty) commit.',
+        '# A fresh user has a normal git identity; the demo repository it creates',
+        '# needs one for its first (empty) commit.',
         'git config --global user.name "Fresh User"',
         'git config --global user.email "fresh@example.invalid"',
         'git config --global init.defaultBranch main',
@@ -372,9 +359,7 @@ def emit(plan: Plan, out: Path) -> None:
         '    git -C "$project" push -q -u origin main',
         '}',
         "",
-        'printf "%s\\n" "[fresh-user] preparing demo repositories under $WORK"',
-        'make_project "$README_PROJECT" "$WORK/readme/origin.git"',
-        'make_project "$INSTALL_PROJECT" "$WORK/install/origin.git"',
+        'printf "%s\\n" "[fresh-user] preparing the demo repository under $WORK"',
         'make_project "$QUICKSTART_PROJECT" "$WORK/quickstart/origin.git"',
         "",
         'STEP_INDEX=0',
@@ -423,8 +408,8 @@ def emit(plan: Plan, out: Path) -> None:
         'cleanup() {',
         '    status=$?',
         '    trap - EXIT INT TERM',
-        '    if [ -f "$README_PROJECT/vowp.toml" ] && [ -d "$HOME/.vowp" ]; then',
-        '        (cd "$README_PROJECT" && vowp down --force) >/dev/null 2>&1 || true',
+        '    if [ -f "$QUICKSTART_PROJECT/vowp.toml" ] && [ -d "$HOME/.vowp" ]; then',
+        '        (cd "$QUICKSTART_PROJECT" && vowp down --force) >/dev/null 2>&1 || true',
         '    fi',
         '    exit "$status"',
         '}',
