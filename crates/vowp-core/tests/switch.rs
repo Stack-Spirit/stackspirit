@@ -18,7 +18,7 @@ use support::fake_git::FakeGit;
 use support::signal_child::shell_command;
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::service::SessionService;
-use vowp_core::session::switch::{run_switch, run_switch_with_input};
+use vowp_core::session::switch::{DrainSleeper, run_switch, run_switch_with_input, run_switch_with_sleeper};
 use vowp_core::{AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps};
 use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Clock,
@@ -31,6 +31,9 @@ use vowp_store::NodePaths;
 use vowp_store::session_files::list_capsule_files;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_tmux::fake::FakeWindows;
+
+/// Upper bound for asynchronous test waits: child markers, run rows and drain hooks.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn ts() -> Timestamp {
     Timestamp::parse("2026-11-08T18:00:00Z").expect("test timestamp")
@@ -149,10 +152,10 @@ fn read_events(deps: &Deps, session: &SessionId) -> Vec<EventEnvelope> {
 /// Poll a file written asynchronously by a fake child until every `marker` appears.
 ///
 /// Signal handlers run asynchronously, so reading the file once right after the child
-/// is signalled can race under load. Re-read every 20 ms for up to 10 s, then panic
-/// with the file's actual contents.
+/// is signalled can race under load. Re-read every 20 ms up to [`WAIT_TIMEOUT`], then
+/// panic with the file's actual contents.
 fn wait_for_markers(path: &Path, markers: &[&str]) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WAIT_TIMEOUT;
     loop {
         let contents = std::fs::read_to_string(path).unwrap_or_default();
         if markers.iter().all(|marker| contents.contains(marker)) {
@@ -160,7 +163,7 @@ fn wait_for_markers(path: &Path, markers: &[&str]) -> String {
         }
         if Instant::now() >= deadline {
             panic!(
-                "timed out after 10s waiting for {markers:?} in {}; contents: {contents:?}",
+                "timed out after {WAIT_TIMEOUT:?} waiting for {markers:?} in {}; contents: {contents:?}",
                 path.display()
             );
         }
@@ -1103,8 +1106,8 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
     });
 
     // The worker thread inserts its run row asynchronously. Under parallel test load
-    // that can take longer than a couple of seconds, so poll generously but boundedly.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // that can take longer than a couple of seconds, so poll up to the shared bound.
+    let deadline = Instant::now() + WAIT_TIMEOUT;
     let mut active_run = None;
     while Instant::now() < deadline {
         let open = store.open_runs().expect("open runs");
@@ -1117,7 +1120,7 @@ fn switch_drain_timeout_interrupts_after_5s_fakeclock() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let active_run = active_run.expect("the service run is active within 10s");
+    let active_run = active_run.expect("the service run is active within the wait bound");
 
     // The fake child writes `ready` only after both traps are installed. Wait for it
     // before the switch can reach its signal phase; otherwise a fast fake clock can
@@ -1335,6 +1338,45 @@ fn switch_seed_rejected_retries_capsule_only_then_aborts() {
     assert_eq!(last_attach, opencode());
 }
 
+/// A sleeper that hands the first drain poll to a writer and waits for its append.
+///
+/// The drained-limit test must append `TurnEnded{Limit}` after the drain has captured
+/// its start sequence but before the next poll. A fixed sleep raced with the switch
+/// startup under load; the first drain sleep is the deterministic point to append.
+struct FirstDrainPoll {
+    ready: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    appended: Mutex<Receiver<()>>,
+}
+
+impl FirstDrainPoll {
+    fn new(ready: std::sync::mpsc::Sender<()>, appended: Receiver<()>) -> Self {
+        Self {
+            ready: Mutex::new(Some(ready)),
+            appended: Mutex::new(appended),
+        }
+    }
+}
+
+impl DrainSleeper for FirstDrainPoll {
+    fn sleep(&self, duration: Duration) {
+        let sender = self
+            .ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(sender) = sender {
+            sender.send(()).expect("writer waits for the drain poll");
+            self.appended
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv_timeout(WAIT_TIMEOUT)
+                .expect("writer appends the limit event");
+        } else {
+            std::thread::sleep(duration);
+        }
+    }
+}
+
 #[test]
 fn switch_drained_limit_then_capsule_failure_restores_blocked() {
     let tmp = tempdir().expect("tempdir");
@@ -1360,11 +1402,15 @@ fn switch_drained_limit_then_capsule_failure_restores_blocked() {
         EventBody::TurnStarted(vowp_protocol::TurnStarted { turn: 1 }),
     );
 
+    let (ready_tx, ready_rx) = channel();
+    let (appended_tx, appended_rx) = channel();
     let writer = {
         let deps = deps.clone();
         let session = session.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(60));
+            ready_rx
+                .recv_timeout(WAIT_TIMEOUT)
+                .expect("drain reaches its first poll");
             append_event(
                 &deps,
                 &session,
@@ -1374,13 +1420,16 @@ fn switch_drained_limit_then_capsule_failure_restores_blocked() {
                     duration_ms: None,
                 }),
             );
+            appended_tx.send(()).expect("sleeper waits for the append");
         })
     };
 
-    let error = run_switch(
+    let sleeper = FirstDrainPoll::new(ready_tx, appended_rx);
+    let error = run_switch_with_sleeper(
         &deps,
         &request(&session, claude(), SwitchReason::Failover),
         &CancelToken::default(),
+        &sleeper,
     )
     .expect_err("capsule failure aborts after the drained limit");
     writer.join().expect("writer");
