@@ -30,6 +30,22 @@ pub const SUPPORTED_OS: &str = "Linux";
 /// The CPU names the release archives cover.
 pub const SUPPORTED_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
 
+/// Returns the `install.sh` command the plan prints and the executor runs.
+///
+/// Setup installs the pinned v0.2 release with no service, cron or watchdog; the service
+/// phase owns the user unit. v0.2 is the first release whose `install.sh` accepts
+/// `--download`/`--version`, so the v0.1 scripts are not installable by setup anyway and
+/// there is no older flag set to preserve here. The standalone installer keeps its v0.1
+/// defaults for callers that run it directly.
+pub fn install_script(version: &str) -> String {
+    let url = format!("https://raw.githubusercontent.com/{RELEASE_REPOSITORY}/v{version}/scripts/install.sh");
+    format!(
+        "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron --no-watchdog",
+        shell_quote(&url),
+        shell_quote(version)
+    )
+}
+
 /// The answers the setup agent collected in its one question message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupAnswers {
@@ -373,13 +389,25 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
             prompt: format!("Install {} on the home, then re-run setup.", missing_tools.join(", ")),
         });
     }
+    if let Some(free) = probe.disk_free_kb
+        && free < 5 * 1024 * 1024
+    {
+        handoffs.push(SetupHandoff {
+            phase: "preflight".to_owned(),
+            kind: "owner-answer".to_owned(),
+            prompt: "Free at least 5 GiB on the home (or grow the disk), then re-run setup.".to_owned(),
+        });
+    }
     for harness in &answers.harnesses {
         let status = probe.harnesses.get(harness).copied().unwrap_or_default();
         if !status.installed {
             handoffs.push(SetupHandoff {
-                phase: "user".to_owned(),
+                phase: "preflight".to_owned(),
                 kind: "login".to_owned(),
-                prompt: format!("Install {harness} on the home with its own flow, then re-run setup."),
+                prompt: format!(
+                    "Install {harness} ({}) on the home with its own flow, then re-run setup.",
+                    commands::harness_binary(harness)
+                ),
             });
         } else if !status.login {
             handoffs.push(SetupHandoff {
@@ -424,24 +452,12 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         idempotent: true,
     });
 
-    let install_url = format!(
-        "https://raw.githubusercontent.com/{RELEASE_REPOSITORY}/v{}/scripts/install.sh",
-        answers.version
-    );
     phases.push(SetupPhase {
         id: "install".to_owned(),
         title: format!("Install VOWP {}", answers.version),
         commands: vec![
             transit(vec![vowp_bin.clone(), "--version".to_owned()]),
-            transit(vec![
-                "sh".to_owned(),
-                "-c".to_owned(),
-                format!(
-                    "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron",
-                    shell_quote(&install_url),
-                    shell_quote(&answers.version)
-                ),
-            ]),
+            transit(vec!["sh".to_owned(), "-c".to_owned(), install_script(&answers.version)]),
         ],
         files: vec![format!("{effective_home}/.local/bin/vowp")],
         requires: {
@@ -487,6 +503,7 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         files: vec![
             vowp_home.clone(),
             format!("{vowp_home}/vowp.db"),
+            format!("{vowp_home}/config.toml"),
             format!("{vowp_home}/vowp.toml"),
             format!("{vowp_home}/projects/_node/project.db"),
         ],

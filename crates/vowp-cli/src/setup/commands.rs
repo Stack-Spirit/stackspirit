@@ -10,8 +10,8 @@ use std::process::{Command, Stdio};
 
 use serde::Serialize;
 use vowp_protocol::{
-    Node, NodeName, OnCreditsExhausted, OnQuota, Profile, Project, ProjectName, ProviderConfig, SecretName, Timestamp,
-    VowpConfig,
+    Node, NodeConfig, NodeFile, NodeName, OnCreditsExhausted, OnQuota, Profile, Project, ProjectName, ProviderConfig,
+    SecretName, Timestamp, VowpConfig,
 };
 use vowp_store::{NodePaths, Store};
 use vowp_tmux::quote::shell_quote;
@@ -23,7 +23,7 @@ use crate::{CliError, Ctx, IoStreams};
 
 use super::{
     CommandOutput, HarnessStatus, LocalSetupState, Probe, SetupAnswers, SetupCheck, SetupHandoff, SetupOutcome,
-    SetupRunner, SudoMode, as_user, build_plan, control_plan, print_outcome, print_plan,
+    SetupRunner, SudoMode, as_user, build_plan, control_plan, install_script, print_outcome, print_plan,
 };
 
 /// The read-only probe script; `setup plan` runs only this.
@@ -188,15 +188,27 @@ pub fn probe(runner: &mut dyn SetupRunner, harnesses: &[String]) -> Result<Probe
         let raw = field("vowp.user_home");
         (!raw.is_empty()).then_some(raw)
     };
-    let effective_home = if user == "vowp" || user == "root" || sudo == SudoMode::Passwordless {
-        vowp_user_home.clone().unwrap_or_else(|| "/home/vowp".to_owned())
-    } else {
-        home.clone()
+    let disk_free_kb = field("disk.free_kb").parse::<u64>().ok();
+    let mut probe = Probe {
+        os,
+        arch,
+        user,
+        home,
+        hostname: field("hostname"),
+        sudo,
+        vowp_version,
+        vowp_path,
+        vowp_user_home,
+        tools,
+        harnesses: BTreeMap::new(),
+        disk_free_kb,
     };
-    let mut harness_map = BTreeMap::new();
+    // The credential check must look in the home setup will use after the user phase,
+    // not necessarily the SSH login user's home.
+    let effective_home = probe.effective_home();
     for harness in harnesses {
         let binary = harness_binary(harness);
-        let installed = match tools.get(binary) {
+        let installed = match probe.tools.get(binary) {
             Some(found) => *found,
             None => runner
                 .run(
@@ -210,27 +222,15 @@ pub fn probe(runner: &mut dyn SetupRunner, harnesses: &[String]) -> Result<Probe
                 .success(),
         };
         let login = harness_login(runner, harness, &effective_home)?;
-        harness_map.insert(harness.clone(), HarnessStatus { installed, login });
+        probe
+            .harnesses
+            .insert(harness.clone(), HarnessStatus { installed, login });
     }
-    let disk_free_kb = field("disk.free_kb").parse::<u64>().ok();
-    Ok(Probe {
-        os,
-        arch,
-        user,
-        home,
-        hostname: field("hostname"),
-        sudo,
-        vowp_version,
-        vowp_path,
-        vowp_user_home,
-        tools,
-        harnesses: harness_map,
-        disk_free_kb,
-    })
+    Ok(probe)
 }
 
 /// Maps a documented harness name to the binary its adapter runs.
-fn harness_binary(harness: &str) -> &str {
+pub(crate) fn harness_binary(harness: &str) -> &str {
     match harness {
         "claude-code" => "claude",
         other => other,
@@ -369,7 +369,8 @@ pub fn run_control(
     let probe = probe(&mut runner, &[])?;
     // `setup home` may have created the home under the vowp user, not the SSH login
     // user. A recorded state or an existing control config is authoritative; the probe
-    // fallback is only for the first control run without a home record.
+    // fallback is only for the first control run without a home record, and it uses the
+    // effective home (the vowp user after passwordless sudo) rather than the login home.
     let remote_home = state
         .as_ref()
         .filter(|state| state.target == target && !state.remote_home.is_empty())
@@ -380,7 +381,7 @@ pub fn run_control(
                 .filter(|config| config.ssh_target == target && !config.remote_home.is_empty())
                 .map(|config| config.remote_home.clone())
         })
-        .unwrap_or_else(|| format!("{}/.vowp", probe.home.trim_end_matches('/')));
+        .unwrap_or_else(|| format!("{}/.vowp", probe.effective_home().trim_end_matches('/')));
     let plan = control_plan(&target, &name, &probe, &remote_home);
     if !args.apply {
         if ctx.json() {
@@ -622,35 +623,68 @@ struct HomeInitReport {
     node_project_created: bool,
 }
 
-/// Writes the node-level `vowp.toml` with this home's node name when it is absent.
+/// Writes the home's node defaults and the reserved `_node` project config when absent.
+///
+/// `~/.vowp/config.toml` is the node file every command merges; `~/.vowp/vowp.toml` is the
+/// config of the reserved `_node` project, which is how home-level commands such as
+/// `vowp secret upgrade` resolve a project. Both carry the owner's harness/provider answer;
+/// neither is overwritten once the owner has one.
 fn ensure_home_config(
     paths: &NodePaths,
     node: &NodeName,
     harnesses: &[String],
     providers: &[String],
 ) -> Result<(), CliError> {
-    let path = paths.root().join("vowp.toml");
-    if path.is_file() {
-        return Ok(());
-    }
     let mut config = home_config(harnesses, providers)?;
-    config.project.name = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
-    config.project.path = Some(paths.root().display().to_string());
-    config.project.push = false;
     config.node.name = node.clone();
     config.validate()?;
-    let text =
-        toml::to_string_pretty(&config).map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()))?;
     std::fs::create_dir_all(paths.root())?;
-    let temp = paths.root().join(".vowp.toml.setup.tmp");
+
+    let project_path = paths.root().join("vowp.toml");
+    if !project_path.is_file() {
+        let mut project = config.clone();
+        project.project.path = Some(paths.root().display().to_string());
+        let text = toml::to_string_pretty(&project)
+            .map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()))?;
+        write_absent(&project_path, ".vowp.toml.setup.tmp", &text)?;
+    }
+
+    let node_path = paths.root().join("config.toml");
+    if !node_path.is_file() {
+        let node_file = NodeFile {
+            node: NodeConfig {
+                name: node.clone(),
+                ..config.node
+            },
+            profiles: config.profiles,
+            providers: config.providers,
+            harnesses: config.harnesses,
+            capsule: config.capsule,
+        };
+        let text = toml::to_string_pretty(&node_file)
+            .map_err(|error| vowp_protocol::ProtocolError::Config(error.to_string()))?;
+        write_absent(&node_path, ".config.toml.setup.tmp", &text)?;
+    }
+    Ok(())
+}
+
+/// Writes `text` beside `path` and renames it into place; the caller checked absence.
+fn write_absent(path: &std::path::Path, temp_name: &str, text: &str) -> Result<(), CliError> {
+    let temp = path
+        .parent()
+        .ok_or_else(|| CliError::Invalid(format!("{} has no parent directory", path.display())))?
+        .join(temp_name);
     std::fs::write(&temp, text)?;
-    std::fs::rename(&temp, &path)?;
+    std::fs::rename(&temp, path)?;
     Ok(())
 }
 
 /// Builds the home config from the owner's harness/provider answers.
 fn home_config(harnesses: &[String], providers: &[String]) -> Result<VowpConfig, CliError> {
     let mut config = VowpConfig::with_defaults_for_tests();
+    config.project.name = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+    config.project.path = None;
+    config.project.push = false;
     if !harnesses.is_empty() {
         let mut ladder = Vec::new();
         for (index, harness) in harnesses.iter().enumerate() {
@@ -1018,16 +1052,7 @@ impl Executor {
             );
             return Ok(None);
         }
-        let url = format!(
-            "https://raw.githubusercontent.com/{}/v{}/scripts/install.sh",
-            super::RELEASE_REPOSITORY,
-            self.answers.version
-        );
-        let script = format!(
-            "curl -fsSL {} | sh -s -- --download --version {} --no-service --no-cron",
-            shell_quote(&url),
-            shell_quote(&self.answers.version)
-        );
+        let script = install_script(&self.answers.version);
         let output = self.remote(vec!["sh".to_owned(), "-c".to_owned(), script], None)?;
         if !output.success() {
             return Err(self.failed("installing vowp", &output));

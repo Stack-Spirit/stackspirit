@@ -478,8 +478,8 @@ fn setup_plan_lists_every_phase_command_and_file() {
     assert!(install_text.contains("--download"), "{install_text}");
     assert!(install_text.contains(VERSION), "{install_text}");
     assert!(
-        !install_text.contains("--no-watchdog"),
-        "old release scripts must stay usable"
+        install_text.contains("--no-service --no-cron --no-watchdog"),
+        "the plan must print the installer flags the executor uses: {install_text}"
     );
     let home = phase(&plan, "home");
     assert!(
@@ -490,6 +490,16 @@ fn setup_plan_lists_every_phase_command_and_file() {
             .any(|file| file.as_str().unwrap_or_default().ends_with(".vowp/vowp.db")),
         "{home}"
     );
+    for wanted in [".vowp/config.toml", ".vowp/vowp.toml"] {
+        assert!(
+            home["files"]
+                .as_array()
+                .expect("home files")
+                .iter()
+                .any(|file| file.as_str().unwrap_or_default().ends_with(wanted)),
+            "the plan must list the readable home config {wanted}: {home}"
+        );
+    }
     assert!(
         !home["files"].to_string().contains("vowp-control/setup.json"),
         "the local setup record is not a remote home file: {home}"
@@ -1051,6 +1061,63 @@ fn setup_control_uses_the_vowp_users_home_after_passwordless_setup() {
 }
 
 #[test]
+fn setup_control_uses_the_effective_home_without_a_state_file() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("passwordless");
+    machine.write_path_vowp();
+    let vowp_home = machine.remote.path().join("vowp-home");
+    machine.write_prefix_vowp(&vowp_home);
+    machine.write_vault_ready();
+
+    let output = machine
+        .command()
+        .env("FAKE_SUDO_MODE", "passwordless")
+        .env("FAKE_VOWP_HOME", &vowp_home)
+        .args([
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--apply",
+            "--yes",
+        ])
+        .output()
+        .expect("run setup home");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_file(machine.control.path().join("setup.json")).expect("remove setup state");
+
+    let control = machine
+        .command()
+        .env("FAKE_SUDO_MODE", "passwordless")
+        .env("FAKE_VOWP_HOME", &vowp_home)
+        .args(["--json", "setup", "control", "--target", "fake.example", "--apply"])
+        .output()
+        .expect("run setup control");
+    assert!(
+        control.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let config: Value = serde_json::from_str(
+        &std::fs::read_to_string(machine.control.path().join("control.json")).expect("control.json"),
+    )
+    .expect("control JSON");
+    assert_eq!(
+        config["remote_home"],
+        format!("{}/.vowp", vowp_home.display()),
+        "control must use the effective home, not the login home: {config}"
+    );
+}
+
+#[test]
 fn setup_home_maps_claude_code_and_requires_a_login() {
     let machine = Machine::new();
     machine.write_ssh();
@@ -1145,15 +1212,18 @@ fn setup_home_maps_claude_code_and_requires_a_login() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let config = std::fs::read_to_string(machine.remote.path().join(".vowp/vowp.toml")).expect("home config");
-    assert!(
-        config.contains("claude-code:claude-sonnet-5-5@medium"),
-        "the chosen harness must reach the home profiles: {config}"
-    );
-    assert!(
-        config.contains("[providers.anthropic]"),
-        "the chosen provider must reach the home config: {config}"
-    );
+    for file in ["config.toml", "vowp.toml"] {
+        let config = std::fs::read_to_string(machine.remote.path().join(".vowp").join(file))
+            .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        assert!(
+            config.contains("claude-code:claude-sonnet-5-5@medium"),
+            "the chosen harness must reach {file}: {config}"
+        );
+        assert!(
+            config.contains("[providers.anthropic]"),
+            "the chosen provider must reach {file}: {config}"
+        );
+    }
 }
 
 #[test]
@@ -1192,17 +1262,30 @@ fn setup_home_installs_the_per_user_binary_when_only_path_vowp_exists() {
     assert!(unit.contains("ExecStart=%h/.local/bin/vowp"), "{unit}");
     let log = machine.log();
     assert!(
-        !log.contains("--no-watchdog"),
-        "the executed install must match the plan: {log}"
+        log.contains("--no-watchdog"),
+        "the executed install must skip the watchdog: {log}"
     );
     assert!(
-        log.contains("--no-service --no-cron"),
+        log.contains("--no-service --no-cron --no-watchdog"),
         "the executed install must match the plan: {log}"
     );
     assert!(
         installed.is_file(),
         "the unit's ExecStart target must exist: {}",
         installed.display()
+    );
+
+    let plan = machine.run(&["--json", "setup", "plan", "--target", "fake.example"]);
+    assert!(
+        plan.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan = json(&plan);
+    let install = phase(&plan, "install")["commands"].to_string();
+    assert!(
+        install.contains("--no-service --no-cron --no-watchdog"),
+        "the plan and the executor must print the same installer flags: {install}"
     );
 }
 
@@ -1489,7 +1572,7 @@ fn install_sh_download_still_works() {
     let url = release_url(version);
 
     let install_home = tempfile::tempdir().expect("temp install home");
-    let prefix = install_home.path().join("bin");
+    let prefix = install_home.path().join(".local/bin");
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh");
     let output = Command::new("sh")
         .arg(&script)
@@ -1499,11 +1582,8 @@ fn install_sh_download_still_works() {
             version,
             "--base-url",
             &url,
-            "--prefix",
-            prefix.to_str().unwrap(),
             "--no-service",
             "--no-cron",
-            "--no-watchdog",
         ])
         .env("HOME", install_home.path())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -1526,8 +1606,12 @@ fn install_sh_download_still_works() {
         format!("vowp {version}")
     );
     assert!(
-        !prefix.join("vowp-watchdog.sh").exists(),
-        "--no-watchdog must not install the watchdog"
+        prefix.join("vowp-watchdog.sh").is_file(),
+        "without --no-watchdog the default-prefix install includes the watchdog"
+    );
+    assert!(
+        install_home.path().join(".config/systemd/user/vowp.service").is_file(),
+        "the default-prefix install includes the unit template"
     );
 }
 
@@ -1554,7 +1638,6 @@ fn install_sh_no_watchdog_skips_watchdog_and_cron_at_the_default_prefix() {
             "--base-url",
             &url,
             "--no-service",
-            "--no-cron",
             "--no-watchdog",
         ])
         .env("HOME", install_home.path())
