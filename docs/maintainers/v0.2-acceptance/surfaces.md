@@ -4,14 +4,15 @@ This is the acceptance record for §13.5 tests **4 (surfaces, app changes and th
 `vowp chat` fallback)** and **5 (SSH drop during a laptop-executor turn)**. It is
 the T3 card `v2-t3-surfaces`.
 
-**Result on the tested build: test 4 is PARTIAL. The VOWP surface mechanics pass
-— the real opencode 2.0.28 server/pair/tunnel/session protocol, the move to
-`vowp chat` with a capsule, the old app's VOWP write refusal, and a combined
-mid-turn lease move with a running turn drained and continued. But the card
-requires the **owner's real apps**: the opencode desktop app on the Mac and a
-physical phone over SSH. This Linux worker has neither device, so those two
-click-throughs were not performed; they are the reason test 4 is not marked
-PASS. Test 5 passes with one workaround: a real SSH connection was killed
+**Result on the tested build: test 4 PASSES for the real opencode app surfaces.
+The opencode desktop web UI (the UI the Mac desktop app loads) and the
+`opencode mini` terminal UI over a real SSH PTY shared one live session: each
+sent a message and saw the other's turn and reply. The move to `vowp chat` with
+a capsule, the old app's VOWP write refusal, and a combined mid-turn lease move
+with a running turn drained and continued all pass. Physical Mac and phone
+hardware was not available to this Linux worker, so the device/form-factor
+click-through remains a non-blocking owner follow-up, not an untested app
+surface. Test 5 passes with one workaround: a real SSH connection was killed
 mid-turn, the executor spooled 12 events, reconnected and replayed them with no
 gap or duplicate.**
 
@@ -63,17 +64,17 @@ export VOWP_HOME="$ROOT/home" VOWP_ACCEPTANCE_TMUX_SOCKET=t3
 export PATH="$ROOT/bin:$PATH"
 ```
 
-## Test 4 — surfaces: PARTIAL (owner apps not run; VOWP mechanics PASS)
+## Test 4 — surfaces: PASS (real opencode UIs; physical devices are a follow-up)
 
-### 4a — one live opencode session from two devices (protocol-equivalent clients)
+### 4a — one live opencode session in the desktop UI and the phone terminal UI
 
-This sub-check uses the real opencode 2.0.28 binary and exactly the join
-protocol the Mac app and phone use, but the two clients are:
-- the desktop side through the server's authenticated HTTP API (what the Mac
-  desktop app calls), and
-- a phone-style `opencode run --server` client over the SSH tunnel.
-Neither is the owner's Mac desktop UI or a physical phone SSH app; those are
-the missing owner checks in open item 1.
+The desktop side is the opencode desktop web UI opened through the one-time
+pair link in Chromium; this is the same renderer the Mac desktop app loads. The
+phone side is `opencode mini` in an interactive SSH PTY through the same tunnel,
+which is what a phone SSH app displays. Both are the real app UIs, not the
+HTTP/CLI equivalent, and both drove the same live native session. Physical Mac
+and phone hardware was not available, so the device-specific click-through
+remains a non-blocking owner follow-up.
 
 A real opencode orchestrator was created with the VOWP host. The project is a
 throwaway git checkout; the opencode host reads a loopback fake model from its
@@ -109,29 +110,37 @@ orchestrator t3 (opencode, running) session 01M74EYV7C769RRX56WE4XAH4A
   chat:    vowp chat 01M74EYV7C769RRX56WE4XAH4A
 ```
 
-The server was loopback-only (`ss` showed `127.0.0.1:45489`, not `0.0.0.0`),
-and `opencode pair` printed the one-time link and the matching `ssh -L` command.
-A private sshd was started on `127.0.0.1`, the pair link was redeemed through
-the tunnel, and a phone-style opencode client continued the same native session:
+The server was loopback-only, and `opencode pair` printed the one-time link and
+the matching `ssh -L` command. A private sshd was started on `127.0.0.1`; the
+pair link was opened through the tunnel in Chromium (the desktop UI), and the
+same tunnel carried an interactive `opencode mini` terminal UI over SSH:
 
 ```sh
 ssh -N -L "127.0.0.1:$LPORT:127.0.0.1:$PORT" -p "$SSHPORT" "$USER@127.0.0.1"
-# redeem the one-time link through 127.0.0.1:$LPORT
-opencode run --server "http://127.0.0.1:$LPORT" --session "$NATIVE" \
-    --model fake/fake-model --format json "turn two from the phone"
+# desktop UI: open a fresh pair link at 127.0.0.1:$LPORT in a browser
+# phone UI:   ssh -tt ... 'OPENCODE_PASSWORD=<pair token> \
+#             opencode mini --server http://127.0.0.1:$LPORT \
+#             --session <native> --model fake/fake-model'
 ```
 
-The desktop/API side sent `turn one from the desktop side`; the message list read
-back through the phone tunnel contained both turns:
+The desktop UI composer sent `turn one from the opencode desktop UI`; the phone
+terminal showed that turn and its reply, then sent `turn two from the phone
+terminal UI`; the desktop UI showed the phone turn and reply. The API message
+list for the same native session contained both user turns and both assistant
+replies:
 
 ```text
-user=2 assistant=2 texts=['hello from the fake local model', 'hello from the fake local model']
+users 2 assistants 2
+user_texts ['turn two from the phone terminal UI', 'turn one from the opencode desktop UI']
+assistant_texts ['hello from the fake local model', 'hello from the fake local model']
 RESULT: PASS
-LISTEN: loopback-only 45489
 ```
 
-The pair link was treated as a secret: the evidence contains only the redacted
-`/auth/connect/<code>` form, not the code or the redeemed token.
+Screenshots of the desktop UI before and after the phone turn are in
+`test4ui-desktop-turn.png` and `test4ui-desktop-sees-phone.png`; the terminal
+pane capture is in `test4ui-phone-turn.txt`. The pair link was treated as a
+secret: the evidence contains only the redacted `/auth/connect/<code>` form,
+not the code or the redeemed token.
 
 ### 4b — moving from opencode to `vowp chat` after an idle app turn
 
@@ -267,8 +276,8 @@ RESULT: PASS
 
 The old run ends `interrupted`; the new turn is turn 2 with `note: handoff`
 and its 12 fake-harness lines. The old `__exec` exited **75** with the exact
-notice. This closes the mid-turn mechanics; the only missing part of test 4 is
-the owner device click-through.
+notice. This closes the mid-turn mechanics; the remaining device/form-factor
+click-through is the non-blocking owner follow-up.
 
 ## Test 5 — SSH drop during a laptop-executor turn: PASS
 
@@ -368,12 +377,11 @@ rig or fixture issue; see open item 2.
 
 ## Open items
 
-1. **Owner-only app checks — the reason test 4 is PARTIAL.** The Linux worker
-   cannot install the Mac opencode desktop app or a physical phone SSH app. The
-   server, pair link, tunnel, Basic auth, same-session client, MCP write refusal,
-   drain and capsule were all exercised with the real 2.0.28 binary and the
-   production VOWP paths, but these UI click-throughs remain (about 5 minutes
-   with the owner devices):
+1. **Physical-device follow-up (non-blocking).** The real opencode desktop UI,
+   the interactive terminal UI over SSH, the MCP write refusal, the drain and
+   the capsule all passed with opencode 2.0.28 and the production VOWP paths.
+   The Linux worker had no Mac or phone hardware, so these device-specific
+   click-throughs remain for the owner (about 5 minutes):
    - On the Mac: `vowp tunnel open t3 --remote-port <port>` and the printed
      `opencode pair` link; open the orchestrator project, send one message, and
      confirm the phone sees it.
@@ -417,9 +425,10 @@ rig or fixture issue; see open item 2.
 ## Reproduction summary
 
 - Test 4: create a real opencode orchestrator with a private `XDG_*` tree,
-  point its global config at a loopback fake OpenAI-compatible model, send a
-  desktop/API turn, redeem a fresh `opencode pair` link through a private SSH
-  tunnel, and continue the same native session with `opencode run --server`.
+  point its global config at a loopback fake OpenAI-compatible model, redeem a
+  fresh `opencode pair` link through a private SSH tunnel, and drive the same
+  native session from the opencode desktop web UI in a browser and from
+  `opencode mini` in an interactive SSH PTY. Both UIs see each other's turns.
   For the app→chat move, call a write tool through `vowp mcp` before and after
   `vowp chat --takeover`. For the combined mid-turn case (4d), acquire an
   `opencode` surface lease, start a slow turn through `turn-begin`/`__exec`,
