@@ -238,6 +238,19 @@ value.
 **Accept:** a deploy command sees its configured secret in the child environment; an unconfigured
 value is absent; the stored value never appears in the release, ledger or logs.
 
+### 12. Make the second `setup verify` fixture run deterministic under load
+
+**Files:** `crates/vowp-cli/tests/setup_verify.rs`, `crates/vowp-cli/src/setup/verify.rs`.
+**Problem:** `setup_verify_fixture_runs_twice_on_one_home` gives the fixture job 120 seconds to merge.
+It passed alone and on two full workspace reruns, but one full parallel workspace run left the second
+job in `fixing` after its worker run had succeeded, and the test timed out. The fixture is timing-
+sensitive and its failure is not reproducible in isolation.
+**Do:** make the fixture wait on the job becoming terminal or making merge progress instead of a bare
+wall-clock cap, and keep the second-run session assertion. If the merge loop can genuinely stall,
+fix that path rather than raising the deadline.
+**Accept:** repeated full workspace runs pass, and a forced slow tick still reaches `done` or fails
+with a specific merge error rather than a generic timeout.
+
 ## How to help
 
 Read [`CONTRIBUTING.md`](../CONTRIBUTING.md) first. Every command in the docs must run, tests must be
