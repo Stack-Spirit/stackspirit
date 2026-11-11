@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use clap::Args;
 use serde::Deserialize;
+use vowp_core::surface::takeover::notice as takeover_notice;
 use vowp_protocol::{
     Cost, Executor, ExecutorRef, HarnessEvent, IngestAck, NodeName, RemoteEvent, RemoteLine, RunOutcome, RunRole,
-    StartInput, StopReason, TurnGrant, TurnRequest,
+    StartInput, StopReason, Timestamp, TurnGrant, TurnRequest,
 };
 
 use crate::ssh_stream::{INGEST_ACK_WINDOW, IngestClient, SshTarget};
@@ -108,11 +109,11 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
             let _ = vowp_core::vault::redact_job_artifacts(ctx.deps(), &store, None);
         }
         client.replay()?;
-        if report_revoked(io, client.revoked())? {
+        if report_revoked(io, client.revoked(), ctx.tz_offset_minutes())? {
             return Ok(75);
         }
         client.finish()?;
-        if report_revoked(io, client.revoked())? {
+        if report_revoked(io, client.revoked(), ctx.tz_offset_minutes())? {
             return Ok(75);
         }
         print_status(ctx, io, &grant, false)?;
@@ -201,12 +202,9 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
                 };
                 if let Some(ack) = client.send(&line)? {
                     match ack {
-                        IngestAck::LeaseRevoked { by, reason, .. } => {
+                        IngestAck::LeaseRevoked { by, at, .. } => {
                             let _ = adapter_run.stop();
-                            writeln!(
-                                io.err(),
-                                "Taken over by {by}: {reason}. This surface is now read-only (follow mode)."
-                            )?;
+                            print_revoked(io, &by, at, ctx.tz_offset_minutes())?;
                             return Ok(75);
                         }
                         IngestAck::Error { message, .. } => {
@@ -219,12 +217,9 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 let heartbeat = RemoteLine::Heartbeat { at: ctx.clock().now() };
-                if let Some(IngestAck::LeaseRevoked { by, reason, .. }) = client.send(&heartbeat)? {
+                if let Some(IngestAck::LeaseRevoked { by, at, .. }) = client.send(&heartbeat)? {
                     let _ = adapter_run.stop();
-                    writeln!(
-                        io.err(),
-                        "Taken over by {by}: {reason}. This surface is now read-only (follow mode)."
-                    )?;
+                    print_revoked(io, &by, at, ctx.tz_offset_minutes())?;
                     return Ok(75);
                 }
             }
@@ -259,11 +254,8 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
     };
     if let Some(ack) = client.send(&line)? {
         match ack {
-            IngestAck::LeaseRevoked { by, reason, .. } => {
-                writeln!(
-                    io.err(),
-                    "Taken over by {by}: {reason}. This surface is now read-only (follow mode)."
-                )?;
+            IngestAck::LeaseRevoked { by, at, .. } => {
+                print_revoked(io, &by, at, ctx.tz_offset_minutes())?;
                 return Ok(75);
             }
             IngestAck::Error { message, .. } => return Err(CliError::Remote(message)),
@@ -271,7 +263,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &ExecArgs) -> Result<i32, Cl
         }
     }
     client.finish()?;
-    if report_revoked(io, client.revoked())? {
+    if report_revoked(io, client.revoked(), ctx.tz_offset_minutes())? {
         return Ok(75);
     }
     print_status(ctx, io, &grant, false)?;
@@ -306,16 +298,19 @@ fn fail_turn(client: &mut IngestClient, io: &mut dyn IoStreams, error: CliError)
     error
 }
 
-/// Prints the read-only takeover notice once; returns whether the lease was revoked.
-fn report_revoked(io: &mut dyn IoStreams, ack: Option<&IngestAck>) -> Result<bool, CliError> {
-    if let Some(IngestAck::LeaseRevoked { by, reason, .. }) = ack {
-        writeln!(
-            io.err(),
-            "Taken over by {by}: {reason}. This surface is now read-only (follow mode)."
-        )?;
+/// Prints the exact read-only takeover notice once; returns whether the lease was revoked.
+fn report_revoked(io: &mut dyn IoStreams, ack: Option<&IngestAck>, tz_offset_minutes: i32) -> Result<bool, CliError> {
+    if let Some(IngestAck::LeaseRevoked { by, at, .. }) = ack {
+        print_revoked(io, by, *at, tz_offset_minutes)?;
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Writes the spec's exact takeover notice for a revoked lease.
+fn print_revoked(io: &mut dyn IoStreams, by: &str, at: Timestamp, tz_offset_minutes: i32) -> Result<(), CliError> {
+    writeln!(io.err(), "{}", takeover_notice(by, at, tz_offset_minutes))?;
+    Ok(())
 }
 
 /// Reads and validates the grant file: JSON and mode 0600.

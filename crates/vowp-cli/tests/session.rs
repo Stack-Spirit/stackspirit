@@ -7,11 +7,11 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vowp_protocol::{
-    Actor, AssistantMessage, Cost, EventBody, EventSource, EventType, HarnessKind, RemoteEvent, RemoteLine, StopReason,
-    Timestamp, TurnGrant, UserMessage,
+    Actor, AssistantMessage, Cost, EventBody, EventSource, EventType, HarnessKind, Lease, NodeName, RemoteEvent,
+    RemoteLine, StopReason, SurfaceKind, Timestamp, TurnGrant, UserMessage,
 };
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 
@@ -719,14 +719,14 @@ if [ \"$(wc -l < \"$FAKE_SSH_RUNS\")\" -eq 1 ]; then\n\
 fi\n\
 exec /bin/sh -c \"$last\"\n";
 
-/// Runs `__exec` with the fixture's fake ssh and control home.
-fn run_exec_over_ssh(
+/// Builds `__exec` with the fixture's fake ssh and control home.
+fn exec_over_ssh_command(
     env: &common::TestEnv,
     fixture: &SshFixture,
     grant: &Path,
     spool: Option<&Path>,
     extra: &[(&str, &str)],
-) -> std::process::Output {
+) -> std::process::Command {
     let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
     command
         .env("PATH", format!("{}:/usr/bin:/bin", fixture.bin.path().display()))
@@ -747,7 +747,20 @@ fn run_exec_over_ssh(
     if let Some(spool) = spool {
         command.arg("--spool-dir").arg(spool);
     }
-    command.output().expect("run __exec over fake ssh")
+    command
+}
+
+/// Runs `__exec` with the fixture's fake ssh and control home.
+fn run_exec_over_ssh(
+    env: &common::TestEnv,
+    fixture: &SshFixture,
+    grant: &Path,
+    spool: Option<&Path>,
+    extra: &[(&str, &str)],
+) -> std::process::Output {
+    exec_over_ssh_command(env, fixture, grant, spool, extra)
+        .output()
+        .expect("run __exec over fake ssh")
 }
 
 /// Returns every regular file below `root`.
@@ -1073,6 +1086,88 @@ fn remote_exec_streams_over_fake_ssh() {
     let store = env.store();
     let run = store.require_run(&grant.run_id).expect("run");
     assert_eq!(run.outcome, Some(vowp_protocol::RunOutcome::Ok));
+}
+
+#[test]
+fn remote_exec_prints_the_exact_takeover_notice() {
+    let env = common::TestEnv::new();
+    let script = configure(&env);
+    let id = create(&env);
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("session id");
+    let initial_at = Timestamp::parse("2026-11-08T14:05:00Z").expect("timestamp");
+    let surface_token = "a".repeat(52);
+    let phone_token = "b".repeat(52);
+    let store = env.store();
+    store
+        .take_lease(&Lease {
+            session_id: session_id.clone(),
+            surface_id: None,
+            surface_kind: SurfaceKind::Chat,
+            node: NodeName::parse("local").expect("node"),
+            holder: "laptop".to_owned(),
+            token: surface_token.clone(),
+            acquired_at: initial_at,
+            heartbeat_at: initial_at,
+        })
+        .expect("initial lease");
+    drop(store);
+
+    // Keep the harness alive so the client heartbeats and can be revoked mid-turn.
+    let fixture_file = script.parent().expect("fake bin").join("capsule.jsonl");
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.0.28'; exit 0; fi\nsleep 10\ncat '{}'\n",
+        fixture_file.display()
+    );
+    std::fs::write(&script, body).expect("fake script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let (_grant, grant_path) = begin_remote_turn(&env, &id, &surface_token, "wait for the takeover");
+    let fixture = ssh_fixture(&env, FORWARDING_SSH);
+    let mut child = exec_over_ssh_command(&env, &fixture, &grant_path, None, &[])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn __exec");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fixture.hello.is_file() {
+        assert!(Instant::now() < deadline, "the client never sent hello");
+        assert!(
+            child.try_wait().expect("try wait").is_none(),
+            "__exec exited before the hello frame"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Give ingest time to validate the hello before the lease row moves.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let takeover_at = Timestamp::parse("2026-11-08T14:06:00Z").expect("timestamp");
+    let store = env.store();
+    store
+        .take_lease(&Lease {
+            session_id,
+            surface_id: None,
+            surface_kind: SurfaceKind::Chat,
+            node: NodeName::parse("local").expect("node"),
+            holder: "phone".to_owned(),
+            token: phone_token,
+            acquired_at: takeover_at,
+            heartbeat_at: takeover_at,
+        })
+        .expect("takeover lease");
+    drop(store);
+
+    let output = child.wait_with_output().expect("__exec output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "__exec did not stop on revocation: {stderr}"
+    );
+    assert_eq!(
+        stderr,
+        "Taken over by phone at 14:06. This surface is now read-only (follow mode).\n"
+    );
 }
 
 #[test]

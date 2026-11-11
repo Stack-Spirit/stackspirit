@@ -5,7 +5,7 @@
 mod support;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use support::fake_adapter::FakeAdapter;
@@ -16,9 +16,9 @@ use vowp_core::session::service::SessionService;
 use vowp_core::surface::lease::{AcquireLease, HEARTBEAT_INTERVAL, LeaseGuard, STALE_AFTER, check_lease_with};
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
-    Actor, AssistantMessage, Clock, Cost, EventBody, EventSource, EventType, Executor, FakeClock, HarnessKind,
-    IngestAck, MemoryLog, NewSession, NodeName, RemoteLine, Run, RunId, RunPurpose, RunRole, SessionId, SessionRole,
-    SessionState, Surface, SurfaceId, SurfaceKind, SwitchReason, Timestamp,
+    Actor, AssistantMessage, AttachAction, Clock, Cost, EventBody, EventSource, EventType, Executor, FakeClock,
+    HarnessKind, IngestAck, MemoryLog, NewSession, Node, NodeName, RemoteLine, Run, RunId, RunPurpose, RunRole,
+    SessionId, SessionRole, SessionState, Surface, SurfaceId, SurfaceKind, SwitchReason, SwitchState, Timestamp,
 };
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_store::{NodePaths, Store, StoreError};
@@ -709,4 +709,242 @@ fn surface_store_crud_and_lease_token_checks() {
         "deleting the surface clears the lease reference"
     );
     assert!(!store.delete_surface(&target.id).expect("delete again"));
+}
+
+#[test]
+fn takeover_switches_to_the_target_node() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, Some(opencode()));
+    let store = deps.open_store().expect("store");
+
+    // A second node that is local to this test host: the switch probes it without SSH.
+    let vps = NodeName::parse("vps").expect("vps node");
+    store
+        .upsert_node(&Node {
+            name: vps.clone(),
+            ssh_target: None,
+            is_local: true,
+            capabilities: serde_json::json!({}),
+            last_seen_at: Some(clock.now()),
+            created_at: clock.now(),
+        })
+        .expect("vps node row");
+
+    let old = surface(SurfaceKind::Chat, "laptop", ts());
+    let old_guard = acquire(&deps, &store, &session, &old).expect("old lease");
+
+    let mut phone = surface(SurfaceKind::Chat, "phone", clock.now());
+    phone.node = vps.clone();
+    let report = vowp_core::takeover(&deps, &store, &session, &phone, clock.now()).expect("takeover");
+
+    assert_eq!(report.previous.as_deref(), Some("laptop"));
+    let switches = store.list_switches(&session).expect("switches");
+    assert_eq!(switches.len(), 1, "the executor switch is recorded");
+    assert_eq!(
+        switches[0].to_node, vps,
+        "the switch target is the takeover surface's node, not the session row's node"
+    );
+    assert_eq!(switches[0].state, SwitchState::Completed);
+    assert_eq!(
+        store.require_session(&session).expect("session").node,
+        local(),
+        "the session log still belongs to its home node"
+    );
+
+    let events = read_events(&deps, &session);
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::SessionExecutor(payload))
+                if payload.action == AttachAction::Attach && payload.node == vps
+        )),
+        "the attach event names the target node"
+    );
+
+    old_guard.release().expect("release old");
+}
+
+#[test]
+fn stale_acquire_boundary_is_exactly_sixty_seconds() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+
+    let old = surface(SurfaceKind::Chat, "laptop", ts());
+    let old_guard = acquire(&deps, &store, &session, &old).expect("old lease");
+    let old_token = old_guard.token().to_owned();
+
+    clock.advance(STALE_AFTER - Duration::from_millis(1));
+    let not_yet = surface(SurfaceKind::Chat, "tablet", clock.now());
+    match acquire(&deps, &store, &session, &not_yet) {
+        Ok(_) => panic!("a lease 59.999 s old is still live"),
+        Err(CoreError::Store(StoreError::Conflict(_))) => {}
+        Err(other) => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(token_of(&store, &session), old_token);
+
+    clock.advance(Duration::from_millis(1));
+    let exactly = surface(SurfaceKind::Chat, "phone", clock.now());
+    let new_guard = acquire(&deps, &store, &session, &exactly).expect("exactly 60 s is stale");
+
+    assert_eq!(store.lease(&session).expect("lease").expect("held").holder, "phone");
+    assert_eq!(new_guard.token(), token_of(&store, &session));
+    let notes: Vec<String> = read_events(&deps, &session)
+        .into_iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::Note(note)) => Some(note.text),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notes.iter().any(|note| note == "stale surface laptop replaced"),
+        "the exact boundary records the stale replacement: {notes:?}"
+    );
+
+    old_guard.release().expect("release old");
+    new_guard.release().expect("release new");
+}
+
+#[test]
+fn sweep_boundary_is_exactly_sixty_seconds() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+
+    let target = surface(SurfaceKind::Chat, "laptop", ts());
+    let guard = acquire(&deps, &store, &session, &target).expect("lease");
+
+    clock.advance(STALE_AFTER - Duration::from_millis(1));
+    assert_eq!(
+        vowp_core::surface::sweep_leases(&deps, &store, clock.now()).expect("sweep"),
+        0,
+        "a lease 59.999 s old is still live"
+    );
+    assert!(store.lease(&session).expect("lease").is_some());
+
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(
+        vowp_core::surface::sweep_leases(&deps, &store, clock.now()).expect("sweep"),
+        1,
+        "exactly 60 s is stale"
+    );
+    assert!(store.lease(&session).expect("lease").is_none());
+
+    guard.release().expect("release");
+}
+
+#[test]
+fn concurrent_acquire_never_writes_a_losing_token() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+
+    let contenders = 4;
+    let rounds = 8;
+    for round in 0..rounds {
+        assert!(
+            store.lease(&session).expect("lease").is_none(),
+            "round {round} starts free"
+        );
+        let barrier = Arc::new(Barrier::new(contenders + 1));
+        let done = Arc::new(AtomicUsize::new(0));
+        let now = clock.now();
+        let mut threads = Vec::new();
+        for index in 0..contenders {
+            let deps = deps.clone();
+            let session = session.clone();
+            let barrier = barrier.clone();
+            let done = done.clone();
+            threads.push(std::thread::spawn(move || {
+                let store = deps.open_store().expect("contender store");
+                let mut contender = surface(SurfaceKind::Chat, "contender", now);
+                contender.holder = format!("surface-{round}-{index}");
+                barrier.wait();
+                let result = acquire(&deps, &store, &session, &contender);
+                done.fetch_add(1, Ordering::SeqCst);
+                result
+            }));
+        }
+        barrier.wait();
+
+        let reader = deps.open_store().expect("reader store");
+        let mut seen = Vec::new();
+        while done.load(Ordering::SeqCst) < contenders {
+            if let Some(lease) = reader.lease(&session).expect("sample lease") {
+                seen.push(lease.token);
+            }
+            std::thread::yield_now();
+        }
+
+        let mut winners = Vec::new();
+        let mut conflicts = 0;
+        for thread in threads {
+            match thread.join().expect("contender thread") {
+                Ok(guard) => winners.push(guard),
+                Err(CoreError::Store(StoreError::Conflict(_))) => conflicts += 1,
+                Err(other) => panic!("round {round}: unexpected acquire error: {other:?}"),
+            }
+        }
+        assert_eq!(winners.len(), 1, "round {round}: exactly one surface wins");
+        assert_eq!(conflicts, contenders - 1, "round {round}: every loser is refused");
+
+        let winner = winners.pop().expect("winner");
+        assert!(
+            seen.iter().all(|token| token == winner.token()),
+            "round {round}: a losing acquire exposed its token: {seen:?}"
+        );
+        assert_eq!(
+            token_of(&store, &session),
+            winner.token(),
+            "round {round}: the winner keeps the row"
+        );
+        winner.release().expect("release winner");
+    }
+}
+
+#[test]
+fn detach_hands_over_the_token_without_releasing() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+
+    let target = surface(SurfaceKind::Chat, "laptop", ts());
+    let guard = acquire(&deps, &store, &session, &target).expect("lease");
+    let token = guard.token().to_owned();
+    let detached = guard.detach();
+
+    assert_eq!(detached, token);
+    let lease = store.lease(&session).expect("lease").expect("detach keeps the row");
+    assert_eq!(lease.token, detached);
+    assert!(
+        store.release_lease(&session, &detached).expect("release detached"),
+        "the caller can release the token it owns"
+    );
+    assert!(store.lease(&session).expect("lease").is_none());
+}
+
+#[test]
+fn takeover_notice_is_the_exact_spec_text() {
+    let at = Timestamp::parse("2026-11-08T14:05:00Z").expect("timestamp");
+    assert_eq!(
+        vowp_core::surface::takeover::notice("phone", at, 0),
+        "Taken over by phone at 14:05. This surface is now read-only (follow mode)."
+    );
 }

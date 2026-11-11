@@ -93,12 +93,13 @@ pub(crate) fn takeover_inner(
     let mut drained = false;
     let mut capsule_id = None;
     if let Some(executor) = row.executor.clone() {
-        // A local target needs no node row; a remote target is named explicitly so the
-        // switch probes it over SSH.
-        let to_node = if row.node == deps.node {
+        // The switch target is the takeover target's node, not the session row's log
+        // owner. A local target needs no node row; a remote target is named explicitly so
+        // the switch probes it over SSH.
+        let to_node = if target.node == deps.node {
             None
         } else {
-            Some(row.node.clone())
+            Some(target.node.clone())
         };
         let switched = SessionService::new(deps.clone()).switch(&SwitchRequest {
             session_id: session.clone(),

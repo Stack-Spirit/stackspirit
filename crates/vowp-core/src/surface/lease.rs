@@ -3,14 +3,16 @@
 //!
 //! A session has at most one lease row. [`LeaseGuard::acquire`] registers the surface,
 //! takes the row, appends the attach note and keeps the heartbeat fresh every five
-//! seconds. A lease whose heartbeat is older than sixty seconds is stale and may be
-//! replaced without asking the owner; a live lease needs an explicit takeover.
+//! seconds. A lease whose heartbeat is sixty seconds old is stale and may be replaced
+//! without asking the owner; a live lease needs an explicit takeover.
 //!
 //! The lease row is also the cross-process takeover signal: a takeover replaces the
 //! token, and the old surface's ingest writer compares its token with the row on every
 //! line and heartbeat. A token mismatch produces [`IngestAck::LeaseRevoked`] through
 //! [`revocation_ack_for`], so no process-local channel is needed.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -43,12 +45,22 @@ pub struct AcquireLease {
     pub takeover: bool,
 }
 
+/// The result of the atomic decision in [`LeaseGuard::acquire`].
+enum AcquireOutcome {
+    /// The caller installed a new lease; `previous` is the stale or absent row it replaced.
+    Installed { lease: Lease, previous: Option<Lease> },
+    /// A live lease was left untouched for the caller to refuse or take over.
+    Live(Lease),
+}
+
 /// A held lease with its heartbeat thread.
 pub struct LeaseGuard {
     deps: Deps,
     session: SessionId,
     token: String,
     thread: Option<JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    detached: bool,
 }
 
 impl LeaseGuard {
@@ -57,24 +69,21 @@ impl LeaseGuard {
     ///
     /// A live lease without `req.takeover` returns [`StoreError::Conflict`] with the
     /// holder, kind, node and acquisition time so the caller can ask the owner.
+    ///
+    /// The decision and the write run in one `BEGIN IMMEDIATE` transaction, so a losing
+    /// concurrent acquire never writes its token and then restores the winner's row. An
+    /// explicit takeover still runs through [`super::takeover::takeover_inner`].
     pub fn acquire(deps: &Deps, store: &Store, req: &AcquireLease) -> Result<LeaseGuard, CoreError> {
         let now = deps.clock.now();
         store.upsert_surface(&req.surface)?;
 
-        let existing = store.lease(&req.session)?;
-        let token = if let Some(previous) = &existing
-            && now.since(previous.heartbeat_at) < STALE_AFTER
-        {
-            if !req.takeover {
-                return Err(CoreError::Store(StoreError::Conflict(held_text(
-                    &req.session,
-                    previous,
-                ))));
+        let outcome = store.transaction(|tx| {
+            let previous = tx.lease(&req.session)?;
+            if let Some(previous) = &previous
+                && !is_stale(now, previous.heartbeat_at)
+            {
+                return Ok(AcquireOutcome::Live(previous.clone()));
             }
-            super::takeover::takeover_inner(deps, store, &req.session, &req.surface, now)?
-                .1
-                .token
-        } else {
             let lease = Lease {
                 session_id: req.session.clone(),
                 surface_id: Some(req.surface.id.clone()),
@@ -85,61 +94,75 @@ impl LeaseGuard {
                 acquired_at: now,
                 heartbeat_at: now,
             };
-            match store.take_lease(&lease)? {
-                Some(previous) => {
-                    // Another surface won the race between our look and our write.
-                    let stale = now.since(previous.heartbeat_at) >= STALE_AFTER;
-                    if stale {
+            let replaced = tx.take_lease(&lease)?;
+            Ok(AcquireOutcome::Installed {
+                lease,
+                previous: replaced,
+            })
+        })?;
+
+        let token = match outcome {
+            AcquireOutcome::Installed { lease, previous } => {
+                match &previous {
+                    Some(previous) => {
                         append_note(
                             deps,
                             store,
                             &req.session,
                             format!("stale surface {} replaced", previous.holder),
                         )?;
-                        lease.token
-                    } else if req.takeover {
-                        // Put the live row back and run the full takeover path so the
-                        // old surface gets the switch, capsule and revocation notice.
-                        store.take_lease(&previous)?;
-                        super::takeover::takeover_inner(deps, store, &req.session, &req.surface, now)?
-                            .1
-                            .token
-                    } else {
-                        store.take_lease(&previous)?;
-                        return Err(CoreError::Store(StoreError::Conflict(held_text(
+                    }
+                    None => {
+                        append_note(
+                            deps,
+                            store,
                             &req.session,
-                            &previous,
-                        ))));
+                            format!(
+                                "surface {} ({}) attached",
+                                surface_kind_name(req.surface.kind),
+                                req.surface.holder
+                            ),
+                        )?;
                     }
                 }
-                None => {
-                    append_note(
-                        deps,
-                        store,
+                lease.token
+            }
+            AcquireOutcome::Live(previous) => {
+                if !req.takeover {
+                    return Err(CoreError::Store(StoreError::Conflict(held_text(
                         &req.session,
-                        format!(
-                            "surface {} ({}) attached",
-                            surface_kind_name(req.surface.kind),
-                            req.surface.holder
-                        ),
-                    )?;
-                    lease.token
+                        &previous,
+                    ))));
                 }
+                super::takeover::takeover_inner(deps, store, &req.session, &req.surface, now)?
+                    .1
+                    .token
             }
         };
 
-        let thread = start_heartbeat(deps, req.session.clone(), token.clone());
+        let (thread, stop) = start_heartbeat(deps, req.session.clone(), token.clone());
         Ok(LeaseGuard {
             deps: deps.clone(),
             session: req.session.clone(),
             token,
             thread: Some(thread),
+            stop,
+            detached: false,
         })
     }
 
     /// Returns the lease token.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// Stops heartbeating and returns the token without releasing the lease.
+    ///
+    /// The caller takes over the heartbeat (the one-shot `session lease --acquire` hand-off);
+    /// dropping the detached guard later neither deletes the row nor touches it.
+    pub fn detach(mut self) -> String {
+        self.detached = true;
+        self.token.clone()
     }
 
     /// Releases the lease and stops the heartbeat thread.
@@ -152,10 +175,13 @@ impl LeaseGuard {
 
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
-        if let Ok(store) = self.deps.open_store() {
+        if !self.detached
+            && let Ok(store) = self.deps.open_store()
+        {
             let _ = store.release_lease(&self.session, &self.token);
         }
-        // The heartbeat thread observes the deleted row on its next tick and exits.
+        // The heartbeat thread checks the flag before its next write and exits.
+        self.stop.store(true, Ordering::SeqCst);
         let _ = self.thread.take();
     }
 }
@@ -218,13 +244,29 @@ pub fn revocation_ack_for(
     }
 }
 
-/// Removes leases whose heartbeat is older than [`STALE_AFTER`].
+/// Returns whether a lease heartbeat is at least [`STALE_AFTER`] old.
+///
+/// Exactly [`STALE_AFTER`] is stale, matching the card rule that an active surface has a
+/// heartbeat *younger* than sixty seconds.
+fn is_stale(now: Timestamp, heartbeat_at: Timestamp) -> bool {
+    now.since(heartbeat_at) >= STALE_AFTER
+}
+
+/// Returns the exclusive `before` bound for the store's stale-lease queries.
+///
+/// The queries compare `heartbeat_at < before`; timestamps have millisecond precision, so
+/// adding 1 ms turns that into "at least [`STALE_AFTER`] old", including the exact boundary.
+fn stale_before(now: Timestamp) -> Timestamp {
+    now.minus(STALE_AFTER).plus(Duration::from_millis(1))
+}
+
+/// Removes leases whose heartbeat is at least [`STALE_AFTER`] old.
 ///
 /// Returns how many rows were deleted. The sweep is the node tick's safety net for a
 /// surface that died without calling [`LeaseGuard::release`]; the conditional delete
 /// re-checks `heartbeat_at`, so a lease refreshed after the stale snapshot survives.
 pub fn sweep_leases(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, CoreError> {
-    let before = now.minus(STALE_AFTER);
+    let before = stale_before(now);
     let mut dropped = 0_u32;
     for lease in store.stale_leases(before)? {
         if store.release_stale_lease(&lease.session_id, &lease.token, before)? {
@@ -306,19 +348,25 @@ fn held_text(session: &SessionId, lease: &Lease) -> String {
 }
 
 /// Starts the heartbeat thread for a held lease.
-fn start_heartbeat(deps: &Deps, session: SessionId, token: String) -> JoinHandle<()> {
+fn start_heartbeat(deps: &Deps, session: SessionId, token: String) -> (JoinHandle<()>, Arc<AtomicBool>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
     let deps = deps.clone();
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         let Ok(store) = deps.open_store() else {
             return;
         };
         loop {
             thread::sleep(HEARTBEAT_INTERVAL);
+            if flag.load(Ordering::SeqCst) {
+                return;
+            }
             let now = deps.clock.now();
             match store.heartbeat_lease(&session, &token, now) {
                 Ok(true) => {}
                 _ => return,
             }
         }
-    })
+    });
+    (handle, stop)
 }
