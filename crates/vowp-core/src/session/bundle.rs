@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vowp_protocol::{
-    Actor, BlobRef, Capsule, CapsuleEvent, CapsuleId, CapsuleTrigger, EventBody, EventEnvelope, EventSource, EventType,
-    ExecutorRef, HarnessKind, NewSession, NodeName, Note, PROTOCOL_VERSION, Session, SessionId, SessionState,
-    SwitchEvent, SwitchId, SwitchReason, Timestamp,
+    Actor, BLOB_PREVIEW_CHARS, BlobRef, Capsule, CapsuleEvent, CapsuleId, CapsuleTrigger, EventBody, EventEnvelope,
+    EventSource, EventType, ExecutorRef, HarnessKind, NewSession, NodeName, Note, PROTOCOL_VERSION, Session, SessionId,
+    SessionState, SwitchEvent, SwitchId, SwitchReason, Timestamp,
 };
 use vowp_store::blobs::BlobStore;
 use vowp_store::reindex::reindex;
@@ -43,6 +43,9 @@ const INLINE_BLOB_MAX: u64 = 65_536;
 
 /// Sidecar holding the origin bundle until the child's first turn consumes it.
 const IMPORT_SIDECAR: &str = "import.json";
+
+/// One decoded inline blob: its lowercase hex SHA-256 and content.
+type DecodedBlob = (String, Vec<u8>);
 
 /// One exported session, self-contained enough to continue on another node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -229,11 +232,13 @@ pub fn import(
     cwd: Option<&Path>,
 ) -> Result<SessionId, CoreError> {
     bundle.validate()?;
-    let inline = decode_blobs(bundle)?;
+    // Decode and verify the origin blobs before redaction re-keys them. The redacted
+    // bytes returned by `redact_bundle` are what the child store receives.
+    let origin_blobs = decode_blobs(bundle)?;
     // Redact before anything is persisted. A bundle may predate the local vault (or come
     // from a node that never knew these secrets); if the redactor cannot be loaded the
     // import fails with no raw capsule file, row or sidecar left behind.
-    let bundle = redact_bundle(deps, bundle)?;
+    let (bundle, inline) = redact_bundle(deps, bundle, origin_blobs)?;
     let store = deps.open_store()?;
     let target = target_executor(deps, &bundle, executor);
     let cwd = resolve_cwd(deps, &bundle, cwd);
@@ -355,7 +360,7 @@ pub fn imported_seed(deps: &Deps, bundle: &Bundle, child: &SessionId, next_input
 
 /// Builds the first-turn seed from the bundle sidecar, when the session has one.
 ///
-/// `import` writes the source bundle next to the child log; the first `run_turn`
+/// `import` writes the redacted bundle next to the child log; the first `run_turn`
 /// consumes it and then removes it (sessions.md §6.3 step 5).
 pub(crate) fn pending_import_seed(
     deps: &Deps,
@@ -414,16 +419,24 @@ fn write_import_sidecar(deps: &Deps, child: &SessionId, bundle: &Bundle) -> Resu
 /// Returns a copy of `bundle` with every payload secret value replaced.
 ///
 /// Import uses this before persisting anything: a bundle can carry values from a node
-/// that never knew the local secrets, and neither the capsule file/row nor the import
-/// sidecar may hold them. Only free-text payloads are redacted; structural fields such
-/// as the bundle format, ids, timestamps and typed enums keep their original values, so
-/// a secret that happens to match one of them cannot make the sidecar unparseable or
-/// change the imported session identity. The checksum is recomputed so the sidecar keeps
-/// the unchanged bundle format and still passes [`Bundle::validate`].
-fn redact_bundle(deps: &Deps, bundle: &Bundle) -> Result<Bundle, CoreError> {
+/// that never knew the local secrets, and neither the capsule file/row, the child blob
+/// store nor the import sidecar may hold them. Only free-text payloads are redacted;
+/// structural fields such as the bundle format, ids, timestamps and typed enums keep
+/// their original values, so a secret that happens to match one of them cannot make the
+/// sidecar unparseable or change the imported session identity. Inline blobs are redacted
+/// when their bytes are valid UTF-8 (text or JSON); invalid UTF-8 is binary and passes
+/// through unchanged. Redaction changes a blob's digest, so the inline map is re-keyed and
+/// matching `BlobRef`s in the tail are rewritten to the new digest, size and preview. The
+/// checksum is recomputed so the sidecar keeps the unchanged bundle format and still
+/// passes [`Bundle::validate`].
+fn redact_bundle(
+    deps: &Deps,
+    bundle: &Bundle,
+    blobs: Vec<DecodedBlob>,
+) -> Result<(Bundle, Vec<DecodedBlob>), CoreError> {
     let redactor = crate::vault::Redactor::load(deps)?;
     if redactor.is_empty() {
-        return Ok(bundle.clone());
+        return Ok((bundle.clone(), blobs));
     }
     let mut redacted = bundle.clone();
     redacted.session.title = redactor.redact(&bundle.session.title);
@@ -440,8 +453,120 @@ fn redact_bundle(deps: &Deps, bundle: &Bundle) -> Result<Bundle, CoreError> {
             *error = redactor.redact(error);
         }
     }
+    let inline = redact_blobs(&redactor, &mut redacted, blobs)?;
     redacted.checksum = checksum(&redacted)?;
-    Ok(redacted)
+    Ok((redacted, inline))
+}
+
+/// Redacts decoded inline blobs and rewrites the bundle's blob references.
+///
+/// A blob is text when its bytes are valid UTF-8. Text that parses as JSON is redacted
+/// through its string values and re-serialized, so both the raw secret and its JSON-escaped
+/// form are replaced; other text is redacted as plain text. Invalid UTF-8 is left untouched
+/// as binary, the conservative choice for content that cannot be classified safely. Because
+/// redaction changes the content digest, each changed blob gets a new `blobs_inline` key and
+/// the tail's `BlobRef`s are rewritten; unchanged blobs keep their digest and bytes.
+fn redact_blobs(
+    redactor: &crate::vault::Redactor,
+    bundle: &mut Bundle,
+    blobs: Vec<DecodedBlob>,
+) -> Result<Vec<DecodedBlob>, CoreError> {
+    if blobs.is_empty() {
+        return Ok(blobs);
+    }
+    let mut remapped: BTreeMap<String, BlobRef> = BTreeMap::new();
+    let mut redacted_blobs = Vec::with_capacity(blobs.len());
+    bundle.blobs_inline.clear();
+    for (old_sha256, bytes) in blobs {
+        let redacted_bytes = redact_blob_bytes(redactor, &bytes)?;
+        let new_sha256 = hex_digest(&redacted_bytes);
+        if new_sha256 != old_sha256.to_ascii_lowercase() {
+            remapped.insert(
+                old_sha256.to_ascii_lowercase(),
+                BlobRef {
+                    sha256: new_sha256.clone(),
+                    bytes: redacted_bytes.len() as u64,
+                    preview: blob_preview(&redacted_bytes),
+                },
+            );
+        }
+        bundle
+            .blobs_inline
+            .insert(new_sha256.clone(), base64_encode(&redacted_bytes));
+        redacted_blobs.push((new_sha256, redacted_bytes));
+    }
+    if !remapped.is_empty() {
+        for event in &mut bundle.tail {
+            remap_event_blob_refs(event, &remapped);
+        }
+    }
+    Ok(redacted_blobs)
+}
+
+/// Redacts one inline blob's bytes according to the text/JSON/binary rule.
+fn redact_blob_bytes(redactor: &crate::vault::Redactor, bytes: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(bytes.to_vec());
+    };
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
+        let original = value.clone();
+        redact_json_strings(redactor, &mut value);
+        if value == original {
+            return Ok(bytes.to_vec());
+        }
+        return serde_json::to_vec(&value).map_err(json_error);
+    }
+    let redacted = redactor.redact(text);
+    if redacted == text {
+        return Ok(bytes.to_vec());
+    }
+    Ok(redacted.into_bytes())
+}
+
+/// Returns the display preview of redacted blob content, matching the blob store's rule.
+fn blob_preview(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .take(BLOB_PREVIEW_CHARS)
+        .collect()
+}
+
+/// Rewrites the `BlobRef`s carried by one event after its blob content changed.
+fn remap_event_blob_refs(event: &mut EventEnvelope, remapped: &BTreeMap<String, BlobRef>) {
+    let Ok(mut body) = event.body() else {
+        return;
+    };
+    let mut changed = false;
+    match &mut body {
+        EventBody::ToolResult(payload) => {
+            if let Some(reference) = &mut payload.output_ref {
+                changed = remap_blob_ref(reference, remapped);
+            }
+        }
+        EventBody::FileChange(payload) => {
+            if let Some(reference) = &mut payload.diff_ref {
+                changed = remap_blob_ref(reference, remapped);
+            }
+        }
+        EventBody::UserMessage(payload) => {
+            for reference in &mut payload.attachments {
+                changed |= remap_blob_ref(reference, remapped);
+            }
+        }
+        _ => {}
+    }
+    if changed {
+        event.payload = body.to_value();
+    }
+}
+
+/// Replaces one reference with its redacted counterpart, when it was re-keyed.
+fn remap_blob_ref(reference: &mut BlobRef, remapped: &BTreeMap<String, BlobRef>) -> bool {
+    let Some(replacement) = remapped.get(&reference.sha256.to_ascii_lowercase()) else {
+        return false;
+    };
+    *reference = replacement.clone();
+    true
 }
 
 /// Redacts the free-text fields of one capsule, leaving ids, enums and telemetry alone.
@@ -530,7 +655,7 @@ fn blob_refs(event: &EventEnvelope) -> Vec<BlobRef> {
 }
 
 /// Decodes and verifies every inline blob before a session is created.
-fn decode_blobs(bundle: &Bundle) -> Result<Vec<(String, Vec<u8>)>, CoreError> {
+fn decode_blobs(bundle: &Bundle) -> Result<Vec<DecodedBlob>, CoreError> {
     let mut decoded = Vec::with_capacity(bundle.blobs_inline.len());
     for (sha256, encoded) in &bundle.blobs_inline {
         let bytes = base64_decode(encoded)?;
