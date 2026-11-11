@@ -31,6 +31,7 @@ calls. It scans tracked files in the working tree and every commit from `git rev
 | `token` | `sk-`, `sb_secret_`, `ghp_`, `github_pat_`, `AKIA`, PEM private-key headers, `xox[abp]-`. |
 | `private_host` | Host-like names ending in `.local`, `.lan`, `.internal`, `.home.arpa` or `.ts.net`. |
 | `ssh_host` | `ssh <user>@<host>` commands. |
+| `ssh_target` | JSON/TOML `ssh_target` fields with a concrete `user@host` value, even when the value is not written as an `ssh` command. |
 | `secret_path` | Tracked paths named `.env*` (except `.env.example`), `*.pem`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `authorized_keys`, or under `.ssh/`. |
 | `large_blob` | Tracked blobs larger than 1 MiB (override with `--max-blob-bytes`). |
 
