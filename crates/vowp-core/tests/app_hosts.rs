@@ -5,7 +5,7 @@
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.5 and the F5 named tests in §15.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -157,6 +157,7 @@ fn handle(
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => raw.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => break,
         }
         if let Some(end) = find_header_end(&raw) {
@@ -314,7 +315,7 @@ fn empty_cursor() -> MirrorCursor {
 /// Polls `transcript_since` until an entry with `text` appears, or panics after two seconds.
 fn wait_for_text(host: &OpencodeHost, handle: &AppHandle, cursor: &MirrorCursor, text: &str) -> TranscriptBatch {
     for _ in 0..100 {
-        let batch = host.transcript_since(handle, cursor).expect("transcript while waiting");
+        let batch = retry_transient(|| host.transcript_since(handle, cursor)).expect("transcript while waiting");
         if batch.entries.iter().any(|entry| entry.text.as_deref() == Some(text)) {
             return batch;
         }
@@ -363,6 +364,54 @@ fn host_request(tmp: &TempDir, port: Option<u16>) -> HostRequest {
     }
 }
 
+/// True for I/O failures caused by a parallel test rather than the host: a signal
+/// interrupts a loopback syscall, or a freshly written fake script is still busy.
+fn transient_io(error: &CoreError) -> bool {
+    match error {
+        CoreError::Io { source, .. } => matches!(source.kind(), ErrorKind::Interrupted | ErrorKind::ExecutableFileBusy),
+        _ => false,
+    }
+}
+
+/// Retries an app-host operation when a parallel test interrupts it. Any other error is
+/// returned immediately, so a real failure is never hidden.
+fn retry_transient<T>(mut operation: impl FnMut() -> Result<T, CoreError>) -> Result<T, CoreError> {
+    for _ in 0..19 {
+        match operation() {
+            Err(error) if transient_io(&error) => thread::sleep(Duration::from_millis(10)),
+            result => return result,
+        }
+    }
+    operation()
+}
+
+/// Retries the Claude login probe while it reports no login, so a signal that interrupts
+/// the fake script does not fail the positive-login test. A genuinely logged-out home
+/// still fails after the bounded retries.
+fn login_present(host: &ClaudeRemoteHost) -> bool {
+    for _ in 0..19 {
+        if host.login_present() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    host.login_present()
+}
+
+/// Starts the logged-in Claude fake, retrying the product's own auth probe as well: a
+/// signal can make that probe read a transient failure even though the fake is logged in.
+fn start_logged_in(host: &ClaudeRemoteHost, request: &HostRequest) -> Result<AppHandle, CoreError> {
+    for _ in 0..19 {
+        match retry_transient(|| host.start(request)) {
+            Err(error) if matches!(&error, CoreError::Refused(message) if message == NO_LOGIN) => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    retry_transient(|| host.start(request))
+}
+
 /// Whether a loopback port currently accepts TCP connections.
 fn port_accepts_connections(port: u16) -> bool {
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(200)).is_ok()
@@ -395,7 +444,7 @@ fn opencode_host_starts_and_stops_with_fake_server() {
     let request = host_request(&tmp, Some(fake.port()));
     std::fs::create_dir_all(&request.workdir).expect("orchestrator dir");
 
-    let handle = host.start(&request).expect("start opencode host");
+    let handle = retry_transient(|| host.start(&request)).expect("start opencode host");
     assert_eq!(handle.kind, OrchestratorApp::Opencode);
     assert_eq!(handle.port, Some(fake.port()));
     assert!(process_alive(handle.pid));
@@ -407,7 +456,7 @@ fn opencode_host_starts_and_stops_with_fake_server() {
         .mode();
     assert_eq!(mode & 0o777, 0o600, "host.json must be private");
 
-    let health = host.health(&handle).expect("health");
+    let health = retry_transient(|| host.health(&handle)).expect("health");
     assert!(health.ok, "health detail: {}", health.detail);
     assert!(health.detail.contains("/api/session"));
 
@@ -428,14 +477,14 @@ fn opencode_host_starts_and_stops_with_fake_server() {
         );
     }
 
-    host.stop(&handle).expect("stop opencode host");
+    retry_transient(|| host.stop(&handle)).expect("stop opencode host");
     assert!(!process_alive(handle.pid), "the fake service is still running");
     assert!(!host_json.exists(), "host.json survived stop");
     assert!(
         !request.workdir.join(".opencode/state/opencode/service.json").exists(),
         "service.json survived stop"
     );
-    let health = host.health(&handle).expect("health after stop");
+    let health = retry_transient(|| host.health(&handle)).expect("health after stop");
     assert!(!health.ok);
 }
 
@@ -449,7 +498,7 @@ fn opencode_v2_service_pair_basic_auth() {
     let host = OpencodeHost::default();
     let handle = handle_for(&workdir);
 
-    let health = host.health(&handle).expect("health");
+    let health = retry_transient(|| host.health(&handle)).expect("health");
     assert!(health.ok, "health detail: {}", health.detail);
     assert!(!fake.auth_headers().is_empty(), "the host sent no request");
     assert!(
@@ -458,7 +507,7 @@ fn opencode_v2_service_pair_basic_auth() {
         fake.auth_headers()
     );
 
-    let first = host.transcript_since(&handle, &empty_cursor()).expect("backfill");
+    let first = retry_transient(|| host.transcript_since(&handle, &empty_cursor())).expect("backfill");
     assert_eq!(first.entries.len(), 3, "{:?}", first.entries);
     assert!(
         first.entries.iter().any(|entry| entry.text.as_deref() == Some("hello")),
@@ -565,13 +614,13 @@ fn opencode_v2_service_pair_basic_auth() {
 
     // A wrong token is rejected with HTTP 401; health reports it instead of pretending.
     write_service_state(&workdir, &fake.url(), "wrong-password");
-    let health = host.health(&handle).expect("health with wrong token");
+    let health = retry_transient(|| host.health(&handle)).expect("health with wrong token");
     assert!(!health.ok);
     assert!(health.detail.contains("401"), "{}", health.detail);
 
     // A non-loopback service URL is refused before any request is sent.
     write_service_state(&workdir, "http://0.0.0.0:9", PASSWORD);
-    let health = host.health(&handle).expect("health with public URL");
+    let health = retry_transient(|| host.health(&handle)).expect("health with public URL");
     assert!(!health.ok);
     assert!(health.detail.contains("127.0.0.1"), "{}", health.detail);
 }
@@ -586,7 +635,7 @@ fn opencode_refuses_non_v2_service() {
     let request = host_request(&tmp, Some(fake.port()));
     std::fs::create_dir_all(&request.workdir).expect("orchestrator dir");
 
-    let error = host.start(&request).expect_err("a v1 service must be refused");
+    let error = retry_transient(|| host.start(&request)).expect_err("a v1 service must be refused");
     assert!(
         matches!(error, CoreError::Refused(ref message) if message.contains("2.x")),
         "{error:?}"
@@ -619,7 +668,7 @@ exit 1
     );
     let request = host_request(&tmp, None);
 
-    let error = host.start(&request).expect_err("start without login must refuse");
+    let error = retry_transient(|| host.start(&request)).expect_err("start without login must refuse");
     assert!(
         matches!(error, CoreError::Refused(ref message) if message == NO_LOGIN),
         "{error:?}"
@@ -655,21 +704,21 @@ exec sleep 60
     let host = ClaudeRemoteHost::new(&script)
         .with_config_dir(&config)
         .with_spawn_check(Duration::from_millis(300));
-    assert!(host.login_present());
+    assert!(login_present(&host));
     let request = host_request(&tmp, None);
     std::fs::create_dir_all(&request.workdir).expect("orchestrator dir");
 
-    let handle = host.start(&request).expect("start remote control");
+    let handle = start_logged_in(&host, &request).expect("start remote control");
     assert_eq!(handle.kind, OrchestratorApp::ClaudeCode);
     assert!(process_alive(handle.pid));
-    let health = host.health(&handle).expect("health");
+    let health = retry_transient(|| host.health(&handle)).expect("health");
     assert!(health.ok, "{}", health.detail);
     let join = host.join_instructions(&handle).expect("join");
     assert!(join.desktop.contains("claude.ai/code"), "{}", join.desktop);
     assert!(join.phone.contains("Claude mobile"), "{}", join.phone);
     assert!(join.chat.contains("vowp chat"), "{}", join.chat);
 
-    host.stop(&handle).expect("stop remote control");
+    retry_transient(|| host.stop(&handle)).expect("stop remote control");
     assert!(!process_alive(handle.pid));
     assert!(!request.workdir.join("host.json").exists());
 }
@@ -693,7 +742,7 @@ exit 1
     let host = ClaudeRemoteHost::new(&script).with_config_dir(&config);
     assert!(!host.login_present(), "an API key is not a claude.ai login");
     let request = host_request(&tmp, None);
-    let error = host.start(&request).expect_err("API-key login must refuse");
+    let error = retry_transient(|| host.start(&request)).expect_err("API-key login must refuse");
     assert!(
         matches!(error, CoreError::Refused(ref message) if message == NO_LOGIN),
         "{error:?}"
@@ -737,7 +786,7 @@ fn claude_transcript_is_read_incrementally() {
 
     let host = ClaudeRemoteHost::new("/bin/true").with_config_dir(&config);
     let handle = handle_for(&workdir);
-    let first = host.transcript_since(&handle, &empty_cursor()).expect("first read");
+    let first = retry_transient(|| host.transcript_since(&handle, &empty_cursor())).expect("first read");
     assert_eq!(first.entries.len(), 4, "{:?}", first.entries);
     assert_eq!(
         first.entries[0].kind,
@@ -771,7 +820,7 @@ fn claude_transcript_is_read_incrementally() {
     )
     .expect("append line");
     drop(line);
-    let second = host.transcript_since(&handle, &first.cursor).expect("incremental read");
+    let second = retry_transient(|| host.transcript_since(&handle, &first.cursor)).expect("incremental read");
     assert_eq!(second.entries.len(), 1, "{:?}", second.entries);
     assert_eq!(second.entries[0].text.as_deref(), Some("again"));
 }
