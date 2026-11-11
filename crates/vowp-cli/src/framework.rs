@@ -52,10 +52,17 @@ pub const FILES: &[FrameworkFile] = &[
         content: include_str!("../../../framework/skills/vowp-capacity-advisor/SKILL.md"),
     },
     FrameworkFile {
+        target: ".claude/skills/vowp-orchestrator/SKILL.md",
+        content: include_str!("../../../framework/skills/vowp-orchestrator/SKILL.md"),
+    },
+    FrameworkFile {
         target: "opencode.jsonc",
         content: include_str!("../../../framework/opencode/opencode.jsonc"),
     },
 ];
+
+/// The instructions file `vowp orchestrator new` writes into its project-local directory.
+pub const ORCHESTRATOR_INSTRUCTIONS: &str = include_str!("../../../framework/templates/ORCHESTRATOR.md");
 
 /// Returns the body of the embedded brief template, without its example front-matter.
 pub fn brief_template_body() -> &'static str {
@@ -79,5 +86,22 @@ mod tests {
         assert!(skill.content.contains("name: vowp-capacity-advisor"));
         assert!(skill.content.contains("vowp capacity set --target"));
         assert!(skill.content.contains("never change"));
+    }
+
+    #[test]
+    fn orchestrator_skill_and_instructions_are_embedded() {
+        let skill = FILES
+            .iter()
+            .find(|file| file.target == ".claude/skills/vowp-orchestrator/SKILL.md")
+            .expect("the orchestrator skill is installed by vowp init");
+        assert!(skill.content.contains("name: vowp-orchestrator"));
+        assert!(skill.content.contains("fleet_status"));
+        assert!(skill.content.contains("session_resume"));
+        assert!(skill.content.contains("control-machine"));
+        assert!(!skill.content.contains("they include the tunnel"));
+        assert!(super::ORCHESTRATOR_INSTRUCTIONS.contains("Never open, query or edit a database"));
+        assert!(super::ORCHESTRATOR_INSTRUCTIONS.contains("Never read, print, log or commit a secret"));
+        assert!(super::ORCHESTRATOR_INSTRUCTIONS.contains("control machine"));
+        assert!(super::ORCHESTRATOR_INSTRUCTIONS.contains("cannot open tunnels itself"));
     }
 }
