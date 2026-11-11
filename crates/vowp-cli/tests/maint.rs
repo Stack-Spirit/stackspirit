@@ -280,9 +280,9 @@ fn node_add_and_rm_probe_with_fake_ssh() {
 // ---------------------------------------------------------------------------
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vowp_core::lifecycle::backup::{BackupOptions, backup as core_backup, restore as core_restore};
 use vowp_core::{
@@ -1517,8 +1517,41 @@ fn backup_offsite_alias_copies_the_default_backup() {
     assert!(rsync.shell.is_none());
 }
 
+/// Stops the writer and disarms the wall-clock watchdog when the test leaves scope,
+/// including while unwinding from a panic.
+struct WriterGuard {
+    stop: Arc<AtomicBool>,
+    finished: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl WriterGuard {
+    fn new(stop: Arc<AtomicBool>, finished: std::sync::mpsc::Sender<()>) -> Self {
+        Self {
+            stop,
+            finished: Some(finished),
+        }
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.send(());
+        }
+    }
+}
+
 #[test]
 fn backup_project_database_while_writer_checkpoints() {
+    // A fixed budget keeps the writer from filling the runner's disk even if a backup
+    // stalls: at most ~10 MiB of payload (10,000 x 1 KiB titles) and ~20 s of commits.
+    const WRITER_MAX_COMMITS: u64 = 10_000;
+    const WRITER_PAUSE: Duration = Duration::from_millis(2);
+    const TITLE_BYTES: usize = 1024;
+    const TEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+    let started_at = Instant::now();
     let fixture = BackupFixture::new();
     let alpha = fixture.env.config.project.name.clone();
     let paths = NodePaths::new(fixture.env.home_path());
@@ -1528,7 +1561,7 @@ fn backup_project_database_while_writer_checkpoints() {
             &alpha,
             &NewJob {
                 id: JobId::parse(&format!("seed-{index:04}")).expect("job id"),
-                title: "x".repeat(8 * 1024),
+                title: "x".repeat(TITLE_BYTES),
                 kind: JobKind::Build,
                 role: Role::Worker,
                 profile: None,
@@ -1547,20 +1580,33 @@ fn backup_project_database_while_writer_checkpoints() {
     drop(seed);
 
     let stop = Arc::new(AtomicBool::new(false));
+    let committed = Arc::new(AtomicU64::new(0));
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = finished_rx.recv_timeout(TEST_TIMEOUT) {
+            eprintln!(
+                "backup_project_database_while_writer_checkpoints exceeded {TEST_TIMEOUT:?}; failing instead of hanging"
+            );
+            std::process::exit(101);
+        }
+    });
+    let writer_guard = WriterGuard::new(Arc::clone(&stop), finished_tx);
+
     let writer_paths = paths.clone();
     let writer_project = alpha.clone();
     let writer_stop = Arc::clone(&stop);
+    let writer_committed = Arc::clone(&committed);
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
         let store = Store::open_with_project(&writer_paths, &writer_project).expect("writer project");
         let mut written = 0_u64;
-        while !writer_stop.load(Ordering::Relaxed) {
+        while written < WRITER_MAX_COMMITS && !writer_stop.load(Ordering::Relaxed) {
             store
                 .insert_job(
                     &writer_project,
                     &NewJob {
                         id: JobId::parse(&format!("live-{written}")).expect("job id"),
-                        title: "y".repeat(8 * 1024),
+                        title: "y".repeat(TITLE_BYTES),
                         kind: JobKind::Build,
                         role: Role::Worker,
                         profile: None,
@@ -1576,9 +1622,11 @@ fn backup_project_database_while_writer_checkpoints() {
                 )
                 .expect("writer job");
             written += 1;
+            writer_committed.store(written, Ordering::SeqCst);
             if written == 1 {
                 started_tx.send(()).expect("writer started signal");
             }
+            std::thread::sleep(WRITER_PAUSE);
         }
         written
     });
@@ -1588,6 +1636,7 @@ fn backup_project_database_while_writer_checkpoints() {
 
     let mut last_backup = None;
     for round in 0..2 {
+        let before = committed.load(Ordering::SeqCst);
         let destination = fixture.env.home_path().join(format!("writer-backup-{round}"));
         fixture
             .run_backup(
@@ -1598,11 +1647,21 @@ fn backup_project_database_while_writer_checkpoints() {
                 },
             )
             .expect("backup while a project writer checkpoints");
+        let after = committed.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "the writer did not commit during backup round {round}: {before} before, {after} after"
+        );
         last_backup = Some(destination);
     }
     stop.store(true, Ordering::SeqCst);
     let written = writer.join().expect("writer thread");
     assert!(written > 0, "the writer must commit while backups run");
+    assert_eq!(
+        written,
+        committed.load(Ordering::SeqCst),
+        "the writer count must match its last published progress"
+    );
 
     let restore_home = tempfile::tempdir().expect("restore home");
     fixture
@@ -1612,6 +1671,14 @@ fn backup_project_database_while_writer_checkpoints() {
     restored.integrity_check().expect("restored integrity");
     let jobs = restored.list_jobs(&JobFilter::default()).expect("jobs");
     assert!(jobs.len() >= 500, "restored only {} jobs", jobs.len());
+
+    let elapsed = started_at.elapsed();
+    assert!(
+        elapsed < TEST_TIMEOUT,
+        "the test must finish within {TEST_TIMEOUT:?}; it took {elapsed:?}"
+    );
+    drop(writer_guard);
+    watchdog.join().expect("watchdog thread");
 }
 
 #[test]
