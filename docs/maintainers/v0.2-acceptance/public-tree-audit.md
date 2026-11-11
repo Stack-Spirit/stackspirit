@@ -2,17 +2,17 @@
 job: v2-j1-public-tree-audit
 status: done
 branch: job/v2-j1-public-tree-audit
-commits: [2a61d81]
-tests: "bash scripts/audit/self-test.sh: PASS; bash docs/tests/run.sh: PASS (private and public tree); python3 docs/reference/check-reference.py: PASS; python3 docs/reference/generate.py --check: PASS (74 pages); cargo fmt/clippy: PASS; cargo test --workspace: PASS (0 failed, 2 ignored); squash-for-public.sh: FAIL at the private-marker gate (35 findings, branch left for inspection)"
-files_changed: [docs/maintainers/v0.2-acceptance/public-tree-audit.md, scripts/audit/allowlist.txt, scripts/audit/public-tree.txt, scripts/audit/public-tree-markers.sh, scripts/audit/scan.sh, scripts/audit/self-test.sh, scripts/audit/squash-for-public.sh]
+commits: [2a61d81, 584cce3, 16ef1b1, 483ecec, e8d2bc0]
+tests: "bash scripts/audit/self-test.sh: PASS; bash docs/tests/run.sh: PASS (private and public tree); python3 docs/reference/check-reference.py: PASS; python3 docs/reference/generate.py --check: PASS (74 pages); cargo fmt/clippy: PASS; cargo test --workspace: PASS (0 failed, 2 ignored); scan.sh --public-tree: FAIL (1 blocked ssh_target, 233 allowlisted); scan.sh --rev public-main: PASS (235 allowlisted, 0 blocked); squash-for-public.sh: FAIL at the private-marker gate (35 findings, branch left for inspection)"
+files_changed: [docs/maintainers/v0.2-acceptance/public-tree-audit.md, scripts/audit/allowlist.txt, scripts/audit/go-public.md, scripts/audit/public-tree.txt, scripts/audit/public-tree-markers.sh, scripts/audit/public-tree-scrub.py, scripts/audit/scan.sh, scripts/audit/self-test.sh, scripts/audit/squash-for-public.sh]
 open_items: []
 questions_for_owner:
   - id: f-public-tree-v02-docs
-    owns: [docs/design/v0.2/README.md, docs/design/v0.2/home-and-surfaces.md, docs/concepts/capacity.md, docs/design/README.md]
-    why: "Replace the v2-* job ids in the examples, remove the delivery dependency graph and the 'merged 2026-11-10' spike notes, and rewrite the C0/C1/S1-S3/K3/T2/T3 build-phase wording in product terms. Keep the behaviour, measurements and named tests; only the build-diary material changes."
+    owns: [docs/design/v0.2/README.md, docs/design/v0.2/home-and-surfaces.md, docs/concepts/capacity.md, docs/design/README.md, docs/design/sessions.md]
+    why: "Replace the v2-* job ids in the examples, remove the delivery dependency graph and the 'merged 2026-11-10' spike notes, and rewrite the C0/C1/S1-S3/K3/T2/T3 build-phase wording in product terms, including the S2 measurement sentence in docs/design/sessions.md. Keep the behaviour, measurements and named tests; only the build-diary material changes."
   - id: f-public-tree-code-comments
-    owns: [crates/vowp-cli/src/**, crates/vowp-core/src/**, crates/vowp-core/tests/**, crates/vowp-protocol/src/**, crates/vowp-store/src/**]
-    why: "Sweep the build-phase comments (C0/C1/D1/D2/E1/E2/F2/F5/G1 fills), the two docs/maintainers/v0.2-spikes references and the v2-g1-vault test id from shipping source and tests. The interfaces stay unchanged; this is a comment and fixture-id change."
+    owns: [crates/vowp-cli/src/**, crates/vowp-cli/tests/**, crates/vowp-core/src/**, crates/vowp-core/tests/**, crates/vowp-protocol/src/**, crates/vowp-protocol/tests/**, crates/vowp-store/src/**, crates/vowp-store/tests/**]
+    why: "Sweep the build-phase comments (C0/C1/D1/D2/E1/E2/F2/F5/G1 fills), the two docs/maintainers/v0.2-spikes references, the v2-g1-vault test id and the concrete ssh_target in crates/vowp-protocol/tests/domain.rs from shipping source and tests. The interfaces stay unchanged; this is a comment and fixture-value change."
   - id: f-public-tree-security-doc
     owns: [docs/security.md]
     why: "docs/security.md:173 points at scripts/audit/scan.sh, which is pruned from the public tree. Describe the secret scan without the private path."
@@ -21,9 +21,9 @@ questions_for_owner:
 # v0.2 public-tree audit (J1)
 
 **Verdict: the public candidate is not ready to ship yet.** Three checks pass; the private-data
-check fails on 35 build-metadata findings. The secret-shaped scan is clean on the candidate. The
-findings need the three `f-*` jobs under `questions_for_owner`; J2 should rebuild `public-main`
-after they merge.
+check fails on 35 build-metadata findings plus one concrete SSH target in the private test fixture
+(the public candidate scrubs that value). The findings need the three `f-*` jobs under
+`questions_for_owner`; J2 should rebuild `public-main` after they merge.
 
 ## Tree audited
 
@@ -32,7 +32,7 @@ after they merge.
   `ae14b2d`, `9b19b79`, `4423385`, `b4458a4`, `1bafd01` and `feffdf6` to `a430e32`; this report and
   the branch were rebased onto the final tree. The last commit only changes
   `docs/maintainers/fresh-setup.md`, which is pruned, so the public tree is unchanged. The tooling
-  commit is **`2a61d81`**.
+  commit is **`e8d2bc0`**.
 
   ```text
   $ git diff --name-only feffdf6..a430e32
@@ -40,18 +40,21 @@ after they merge.
   ```
 
 - Public candidate: the orphan `public-main` tree produced by
-  `scripts/audit/squash-for-public.sh --force`, tree **`e5d59f6`**, **636 files**
-  (commit `c5d1233`; this report is pruned, so a later report-only commit does not change the tree).
+  `scripts/audit/squash-for-public.sh --force`, tree **`6383faa`**, **636 files**
+  (commit `2ad3462`; this report is pruned, so a later report-only commit does not change the tree).
 - No push, tag, publish or visibility change was made. The private working tree, the real home, the
   default tmux server and the network were not touched by the audit.
+- The `commits` field lists the substantive commits before the report-only commit that contains
+  this file; the worker report at `/home/dev/vowp-night/jobs/v2-j1-public-tree-audit/report.md`
+  lists the full chain.
 
 ## Commands and results
 
 | Command | Result |
 |---|---|
 | `bash scripts/audit/self-test.sh` | PASS: scanner rules, masking, allowlist, history, public-tree prune, build markers and scrub idempotence |
-| `bash scripts/audit/scan.sh --public-tree --summary` | PASS: 225 findings, 225 allowlisted, **0 blocked** |
-| `bash scripts/audit/scan.sh --rev public-main --summary` | PASS: 225 findings, 225 allowlisted, **0 blocked** |
+| `bash scripts/audit/scan.sh --public-tree --summary` | **FAIL: 1 blocked `ssh_target`** (234 findings, 233 allowlisted) |
+| `bash scripts/audit/scan.sh --rev public-main --summary` | PASS: 235 findings, 235 allowlisted, **0 blocked** (the scrubbed SSH fixture is allowlisted) |
 | `bash scripts/audit/public-tree-check.sh --rev public-main` | PASS: 636 files, no pruned path, every required path |
 | `bash scripts/audit/public-tree-markers.sh --rev public-main --summary` | **FAIL: 35 findings** (8 `job_id`, 3 `private_path`, 24 `build_diary`) |
 | `bash docs/tests/run.sh` (private tree) | PASS: 537 links in 143 files, 26 headings; 768 references, 69 commands, 40 implemented, 0 planned |
@@ -63,10 +66,11 @@ after they merge.
 | `cargo test --workspace` | PASS: 0 failed, 2 ignored |
 | `bash scripts/audit/squash-for-public.sh --force` | Build, clippy, tests, prune, scrub and secret scan pass; **stops at the marker gate** and leaves `public-main` for inspection |
 
-The first squash attempt on this tree hit `setup_verify_run_reports_every_check` in
-`crates/vowp-cli/tests/setup_verify.rs:441` (the fixture job ended `failed`). The test passed when
-rerun alone and the second full squash run passed the build and test stages. This is the known
-load-sensitive setup-verify test, not a public-tree finding.
+The squash test stage hit load-sensitive `setup_verify` tests twice
+(`setup_verify_run_reports_every_check` at `crates/vowp-cli/tests/setup_verify.rs:441` and
+`setup_verify_fixture_job_merges` at `:245`). Both passed when rerun alone and the next full run
+passed the build and test stages. This is the known load-sensitive setup-verify group, not a
+public-tree finding.
 
 The supervisor's first gate run on this branch also hit a `loops_supervisor` failure under load
 (the gate output was truncated before the test name). The exact gate command,
@@ -78,8 +82,16 @@ product finding.
 
 ### Check 1 — no private data: **FAIL**
 
-The seven secret-shaped rules are clean on the candidate: no real home path, private hostname, SSH
-target, token, key, `.env` path or large blob is non-allowlisted. The build-metadata scan fails:
+The secret scanner now covers eight content patterns. One private-tree finding is blocked:
+`crates/vowp-protocol/tests/domain.rs:215` contains `"ssh_target": "dev@vps"` — the build Unix
+user and the home node name. The old scanner only matched a command-form `ssh user@host`, so this
+shipped unnoticed; the new `ssh_target` rule (JSON/TOML field plus value) catches it. The
+public-tree scrub rewrites the value to `"ssh_target": "vowp@example.invalid"` in the staged
+candidate, and that reserved placeholder is allowlisted, so `scan.sh --rev public-main` passes.
+The private fixture still needs the `f-public-tree-code-comments` job (it owns
+`crates/vowp-protocol/tests/**`). No other secret-shaped rule is blocked.
+
+The build-metadata scan fails:
 
 ```text
 $ bash scripts/audit/public-tree-markers.sh --rev public-main
@@ -131,15 +143,22 @@ delivery plan in places:
 - `docs/design/v0.2/home-and-surfaces.md:7` says the document freezes "what the later jobs need",
   and `:18-19` calls the labels "implementation-phase labels … None is user-facing" while they
   ship. `:1812`, `:1820`, `:1832`, `:1853`, `:2270`, `:2290`, `:2476`, `:2646`, `:2731`, `:2789`,
-  `:3083`, `:3437`, `:3640-3727`, and `:4159` add `S1`/`S2`/`S3`/`F5`/`F6`/`H1`/`C2`/`E2` build
+  `:3085`, `:3439`, `:3640-3727`, and `:4159` add `S1`/`S2`/`S3`/`F5`/`F6`/`H1`/`C2`/`E2` build
   notes.
 - `docs/concepts/capacity.md:67`, `:73` and `:238` say `S1 measured` / `the S1 measurements`; the
-  numbers can stay, the spike label should become product wording.
+  numbers can stay, the spike label should become product wording. `docs/design/sessions.md:245`
+  has the same problem for `S2` ("S2 measured 99.6–265 ms live SSH, bound < 2 s"); keep the
+  measurement, rewrite the spike label.
 - `docs/design/README.md:26` and `:60` advertise `C0 hooks` in the v0.2 spec.
 - Shipping source comments use the same phase labels: `C0` appears 128 times, `E2` 26, `G1` 31,
   `F5` 19, `F6` 14, `E1` 22, `S3` 17, `C1` 38 (line counts from
   `git grep -I -E '\bC0\b'` and the matching labels). The marker rule names the `C0 freezes` subset;
   the rest is the same cleanup.
+- The public tests also carry the labels: `crates/vowp-store/tests/schema_enums.rs:294,318` (C0),
+  `crates/vowp-store/tests/migration.rs:2`, `crates/vowp-store/tests/split.rs:2` and
+  `crates/vowp-store/tests/crash_split.rs:2` (C1), `crates/vowp-cli/tests/core.rs:330` (C0),
+  `crates/vowp-cli/tests/mcp.rs:6` (F6), `crates/vowp-cli/tests/up.rs:1572` (D1) and
+  `crates/vowp-protocol/tests/schema.rs:29` (C0). The code-comment job owns all three test trees.
 
 **Not findings:** `AI-Assisted: <model> via VOWP` is the documented product trailer
 (`CONTRIBUTING.md`, the PR template and the framework templates) and is intentionally not matched;
@@ -179,7 +198,7 @@ Evidence:
 $ git ls-tree -r --name-only public-main | grep -E '^(AGENTS\.md|docs/maintainers/|scripts/(spikes|acceptance|audit|dogfood|fresh-user)/|site/)'
 (no output)
 $ bash scripts/audit/public-tree-check.sh --rev public-main
-public-tree: OK: c5d123397d986a622f163cf0efe481a5ef3f232d has 636 file(s), no pruned path and every required path.
+public-tree: OK: 2ad3462ad283d87c82bbeef64c9c0c2a454adf0e has 636 file(s), no pruned path and every required path.
 ```
 
 ## Tooling changed by this job
@@ -188,15 +207,21 @@ public-tree: OK: c5d123397d986a622f163cf0efe481a5ef3f232d has 636 file(s), no pr
   the v0.2 design and setup docs.
 - `scripts/audit/scan.sh` gains `--public-tree`, which scans only the paths that would ship and
   skips every manifest prune path. It also initialises its count file (a clean tree previously made
-  the summary awk read a missing file) and ignores Rust field access such as
-  `args.local_port` / `self.local.path()` as hostnames.
+  the summary awk read a missing file), ignores Rust field access such as
+  `args.local_port` / `self.local.path()` as hostnames, and adds the `ssh_target` rule for
+  JSON/TOML user@host fields.
+- `scripts/audit/public-tree-scrub.py` rewrites the concrete `ssh_target` fixture in
+  `crates/vowp-protocol/tests/domain.rs` to the reserved `vowp@example.invalid` value in the staged
+  index only; the self-test covers the rewrite and the untouched private file.
 - `scripts/audit/public-tree-markers.sh` is new: it scans a worktree, index or revision for
   `vowp-night`, private AI trailers, `v2-*` job ids, references to pruned private paths and
   build-diary wording. `scripts/audit/self-test.sh` covers it and `squash-for-public.sh` runs it on
   the new branch before reporting success.
 - `scripts/audit/allowlist.txt` records the v0.2 product placeholders (`/home/vowp`,
   `/home/vowp-vault`, `/home/fake`, `setup@example.invalid`, `vowp@home.example`,
-  `vowp@example.invalid`) and `0.0.0.0` with reasons.
+  `vowp@example.invalid`), the reserved `ssh_target` examples and `0.0.0.0` with reasons.
+- `scripts/audit/squash-for-public.sh` scans the scrubbed staged tree, not the unscrubbed working
+  tree, and `scripts/audit/go-public.md` lists the new marker guard.
 
 ## f-* jobs to create
 
