@@ -27,6 +27,7 @@ unsafe_code = "forbid"
 [package]
 name = "vowp-cli"
 description = "The VOWP command-line interface and `vowp` binary."
+build = "scripts/release/build.rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -44,6 +45,7 @@ include = [
   "framework/skills/**",
   "framework/opencode/**",
   "crates/vowp-cli/README.md",
+  "scripts/release/build.rs",
   "Cargo.toml",
 ]
 
@@ -65,7 +67,7 @@ path = "crates/vowp-cli/tests/chat.rs"
 
 [[test]]
 name = "control"
-path = "crates/vowp-cli/tests/control.rs"
+path = "scripts/release/cargo-tests/control.rs"
 
 [[test]]
 name = "core"
@@ -101,7 +103,7 @@ path = "crates/vowp-cli/tests/loops.rs"
 
 [[test]]
 name = "maint"
-path = "crates/vowp-cli/tests/maint.rs"
+path = "scripts/release/cargo-tests/maint.rs"
 
 [[test]]
 name = "project_path"
