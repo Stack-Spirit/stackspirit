@@ -4,15 +4,17 @@ All notable changes to VOWP are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-Release notes for the first public release are in
+Release notes are in [`docs/release/0.2.0.md`](docs/release/0.2.0.md) and
 [`docs/release/0.1.0.md`](docs/release/0.1.0.md). The product scope and the
-features deliberately left out of v0.1 are in [`docs/roadmap.md`](docs/roadmap.md).
+features deliberately left out of v0.2 are in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
 The v0.2 feature set: one VPS **home** that owns the truth, and many **surfaces** that talk to it.
-This section lists features only; the release job owns the tag, the release notes and the
-publish step.
+This is an early release; the interfaces may still change. The upgrade path, acceptance evidence
+and known limits are in [`docs/release/0.2.0.md`](docs/release/0.2.0.md).
 
 ### Added
 
@@ -206,5 +208,6 @@ generated CLI and JSON Schema reference (`docs/reference/`), the design spec
 (`docs/design/`), a docs command/link checker (`docs/tests/`) and the runnable
 `examples/hello-vowp` fake-adapter demo.
 
-[Unreleased]: https://github.com/syver777/vowp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/syver777/vowp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/syver777/vowp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/syver777/vowp/releases/tag/v0.1.0
