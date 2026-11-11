@@ -1,6 +1,6 @@
 # v0.2 / v0.3 — cross-node session sync
 
-Status: **partly superseded by v0.2**. v0.2's remote execution (`docs/design/v0.2/home-and-surfaces.md`
+Status: current for the commands shown; **partly superseded by v0.2**. v0.2's remote execution (`docs/design/v0.2/home-and-surfaces.md`
 §7.2) keeps one session on the home and moves only the **executor** to another machine. That is the
 product behaviour "the same conversation from the laptop and the phone"; a session no longer has to
 be copied between nodes for a human to continue it.

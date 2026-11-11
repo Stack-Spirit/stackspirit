@@ -72,7 +72,7 @@ Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status"
   control machine.
 - `down`: writes `~/.vowp/stop`, waits ≤ 30 s for the lock to disappear; `--force` additionally sends SIGTERM to the pid. Running runs are interrupted and re-queued (`stalled`, not failed). Windows are left for inspection unless `--kill-windows`.
 - `status`: one screen — supervisor (pid, uptime, last tick age), every project with jobs by state, slots busy/total, planner/keeper executors, limits with reset times, cost today, inbox open count. JSON keeps the v0.1 keys and adds `home` and `projects`. Exit 0 whether or not a supervisor runs (use `--json` `running` field; `vowp status --check` exits 1 if the heartbeat is older than 3 min — the watchdog uses this).
-- `board`: refreshing dashboard (clear+redraw every `--interval`, default 2 s; `--once` prints once): every project's jobs by state with the running ones listed (job, executor, age, last event age), slots, limits, cost, inbox, last checkpoint. It always recomputes from the databases; `board.json` is only a convenience copy written by the supervisor.
+- `board`: refreshing dashboard (clear+redraw every `--interval`, default 2 s; `--once` prints once). With one project selected it prints the v0.1 single-project frame: jobs by state, the running jobs (job, executor, age, last event age), slots, limits, cost, inbox and the last checkpoint. With several projects, or no project selected, it prints the fleet frame: every project's state, jobs by state, running/queued/blocked jobs, last merge, gate failures and cost today, then provider limits and the open inbox count; the fleet frame prints no slots and no last checkpoint. It always recomputes from the databases; `board.json` is only a convenience copy written by the supervisor.
 
 ## 3. Planning and the graph
 
@@ -359,7 +359,7 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 | `vowp --version` / `vowp version` | `vowp 0.1.0 (<git sha>) schema 1` |
 | `vowp __window <board\|capacity\|supervisor\|planner\|keeper\|inbox\|job> [<id>]` | hidden; what tmux windows run (renders the board or capacity screen, tails `supervisor.log`, tails the planner/keeper session, lists the inbox, tails a job session). Read-only. |
 | `vowp __exec --grant <file> [--spool-dir <dir>]` | hidden remote-executor client (sessions.md §9). |
-| `vowp __vault-exec --env <NAME> -- <cmd…>` · `vowp __vault-admin set\|rm <NAME>` | hidden vault-user helper; `set` reads the value from stdin, never argv. In basic mode `__vault-exec` is a plain exec. |
+| `vowp __vault-exec --env <NAME> -- <cmd…>` · `vowp __vault-admin probe\|set\|rm <NAME>` | hidden vault-user helper; `probe` checks the helper context and vault directory, `set` reads the value from stdin, never argv. In basic mode `__vault-exec` is a plain exec. |
 | `vowp setup __home-init [--root <dir>] [--name <n>] [--harness <h>] [--provider <p>]` | hidden internal bootstrap used by `setup home`; not part of the public contract. |
 | `vowp orchestrator __keepalive <name>` | hidden: keeps one orchestrator's lease alive after the CLI exits. |
 

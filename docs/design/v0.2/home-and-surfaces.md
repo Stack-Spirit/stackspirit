@@ -1,6 +1,6 @@
 # v0.2 — home, surfaces and the fleet: the implementable spec
 
-Status: **normative for v0.2**. This is the specification the v0.2 jobs implement. It covers plan
+Status: current for the commands shown; **normative for v0.2**. This is the specification the v0.2 jobs implement. It covers plan
 §3–§10: the global + per-project data model, the one node supervisor, the snapshot read model,
 capacity, sessions and surfaces (including remote execution, leases, the apps, MCP and the chat
 fallback), the control machine, secrets, lifecycle/backup and AI-first setup. It also freezes the
@@ -2937,7 +2937,8 @@ columns, and supports `/takeover` and `/follow`.
 | **vault user** | the `vowp-vault` Unix user exists and the helper is allowed by sudoers | `/home/vowp-vault/secrets/<NAME>` mode 0600 | `vowp-vault` |
 | **basic** | no sudo or no vault user (common) | `~/.vowp/secrets/<NAME>` mode 0600 | `vowp` |
 
-`~/.vowp/secrets/mode` contains `vault` or `basic` (0600). `vowp doctor` and the board print
+`~/.vowp/secrets/mode` contains `vault` when vault mode is active (0600); basic mode is the default
+when the file is absent, so the no-sudo path writes no marker. `vowp doctor` and the board print
 `secrets: vault user` or `secrets: basic mode (same user)`. The honest limit is in the public docs:
 *any agent that can run arbitrary code in a process that holds a secret can print it; this design
 keeps secrets out of files the agent can read, out of transcripts and out of git, but it cannot make
@@ -3203,14 +3204,18 @@ vowp setup verify [--json]
 ```
 
 - `plan` prints every phase, every command (argv, no shell interpolation) and every file it will
-  touch, as text and JSON. **It changes nothing** (no writes, no sudo, no network beyond the
-  `ssh -o BatchMode=yes ... vowp --version` probe). A missing `vowp` on the remote is a phase
+  touch, as text and JSON. **It changes nothing** (no writes, no sudo, no network beyond read-only
+  SSH probes). The probes check the OS and architecture, the login user and home, free disk, the
+  tools (`git`, `tmux`, `curl`, `systemctl`, `loginctl`), the harness binaries and whether the
+  chosen harnesses appear signed in, an existing `vowp`, and the sudo mode. It prints only the
+  plan; a failed requirement becomes a hand-off. A missing `vowp` on the remote is a phase
   ("install"), not an error.
 - `home --apply` is idempotent. Phases:
   1. **preflight** — SSH key login, OS/arch, disk, `git`, `tmux`, `curl`; never reads a secret.
   2. **user** — create the non-root `vowp` user if sudo is available; otherwise run as the current
      user and record the no-sudo mode.
-  3. **install** — `scripts/install.sh --download` (curl stays the primitive), verify the version.
+  3. **install** — `scripts/install.sh --download --no-service --no-cron --no-watchdog` (curl stays
+     the primitive), verify the version.
   4. **home** — `~/.vowp/`, global DB, node registry, `vowp doctor`.
   5. **service** — user systemd unit `vowp.service`, linger on, start.
   6. **vault** — vault user + helper when sudo allows, else basic mode; never a secret value.

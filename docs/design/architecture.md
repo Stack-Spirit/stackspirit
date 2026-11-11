@@ -146,7 +146,7 @@ Project directories (inside each project checkout, committed unless noted):
 ```
 <repo>/
 ├─ vowp.toml                   project config (§5)
-├─ AGENTS.md  CLAUDE.md  .agents/skills/…      installed by `vowp init` from the embedded framework templates
+├─ AGENTS.md  CLAUDE.md  .claude/skills/…      installed by `vowp init` from the embedded framework templates
 ├─ opencode.jsonc                              agent definitions with permission presets
 └─ .vowp/
      ├─ jobs/<jobId>/brief.md  report.md       job contract and result (committed on the job branch)

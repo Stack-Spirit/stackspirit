@@ -281,7 +281,7 @@ The phases are:
 | **install** | Runs the pinned release installer (`--download --version <version> --no-service --no-cron --no-watchdog`) and verifies the installed version. | The `vowp` binary under the effective user's `~/.local/bin`. |
 | **home** | Creates `~/.vowp/`, the global database, `config.toml`, `vowp.toml` and the reserved `_node` project database; runs `vowp doctor`. | The home directory and database files. Existing config files are not overwritten. |
 | **service** | Installs the user unit `vowp.service`, enables linger and starts it when systemd is available. | A user service. A missing systemd is a warning, not a silent success. |
-| **vault** | Creates the vault user and helper when sudo is passwordless; otherwise records basic secret mode. Never stores a secret value. | A vault mode, or basic mode. |
+| **vault** | Creates the vault user and helper when sudo is passwordless; otherwise uses basic secret mode and writes no `secrets/mode` marker. Never stores a secret value. | A vault user/helper, or basic mode. |
 | **projects** | Registers the repositories the owner named. Each must already exist on the home and contain `vowp.toml`. | Project registry rows and project databases. |
 | **tunnels** | None by default. Tunnels are opened from the control machine when needed. | Nothing by default. |
 
