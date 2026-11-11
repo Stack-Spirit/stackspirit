@@ -69,13 +69,17 @@ fn register_project(store: &Store, name: &ProjectName) {
 }
 
 fn insert_job(store: &Store, project: &ProjectName, id: &str) -> Job {
+    insert_job_with_needs(store, project, id, &[])
+}
+
+fn insert_job_with_needs(store: &Store, project: &ProjectName, id: &str, needs: &[&str]) -> Job {
     let new = NewJob {
         id: JobId::parse(id).unwrap(),
         title: format!("job {id}"),
         kind: JobKind::Build,
         role: Role::Worker,
         profile: Some("worker".to_owned()),
-        needs: Vec::new(),
+        needs: needs.iter().map(|need| JobId::parse(need).unwrap()).collect(),
         owns: vec!["src/**".to_owned()],
         reads: Vec::new(),
         gates: None,
@@ -582,10 +586,92 @@ fn oom_raise_applies_once_to_the_matching_project_and_kind() {
 }
 
 #[test]
+fn oom_raise_is_scoped_to_the_project_and_the_24_hour_window() {
+    let (_tmp, deps, store, project, job) = fixture();
+    let other = ProjectName::parse("other").unwrap();
+    let stale = ProjectName::parse("stale").unwrap();
+    register_project(&store, &other);
+    register_project(&store, &stale);
+    let other_store = Store::open_with_project(&deps.paths, &other).unwrap();
+    let stale_store = Store::open_with_project(&deps.paths, &stale).unwrap();
+    let other_job = insert_job(&other_store, &other, "other-job");
+    let stale_job = insert_job(&stale_store, &stale, "stale-job");
+    store
+        .insert_host_sample(&sample(now(), 8 * GIB, 2 * GIB, 0, Some(0.0), 50 * GIB, Some(4.0)))
+        .unwrap();
+    for name in [&project, &other, &stale] {
+        seed_estimate_kind(&store, name, JobKind::Build, GIB, 1.0);
+    }
+    store.kv_set("capacity:estimates_at", &now().as_rfc3339()).unwrap();
+    insert_oom_usage(
+        &store,
+        &other,
+        JobKind::Build,
+        None,
+        now().minus(Duration::from_secs(60)),
+    );
+    insert_oom_usage(
+        &store,
+        &stale,
+        JobKind::Build,
+        None,
+        now().minus(Duration::from_secs(25 * 60 * 60)),
+    );
+
+    let manager = CapacityManager::new(deps.clone());
+    let unaffected = manager.admit(&store, &request(&deps, &store, &job), now()).unwrap();
+    assert_eq!(
+        unaffected,
+        AdmitDecision::Admit,
+        "another project's OOM row must not raise this project's estimate"
+    );
+
+    let other_first = manager
+        .admit(&other_store, &request(&deps, &other_store, &other_job), now())
+        .unwrap();
+    assert_eq!(
+        wait_code(other_first),
+        WaitCode::Ram,
+        "the other project's row is still owed its raise"
+    );
+    let other_second = manager
+        .admit(&other_store, &request(&deps, &other_store, &other_job), now())
+        .unwrap();
+    assert_eq!(
+        other_second,
+        AdmitDecision::Admit,
+        "the other project's raise is consumed by that project's next admission"
+    );
+
+    let old = manager
+        .admit(&stale_store, &request(&deps, &stale_store, &stale_job), now())
+        .unwrap();
+    assert_eq!(
+        old,
+        AdmitDecision::Admit,
+        "an OOM row older than 24 h no longer raises the estimate"
+    );
+}
+
+#[test]
 fn node_tick_parks_an_oom_killed_job() {
     let env = node_env(&[("alpha", 1)]);
     let project = env.projects[0].clone();
-    let job = insert_job(&env.store, &project, "oom-job");
+    // The OOM job needs an unfinished blocker, so the project tick never dispatches it and
+    // cannot reach `CapacityManager::admit`/`maintain`; only the node sample step can park it.
+    let blocker = insert_job(&env.store, &project, "oom-blocker");
+    Store::open_with_project(&env.paths, &project)
+        .unwrap()
+        .set_job_state(
+            &blocker.id,
+            JobState::Parked,
+            &vowp_store::StateChange {
+                note: Some("parked: test blocker".to_owned()),
+                parked_reason: Some(ParkedReason::Manual),
+            },
+        )
+        .unwrap();
+    let job = insert_job_with_needs(&env.store, &project, "oom-job", &["oom-blocker"]);
     insert_oom_usage(
         &env.store,
         &project,
@@ -604,6 +690,18 @@ fn node_tick_parks_an_oom_killed_job() {
     );
 
     let project_store = Store::open_with_project(&env.paths, &project).unwrap();
+    let open_runs = project_store.open_runs().unwrap();
+    assert!(
+        !open_runs
+            .iter()
+            .any(|run| run.job_id.as_ref().is_some_and(|id| id == &blocker.id || id == &job.id)),
+        "the blocker prevents a worker admission on this tick: {open_runs:?}"
+    );
+    assert_eq!(
+        project_store.require_job(&blocker.id).unwrap().state,
+        JobState::Parked,
+        "the blocker stays parked, so it never triggers an admission either"
+    );
     let parked = project_store.require_job(&job.id).unwrap();
     assert_eq!(parked.state, JobState::Parked);
     assert_eq!(parked.parked_reason, Some(ParkedReason::Manual));
