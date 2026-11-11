@@ -2,7 +2,7 @@
 #
 # Each non-comment line is: rule|path|matched-value|reason
 #   rule          one of ipv4, home_path, email, token, private_host, ssh_host,
-#                 secret_path, large_blob
+#                 ssh_target, secret_path, large_blob
 #   path          a repo-relative file path, or * for a value that is safe anywhere
 #   matched-value the exact text the scanner matched (never a secret)
 #   reason        why this finding is safe; must not be empty

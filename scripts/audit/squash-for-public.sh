@@ -4,10 +4,11 @@
 #
 # This is the publication path chosen by the owner on 2026-11-09: the current
 # private repository and its history stay private; the public repository starts
-# with a single commit. The script refuses to create the branch if the working
-# tree has findings, if the build is not green, or if the staged public tree
-# contains a pruned path, is missing a required product path, or has a
-# top-level path outside the publication allow-list.
+# with a single commit. The script stops if the working tree is not clean or the
+# build is not green, and checks the staged public tree before committing it:
+# no pruned path, every required product path, only allowed top-level paths.
+# The scanner and marker checks run on the resulting commit, not on the private
+# working tree; a failing check leaves the branch in place for inspection.
 #
 # The staged tree is built in a temporary index. The private checkout, branch
 # and files are left untouched. It never pushes, tags, publishes or changes

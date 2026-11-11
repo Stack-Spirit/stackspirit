@@ -152,7 +152,8 @@ if [ "$mode" = rev ]; then
     rev=$(git rev-parse --verify "$rev^{commit}" 2>/dev/null) || die "not a commit: $rev"
 fi
 
-# The eight content patterns. They are also documented in docs/maintainers/public-audit.md.
+# The seven content patterns, plus the secret_path and large_blob path checks.
+# They are also documented in docs/maintainers/public-audit.md.
 RE_IP='([0-9]{1,3}\.){3}[0-9]{1,3}'
 RE_HOME='(/home/|/Users/)[A-Za-z0-9._-]+'
 RE_EMAIL='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
