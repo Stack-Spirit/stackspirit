@@ -31,7 +31,7 @@ use vowp_protocol::{
     ProjectState, Role, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, Timestamp, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
-use vowp_store::{NodePaths, SessionFilter, Store};
+use vowp_store::{JobFilter, NodePaths, SessionFilter, Store};
 use vowp_tmux::fake::FakeWindows;
 
 use crate::cmd::setup::SetupVerifyArgs;
@@ -464,17 +464,35 @@ pub fn fixture_job_merges(ctx: &Ctx) -> Result<SetupCheck, CliError> {
             JobState::Done => break,
             JobState::Failed | JobState::Parked | JobState::Cancelled | JobState::Replanned => {
                 let last_run = store.last_run_of_job(&job_id)?;
+                let jobs = store.list_jobs(&JobFilter {
+                    project: Some(fixture.project.clone()),
+                    ..JobFilter::default()
+                })?;
+                let states = jobs
+                    .iter()
+                    .map(|job| format!("{}={}", job.id, job.state.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let gates = store.gate_results_for(&job_id, job.attempts)?;
+                let failed_gates = gates
+                    .iter()
+                    .filter(|gate| !gate.passed)
+                    .map(|gate| format!("{:?} {:?}", gate.gate, gate.evidence))
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 return Ok(check(
                     "fixture.job_merge",
                     "fail",
                     format!(
-                        "fixture job ended in {}{}; note {:?}; last run {}",
+                        "fixture job ended in {}{}; note {:?}; jobs {}; failed gates {}; last run {}",
                         job.state.as_str(),
                         job.parked_reason
                             .as_ref()
                             .map(|reason| format!(" ({reason:?})"))
                             .unwrap_or_default(),
                         job.note,
+                        states,
+                        failed_gates,
                         last_run
                             .as_ref()
                             .map(|run| format!("{:?}: {}", run.outcome, first_line(&run.detail, "")))
@@ -486,14 +504,24 @@ pub fn fixture_job_merges(ctx: &Ctx) -> Result<SetupCheck, CliError> {
         }
         if Instant::now() >= deadline {
             let last_run = store.last_run_of_job(&job_id)?;
+            let jobs = store.list_jobs(&JobFilter {
+                project: Some(fixture.project.clone()),
+                ..JobFilter::default()
+            })?;
+            let states = jobs
+                .iter()
+                .map(|job| format!("{}={}", job.id, job.state.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Ok(check(
                 "fixture.job_merge",
                 "fail",
                 format!(
-                    "fixture job did not merge within {}s (last state {}; continues {}; last run {})",
+                    "fixture job did not merge within {}s (last state {}; continues {}; jobs {}; last run {})",
                     FIXTURE_MERGE_TIMEOUT.as_secs(),
                     job.state.as_str(),
                     job.continues,
+                    states,
                     last_run
                         .as_ref()
                         .map(|run| format!("{:?}: {}", run.outcome, first_line(&run.detail, "")))
@@ -798,21 +826,34 @@ fn unique_suffix() -> String {
 }
 
 /// Returns the fake opencode script for `job`.
+///
+/// The report path is taken from the prompt, so a fix child (whose id differs from the
+/// fixture job's id) writes its own report instead of leaving its run without one. A
+/// child without a report stalls forever and keeps the fixture job in `fixing` until the
+/// merge deadline.
 fn harness_script(job: &JobId, reply: &str, commit_file: bool) -> String {
     let commit = if commit_file {
         format!(
             r#"sleep 1
-mkdir -p .vowp/jobs/{job}
-cat > .vowp/jobs/{job}/report.md <<'VOWP_REPORT_EOF'
+prompt=""
+for arg in "$@"; do prompt="$arg"; done
+report=$(printf '%s\n' "$prompt" | grep -o '\.vowp/jobs/[^[:space:]]*/report\.md' | head -n 1)
+if [ -z "$report" ]; then
+  report=".vowp/jobs/{job}/report.md"
+fi
+report_job=$(basename "$(dirname "$report")")
+branch=$(git symbolic-ref --short HEAD)
+mkdir -p "$(dirname "$report")"
+cat > "$report" <<VOWP_REPORT_EOF
 ---
-job: {job}
+job: $report_job
 status: done
-branch: job/{job}
+branch: $branch
 ---
 setup verify fixture turn
 VOWP_REPORT_EOF
 printf '%s\n' 'setup verify fixture turn' > setup-verify.txt
-git add .vowp/jobs/{job}/report.md setup-verify.txt >/dev/null 2>&1
+git add "$report" setup-verify.txt >/dev/null 2>&1
 git -c user.name='setup verify' -c user.email='setup@example.invalid' commit -m 'setup verify fixture turn' >/dev/null 2>&1
 "#
         )
@@ -893,4 +934,79 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output, CliError>
         return Err(CliError::Io(error));
     }
     child.wait_with_output().map_err(CliError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+    use vowp_protocol::JobId;
+
+    use super::harness_script;
+
+    #[test]
+    fn fixture_harness_writes_the_report_for_the_running_child_job() {
+        let temp = TempDir::new().expect("temp fixture");
+        let repo = temp.path();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["checkout", "--quiet", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=setup verify",
+                "-c",
+                "user.email=setup@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture base",
+            ],
+        ] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+
+        let script = repo.join("fake-opencode");
+        let root = JobId::parse("setup-verify-job-root").expect("root job id");
+        fs::write(&script, harness_script(&root, "fixture answer", true)).expect("write harness");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod harness");
+
+        let child = "setup-verify-job-root-fix-1";
+        let prompt = format!(
+            "Fix exactly these problems in the same worktree and update {}/.vowp/jobs/{child}/report.md. \
+             Do not widen scope.",
+            repo.display()
+        );
+        let output = Command::new(&script)
+            .args(["run", &prompt])
+            .current_dir(repo)
+            .output()
+            .expect("run harness");
+        assert!(
+            output.status.success(),
+            "harness failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !repo.join(".vowp/jobs/setup-verify-job-root/report.md").exists(),
+            "the root report must not satisfy a child run"
+        );
+        let report = fs::read_to_string(repo.join(format!(".vowp/jobs/{child}/report.md"))).expect("child report");
+        assert!(report.contains(&format!("job: {child}")), "{report}");
+        assert!(report.contains("status: done"), "{report}");
+        assert!(report.contains("branch: main"), "{report}");
+        assert!(
+            repo.join("setup-verify.txt").is_file(),
+            "the fixture commit must include its file"
+        );
+    }
 }
