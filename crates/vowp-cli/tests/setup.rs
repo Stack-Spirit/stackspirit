@@ -623,6 +623,101 @@ fn setup_plan_lists_every_phase_command_and_file() {
 }
 
 #[test]
+fn setup_plan_basic_mode_does_not_claim_a_mode_file() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+
+    let plan = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "plan",
+            "--target",
+            "fake.example",
+            "--secret",
+            "DEEPSEEK_API_KEY",
+        ],
+    );
+    assert!(
+        plan.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan = json(&plan);
+    let basic = phase(&plan, "vault");
+    let basic_files = basic["files"]
+        .as_array()
+        .expect("vault files")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        basic_files.iter().any(|file| file.ends_with("secrets/<NAME>")),
+        "basic mode must list the secret files the owner saves: {basic}"
+    );
+    assert!(
+        !basic_files.iter().any(|file| file.contains("secrets/mode")),
+        "basic mode writes no mode marker; the plan must not list one: {basic}"
+    );
+
+    let vault_plan = machine.run_with_sudo("passwordless", &["--json", "setup", "plan", "--target", "fake.example"]);
+    assert!(
+        vault_plan.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&vault_plan.stderr)
+    );
+    let vault_plan = json(&vault_plan);
+    let vault = phase(&vault_plan, "vault");
+    let vault_files = vault["files"]
+        .as_array()
+        .expect("vault files")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for wanted in [
+        "secrets/mode",
+        "/home/vowp-vault",
+        "/usr/local/lib/vowp/__vault-admin",
+        "/etc/sudoers.d/vowp-vault",
+    ] {
+        assert!(
+            vault_files.iter().any(|file| file.contains(wanted)),
+            "vault mode must still list {wanted}: {vault}"
+        );
+    }
+
+    // The plan and the home run agree: basic mode leaves no marker file, so an absent
+    // `secrets/mode` is the basic-mode signal.
+    let home = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--apply",
+            "--yes",
+        ],
+    );
+    assert!(
+        home.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&home.stdout),
+        String::from_utf8_lossy(&home.stderr)
+    );
+    let outcome = json(&home);
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    assert!(
+        !machine.remote.path().join(".vowp/secrets/mode").exists(),
+        "a basic-mode home run must not write a mode marker"
+    );
+}
+
+#[test]
 fn setup_rejects_an_ssh_target_that_looks_like_an_option() {
     let machine = Machine::new();
     machine.write_ssh();

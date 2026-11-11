@@ -591,10 +591,9 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
                 "/etc/sudoers.d/vowp-vault".to_owned(),
             ]
         } else {
-            vec![
-                format!("{vowp_home}/secrets/<NAME>"),
-                format!("{vowp_home}/secrets/mode"),
-            ]
+            // Basic mode has no marker file: an absent `secrets/mode` means basic, so the
+            // only files this phase can touch are the secret values the owner saves.
+            vec![format!("{vowp_home}/secrets/<NAME>")]
         },
         requires: {
             let mut requires = if probe.sudo == SudoMode::Passwordless {
