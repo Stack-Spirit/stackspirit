@@ -19,8 +19,19 @@
 set -eu
 
 PROGRAM=install.sh
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
+# `$0` is the shell name when this script is piped from curl (`sh -s -- ...`),
+# so it has no directory. Do not `cd .` in that case: the caller's cwd may be a
+# login home the target user cannot search. A standalone install has no
+# checkout templates next to it.
+case $0 in
+    */*) SCRIPT_DIR=$(CDPATH='' cd -- "${0%/*}" && pwd) ;;
+    *) SCRIPT_DIR= ;;
+esac
+if [ -n "$SCRIPT_DIR" ]; then
+    REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
+else
+    REPO_ROOT=
+fi
 
 GITHUB_REPO=syver777/vowp
 DEFAULT_RELEASE_BASE_URL=https://github.com/syver777/vowp/releases/download
@@ -171,11 +182,11 @@ find_binary() {
         printf '%s\n' "$CARGO_TARGET_DIR/debug/vowp"
         return 0
     fi
-    if [ -x "$REPO_ROOT/target/release/vowp" ]; then
+    if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/target/release/vowp" ]; then
         printf '%s\n' "$REPO_ROOT/target/release/vowp"
         return 0
     fi
-    if [ -x "$REPO_ROOT/target/debug/vowp" ]; then
+    if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/target/debug/vowp" ]; then
         printf '%s\n' "$REPO_ROOT/target/debug/vowp"
         return 0
     fi
@@ -334,7 +345,9 @@ download_archive() {
     SOURCE_BIN="$DOWNLOAD_TMP/extract/vowp-${VERSION}-${TARGET}/vowp"
     [ -f "$SOURCE_BIN" ] || die "archive does not contain $ARCHIVE/vowp"
     chmod 0755 "$SOURCE_BIN"
-    DOWNLOADED_VERSION=$("$SOURCE_BIN" --version 2>&1) \
+    # Run the probe from the temp dir: the caller's cwd may be a login home the
+    # target user cannot search, and shells warn when getcwd() fails.
+    DOWNLOADED_VERSION=$(cd "$DOWNLOAD_TMP" && "$SOURCE_BIN" --version 2>&1) \
         || die "downloaded binary failed to run: $SOURCE_BIN --version"
     case "$DOWNLOADED_VERSION" in
         "vowp ${VERSION}"*) ;;
@@ -358,7 +371,7 @@ if [ -z "$SOURCE_BIN" ] && [ "$DRY_RUN" -eq 1 ] && [ "$DOWNLOAD" -eq 0 ]; then
 fi
 
 HAVE_TEMPLATES=0
-if [ -f "$SCRIPT_DIR/vowp-watchdog.sh" ] && [ -f "$SCRIPT_DIR/vowp.service" ]; then
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/vowp-watchdog.sh" ] && [ -f "$SCRIPT_DIR/vowp.service" ]; then
     HAVE_TEMPLATES=1
 fi
 

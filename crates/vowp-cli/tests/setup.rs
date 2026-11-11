@@ -67,6 +67,29 @@ exec sh -c "$last"
         write_exec(&self.bin.path().join("ssh"), script);
     }
 
+    /// Writes a fake `ssh` that runs each remote command from a directory that
+    /// no longer exists, so `cd .` fails as it does in a login home the target
+    /// user cannot traverse.
+    fn write_ssh_from_vanished_cwd(&self) {
+        let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+last=""
+for arg in "$@"; do last="$arg"; done
+gone="$FAKE_REMOTE_HOME/.vanished-login"
+mkdir -p "$gone"
+cd "$gone"
+rmdir "$gone"
+HOME="$FAKE_REMOTE_HOME"
+VOWP_HOME="$FAKE_REMOTE_HOME/.vowp"
+VOWP_VAULT_HOME="$FAKE_REMOTE_HOME/vowp-vault"
+VOWP_VAULT_HELPER="$FAKE_REMOTE_HOME/vowp-vault/helper"
+PATH="$FAKE_REMOTE_BIN:$PATH"
+export HOME VOWP_HOME VOWP_VAULT_HOME VOWP_VAULT_HELPER PATH
+exec sh -c "$last"
+"#;
+        write_exec(&self.bin.path().join("ssh"), script);
+    }
+
     /// Installs the fake remote tools. `sudo_mode` is `passwordless` or `password`.
     fn write_tools(&self, _sudo_mode: &str) {
         let log = &self.tools_log;
@@ -238,6 +261,8 @@ exit 2
     }
 
     /// Writes a fake `curl` that emits an installer for the fake `vowp` prefix.
+    /// The installer touches its inherited cwd with `cd .` like the released
+    /// installer, so it fails from a login home the target user cannot search.
     fn write_fake_curl(&self) {
         let real = vowp_binary();
         let wrapper = format!(
@@ -245,7 +270,7 @@ exit 2
             shell_path(Path::new(&real))
         );
         let installer = format!(
-            "mkdir -p \"$HOME/.local/bin\"\ncat > \"$HOME/.local/bin/vowp\" <<'VOWP_SETUP_EOF'\n{wrapper}VOWP_SETUP_EOF\nchmod 0755 \"$HOME/.local/bin/vowp\"\n"
+            "cd .\nmkdir -p \"$HOME/.local/bin\"\ncat > \"$HOME/.local/bin/vowp\" <<'VOWP_SETUP_EOF'\n{wrapper}VOWP_SETUP_EOF\nchmod 0755 \"$HOME/.local/bin/vowp\"\n"
         );
         let curl = format!("#!/bin/sh\ncat <<'VOWP_CURL_EOF'\n{installer}VOWP_CURL_EOF\n");
         write_exec(&self.remote_bin.path().join("curl"), &curl);
@@ -1538,6 +1563,65 @@ fn setup_home_installs_the_per_user_binary_when_only_path_vowp_exists() {
 }
 
 #[test]
+fn setup_home_installs_from_a_non_traversable_login_home() {
+    let machine = Machine::new();
+    machine.write_ssh_from_vanished_cwd();
+    machine.write_tools("password");
+    machine.write_path_vowp();
+    machine.write_fake_curl();
+
+    let plan = machine.run(&["--json", "setup", "plan", "--target", "fake.example"]);
+    assert!(
+        plan.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&plan.stdout),
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan = json(&plan);
+    let install = phase(&plan, "install")["commands"].to_string();
+    assert!(
+        install.contains("--download"),
+        "the install phase must fetch the release: {install}"
+    );
+
+    let output = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--apply",
+            "--yes",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed = machine.remote.path().join(".local/bin/vowp");
+    assert!(
+        installed.is_file(),
+        "setup must install the binary from a login home the target user cannot traverse: {}",
+        installed.display()
+    );
+    let unit = std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/vowp.service")).expect("unit");
+    assert!(unit.contains("ExecStart=%h/.local/bin/vowp"), "{unit}");
+    let log = machine.log();
+    assert!(
+        log.contains("cd / &&"),
+        "the installer must start from a traversable directory: {log}"
+    );
+    assert!(
+        log.contains("--no-service --no-cron --no-watchdog"),
+        "the executed install must match the plan: {log}"
+    );
+}
+
+#[test]
 fn setup_home_treats_root_without_sudo_as_no_sudo() {
     let machine = Machine::new();
     machine.write_ssh();
@@ -1917,6 +2001,47 @@ fn install_sh_download_still_works() {
     assert!(
         install_home.path().join(".config/systemd/user/vowp.service").is_file(),
         "the default-prefix install includes the unit template"
+    );
+}
+
+#[test]
+fn install_sh_runs_when_piped_from_a_vanished_login_cwd() {
+    let version = "0.2.0";
+    let url = release_url(version);
+
+    let install_home = tempfile::tempdir().expect("temp install home");
+    let login_home = tempfile::tempdir().expect("temp login home");
+    let vanished = login_home.path().join("home");
+    std::fs::create_dir_all(&vanished).expect("vanished login home");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh");
+    let command = format!(
+        "cd {vanished} && rmdir {vanished} && cat {script} | sh -s -- --download --version {version} --base-url {url} --no-service --no-cron --no-watchdog",
+        vanished = shell_path(&vanished),
+        script = shell_path(&script),
+        url = shell_path(Path::new(&url)),
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .env("HOME", install_home.path())
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .output()
+        .expect("run install.sh");
+    assert!(
+        output.status.success(),
+        "install.sh failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed = install_home.path().join(".local/bin/vowp");
+    assert!(installed.is_file(), "installed binary missing: {}", installed.display());
+    let version_output = Command::new(&installed)
+        .arg("--version")
+        .output()
+        .expect("run installed binary");
+    assert_eq!(
+        String::from_utf8_lossy(&version_output.stdout).trim(),
+        format!("vowp {version}")
     );
 }
 

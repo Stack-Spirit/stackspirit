@@ -1071,6 +1071,11 @@ impl Executor {
             return Ok(None);
         }
         let script = install_script(&self.answers.version);
+        // The SSH login user's cwd may be a home the target user cannot
+        // traverse, and released installers may `cd .` before they start.
+        // Start from `/`, which every user can search; every setup path is
+        // absolute.
+        let script = format!("cd / && {script}");
         let output = self.remote(vec!["sh".to_owned(), "-c".to_owned(), script], None)?;
         if !output.success() {
             return Err(self.failed("installing vowp", &output));
