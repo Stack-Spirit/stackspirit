@@ -363,6 +363,28 @@ fn host_request(tmp: &TempDir, port: Option<u16>) -> HostRequest {
     }
 }
 
+/// Whether a loopback port currently accepts TCP connections.
+fn port_accepts_connections(port: u16) -> bool {
+    TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(200)).is_ok()
+}
+
+/// Picks a loopback port that refuses connections. Another test binary can bind the
+/// ephemeral port between the probe and the check, so retry with a new port instead of
+/// assuming the first one stays free.
+fn free_port() -> u16 {
+    const ATTEMPTS: usize = 20;
+    for _ in 0..ATTEMPTS {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).expect("probe port");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+        thread::sleep(Duration::from_millis(10));
+        if !port_accepts_connections(port) {
+            return port;
+        }
+    }
+    panic!("no free loopback port after {ATTEMPTS} attempts");
+}
+
 #[test]
 fn opencode_host_starts_and_stops_with_fake_server() {
     let tmp = tempdir().expect("temp dir");
@@ -826,25 +848,35 @@ fn app_host_fake_never_opens_a_socket() {
         }
     }
 
-    // Pick a port that is free now; the fake never binds it.
-    let probe = TcpListener::bind(("127.0.0.1", 0)).expect("probe port");
-    let port = probe.local_addr().expect("probe address").port();
-    drop(probe);
-    let tmp = tempdir().expect("temp dir");
-    let host = FileHost { port };
-    let request = host_request(&tmp, Some(port));
-    let handle = host.start(&request).expect("fake start");
-    assert!(host.health(&handle).expect("fake health").ok);
-    assert_eq!(host.join_instructions(&handle).expect("join").desktop, "fake desktop");
-    let batch = host
-        .transcript_since(&handle, &empty_cursor())
-        .expect("fake transcript");
-    assert_eq!(batch.entries.len(), 1);
-    let address: SocketAddr = format!("127.0.0.1:{port}").parse().expect("socket address");
+    // The file-backed fake never binds its port. A parallel test binary can steal an
+    // ephemeral port between the probe and the check, so retry the whole sequence with a
+    // fresh port instead of failing on the first race.
+    const ATTEMPTS: usize = 20;
+    let mut accepted = false;
+    for _ in 0..ATTEMPTS {
+        let port = free_port();
+        let tmp = tempdir().expect("temp dir");
+        let host = FileHost { port };
+        let request = host_request(&tmp, Some(port));
+        let handle = host.start(&request).expect("fake start");
+        assert_eq!(handle.port, Some(port), "the fake reported a different port");
+        assert!(host.health(&handle).expect("fake health").ok);
+        assert_eq!(host.join_instructions(&handle).expect("join").desktop, "fake desktop");
+        let batch = host
+            .transcript_since(&handle, &empty_cursor())
+            .expect("fake transcript");
+        assert_eq!(batch.entries.len(), 1);
+
+        let stolen = port_accepts_connections(port);
+        host.stop(&handle).expect("fake stop");
+        assert!(!host.health(&handle).expect("fake health after stop").ok);
+        if !stolen {
+            accepted = true;
+            break;
+        }
+    }
     assert!(
-        TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err(),
-        "the fake host opened a listener on its port"
+        accepted,
+        "every loopback port was claimed after start ({ATTEMPTS} attempts); the fake may be listening"
     );
-    host.stop(&handle).expect("fake stop");
-    assert!(!host.health(&handle).expect("fake health after stop").ok);
 }
