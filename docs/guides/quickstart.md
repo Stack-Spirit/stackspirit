@@ -193,7 +193,7 @@ commands are:
 | Command | Effect |
 |---|---|
 | `/status` | Show the session, executor, node and lease state. |
-| `/takeover` | Take the lease from another live surface. |
+| `/takeover` | Take the lease from another live surface in an interactive chat. After `/follow`, reopen with `vowp chat <id> --takeover`. |
 | `/follow` | Drop to read-only follow mode. |
 | `/switch <executor>` | Move the next turn to another harness or model. |
 | `/capsule` | Write a handoff capsule now. |

@@ -297,7 +297,8 @@ vowp orchestrator resume main
 
 An orchestrator is a project-less or project-bound session with the `orchestrator` role. Its
 directory is `~/.vowp/orchestrators/<name>/` and holds only project-local app config, the
-instructions template, the lease token and host state. `new` starts the app host where that app
+instructions template, the lease token, host state, the transcript cursor (`mirror.json`), the
+keeper log (`keeper.log`) and the keeper pid (`keeper.pid`). `new` starts the app host where that app
 supports it (an opencode server that binds loopback, or Claude Remote Control, which opens no local
 port and connects outbound to claude.ai) and prints desktop, phone and `vowp chat` join
 instructions. `stop` stops the host and releases the lease; the session stays. `resume` starts it

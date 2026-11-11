@@ -379,9 +379,12 @@ values.
 
 The honest limit: any agent that can run arbitrary code in a process that holds a secret can print
 it. **Basic mode does not separate the value from the agent's user**: `~/.vowp/secrets/<NAME>` is mode
-0600 but owned by the runtime user, and a harness spawned as that user can read it. **Vault mode is
-the mode that separates them**: the file lives under `vowp-vault` and the runtime user cannot read it;
-only the helper injects the configured names. Neither mode encrypts the file at rest. VOWP keeps
+0600 but owned by the runtime user, and a harness spawned as that user can read it. **Vault mode
+keeps the files out of the runtime user's direct readable tree**: they live under `vowp-vault` at
+mode 0600. It is not isolation from code that can invoke the helper: the sudoers rule lets the
+runtime user run the helper as `vowp-vault` with no argument restriction, and `__vault-exec` can
+read any stored name and run the caller's command as `vowp-vault`. Treat the helper as the trust
+boundary; `env_pass` is not an allow-list for it. Neither mode encrypts the file at rest. VOWP keeps
 values out of configuration and git, and redacts exact injected values on the event paths above, but
 it does not keep them out of every database row or every log and cannot make a secret unreadable to
 code that is given it. Harness logins stay under the harness's own control. The full statement is in

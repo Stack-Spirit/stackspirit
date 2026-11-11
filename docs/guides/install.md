@@ -54,7 +54,7 @@ cleanly at a hand-off instead of guessing:
 |---|---|
 | `preflight` | Checks SSH, OS/architecture, disk, `git`, `tmux` and `curl`; reads no secret. |
 | `user` | Creates a non-root `vowp` user when sudo allows it; otherwise records no-sudo mode. |
-| `install` | Installs the pinned binary and its service files, then verifies the version. |
+| `install` | Installs the pinned binary and verifies the version. |
 | `home` | Creates the home, the global database and the node registry, then runs `vowp doctor`. |
 | `service` | Installs the user unit `vowp.service`, enables linger and starts it. |
 | `vault` | Creates the vault user when sudo allows it, otherwise uses basic secret mode. It never stores a value. |

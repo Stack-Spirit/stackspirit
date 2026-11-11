@@ -82,7 +82,7 @@ In a chat, each line is a user turn. Assistant text streams, and tool calls are 
 |---|---|
 | `/switch <executor>` | Run the switch protocol to another harness or model. |
 | `/status` | Show the session, executor, node and lease state. |
-| `/takeover` | Take the lease from another live surface. |
+| `/takeover` | Take the lease from another live surface in an interactive chat. After `/follow`, reopen with `vowp chat <id> --takeover`. |
 | `/follow` | Release the lease and follow read-only. |
 | `/capsule` | Write a capsule now and print its id. |
 | `/help` or `/?` | Print the slash-command list. |
@@ -114,7 +114,9 @@ One surface holds the lease. The rules are deliberately simple:
   It keeps showing new events, but every write is refused. A turn running on the old surface is
   drained for up to five seconds, then interrupted; the events already written stay in the log and a
   capsule is written. The new surface continues from that capsule.
-- `vowp chat --follow` and the `/follow` command release the lease and only read.
+- `vowp chat --follow` and the `/follow` command release the lease and only read. A chat in follow
+  mode accepts only `/quit`, `/status` and `/follow`; to take the lease back, reopen with
+  `vowp chat <id> --takeover`.
 - A surface that exits normally releases the lease.
 
 VOWP cannot close another vendor's window. The cut-off is enforced where the power is: the VOWP MCP

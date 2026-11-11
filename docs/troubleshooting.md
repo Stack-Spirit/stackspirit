@@ -219,9 +219,10 @@ harness is installed and the executor string parses. For a remote target, run
 or pass `--takeover`; declining exits 4. To read without taking the lease, pass `--follow` (or use
 `/follow` in chat): that is the read-only mode. Non-TTY input defaults to no and exits 4.
 
-**A surface says "This surface is read-only".** Another surface took the lease. Use `/takeover` or
-`--takeover` to take it back, or `/follow` to keep reading. The old surface keeps printing new events
-but every write is refused.
+**A surface says "This surface is read-only".** Another surface took the lease, or this chat was
+started with `--follow`/`/follow`. A chat in follow mode accepts only `/quit`, `/status` and
+`/follow`; to take the lease back, reopen with `vowp chat <id> --takeover`. The old surface keeps
+printing new events but every write is refused.
 
 **The old app does not show the takeover notice.** VOWP cannot close another vendor's window. Its VOWP
 MCP write tools refuse with the notice; the app's own display may lag. Use `vowp chat` to confirm the

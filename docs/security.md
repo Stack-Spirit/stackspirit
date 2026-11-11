@@ -85,7 +85,7 @@ error messages, commands and the setup plan.
 
 | Mode | When | Storage | Owner |
 |---|---|---|---|
-| **vault user** | The `vowp-vault` Unix user and the helper exist, and one sudoers line allows the helper. | `/home/vowp-vault/secrets/<NAME>`, mode 0600. | `vowp-vault` |
+| **vault user** | The `vowp-vault` Unix user and the helper exist, and one sudoers line lets the runtime user run the helper as `vowp-vault`. | `/home/vowp-vault/secrets/<NAME>`, mode 0600. | `vowp-vault` |
 | **basic** | No sudo or no vault user (common on a VPS the owner does not administer as root). | `~/.vowp/secrets/<NAME>`, mode 0600. | the runtime user (`vowp` or the SSH user) |
 
 `~/.vowp/secrets/mode` records `vault` or `basic` (0600). `vowp secret upgrade` prints the one sudo
@@ -93,10 +93,13 @@ command that creates the vault user and moves the files; without sudo, VOWP stay
 
 **Basic mode does not separate the value from the agent's user.** The secret file is mode 0600 but
 owned by the runtime user (`vowp` or the SSH user), and the harness is spawned as that same user, so
-the harness can read `~/.vowp/secrets/<NAME>` if it tries. **Vault mode is the mode that separates
-them:** the file lives under `vowp-vault`, the runtime user cannot read it, and only the helper
-injects the configured names. Neither mode encrypts the store at rest; the Unix account permissions
-and disk encryption are the boundary. The vault user is not a hardware keystore.
+the harness can read `~/.vowp/secrets/<NAME>` if it tries. **Vault mode keeps the files out of the
+runtime user's direct readable tree:** they live under `vowp-vault` at mode 0600. It is not
+isolation from code that can invoke the helper: the sudoers rule lets the runtime user run the
+helper as `vowp-vault` with no argument restriction, and the helper can read or write any stored
+name and run the caller's command as `vowp-vault`. Treat the helper as the trust boundary, not the
+Unix user alone. Neither mode encrypts the store at rest; the Unix account permissions and disk
+encryption are the boundary. The vault user is not a hardware keystore.
 
 ### Commands
 
@@ -129,14 +132,16 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
   running the turn; the home session service and the remote `__exec` path both do this. A name that
   cannot be resolved is a warning on the home path and an error on a remote surface. The promoter
   still runs `[env.*]` deploy/probe commands with no added secret environment.
-- `__vault-exec` is the hidden read/inject helper: `__vault-exec --env NAME -- <cmd…>` reads only
-  `NAME` and execs the command with that one variable set. In vault mode the sudoers line chooses
-  `vowp-vault`; the helper has no `--user` flag and cannot run an arbitrary command outside the one it
-  is given.
-- In vault mode the same root-owned helper has the only write path:
-  `__vault-admin set <NAME>` reads the value from stdin (never argv), validates the name and writes
-  the file as `vowp-vault`; `rm <NAME>` unlinks it. The sudoers line names these fixed subcommands,
-  not an arbitrary command.
+- `__vault-exec` is the hidden read/inject helper: `__vault-exec --env NAME -- <cmd…>` reads the
+  named file and execs `<cmd…>` as `vowp-vault` with that one variable set. It is not limited to
+  `env_pass` names: any stored name works, and the command runs with the vault user's access. The
+  sudoers rule permits the runtime user to invoke the helper with no argument restriction, so the
+  helper is the trust boundary; a harness that can call it can reach every stored secret, not only
+  the names it was given.
+- In vault mode the same helper is the only write path: `__vault-admin set <NAME>` reads the value
+  from stdin (never argv), validates the name and writes the file as `vowp-vault`; `rm <NAME>`
+  unlinks it. The sudoers rule names the helper binary, not fixed subcommands, and places no
+  argument restriction on it; the helper's own parser chooses set/rm/probe/exec.
 - In basic mode the helper is a plain exec with the same argv; the value is protected only by the
   runtime user's permissions, and the harness runs as that same user.
 
@@ -167,8 +172,10 @@ runs on the public tree.
 ### The honest limit
 
 **Any agent that can run arbitrary code inside a process that holds a secret can print it.** In vault
-mode the design keeps the secret files outside the runtime user's readable tree and injects only the
-configured names. In basic mode it does not separate them: the secret file is owned by the same user
+mode the files are outside the runtime user's direct readable tree, but the helper is a broad trust
+boundary: the sudoers rule has no argument restriction, `__vault-exec` can read any stored name, and
+it runs the caller's command as `vowp-vault`. `env_pass` is not an allow-list for the helper. In
+basic mode VOWP does not separate them: the secret file is owned by the same user
 as the harness, so a harness that reads `~/.vowp/secrets/<NAME>` can recover the value. Neither mode
 encrypts the store at rest, and neither can make a secret unreadable to code that is given it. VOWP
 keeps values out of configuration and git, and redacts exact injected values on the session-service
@@ -232,8 +239,10 @@ are your responsibility.
 - **Ownership locks.** Dispatch refuses overlapping `owns` globs. `owns_respected` checks both committed
   and uncommitted paths, so a file written but not committed is still a violation.
 - **No `sudo` for workers.** The framework's agent permissions deny `sudo` and `git push` to workers;
-  the supervisor itself runs as the user and does not install system packages. The vault helper is the
-  one narrow exception, allowed by an explicit sudoers line for fixed subcommands.
+  the supervisor itself runs as the user and does not install system packages. The vault helper is
+  the one broad exception: the sudoers rule lets the runtime user run it as `vowp-vault` with no
+  argument restriction, so it can read or write any stored secret and run commands as `vowp-vault`.
+  Treat the helper as a trust boundary, not a narrow one.
 - **Timeouts and process groups.** Command gates have timeouts and kill the process group, not just the
   immediate child, so a shell cannot leave an orphan running; harness runs are stopped through the
   adapter's interrupt/stop path.
@@ -373,7 +382,8 @@ Be explicit about the limits:
 - [ ] Put provider values in the secret store or the service environment; never in `vowp.toml`, a
       command argument or a chat.
 - [ ] Prefer vault mode; if you use basic mode, accept that the runtime user owns the files and say so
-      in the setup report.
+      in the setup report. In either mode, treat the vault helper and its sudoers rule as the secret
+      boundary.
 - [ ] Review `[node].cwd_allow`; keep it as small as the work requires.
 - [ ] Review `[profiles.*].ladder`; every rung is a provider you are willing to pay or quota-limit.
 - [ ] Keep `[project].check_cmds` meaningful: the merge queue is the last automated check before

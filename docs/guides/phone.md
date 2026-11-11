@@ -78,7 +78,7 @@ and tool calls appear as `· tool: <name>`.
 | Slash command | Use it when |
 |---|---|
 | `/status` | You want the session, executor, node and lease state. |
-| `/takeover` | The laptop still holds the session and you want it on the phone. |
+| `/takeover` | The laptop still holds the session and you want it on the phone (not in follow mode; reopen with `--takeover` instead). |
 | `/follow` | You only want to read and not take the lease. |
 | `/switch <executor>` | The current provider is limited or you want another model. |
 | `/capsule` | You want a handoff document before leaving. |
@@ -134,7 +134,7 @@ with a tunnel. Never paste a key into the chat, a report or an issue. The honest
 | `no control configuration` | That is a control-machine command. The phone path runs `vowp chat` **on** the home, not `vowp control`. |
 | `session ... not found` | Use a longer unique prefix, or the full id from `vowp session ls` or `vowp orchestrator ls`. |
 | `Active on laptop ... Take over?` | Answer `y`, or use `--takeover`. Declining exits 4; use `--follow` to read without taking the lease. |
-| `This surface is read-only` | Another surface holds the lease. Use `/takeover` or `--takeover` to take it back, or `/follow` to keep reading. |
+| `This surface is read-only` | Another surface holds the lease. Reopen with `vowp chat <id> --takeover`; follow mode does not accept `/takeover`. Use `--follow` to stay read-only. |
 | Text wraps badly | Keep the app font at a readable size; the surface itself wraps at 80 columns and does not need a wide terminal. |
 | SSH drops mid-turn | The session stays on the home. Reconnect and open the same session; events are spooled and replayed without gaps or duplicates. |
 | `session is blocked by a provider limit` | Use `/switch <executor>` to move the next turn to another rung, or wait for the reset. |
