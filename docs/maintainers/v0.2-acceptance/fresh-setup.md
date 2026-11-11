@@ -19,8 +19,10 @@ contract file from the tested checkout and a local release mirror, described und
 
 ## Environment
 
-- Date: 2026-11-11 (UTC). The run finished at 10:22 UTC.
-- Worktree: `job/v2-t1-fresh-setup`, based on `a0d0aee` (`origin/main` at the time).
+- Date: 2026-11-11 (UTC). The main run finished at 10:22 UTC; the rebased re-run
+  finished at 11:02 UTC.
+- Worktree: `job/v2-t1-fresh-setup`, based on `a0d0aee` (`origin/main` at the time)
+  and later rebased onto `e41459f` for the setup-verify fix.
 - Binary under test: built from the HEAD source with
   `cargo build -p vowp-cli --bin vowp`. The workspace package version is still
   `0.1.0`; because the release tag does not exist, the acceptance copy used for the
@@ -30,6 +32,12 @@ contract file from the tested checkout and a local release mirror, described und
   local release archive is
   `vowp-0.2.0-x86_64-unknown-linux-gnu.tar.gz`, SHA-256
   `71a99306d076cf274ba6b1469ab4ad8e654285ef235a39336c67b69f0b2fc28f`.
+  The clean sudo run was repeated after the branch was rebased onto `e41459f` (the
+  f-i1b verify fix); the rebased binary is
+  `565400f10d549e5153d69e55b0bd87d104d10b4592eb8f02e9d093366afb2d74`, its archive
+  `188c1b4ed3f9f0a63d58dbf6cd760b64464ace89e896e51cfe724ea14c99094f`. The
+  plan/home/control/install sources are byte-identical between `a0d0aee` and
+  `e41459f`; only `setup/verify.rs` and its tests changed.
 - Rig: the T0 images, `vowp-acceptance/vps:sudo` (`3c19867d4d63`),
   `vowp-acceptance/vps:no-sudo` (`335555ae638a`) and
   `vowp-acceptance/phone:local` (`91530d993554`). The home containers are Ubuntu
@@ -207,6 +215,17 @@ fallback.
   (`changed`, `checks`, `handoff`, `phase`, `status`) and the `setup verify --json`
   document had the same five; the checks were `gc.dry_run`, `fixture.job_merge`,
   `control.snapshot` and `orchestrator.chat`, all `ok`.
+
+### Rebased-tree re-run
+
+`origin/main` advanced to `e41459f` while this card was in progress and brought the
+f-i1b setup-verify fix. The branch was rebased onto it and the clean sudo path was
+repeated from an empty rig with the rebased `0.2.0` build. `setup plan`,
+`setup home --apply --yes`, `setup control --apply` and `setup verify` all exited
+**0**; the install verified the rebased archive SHA-256 `188c1b4e...`, the verify
+snapshot was as of `2026-11-11T11:02:09.574Z`, and the orchestrator chat session was
+`01M754BCYJGY2E93X6K88WSCF2`. The plan/home/control/install sources are identical
+between `a0d0aee` and `e41459f`; the repeat covers the changed verify code.
 
 ## Test 1b — sudo rig, user-creation path: one product defect, then PASS
 
