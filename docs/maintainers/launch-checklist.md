@@ -40,9 +40,8 @@ from `Cargo.toml` or the npm package.
       issues are the support entry point.
 - [ ] Do not publish a Homebrew tap for 0.2.0. `packaging/homebrew/vowp.rb` is a
       template; the tap remains an owner decision for a later release.
-- [ ] The npm package version must be `0.2.0` before step 10. **This file's job
-      does not own `packaging/npm/package.json`;** if it still says `0.1.0`,
-      stop and have the release owner bump the package version (and its
+- [ ] The npm package version must be `0.2.0` before step 8. If it still says
+      `0.1.0`, stop and have the release owner bump the package version (and its
       `packaging/npm/README.md` early-release line) before the npm publish.
 - [ ] The owner accepts that the T1/T3/T5 owner-device checks are marked "not
       run" in `docs/release/0.2.0.md` and are not waived.
@@ -108,11 +107,42 @@ fi
 cargo run -q -p vowp-cli --bin vowp -- --version   # vowp 0.2.0
 
 node -p 'require("./packaging/npm/package.json").version'   # must be 0.2.0
+
+# No current-version 0.1.0 reference may remain in a public file. Historical
+# release notes, the migration section of docs/release/0.2.0.md, third-party
+# dependency versions and test fixtures are excluded. The line filter keeps
+# historical mentions in otherwise current files, such as the roadmap's v0.1
+# release sentence.
+historical_line='v0\.1 public release|Upgrade from 0\.1\.0|v0\.1\.0 binary|v0\.1 home|v0\.1\.0 release'
+if git grep -nI '0\.1\.0' -- . \
+    ':!CHANGELOG.md' \
+    ':!docs/release/0.1.0.md' \
+    ':!docs/release/0.2.0.md' \
+    ':!docs/maintainers' \
+    ':!Cargo.lock' \
+    ':!THIRD-PARTY-LICENSES.md' \
+    ':!crates/*/tests/*' \
+    ':!scripts/acceptance' \
+    ':!scripts/audit' \
+    ':!scripts/dogfood' \
+    ':!scripts/fresh-user' \
+    ':!scripts/spikes' \
+    ':!site' \
+    ':!AGENTS.md' \
+    ':!docs/dogfood' \
+    ':!docs/fresh-user' |
+    grep -vE "$historical_line"; then
+  echo "current-version 0.1.0 reference found (listed above)" >&2
+  exit 1
+fi
 ```
 
 The npm line is the one deliberate cross-path check. If it prints `0.1.0`, stop:
-the package cannot publish a release that does not exist, and editing
-`packaging/npm/package.json` is outside the J2 release job's owned paths.
+the package cannot publish a release that does not exist. The version grep must
+print nothing; every remaining hit must be a clearly labelled historical note or
+a non-VOWP version, otherwise fix it before building the public tree. The crate
+READMEs, the issue templates and the Homebrew README are public product files; a
+`0.1.0` hit there is current-version text, not history.
 
 ### 1.3 Package and npm dry runs
 
@@ -136,7 +166,7 @@ cd ../..
 `package.json` plus the package's `bin/`, `lib/`, `scripts/postinstall.js`,
 `README.md` and `LICENSE`. The publish script refuses when the public release
 assets for its package version are missing, so the npm publish itself stays in
-step 10.
+step 8.
 
 ### 1.4 Documentation and script checks
 
@@ -415,7 +445,7 @@ version cannot be deleted or replaced; only yanked.
 
 The npm script refuses unless the public GitHub release assets for its package
 version exist and their checksums match. Publish the GitHub release (step 6)
-first and bump the package to `0.2.0` (step 0) if it is still `0.1.0`.
+first; §1.2 verifies the package version before this step.
 
 ```sh
 cd "$RELEASE_ROOT"
@@ -524,7 +554,8 @@ vowp --home "$H" migrate --rollback "$H/backups/pre-0.2-<timestamp>.db"
 ```
 
 The generator and rig are internal and pruned from the public tree; run this
-from the private release checkout. The shorter owner check in step 6 of
+from the private release checkout. The shorter owner check in the
+[Upgrade from 0.1.0](../release/0.2.0.md#upgrade-from-010) section of
 `docs/release/0.2.0.md` is the runbook users follow.
 
 ## 10. Repository settings and final checks

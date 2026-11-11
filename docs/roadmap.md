@@ -6,9 +6,9 @@ This page records what the current tree ships, what is deliberately **not** in v
 order for v0.3 and later. It promises no dates. The authoritative proof for every claim is the
 linked document or the code itself.
 
-The v0.1 public release is **v0.1.0**. The v0.2 feature set is merged on `main`; the release job
-owns the version bump, tag, release notes and published artifacts, and this tree identifies itself
-as `0.1.0` until that job runs. This page does not duplicate those instructions.
+The v0.1 public release is **v0.1.0**. The v0.2 feature set is merged on `main`; this tree identifies
+itself as `0.2.0`, and the release job owns the tag, published artifacts and release notes. This page
+does not duplicate those instructions.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the normative v0.2 specification is
