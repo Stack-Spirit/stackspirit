@@ -181,11 +181,18 @@ contents. The [security model](../security.md) describes the limits, and
 ```sh
 vowp doctor
 vowp fleet status
+vowp setup verify
 ```
 
 `doctor` exits 0 only when no check failed. On a control machine, `vowp fleet status` proves that the
 SSH route and the snapshot cache work; `vowp control status` shows the cached `as of` time. If a
 harness or provider check fails, fix it on the home, not on the laptop.
+
+`setup verify` is the end-to-end fixture check: a gc dry run, a fixture project through one fake
+harness turn and the real merge queue, a fresh snapshot, and one orchestrator chat turn. It creates
+the fixture under the home's `setup-verify/` area and removes it on every exit path; it does not touch
+your repositories. On a control machine it runs the home checks over SSH and refreshes the local
+snapshot cache. It prints `ok`, `warn` or `fail` per check and exits 1 when a check fails.
 
 Next: [Getting started](quickstart.md) for the first project and the first conversation, or
 [Running a home on a VPS](vps.md) for the server details.

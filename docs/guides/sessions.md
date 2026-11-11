@@ -114,8 +114,9 @@ One surface holds the lease. The rules are deliberately simple:
   It keeps showing new events, but every write is refused. A turn running on the old surface is
   drained for up to five seconds, then interrupted; the events already written stay in the log and a
   capsule is written. The new surface continues from that capsule.
-- `vowp chat --follow` and the `/follow` command release the lease and only read. A chat in follow
-  mode accepts only `/quit`, `/status` and `/follow`; to take the lease back, reopen with
+- `vowp chat --follow` and the `/follow` command release the lease and only read. An interactive
+  chat then follows until Ctrl-C and accepts no slash commands; a scripted (non-TTY) chat accepts
+  `/quit`, `/status` and `/follow`. To take the lease back, reopen with
   `vowp chat <id> --takeover`.
 - A surface that exits normally releases the lease.
 

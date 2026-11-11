@@ -72,7 +72,7 @@ Trust boundaries:
 | **tmux safety** | Only tagged `vowp-` windows are touched. Every window is a read-only view. There is no respawn or keystroke API; `capture-pane` is display-only and never drives a decision. |
 | **Guarded promotion** | Guards → serving bank → diff → approval → deploy → probe → rollback record. A refusal is staged, never retried with a weakened check. |
 | **Nothing public without a human** | Publishing, deploying, visibility changes, releases and new accounts require an approval inbox item answered by a human, unless the environment is explicitly configured with `approval = "policy"` and the operator passes `--yes`. |
-| **Secret scan** | The `secret_scan` gate runs on every job diff and again on the merge queue's rebased tree before a push. A hit blocks the push and stores only the file, line and rule name. |
+| **Secret scan** | The `secret_scan` gate is in the default gate set for code jobs and also runs on the merge queue's rebased tree before a push. A hit blocks the push and stores only the file, line and rule name. |
 | **Provider spend** | A rung not listed in the profile is never used. Credits exhausted parks jobs and opens an inbox item; it never silently switches to another paid provider. |
 | **Bounded autonomy** | Continues, hang restarts, fix rounds and repeated actions are bounded. The supervisor cannot be told to "just keep going" past those bounds. |
 
@@ -267,7 +267,8 @@ are your responsibility.
   involved.
 - `vowp orchestrator new` writes only the orchestrator's project-local config under
   `~/.vowp/orchestrators/<name>/`: `opencode.json` or `.mcp.json`, `AGENTS.md`, `orchestrator.json`,
-  the lease token and host state. It does not edit the user's global app config.
+  the lease token, host state, the transcript cursor (`mirror.json`), the keeper log
+  (`keeper.log`) and the keeper pid (`keeper.pid`). It does not edit the user's global app config.
 - `vowp mcp` is a stdio server. Every write tool reads the token file and checks the session lease; a
   stale token cannot write. The actor is recorded as `session:<id>/surface:<surface-id>`.
 - The old surface of a takeover is not closed by VOWP (it cannot close another vendor's window). Its

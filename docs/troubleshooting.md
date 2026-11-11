@@ -220,9 +220,10 @@ or pass `--takeover`; declining exits 4. To read without taking the lease, pass 
 `/follow` in chat): that is the read-only mode. Non-TTY input defaults to no and exits 4.
 
 **A surface says "This surface is read-only".** Another surface took the lease, or this chat was
-started with `--follow`/`/follow`. A chat in follow mode accepts only `/quit`, `/status` and
-`/follow`; to take the lease back, reopen with `vowp chat <id> --takeover`. The old surface keeps
-printing new events but every write is refused.
+started with `--follow`/`/follow`. An interactive chat then follows until Ctrl-C and accepts no
+slash commands; a scripted (non-TTY) chat accepts `/quit`, `/status` and `/follow`. To take the lease
+back, reopen with `vowp chat <id> --takeover`. The old surface keeps printing new events but every
+write is refused.
 
 **The old app does not show the takeover notice.** VOWP cannot close another vendor's window. Its VOWP
 MCP write tools refuse with the notice; the app's own display may lag. Use `vowp chat` to confirm the
@@ -287,10 +288,13 @@ phone, use `vowp secret set NAME` instead. The page is single-use and expires af
 re-run `vowp secret upgrade`. Without sudo, VOWP stays in basic mode; injection and redaction still
 work, but the runtime user owns the secret files.
 
-**A secret value appears in a log or report.** That is a bug. Stop, remove the value from the artifact,
-rotate the secret, and report the file and the secret **name** only. Do not paste the value into a
-public issue. The redactor replaces injected exact values with `[REDACTED:<NAME>]`, but it cannot catch
-a value the agent prints before injection or one copied from outside the store.
+**A secret value appears in a log or report.** Rotate the secret and remove the value from the
+artifact. Redaction replaces injected exact values with `[REDACTED:<NAME>]` on the session-service and
+remote-ingest event paths, in the snapshot, in capsules, and in a finished report and run mirror. It
+is not applied to the supervisor log, gate command evidence, ledger rows, the `session switch` harness
+events or the `session watch` importer, so a value a command printed can remain in those files;
+restrict access to `~/.vowp`. If the value is in a path that should be redacted, stop and report the
+file and the secret **name** only. Do not paste the value into a public issue.
 
 **A backup says `secrets/: never backed up`.** That is correct. Restore the home, then set each secret
 again with `vowp secret set NAME`. Never put a secret in a backup or an encrypted archive as a

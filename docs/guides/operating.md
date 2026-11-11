@@ -156,9 +156,14 @@ built-in rotation for the supervisor log, so use your normal log rotation.
 | `~/.vowp/migration.json` | Present only while a migration is in flight. |
 | `<project>/.vowp/checkpoints/` | Planner checkpoint summaries. |
 
-Never log or paste prompts, environment values or secret-looking strings. Run and limit details are
-redacted before storage, and injected secret values are replaced with `[REDACTED:<NAME>]`, but
-session logs are still sensitive: they can contain prompts, tool output and file contents.
+Never log or paste prompts, environment values or secret-looking strings. Exact injected values are
+replaced with `[REDACTED:<NAME>]` on the session-service and remote-ingest event paths, in the
+snapshot, in capsules, and in a finished job report and run mirror. The supervisor log, gate command
+evidence, ledger rows, the `session switch` harness events and the `session watch` importer are
+written without that redaction, and a report or run mirror is still raw while its turn runs. Treat
+session logs, the databases and every file under `~/.vowp` as sensitive: they can contain prompts,
+tool output and file contents. The coverage is stated exactly in the
+[security model](../security.md#redaction).
 
 ## Loops
 
