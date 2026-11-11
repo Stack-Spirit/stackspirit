@@ -26,9 +26,13 @@ The release log (`releases.log`) is not currently classified; GC leaves it untou
 outside the classified set. Adding it to the catalog is a follow-up.
 
 The classification is **derived from database state wherever possible**, so no registration hook is
-needed when a run, session, worktree or sample is created. The `catalog` table adds rows for files that
-cannot be derived (backups, release banks, archived project directories) and records what a GC pass
-did. Both sources are merged by path, and a protected class always wins over a disposable one.
+needed when a run, session, worktree or sample is created. Known paths are scanned directly too:
+`backups/`, `gates/` and `archive/` under the home are truth, release snapshots and `[env.*]` checkouts
+are production, and the sessions and worktree rows supply the rest. The `catalog` table is a durable
+side table merged in by path; a catalog row can only strengthen protection, never downgrade a derived
+class. In this build the only production writer of new catalog rows is the run-output gzip step, which
+records the `.gz` file and marks any existing catalog row for the old path deleted. Adding catalog rows
+for the other classes is a follow-up.
 
 An orchestrator session is always **open work**, even if its bound project has finished a job. A stale
 `done` job can never make a live session compactable; only an idle or explicitly closed session moves
@@ -85,9 +89,10 @@ When a session is closed and 30 days have passed since its last update, compacti
 
 After compaction, vowp `session tail` and vowp `session show --events` exit 3 with a message pointing
 at vowp `session show --capsule`. vowp `session show --capsule` and vowp `session export` keep working;
-export writes the capsule with an empty event tail and says so. There is no full-log replay after
-compaction, which is the point of the class. vowp `reindex` skips a session with no log and reports
-it; it never deletes the row.
+an export from a compacted session carries its latest capsule, an empty event tail and `compacted_at`
+set, while the command's human output is the output path (or the bundle itself with `--out -`). There is
+no full-log replay after compaction, which is the point of the class. vowp `reindex` skips a session
+with no log and reports it; it never deletes the row.
 
 ### Run output
 
@@ -128,7 +133,10 @@ directory backup contains:
 - the authoritative session content: `log.jsonl`, blobs, capsules, `summary.md` and `adapters.json`;
 - an informational catalog file;
 - `manifest.json` with a format tag, version, schema versions, a SHA-256 for every content file and row
-  counts for every database table.
+  counts for the listed tables. The global count covers `nodes`, `projects`, `sessions`,
+  `session_events` and `capsules`; each project count covers `jobs`, `runs`, `edges`, `loops`,
+  `schedules`, `inbox`, `ledger` and `releases`. Restore checks `integrity_check` and exactly those
+  counts, not every table in the schema.
 
 Without the session content a restore would keep the index rows but lose every conversation, so it is
 never optional. Secrets are never included; the manifest records that they were skipped and restore

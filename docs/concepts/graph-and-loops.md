@@ -5,7 +5,7 @@ does it, and a gate is how the result is checked. The supervisor is a determinis
 the graph every tick, starts work, records evidence and moves states. Models are asked for judgment only.
 
 > **Status: current.** The graph engine and the `vowp job`/`vowp graph` commands are implemented. One
-> node supervisor (`vowp up`) runs the loops for every active project on the home, in round-robin order.
+> node supervisor (`vowp up`) runs the loops for every active project on the home, in fairness order.
 
 ## Jobs
 
@@ -103,11 +103,13 @@ These commands are implemented today, including the supervisor commands (`vowp u
 3. **Measured capacity, provider concurrency and ordering.** The node capacity manager checks the brake,
    the provider limit, the worker target, RAM, CPU and disk before a job is dispatched; a wait leaves the
    job `ready` with a reason. Planner and keeper turns start when due outside this path, and the merge
-   queue bypasses it. Projects are ticked in name order with a rotating start offset; the stored project
-   weight is reported but does not change ordering in this build. Within a project, priority and then age
-   order ready jobs. `[node].max_workers` (default 4) is a preference for the advised target, not a hard
-   cap; `max_verifiers` (default 2) bounds the verifier share. `[providers.<p>].max_concurrent` bounds
-   each provider and is lowered after rate limits. See [capacity](capacity.md).
+   queue bypasses it. Projects tick by fairness weight, highest first; inside one weight the project
+   admitted last moves to the back of its group, and a rotating offset starts a group with no recorded
+   last admission. The registry's `project weight` is reported and sets that order. Within a project,
+   priority and then age order ready jobs. `[node].max_workers` (default 4) is a preference for the
+   advised target, not a hard cap; `max_verifiers` (default 2) bounds the verifier share.
+   `[providers.<p>].max_concurrent` bounds each provider and is lowered after rate limits. See
+   [capacity](capacity.md).
 4. **One worktree per job** on branch `job/<id>`. Workers run in that worktree. Verify, fix and merge jobs
    reuse the original's worktree and branch.
 5. **Single writer to the default branch.** Only the supervisor's merge queue writes and pushes the
@@ -131,7 +133,7 @@ These commands are implemented today, including the supervisor commands (`vowp u
 ### The L1 tick
 
 A node tick first samples capacity, sweeps stale leases and runs the lifecycle tick, then runs each
-active project's L1 steps in round-robin order. Within one project, each tick is wrapped so one failing
+active project's L1 steps in fairness order. Within one project, each tick is wrapped so one failing
 step never aborts the rest. The order is:
 
 0. Apply pause and CLI request rows (`retry`, `park`, `cancel`, `nudge`, `restart`, `replan`, `fail`,

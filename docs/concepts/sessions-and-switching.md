@@ -139,17 +139,17 @@ name for a generic CLI. A profile is an ordered ladder of executors; rung 0 is p
 | **claude-code** | `claude -p --output-format stream-json --verbose [--resume <id>] --model … --effort … --permission-mode …` | `--resume <native id>` | usage/session/weekly limit text and reset time, 429/overloaded, auth; repeated unknown errors become "unavailable for 15 min" |
 | **opencode** | `opencode run --format json [--session <id>] --model provider/model#variant --auto` | `--session <native id>` | 402/insufficient credit, 429, auth, context overflow |
 | **cli** (generic) | Any command with JSON or plain output plus a mapping file | per tool | exit codes and patterns from the mapping file |
-| **opencode host** | An opencode server on the home, joined through an SSH tunnel and `opencode pair` | the app's own session | not yet classified from the host (mirror not wired) |
-| **Claude Remote Control** | Claude Code on the home, driven by the Claude apps where a claude.ai login exists | the app's own session | not yet classified from the host (mirror not wired) |
+| **opencode host** | An opencode server on the home, joined through an SSH tunnel and `opencode pair` | the app's own session | transcript mirrored at host create/resume and supervisor startup; limits are not parsed from the host yet |
+| **Claude Remote Control** | Claude Code on the home, driven by the Claude apps where a claude.ai login exists | the app's own session | transcript mirrored at host create/resume and supervisor startup; limits are not parsed from the host yet |
 
 Adapters spawn stock binaries exactly as a user would. They do not read login files, spoof clients or
 forward tokens. The harness never sees tmux; the tmux window only follows the event log. The ACP adapter
 is a deferred design note, not part of v0.2 delivery.
 
-The transcript-mirror helpers exist but are not wired into the production hosts in this build, so app
-turns are not automatically copied into the VOWP log yet. The planned mirror reads opencode's event
-stream and backfills from its session export; Claude Code uses the transcript importer. The MCP
-`session_resume` tool currently reads the session log and capsule directly. See
+The transcript mirror runs when the orchestrator is created, resumed, or resumed by the supervisor at
+startup: it appends the app's new entries to the VOWP log once and writes the `mirror.json` cursor. It
+is not a continuous watcher, so the next create/resume/startup pass catches up. The MCP
+`session_resume` tool reads the session log and capsule directly. See
 [home and surfaces](home-and-surfaces.md#app-surfaces-and-orchestrators).
 
 ## Capsules

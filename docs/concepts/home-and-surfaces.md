@@ -49,7 +49,7 @@ registry commands are:
 | vowp `project resume <name>` | Returns a paused project to `active`. An archived project is refused. |
 | vowp `project archive <name>` | Stops all ticks for the project and keeps its database. |
 | vowp `project rm <name> --yes` | Archives the project directory under `~/.vowp/archive/projects/` and removes the registry row. It refuses while the project is running and for `_node`. |
-| vowp `project weight <name> <1-100>` | Sets the stored fairness weight. It is shown in project output, but weighted dispatch is not wired into this build. |
+| vowp `project weight <name> <1-100>` | Sets the fairness weight. Higher weights are ticked first; within a weight the project admitted last moves to the back. |
 
 A paused project still gets maintenance work — requests, reconcile, harvest, stalls, state changes,
 gates, verify, merge and the board — but no dispatch, triggers or work-creating schedules. An archived
@@ -63,21 +63,22 @@ running.
 `~/.vowp/supervisor.lock`; a second `vowp up` exits 4. `vowp up` on a control machine refuses with exit
 5 because the control machine has no truth to run.
 
-Each tick does a node pass, then every active project's L1–L9 steps in round-robin order:
+Each tick does a node pass, then every active project's L1–L9 steps in fairness order:
 
 ```text
 0. node sample        capacity sample, stale-lease sweep, lifecycle tick
 1. global             apply drained node requests
-2. projects           each active project in round-robin order, each isolated by catch_unwind
+2. projects           each active project in fairness order, each isolated by catch_unwind
 3. snapshot           write snapshot.json after the project steps
 4. board              write board.json for one active project, or the only paused project
 5. heartbeat          update ~/.vowp/heartbeat and the supervisor pid
 ```
 
-The round-robin start offset advances every tick, so no project is always first. Projects are ticked in
-name order with that moving offset; every active project gets one L1 tick per node tick. Within a project,
-job priority decides dispatch order. The stored project weight is reported but does not change dispatch
-order in this build.
+The order comes from the fairness weight and the last admission. Higher-weight projects go first;
+within one weight the project admitted last moves to the back of its group, so a project that just got
+work does not stay first. A group with no recorded last admission starts from a per-tick rotating offset,
+and an unreadable registry falls back to name order with that offset. Every active project gets one L1
+tick per node tick. Within a project, job priority decides dispatch order.
 
 `vowp up --once` runs startup plus exactly one node tick, which is useful for a cron check and for
 tests. `vowp down` writes the stop file and waits; `--force` signals the supervisor and
@@ -153,8 +154,8 @@ The snapshot carries:
 - total capacity: target and advice, brake state, reserves and the running run count. The
   snapshot's `measured` host sample is `null` and `running` carries zero RAM/CPU in this build;
   vowp `capacity show` is the measured report;
-- provider limits, open inbox items, recent sessions with their active surface, and orchestrator
-  cards.
+- provider limits, open inbox items, recent sessions (the session card's `active_surface` field is
+  reserved and always `null` in this build), and orchestrator cards.
 
 Read commands:
 
@@ -168,8 +169,8 @@ Read commands:
 | vowp `board [--once]` | The refreshing terminal board. With one project the output stays byte-compatible with v0.1. |
 
 The snapshot never contains a secret value, a lease token or a full event payload. Titles, job ids and
-questions are included; bodies are truncated. The registered checkout path is included, so treat the
-snapshot like the rest of the home state.
+inbox item titles are included; inbox bodies are omitted (the snapshot's inbox rows have no body field).
+The registered checkout path is included, so treat the snapshot like the rest of the home state.
 
 ## Sessions, surfaces and leases
 
@@ -283,12 +284,15 @@ project. vowp `orchestrator new [--name] [--project] --app opencode|claude-code|
    the desktop, the phone and `vowp chat`.
 
 vowp `orchestrator ls` lists cards; vowp `orchestrator stop` stops the host and releases the lease (the session
-stays); vowp `orchestrator resume` starts it again. The node supervisor does not resume orchestrators by
-itself after a home restart: run vowp `orchestrator resume <name>` for the ones you want back. A host that
-cannot start is recorded as `degraded`, releases the lease and returns the host error (a non-zero
-exit); the session and state file remain, and vowp `orchestrator resume` can retry once the host is
-available.
-`--app chat` creates no background host: its join command starts the chat surface directly.
+stays); vowp `orchestrator resume` starts it again. The node supervisor resumes orchestrators by itself
+after a home restart: startup starts every orchestrator whose state file says `running`. A live host
+whose token still owns the lease is reused; a live host that lost its lease (another surface may hold
+it) is left alone and logged. A host that cannot start is recorded as `degraded`, its error is logged,
+and the remaining orchestrators still resume, so the home stays up. The session and state file remain,
+and vowp `orchestrator resume <name>` retries a degraded one once the host is available. A failed
+vowp `orchestrator new` also records `degraded`, releases the lease and returns the host error (a
+non-zero exit). `--app chat` creates no background host: its join command starts the chat surface
+directly.
 
 The instructions template tells the orchestrator to read the snapshot, report plainly with times,
 propose before acting, apply only after the owner's yes, never open a database or read a secret, and
@@ -296,13 +300,18 @@ never claim a tool or join is working without checking.
 
 ### Transcript mirror and resume
 
-The mirror and resume helpers are implemented and tested in the core, but they are **not wired into
-the production node supervisor or app hosts in this build**. An orchestrator's app turns are therefore
-not yet copied into the VOWP log, and no `mirror.json` cursor is written in production. The planned path
-is an opencode event-stream mirror with export backfill and a Claude transcript importer, with the
-cursor under `~/.vowp/orchestrators/<name>/mirror.json`. Until that wiring lands, use the app's own
-history and `vowp session export`; the MCP `session_resume` tool reads the session log and capsule
-directly.
+A running app host's transcript is mirrored into the canonical session log at three moments: when the
+orchestrator is created (vowp `orchestrator new`), when it is resumed (vowp `orchestrator resume`) and
+when the supervisor resumes running orchestrators at startup (`Orchestrator::resume_all`). Each pass
+reads the app's new entries since the cursor, appends each one at most once (the native-id map skips
+duplicates) and writes `~/.vowp/orchestrators/<name>/mirror.json` with the last mirrored app id and the
+update time. A transcript read or cursor write failure is logged and does not stop the host; the cursor
+is still written so the next pass has a starting point. This is not a continuous watcher: between those
+calls the app owns its transcript and the next create/resume/startup pass catches up.
+
+`resume_context`, which builds the capsule and last turns for a new app, is implemented and tested in
+the core but has no production caller yet; the MCP `session_resume` tool reads the session log and
+capsule directly.
 
 ## MCP tools
 
@@ -343,8 +352,9 @@ VOWP refers to a secret by **name** only. No command takes a value as an argumen
 
 - **Vault-user mode** (when a separate `vowp-vault` user and the one sudoers line exist) stores files
   under `/home/vowp-vault/secrets/<NAME>` mode 0600.
-- **Basic mode** (no sudo or no vault user) stores them under `~/.vowp/secrets/<NAME>` mode 0600 and
-  says so in vowp `doctor` and on the board.
+- **Basic mode** (no sudo or no vault user) stores them under `~/.vowp/secrets/<NAME>` mode 0600.
+  Setup reports the mode it chose (`basic mode (same user)`) and vowp `secret upgrade` reports the move to
+  the vault user; `vowp doctor` and the board do not print the secret mode in this build.
 
 vowp `secret set` reads from a hidden prompt; vowp `secret ls` shows names and the last four characters;
 vowp `secret rm` deletes; vowp `secret upgrade` prints the one sudo command that moves basic-mode files to the

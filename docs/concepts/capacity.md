@@ -113,13 +113,15 @@ the node's capacity from its own runs alone.
 
 ### Fairness
 
-Every active project gets one L1 tick per node tick, in project-name order, with the start offset
-advancing each tick, so no project is permanently first and none is skipped. Within a project, ready
-jobs dispatch by priority and then age. The stored `project weight` is shown in project and snapshot
-output, but weighted or least-recently-admitted ordering is not wired into the supervisor in this
-build; every project still gets its turn. `max_workers` in
-`vowp.toml` is a preference, not a cap: it seeds the advisor's suggestion and the worker-slot
-bookkeeping, but admission uses the capacity target and the measured checks. When the target rises
+Every active project gets one L1 tick per node tick. The node supervisor orders projects by **fairness
+weight**, highest first. Inside one weight the project admitted last moves to the back of its group, so
+the next project in the rotation goes first; when no project in a group was admitted last, a per-tick
+rotating offset starts that group. A registry read failure falls back to plain name order with the same
+offset. Every active project still gets its turn. Within a project, ready jobs dispatch by priority and
+then age. `project weight` is shown in project and snapshot output and now changes the order; `vowp
+project weight <name> <1-100>` sets it. `max_workers` in
+`vowp.toml` is a preference, not a cap: it is the bootstrap before the first host sample and sizes the
+worker-slot bookkeeping, but admission uses the capacity target and the measured checks. When the target rises
 above the configured preference, the supervisor grows the worker rows so the board still shows a slot
 per run.
 
@@ -132,7 +134,7 @@ trips on measured conditions and clears after two clean samples:
 |---|---|
 | `memory_pressure` | `/proc/pressure/memory` `avg10` is above 10.0 for two consecutive samples. |
 | `swap_growth` | Swap used grew by more than 64 MiB per minute over the last three samples. |
-| `disk_low` | Free disk on the home or worktree filesystem is below 5 GiB for two samples. |
+| `disk_low` | Free disk on the home or worktree filesystem is below 5 GiB in the latest sample. One low sample trips it; the brake clears after two clean samples. |
 | `provider` | Every configured provider has an active limit. |
 
 vowp `capacity show` prints the active reason and its start time, for example
@@ -148,13 +150,15 @@ The advised target is:
 
 ```text
 advised = clamp(min(ram_fit, cpu_fit, provider_cap), 1, 64)
-ram_fit = floor((mem_available - reserve) / pooled_ram_p90)
-cpu_fit = floor(cpu_quota * 0.85 / pooled_cpu_p90)
-provider_cap = min(max_concurrent of the configured providers)
+ram_fit = floor((mem_available - reserve) / max_measured_ram_p90)
+cpu_fit = floor((cpu_quota * 0.85) / max_measured_cpu_p90)
+provider_cap = smallest max_concurrent among the configured providers
 ```
 
-Before the first host sample, the configured `max_workers` is the bootstrap. A fallback host (no
-`/proc`) proposes 1 rather than pretending to measure. The target is written as a history row when it
+The RAM and CPU terms use the largest p90 across stored estimates that have samples, not the all-runs
+pooled row: the target must fit the biggest common run. With no measured estimate the constant default
+is used. Before the first host sample, the configured `max_workers` is the bootstrap. A fallback host
+(no `/proc`) proposes 1 rather than pretending to measure. The target is written as a history row when it
 moves by more than one worker, with `set_by='supervisor'`, and appears as `advised_target` in the
 snapshot.
 
@@ -203,7 +207,7 @@ A job that is not starting is not necessarily broken. Read vowp `fleet queue` or
 | `disk 3.4 GB free; minimum is 5.0 GB` | The home or worktrees are nearly full. | Run vowp `gc`, clear space, or move worktrees. |
 | `provider <name> limited: …` | The provider has a quota, rate or auth limit. | Wait for the reset, or fix auth/credits. |
 | `N worker(s) running; target is M` | The target is reached. | Wait, or raise the target if the machine can take it. |
-| `brake: memory pressure …` | The machine is under pressure. | Let it clear; do not force more runs. |
+| `memory pressure (avg10 14.2)` | The machine is under pressure. The job note has no `brake:` prefix; `capacity show` adds it. | Let it clear; do not force more runs. |
 
 The waiting reason is the same sentence stored on the job and in the snapshot; it is not a separate
 guess.
@@ -227,8 +231,9 @@ affected jobs and opens one inbox item; it does not switch to an unlisted paid p
 
 - **No `/proc` (macOS, minimal container).** Auto proposes 1, admission skips RAM and CPU, the disk
   check still runs, and the UI says `fallback`. Use a fixed target if the machine can take more.
-- **No systemd user cgroups.** Per-run usage falls back to the process tree. Estimates are labelled
-  `proc_tree`; admission still works but is less precise.
+- **No systemd user cgroups.** Per-run usage falls back to the process tree and its `run_usage` rows
+  carry source `proc_tree`; the estimates built from them are still labelled `measured`, `pooled` or
+  `default` by sample count, never `proc_tree`. Admission still works but is less precise.
 - **A cold build with no history.** The default estimate is deliberately conservative. The first real
   runs replace it quickly; the S1 measurements show why a blanket 1.5 GiB default is too low for a cold
   Rust build.
