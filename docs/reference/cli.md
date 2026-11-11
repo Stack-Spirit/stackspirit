@@ -55,6 +55,10 @@ python3 docs/reference/check-reference.py
 | [`vowp session import`](#vowp-session-import) | Import a session bundle |
 | [`vowp session watch`](#vowp-session-watch) | Record interactive Claude Code transcripts |
 | [`vowp session tail`](#vowp-session-tail) | Print a session's event log |
+| [`vowp session turn-begin`](#vowp-session-turn-begin) | Hidden: begin a remote turn and print its grant |
+| [`vowp session ingest`](#vowp-session-ingest) | Hidden: ingest remote events for one run |
+| [`vowp session lease`](#vowp-session-lease) | Hidden: show or acquire a session lease |
+| [`vowp session takeover`](#vowp-session-takeover) | Hidden: take a session over from another surface |
 | [`vowp chat`](#vowp-chat) | Alias of `session chat` |
 | [`vowp inbox`](#vowp-inbox) | List and answer inbox items |
 | [`vowp inbox ls`](#vowp-inbox-ls) | List inbox items |
@@ -120,6 +124,7 @@ python3 docs/reference/check-reference.py
 | [`vowp setup home`](#vowp-setup-home) | Set up the home on a fresh machine |
 | [`vowp setup control`](#vowp-setup-control) | Set up this machine as the control machine |
 | [`vowp setup verify`](#vowp-setup-verify) | Run the fixture verification on the home |
+| [`vowp setup __home-init`](#vowp-setup-__home-init) | Internal home bootstrap used by `setup home`; not part of the public contract |
 | [`vowp control`](#vowp-control) | Configure this machine as the control machine |
 | [`vowp control init`](#vowp-control-init) | Record the home this machine controls |
 | [`vowp control status`](#vowp-control-status) | Print the control configuration and cache metadata |
@@ -128,6 +133,7 @@ python3 docs/reference/check-reference.py
 | [`vowp orchestrator ls`](#vowp-orchestrator-ls) | List orchestrators |
 | [`vowp orchestrator stop`](#vowp-orchestrator-stop) | Stop an orchestrator's host and release its lease |
 | [`vowp orchestrator resume`](#vowp-orchestrator-resume) | Start an orchestrator's host again |
+| [`vowp orchestrator __keepalive`](#vowp-orchestrator-__keepalive) | Hidden: keep one orchestrator's lease alive after the CLI exits |
 | [`vowp migrate`](#vowp-migrate) | Migrate a v0.1 home to the v0.2 layout |
 | [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server |
 | [`vowp __exec`](#vowp-__exec) | Hidden: remote executor client |
@@ -916,6 +922,99 @@ Options:
       --node <NAME>          Run the command on that node over ssh
       --pretty               One pretty line per event
       --from <N>             Start after this sequence number
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp session turn-begin`
+
+```text
+Hidden: begin a remote turn and print its grant
+
+Usage: vowp session turn-begin [OPTIONS] --executor <EXECUTOR> --purpose <PURPOSE> --node <NAME> --request <FILE|-> <ID>
+
+Arguments:
+  <ID>  Session id or unique prefix
+
+Options:
+      --executor <EXECUTOR>  Executor to run on the surface's machine
+      --json                 Print one machine-readable JSON document on stdout
+      --purpose <PURPOSE>    Purpose of the run (`start`, `continue`, `fix`, ...)
+      --node <NAME>          Node that will execute the run
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --request <FILE|->     Request document file, or `-` for stdin
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp session ingest`
+
+```text
+Hidden: ingest remote events for one run
+
+Usage: vowp session ingest [OPTIONS] --run <ID> <ID>
+
+Arguments:
+  <ID>  Session id or unique prefix
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --run <ID>             Run id to ingest
+      --node <NAME>          Run the command on that node over ssh
+      --replay               Hint that the client is replaying its spool
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp session lease`
+
+```text
+Hidden: show or acquire a session lease
+
+Usage: vowp session lease [OPTIONS] <SESSION>
+
+Arguments:
+  <SESSION>  Session id or unique prefix
+
+Options:
+      --acquire <KIND>       Acquire the lease for this surface kind (`chat`, `opencode`, ...)
+      --json                 Print one machine-readable JSON document on stdout
+      --holder <NAME>        Human-visible holder name
+      --node <NAME>          Node the surface runs on
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp session takeover`
+
+```text
+Hidden: take a session over from another surface
+
+Usage: vowp session takeover [OPTIONS] --kind <KIND> --holder <NAME> --node <NAME> <SESSION>
+
+Arguments:
+  <SESSION>  Session id or unique prefix
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --kind <KIND>          Surface kind taking over (`chat`, `opencode`, ...)
+      --holder <NAME>        Human-visible holder name
+      --node <NAME>          Node the new surface runs on
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal
@@ -2339,6 +2438,28 @@ Options:
   -h, --help                 Print help
 ```
 
+#### `vowp setup __home-init`
+
+```text
+Internal home bootstrap used by `setup home`; not part of the public contract
+
+Usage: vowp setup __home-init [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --name <NAME>          Local node name; defaults to this home's configured name
+      --node <NAME>          Run the command on that node over ssh
+      --root <DIR>           Home directory to create; the process context may not know it yet
+      --harness <NAME>       Harness to write into the new home profiles; repeatable
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --provider <NAME>      Provider name to write into the new home config; repeatable
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
 ### `vowp control`
 
 ```text
@@ -2494,6 +2615,27 @@ Options:
 Start an orchestrator's host again
 
 Usage: vowp orchestrator resume [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Orchestrator name
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp orchestrator __keepalive`
+
+```text
+Hidden: keep one orchestrator's lease alive after the CLI exits
+
+Usage: vowp orchestrator __keepalive [OPTIONS] <NAME>
 
 Arguments:
   <NAME>  Orchestrator name
