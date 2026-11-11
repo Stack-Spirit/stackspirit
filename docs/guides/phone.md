@@ -106,8 +106,9 @@ The orchestrator's printed `phone` instruction is the exact command for the app 
   home where the claude.ai login exists.
 
 Both are the same VOWP session, so moving between the app and `vowp chat` uses the lease and capsule
-rules in [Sessions and surfaces](sessions.md). The phone never needs a public port; the app host
-binds loopback on the home and the phone reaches it over SSH.
+rules in [Sessions and surfaces](sessions.md). The phone never needs a public port: the opencode host
+binds loopback on the home and the phone reaches it over SSH, while Claude Remote Control connects
+outbound to claude.ai from the home and opens no local port.
 
 ## Enter a secret from the phone
 

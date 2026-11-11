@@ -36,7 +36,7 @@ pre-release builds are not supported.
 | Secret values | `~/.vowp/secrets/` (basic mode) or `/home/vowp-vault/secrets/` (vault mode) | They unlock providers and deploy targets. |
 | Harness logins | Claude Code/opencode's own storage | VOWP must never read or copy them. |
 | The control cache and tunnels | `~/.vowp-control/` | Snapshot content, spooled events and local forward records. |
-| App config and pair links | `~/.vowp/orchestrators/<name>/` | They grant access to the session and its tools. |
+| App config and opencode pair links | `~/.vowp/orchestrators/<name>/` | They grant access to the session and its tools. |
 
 Trust boundaries:
 
@@ -59,14 +59,14 @@ Trust boundaries:
 |---|---|
 | **One writer per session** | `sessions/<id>/log.jsonl` is appended only on the home, by the session service or the hidden `session ingest` path. `seq` has no gaps or duplicates; ingest is idempotent by event id. |
 | **The home is authoritative** | Control machines, apps and MCP servers never write a DB file. They route commands to the home. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
-| **No public listener** | The supervisor opens no public HTTP, SSE or API port. The only listeners are loopback: an app host such as the opencode server, and the one-time secret paste page. Both are reached through an SSH tunnel; the vector is one-time and loopback-only. |
+| **No public listener** | The supervisor opens no public HTTP, SSE or API port. The opencode app host and the one-time secret paste page listen on loopback only, and a control machine reaches both through an SSH tunnel; the secret vector is one-time. Claude Remote Control opens no local port: it connects outbound to claude.ai from the home. |
 | **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. `vowp doctor` reports presence by name and never calls the network. Secret values live only in the secret store (see [Secrets](#secrets)). This covers configuration and argv, not every stored byte: exact-value redaction covers the session-service and remote-ingest event paths and the snapshot, but `supervisor.log`, gate evidence, ledger rows, the switch turn path and the `session watch` importer are written unredacted and can hold a value a command printed (see [Redaction](#redaction)). |
 | **Stock binaries only** | Adapters spawn `claude`, `opencode` or a configured CLI exactly as a user would. No client spoofing, no "sign in with Claude" inside VOWP, no token forwarding. The optional `session watch` importer reads transcript JSONL read-only; it does not read auth files. |
 | **cwd allow-list** | Before a run, the session layer checks that the working directory is inside the job worktree, the project path, the worktree root or `[node].cwd_allow`. Anything else is refused. |
 | **Worktree isolation** | One worktree per job on branch `job/<id>`. The `owns_respected` gate checks the diff and uncommitted files against the job's globs; dispatch-time locks prevent overlapping owners from running together. |
 | **One active surface** | A lease row exists at most once per session. A surface without the current token can read in follow mode; every write is refused. A stale lease (60 s without heartbeat) is swept. Takeover drains the old turn, writes a capsule and cuts the old surface off. |
 | **MCP writes check the lease** | Every `vowp mcp` write tool calls `surface::check_lease` with the token from the app's project-local token file. A moved session's old app gets the read-only notice; read tools keep working. |
-| **Project-local app config** | `vowp orchestrator new` writes only under `~/.vowp/orchestrators/<name>/`, never the user's global app config. The pair link is single-use, expires, and is treated as a secret. |
+| **Project-local app config** | `vowp orchestrator new` writes only under `~/.vowp/orchestrators/<name>/`, never the user's global app config. The opencode pair link is single-use, expires, and is treated as a secret. |
 | **tmux safety** | Only tagged `vowp-` windows are touched. Every window is a read-only view. There is no respawn or keystroke API; `capture-pane` is display-only and never drives a decision. |
 | **Guarded promotion** | Guards → serving bank → diff → approval → deploy → probe → rollback record. A refusal is staged, never retried with a weakened check. |
 | **Nothing public without a human** | Publishing, deploying, visibility changes, releases and new accounts require an approval inbox item answered by a human, unless the environment is explicitly configured with `approval = "policy"` and the operator passes `--yes`. |
@@ -123,8 +123,9 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 ### Injection
 
 - A harness run's `env_pass` is a list of **names**. `vault::env_for` resolves exactly those names for
-  that harness (plus names listed by `[env.*]` deploy/promote commands) and returns `(name, value)`
-  pairs to the adapter. A missing name is a warning, not a hard failure.
+  that harness and returns `(name, value)` pairs to the adapter. A missing name is a warning, not a
+  hard failure. This is the only injection path today: the promoter runs `[env.*]` deploy/probe
+  commands with no added secret environment.
 - `__vault-exec` is the hidden read/inject helper: `__vault-exec --env NAME -- <cmd…>` reads only
   `NAME` and execs the command with that one variable set. In vault mode the sudoers line chooses
   `vowp-vault`; the helper has no `--user` flag and cannot run an arbitrary command outside the one it
@@ -245,9 +246,13 @@ are your responsibility.
 
 ## Apps, MCP and leases
 
-- The app host (opencode server or Claude Remote Control) runs on the home and binds loopback. The
-  desktop or phone joins through `vowp tunnel` and the app's own pairing/session flow. No public port
-  is opened. The pair link is single-use and expires in five minutes; treat it as a secret.
+- The opencode app host runs on the home and binds loopback. The desktop joins through `vowp tunnel`
+  and the app's own pairing flow; the phone runs `opencode --server` against the loopback port over
+  SSH. No public port is opened. The opencode pair link is single-use and expires in five minutes;
+  treat it as a secret. Claude Remote Control also runs on the home, but it opens no local port: the
+  `claude remote-control` process connects outbound to claude.ai, and the desktop joins at
+  `https://claude.ai/code` or the phone in the Claude mobile app. No VOWP tunnel or pair link is
+  involved.
 - `vowp orchestrator new` writes only the orchestrator's project-local config under
   `~/.vowp/orchestrators/<name>/`: `opencode.json` or `.mcp.json`, `AGENTS.md`, `orchestrator.json`,
   the lease token and host state. It does not edit the user's global app config.
@@ -349,8 +354,9 @@ Be explicit about the limits:
   not a substitute for reviewing the change.
 - **Network egress.** The supervisor opens no public listening sockets and makes no model-provider
   calls, but it is not offline. The merge queue runs `git fetch` and `git push` against the configured
-  remote, `--node` runs commands over SSH, the app hosts bind loopback, and the harnesses it starts
-  make their own provider calls. Restrict egress at the OS or network level if that matters to you.
+  remote, `--node` runs commands over SSH, the opencode app host binds loopback, Claude Remote
+  Control connects outbound to claude.ai, and the harnesses it starts make their own provider calls.
+  Restrict egress at the OS or network level if that matters to you.
 - **The VPS provider.** The owner is responsible for the server, its disk, its snapshots and its
   billing. VOWP does not take provider-level backups.
 
@@ -359,7 +365,8 @@ Be explicit about the limits:
 - [ ] Run the home as a dedicated non-root user with access only to the projects it needs.
 - [ ] Use key-only SSH in batch mode; disable password authentication once keys work.
 - [ ] Keep `~/.vowp` and `~/.vowp-control` out of shared backups and out of any repository.
-- [ ] Open no public port. Reach app hosts and the secret page through `vowp tunnel` only.
+- [ ] Open no public port. Reach the opencode app host and the secret page through `vowp tunnel` only;
+      Claude Remote Control uses an outbound connection to claude.ai and no tunnel.
 - [ ] Put provider values in the secret store, never in `vowp.toml`, a command argument or a chat.
 - [ ] Prefer vault mode; if you use basic mode, accept that the runtime user owns the files and say so
       in the setup report.
@@ -370,5 +377,5 @@ Be explicit about the limits:
 - [ ] Keep `[merge].secret_scan = true`.
 - [ ] Use `approval = "human"` for production; do not set `policy` just to avoid answering the inbox.
 - [ ] Back up before upgrading; test the restore path and the migration rollback.
-- [ ] Treat session logs, app transcripts, the control cache and pair links as sensitive.
+- [ ] Treat session logs, app transcripts, the control cache and opencode pair links as sensitive.
 - [ ] Revoke a lost phone or laptop key; the lease and the key are the access.

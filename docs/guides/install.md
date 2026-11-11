@@ -123,12 +123,14 @@ unit and the five-minute watchdog. Preview it first if you like:
 
 ```sh
 ./scripts/install.sh --dry-run
-./scripts/install.sh --no-service --no-cron   # control machine: binary only
+./scripts/install.sh --no-service --no-watchdog   # control machine: no enabled service, no watchdog
 ```
 
-Use `--linger` to keep the user service available after logout. On a control machine, `--no-service
---no-cron` is the normal choice; the home runs the supervisor, not the laptop. The unit is
-`vowp.service`, one service for the whole home, and its `ExecStart` is `vowp up --foreground`.
+Use `--linger` to keep the user service available after logout. On a control machine,
+`--no-service --no-watchdog` is the normal choice; the home runs the supervisor, not the laptop.
+`--no-service` leaves the unit installed but does not enable or start it; `--no-watchdog` skips the
+watchdog script and its crontab entry (it implies `--no-cron`). The unit is `vowp.service`, one
+service for the whole home, and its `ExecStart` is `vowp up --foreground`.
 
 If you build with `cargo install` instead, the binary lands in `$CARGO_HOME/bin` (usually
 `~/.cargo/bin`); add that directory to `PATH` or pass `--root <dir>`.

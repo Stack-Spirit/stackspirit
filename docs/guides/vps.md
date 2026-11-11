@@ -77,10 +77,12 @@ cargo build --release --workspace
 vowp --version
 ```
 
-The script installs `~/.local/bin/vowp`, the user unit `vowp.service` and the five-minute watchdog,
-unless you pass `--no-service` or `--no-cron`. Use `--linger` so the user manager stays available
-after logout. The unit runs `vowp up --foreground` with `VOWP_HOME=%h/.vowp`; there is one service for
-the whole home, not one per project.
+The script installs `~/.local/bin/vowp`, the user unit `vowp.service` and the five-minute watchdog.
+`--no-service` leaves the unit installed but does not enable or start it; `--no-watchdog` skips the
+watchdog script and its crontab entry (it implies `--no-cron`); `--no-cron` alone only leaves the
+crontab unchanged. Use `--linger` so the user manager stays available after logout. The unit runs
+`vowp up --foreground` with `VOWP_HOME=%h/.vowp`; there is one service for the whole home, not one
+per project.
 
 Check the prerequisites as that user:
 
@@ -458,9 +460,9 @@ refused rather than guessed at.
 
 ## SSH and firewall
 
-The home opens no public listening socket. The only inbound service is SSH. The app hosts and the
-one-time secret page bind loopback and are reached through an SSH tunnel; never expose them on a
-public interface.
+The home opens no public listening socket. The only inbound service is SSH. The opencode app host
+and the one-time secret page bind loopback and are reached through an SSH tunnel; never expose them
+on a public interface. Claude Remote Control opens no local port: it connects outbound to claude.ai.
 
 On a server with `ufw`:
 

@@ -50,10 +50,12 @@ file. Do not switch to nightly.
 default. Add that directory to `PATH`, or install with `--root <dir>` and add `<dir>/bin`. The install
 script uses `~/.local/bin`.
 
-**`vowp setup plan` fails on SSH.** It runs
-`ssh -o BatchMode=yes <target> vowp --version`. Test the same command from the same shell. A missing
-remote `vowp` is the `install` phase, not a plan error; a permission failure is a key problem. Fix the
-key on the home; never put a password in an argument.
+**`vowp setup plan` fails on SSH.** It runs a read-only probe over
+`ssh -o BatchMode=yes <target>`: OS and architecture, `git`, `tmux`, `curl`, systemd, sudo mode and,
+when `vowp` is on the remote `PATH`, `vowp --version`. Test plain SSH first with
+`ssh -o BatchMode=yes <target> true`. A missing remote `vowp` is the `install` phase, not a plan
+error; a permission failure is a key problem. Fix the key on the home; never put a password in an
+argument.
 
 **`vowp setup home` exits 5.** Read the `handoff` object in the JSON (or the text prompt). A hand-off
 is a deliberate stop, not a failure:
@@ -257,9 +259,10 @@ opencode builds expose MCP configuration without making the tools available to t
 Code (after the project-local `.mcp.json` approval) or `vowp chat` as the tool path; the transcript
 mirror and lease still work on opencode.
 
-**The join link or pair code is lost.** Run `vowp orchestrator new` again with `--force`, or resume and
-re-read the card with `vowp orchestrator ls --json`. Treat the pair link as a secret: it is single-use
-and expires. Open a fresh tunnel rather than sharing a stale one.
+**The opencode join link or pair code is lost.** Run `vowp orchestrator new` again with `--force`, or
+resume and re-read the card with `vowp orchestrator ls --json`. Treat the opencode pair link as a
+secret: it is single-use and expires. Open a fresh tunnel rather than sharing a stale one. Claude
+Remote Control has no pair link; re-open `https://claude.ai/code` or the Claude mobile app instead.
 
 **`vowp tunnel` says it is opened from the control machine.** Run it on the machine that will use the
 forward; the home refuses it. A tunnel that dies immediately usually means the remote port is not

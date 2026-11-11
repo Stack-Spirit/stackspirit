@@ -72,8 +72,9 @@ the home remains the only source.
 
 ## Open a tunnel
 
-Apps and the one-time secret page bind loopback on the home. A control machine reaches them through a
-managed SSH forward:
+The opencode app host and the one-time secret page bind loopback on the home. A control machine
+reaches them through a managed SSH forward. Claude Remote Control does not use a tunnel: it connects
+outbound to claude.ai from the home and opens no local port.
 
 ```sh
 vowp tunnel open opencode --remote-port <port>

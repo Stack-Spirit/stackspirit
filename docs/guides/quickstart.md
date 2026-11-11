@@ -100,8 +100,8 @@ vowp fleet queue
 ```
 
 `vowp up` ensures `vowp-home` (the `board` and `capacity` windows) and one `vowp-<project>` session
-per active project, then detaches the supervisor. Run it from the home, or from a checkout to register
-that checkout on the way. `vowp up --foreground` is what the systemd unit runs; `--once` runs one tick
+for every non-archived project (including paused ones), then detaches the supervisor. Run it from the
+home, or from a checkout to register that checkout on the way. `vowp up --foreground` is what the systemd unit runs; `--once` runs one tick
 for a smoke test.
 
 `vowp status` is the short screen; `vowp fleet status` is the fleet view, and

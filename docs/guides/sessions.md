@@ -130,13 +130,15 @@ The product surfaces are the apps people already use:
 |---|---|---|
 | `vowp chat` | A terminal on the home, a control machine or a phone over SSH. | Turns, slash commands and capsules through the lease. |
 | opencode | An opencode server on the home; the desktop joins through an SSH tunnel and `opencode pair`, the phone runs `opencode --server ...` over SSH. | Its own session; VOWP MCP tools where the app exposes them. |
-| Claude app | Claude Code Remote Control on the home, where a claude.ai login exists. | The same session; VOWP MCP tools after the project-local `.mcp.json` approval. |
+| Claude app | Claude Code Remote Control on the home, where a claude.ai login exists; it connects outbound to claude.ai and the desktop or phone joins there. | The same session; VOWP MCP tools after the project-local `.mcp.json` approval. |
 | `vowp mcp` | A stdio MCP server started by the app. | The write tools, each checked against the current lease. |
 
 `vowp orchestrator new` creates the project-local app config, starts the host and prints the exact
 join instructions for the desktop, the phone and `vowp chat`. It never edits your global app config.
-The app host binds loopback on the home; the control machine reaches it through
-`vowp tunnel open` and no public port is opened. The instructions and the app-host details are in
+The opencode app host binds loopback on the home; the control machine reaches it through
+`vowp tunnel open` and no public port is opened. Claude Remote Control opens no local port: it
+connects outbound to claude.ai from the home, and the desktop or phone joins the Remote Control
+session there. The instructions and the app-host details are in
 [Operating a home](operating.md#orchestrators) and the
 [v0.2 specification](../design/v0.2/home-and-surfaces.md#75-app-surfaces-opencode-claude-mirror-and-resume).
 
