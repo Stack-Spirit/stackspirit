@@ -1,4 +1,4 @@
-//! `vowp reindex`, `backup`, `schema`, `version`, and the CLI-wide listing and stub tests.
+//! `vowp reindex`, `backup`, `schema`, `version`, and the CLI-wide listing and command-coverage tests.
 
 mod common;
 
@@ -190,8 +190,8 @@ fn no_command_returns_not_implemented() {
         let (code, stdout, stderr) = env.run(&args);
         let text = format!("{stdout}\n{stderr}");
         if text.contains("not implemented") {
-            // A command may still be an explicit stub only while its own handler source
-            // contains the stub. Once it is implemented, a NotImplemented return fails.
+            // A command may answer NotImplemented while its own handler source still returns
+            // that error. Once the handler is implemented, a NotImplemented return fails.
             let source = source_for(args[0]);
             assert!(
                 source.contains("Err(CliError::NotImplemented("),
