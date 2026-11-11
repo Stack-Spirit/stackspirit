@@ -2,8 +2,8 @@
 job: v2-j1-public-tree-audit
 status: done
 branch: job/v2-j1-public-tree-audit
-commits: [87b3743]
-tests: "bash scripts/audit/self-test.sh: PASS; bash docs/tests/run.sh: PASS (private and public tree); python3 docs/reference/check-reference.py: PASS; python3 docs/reference/generate.py --check: PASS (74 pages); cargo fmt/clippy: PASS; cargo test --workspace: 1145 passed, 0 failed, 2 ignored; squash-for-public.sh: FAIL at the private-marker gate (35 findings, branch left for inspection)"
+commits: [2a61d81]
+tests: "bash scripts/audit/self-test.sh: PASS; bash docs/tests/run.sh: PASS (private and public tree); python3 docs/reference/check-reference.py: PASS; python3 docs/reference/generate.py --check: PASS (74 pages); cargo fmt/clippy: PASS; cargo test --workspace: PASS (0 failed, 2 ignored); squash-for-public.sh: FAIL at the private-marker gate (35 findings, branch left for inspection)"
 files_changed: [docs/maintainers/v0.2-acceptance/public-tree-audit.md, scripts/audit/allowlist.txt, scripts/audit/public-tree.txt, scripts/audit/public-tree-markers.sh, scripts/audit/scan.sh, scripts/audit/self-test.sh, scripts/audit/squash-for-public.sh]
 open_items: []
 questions_for_owner:
@@ -27,20 +27,21 @@ after they merge.
 
 ## Tree audited
 
-- Merged `origin/main` at **`1bafd01`** (`docs: record the T1 VM deletion as complete`).
+- Merged `origin/main` at **`a430e32`** (`docs: refresh the T1 installer status and diff lists`).
   `main` moved during the audit from `e3e73b3` through `1864d68`, `0655c2a`, `d4ce1f9`,
-  `ae14b2d`, `9b19b79`, `4423385` and `b4458a4` to `1bafd01`; this report and the branch were rebased
-  onto the final tree. The last two main commits only change `docs/maintainers/fresh-setup.md`,
-  which is pruned, so the public tree is unchanged. The tooling commit is **`87b3743`**.
+  `ae14b2d`, `9b19b79`, `4423385`, `b4458a4`, `1bafd01` and `feffdf6` to `a430e32`; this report and
+  the branch were rebased onto the final tree. The last commit only changes
+  `docs/maintainers/fresh-setup.md`, which is pruned, so the public tree is unchanged. The tooling
+  commit is **`2a61d81`**.
 
   ```text
-  $ git diff --name-only b4458a4..1bafd01
+  $ git diff --name-only feffdf6..a430e32
   docs/maintainers/v0.2-acceptance/fresh-setup.md
   ```
 
 - Public candidate: the orphan `public-main` tree produced by
-  `scripts/audit/squash-for-public.sh --force`, tree **`e2c017b`**, **636 files**
-  (commit `c485a80`; this report is pruned, so a later report-only commit does not change the tree).
+  `scripts/audit/squash-for-public.sh --force`, tree **`e5d59f6`**, **636 files**
+  (commit `c5d1233`; this report is pruned, so a later report-only commit does not change the tree).
 - No push, tag, publish or visibility change was made. The private working tree, the real home, the
   default tmux server and the network were not touched by the audit.
 
@@ -59,7 +60,7 @@ after they merge.
 | `python3 docs/reference/generate.py --check` (`VOWP_BIN=…/debug/vowp`) | PASS: 74 generated pages are current |
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --workspace` | PASS: 1145 passed, 0 failed, 2 ignored |
+| `cargo test --workspace` | PASS: 0 failed, 2 ignored |
 | `bash scripts/audit/squash-for-public.sh --force` | Build, clippy, tests, prune, scrub and secret scan pass; **stops at the marker gate** and leaves `public-main` for inspection |
 
 The first squash attempt on this tree hit `setup_verify_run_reports_every_check` in
@@ -178,7 +179,7 @@ Evidence:
 $ git ls-tree -r --name-only public-main | grep -E '^(AGENTS\.md|docs/maintainers/|scripts/(spikes|acceptance|audit|dogfood|fresh-user)/|site/)'
 (no output)
 $ bash scripts/audit/public-tree-check.sh --rev public-main
-public-tree: OK: c485a805d4e221ed7287f900f90835145b674e13 has 636 file(s), no pruned path and every required path.
+public-tree: OK: c5d123397d986a622f163cf0efe481a5ef3f232d has 636 file(s), no pruned path and every required path.
 ```
 
 ## Tooling changed by this job
