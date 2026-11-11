@@ -59,6 +59,9 @@ dd if=/dev/zero of="$repo/big.bin" bs=1024 count=1100 2>/dev/null
 printf 'loopback 127.0.0.1\nplaceholder /home/user/project\nreserved test@example.invalid\n' > "$repo/benign.txt"
 # Rust field access such as `args.local_port` must not be mistaken for a host.
 printf 'fn probe() { let _ = args.local_port; let _ = self.local.path(); let _ = listener.local_addr(); }\n' > "$repo/benign.rs"
+# A concrete ssh_target is a finding; a reserved example target is allowlisted.
+printf '{"ssh_target": "dev@vps"}\n' > "$repo/ssh-target.json"
+printf '{"ssh_target": "vowp@example.invalid"}\n' > "$repo/ssh-placeholder.json"
 
 git -C "$repo" add -A
 git -C "$repo" commit -qm "synthetic secrets"
@@ -77,7 +80,7 @@ summary_out=$tmp/summary.txt
 if run_scan --worktree --summary > "$summary_out" 2>&1; then
     fail "working-tree scan should fail on synthetic secrets"
 fi
-for category in ipv4 home_path email token private_host ssh_host secret_path large_blob; do
+for category in ipv4 home_path email token private_host ssh_host ssh_target secret_path large_blob; do
     grep -q "  $category .*blocked" "$summary_out" || fail "category not reported: $category"
 done
 
@@ -87,7 +90,7 @@ if run_scan --worktree > "$full_out" 2>&1; then
     fail "working-tree scan should fail without --summary"
 fi
 grep -q 'secrets.txt:worktree:' "$full_out" || fail "file:commit:line is missing"
-for raw in "$sk" "$ghp" "$pat" "$aws" "$pem" "$slack" "$ip" "$home_path" "$email" "$host"; do
+for raw in "$sk" "$ghp" "$pat" "$aws" "$pem" "$slack" "$ip" "$home_path" "$email" "$host" "dev@vps"; do
     if grep -Fq -- "$raw" "$full_out"; then
         fail "scanner printed a full matched value"
     fi
@@ -103,7 +106,7 @@ else
 fi
 
 # 4. Remove the synthetic secrets: the current tree is clean, old history is not.
-git -C "$repo" rm -q secrets.txt .env keys/id_rsa big.bin
+git -C "$repo" rm -q secrets.txt .env keys/id_rsa big.bin ssh-target.json
 git -C "$repo" commit -qm "remove synthetic secrets"
 run_scan --worktree >/dev/null 2>&1 || fail "clean working tree should pass"
 run_scan --rev HEAD >/dev/null 2>&1 || fail "clean HEAD tree should pass"
@@ -239,7 +242,7 @@ run_check --index --manifest public-tree-test.txt >/dev/null 2>&1 ||
 #    in the index only, is idempotent, accepts an already-clean file, and fails
 #    on a duplicate or a partial paragraph.
 srepo=$tmp/scrub-repo
-mkdir -p "$srepo/scripts/audit" "$srepo/scripts/release"
+mkdir -p "$srepo/scripts/audit" "$srepo/scripts/release" "$srepo/crates/vowp-protocol/tests"
 cp "$script_dir/public-tree-scrub.sh" "$script_dir/public-tree-scrub.py" "$srepo/scripts/audit/"
 chmod +x "$srepo/scripts/audit/public-tree-scrub.sh"
 git init -q -b main "$srepo"
@@ -254,6 +257,10 @@ show_staged() {
     (cd "$srepo" && git show :scripts/release/version-test.rs)
 }
 
+show_staged_domain() {
+    (cd "$srepo" && git show :crates/vowp-protocol/tests/domain.rs)
+}
+
 cat > "$srepo/scripts/release/version-test.rs" <<'EOF'
 //! Integration test for the `vowp --version` output.
 //!
@@ -264,9 +271,17 @@ cat > "$srepo/scripts/release/version-test.rs" <<'EOF'
 
 use std::process::Command;
 EOF
+cat > "$srepo/crates/vowp-protocol/tests/domain.rs" <<'EOF'
+{
+  "name": "vps",
+  "ssh_target": "dev@vps",
+  "is_local": false
+}
+EOF
 git -C "$srepo" add -A
 git -C "$srepo" commit -qm "scrub fixture with the old paragraph"
 original=$(cat "$srepo/scripts/release/version-test.rs")
+original_domain=$(cat "$srepo/crates/vowp-protocol/tests/domain.rs")
 run_scrub >/dev/null 2>&1 || fail "the scrub should rewrite the old paragraph"
 if ! show_staged | grep -q 'asserts the same version that the root package publishes'; then
     fail "the scrub did not write the product paragraph"
@@ -276,6 +291,14 @@ if show_staged | grep -q 'packaging job does not own'; then
 fi
 [ "$(cat "$srepo/scripts/release/version-test.rs")" = "$original" ] ||
     fail "the scrub changed the private working tree"
+if ! show_staged_domain | grep -q 'vowp@example.invalid'; then
+    fail "the scrub did not replace the concrete ssh_target"
+fi
+if show_staged_domain | grep -q 'dev@vps'; then
+    fail "the scrub left the concrete ssh_target in the index"
+fi
+[ "$(cat "$srepo/crates/vowp-protocol/tests/domain.rs")" = "$original_domain" ] ||
+    fail "the scrub changed the private domain fixture"
 
 run_scrub >/dev/null 2>&1 ||
     fail "the scrub should be idempotent on an already-scrubbed file"
@@ -376,12 +399,25 @@ fi
 for category in ai_trailer build_diary job_id private_path; do
     grep -q "  $category" "$marker_summary" || fail "marker category not reported: $category"
 done
-if grep -q 'scripts/audit/notes.md' "$marker_summary"; then
-    fail "the marker scan reported a pruned path"
-fi
+# The pruned notes file contains one more `vowp-night`, one more `v2-*` id and
+# one more `scripts/audit/` reference. Exact counts prove it was skipped; the
+# summary does not print paths, so the full output is checked separately below.
+grep -qE '^  night_shift +1$' "$marker_summary" ||
+    fail "the pruned path changed the night_shift count"
+grep -qE '^  ai_trailer +1$' "$marker_summary" ||
+    fail "the pruned path changed the ai_trailer count"
+grep -qE '^  job_id +1$' "$marker_summary" ||
+    fail "the pruned path changed the job_id count"
+grep -qE '^  private_path +1$' "$marker_summary" ||
+    fail "the pruned path changed the private_path count"
+grep -qE '^  build_diary +1$' "$marker_summary" ||
+    fail "the pruned path changed the build_diary count"
 marker_out=$tmp/marker-full.txt
 if run_markers --worktree > "$marker_out" 2>&1; then
     fail "the full marker scan should fail too"
+fi
+if grep -q 'scripts/audit/notes.md' "$marker_out"; then
+    fail "the full marker scan reported a pruned path"
 fi
 grep -q 'docs/bad.md:.*job v2-b1-spec' "$marker_out" || fail "the job id was not reported"
 grep -q 'docs/bad.md:.*via vowp-night' "$marker_out" || fail "the private trailer was not reported"

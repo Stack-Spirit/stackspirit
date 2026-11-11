@@ -39,6 +39,12 @@ email|*|setup@example.invalid|Reserved .invalid example domain in the setup test
 email|*|vowp@example.invalid|Reserved .invalid example domain in a CLI test fixture.
 email|*|vowp@home.example|The reserved .example TLD in the v0.2 design example.
 
+# `ssh_target` fields in tests and design examples. These values use reserved
+# example domains; a concrete owner-user@node target is deliberately not listed.
+ssh_target|*|ssh_target": "fake.example"|Reserved .example placeholder in test fixtures.
+ssh_target|*|ssh_target": "vowp@example.invalid"|Reserved .invalid placeholder in a CLI test.
+ssh_target|*|ssh_target": "vowp@home.example"|The reserved .example TLD in the v0.2 design example.
+
 # False positives from the hostname rule: Rust method names and a test path
 # that end in `.local`, not DNS names.
 private_host|crates/vowp-cli/tests/init.rs|store.local|Rust method `store.local_node()`, not a hostname.

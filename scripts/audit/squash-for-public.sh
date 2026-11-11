@@ -44,17 +44,16 @@ Usage: scripts/audit/squash-for-public.sh [--force]
 
 Creates the orphan branch `public-main` with one commit of the current tree,
 after:
-  1. scripts/audit/scan.sh --public-tree passes (private prune paths are not
-     part of the candidate; the staged tree is scanned again in step 7);
-  2. cargo fmt --all -- --check passes;
-  3. cargo clippy --workspace --all-targets -- -D warnings passes;
-  4. cargo test --workspace passes;
-  5. the staged public tree removes every path in scripts/audit/public-tree.txt,
+  1. cargo fmt --all -- --check passes;
+  2. cargo clippy --workspace --all-targets -- -D warnings passes;
+  3. cargo test --workspace passes;
+  4. the staged public tree removes every path in scripts/audit/public-tree.txt,
      applies the public-tree content scrub, contains every required product
      path and keeps only allowed top-level entries (scripts/audit/public-tree-check.sh --index);
-  6. scripts/audit/public-tree-check.sh --rev public-main passes;
-  7. scripts/audit/scan.sh --rev public-main passes;
-  8. scripts/audit/public-tree-markers.sh --rev public-main passes.
+  5. scripts/audit/public-tree-check.sh --rev public-main passes;
+  6. scripts/audit/scan.sh --rev public-main passes (the scan runs on the
+     scrubbed tree, so a known fixture rewrite is not a false failure);
+  7. scripts/audit/public-tree-markers.sh --rev public-main passes.
 
 The staged tree is built in a temporary index, so the private checkout is not
 changed. The script never pushes. It prints the exact commands for the owner.
@@ -107,9 +106,6 @@ fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/vowp-public.XXXXXX") || fail "cannot create a temporary directory"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-
-echo "squash: scanning the public paths in the working tree"
-scripts/audit/scan.sh --public-tree || fail "the public paths still have a non-allowlisted finding"
 
 echo "squash: checking formatting"
 cargo fmt --all -- --check || fail "cargo fmt --all -- --check failed"

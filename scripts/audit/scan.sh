@@ -152,14 +152,17 @@ if [ "$mode" = rev ]; then
     rev=$(git rev-parse --verify "$rev^{commit}" 2>/dev/null) || die "not a commit: $rev"
 fi
 
-# The seven content patterns. They are also documented in docs/maintainers/public-audit.md.
+# The eight content patterns. They are also documented in docs/maintainers/public-audit.md.
 RE_IP='([0-9]{1,3}\.){3}[0-9]{1,3}'
 RE_HOME='(/home/|/Users/)[A-Za-z0-9._-]+'
 RE_EMAIL='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 RE_TOKEN='(sk-[A-Za-z0-9_-]{20,}|sb_secret_[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[abp]-[A-Za-z0-9-]{10,})'
 RE_HOST='[A-Za-z0-9][A-Za-z0-9._-]*\.(local|lan|internal|home\.arpa|ts\.net)'
 RE_SSH='ssh +[A-Za-z0-9._-]+@[A-Za-z0-9._-]+'
-RE_COMBINED="$RE_IP|$RE_HOME|$RE_EMAIL|$RE_TOKEN|$RE_HOST|$RE_SSH"
+# A JSON/TOML `ssh_target` field carries a concrete user@host even when the
+# value is not written as an `ssh` command. Match the field and its value.
+RE_SSH_TARGET='ssh_target"?[[:space:]]*[:=][[:space:]]*"[^"]+"'
+RE_COMBINED="$RE_IP|$RE_HOME|$RE_EMAIL|$RE_TOKEN|$RE_HOST|$RE_SSH|$RE_SSH_TARGET"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/vowp-audit.XXXXXX") || die "cannot create a temporary directory"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
@@ -190,6 +193,7 @@ fi
     printf 'token\t%s\n' "$RE_TOKEN"
     printf 'private_host\t%s\n' "$RE_HOST"
     printf 'ssh_host\t%s\n' "$RE_SSH"
+    printf 'ssh_target\t%s\n' "$RE_SSH_TARGET"
 } > "$tmp/rules"
 
 # AWK does the content classification in one process per tree. It reads the

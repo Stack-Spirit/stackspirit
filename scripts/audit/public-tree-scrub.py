@@ -37,6 +37,9 @@ NEW_VERSION_TEST = """//! The publishable `vowp-cli` package manifest lives at t
 //! asserts the same version that the root package publishes.
 """
 
+OLD_SSH_TARGET = '"ssh_target": "dev@vps"'
+NEW_SSH_TARGET = '"ssh_target": "vowp@example.invalid"'
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -58,7 +61,10 @@ class Rule:
         return tuple(sorted(lines))
 
 
-RULES = (Rule("scripts/release/version-test.rs", OLD_VERSION_TEST, NEW_VERSION_TEST),)
+RULES = (
+    Rule("scripts/release/version-test.rs", OLD_VERSION_TEST, NEW_VERSION_TEST),
+    Rule("crates/vowp-protocol/tests/domain.rs", OLD_SSH_TARGET, NEW_SSH_TARGET),
+)
 
 
 class ScrubError(Exception):

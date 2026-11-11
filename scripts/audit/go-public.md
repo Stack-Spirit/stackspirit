@@ -21,14 +21,15 @@ git status --short                 # must be empty
 git fetch --all
 git rev-parse --short HEAD         # record this commit in the launch log
 
-scripts/audit/scan.sh --worktree   # must exit 0
-scripts/audit/licenses.sh          # must exit 0
+scripts/audit/scan.sh --public-tree           # must exit 0
+scripts/audit/public-tree-markers.sh --worktree  # must exit 0
+scripts/audit/licenses.sh                     # must exit 0
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-If `scan.sh --worktree` reports the six unowned files from the audit, the owner runs the staged fix:
+If `scan.sh --public-tree` reports the six unowned files from the audit, the owner runs the staged fix:
 
 ```sh
 scripts/audit/fix-unowned-private-paths.sh              # dry run: 6 files
@@ -55,9 +56,9 @@ every change.
 scripts/audit/squash-for-public.sh
 ```
 
-The script performs, in order: the working-tree scan, `cargo fmt --check`, clippy, the test suite, the
-top-level path allow-list, the orphan commit, and the scan of `public-main`. It refuses to continue on a
-failure. It never pushes.
+The script performs, in order: `cargo fmt --check`, clippy, the test suite, the staged public-tree
+prune and content scrub, the top-level path allow-list, the orphan commit, the secret scan of
+`public-main`, and the private build-marker scan. It refuses to continue on a failure. It never pushes.
 
 When rehearsing the squash in a temporary clone, give Cargo a target directory for that clone (for
 example `CARGO_TARGET_DIR=$PWD/target scripts/audit/squash-for-public.sh`) or run `cargo clean` in the
@@ -71,6 +72,7 @@ git rev-list --count public-main                 # must be 1
 git log -1 --format='%an <%ae>%n%s' public-main  # author and "VOWP 0.1.0"
 git ls-tree -r --name-only public-main | wc -l
 scripts/audit/scan.sh --rev public-main          # must exit 0
+scripts/audit/public-tree-markers.sh --rev public-main  # must exit 0
 ```
 
 **Verify:** exactly one commit, the expected author, the message `VOWP 0.1.0`, and a clean scan. The
