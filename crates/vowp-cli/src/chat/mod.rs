@@ -76,7 +76,8 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
     }
 
     let surface = chat_surface(ctx);
-    let (mut guard, previous) = acquire(ctx, io, &store, &session, &surface, opts.takeover)?;
+    let (guard, previous) = acquire(ctx, io, &store, &session, &surface, opts.takeover)?;
+    let mut guard = Some(guard);
     // The attach note moved the log on, so every display started from here must use the
     // refreshed row rather than the pre-lease snapshot.
     session = store.require_session(&session.id)?;
@@ -90,8 +91,11 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
 
     if let Some(target) = &opts.executor {
         ensure_executor_node(ctx, target.node.as_ref().or(opts.node.as_ref()))?;
-        if let Err(error) = check_lease_with(&store, &session.id, Some(guard.token())) {
-            let _ = error;
+        let Some(token) = guard.as_ref().map(|held| held.token().to_owned()) else {
+            return Ok(0);
+        };
+        if check_lease_with(&store, &session.id, Some(&token)).is_err() {
+            release_guard(&mut guard)?;
             let current = store.require_session(&session.id)?;
             writeln!(
                 io.err(),
@@ -129,8 +133,11 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
             continue;
         }
 
-        if let Err(error) = check_lease_with(&store, &session.id, Some(guard.token())) {
-            let _ = error;
+        let Some(token) = guard.as_ref().map(|held| held.token().to_owned()) else {
+            break;
+        };
+        if check_lease_with(&store, &session.id, Some(&token)).is_err() {
+            release_guard(&mut guard)?;
             writeln!(
                 io.err(),
                 "{}",
@@ -139,9 +146,14 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
             let current = store.require_session(&session.id)?;
             return follow_mode(ctx, io, &store, &current, current.last_seq);
         }
-        match run_turn(ctx, io, &store, &session, &guard, line, opts.node.as_ref()) {
-            Ok(TurnStatus::Ok) => {}
-            Ok(TurnStatus::Revoked) => {
+        let status = match guard.as_ref() {
+            Some(held) => run_turn(ctx, io, &store, &session, held, line, opts.node.as_ref())?,
+            None => break,
+        };
+        match status {
+            TurnStatus::Ok => {}
+            TurnStatus::Revoked => {
+                release_guard(&mut guard)?;
                 let current = store.require_session(&session.id)?;
                 writeln!(
                     io.err(),
@@ -150,7 +162,6 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
                 )?;
                 return follow_mode(ctx, io, &store, &current, current.last_seq);
             }
-            Err(error) => return Err(error),
         }
         session = store.require_session(&session.id)?;
         if session.state == SessionState::Blocked {
@@ -256,13 +267,25 @@ fn acquire(
     Ok((guard, existing))
 }
 
+/// Releases the held lease, if any, and stops this surface writing.
+///
+/// `/follow` and a revoked lease both hand the session to another surface. Releasing the
+/// guard deletes the lease row before the follower starts, so the heartbeat thread stops
+/// and another surface does not have to take over from a process that is only reading.
+fn release_guard(guard: &mut Option<LeaseGuard>) -> Result<(), CliError> {
+    if let Some(held) = guard.take() {
+        held.release()?;
+    }
+    Ok(())
+}
+
 /// Handles one slash command; returns whether the chat loop should continue.
 fn slash_command(
     ctx: &Ctx,
     io: &mut dyn IoStreams,
     store: &Store,
     session: &mut Session,
-    guard: &mut LeaseGuard,
+    guard: &mut Option<LeaseGuard>,
     rest: &str,
     opts: &ChatOptions,
 ) -> Result<bool, CliError> {
@@ -281,8 +304,11 @@ fn slash_command(
             Ok(true)
         }
         "switch" => {
-            if let Err(error) = check_lease_with(store, &session.id, Some(guard.token())) {
-                let _ = error;
+            let Some(token) = guard.as_ref().map(|held| held.token().to_owned()) else {
+                return Ok(false);
+            };
+            if check_lease_with(store, &session.id, Some(&token)).is_err() {
+                release_guard(guard)?;
                 let current = store.require_session(&session.id)?;
                 writeln!(
                     io.err(),
@@ -336,7 +362,7 @@ fn slash_command(
                     takeover: true,
                 },
             )?;
-            *guard = replacement;
+            *guard = Some(replacement);
             match before {
                 Some(lease) if lease.holder != surface.holder => {
                     writeln!(io.out(), "took session {} over from {}", session.id, lease.holder)?;
@@ -348,8 +374,7 @@ fn slash_command(
             Ok(true)
         }
         "follow" => {
-            let token = guard.token().to_owned();
-            store.release_lease(&session.id, &token)?;
+            release_guard(guard)?;
             writeln!(
                 io.out(),
                 "following session {} read-only; press Ctrl-C to stop",
@@ -360,7 +385,10 @@ fn slash_command(
             follow_mode(ctx, io, store, &current, current.last_seq).map(|_| false)
         }
         "capsule" => {
-            check_lease_with(store, &session.id, Some(guard.token()))?;
+            let Some(token) = guard.as_ref().map(|held| held.token().to_owned()) else {
+                return Ok(false);
+            };
+            check_lease_with(store, &session.id, Some(&token))?;
             let service = SessionService::new(ctx.deps().clone());
             let capsule = service.write_capsule(&session.id, CapsuleTrigger::Manual)?;
             writeln!(io.out(), "{}", capsule.capsule_id)?;
@@ -615,17 +643,26 @@ fn follow_mode(
 
     let cancel = CancelToken::default();
     cancel.cancel();
-    let _ = follow_to(store, &session.id, after_seq, &cancel, io.out())?;
+    let mut last = after_seq;
     loop {
+        // Scripted follow drains the index at every command boundary: a pipe can write an
+        // event and then `/quit`, and the follower still prints that event before exiting.
+        last = poll_follow(store, &session.id, last, io)?;
         let mut line = String::new();
         let read = io.input().read_line(&mut line)?;
         if read == 0 {
-            return Ok(0);
+            break;
         }
         match line.trim() {
             "" => {}
-            "/quit" | "/q" => return Ok(0),
-            "/status" => print_status(ctx, io, store, session)?,
+            "/quit" | "/q" => {
+                let _ = poll_follow(store, &session.id, last, io)?;
+                return Ok(0);
+            }
+            "/status" => {
+                let current = store.require_session(&session.id)?;
+                print_status(ctx, io, store, &current)?;
+            }
             "/follow" => {}
             _ => writeln!(
                 io.err(),
@@ -634,6 +671,15 @@ fn follow_mode(
             )?,
         }
     }
+    let _ = poll_follow(store, &session.id, last, io)?;
+    Ok(0)
+}
+
+/// Drains the events already indexed after `after_seq` and returns the last sequence read.
+fn poll_follow(store: &Store, session: &SessionId, after_seq: u64, io: &mut dyn IoStreams) -> Result<u64, CliError> {
+    let cancel = CancelToken::default();
+    cancel.cancel();
+    Ok(follow_to(store, session, after_seq, &cancel, io.out())?)
 }
 
 /// Returns the exact read-only notice for the current lease holder.

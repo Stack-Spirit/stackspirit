@@ -17,7 +17,8 @@ use vowp_cli::chat::ChatOptions;
 use vowp_cli::{BufferIo, Ctx};
 use vowp_core::surface::follow::follow_to;
 use vowp_protocol::{
-    Actor, CancelToken, EventBody, EventSource, Executor, HarnessKind, NodeName, Note, SessionId, SystemClock,
+    Actor, CancelToken, CapsuleTrigger, EventBody, EventSource, Executor, HarnessKind, NodeName, Note, RunPurpose,
+    SessionId, SystemClock,
 };
 use vowp_store::NodePaths;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -138,7 +139,15 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
 fn run_chat(env: &common::TestEnv, args: &[&str], input: &str) -> (i32, String, String) {
     let mut child = spawn_chat(env, args);
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes()).expect("write chat input");
+        // A lease refusal exits before the test writes the scripted input, so the pipe may
+        // already be closed. That is the expected outcome for those runs, not a test bug.
+        if let Err(error) = stdin.write_all(input.as_bytes()) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "write chat input: {error}"
+            );
+        }
     }
     let output = child.wait_with_output().expect("wait for vowp chat");
     (
@@ -196,6 +205,11 @@ fn chat_takes_over_and_prints_notice() {
     assert!(stdout.contains("lease: local (chat) on local"), "{stdout}");
 
     let session = SessionId::parse(&id).expect("session id");
+    let last_seq = env.store().require_session(&session).expect("session").last_seq;
+    assert!(
+        stdout.contains(&format!("events: {last_seq}")),
+        "/status used the pre-attach sequence: {stdout}"
+    );
     assert!(
         env.store().lease(&session).expect("lease query").is_none(),
         "chat must release the lease on exit"
@@ -344,7 +358,7 @@ fn chat_follow_prints_new_events_at_narrow_width() {
 }
 
 #[test]
-fn chat_follow_command_releases_the_lease() {
+fn chat_follow_command_releases_the_lease_and_prints_new_events() {
     let env = common::TestEnv::new();
     configure(&env, "hello");
     let id = create(&env);
@@ -359,10 +373,40 @@ fn chat_follow_command_releases_the_lease() {
         }),
         "/follow kept the lease"
     );
+
+    // An event appended after `/follow` must reach the follower output.
+    let paths = NodePaths::new(env.home_path());
+    let log = SessionLog::open(&paths, &session, Arc::new(SystemClock)).expect("writer");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Vowp,
+                model: None,
+                node: Some(NodeName::parse("local").expect("node")),
+                native_session_id: None,
+            },
+            body: EventBody::Note(Note {
+                text: "the follower sees this".to_owned(),
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append note");
+    env.store().index_event(&index_row(&appended)).expect("index event");
+    log.sync().expect("sync log");
+
     send_chat(&mut child, "hello\n/quit\n");
     let output = child.wait_with_output().expect("wait for chat");
     assert_eq!(output.status.code().unwrap_or(-1), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("following session"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("#{} note", appended.envelope.seq)),
+        "the follower did not print the new event: {stdout}"
+    );
+    assert!(stdout.contains("the follower sees this"), "{stdout}");
     assert!(
         stderr.contains("This surface is read-only (follow mode)."),
         "follow mode must refuse writes: {stderr}"
@@ -475,16 +519,58 @@ fn chat_slash_switch_status_capsule() {
     let id = create(&env);
     let session = SessionId::parse(&id).expect("session id");
 
-    let input = "/status\n/switch opencode:deepseek/deepseek-flash#max --node local\n/capsule\n/quit\n";
-    let (code, stdout, stderr) = run_chat(&env, &["chat", &id], input);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("session:"), "{stdout}");
-    assert!(stdout.contains("switched to"), "{stdout}");
+    let mut child = spawn_chat(&env, &["chat", &id]);
+    assert!(wait_for_lease(&env, &id, "local"), "chat did not take the lease");
+    send_chat(
+        &mut child,
+        "/status\n/switch opencode:deepseek/deepseek-flash#max --node local\n/capsule\n",
+    );
 
     let store = env.store();
     assert!(
+        wait_until(Duration::from_secs(5), || {
+            store
+                .latest_capsule(&session)
+                .expect("capsules")
+                .is_some_and(|capsule| capsule.trigger == CapsuleTrigger::Manual)
+        }),
+        "/capsule did not write a capsule"
+    );
+    assert!(
         !store.list_switches(&session).expect("switches").is_empty(),
         "/switch must record a switch row"
+    );
+
+    // A takeover revokes this surface's token. The named slash test must cover the
+    // revoked switch, not only the happy path as the lease holder.
+    let (code, _stdout, stderr) = env.run(&[
+        "session", "takeover", &id, "--kind", "chat", "--holder", "phone", "--node", "local",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let after_takeover = store.list_switches(&session).expect("switches").len();
+
+    send_chat(
+        &mut child,
+        "/switch opencode:deepseek/deepseek-flash#max --node local\n/quit\n",
+    );
+    let output = child.wait_with_output().expect("wait for chat");
+    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("session:"), "{stdout}");
+    assert_eq!(
+        stdout.matches("switched to").count(),
+        1,
+        "only the pre-takeover switch may succeed: {stdout}"
+    );
+    assert!(stderr.contains("Taken over by phone at "), "{stderr}");
+    assert!(stderr.contains("read-only"), "{stderr}");
+
+    let switches = store.list_switches(&session).expect("switches");
+    assert_eq!(
+        switches.len(),
+        after_takeover,
+        "a revoked surface wrote another switch: {switches:?}"
     );
     assert!(
         store.latest_capsule(&session).expect("capsules").is_some(),
@@ -512,6 +598,11 @@ fn chat_remote_executor_uses_surface_machine() {
         .expect("the turn records an executor attach");
     let run = env.store().require_run(&attached.0).expect("run row");
     assert_eq!(run.node.as_str(), "local", "the executor must be the surface machine");
+    assert_eq!(
+        run.purpose,
+        RunPurpose::Start,
+        "the first chat turn must start the session, not continue it"
+    );
     assert_eq!(
         run.executor,
         Some(Executor::parse("opencode:deepseek/deepseek-flash#max").expect("executor"))

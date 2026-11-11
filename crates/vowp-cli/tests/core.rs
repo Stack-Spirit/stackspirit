@@ -313,11 +313,27 @@ fn ctx_build_requires_init() {
 }
 
 #[test]
-fn legacy_single_file_backup_still_works() {
+fn c0_chat_flags_are_no_longer_frozen() {
     let env = common::TestEnv::new();
+    let cases: &[&[&str]] = &[
+        &["chat", "nope00", "--node", "laptop"],
+        &["chat", "nope00", "--follow"],
+        &["chat", "nope00", "--takeover"],
+        &["session", "chat", "nope00", "--follow"],
+    ];
+    for args in cases {
+        let (code, _stdout, stderr) = env.run(args);
+        assert_eq!(code, 3, "{args:?}: {stderr}");
+        assert!(stderr.contains("session nope00"), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("not implemented in this build"),
+            "{args:?} was still refused by C0: {stderr}"
+        );
+    }
+
+    // The legacy single-file form still works.
     let legacy = env.home_path().join("legacy.db");
     let legacy = legacy.to_str().expect("legacy path");
-
     let (code, _stdout, stderr) = env.run(&["backup", "--to", legacy]);
     assert_eq!(code, 0, "legacy .db backup failed: {stderr}");
     assert!(
