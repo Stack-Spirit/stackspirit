@@ -95,14 +95,7 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
             return Ok(0);
         };
         if check_lease_with(&store, &session.id, Some(&token)).is_err() {
-            release_guard(&mut guard)?;
-            let current = store.require_session(&session.id)?;
-            writeln!(
-                io.err(),
-                "{}",
-                read_only_notice(&store, &current, ctx.tz_offset_minutes())?
-            )?;
-            return follow_mode(ctx, io, &store, &current, current.last_seq);
+            return revoked_follow(ctx, io, &store, &session.id, || release_guard(&mut guard));
         }
         let switched = crate::cmd::session::switch_to(
             ctx,
@@ -137,14 +130,7 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
             break;
         };
         if check_lease_with(&store, &session.id, Some(&token)).is_err() {
-            release_guard(&mut guard)?;
-            writeln!(
-                io.err(),
-                "{}",
-                read_only_notice(&store, &session, ctx.tz_offset_minutes())?
-            )?;
-            let current = store.require_session(&session.id)?;
-            return follow_mode(ctx, io, &store, &current, current.last_seq);
+            return revoked_follow(ctx, io, &store, &session.id, || release_guard(&mut guard));
         }
         let status = match guard.as_ref() {
             Some(held) => run_turn(ctx, io, &store, &session, held, line, opts.node.as_ref())?,
@@ -153,14 +139,7 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
         match status {
             TurnStatus::Ok => {}
             TurnStatus::Revoked => {
-                release_guard(&mut guard)?;
-                let current = store.require_session(&session.id)?;
-                writeln!(
-                    io.err(),
-                    "{}",
-                    read_only_notice(&store, &current, ctx.tz_offset_minutes())?
-                )?;
-                return follow_mode(ctx, io, &store, &current, current.last_seq);
+                return revoked_follow(ctx, io, &store, &session.id, || release_guard(&mut guard));
             }
         }
         session = store.require_session(&session.id)?;
@@ -296,12 +275,36 @@ pub fn capture_follow_start(
     Ok(start_seq)
 }
 
-/// Follows a session read-only after `/switch` found its lease revoked.
+/// Follows a session read-only after any fallback found its lease revoked.
 ///
 /// The stale guard is released before following, but the start sequence must be captured
 /// first: an event indexed while the guard is being released belongs to the follower's
 /// window and must be printed. Reading `last_seq` afterwards would advance it past that
-/// event and silently skip it.
+/// event and silently skip it. Every revoked-lease fallback goes through this function so
+/// no path can release first and follow from the post-release row.
+///
+/// `release` is injected so the ordering is testable without a live lease.
+fn revoked_follow(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    store: &Store,
+    session: &SessionId,
+    release: impl FnOnce() -> Result<(), CliError>,
+) -> Result<i32, CliError> {
+    let start_seq = capture_follow_start(store, session, release)?;
+    let current = store.require_session(session)?;
+    writeln!(
+        io.err(),
+        "{}",
+        read_only_notice(store, &current, ctx.tz_offset_minutes())?
+    )?;
+    follow_mode(ctx, io, store, &current, start_seq)
+}
+
+/// Follows a session read-only after `/switch` found its lease revoked.
+///
+/// Unlike the other revoked-lease fallbacks this one returns to the slash-command
+/// dispatcher instead of the chat loop's exit code, so it discards the follower's 0.
 ///
 /// `release` is injected so the ordering is testable without a live lease.
 pub fn revoked_switch_follow(
@@ -311,14 +314,7 @@ pub fn revoked_switch_follow(
     session: &SessionId,
     release: impl FnOnce() -> Result<(), CliError>,
 ) -> Result<(), CliError> {
-    let start_seq = capture_follow_start(store, session, release)?;
-    let current = store.require_session(session)?;
-    writeln!(
-        io.err(),
-        "{}",
-        read_only_notice(store, &current, ctx.tz_offset_minutes())?
-    )?;
-    follow_mode(ctx, io, store, &current, start_seq)?;
+    revoked_follow(ctx, io, store, session, release)?;
     Ok(())
 }
 

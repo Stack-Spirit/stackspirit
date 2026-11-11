@@ -6,22 +6,22 @@
 
 mod common;
 
-use std::io::Write as _;
+use std::io::{Cursor, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vowp_cli::chat::{ChatOptions, capture_follow_start, revoked_switch_follow};
-use vowp_cli::{BufferIo, Ctx};
+use vowp_cli::{BufferIo, Ctx, IoStreams};
 use vowp_core::surface::follow::follow_to;
 use vowp_protocol::{
-    Actor, CancelToken, CapsuleTrigger, EventBody, EventSource, Executor, HarnessKind, NodeName, Note, RunPurpose,
-    SessionId, SystemClock,
+    Actor, CancelToken, CapsuleTrigger, EventBody, EventSource, Executor, ExecutorRef, HarnessKind, NodeName, Note,
+    RunPurpose, SessionId, Surface, SurfaceId, SurfaceKind, SystemClock,
 };
-use vowp_store::NodePaths;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
+use vowp_store::{NodePaths, Store};
 
 /// Writes a fake opencode binary that replies with `reply` and stops normally.
 fn fake_opencode(env: &common::TestEnv, reply: &str) -> PathBuf {
@@ -175,6 +175,263 @@ fn events(env: &common::TestEnv, id: &str) -> Vec<vowp_protocol::EventEnvelope> 
         .expect("open session log")
         .read_all()
         .expect("read session log")
+}
+
+/// A one-shot hook around a buffered stdin.
+struct HookReader {
+    input: Cursor<Vec<u8>>,
+    hook: Option<Box<dyn FnOnce()>>,
+}
+
+impl std::io::Read for HookReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.input.read(buffer)
+    }
+}
+
+impl std::io::BufRead for HookReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.input.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+    }
+
+    fn read_line(&mut self, line: &mut String) -> std::io::Result<usize> {
+        if let Some(hook) = self.hook.take() {
+            hook();
+        }
+        self.input.read_line(line)
+    }
+}
+
+/// A buffer stream whose first `out` call or first `read_line` can run a hook.
+struct HookIo {
+    out: Vec<u8>,
+    err: Vec<u8>,
+    input: HookReader,
+    tty: bool,
+    out_hook: Option<Box<dyn FnOnce()>>,
+}
+
+impl HookIo {
+    fn new(input: &str, out_hook: Option<Box<dyn FnOnce()>>, input_hook: Option<Box<dyn FnOnce()>>) -> Self {
+        Self {
+            out: Vec::new(),
+            err: Vec::new(),
+            input: HookReader {
+                input: Cursor::new(input.as_bytes().to_vec()),
+                hook: input_hook,
+            },
+            tty: false,
+            out_hook,
+        }
+    }
+
+    fn stdout(&self) -> String {
+        String::from_utf8_lossy(&self.out).into_owned()
+    }
+
+    fn stderr(&self) -> String {
+        String::from_utf8_lossy(&self.err).into_owned()
+    }
+}
+
+impl IoStreams for HookIo {
+    fn out(&mut self) -> &mut dyn std::io::Write {
+        if let Some(hook) = self.out_hook.take() {
+            hook();
+        }
+        &mut self.out
+    }
+
+    fn err(&mut self) -> &mut dyn std::io::Write {
+        &mut self.err
+    }
+
+    fn input(&mut self) -> &mut dyn std::io::BufRead {
+        &mut self.input
+    }
+
+    fn is_tty(&self) -> bool {
+        self.tty
+    }
+}
+
+/// A writer that indexes one note while a revoked-lease fallback releases its stale guard.
+struct ReleaseWindow {
+    locked: std::sync::mpsc::Receiver<()>,
+    handle: std::thread::JoinHandle<vowp_protocol::EventEnvelope>,
+}
+
+impl ReleaseWindow {
+    /// Waits until the writer holds the index write lock, so the release below it blocks.
+    fn wait_until_locked(&self) {
+        self.locked
+            .recv_timeout(Duration::from_secs(30))
+            .expect("release-window writer did not take the index lock");
+    }
+
+    /// Waits for the writer to commit and returns the event it indexed.
+    fn finish(self) -> vowp_protocol::EventEnvelope {
+        self.handle.join().expect("release-window writer panicked")
+    }
+}
+
+/// Starts a thread that waits for `ready`, takes the index write lock, then indexes a note.
+///
+/// A revoked guard's release deletes no row, but it still goes through the store. Holding
+/// the write lock makes that release wait until the note is committed, so the note lands
+/// between the fallback's capture point and its post-release read.
+fn start_release_window(
+    home: PathBuf,
+    session: SessionId,
+    ready: PathBuf,
+    text: &'static str,
+    hold: Duration,
+) -> ReleaseWindow {
+    let (locked_tx, locked) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "release-window writer timed out waiting for {ready:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let paths = NodePaths::new(&home);
+        let store = Store::open(&paths).expect("release-window store");
+        let log = SessionLog::open(&paths, &session, Arc::new(SystemClock)).expect("release-window log");
+        store
+            .transaction(|tx| {
+                locked_tx.send(()).expect("signal the release-window lock");
+                // The fallback captures its start before it reaches the blocked release.
+                // Holding the lock keeps the note inside that release window.
+                std::thread::sleep(hold);
+                let event = log
+                    .append(NewEvent {
+                        actor: Actor::System,
+                        source: EventSource {
+                            harness: HarnessKind::Vowp,
+                            model: None,
+                            node: Some(NodeName::parse("local").expect("node")),
+                            native_session_id: None,
+                        },
+                        body: EventBody::Note(Note { text: text.to_owned() }),
+                        raw: None,
+                        ts: None,
+                    })
+                    .expect("append release-window note");
+                tx.index_event(&index_row(&event))?;
+                log.sync().expect("sync release-window log");
+                Ok(event.envelope)
+            })
+            .expect("release-window transaction")
+    });
+    ReleaseWindow { locked, handle }
+}
+
+/// Takes the session over for a phone surface, revoking the chat guard's token.
+fn take_over(deps: &vowp_core::Deps, store: &Store, session: &SessionId) {
+    let now = deps.clock.now();
+    let surface = Surface {
+        id: SurfaceId::new(),
+        kind: SurfaceKind::Chat,
+        node: NodeName::parse("local").expect("node"),
+        holder: "phone".to_owned(),
+        app: None,
+        cwd: None,
+        metadata: serde_json::json!({}),
+        created_at: now,
+        last_seen_at: now,
+    };
+    vowp_core::takeover(deps, store, session, &surface, now).expect("takeover");
+}
+
+/// Builds a hook that takes the lease over, then indexes a note during the release window.
+fn takeover_window_hook(
+    deps: &vowp_core::Deps,
+    home: &Path,
+    session: &SessionId,
+    sync: &Path,
+    text: &'static str,
+    window_tx: std::sync::mpsc::Sender<ReleaseWindow>,
+) -> Box<dyn FnOnce()> {
+    let deps = deps.clone();
+    let home = home.to_path_buf();
+    let session = session.clone();
+    let ready = sync.join("ready");
+    Box::new(move || {
+        let paths = NodePaths::new(&home);
+        let store = Store::open(&paths).expect("takeover store");
+        take_over(&deps, &store, &session);
+        std::fs::write(&ready, b"ready").expect("write ready marker");
+        let window = start_release_window(home, session, ready, text, Duration::from_millis(500));
+        window.wait_until_locked();
+        window_tx.send(window).expect("send release window");
+    })
+}
+
+/// Writes a fake `__exec` that takes the session over, waits for the test, then reports revocation.
+fn fake_revoked_exec(env: &common::TestEnv, id: &str, sync: &Path) -> PathBuf {
+    let dir = env.home_path().join("fake-revoked-exec");
+    std::fs::create_dir_all(&dir).expect("fake exec dir");
+    let script = dir.join("vowp-exec");
+    let ready = sync.join("ready");
+    let go = sync.join("go");
+    let body = format!(
+        "#!/bin/sh\n\
+         '{vowp}' --home '{home}' --project '{project}' --no-color session takeover '{id}' \
+         --kind chat --holder phone --node local >/dev/null 2>&1 || exit 70\n\
+         : > '{ready}'\n\
+         while [ ! -f '{go}' ]; do sleep 0.01; done\n\
+         exit 75\n",
+        vowp = env!("CARGO_BIN_EXE_vowp"),
+        home = env.home_path().display(),
+        project = env.project_path().display(),
+        id = id,
+        ready = ready.display(),
+        go = go.display(),
+    );
+    std::fs::write(&script, body).expect("fake exec script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    script
+}
+
+/// Asserts that a revoked fallback printed the release-window note and kept the lease.
+fn assert_release_window_followed(
+    env: &common::TestEnv,
+    session: &SessionId,
+    event: &vowp_protocol::EventEnvelope,
+    stdout: &str,
+    stderr: &str,
+    text: &str,
+) {
+    assert!(
+        stdout.contains(&format!("#{} note", event.seq)),
+        "the fallback skipped an event indexed during the release window: {stdout}"
+    );
+    assert!(stdout.contains(text), "{stdout}");
+    assert!(stderr.contains("Taken over by phone at "), "{stderr}");
+    assert!(stderr.contains("read-only"), "{stderr}");
+    let lease = env
+        .store()
+        .lease(session)
+        .expect("lease query")
+        .expect("the new holder's lease");
+    assert_eq!(
+        lease.holder, "phone",
+        "the revoked surface released the new holder's lease"
+    );
+    let switches = env.store().list_switches(session).expect("switches");
+    assert!(
+        !switches
+            .iter()
+            .any(|switch| switch.reason == vowp_protocol::SwitchReason::User),
+        "a revoked fallback wrote a user switch: {switches:?}"
+    );
 }
 
 #[test]
@@ -779,4 +1036,165 @@ fn chat_non_tty_reads_turns_until_eof() {
         .filter(|event| matches!(event.body(), Ok(EventBody::UserMessage(_))))
         .count();
     assert_eq!(user_messages, 2, "chat must run every turn before EOF");
+}
+
+#[test]
+fn chat_prompt_loop_revoked_lease_follows_from_the_pre_release_sequence() {
+    let env = common::TestEnv::new();
+    configure(&env, &capsule_reply());
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let global = env.global(false);
+    let ctx = Ctx::build(&global, &BufferIo::new("")).expect("build context");
+
+    let sync = env.home_path().join("prompt-release-sync");
+    std::fs::create_dir_all(&sync).expect("sync dir");
+    let (window_tx, window_rx) = std::sync::mpsc::channel();
+    let hook = takeover_window_hook(
+        ctx.deps(),
+        env.home_path(),
+        &session,
+        &sync,
+        "indexed during the prompt-loop release window",
+        window_tx,
+    );
+    let mut io = HookIo::new("hello\n/quit\n", None, Some(hook));
+    let code = vowp_cli::chat::run_shared(
+        &ctx,
+        &mut io,
+        &ChatOptions {
+            session: session.clone(),
+            executor: None,
+            node: None,
+            follow: false,
+            takeover: false,
+        },
+    )
+    .expect("chat runs");
+    assert_eq!(code, 0);
+
+    let window = window_rx.try_recv().expect("the prompt hook must run");
+    let event = window.finish();
+    assert_release_window_followed(
+        &env,
+        &session,
+        &event,
+        &io.stdout(),
+        &io.stderr(),
+        "indexed during the prompt-loop release window",
+    );
+    assert!(
+        !events(&env, &id)
+            .iter()
+            .any(|event| matches!(event.body(), Ok(EventBody::UserMessage(_)))),
+        "a revoked prompt must not start a turn"
+    );
+}
+
+#[test]
+fn chat_executor_option_revoked_lease_follows_from_the_pre_release_sequence() {
+    let env = common::TestEnv::new();
+    configure(&env, &capsule_reply());
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let global = env.global(false);
+    let ctx = Ctx::build(&global, &BufferIo::new("")).expect("build context");
+
+    let sync = env.home_path().join("executor-release-sync");
+    std::fs::create_dir_all(&sync).expect("sync dir");
+    let (window_tx, window_rx) = std::sync::mpsc::channel();
+    let hook = takeover_window_hook(
+        ctx.deps(),
+        env.home_path(),
+        &session,
+        &sync,
+        "indexed during the executor-option release window",
+        window_tx,
+    );
+    let mut io = HookIo::new("/quit\n", Some(hook), None);
+    let code = vowp_cli::chat::run_shared(
+        &ctx,
+        &mut io,
+        &ChatOptions {
+            session: session.clone(),
+            executor: Some(ExecutorRef {
+                executor: Executor::parse("opencode:deepseek/deepseek-flash#max").expect("executor"),
+                node: None,
+            }),
+            node: None,
+            follow: false,
+            takeover: false,
+        },
+    )
+    .expect("chat runs");
+    assert_eq!(code, 0);
+
+    let window = window_rx.try_recv().expect("the executor hook must run");
+    let event = window.finish();
+    let stdout = io.stdout();
+    assert!(
+        !stdout.contains("switched to"),
+        "a revoked --executor must not switch: {stdout}"
+    );
+    assert_release_window_followed(
+        &env,
+        &session,
+        &event,
+        &stdout,
+        &io.stderr(),
+        "indexed during the executor-option release window",
+    );
+}
+
+#[test]
+fn chat_turn_revoked_lease_follows_from_the_pre_release_sequence() {
+    let env = common::TestEnv::new();
+    configure(&env, &capsule_reply());
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+
+    let sync = env.home_path().join("turn-release-sync");
+    std::fs::create_dir_all(&sync).expect("sync dir");
+    let exec = fake_revoked_exec(&env, &id, &sync);
+
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["chat", &id])
+        .env("VOWP_EXEC_BIN", &exec)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn vowp chat");
+    assert!(wait_for_lease(&env, &id, "local"), "chat did not take the lease");
+
+    let window = start_release_window(
+        env.home_path().to_path_buf(),
+        session.clone(),
+        sync.join("ready"),
+        "indexed during the revoked-turn release window",
+        // The fake executor exits and the chat then processes its output before the
+        // fallback reaches the release; keep the lock long enough to cover that gap.
+        Duration::from_secs(2),
+    );
+    send_chat(&mut child, "hello\n/quit\n");
+    window.wait_until_locked();
+    std::fs::write(sync.join("go"), b"go").expect("write go marker");
+
+    let event = window.finish();
+    let output = child.wait_with_output().expect("wait for chat");
+    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_release_window_followed(
+        &env,
+        &session,
+        &event,
+        &stdout,
+        &stderr,
+        "indexed during the revoked-turn release window",
+    );
 }
