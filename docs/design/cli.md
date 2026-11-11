@@ -359,7 +359,7 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 | `vowp --version` / `vowp version` | `vowp 0.1.0 (<git sha>) schema 1` |
 | `vowp __window <board\|capacity\|supervisor\|planner\|keeper\|inbox\|job> [<id>]` | hidden; what tmux windows run (renders the board or capacity screen, tails `supervisor.log`, tails the planner/keeper session, lists the inbox, tails a job session). Read-only. |
 | `vowp __exec --grant <file> [--spool-dir <dir>]` | hidden remote-executor client (sessions.md §9). |
-| `vowp __vault-exec --env <NAME> -- <cmd…>` · `vowp __vault-admin probe\|set\|rm <NAME>` | hidden vault-user helper; `probe` checks the helper context and vault directory, `set` reads the value from stdin, never argv. In basic mode `__vault-exec` is a plain exec. |
+| `vowp __vault-exec --env <NAME> -- <cmd…>` · `vowp __vault-admin probe` · `vowp __vault-admin set\|rm <NAME>` | hidden vault-user helper; `probe` takes no name and checks the helper context and vault directory, `set` reads the value from stdin, never argv. In basic mode `__vault-exec` is a plain exec. |
 | `vowp setup __home-init [--root <dir>] [--name <n>] [--harness <h>] [--provider <p>]` | hidden internal bootstrap used by `setup home`; not part of the public contract. |
 | `vowp orchestrator __keepalive <name>` | hidden: keeps one orchestrator's lease alive after the CLI exits. |
 

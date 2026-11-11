@@ -238,6 +238,10 @@ value.
 **Accept:** a deploy command sees its configured secret in the child environment; an unconfigured
 value is absent; the stored value never appears in the release, ledger or logs.
 
+### 12. Setup verify fixture under load — closed
+
+Closed because the merged fixture uses a 300 s timeout and one test target.
+
 ## How to help
 
 Read [`CONTRIBUTING.md`](../CONTRIBUTING.md) first. Every command in the docs must run, tests must be

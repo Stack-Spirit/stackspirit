@@ -2938,8 +2938,10 @@ columns, and supports `/takeover` and `/follow`.
 | **basic** | no sudo or no vault user (common) | `~/.vowp/secrets/<NAME>` mode 0600 | `vowp` |
 
 `~/.vowp/secrets/mode` contains `vault` when vault mode is active (0600); basic mode is the default
-when the file is absent, so the no-sudo path writes no marker. `vowp doctor` and the board print
-`secrets: vault user` or `secrets: basic mode (same user)`. The honest limit is in the public docs:
+when the file is absent, so the no-sudo path writes no marker. Only `vowp secret upgrade` prints the
+mode line (`secrets: vault user`, or `secrets: vault user (switched from basic mode)` after a
+switch); `vowp doctor` and the board print no secrets-mode line. The honest limit is in the public
+docs:
 *any agent that can run arbitrary code in a process that holds a secret can print it; this design
 keeps secrets out of files the agent can read, out of transcripts and out of git, but it cannot make
 a secret unreadable to code that is given it.*
@@ -2979,7 +2981,7 @@ vowp secret request <NAME>          # one-time 127.0.0.1 paste page; URL + expir
 - **Secrets are home state.** On a control machine, `vowp secret set/rm/upgrade/ls` route to the
   home over SSH. `set` uses `ssh -t` so the home's hidden prompt has a TTY; the value crosses the
   encrypted SSH channel and is never in argv. `secret request` opens the local tunnel as described
-  in §9.2. `vowp doctor` on the home reports the vault mode.
+  in §9.2. On the home, `vowp secret upgrade` prints `secrets: vault user` when the vault is active.
 - **Injection.** A harness run's `env_pass` is a list of **names**. `vault::env_for` resolves exactly
   those names for that harness (plus names listed by `[env.*]` deploy/promote commands) and returns
   `(name, value)` pairs to the adapter; a missing name is a warning, not a hard failure (unless the

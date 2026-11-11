@@ -88,8 +88,9 @@ error messages, commands and the setup plan.
 | **vault user** | The `vowp-vault` Unix user and the helper exist, and one sudoers line lets the runtime user run the helper as `vowp-vault`. | `/home/vowp-vault/secrets/<NAME>`, mode 0600. | `vowp-vault` |
 | **basic** | No sudo or no vault user (common on a VPS the owner does not administer as root). | `~/.vowp/secrets/<NAME>`, mode 0600. | the runtime user (`vowp` or the SSH user) |
 
-`~/.vowp/secrets/mode` records `vault` or `basic` (0600). `vowp secret upgrade` prints the one sudo
-command that creates the vault user and moves the files; without sudo, VOWP stays in basic mode.
+`~/.vowp/secrets/mode` contains `vault` when vault mode is active (0600); an absent file means basic
+mode, so the no-sudo path writes no marker. `vowp secret upgrade` prints the one sudo command that
+creates the vault user and moves the files; without sudo, VOWP stays in basic mode.
 
 **Basic mode does not separate the value from the agent's user.** The secret file is mode 0600 but
 owned by the runtime user (`vowp` or the SSH user), and the harness is spawned as that same user, so
