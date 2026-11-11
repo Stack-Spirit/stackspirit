@@ -20,18 +20,22 @@ native session, the app→chat lease move with capsule and old-tool refusal, the
 chat fallback mid-turn drain, and a combined app/lease move mid-turn. A fresh
 re-check on 2026-11-11 confirmed the orchestrator join text and pair-link URL
 shape, and that the old surface's `vowp mcp` write is refused **82 ms** after a
-lease move (well inside the 2 s bound). Test 5 was re-run on the acceptance rig
-with the real `vowp` CLI: a real SSH connection was killed after three spooled
-events, the executor reconnected and replayed 12 events, and the home log has
-19 contiguous events with 12 unique assistant lines and no gap or duplicate.
+lease move (well inside the 2 s bound). Test 5 was re-run twice on the
+acceptance rig with the real `vowp` CLI: the original run pinned `project.path`
+while the defect below was open, and the follow-up run used current `main`
+after the fix with the fixture's stock `vowp.toml`, which has no
+`project.path`. In both runs a real SSH connection was killed after three
+spooled events, the executor reconnected and replayed 12 events, and the home
+log has 19 contiguous events with 12 unique assistant lines and no gap or
+duplicate.
 
-The run also found one product defect that affects remote execution: an explicit
-`--project <name>` fails with `io: No such file or directory` when the project's
-`vowp.toml` has no `project.path` and the command runs outside the checkout.
-`__exec` always sends the project name to the home, so the T3 test pinned the
-documented `project.path` field in the throwaway fixture to exercise the real
-CLI path. The defect still reproduces without it and remains a follow-up job
-(open item 2); the spool/replay behaviour itself is not affected.
+The T3 work found one product defect that affects remote execution: an
+explicit `--project <name>` failed with `io: No such file or directory` when
+the project's `vowp.toml` had no `project.path` and the command ran outside the
+checkout. `f-project-path-default` fixes it by defaulting `[project].path` to
+the directory containing `vowp.toml` (fix commit `50e63b5`, with `b78ae83`
+registering its integration test); the follow-up test-5 run exercises the real
+`--project t3ssh` path without the pinned field.
 
 ## PENDING OWNER ACCEPTANCE
 
@@ -39,9 +43,11 @@ These are the owner checks. The two physical-device click-throughs were
 deferred by the planner on 2026-11-11; the Claude Remote Control join is the
 separate 5-minute owner test from §16.3. None was run: this Linux worker has no
 Mac, no phone and no logged-in Tailscale path to either device. The owner
-should use the final build from this branch (the automated app-UI run used
-`3c57f7c`; the final branch is based on `origin/main` `ef3765c`, whose surface,
-lease and remote-ingest code is unchanged).
+should use the final build from this branch. The automated app-UI run used
+`3c57f7c`; `crates/vowp-core/src/surface/orchestrator.rs` changed between
+`3c57f7c` and `ef3765c` (instructions packaging, resume, mirror cursor), so 4a
+was not re-run on the final commit. The opencode-host, lease and remote-ingest
+paths are unchanged, and 4e re-checks join/pair/lease/MCP on the final binary.
 
 ### 1. opencode desktop app on the Mac
 
@@ -140,19 +146,25 @@ $ echo $?
 ```
 
 `vowp orchestrator ls` records that orchestrator as `degraded` with the
-fallback join text, exactly as §16.13 describes. This is the honest refusal
-path; the owner join is still pending.
+fallback join text, as §12.3/§7.6 describe. This is the honest refusal path;
+the owner join is still pending.
 
 ## Environment
 
 - Date: 2026-11-11 (UTC).
-- Worktree: `job/v2-t3-surfaces`, based on `origin/main` `ef3765c`.
+- Original record: worktree `job/v2-t3-surfaces`, based on `origin/main`
+  `ef3765c`. Follow-up record and test-5 re-run: worktree
+  `job/f-t3-record-followups`, based on `origin/main` `b78ae83` (which includes
+  `f-project-path-default`).
 - The app-UI evidence was collected with the binary at `3c57f7c`:
   `cargo build -p vowp-cli --bin vowp`, `vowp 0.1.0`, SHA-256
   `320916762ddf7ed636c2bb2eaa1ed56ff1d8dedc49e9ef95cb82151f1463973c`.
-- The fresh join, lease-refusal and test-5 re-check ran on the final code
-  (`ef3765c` plus this docs-only branch): `vowp 0.1.0`, SHA-256
+- The fresh join, lease-refusal and original test-5 re-check ran on the final
+  code (`ef3765c` plus the docs-only branch): `vowp 0.1.0`, SHA-256
   `5bc6e07eb5a78ce4c20d76da9a12e06aab6d543e81793416709566b8d47c990b`.
+- The follow-up test-5 run used the current-`main` binary built on
+  `b78ae83`: `vowp 0.1.0`, SHA-256
+  `dbc542a6d88c88eca4a62ca6346c5c7c722a9a0b2fff4be00ecabd481c540336`.
 - opencode: `opencode v2.0.28` (the version the S3 spike pinned). OpenSSH
   `9.6p1`.
 - Test 4 ran on the Linux build host with a private `HOME`, `XDG_*` tree,
@@ -160,18 +172,22 @@ path; the owner join is still pending.
   private XDG tree under the orchestrator directory and a local fake
   OpenAI-compatible model on `127.0.0.1`; no provider key, real model, public
   port or real `~/.vowp` was used.
-- Test 5 ran in the T0 rig: home container `vowp-acceptance-t3final-home`
-  (image `vowp-acceptance/vps:sudo`, `sha256:3c19867d4d633df0ca5f0dda7fa06300e69816a3857c1488be05184c915011ab`,
-  Ubuntu 24.04). The home was a temporary `/home/vowp/acceptance/t3final/home`;
-  `TMUX_TMPDIR` was `/home/vowp/.acceptance/tmux` and the socket was
-  `vowp-acceptance-t3final`. The laptop executor for test 5 was the build host,
-  not the rig's disposable phone client (that client was used only for earlier
-  surface-shape checks; the owner phone click-through is pending). The host
-  home, host `~/.vowp`, host tmux server, network and real harnesses were never
-  used.
-- The rig was removed after the evidence was collected with
-  `bash scripts/acceptance/rig.sh down --name t3final` (exit 0; containers,
-  network and generated keys removed).
+- Test 5 originally ran in the T0 rig on `t3final`: home container
+  `vowp-acceptance-t3final-home` (image `vowp-acceptance/vps:sudo`,
+  `sha256:3c19867d4d633df0ca5f0dda7fa06300e69816a3857c1488be05184c915011ab`,
+  Ubuntu 24.04), temporary home `/home/vowp/acceptance/t3final/home`,
+  `TMUX_TMPDIR` `/home/vowp/.acceptance/tmux` and socket
+  `vowp-acceptance-t3final`. The follow-up re-run used rig `t3follow`:
+  container `vowp-acceptance-t3follow-home` (same image and digest), temporary
+  home `/home/vowp/acceptance/t3follow/home`, the same `TMUX_TMPDIR` and
+  socket `vowp-acceptance-t3follow`.
+- The laptop executor for test 5 was the build host, not the rig's disposable
+  phone client (that client was used only for earlier surface-shape checks;
+  the owner phone click-through is pending). The host home, host `~/.vowp`,
+  host tmux server, network and real harnesses were never used.
+- Both rigs were removed after the evidence was collected with
+  `bash scripts/acceptance/rig.sh down --name <rig>` (`t3final` and
+  `t3follow`; containers, network and generated keys removed).
 
 `V` below is the built `vowp` and `$ROOT` is a private temporary directory:
 
@@ -424,7 +440,11 @@ orchestrator t3join (opencode, running) session 01M74P8Z6AST9MARPFCY1KDC5R
   chat: vowp chat 01M74P8Z6AST9MARPFCY1KDC5R
 ```
 
-The matching `opencode pair` output (code redacted; the link was not logged):
+The matching `opencode pair` output, reproduced with the one-time code
+redacted. The temporary raw evidence file that held the code during
+verification (under the worker's `/tmp/opencode/t3-final/join` evidence tree)
+has since been deleted; the committed record never contained the code, and it
+is not reproduced here:
 
 ```text
 Open a link to connect. Links work once and expire in 5 minutes.
@@ -484,32 +504,37 @@ printf 't3 fake answer: %s\n' "$(printf '%s' "$prompt" | head -n 1)"
 
 ### Setup
 
-The home container was a temporary VOWP home with one fixture project
-(`t3ssh`, a T0 `hello` fixture) and a surface-only node named `laptop`. Start it
-with the T0 rig; inside the home container these commands use the home's
-`vowp` and `H`:
+Test 5 was run twice on the T0 rig. The original fresh run (`t3final`,
+2026-11-11) used the then-current `ef3765c`-based binary and pinned the
+documented `project.path` field in the throwaway fixture because the
+`--project <name>` defect was still open. The follow-up acceptance run
+(`t3follow`, 2026-11-11) used the current-`main` binary after
+`f-project-path-default` (`50e63b5`, with `b78ae83` registering its test
+target) and the fixture's stock `vowp.toml`, which has no `project.path`. The
+commands below are the `t3follow` run; the earlier run used the same shape with
+the removed `sed` line.
+
+The home was a temporary VOWP home with one fixture project (`t3ssh`, a T0
+`hello` fixture) and a surface-only node named `laptop`. Start it with the T0
+rig; inside the home container these commands use the home's `vowp` and `H`:
 
 ```sh
-bash scripts/acceptance/rig.sh up --name t3final --variant sudo --no-build
+bash scripts/acceptance/rig.sh up --name t3follow --variant sudo --no-build
 # Copy the built binary into the home and put it on the SSH PATH; the
 # `session ingest` child invokes `vowp` by name.
-docker cp target/debug/vowp vowp-acceptance-t3final-home:/home/vowp/vowp
-docker exec -u root vowp-acceptance-t3final-home sh -lc \
+docker cp target/debug/vowp vowp-acceptance-t3follow-home:/home/vowp/vowp
+docker exec -u root vowp-acceptance-t3follow-home sh -lc \
   'cp /home/vowp/vowp /usr/local/bin/vowp && chmod 0755 /usr/local/bin/vowp'
 # inside the home container:
-H=/home/vowp/acceptance/t3final/home
+H=/home/vowp/acceptance/t3follow/home
 ```
 
-The fixture is created with the T0 generator, then its `vowp.toml` pins the
-documented main-checkout field so the real `--project <name>` path works from
-outside the checkout:
+The fixture is created with the T0 generator; its stock `vowp.toml` has no
+`project.path`, so the fix defaults it from the `vowp.toml` directory:
 
 ```sh
 bash /opt/vowp-acceptance/fixtures/project.sh hello \
     /home/vowp/projects/t3ssh --name t3ssh
-# In the throwaway fixture only: add the main checkout path to [project].
-sed -i '/^\[project\]/a path = "/home/vowp/projects/t3ssh"' \
-    /home/vowp/projects/t3ssh/vowp.toml
 # Install the streaming fake harness used by the turn (test4-fake-worker.sh).
 cp <evidence>/test4-fake-worker.sh \
     /home/vowp/projects/t3ssh/.acceptance/bin/fake-worker
@@ -521,11 +546,15 @@ registered:
 
 ```sh
 mkdir -p /home/vowp/initproj && cd /home/vowp/initproj
-git init -q -b main && printf 't3 final home\n' > README.md
+git init -q -b main && printf 't3 follow home\n' > README.md
 git add README.md && git -c user.name=t3 -c user.email=t3@example.invalid commit -qm init
-vowp --home "$H" init --name t3final-home --no-framework
+vowp --home "$H" init --name t3follow-home --no-framework
 vowp --home "$H" project add /home/vowp/projects/t3ssh
 vowp --home "$H" node add laptop -
+# from outside the checkout, with no project.path in the fixture:
+cd /home/vowp
+vowp --home "$H" --project t3ssh --json session ls
+# [] (exit 0)
 ```
 
 The laptop side was the build host with its own temporary `VOWP_HOME`, a
@@ -533,20 +562,23 @@ private tmux directory and a private `VOWP_CONTROL_HOME` whose `control.json`
 named the rig's SSH target and the home path:
 
 ```json
-{"role":"control","home":"vowp-home","ssh_target":"t3finalhome",
- "remote_home":"/home/vowp/acceptance/t3final/home","created_at":"..."}
+{"role":"control","home":"vowp-home","ssh_target":"t3followhome",
+ "remote_home":"/home/vowp/acceptance/t3follow/home","created_at":"..."}
 ```
 
 For the test only, an `ssh` wrapper on the laptop's `PATH` maps the
-`t3finalhome` alias to the rig's loopback port and generated owner key; it does
-not change the VOWP CLI or the ingest path. The home created a session with the
-fake CLI executor, acquired an executor lease, and wrote the `turn-begin` grant
-(the grant file was mode 0600; its token is never printed here):
+`t3followhome` alias to the rig's loopback port and generated owner key; it does
+not change the VOWP CLI or the ingest path. The laptop checkout is a second copy
+of the same fixture (its `vowp.toml` also has no `project.path`), so
+`__exec --project <laptop-checkout>` exercises the same default. The home
+created a session with the fake CLI executor, acquired an executor lease, and
+wrote the `turn-begin` grant (the grant file was mode 0600; its token is never
+printed here):
 
 ```sh
 # inside the home container
 SID=$(vowp --home "$H" --project t3ssh --json session new \
-        --title "t3final ssh drop" --executor cli:acceptance-hello \
+        --title "t3follow ssh drop" --executor cli:acceptance-hello \
         --cwd /home/vowp/projects/t3ssh | jq -r .id)
 TOKEN=$(vowp --home "$H" --project t3ssh session lease "$SID" \
           --acquire opencode --holder laptop --node laptop)
@@ -565,8 +597,8 @@ The fake harness streamed 12 lines with 0.35 s between lines. On the laptop,
 `vowp session ingest`; the executor-side spool was a private directory on the
 laptop. The home's `session ingest` is invoked as `vowp --home <remote-home>
 --project t3ssh session ingest ...` by the real `__exec`, so this run exercises
-the project-name path (the throwaway fixture's `project.path` is what keeps the
-relative harness mapping resolvable from the home directory).
+the project-name path without `project.path`: the fix defaults it to the
+fixture directory and the relative harness mapping resolves from there.
 
 ### The drop and replay
 
@@ -575,17 +607,26 @@ boundary. `__exec` reconnected on the next event and replayed from the first
 unacknowledged frame. The two SSH connections are visible in the wrapper log:
 
 ```text
-DROP at spool_lines=3
+DROP at spool_lines=3 ssh_pid=1624522
 EXEC_EXIT=0
 SSH_CONNECTIONS=2
 {"ack_window":64,"done":true,"resumed":false,
- "run_id":"01M74PFYDZX0Q5QN9VYAG65SM7",
- "session_id":"01M74PFYA4VGXH2MFVNEYTCT6Q"}
+ "run_id":"01M74Y78G5EV0VA4NVH9B6EJK0",
+ "session_id":"01M74Y77XWQZ64DEG1QCCTNXB9"}
 ```
 
 `resumed:false` means this was a fresh `__exec` process, not that the killed
 connection was ignored: the same process reconnected and replayed its spool
 before finishing. A separate client-crash resume would print `resumed:true`.
+
+The follow-up evidence is in `/tmp/opencode/t3follow/evidence`: `drop.txt` (the
+drop log, exit, connection count and status above), `ssh.log` (both `session
+ingest --project t3ssh` invocations), `home-check.txt` and `spool-check.txt`.
+The earlier `t3final` run produced the same result. Its drop log with the
+`DROP at spool_lines=3` line is `/tmp/opencode/t3-evidence/test5-drop.txt`;
+`/tmp/opencode/t3-final/test5-drop.txt` contains only the status document and
+does not contain the drop line, so it is not evidence for that detail.
+`/tmp/opencode/t3-final/test5-check.txt` is the earlier home-log check.
 
 The home log and the executor spool agree exactly:
 
@@ -609,20 +650,34 @@ The home's sequence numbers are exactly `1..19`: 3 framing events
 executor detach. The 12 assistant lines are unique. Nothing was lost in the
 killed connection and nothing was applied twice.
 
-### The project-lookup workaround
+### The project-name path without `project.path`
 
 The first T3 attempt failed before the harness started because
-`$V --home "$H" --project t3ssh session ...` exits 1 with
+`$V --home "$H" --project t3ssh session ...` exited 1 with
 `{"error":{"kind":"io","message":"io: No such file or directory (os error 2)"}}`
-when run outside the checkout and the project has no `project.path`, while the
-same command without `--project` from inside the checkout works. `__exec` always
-sends `--project <name>` to the home, so this fresh run pins `project.path` in
-the throwaway fixture. The defect is a product issue, not a rig or fixture
-issue; see open item 2. This replaces the earlier T3 run's home-side wrapper
-that dropped the `--project` flag: the fresh run uses the real flag and the real
-ingest path.
+when run outside the checkout and the project had no `project.path`, while the
+same command without `--project` from inside the checkout worked. `__exec`
+always sends `--project <name>` to the home, so the original fresh run pinned
+`project.path` in the throwaway fixture.
 
-## Open items
+`f-project-path-default` removes that workaround: `load_project_config` fills an
+omitted `[project].path` with the directory containing `vowp.toml`, so the
+relative harness mapping resolves under the project checkout instead of the
+caller's cwd. The follow-up `t3follow` run above used the stock fixture config
+(no `project.path`), and the project lookup from `/home/vowp` exited 0 before
+the turn. The new integration test covers the same path:
+
+```text
+$ cargo test -p vowp-cli --test project_path
+test load_project_config_defaults_project_path ... ok
+test cli_project_name_resolves_relative_mapping_outside_checkout ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+This replaces the earlier T3 run's home-side wrapper that dropped the
+`--project` flag: both runs use the real flag and the real ingest path.
+
+## Open items and followup dispositions
 
 1. **PENDING OWNER ACCEPTANCE — the owner checks above.** They were deferred
    to the owner by the planner on 2026-11-11 (the two device click-throughs) or
@@ -630,30 +685,15 @@ ingest path.
    failure of the automated scope. The exact commands and expected results are
    in the section above. The owner should use the final build.
 
-2. **Fix job: explicit `--project <name>` fails outside the checkout when the
-   project config has no `project.path`.**
-   On a test home with project `t3ssh` registered at
-   `/home/vowp/projects/t3ssh`:
-
-   ```sh
-   cd /home/vowp
-   vowp --home /home/vowp/acceptance/t3final/home --project t3ssh --json session ls
-   # {"error":{"hint":null,"kind":"io","message":"io: No such file or directory (os error 2)"}}
-
-   cd /home/vowp/projects/t3ssh
-   vowp --home /home/vowp/acceptance/t3final/home --json session ls
-   # exits 0 and lists the session
-   ```
-
-   This makes `vowp session ingest --project <name>` fail when `__exec` reaches
-   the home over SSH unless the project pins `project.path`, so a
-   laptop-executor turn cannot run without a workaround. The failure is the
-   relative harness mapping resolved against the current directory in
-   `crates/vowp-core/src/deps.rs` (`mapping_path` / `config.project.path`); the
-   other fix is to set `config.project.path` from the resolved checkout in
-   `crates/vowp-cli/src/ctx.rs`. T2 recorded a related `project add` symptom;
-   T3 shows it also breaks the remote-ingest path. This doc only records the
-   defect; the fix is an `f-*` follow-up outside T3's ownership.
+2. **Resolved — explicit `--project <name>` failed outside the checkout when
+   the project config had no `project.path`.** `f-project-path-default` (fix
+   commit `50e63b5`, with `b78ae83` registering its integration test) fills an
+   omitted `config.project.path` from the directory containing `vowp.toml` in
+   `crates/vowp-cli/src/ctx.rs`, so the relative harness mapping resolves under
+   the project checkout. The follow-up test-5 run above uses the real
+   `--project t3ssh` ingest path with no pinned field, and
+   `cargo test -p vowp-cli --test project_path` covers the same resolution from
+   an unrelated directory. This removes the workaround from the original run.
 
 3. **opencode MCP model exposure remains the §16.20 open assumption.** The
    project-local `opencode.json` registers `vowp mcp` and a scripted MCP client
@@ -679,11 +719,36 @@ ingest path.
   handoff message. The owner Mac/phone click-through and the Claude Remote
   Control join are the PENDING OWNER ACCEPTANCE items above.
 - Test 5: use the T0 rig's `vps:sudo` home, a temporary home and fixture
-  project with `project.path` pinned, a surface-only `laptop` node, and a
-  private SSH alias; kill the executor's SSH child after the spool has three
-  events and check the home log for contiguous sequence numbers and exactly one
-  copy of every event. The real `__exec` → `vowp session ingest --project
-  t3ssh` path is used.
+  project with no `project.path`, a surface-only `laptop` node, and a private
+  SSH alias; kill the executor's SSH child after the spool has three events and
+  check the home log for contiguous sequence numbers and exactly one copy of
+  every event. The real `__exec` → `vowp session ingest --project t3ssh` path is
+  used. The earlier `t3final` run used the same shape with `project.path`
+  pinned before the fix.
+
+## Verification followups
+
+The five non-blocking followups from the `v2-t3-surfaces` verify-1 review are
+disposed of in this record:
+
+1. **4e pair code:** the 4e text now says the committed output is redacted and
+   the temporary raw evidence file was deleted during verification; the code is
+   not reproduced.
+2. **Final-commit scope:** the record now says
+   `crates/vowp-core/src/surface/orchestrator.rs` changed between `3c57f7c`
+   and `ef3765c`, that 4a was not re-run on the final commit, and that the
+   opencode-host/lease/ingest paths are unchanged while 4e re-checks
+   join/pair/lease/MCP.
+3. **Join-state citation:** the degraded/fallback join state now cites
+   §12.3/§7.6 without "exactly".
+4. **Test-5 drop artifact:** the follow-up run's drop log is
+   `/tmp/opencode/t3follow/evidence/drop.txt`; the earlier
+   `/tmp/opencode/t3-evidence/test5-drop.txt` has the `DROP at spool_lines=3`
+   line, and `/tmp/opencode/t3-final/test5-drop.txt` is cited only as the
+   status document it is.
+5. **Test-5 project path:** test 5 now passes on the `t3follow` rig without
+   `project.path` after `f-project-path-default` (`50e63b5`, with `b78ae83`
+   registering its test); the setup and evidence are recorded above.
 
 ## Gate status
 
