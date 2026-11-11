@@ -6,10 +6,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use tempfile::TempDir;
 use vowp_protocol::{Node, NodeName, Project, VowpConfig};
 use vowp_store::{NodePaths, Store};
+
+/// The resolved CLI binary, built at most once per test process.
+static CLI_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
 /// One temporary node home and project, plus the private tmux environment.
 struct CliEnv {
@@ -98,6 +102,11 @@ impl CliEnv {
 
 /// Returns the `vowp` binary, building it once when the core test target runs alone.
 fn cli_binary() -> PathBuf {
+    CLI_BINARY.get_or_init(resolve_cli_binary).clone()
+}
+
+/// Resolves or builds the CLI binary exactly once.
+fn resolve_cli_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vowp") {
         return PathBuf::from(path);
     }
