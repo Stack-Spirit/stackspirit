@@ -22,13 +22,14 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
-    ExecutorRef, JoinInstructions, Lease, NewSession, OrchestratorApp, OrchestratorCard, Project, ProjectName,
+    ExecutorRef, JoinInstructions, Lease, Level, NewSession, OrchestratorApp, OrchestratorCard, Project, ProjectName,
     SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp,
 };
 use vowp_store::{Store, StoreError};
 
 use super::claude_remote::ClaudeRemoteHost;
 use super::lease::{AcquireLease, LeaseGuard};
+use super::mirror::{self, MirrorCursor};
 use super::native::{AppHandle, AppHost, HostRequest, process_alive, write_private_json};
 use super::opencode_host::OpencodeHost;
 use crate::CoreError;
@@ -36,7 +37,73 @@ use crate::deps::Deps;
 use crate::session::service::SessionService;
 
 /// The instructions file written into every orchestrator directory.
-const INSTRUCTIONS: &str = include_str!("../../../../framework/templates/ORCHESTRATOR.md");
+///
+/// The text lives in this crate so `cargo package -p vowp-core` carries it. The
+/// repository copy in `framework/templates/ORCHESTRATOR.md` stays byte-identical and
+/// a `vowp-cli` test checks that the two do not drift.
+pub const ORCHESTRATOR_INSTRUCTIONS: &str = r#"# VOWP orchestrator
+
+You are the owner's VOWP orchestrator. This directory belongs to one orchestrator session; the
+session itself lives on the VOWP home and is shared by every surface the owner uses (the opencode
+desktop app, a Claude app, or `vowp chat`). This file is your standing instruction, not a job brief.
+
+## Start every turn with the real picture
+
+1. Read `vowp fleet status --json` (or the home's `snapshot.json`), then `vowp fleet queue --json`
+   and `vowp fleet inbox --json`. Read `vowp capacity report --json` when capacity, waiting work or
+   a brake could matter.
+2. Say what is running, waiting, blocked or failed, with the times from the snapshot. Do not invent
+   status, counts or completion.
+3. Say what you propose and why, then ask. The owner decides.
+4. Apply only after an explicit yes, through the VOWP tools or the matching `vowp` command.
+
+## How to talk to the owner
+
+- Plain sentences, short paragraphs, times in the home's timezone. No wide tables and no colour
+  requirement; the owner may be on a phone over SSH, or in the Claude mobile app for Remote Control.
+- A phone join is app-specific: run the SSH `join.phone` command for opencode and `vowp chat`, and
+  open the Claude mobile app for Claude Remote Control.
+- Report a failure with its exact command or tool, the exit status and the useful tail of the output.
+- When the owner asks to see something, use the `vowp tunnel open` command printed in `join.desktop`
+  **on the control machine**. This home cannot open tunnels itself; `tunnel_open` and
+  `vowp tunnel open` refuse here. Ask the owner to run the control-machine command and give you the
+  local address, then close it on the control machine when the owner is done.
+- When the owner changes app, device or model, continue the same session. The new surface gets the
+  capsule and the last turns from `session_resume`; the old surface becomes read-only and says so.
+
+## Hard limits
+
+- Never open, query or edit a database, `orchestrator.json`, a capsule or a session log by hand.
+  Use the commands and tools.
+- Never read, print, log or commit a secret value, token, key or `.env` file. Refer to secrets by
+  name only; use `vowp secret request` for a value the owner must enter.
+- Never push, publish, deploy or change repository visibility. The supervisor merges; the owner
+  publishes.
+- A write tool that refuses because the session moved is final. Do not retry it with another token
+  or another surface; tell the owner and continue read-only here.
+- Never claim a tool, app join, tunnel or job is working without checking it.
+
+## VOWP tools
+
+When the app exposes the VOWP MCP server, prefer these tools over shell parsing: `fleet_status`,
+`fleet_queue`, `inbox_list`, `inbox_answer`, `job_add`, `job_pause`, `job_retry`, `capacity_report`,
+`capacity_set`, `session_tail`, `session_handoff`, `session_resume`, `secret_request`.
+`tunnel_open` and `tunnel_close` exist only on a control-machine surface; do not promise them from
+the home.
+
+Some opencode 2.0.28 builds report the server `connected` without exposing its tools to the model.
+The config and the server are still real; if you cannot see the tools, use the `vowp` CLI or the
+`vowp chat` fallback and tell the owner which path you used.
+
+## This directory
+
+- `orchestrator.json` records the name, app, session id, bound project, executor and state.
+- `opencode.json` or `.mcp.json` registers the `vowp mcp` server for this app, using the lease token
+  in `lease.token`.
+- `host.json` belongs to the running app host; `mirror.json` is the transcript cursor.
+
+Do not edit these files. `vowp orchestrator stop` and `vowp orchestrator resume` manage them.
+"#;
 
 /// The persisted orchestrator state file.
 const STATE_FILE: &str = "orchestrator.json";
@@ -46,6 +113,9 @@ const LEASE_FILE: &str = "lease.token";
 
 /// The app host's state file (written by the host implementation).
 const HOST_FILE: &str = "host.json";
+
+/// The transcript cursor written for a running orchestrator.
+const MIRROR_FILE: &str = "mirror.json";
 
 /// The pid file of the long-lived lease keeper.
 pub const KEEPER_PID_FILE: &str = "keeper.pid";
@@ -217,6 +287,9 @@ impl Orchestrator {
             surface_id: Some(surface_id),
         };
         write_state(&dir, &state)?;
+        if let (Some(host), Some(handle)) = (host.as_ref(), handle.as_ref()) {
+            self.mirror(&dir, &state, host.as_ref(), handle);
+        }
         Ok(info_from_state(state, dir, handle))
     }
 
@@ -358,6 +431,9 @@ impl Orchestrator {
         state.state = "running".to_owned();
         state.join = Some(join);
         write_state(&dir, &state)?;
+        if let Some(host) = host.as_ref() {
+            self.mirror(&dir, &state, host.as_ref(), &handle);
+        }
         Ok(info_from_state(state, dir, Some(handle)))
     }
 
@@ -371,6 +447,28 @@ impl Orchestrator {
             if state.state != "running" {
                 continue;
             }
+            let dir = self.dir(&state.name);
+            // A live host is already running. Reuse it only while it still owns its
+            // lease: a supervisor restart must not invalidate every app config, and it
+            // must not steal a session another surface took over.
+            if let Some(handle) = host_handle(&dir, state.app) {
+                if !self.can_reuse_live_lease(&dir, &state)? {
+                    self.deps.log.log(
+                        Level::Warn,
+                        "orchestrator",
+                        &format!(
+                            "{} is running without its lease (another surface may hold it); leaving it",
+                            state.name
+                        ),
+                    );
+                    continue;
+                }
+                if let Ok(Some(host)) = self.host_for(state.app) {
+                    self.mirror(&dir, &state, host.as_ref(), &handle);
+                    resumed.push(info_from_state(state, dir, Some(handle)));
+                    continue;
+                }
+            }
             match self.resume(&state.name) {
                 Ok(info) => resumed.push(info),
                 Err(error) => {
@@ -383,6 +481,28 @@ impl Orchestrator {
             }
         }
         Ok(resumed)
+    }
+
+    /// Returns whether a live host still owns the lease named by its token file.
+    ///
+    /// `resume_all` uses this to leave an already-running orchestrator and its keeper
+    /// untouched; only a missing or replaced lease needs a takeover.
+    fn can_reuse_live_lease(&self, dir: &Path, state: &StateFile) -> Result<bool, CoreError> {
+        if state.app == OrchestratorApp::Chat {
+            return Ok(true);
+        }
+        let token = match fs::read_to_string(dir.join(LEASE_FILE)) {
+            Ok(token) => token.trim().to_owned(),
+            Err(_) => return Ok(false),
+        };
+        if token.is_empty() {
+            return Ok(false);
+        }
+        let scoped = self.scoped_deps(state.project.as_ref())?;
+        let store = scoped.open_store()?;
+        Ok(store
+            .lease(&state.session_id)?
+            .is_some_and(|lease| lease.token == token))
     }
 
     /// Keeps one orchestrator's lease alive until its pid file changes or it is revoked.
@@ -575,7 +695,7 @@ impl Orchestrator {
         surface: &SurfaceId,
         token_file: &Path,
     ) -> Result<(), CoreError> {
-        write_private_text(&dir.join("AGENTS.md"), INSTRUCTIONS)?;
+        write_private_text(&dir.join("AGENTS.md"), ORCHESTRATOR_INSTRUCTIONS)?;
         let token_file = token_file.display().to_string();
         let session = session.to_string();
         let surface = surface.to_string();
@@ -625,6 +745,50 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Mirrors one running host's new transcript entries and writes `mirror.json`.
+    ///
+    /// A transcript read or cursor write failure is logged, not returned: `create` and
+    /// `resume` already started the host, and the app may still be coming up. The cursor
+    /// file is written even after a failed read so `mirror.json` exists for a running
+    /// orchestrator and the next pass starts from the last known position.
+    fn mirror(&self, dir: &Path, state: &StateFile, host: &dyn AppHost, handle: &AppHandle) {
+        let path = dir.join(MIRROR_FILE);
+        let mut cursor = match mirror::read_cursor(&path) {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                self.deps.log.log(
+                    Level::Warn,
+                    "orchestrator",
+                    &format!("cannot read {}: {error}", path.display()),
+                );
+                MirrorCursor {
+                    last_native_id: None,
+                    updated_at: self.deps.clock.now(),
+                }
+            }
+        };
+        let result = (|| -> Result<(), CoreError> {
+            let scoped = self.scoped_deps(state.project.as_ref())?;
+            let store = scoped.open_store()?;
+            mirror::mirror_from_host(&scoped, &store, &state.session_id, host, handle, &mut cursor)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.deps.log.log(
+                Level::Warn,
+                "orchestrator",
+                &format!("cannot mirror {}: {error}", state.name),
+            );
+        }
+        if let Err(error) = mirror::write_cursor(&path, &cursor) {
+            self.deps.log.log(
+                Level::Warn,
+                "orchestrator",
+                &format!("cannot write {}: {error}", path.display()),
+            );
+        }
+    }
+
     /// Returns the app's project-local config path.
     fn config_path(&self, dir: &Path, app: OrchestratorApp) -> PathBuf {
         match app {
@@ -639,7 +803,9 @@ impl Orchestrator {
         match project {
             Some(project) => {
                 if global.project(project)?.is_none() {
-                    return Err(CoreError::NotFound(format!("project {project}")));
+                    return Err(CoreError::NotFound(format!(
+                        "project {project} is not registered; run `vowp project add <path>` first"
+                    )));
                 }
                 Store::create_project_db(&self.deps.paths, project)?;
             }

@@ -17,14 +17,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::Value;
 use tempfile::TempDir;
 use vowp_protocol::{
-    JoinInstructions, Lease, Node, NodeName, OrchestratorApp, Project, SessionRole, Surface, SurfaceId, SurfaceKind,
-    Timestamp, VowpConfig,
+    JoinInstructions, Lease, Node, NodeName, OrchestratorApp, Project, ProjectName, SessionRole, Surface, SurfaceId,
+    SurfaceKind, Timestamp, VowpConfig,
 };
 use vowp_store::{NodePaths, Store};
 
 use vowp_core::deps::Deps;
 use vowp_core::surface::mirror::MirrorCursor;
-use vowp_core::surface::native::{AppHandle, AppHost, HostHealth, HostRequest, TranscriptBatch};
+use vowp_core::surface::native::{AppHandle, AppHost, HostHealth, HostRequest, TranscriptBatch, TranscriptEntry};
 use vowp_core::surface::orchestrator::{NewOrchestrator, Orchestrator};
 
 use crate::{BufferIo, Ctx, Global};
@@ -124,6 +124,7 @@ struct FakeHost {
     kind: OrchestratorApp,
     starts: Arc<AtomicUsize>,
     stops: Arc<AtomicUsize>,
+    entries: Vec<TranscriptEntry>,
 }
 
 impl FakeHost {
@@ -135,10 +136,32 @@ impl FakeHost {
                 kind,
                 starts: Arc::clone(&starts),
                 stops: Arc::clone(&stops),
+                entries: Vec::new(),
             },
             starts,
             stops,
         )
+    }
+
+    /// Returns a fake host that publishes one transcript entry on its first mirror pass.
+    fn with_entry(mut self, native_id: &str) -> Self {
+        self.entries = vec![TranscriptEntry {
+            native_id: native_id.to_owned(),
+            kind: vowp_core::surface::native::TranscriptKind::UserMessage,
+            ts: Timestamp::now(),
+            text: Some("hello from the fake app".to_owned()),
+            tool: None,
+            input: None,
+            output: None,
+            path: None,
+            call_id: None,
+            model: None,
+            native_session: None,
+            ok: None,
+            tokens: None,
+            usd: None,
+        }];
+        self
     }
 
     fn host_file(workdir: &std::path::Path) -> std::path::PathBuf {
@@ -209,8 +232,13 @@ impl AppHost for FakeHost {
         _handle: &AppHandle,
         cursor: &MirrorCursor,
     ) -> Result<TranscriptBatch, vowp_core::CoreError> {
+        let entries = if cursor.last_native_id.is_some() {
+            Vec::new()
+        } else {
+            self.entries.clone()
+        };
         Ok(TranscriptBatch {
-            entries: Vec::new(),
+            entries,
             cursor: cursor.clone(),
         })
     }
@@ -290,6 +318,7 @@ fn orchestrator_new_writes_only_project_local_config() {
         "AGENTS.md",
         "lease.token",
         "host.json",
+        "mirror.json",
     ] {
         assert!(dir.join(name).is_file(), "{name} was not written");
     }
@@ -351,7 +380,16 @@ fn orchestrator_registers_mcp_in_opencode_and_claude_configs() {
         "opencode config does not name the lease token: {command:?}"
     );
     let surface = arg_after(&command, "--surface");
-    assert_eq!(surface.len(), 26, "unexpected surface id: {surface}");
+    let lease = env
+        .store()
+        .lease(&opencode.session)
+        .expect("opencode lease lookup")
+        .expect("opencode orchestrator has no lease");
+    assert_eq!(
+        lease.surface_id,
+        Some(SurfaceId(surface)),
+        "opencode MCP config names a different surface than the lease row"
+    );
 
     let claude = orchestrator
         .create(&request("cc", OrchestratorApp::ClaudeCode))
@@ -368,7 +406,17 @@ fn orchestrator_registers_mcp_in_opencode_and_claude_configs() {
     assert_eq!(args[0], "mcp");
     assert!(args.contains(&claude.session.to_string()));
     assert!(args.contains(&claude.dir.join("lease.token").display().to_string()));
-    assert_eq!(arg_after(&args, "--surface").len(), 26);
+    let surface = arg_after(&args, "--surface");
+    let lease = env
+        .store()
+        .lease(&claude.session)
+        .expect("Claude lease lookup")
+        .expect("Claude orchestrator has no lease");
+    assert_eq!(
+        lease.surface_id,
+        Some(SurfaceId(surface)),
+        "Claude MCP config names a different surface than the lease row"
+    );
     assert!(!claude.dir.join("opencode.json").exists());
 }
 
@@ -570,6 +618,166 @@ fn orchestrator_state_survives_supervisor_restart() {
 }
 
 #[test]
+fn orchestrator_writes_mirror_cursor_for_a_running_host() {
+    let env = TestEnv::new();
+    let (host, _, _) = FakeHost::new(OrchestratorApp::Opencode);
+    let host = host.with_entry("fake-entry-1");
+    let orchestrator = Orchestrator::with_hosts(deps(&env), vec![Arc::new(host)]);
+    let info = orchestrator
+        .create(&request("mirror", OrchestratorApp::Opencode))
+        .expect("create orchestrator");
+
+    let mirror = read_json(&info.dir.join("mirror.json"));
+    assert_eq!(mirror["last_native_id"], "fake-entry-1");
+    assert!(
+        mirror["updated_at"].is_string(),
+        "mirror.json has no cursor timestamp: {mirror}"
+    );
+
+    let store = env.store();
+    let user_events = |store: &Store| {
+        store
+            .event_rows(&info.session, 0, 50)
+            .expect("event rows")
+            .into_iter()
+            .filter(|row| row.event_type == vowp_protocol::EventType::UserMessage)
+            .count()
+    };
+    assert_eq!(user_events(&store), 1, "the first pass did not mirror the entry");
+
+    // Resume reuses the same host and mirrors once more; the native-id map skips it.
+    let resumed = orchestrator.resume("mirror").expect("resume orchestrator");
+    assert_eq!(resumed.card.name, "mirror");
+    assert_eq!(user_events(&store), 1, "resume mirrored the same entry twice");
+    let mirror = read_json(&info.dir.join("mirror.json"));
+    assert_eq!(mirror["last_native_id"], "fake-entry-1");
+}
+
+#[test]
+fn node_supervisor_startup_resumes_running_orchestrators() {
+    let env = TestEnv::new();
+    let (orchestrator, starts, _, _, _) = manager(deps(&env));
+    let info = orchestrator
+        .create(&request("boot", OrchestratorApp::Opencode))
+        .expect("create orchestrator");
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+    // A crash loses host.json while orchestrator.json still says `running`.
+    std::fs::remove_file(info.dir.join("host.json")).expect("simulate host crash");
+    let (restarted, restarted_starts, _, _, _) = manager(deps(&env));
+    let mut node =
+        vowp_core::loops::NodeSupervisor::with_orchestrator(deps(&env), restarted).expect("build the node supervisor");
+    let report = node.startup().expect("node startup");
+
+    assert_eq!(report.orchestrators_resumed, 1, "{report:?}");
+    assert_eq!(
+        restarted_starts.load(Ordering::SeqCst),
+        1,
+        "startup did not resume the host"
+    );
+    assert_eq!(read_json(&state_path(&info.dir))["state"], "running");
+    assert!(info.dir.join("host.json").is_file(), "startup left no live host state");
+}
+
+#[test]
+fn node_supervisor_startup_leaves_a_live_orchestrator_alone() {
+    let env = TestEnv::new();
+    let (orchestrator, _, _, _, _) = manager(deps(&env));
+    let info = orchestrator
+        .create(&request("live", OrchestratorApp::Opencode))
+        .expect("create orchestrator");
+    let before = env
+        .store()
+        .lease(&info.session)
+        .expect("lease lookup")
+        .expect("create left no lease");
+    let token_path = info.dir.join("lease.token");
+    let token = std::fs::read_to_string(&token_path).expect("lease token file");
+    assert_eq!(before.token, token.trim());
+
+    let (restarted, restarted_starts, _, _, _) = manager(deps(&env));
+    let mut node =
+        vowp_core::loops::NodeSupervisor::with_orchestrator(deps(&env), restarted).expect("build the node supervisor");
+    let report = node.startup().expect("node startup");
+
+    assert_eq!(report.orchestrators_resumed, 1, "{report:?}");
+    assert_eq!(
+        restarted_starts.load(Ordering::SeqCst),
+        0,
+        "startup restarted a host that was already running"
+    );
+    let after = env
+        .store()
+        .lease(&info.session)
+        .expect("lease lookup")
+        .expect("startup dropped a live lease");
+    assert_eq!(after.token, before.token, "startup replaced a live lease token");
+    assert_eq!(
+        std::fs::read_to_string(&token_path).expect("lease token file"),
+        token,
+        "startup rewrote the live lease token file"
+    );
+    assert!(
+        info.dir.join("mirror.json").is_file(),
+        "startup did not refresh the mirror"
+    );
+}
+
+#[test]
+fn node_supervisor_startup_does_not_steal_a_taken_over_lease() {
+    let env = TestEnv::new();
+    let (orchestrator, _, _, _, _) = manager(deps(&env));
+    let info = orchestrator
+        .create(&request("moved-live", OrchestratorApp::Opencode))
+        .expect("create orchestrator");
+    let store = env.store();
+    let now = Timestamp::now();
+    let surface = Surface {
+        id: SurfaceId::new(),
+        kind: SurfaceKind::Opencode,
+        node: NodeName::parse("local").expect("node"),
+        holder: "phone".to_owned(),
+        app: Some("opencode".to_owned()),
+        cwd: None,
+        metadata: serde_json::json!({}),
+        created_at: now,
+        last_seen_at: now,
+    };
+    store.upsert_surface(&surface).expect("other surface row");
+    let other_token = vowp_core::surface::new_lease_token();
+    store
+        .take_lease(&Lease {
+            session_id: info.session.clone(),
+            surface_id: Some(surface.id.clone()),
+            surface_kind: SurfaceKind::Opencode,
+            node: surface.node.clone(),
+            holder: "phone".to_owned(),
+            token: other_token.clone(),
+            acquired_at: now,
+            heartbeat_at: now,
+        })
+        .expect("simulate takeover");
+
+    let (restarted, restarted_starts, _, _, _) = manager(deps(&env));
+    let mut node =
+        vowp_core::loops::NodeSupervisor::with_orchestrator(deps(&env), restarted).expect("build the node supervisor");
+    let report = node.startup().expect("node startup");
+
+    assert_eq!(report.orchestrators_resumed, 0, "{report:?}");
+    assert_eq!(
+        restarted_starts.load(Ordering::SeqCst),
+        0,
+        "startup restarted the old host after a takeover"
+    );
+    let lease = store
+        .lease(&info.session)
+        .expect("lease lookup")
+        .expect("startup dropped the new holder's lease");
+    assert_eq!(lease.holder, "phone");
+    assert_eq!(lease.token, other_token, "startup stole the taken-over lease");
+}
+
+#[test]
 fn orchestrator_keeper_keeps_the_lease_after_the_cli_exits() {
     let env = TestEnv::new();
     let (orchestrator, _, _, _, _) = manager(deps(&env));
@@ -685,6 +893,55 @@ fn orchestrator_chat_cli_round_trip() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("(chat, running)"), "{stdout}");
     assert_eq!(read_json(&state_path(&dir))["state"], "running");
+}
+
+#[test]
+fn orchestrator_project_path_names_a_registered_project() {
+    let env = TestEnv::new();
+    let checkout = tempfile::tempdir().expect("temp checkout");
+    let mut config = VowpConfig::with_defaults_for_tests();
+    config.project.name = ProjectName::parse("checkout").expect("checkout name");
+    std::fs::write(
+        checkout.path().join("vowp.toml"),
+        toml::to_string_pretty(&config).expect("config serialises"),
+    )
+    .expect("write checkout vowp.toml");
+    let path = checkout.path().display().to_string();
+    let args = [
+        "orchestrator",
+        "new",
+        "--app",
+        "chat",
+        "--name",
+        "from-path",
+        "--project",
+        path.as_str(),
+    ];
+
+    // A checkout path is resolved to its `[project].name`; binding still requires that
+    // name in the registry, and the refusal says how to register it.
+    let (code, _, stderr) = env.run(&args);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("project checkout"), "{stderr}");
+    assert!(stderr.contains("not registered"), "{stderr}");
+
+    let store = env.store();
+    let now = Timestamp::now();
+    store
+        .upsert_project(&Project {
+            name: config.project.name.clone(),
+            path: path.clone(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::to_value(&config).expect("config json"),
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("register the checkout");
+    let (code, stdout, stderr) = env.run(&args);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    let state = read_json(&state_path(&env.home_path().join("orchestrators/from-path")));
+    assert_eq!(state["project"], "checkout");
 }
 
 #[test]

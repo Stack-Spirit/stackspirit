@@ -17,7 +17,9 @@ desktop app, a Claude app, or `vowp chat`). This file is your standing instructi
 ## How to talk to the owner
 
 - Plain sentences, short paragraphs, times in the home's timezone. No wide tables and no colour
-  requirement; the owner may be on a phone over SSH.
+  requirement; the owner may be on a phone over SSH, or in the Claude mobile app for Remote Control.
+- A phone join is app-specific: run the SSH `join.phone` command for opencode and `vowp chat`, and
+  open the Claude mobile app for Claude Remote Control.
 - Report a failure with its exact command or tool, the exit status and the useful tail of the output.
 - When the owner asks to see something, use the `vowp tunnel open` command printed in `join.desktop`
   **on the control machine**. This home cannot open tunnels itself; `tunnel_open` and

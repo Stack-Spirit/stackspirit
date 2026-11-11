@@ -30,6 +30,7 @@ use crate::gates::{GateCtx, GateRunner};
 use crate::ledger::{BoardSnapshot, Ledger};
 use crate::schedules::ScheduleEngine;
 use crate::session::service::SessionService;
+use crate::surface::orchestrator::Orchestrator;
 
 use super::l2_worker::ReportOutcome;
 use super::l4_planner::{self, SessionChoice};
@@ -2390,6 +2391,8 @@ pub struct NodeReconcileReport {
     pub cross_db: CrossDbReconcile,
     /// Migration performed by this startup, when the CLI asked for one.
     pub migration: Option<MigrationReport>,
+    /// Running orchestrators whose app hosts were resumed.
+    pub orchestrators_resumed: u32,
     /// Per-project startup counters.
     pub per_project: BTreeMap<ProjectName, ReconcileReport>,
 }
@@ -2414,6 +2417,7 @@ pub struct NodeTickReport {
 /// park itself.
 pub struct NodeSupervisor {
     deps: Deps,
+    orchestrators: Orchestrator,
     global: Store,
     projects: BTreeMap<ProjectName, ProjectSupervisor>,
     order: Vec<ProjectName>,
@@ -2428,12 +2432,23 @@ pub struct NodeSupervisor {
 impl NodeSupervisor {
     /// Opens the node registry and loads every active or paused project.
     pub fn new(deps: Deps) -> Result<Self, CoreError> {
+        let orchestrators = Orchestrator::new(deps.clone());
+        Self::with_orchestrator(deps, orchestrators)
+    }
+
+    /// Creates a node supervisor with explicit orchestrator app hosts.
+    ///
+    /// Production uses [`NodeSupervisor::new`], which builds the real opencode and
+    /// Claude Code hosts. Tests pass fake hosts so a startup resume never launches an
+    /// app.
+    pub fn with_orchestrator(deps: Deps, orchestrators: Orchestrator) -> Result<Self, CoreError> {
         let global = Store::open_global(&deps.paths)?.with_clock(deps.clock.clone());
         ensure_node_project(&deps, &global)?;
         let (wake, wake_rx) = WakeHandle::channel();
         let mut supervisor = Self {
             started_at: deps.clock.now(),
             deps,
+            orchestrators,
             global,
             projects: BTreeMap::new(),
             order: Vec::new(),
@@ -2463,6 +2478,15 @@ impl NodeSupervisor {
             migration: self.pending_migration.take(),
             ..NodeReconcileReport::default()
         };
+        match self.orchestrators.resume_all() {
+            Ok(resumed) => {
+                report.orchestrators_resumed = u32::try_from(resumed.len()).unwrap_or(u32::MAX);
+            }
+            Err(error) => self
+                .deps
+                .log
+                .log(Level::Warn, "node", &format!("orchestrator resume: {error}")),
+        }
         let names: Vec<ProjectName> = self.projects.keys().cloned().collect();
         for name in names {
             let Some(project) = self.projects.get_mut(&name) else {
