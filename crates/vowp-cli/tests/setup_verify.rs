@@ -14,9 +14,9 @@ use crate::setup::verify;
 use crate::{BufferIo, Ctx, Global};
 use tempfile::TempDir;
 use vowp_protocol::{
-    CapacitySnapshot, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SupervisorSnapshot, Timestamp,
+    CapacitySnapshot, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Session, Snapshot, SupervisorSnapshot, Timestamp,
 };
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePaths, SessionFilter, Store};
 
 /// Returns the `vowp` binary Cargo built for this package.
 fn vowp_binary() -> PathBuf {
@@ -190,6 +190,25 @@ fn write_control_home(root: &Path, home: &str, fetched_at: Timestamp) {
     .expect("snapshot.meta.json");
 }
 
+/// Returns the fixture session rows left in the home's global session index.
+///
+/// The store has no delete-session API, so a run retains one index row. The fixture uses
+/// a run-unique job id; these rows let the tests prove that no later run reuses them.
+fn fixture_sessions(home: &Path) -> Vec<Session> {
+    Store::open_global(&NodePaths::new(home))
+        .expect("open home")
+        .list_sessions(&SessionFilter::default())
+        .expect("list sessions")
+        .into_iter()
+        .filter(|session| {
+            session
+                .job_id
+                .as_ref()
+                .is_some_and(|job| job.as_str().starts_with("setup-verify-job-"))
+        })
+        .collect()
+}
+
 #[test]
 fn setup_verify_fixture_job_merges() {
     let env = TestHome::new("setup-verify-fixture");
@@ -212,6 +231,56 @@ fn setup_verify_fixture_job_merges() {
             .any(|project| project.name.as_str().starts_with("setup-verify-job-")),
         "fixture project was left registered: {projects:?}"
     );
+}
+
+#[test]
+fn setup_verify_fixture_runs_twice_on_one_home() {
+    let env = TestHome::new("setup-verify-fixture-twice");
+    let ctx = env.ctx();
+
+    let first = verify::fixture_job_merges(&ctx).expect("first fixture check");
+    assert_eq!(first.status, "ok", "{}", first.detail);
+    let after_first = fixture_sessions(&env.home);
+    assert_eq!(
+        after_first.len(),
+        1,
+        "expected exactly one first-run session row: {after_first:?}"
+    );
+    let first_job = after_first[0].job_id.clone().expect("fixture job id");
+    let paths = NodePaths::new(&env.home);
+    assert!(
+        !paths.session_dir(&after_first[0].id).exists(),
+        "the first fixture's session directory must be removed: {:?}",
+        paths.session_dir(&after_first[0].id)
+    );
+
+    let second = verify::fixture_job_merges(&ctx).expect("second fixture check");
+    assert_eq!(second.status, "ok", "{}", second.detail);
+    let after_second = fixture_sessions(&env.home);
+    assert_eq!(
+        after_second.len(),
+        2,
+        "expected one session row per fixture run: {after_second:?}"
+    );
+    let jobs: Vec<_> = after_second
+        .iter()
+        .filter_map(|session| session.job_id.clone())
+        .collect();
+    assert!(
+        jobs.iter().filter(|job| **job == first_job).count() == 1,
+        "the first run's job id must survive unchanged: {jobs:?}"
+    );
+    assert!(
+        jobs.iter().any(|job| *job != first_job),
+        "the second run must use a new job id instead of reusing {first_job}: {jobs:?}"
+    );
+    for session in &after_second {
+        assert!(
+            !paths.session_dir(&session.id).exists(),
+            "every fixture session directory must be removed: {:?}",
+            paths.session_dir(&session.id)
+        );
+    }
 }
 
 #[test]
@@ -326,31 +395,41 @@ fn setup_verify_run_reports_every_check() {
 #[test]
 fn setup_verify_cli_runs_every_check() {
     let env = TestHome::new("setup-verify-cli");
-    let output = env
-        .command()
-        .args(["--json", "setup", "verify"])
-        .output()
-        .expect("run vowp setup verify");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "setup verify failed: {stdout}\n{stderr}");
-    let outcome: serde_json::Value =
-        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}"));
-    assert_eq!(outcome["status"], "ok", "{outcome}");
-    let checks = outcome["checks"].as_array().expect("checks array");
-    let by_name = |name: &str| {
-        checks
-            .iter()
-            .find(|check| check["name"] == name)
-            .unwrap_or_else(|| panic!("missing check {name}: {outcome}"))
-    };
-    assert_eq!(by_name("fixture.job_merge")["status"], "ok", "{outcome}");
-    assert_eq!(by_name("orchestrator.chat")["status"], "ok", "{outcome}");
-    assert_ne!(by_name("control.snapshot")["status"], "fail", "{outcome}");
+    // A second identical run on the same home must work: the first run's fixture
+    // sessions and project are gone, so verify must not reuse a stale session.
+    for run in 1..=2 {
+        let output = env
+            .command()
+            .args(["--json", "setup", "verify"])
+            .output()
+            .expect("run vowp setup verify");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "setup verify run {run} failed: {stdout}\n{stderr}"
+        );
+        let outcome: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("invalid JSON in run {run} ({error}): {stdout}"));
+        assert_eq!(outcome["status"], "ok", "run {run}: {outcome}");
+        let checks = outcome["checks"].as_array().expect("checks array");
+        let by_name = |name: &str| {
+            checks
+                .iter()
+                .find(|check| check["name"] == name)
+                .unwrap_or_else(|| panic!("missing check {name} in run {run}: {outcome}"))
+        };
+        assert_eq!(by_name("fixture.job_merge")["status"], "ok", "run {run}: {outcome}");
+        assert_eq!(by_name("orchestrator.chat")["status"], "ok", "run {run}: {outcome}");
+        assert_ne!(by_name("control.snapshot")["status"], "fail", "run {run}: {outcome}");
+    }
 }
 
 /// Creates a remote home and installs the per-user `vowp` wrapper setup home would install.
-fn init_remote_home(root: &Path) -> (PathBuf, PathBuf) {
+///
+/// Returns the home path, the project path and the home's own node name (the name
+/// `control.json` records and the snapshot reports).
+fn init_remote_home(root: &Path) -> (PathBuf, PathBuf, String) {
     let home = root.join(".vowp");
     let project = root.join("project");
     let tmux = root.join("tmux");
@@ -409,7 +488,15 @@ fn init_remote_home(root: &Path) -> (PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod remote vowp");
     }
-    (home, project)
+    let node = Store::open_global(&NodePaths::new(&home))
+        .expect("open remote home")
+        .local_node()
+        .expect("read remote node")
+        .expect("remote home has a local node")
+        .name
+        .as_str()
+        .to_owned();
+    (home, project, node)
 }
 
 #[test]
@@ -417,7 +504,7 @@ fn setup_verify_control_runs_the_checks_on_the_home() {
     ensure_vowp_binary();
     let control = TempDir::new().expect("control home");
     let remote = TempDir::new().expect("remote home");
-    let (remote_home, _remote_project) = init_remote_home(remote.path());
+    let (remote_home, _remote_project, remote_node) = init_remote_home(remote.path());
     let control_root = control.path().join("control");
     let bin = control.path().join("bin");
     let tmux = control.path().join("tmux");
@@ -426,7 +513,7 @@ fn setup_verify_control_runs_the_checks_on_the_home() {
     std::fs::create_dir_all(&tmux).expect("control tmux");
     let config = serde_json::json!({
         "role": "control",
-        "home": "remote-fixture",
+        "home": remote_node,
         "ssh_target": "fake.example",
         "remote_home": remote_home.display().to_string(),
         "created_at": Timestamp::now(),

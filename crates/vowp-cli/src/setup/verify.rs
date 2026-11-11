@@ -45,8 +45,9 @@ use crate::setup::SetupRunner;
 /// The fake harness reply used by the chat check.
 const CHAT_REPLY: &str = "setup verify orchestrated answer";
 
-/// The fixture job id.
-const FIXTURE_JOB: &str = "setup-verify";
+/// Prefix for the fixture project and job ids. Each run adds a unique suffix so a
+/// retained session index row can never be reused by a later run or by a real job.
+const FIXTURE_JOB_PREFIX: &str = "setup-verify";
 
 /// A unique resident of the home's temporary verification area.
 struct Scratch {
@@ -74,6 +75,10 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
+        // Remove the shared `setup-verify/` parent too when this was its last run.
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
     }
 }
 
@@ -90,11 +95,15 @@ impl Drop for RemoveDir {
 ///
 /// The project is archived while it exists so a running node supervisor never ticks it.
 /// The fixture's own `Supervisor` drives it through the real project store and merge
-/// queue. Dropping the fixture removes its sessions, project row, database and checkout.
+/// queue. The project and job ids are unique per run, so a session index row retained
+/// by the store can never be picked up by a later verification or by a real job.
+/// Dropping the fixture removes its session directories, project row, database and
+/// checkout; the global session index rows keep the run-unique job id.
 struct Fixture {
     _scratch: Scratch,
     paths: NodePaths,
     project: ProjectName,
+    job: JobId,
     root: PathBuf,
     repo: PathBuf,
     deps: Deps,
@@ -104,7 +113,9 @@ impl Fixture {
     /// Registers a temporary project in `base`'s home and builds its dependencies.
     fn new(base: &Deps, label: &str, reply: &str, commit_file: bool) -> Result<Self, CliError> {
         let scratch = Scratch::new(&base.paths.root().join("setup-verify"), label)?;
-        let project = ProjectName::parse(&format!("setup-verify-{label}-{}", unique_suffix()))?;
+        let suffix = unique_suffix();
+        let project = ProjectName::parse(&format!("{FIXTURE_JOB_PREFIX}-{label}-{suffix}"))?;
+        let job = JobId::parse(&format!("{FIXTURE_JOB_PREFIX}-{label}-{suffix}"))?;
         let root = scratch.path.clone();
         let repo = root.join("project");
         let origin = root.join("origin.git");
@@ -130,7 +141,7 @@ impl Fixture {
         git(&repo, &["push", "--quiet", "-u", "origin", "main"])?;
 
         let harness = root.join("fake-opencode");
-        write_exec(&harness, &harness_script(reply, commit_file))?;
+        write_exec(&harness, &harness_script(&job, reply, commit_file))?;
 
         let mut config = VowpConfig::with_defaults_for_tests();
         config.node.name = base.node.clone();
@@ -216,6 +227,7 @@ impl Fixture {
             _scratch: scratch,
             paths: base.paths.clone(),
             project,
+            job,
             root,
             repo,
             deps,
@@ -376,7 +388,7 @@ pub fn gc_dry_run(ctx: &Ctx) -> Result<SetupCheck, CliError> {
 pub fn fixture_job_merges(ctx: &Ctx) -> Result<SetupCheck, CliError> {
     let fixture = Fixture::new(ctx.deps(), "job", "setup verify fixture answered", true)?;
     let store = fixture.deps.open_store()?;
-    let job_id = JobId::parse(FIXTURE_JOB)?;
+    let job_id = fixture.job.clone();
     let mut supervisor = Supervisor::new(fixture.deps.clone(), fixture.project.clone())?;
     supervisor.startup()?;
     store.insert_job(
@@ -557,11 +569,13 @@ pub fn snapshot_check(ctx: &Ctx) -> Result<SetupCheck, CliError> {
     vowp_core::fleet::write_snapshot(ctx.deps(), &store, ctx.clock().now())?;
     let snapshot = vowp_core::fleet::read_snapshot(ctx.paths())?;
     let mut result = validate_snapshot(&snapshot, Timestamp::now(), "home snapshot")?;
-    result.status = "warn".to_owned();
-    result.detail = format!(
-        "{}; no control machine is configured on this machine, so readability from a control machine was not verified",
-        result.detail
-    );
+    if result.status == "ok" {
+        result.status = "warn".to_owned();
+        result.detail = format!(
+            "{}; no control machine is configured on this machine, so readability from a control machine was not verified",
+            result.detail
+        );
+    }
     Ok(result)
 }
 
@@ -595,7 +609,8 @@ fn snapshot_from_control(control: &ControlHome) -> Result<SetupCheck, CliError> 
     let meta = serde_json::json!({"fetched_at": fetched_at, "source": "remote"});
     let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(vowp_protocol::ProtocolError::from)?;
     crate::remote::write_private(&control.root.join("snapshot.meta.json"), &meta_bytes)?;
-    validate_snapshot(&snapshot, fetched_at, "remote")
+    // Validate the cache we just wrote, including that it names the configured home.
+    snapshot_readable_from_control(&control.root)
 }
 
 /// Reads the snapshot cache written by `setup control --apply`.
@@ -622,7 +637,7 @@ pub fn snapshot_readable_from_control(root: &Path) -> Result<SetupCheck, CliErro
             ),
         ));
     }
-    validate_snapshot(&cached.snapshot, cached.fetched_at, "control cache")
+    validate_snapshot(&cached.snapshot, cached.fetched_at, &cached.source)
 }
 
 /// Validates the snapshot document and returns an `ok` check with its `as of` time.
@@ -703,25 +718,27 @@ fn unique_suffix() -> String {
     )
 }
 
-/// Returns the fake opencode script.
-fn harness_script(reply: &str, commit_file: bool) -> String {
+/// Returns the fake opencode script for `job`.
+fn harness_script(job: &JobId, reply: &str, commit_file: bool) -> String {
     let commit = if commit_file {
-        r#"sleep 1
-mkdir -p .vowp/jobs/setup-verify
-cat > .vowp/jobs/setup-verify/report.md <<'VOWP_REPORT_EOF'
+        format!(
+            r#"sleep 1
+mkdir -p .vowp/jobs/{job}
+cat > .vowp/jobs/{job}/report.md <<'VOWP_REPORT_EOF'
 ---
-job: setup-verify
+job: {job}
 status: done
-branch: job/setup-verify
+branch: job/{job}
 ---
 setup verify fixture turn
 VOWP_REPORT_EOF
 printf '%s\n' 'setup verify fixture turn' > setup-verify.txt
-git add .vowp/jobs/setup-verify/report.md setup-verify.txt >/dev/null 2>&1
+git add .vowp/jobs/{job}/report.md setup-verify.txt >/dev/null 2>&1
 git -c user.name='setup verify' -c user.email='setup@example.invalid' commit -m 'setup verify fixture turn' >/dev/null 2>&1
 "#
+        )
     } else {
-        ""
+        String::new()
     };
     let event = serde_json::json!({
         "type": "text",
