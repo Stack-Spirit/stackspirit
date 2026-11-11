@@ -67,6 +67,14 @@ The first squash attempt on this tree hit `setup_verify_run_reports_every_check`
 rerun alone and the second full squash run passed the build and test stages. This is the known
 load-sensitive setup-verify test, not a public-tree finding.
 
+The supervisor's first gate run on this branch also hit a `loops_supervisor` failure under load
+(the gate output was truncated before the test name). The exact gate command,
+`cargo test --workspace`, passed on rerun on the same tree, and
+`cargo test -p vowp-core --test loops_supervisor` passed three more times. The timing-sensitive
+cases in that file use 1-second sleeps (`tick_does_not_block_on_slow_gate`,
+`tick_does_not_block_on_slow_merge`); this is a load-sensitive test flake, not a public-tree or
+product finding.
+
 ### Check 1 — no private data: **FAIL**
 
 The seven secret-shaped rules are clean on the candidate: no real home path, private hostname, SSH
