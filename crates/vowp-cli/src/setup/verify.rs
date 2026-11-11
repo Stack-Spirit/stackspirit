@@ -940,12 +940,39 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output, CliError>
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
     use std::process::Command;
+    use std::time::Duration;
 
     use tempfile::TempDir;
     use vowp_protocol::JobId;
 
     use super::harness_script;
+
+    /// Runs the freshly written fake harness, retrying the ETXTBSY/EINTR races that a
+    /// parallel test can cause by briefly holding a write descriptor or interrupting
+    /// `exec`. Any other error, and a real harness failure, is returned unchanged.
+    fn run_harness(script: &Path, prompt: &str, repo: &Path) -> std::process::Output {
+        for _ in 0..19 {
+            match Command::new(script).args(["run", prompt]).current_dir(repo).output() {
+                Ok(output) => return output,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ExecutableFileBusy | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("run harness: {error}"),
+            }
+        }
+        Command::new(script)
+            .args(["run", prompt])
+            .current_dir(repo)
+            .output()
+            .expect("run harness")
+    }
 
     #[test]
     fn fixture_harness_writes_the_report_for_the_running_child_job() {
@@ -986,11 +1013,7 @@ mod tests {
              Do not widen scope.",
             repo.display()
         );
-        let output = Command::new(&script)
-            .args(["run", &prompt])
-            .current_dir(repo)
-            .output()
-            .expect("run harness");
+        let output = run_harness(&script, &prompt, repo);
         assert!(
             output.status.success(),
             "harness failed: {}",
