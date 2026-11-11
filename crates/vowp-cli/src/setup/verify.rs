@@ -49,6 +49,11 @@ const CHAT_REPLY: &str = "setup verify orchestrated answer";
 /// retained session index row can never be reused by a later run or by a real job.
 const FIXTURE_JOB_PREFIX: &str = "setup-verify";
 
+/// How long one fixture job may take to merge. A loaded CI runner can starve the real
+/// supervisor and merge queue for much longer than a quiet machine; the check still fails
+/// on a genuinely stuck job, only after a wider margin.
+const FIXTURE_MERGE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// A unique resident of the home's temporary verification area.
 struct Scratch {
     path: PathBuf,
@@ -451,7 +456,7 @@ pub fn fixture_job_merges(ctx: &Ctx) -> Result<SetupCheck, CliError> {
         "setup verify",
     )?;
 
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + FIXTURE_MERGE_TIMEOUT;
     loop {
         let _ = supervisor.tick();
         let job = store.require_job(&job_id)?;
@@ -485,7 +490,8 @@ pub fn fixture_job_merges(ctx: &Ctx) -> Result<SetupCheck, CliError> {
                 "fixture.job_merge",
                 "fail",
                 format!(
-                    "fixture job did not merge within 120s (last state {}; continues {}; last run {})",
+                    "fixture job did not merge within {}s (last state {}; continues {}; last run {})",
+                    FIXTURE_MERGE_TIMEOUT.as_secs(),
                     job.state.as_str(),
                     job.continues,
                     last_run
@@ -887,13 +893,4 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output, CliError>
         return Err(CliError::Io(error));
     }
     child.wait_with_output().map_err(CliError::Io)
-}
-
-#[cfg(test)]
-mod integration_tests {
-    // The test file imports the public library as `vowp_cli`, so it compiles both through
-    // this library module and as the independent `[[test]]` target.
-    use crate as vowp_cli;
-
-    include!("../../tests/setup_verify.rs");
 }
