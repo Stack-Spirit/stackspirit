@@ -4,15 +4,30 @@
 //! Nothing reads the real `~/.vowp`, the default tmux server, the network or a real
 //! harness.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
 
+use crate::cmd::setup::SetupVerifyArgs;
 use crate::setup::verify;
+use crate::{BufferIo, Ctx, Global};
 use tempfile::TempDir;
 use vowp_protocol::{
     CapacitySnapshot, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SupervisorSnapshot, Timestamp,
 };
+
+/// Returns the `vowp` binary Cargo built for this package.
+fn vowp_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vowp") {
+        return PathBuf::from(path);
+    }
+    let current = std::env::current_exe().expect("test executable");
+    current
+        .parent()
+        .and_then(Path::parent)
+        .expect("target directory")
+        .join("vowp")
+}
 
 /// Builds the real `vowp` binary once so the chat check can run the same code a user runs.
 fn ensure_vowp_binary() {
@@ -169,4 +184,85 @@ fn setup_verify_orchestrator_answers_chat() {
         "the check must name the orchestrator session: {}",
         check.detail
     );
+}
+
+#[test]
+fn setup_verify_run_reports_every_check() {
+    ensure_vowp_binary();
+    let temp = TempDir::new().expect("temp home");
+    let home = temp.path().join("home/.vowp");
+    let project = temp.path().join("project");
+    let tmux = temp.path().join("tmux");
+    std::fs::create_dir_all(&project).expect("project dir");
+    std::fs::create_dir_all(&tmux).expect("private tmux dir");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["checkout", "--quiet", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=setup verify",
+            "-c",
+            "user.email=setup@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture base",
+        ],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&project)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let init = Command::new(vowp_binary())
+        .arg("--home")
+        .arg(&home)
+        .args(["init", "--name", "setup-verify-run", "--no-framework"])
+        .current_dir(&project)
+        .env("HOME", temp.path())
+        .env("TMUX_TMPDIR", &tmux)
+        .env("NO_COLOR", "1")
+        .env("VOWP_CONTROL_HOME", temp.path().join("no-control"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_HOME")
+        .output()
+        .expect("run vowp init");
+    assert!(
+        init.status.success(),
+        "vowp init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let global = Global {
+        json: true,
+        home: Some(home),
+        project: Some(project.display().to_string()),
+        ..Global::default()
+    };
+    let mut io = BufferIo::new("");
+    let ctx = Ctx::build(&global, &io).expect("build home context");
+    let code = verify::run(&ctx, &mut io, &SetupVerifyArgs::default()).expect("run setup verify");
+    let stdout = io.stdout();
+    assert_eq!(code, 0, "{stdout}");
+    let outcome: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}"));
+    assert_eq!(outcome["status"], "ok", "{outcome}");
+    assert_eq!(outcome["phase"], "verify", "{outcome}");
+    let checks = outcome["checks"].as_array().expect("checks array");
+    let by_name = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("missing check {name}: {outcome}"))
+    };
+    assert_eq!(by_name("fixture.job_merge")["status"], "ok", "{outcome}");
+    assert_eq!(by_name("orchestrator.chat")["status"], "ok", "{outcome}");
+    assert_eq!(by_name("gc.dry_run")["status"], "ok", "{outcome}");
+    assert_ne!(by_name("control.snapshot")["status"], "fail", "{outcome}");
 }
