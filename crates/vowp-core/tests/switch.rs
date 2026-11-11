@@ -23,13 +23,13 @@ use vowp_core::{AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, Core
 use vowp_protocol::{
     Actor, Adapter, AdapterCapabilities, AdapterError, AdapterRun, AssistantMessage, AttachAction, CancelToken, Clock,
     Cost, EventBody, EventEnvelope, EventId, EventIndexRow, EventSource, EventType, Executor, ExecutorRef, FakeClock,
-    HarnessEvent, HarnessKind, Limit, LimitRowKind, MemoryLog, Node, NodeName, ProbeResult, Run, RunId, RunOutcome,
-    RunPurpose, RunRole, RunSummary, SecretName, SessionId, SessionOps, SessionRole, StartInput, StopReason,
-    SwitchReason, SwitchRequest, SwitchState, Timestamp, TurnRequest,
+    HarnessEvent, HarnessKind, Lease, Limit, LimitRowKind, MemoryLog, Node, NodeName, ProbeResult, Run, RunId,
+    RunOutcome, RunPurpose, RunRole, RunSummary, SecretName, SessionId, SessionOps, SessionRole, StartInput,
+    StopReason, Surface, SurfaceId, SurfaceKind, SwitchReason, SwitchRequest, SwitchState, Timestamp, TurnRequest,
 };
-use vowp_store::NodePaths;
 use vowp_store::session_files::list_capsule_files;
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
+use vowp_store::{NodePaths, Store};
 use vowp_tmux::fake::FakeWindows;
 
 /// Upper bound for asynchronous test waits: child markers, run rows and drain hooks.
@@ -128,6 +128,36 @@ fn create_session_at(service: &SessionService, name: &str, executor: Executor, c
 
 fn create_session(service: &SessionService, tmp: &TempDir, name: &str) -> SessionId {
     create_session_at(service, name, opencode(), tmp.path().join("project"))
+}
+
+fn surface(holder: &str) -> Surface {
+    Surface {
+        id: SurfaceId::new(),
+        kind: SurfaceKind::Chat,
+        node: node(),
+        holder: holder.to_owned(),
+        app: None,
+        cwd: None,
+        metadata: serde_json::json!({}),
+        created_at: ts(),
+        last_seen_at: ts(),
+    }
+}
+
+fn hold_lease(store: &Store, session: &SessionId, surface: &Surface) {
+    store.upsert_surface(surface).expect("surface");
+    store
+        .take_lease(&Lease {
+            session_id: session.clone(),
+            surface_id: Some(surface.id.clone()),
+            surface_kind: surface.kind,
+            node: surface.node.clone(),
+            holder: surface.holder.clone(),
+            token: vowp_protocol::surface::new_lease_token(),
+            acquired_at: ts(),
+            heartbeat_at: ts(),
+        })
+        .expect("lease");
 }
 
 fn request(session: &SessionId, to: Executor, reason: SwitchReason) -> SwitchRequest {
@@ -1564,6 +1594,107 @@ fn seeded_switch_outside_cwd_is_refused() {
     let current = store.require_session(&session).expect("session");
     assert_eq!(current.state, vowp_protocol::SessionState::Idle);
     assert_eq!(current.executor, Some(opencode()));
+}
+
+#[test]
+fn takeover_from_orchestrator_cwd_writes_valid_capsule() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new().with("opencode", Arc::new(capsule_adapter("orchestrator takeover handoff"))),
+    );
+    let orchestrator_cwd = deps.paths.root().join("orchestrators").join("night");
+    std::fs::create_dir_all(&orchestrator_cwd).expect("orchestrator dir");
+    let service = SessionService::new(deps.clone());
+    let session = create_session_at(&service, "orchestrator takeover", opencode(), orchestrator_cwd);
+    let store = deps.open_store().expect("store");
+    hold_lease(&store, &session, &surface("laptop"));
+
+    let report = vowp_core::takeover(&deps, &store, &session, &surface("phone"), ts()).expect("takeover");
+
+    assert_eq!(report.previous.as_deref(), Some("laptop"));
+    assert!(!report.drained);
+    let capsule_id = report.capsule_id.expect("the takeover writes a capsule");
+    let capsule = store
+        .latest_capsule(&session)
+        .expect("latest capsule")
+        .expect("capsule");
+    assert_eq!(capsule.capsule_id, capsule_id);
+    assert_eq!(capsule.intent, "orchestrator takeover handoff");
+    capsule.validate().expect("the capsule is valid after the repair path");
+    let switches = store.list_switches(&session).expect("switches");
+    assert_eq!(switches.len(), 1);
+    assert_eq!(switches[0].state, SwitchState::Completed);
+    assert_eq!(switches[0].reason, SwitchReason::Takeover);
+}
+
+#[test]
+fn takeover_from_outside_cwd_is_refused() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new().with("opencode", Arc::new(capsule_adapter("never written"))),
+    );
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let service = SessionService::new(deps.clone());
+    let session = create_session_at(&service, "outside takeover", opencode(), outside);
+    let store = deps.open_store().expect("store");
+    hold_lease(&store, &session, &surface("laptop"));
+
+    let error = vowp_core::takeover(&deps, &store, &session, &surface("phone"), ts())
+        .expect_err("an unrelated cwd refuses the takeover");
+    assert!(
+        error.to_string().contains("outside the allow-list"),
+        "the allow-list error is preserved: {error:?}"
+    );
+    assert!(
+        store.latest_capsule(&session).expect("latest capsule").is_none(),
+        "a refused takeover writes no capsule"
+    );
+    assert_eq!(
+        store.require_session(&session).expect("session").executor,
+        Some(opencode())
+    );
+}
+
+#[test]
+fn seeded_switch_from_orchestrator_cwd_is_allowed() {
+    let tmp = tempdir().expect("tempdir");
+    let deps = deps(
+        &tmp,
+        AdapterRegistry::new()
+            .with("opencode", Arc::new(capsule_adapter("orchestrator seeded handoff")))
+            .with(
+                "claude-code",
+                Arc::new(FakeAdapter::new(HarnessKind::ClaudeCode, Vec::new())),
+            ),
+    );
+    let orchestrator_cwd = deps.paths.root().join("orchestrators").join("night");
+    std::fs::create_dir_all(&orchestrator_cwd).expect("orchestrator dir");
+    let service = SessionService::new(deps.clone());
+    let session = create_session_at(&service, "orchestrator seeded", opencode(), orchestrator_cwd);
+    let store = deps.open_store().expect("store");
+
+    let switch = run_switch_with_input(
+        &deps,
+        &request(&session, claude(), SwitchReason::User),
+        "continue",
+        &CancelToken::default(),
+    )
+    .expect("seeded switch from the VOWP orchestrator directory");
+
+    assert_eq!(switch.state, SwitchState::Completed);
+    let capsule = store
+        .latest_capsule(&session)
+        .expect("latest capsule")
+        .expect("capsule");
+    assert_eq!(Some(&capsule.capsule_id), switch.capsule_id.as_ref());
+    assert_eq!(capsule.intent, "orchestrator seeded handoff");
+    capsule.validate().expect("the capsule is valid after the repair path");
+    let current = store.require_session(&session).expect("session");
+    assert_eq!(current.executor, Some(claude()));
+    assert_eq!(current.state, vowp_protocol::SessionState::Idle);
 }
 
 #[test]

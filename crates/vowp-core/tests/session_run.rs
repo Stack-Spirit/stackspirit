@@ -485,6 +485,36 @@ fn run_turn_cwd_outside_allow_list_refused() {
 }
 
 #[test]
+fn run_turn_from_orchestrator_cwd_is_allowed() {
+    let tmp = tempdir().expect("tempdir");
+    let fake = Arc::new(FakeAdapter::new(HarnessKind::Opencode, Vec::new()));
+    let deps = deps(
+        &tmp,
+        config_for(tmp.path()),
+        AdapterRegistry::new().with("opencode", fake.clone()),
+    );
+    let cwd = deps.paths.root().join("orchestrators").join("night");
+    std::fs::create_dir_all(&cwd).expect("orchestrator dir");
+    let service = SessionService::new(deps.clone());
+    let session = service
+        .create_session(vowp_protocol::NewSession {
+            project: None,
+            job_id: None,
+            role: SessionRole::Worker,
+            title: "orchestrator".to_owned(),
+            cwd,
+            parent: None,
+            executor: Some(opencode()),
+        })
+        .expect("create session");
+
+    service
+        .run_turn(turn(&session, opencode(), "work"), &CancelToken::default())
+        .expect("the VOWP orchestrator directory is inside the allow-list");
+    assert_eq!(fake.starts().len(), 1);
+}
+
+#[test]
 fn run_turn_cancel_interrupts_adapter() {
     let tmp = tempdir().expect("tempdir");
     let (started_tx, started_rx) = channel();

@@ -6,7 +6,7 @@
 //! after the run's `turn.ended`. Capsules and seeds live in the sibling modules; this file
 //! wires them into the service and keeps the store's index rows in step with the log.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
@@ -477,31 +477,9 @@ impl SessionService {
         switch::run_switch(&self.deps, req, &CancelToken::default())
     }
 
-    /// Checks `cwd` against the project path, worktree root and `[node].cwd_allow`.
+    /// Checks session `cwd` against the shared allow-list.
     fn check_cwd(&self, cwd: &str) -> Result<(), CoreError> {
-        let path = Path::new(cwd);
-        let mut roots: Vec<&str> = Vec::new();
-        if let Some(project) = &self.deps.config.project.path {
-            roots.push(project);
-        }
-        if let Some(root) = &self.deps.config.project.worktree_root {
-            roots.push(root);
-        }
-        roots.extend(self.deps.config.node.cwd_allow.iter().map(String::as_str));
-        if roots.is_empty() {
-            return Ok(());
-        }
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        for root in roots {
-            let root_path = Path::new(root);
-            let root_path = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
-            if path.starts_with(&root_path) {
-                return Ok(());
-            }
-        }
-        Err(CoreError::Refused(format!(
-            "working directory {cwd} is outside the allow-list"
-        )))
+        check_cwd(&self.deps, cwd)
     }
 
     /// Returns the configured harness entry for `executor`.
@@ -762,6 +740,43 @@ impl SessionService {
         )?;
         Ok(())
     }
+}
+
+/// Checks `cwd` against the shared session allow-list.
+///
+/// The allowed roots are the project path, the worktree root, `[node].cwd_allow` and the
+/// VOWP-owned orchestrator root `<VOWP_HOME>/orchestrators`. Orchestrator sessions run in
+/// `<VOWP_HOME>/orchestrators/<name>/`, so a takeover or repair must accept that directory
+/// even though it is outside the project checkout.
+///
+/// A configuration with no project path, worktree root or `[node].cwd_allow` keeps the
+/// historical fallback: no allow-list is configured, so every directory is admitted.
+pub(crate) fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
+    let path = Path::new(cwd);
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(project) = &deps.config.project.path {
+        roots.push(PathBuf::from(project));
+    }
+    if let Some(root) = &deps.config.project.worktree_root {
+        roots.push(PathBuf::from(root));
+    }
+    roots.extend(deps.config.node.cwd_allow.iter().map(PathBuf::from));
+    if roots.is_empty() {
+        return Ok(());
+    }
+    // VOWP creates and owns this root; it is not a user-supplied `cwd_allow` entry.
+    roots.push(deps.paths.root().join("orchestrators"));
+
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for root in &roots {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if path.starts_with(&root) {
+            return Ok(());
+        }
+    }
+    Err(CoreError::Refused(format!(
+        "working directory {cwd} is outside the allow-list"
+    )))
 }
 
 impl SessionOps for SessionService {

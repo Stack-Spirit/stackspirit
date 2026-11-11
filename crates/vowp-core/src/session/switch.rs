@@ -29,7 +29,7 @@ use crate::error::CoreError;
 use crate::session::capsule::CapsuleWriter;
 use crate::session::recovery::last_turn_blocked;
 use crate::session::seed::seed_prompt;
-use crate::session::service::tail_of_complete_turns;
+use crate::session::service::{check_cwd, tail_of_complete_turns};
 
 /// Poll interval for adapter events during a seeded switch turn.
 const EVENT_POLL: Duration = Duration::from_millis(200);
@@ -666,33 +666,6 @@ fn wait_window(
         // Bound: the `window` deadline constructed above.
         sleeper.sleep(DRAIN_POLL);
     }
-}
-
-/// Checks `cwd` against the project path, worktree root and `[node].cwd_allow`.
-fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
-    let path = Path::new(cwd);
-    let mut roots: Vec<&str> = Vec::new();
-    if let Some(project) = &deps.config.project.path {
-        roots.push(project);
-    }
-    if let Some(root) = &deps.config.project.worktree_root {
-        roots.push(root);
-    }
-    roots.extend(deps.config.node.cwd_allow.iter().map(String::as_str));
-    if roots.is_empty() {
-        return Ok(());
-    }
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    for root in roots {
-        let root = Path::new(root);
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        if path.starts_with(&root) {
-            return Ok(());
-        }
-    }
-    Err(CoreError::Refused(format!(
-        "working directory {cwd} is outside the allow-list"
-    )))
 }
 
 /// Probes the switch target: locally through its adapter, remotely through `vowp doctor`.
