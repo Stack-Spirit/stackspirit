@@ -337,7 +337,7 @@ fn opencode_mirror_maps_messages_to_events() {
 }
 
 #[test]
-fn opencode_s3_export_shape_keeps_user_messages_and_cost() {
+fn opencode_export_shape_keeps_user_messages_and_cost() {
     // Trimmed copy of the recorded v2.0.28 `session-export.json`: user text is top-level,
     // assistant content is in `content`, cost/tokens are at message level, and non-content
     // messages (`idle`, `model-switched`) are skipped.

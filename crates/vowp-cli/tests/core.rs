@@ -313,7 +313,7 @@ fn ctx_build_requires_init() {
 }
 
 #[test]
-fn c0_chat_flags_are_no_longer_frozen() {
+fn chat_flags_are_no_longer_frozen() {
     let env = common::TestEnv::new();
     let cases: &[&[&str]] = &[
         &["chat", "nope00", "--node", "laptop"],

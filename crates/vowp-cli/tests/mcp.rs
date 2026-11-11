@@ -3,9 +3,10 @@
 // Every test uses a temporary node home and project, a scripted stdio client and never
 // touches the real `~/.vowp`, the default tmux server, the network or a real harness.
 //
-// The crate root lists every test target explicitly and this module does not own `Cargo.toml`, so
-// `src/mcp/tests.rs` includes this same file as a lib unit-test module. The fixture below
-// is deliberately self-contained so both compilation modes see the same tests.
+// The crate root lists every test target explicitly; this suite has no owning `Cargo.toml`
+// entry, so `src/mcp/tests.rs` includes the same file as a lib unit-test module. The
+// fixture below is deliberately self-contained so both compilation modes see the same
+// tests.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

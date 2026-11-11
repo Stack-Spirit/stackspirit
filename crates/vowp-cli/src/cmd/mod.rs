@@ -1,8 +1,7 @@
 //! Command dispatch. Spec: `docs/design/crates/vowp-cli.md` §1.
 //!
 //! `init` and `doctor` run before a [`crate::Ctx`] exists; every other command receives one.
-//! A command whose handler is not implemented yet is an explicit `NotImplemented` stub here,
-//! never a silent no-op.
+//! Every command is dispatched to its handler in `cmd/<name>.rs`; none is a silent no-op.
 
 use crate::cli::{Command, MaintCommand, PromoteCommand, SessionCommand, UpCommand};
 use crate::{CliError, Ctx, IoStreams};
@@ -40,12 +39,12 @@ pub mod tunnel;
 pub mod up;
 pub mod window;
 
-/// Returns the shared not-implemented error: the command exists but is not implemented in this build.
+/// Returns the shared not-implemented error.
 pub(crate) fn not_implemented() -> CliError {
     CliError::NotImplemented("not implemented in this build")
 }
 
-/// Returns whether `command` still uses a frozen-flag guard.
+/// Returns whether `command` still needs the v0.2 pre-dispatch guard.
 ///
 /// Chat's v0.2 flags are no longer refused here. The remaining frozen flags
 /// (`up --no-migrate`, `loops --all`, `schedule --all`) are handled by their own handlers;

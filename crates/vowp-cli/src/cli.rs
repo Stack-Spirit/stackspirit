@@ -2,8 +2,7 @@
 //!
 //! Spec: `docs/design/cli.md` and `docs/design/v0.2/home-and-surfaces.md` §12–§13.5.
 //! This file fixes every v0.2 top-level command, subcommand and flag; each command's
-//! handler and its `Args` struct live in `cmd/<name>.rs`. `Command` also contains commands
-//! whose handlers are explicit [`crate::CliError::NotImplemented`] stubs in this build.
+//! handler and its `Args` struct live in `cmd/<name>.rs`.
 
 use std::path::PathBuf;
 
