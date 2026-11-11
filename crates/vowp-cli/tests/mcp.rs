@@ -7,7 +7,9 @@
 // `src/mcp/tests.rs` includes this same file as a lib unit-test module. The fixture below
 // is deliberately self-contained so both compilation modes see the same tests.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -193,6 +195,15 @@ fn create_session(env: &TestEnv) -> String {
     id
 }
 
+/// Creates an idle session with no executor and returns its id.
+fn create_idle_session(env: &TestEnv) -> String {
+    let (code, stdout, stderr) = env.run(&["session", "new", "--title", "idle mcp test"]);
+    assert_eq!(code, 0, "session new failed: {stderr}");
+    let id = stdout.trim().to_owned();
+    SessionId::parse(&id).expect("session id");
+    id
+}
+
 /// Takes a lease with the given token and holder.
 fn take_lease(env: &TestEnv, session: &str, token: &str, holder: &str) {
     let id = SessionId::parse(session).expect("session id");
@@ -241,6 +252,198 @@ fn token_file(env: &TestEnv, token: &str) -> PathBuf {
     let path = env.home_path().join("lease.token");
     std::fs::write(&path, format!("{token}\n")).expect("token file");
     path
+}
+
+/// Returns the built `vowp` binary, including when this file runs as a lib unit test.
+fn vowp_binary() -> PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_vowp") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+    }
+    let exe = std::env::current_exe().expect("current test executable");
+    let candidate = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join("vowp"))
+        .expect("target directory");
+    assert!(
+        candidate.is_file(),
+        "vowp binary not found at {}; run `cargo build --bin vowp` first",
+        candidate.display()
+    );
+    candidate
+}
+
+/// A temporary control machine with a fake `ssh` that answers the routed calls.
+struct ControlEnv {
+    root: TempDir,
+    control: PathBuf,
+    token: PathBuf,
+    bin: PathBuf,
+    args: PathBuf,
+    stdin: PathBuf,
+    session: String,
+    refuse: bool,
+}
+
+impl ControlEnv {
+    /// Creates the control directory, token file and fake `ssh`.
+    fn new(refuse: bool) -> Self {
+        let root = tempfile::tempdir().expect("temp control root");
+        let control = root.path().join("control");
+        let home = root.path().join("home");
+        let bin = root.path().join("bin");
+        let tmux = root.path().join("tmux");
+        for dir in [&control, &home, &bin, &tmux] {
+            std::fs::create_dir_all(dir).expect("control dir");
+        }
+        let config = json!({
+            "role": "control",
+            "home": "vowp-home",
+            "ssh_target": "fake.example",
+            "remote_home": "/home/fake/.vowp",
+            "created_at": Timestamp::now().as_rfc3339(),
+        });
+        std::fs::write(
+            control.join("control.json"),
+            serde_json::to_vec_pretty(&config).expect("control json"),
+        )
+        .expect("control.json");
+
+        let token = control.join("lease.token");
+        std::fs::write(&token, format!("{}\n", lease_token("control"))).expect("control token");
+
+        let args = root.path().join("ssh-args");
+        let stdin = root.path().join("ssh-stdin");
+        let ssh = bin.join("ssh");
+        let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_ARGS"
+case " $* " in
+  *" -N "*)
+    sleep 30
+    exit 0
+    ;;
+esac
+head -n 4 > "$FAKE_SSH_STDIN"
+if [ -n "${FAKE_SSH_REFUSE:-}" ]; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"refused: Taken over by phone at 14:05. This surface is now read-only (follow mode)."}],"isError":true}}'
+elif grep -q '"secret_request"' "$FAKE_SSH_STDIN"; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"name\":\"DEEPSEEK_API_KEY\",\"url\":\"http://127.0.0.1:45555/s/faketoken\",\"expires_at\":\"2099-01-01T00:00:00.000Z\",\"single_use\":true}"}],"isError":false}}'
+else
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"ok\":true}"}],"isError":false}}'
+fi
+cat > /dev/null
+exit 0
+"#;
+        std::fs::write(&ssh, script).expect("fake ssh");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod fake ssh");
+
+        Self {
+            root,
+            control,
+            token,
+            bin,
+            args,
+            stdin,
+            session: SessionId::new().to_string(),
+            refuse,
+        }
+    }
+
+    /// Builds one control-machine `vowp` command with an isolated environment.
+    fn command(&self) -> Command {
+        let mut command = Command::new(vowp_binary());
+        command
+            .current_dir(self.root.path())
+            .env("HOME", self.root.path().join("home"))
+            .env("VOWP_CONTROL_HOME", &self.control)
+            .env("TMUX_TMPDIR", self.root.path().join("tmux"))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("FAKE_SSH_ARGS", &self.args)
+            .env("FAKE_SSH_STDIN", &self.stdin)
+            .env_remove("VOWP_HOME")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        if self.refuse {
+            command.env("FAKE_SSH_REFUSE", "1");
+        } else {
+            command.env_remove("FAKE_SSH_REFUSE");
+        }
+        command
+    }
+
+    /// Runs the control MCP server with scripted stdin.
+    fn mcp(&self, input: &str) -> (i32, String, String) {
+        let mut child = self
+            .command()
+            .args([
+                "mcp",
+                "--session",
+                &self.session,
+                "--surface",
+                "control-surface",
+                "--token-file",
+                self.token.to_str().expect("token path"),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn control vowp mcp");
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(input.as_bytes()).expect("write MCP stdin");
+        }
+        drop(child.stdin.take());
+        let output = child.wait_with_output().expect("control MCP output");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
+    /// Returns the recorded fake-ssh argv text.
+    fn ssh_args(&self) -> String {
+        std::fs::read_to_string(&self.args).unwrap_or_default()
+    }
+
+    /// Returns the recorded fake-ssh stdin text.
+    fn ssh_stdin(&self) -> String {
+        std::fs::read_to_string(&self.stdin).unwrap_or_default()
+    }
+
+    /// Returns the control machine's tunnel records.
+    fn tunnels(&self) -> Vec<Value> {
+        let text = std::fs::read_to_string(self.control.join("tunnels.json")).unwrap_or_default();
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        serde_json::from_str(&text).expect("tunnels JSON")
+    }
+}
+
+impl Drop for ControlEnv {
+    fn drop(&mut self) {
+        for tunnel in self.tunnels() {
+            if let Some(pid) = tunnel["pid"].as_u64() {
+                let _ = Command::new("kill")
+                    .args(["-TERM", "--", &format!("-{pid}")])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+    }
 }
 
 #[test]
@@ -587,5 +790,176 @@ fn mcp_works_over_scripted_stdio_client() {
             .as_str()
             .is_some_and(|text| Timestamp::parse(text).is_ok()),
         "{status}"
+    );
+}
+
+#[test]
+fn mcp_session_resume_takeover_replaces_live_lease_and_token() {
+    let env = TestEnv::new();
+    let session = create_idle_session(&env);
+    let phone_token = lease_token("phone");
+    take_lease(&env, &session, &phone_token, "phone");
+    let token = token_file(&env, &phone_token);
+
+    let input = format!("{}\n", tool_call(1, "session_resume", json!({"takeover": true})));
+    let (code, stdout, stderr) = run_mcp(&env, &session, "new-surface", &token, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let context = tool_text(result);
+    assert_eq!(context["lease"]["holder"], "mcp", "{context}");
+    assert_eq!(context["lease"]["kind"], "mcp", "{context}");
+
+    let new_token = std::fs::read_to_string(&token)
+        .expect("updated token file")
+        .trim()
+        .to_owned();
+    assert_eq!(new_token.len(), 52, "new lease token length");
+    assert_ne!(new_token, phone_token, "takeover must rotate the token");
+
+    // The old surface is cut off immediately.
+    let old = env.home_path().join("old.token");
+    std::fs::write(&old, format!("{phone_token}\n")).expect("old token file");
+    let input = format!(
+        "{}\n",
+        tool_call(
+            1,
+            "capacity_set",
+            json!({"target": 2, "mode": "fixed", "override": true}),
+        )
+    );
+    let (code, stdout, stderr) = run_mcp(&env, &session, "old-surface", &old, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let refused = response(&values, 1);
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    let text = refused["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("Taken over by mcp"), "{text}");
+
+    // The new surface can write with the token the takeover wrote.
+    let (code, stdout, stderr) = run_mcp(&env, &session, "new-surface", &token, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let accepted = response(&values, 1);
+    assert_eq!(accepted["result"]["isError"], false, "{accepted}");
+}
+
+#[test]
+fn mcp_control_takeover_is_refused_without_touching_token() {
+    let control = ControlEnv::new(false);
+    let before = std::fs::read_to_string(&control.token).expect("token before");
+    let input = format!("{}\n", tool_call(1, "session_resume", json!({"takeover": true})));
+    let (code, stdout, stderr) = control.mcp(&input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], true, "{result}");
+    let text = result["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("takeover must run on the home"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(&control.token).expect("token after"),
+        before,
+        "a refused control takeover must not change the token file"
+    );
+    assert!(control.ssh_args().is_empty(), "no ssh call before the refusal");
+}
+
+#[test]
+fn mcp_control_secret_request_routes_and_returns_local_url() {
+    let control = ControlEnv::new(false);
+    let input = format!(
+        "{}\n",
+        tool_call(1, "secret_request", json!({"name": "DEEPSEEK_API_KEY"}))
+    );
+    let (code, stdout, stderr) = control.mcp(&input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let request = tool_text(result);
+    assert_eq!(request["name"], "DEEPSEEK_API_KEY");
+    assert!(
+        request["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("http://127.0.0.1:") && url.contains("/s/faketoken")),
+        "{request}"
+    );
+    assert_eq!(request["single_use"], true);
+    assert_eq!(request["expires_at"], "2099-01-01T00:00:00.000Z");
+    assert!(
+        control.ssh_stdin().contains("\"secret_request\""),
+        "the home must receive the lease-checked secret request: {}",
+        control.ssh_stdin()
+    );
+
+    let tunnels = control.tunnels();
+    assert_eq!(tunnels.len(), 1, "{tunnels:?}");
+    assert_eq!(tunnels[0]["name"], "secret-DEEPSEEK_API_KEY");
+    assert_eq!(tunnels[0]["remote_port"], 45555);
+
+    let input = format!("{}\n", tool_call(1, "tunnel_close", json!({"name": "secret-DEEPSEEK_API_KEY"})));
+    let (code, stdout, stderr) = control.mcp(&input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    assert_eq!(tool_text(result)["closed"], true);
+    assert!(control.tunnels().is_empty(), "the tunnel record must be removed");
+}
+
+#[test]
+fn mcp_control_tunnel_write_checks_the_lease() {
+    let control = ControlEnv::new(true);
+    let input = format!(
+        "{}\n",
+        tool_call(1, "tunnel_open", json!({"name": "web", "remote_port": 8080}))
+    );
+    let (code, stdout, stderr) = control.mcp(&input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], true, "{result}");
+    let text = result["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("Taken over by phone"), "{text}");
+    assert!(text.contains("read-only"), "{text}");
+    assert!(control.tunnels().is_empty(), "a refused write must not open a tunnel");
+}
+
+#[test]
+fn mcp_control_tunnel_open_and_close_record_actor() {
+    let control = ControlEnv::new(false);
+    let input = format!(
+        "{}\n",
+        tool_call(1, "tunnel_open", json!({"name": "web", "remote_port": 8080}))
+    );
+    let (code, stdout, stderr) = control.mcp(&input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let tunnel = tool_text(result);
+    assert_eq!(tunnel["name"], "web");
+    assert_eq!(tunnel["remote_port"], 8080);
+    assert!(tunnel["local_port"].as_u64().is_some_and(|port| port > 0), "{tunnel}");
+    assert!(
+        control.ssh_stdin().contains("\"_mcp_audit\"") && control.ssh_stdin().contains("\"tunnel_open\""),
+        "the home must receive the lease-checked actor audit: {}",
+        control.ssh_stdin()
+    );
+    assert_eq!(control.tunnels().len(), 1);
+
+    let input = format!("{}\n", tool_call(1, "tunnel_close", json!({"name": "web"})));
+    let (code, stdout, stderr) = control.mcp(&input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    assert_eq!(tool_text(result)["closed"], true);
+    assert!(control.tunnels().is_empty());
+    assert!(
+        control.ssh_stdin().contains("\"tunnel_close\""),
+        "the close audit must name tunnel_close: {}",
+        control.ssh_stdin()
     );
 }

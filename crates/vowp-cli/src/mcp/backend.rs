@@ -5,38 +5,35 @@
 //! home's JSON CLI (with the snapshot cache as the offline fallback), sends writes to a
 //! one-shot `vowp mcp` on the home over SSH, and keeps tunnel processes local.
 
+use serde_json::{Map, Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-use serde_json::{Map, Value, json};
 use vowp_core::fleet;
 use vowp_core::ledger::Ledger;
 use vowp_core::requests::{self, Request};
 use vowp_core::session::service::SessionService;
-use vowp_core::surface::{check_lease_with, takeover};
+use vowp_core::surface::{AcquireLease, LeaseGuard, check_lease_with, takeover};
 use vowp_core::vault;
 use vowp_core::{AdapterRegistry, CapacityManager, CoreError, Deps};
 use vowp_protocol::{
     CapsuleTrigger, FleetStatus, InboxId, InboxItem, JobId, JobState, LeaseStatus, LedgerEntry, LedgerKind, NewJob,
-    ProjectName, SecretName, SecretRequest, SessionId, Surface, SurfaceId, SurfaceKind, TargetMode, Timestamp,
+    Project, ProjectName, SecretName, SecretRequest, Session, SessionId, Surface, SurfaceId, SurfaceKind, TargetMode,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{SessionFilter, Store, StoreError};
 use vowp_tmux::quote::shell_quote;
 
 use crate::Ctx;
-use crate::node_ctx::NodeRole;
+use crate::node_ctx::{ControlHome, NodeRole};
 
 use super::McpOptions;
 use super::tools::ToolError;
 
 /// Milliseconds a job request waits for a live supervisor before leaving it queued.
 const JOB_WAIT: Duration = Duration::from_secs(5);
-/// Seconds between lease heartbeats after an MCP takeover.
-const HEARTBEAT_SECS: u64 = 5;
 
 /// The tool implementation for one MCP server process.
 pub struct Backend<'a> {
@@ -123,9 +120,22 @@ impl<'a> Backend<'a> {
             }
             "session_resume" => {
                 if self.is_control() {
-                    self.remote_tool_call(name, arguments, true)
+                    let takeover = opt_bool(args, "takeover")?.unwrap_or(false);
+                    if takeover {
+                        return Err(ToolError::refused(
+                            "session takeover must run on the home; resume from an app host on the home or run `vowp session takeover` there",
+                        ));
+                    }
+                    self.remote_tool_call(name, arguments, false)
                 } else {
                     self.session_resume(args)
+                }
+            }
+            "_mcp_audit" => {
+                if self.is_control() {
+                    self.remote_tool_call(name, arguments, true)
+                } else {
+                    self.lease_audit(args)
                 }
             }
             other => Err(ToolError::new("invalid_input", format!("unknown tool: {other}"))),
@@ -160,12 +170,50 @@ impl<'a> Backend<'a> {
             .project(project)?
             .ok_or_else(|| ToolError::new("not_found", format!("project {project}")))?;
         let root = std::path::Path::new(&entry.path);
-        let config = crate::ctx::load_project_config(&root.join("vowp.toml"), self.ctx.paths())?;
+        let config = match crate::ctx::load_project_config(&root.join("vowp.toml"), self.ctx.paths()) {
+            Ok(config) => config,
+            Err(_) if project.as_str() == vowp_store::RESERVED_NODE_PROJECT => {
+                // A project-less session uses the node's own home config, which may have
+                // no `vowp.toml` yet on a freshly migrated home.
+                let mut config = (*self.ctx.config()).clone();
+                config.project.name = project.clone();
+                config.project.path = Some(entry.path.clone());
+                config
+            }
+            Err(error) => return Err(error.into()),
+        };
         let adapters = AdapterRegistry::from_config(&config)?;
         let mut deps = self.ctx.deps().clone();
         deps.config = Arc::new(config);
         deps.adapters = Arc::new(adapters);
         Ok(deps)
+    }
+
+    /// Registers the reserved `_node` project when a project-less session needs it.
+    fn ensure_node_project(&self) -> Result<ProjectName, ToolError> {
+        let project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+        let global = self.global()?;
+        if global.project(&project)?.is_none() {
+            let now = self.ctx.clock().now();
+            global.upsert_project(&Project {
+                name: project.clone(),
+                path: self.ctx.paths().root().display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: json!({}),
+                created_at: now,
+                updated_at: now,
+            })?;
+        }
+        Ok(project)
+    }
+
+    /// Returns the project that owns a session, using `_node` for project-less sessions.
+    fn session_project(&self, row: &Session) -> Result<ProjectName, ToolError> {
+        match &row.project {
+            Some(project) => Ok(project.clone()),
+            None => self.ensure_node_project(),
+        }
     }
 
     /// Returns the project a job operation should use.
@@ -274,8 +322,32 @@ impl<'a> Backend<'a> {
         if token.is_empty() {
             return Err(ToolError::invalid("lease token file is empty"));
         }
+        self.check_lease_token(session, &token)
+    }
+
+    /// Checks the lease when the token file exists, for read-only resume.
+    fn lease_gate_optional(&self, session: &SessionId) -> Result<(), ToolError> {
+        let text = match std::fs::read_to_string(&self.opts.token_file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(ToolError::new(
+                    "not_found",
+                    format!("lease token file {}: {error}", self.opts.token_file.display()),
+                ));
+            }
+        };
+        let token = text.trim_end_matches(['\r', '\n']).to_owned();
+        if token.is_empty() {
+            return Ok(());
+        }
+        self.check_lease_token(session, &token)
+    }
+
+    /// Compares one token with the live lease row.
+    fn check_lease_token(&self, session: &SessionId, token: &str) -> Result<(), ToolError> {
         let store = self.global()?;
-        match check_lease_with(&store, session, Some(&token)) {
+        match check_lease_with(&store, session, Some(token)) {
             Ok(()) => Ok(()),
             Err(CoreError::Refused(_)) => {
                 let notice = store
@@ -286,6 +358,40 @@ impl<'a> Backend<'a> {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Checks the lease on the home and records one control-machine write actor.
+    fn audit_control_write(&self, tool: &str, detail: Value) -> Result<(), ToolError> {
+        let arguments = json!({
+            "tool": tool,
+            "detail": detail,
+            "session": self.opts.session.as_str(),
+        });
+        self.remote_tool_call("_mcp_audit", &arguments, true)?;
+        Ok(())
+    }
+
+    /// Home half of [`Self::audit_control_write`].
+    fn lease_audit(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let tool = req_str(args, "tool")?;
+        let detail = args.get("detail").cloned().unwrap_or_else(|| json!({}));
+        let session = self.target_session(opt_str(args, "session")?)?;
+        self.lease_gate(&session)?;
+        let global = self.global()?;
+        let row = global.require_session(&session)?;
+        let store = match &row.project {
+            Some(project) => self.project_store(project)?,
+            None => global,
+        };
+        self.record(
+            &store,
+            row.project.clone(),
+            LedgerKind::Note,
+            tool,
+            detail,
+            format!("mcp {tool}"),
+        )?;
+        Ok(json!({"ok": true}))
     }
 
     /// Appends the MCP actor row for a successful write.
@@ -687,6 +793,7 @@ impl<'a> Backend<'a> {
         let name = req_str(args, "name")?;
         let remote_port =
             opt_u32(args, "remote_port")?.ok_or_else(|| ToolError::invalid("tunnel_open requires remote_port"))?;
+        self.audit_control_write("tunnel_open", json!({"name": name, "remote_port": remote_port}))?;
         let mut command = vec![
             "tunnel".to_owned(),
             "open".to_owned(),
@@ -709,6 +816,7 @@ impl<'a> Backend<'a> {
             return Err(ToolError::refused("tunnels are opened by the control machine"));
         }
         let name = req_str(args, "name")?;
+        self.audit_control_write("tunnel_close", json!({"name": name}))?;
         self.run_cli_json(&["tunnel".to_owned(), "close".to_owned(), name.to_owned()])
     }
 
@@ -729,68 +837,163 @@ impl<'a> Backend<'a> {
         Ok(serde_json::to_value(request)?)
     }
 
-    /// Starts a secret request through the control machine's routed CLI.
+    /// Starts a secret request on the home and keeps its page alive from this control process.
     ///
-    /// The child keeps the home's paste page and the local tunnel alive after this call
-    /// returns; the MCP result carries only the local URL and expiry.
+    /// The home's `secret_request` checks the lease and records the actor. This process
+    /// keeps the one-shot MCP connection open for the page lifetime, forwards the home's
+    /// loopback port through a local tunnel and returns only the local URL and expiry.
     fn secret_request_control(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
-        self.lease_gate(&self.opts.session)?;
         let name = SecretName::parse(req_str(args, "name")?)?;
-        let exe = std::env::current_exe()?;
-        let mut child = Command::new(exe)
-            .arg("secret")
-            .arg("request")
-            .arg(name.as_str())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| ToolError::new("remote", format!("secret request: {error}")))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ToolError::new("remote", "secret request produced no stdout"))?;
-        let mut reader = BufReader::new(stdout);
-        let mut first = String::new();
-        reader
-            .read_line(&mut first)
-            .map_err(|error| ToolError::new("remote", format!("secret request: {error}")))?;
-        let first = first.trim_end();
-        let Some(url) = first.strip_prefix("open ") else {
+        let control = self
+            .ctx
+            .control()
+            .ok_or_else(|| ToolError::refused("this command needs a control machine"))?;
+        let token = self.remote_token(true)?;
+        let arguments = json!({"name": name.as_str()});
+        let input = self.remote_input(&token, "secret_request", &arguments);
+        let (mut child, mut reader) = self.spawn_remote_mcp(control, &input)?;
+
+        let mut call_result = None;
+        let mut call_error = None;
+        loop {
+            let mut line = String::new();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|error| ToolError::new("remote", format!("secret request: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if value.get("id").and_then(Value::as_u64) != Some(2) {
+                continue;
+            }
+            if let Some(error) = value.get("error") {
+                call_error = Some(
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("remote error")
+                        .to_owned(),
+                );
+            } else {
+                call_result = value.get("result").cloned();
+            }
+            break;
+        }
+        if let Some(message) = call_error {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ToolError::new("remote", message));
+        }
+        let Some(result) = call_result else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ToolError::new("remote", "the home did not answer the secret request"));
+        };
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            let text = result
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("remote tool failed");
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(parse_tool_text(text));
+        }
+        let text = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("text"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::new("remote", "secret request answer has no text content"))?;
+        let request: SecretRequest = serde_json::from_str(text)
+            .map_err(|error| ToolError::new("remote", format!("secret request answer: {error}")))?;
+        let Some((remote_port, path)) = loopback_url(&request.url) else {
             let _ = child.kill();
             let _ = child.wait();
             return Err(ToolError::new(
                 "remote",
-                format!("unexpected secret request output: {first:?}"),
+                format!("secret request returned a non-loopback URL: {}", request.url),
             ));
         };
-        let mut second = String::new();
-        reader
-            .read_line(&mut second)
-            .map_err(|error| ToolError::new("remote", format!("secret request: {error}")))?;
-        let expires_at = second
-            .trim_end()
-            .strip_prefix("expires ")
-            .and_then(|text| text.split_whitespace().next())
-            .and_then(|text| Timestamp::parse(text).ok())
-            .ok_or_else(|| {
-                ToolError::new(
-                    "remote",
-                    format!("unexpected secret request expiry: {:?}", second.trim_end()),
-                )
-            })?;
+
+        let tunnel_name = format!("secret-{name}");
+        let local_port = match self.ensure_local_tunnel(&tunnel_name, remote_port) {
+            Ok(port) => port,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+
+        // Keep the home page alive until its expiry. Dropping stdin closes the remote MCP
+        // loop, which stops the paste page.
+        let stdin = child.stdin.take();
+        let expires_at = request.expires_at;
+        let now = self.ctx.clock().now();
+        let secs = expires_at.unix_secs().saturating_sub(now.unix_secs());
+        let secs = u64::try_from(secs.clamp(1, 600)).unwrap_or(1);
         thread::spawn(move || {
+            thread::sleep(Duration::from_secs(secs));
+            drop(stdin);
             let mut rest = String::new();
             let _ = reader.read_to_string(&mut rest);
             let _ = child.wait();
+            let mut io = crate::BufferIo::new("");
+            let _ = crate::run(
+                vec![
+                    "vowp".to_owned(),
+                    "--json".to_owned(),
+                    "tunnel".to_owned(),
+                    "close".to_owned(),
+                    tunnel_name,
+                ],
+                &mut io,
+            );
         });
+
         let request = SecretRequest {
             name,
-            url: url.to_owned(),
+            url: format!("http://127.0.0.1:{local_port}{path}"),
             expires_at,
             single_use: true,
         };
         Ok(serde_json::to_value(request)?)
+    }
+
+    /// Reuses or opens the local forward for one secret request.
+    fn ensure_local_tunnel(&self, name: &str, remote_port: u16) -> Result<u16, ToolError> {
+        let tunnels = self.run_cli_json(&["tunnel".to_owned(), "ls".to_owned()])?;
+        if let Some(existing) = tunnels
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"].as_str() == Some(name)))
+        {
+            if existing["remote_port"].as_u64() == Some(u64::from(remote_port))
+                && let Some(port) = existing["local_port"]
+                    .as_u64()
+                    .and_then(|port| u16::try_from(port).ok())
+            {
+                return Ok(port);
+            }
+            self.run_cli_json(&["tunnel".to_owned(), "close".to_owned(), name.to_owned()])?;
+        }
+        let tunnel = self.run_cli_json(&[
+            "tunnel".to_owned(),
+            "open".to_owned(),
+            name.to_owned(),
+            "--remote-port".to_owned(),
+            remote_port.to_string(),
+        ])?;
+        tunnel["local_port"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| ToolError::new("remote", "tunnel open returned no local port"))
     }
 
     /// Writes a capsule so another app can continue the session.
@@ -799,19 +1002,14 @@ impl<'a> Backend<'a> {
         self.lease_gate(&session)?;
         let global = self.global()?;
         let row = global.require_session(&session)?;
-        let deps = match &row.project {
-            Some(project) => self.deps_for_project(project)?,
-            None => self.ctx.deps().clone(),
-        };
+        let project = self.session_project(&row)?;
+        let deps = self.deps_for_project(&project)?;
         let capsule = SessionService::new(deps).write_capsule(&session, CapsuleTrigger::Manual)?;
-        let store = match &row.project {
-            Some(project) => self.project_store(project)?,
-            None => global,
-        };
+        let store = self.project_store(&project)?;
         let reason = opt_str(args, "reason")?.unwrap_or("session handoff");
         self.record(
             &store,
-            row.project.clone(),
+            Some(project),
             LedgerKind::Note,
             "session_handoff",
             json!({"session": session.as_str(), "capsule": capsule.capsule_id.as_str(), "reason": reason}),
@@ -827,6 +1025,7 @@ impl<'a> Backend<'a> {
         let limit = opt_u32(args, "limit")?.unwrap_or(20).clamp(1, 200) as usize;
         let global = self.global()?;
         let row = global.require_session(&session)?;
+        let project = self.session_project(&row)?;
 
         if takeover_requested {
             let surface_id = opt_str(args, "surface")?
@@ -844,13 +1043,23 @@ impl<'a> Backend<'a> {
                 created_at: now,
                 last_seen_at: now,
             };
-            takeover(self.ctx.deps(), &global, &session, &surface, now)?;
-            if let Some(lease) = global.lease(&session)? {
-                crate::remote::write_private(&self.opts.token_file, lease.token.as_bytes())?;
-                spawn_heartbeat(self.ctx.deps().clone(), session.clone(), lease.token);
-            }
+            let store = self.project_store(&project)?;
+            let deps = self.deps_for_project(&project)?;
+            let guard = LeaseGuard::acquire(
+                &deps,
+                &store,
+                &AcquireLease {
+                    session: session.clone(),
+                    surface,
+                    takeover: true,
+                },
+            )?;
+            crate::remote::write_private(&self.opts.token_file, guard.token().as_bytes())?;
+            // Keep the guard's heartbeat alive for the MCP process lifetime. Dropping it
+            // would release the lease this resume just acquired.
+            std::mem::forget(guard);
         } else {
-            self.lease_gate(&session)?;
+            self.lease_gate_optional(&session)?;
         }
 
         let capsule = global.latest_capsule(&session)?;
@@ -870,13 +1079,10 @@ impl<'a> Backend<'a> {
             token: None,
         });
 
-        let store = match &row.project {
-            Some(project) => self.project_store(project)?,
-            None => global,
-        };
+        let store = self.project_store(&project)?;
         self.record(
             &store,
-            row.project.clone(),
+            Some(project),
             LedgerKind::Note,
             "session_resume",
             json!({
@@ -932,15 +1138,11 @@ impl<'a> Backend<'a> {
             .map_err(|error| ToolError::new("remote", format!("invalid JSON from the home: {error}")))
     }
 
-    /// Sends one `tools/call` to a one-shot `vowp mcp` on the home.
-    fn remote_tool_call(&self, tool: &str, arguments: &Value, require_token: bool) -> Result<Value, ToolError> {
-        let control = self
-            .ctx
-            .control()
-            .ok_or_else(|| ToolError::refused("this command needs a control machine"))?;
+    /// Reads the local lease token for a routed write.
+    fn remote_token(&self, require: bool) -> Result<String, ToolError> {
         let token = match std::fs::read_to_string(&self.opts.token_file) {
             Ok(text) => text.trim_end_matches(['\r', '\n']).to_owned(),
-            Err(_error) if !require_token => String::new(),
+            Err(_error) if !require => String::new(),
             Err(error) => {
                 return Err(ToolError::new(
                     "not_found",
@@ -948,33 +1150,27 @@ impl<'a> Backend<'a> {
                 ));
             }
         };
-        if require_token && token.is_empty() {
+        if require && token.is_empty() {
             return Err(ToolError::invalid("lease token file is empty"));
         }
+        Ok(token)
+    }
 
-        let script = format!(
+    /// Builds the remote shell command that runs a one-shot `vowp mcp` on the home.
+    fn remote_mcp_script(&self, remote_home: &str) -> String {
+        format!(
             "d=$(mktemp -d) || exit 1; trap 'rm -rf \"$d\"' EXIT; umask 077; \
              IFS= read -r token; printf '%s' \"$token\" > \"$d/token\"; \
              vowp {} {} mcp --session {} --surface {} --token-file \"$d/token\"",
             shell_quote("--home"),
-            shell_quote(&control.config.remote_home),
+            shell_quote(remote_home),
             shell_quote(self.opts.session.as_str()),
             shell_quote(&self.opts.surface.0),
-        );
-        let mut child = Command::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                &control.config.ssh_target,
-                &script,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ToolError::new("remote", format!("ssh {}: {error}", control.config.ssh_target)))?;
+        )
+    }
+
+    /// Builds the four JSON-RPC lines for one routed `tools/call`.
+    fn remote_input(&self, token: &str, tool: &str, arguments: &Value) -> String {
         let initialize = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -992,25 +1188,68 @@ impl<'a> Backend<'a> {
             "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         });
-        let input = format!(
+        format!(
             "{token}\n{initialize}\n{initialized}\n{call}\n",
             initialize = serde_json::to_string(&initialize).unwrap_or_default(),
             initialized = serde_json::to_string(&initialized).unwrap_or_default(),
             call = serde_json::to_string(&call).unwrap_or_default(),
-        );
+        )
+    }
+
+    /// Spawns the remote MCP process and leaves its stdin open for the caller.
+    fn spawn_remote_mcp(
+        &self,
+        control: &ControlHome,
+        input: &str,
+    ) -> Result<(std::process::Child, BufReader<std::process::ChildStdout>), ToolError> {
+        let script = self.remote_mcp_script(&control.config.remote_home);
+        let mut child = Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                &control.config.ssh_target,
+                &script,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| ToolError::new("remote", format!("ssh {}: {error}", control.config.ssh_target)))?;
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
                 .write_all(input.as_bytes())
                 .map_err(|error| ToolError::new("remote", format!("ssh stdin: {error}")))?;
         }
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ToolError::new("remote", "ssh produced no stdout"))?;
+        Ok((child, BufReader::new(stdout)))
+    }
+
+    /// Sends one `tools/call` to a one-shot `vowp mcp` on the home.
+    fn remote_tool_call(&self, tool: &str, arguments: &Value, require_token: bool) -> Result<Value, ToolError> {
+        let control = self
+            .ctx
+            .control()
+            .ok_or_else(|| ToolError::refused("this command needs a control machine"))?;
+        let token = self.remote_token(require_token)?;
+        let input = self.remote_input(&token, tool, arguments);
+        let (mut child, mut reader) = self.spawn_remote_mcp(control, &input)?;
         drop(child.stdin.take());
-        let output = child
-            .wait_with_output()
+        let mut stdout = String::new();
+        reader
+            .read_to_string(&mut stdout)
+            .map_err(|error| ToolError::new("remote", format!("ssh stdout: {error}")))?;
+        let status = child
+            .wait()
             .map_err(|error| ToolError::new("remote", format!("ssh {}: {error}", control.config.ssh_target)))?;
 
         let mut call_result = None;
         let mut call_error = None;
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
+        for line in stdout.lines() {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
@@ -1033,10 +1272,12 @@ impl<'a> Backend<'a> {
             return Err(ToolError::new("remote", message));
         }
         let Some(result) = call_result else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ToolError::new(
                 "remote",
-                format!("no tools/call answer from the home: {}", stderr.trim()),
+                format!(
+                    "no tools/call answer from the home (exit {})",
+                    status.code().unwrap_or(-1)
+                ),
             ));
         };
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
@@ -1082,23 +1323,11 @@ impl<'a> Backend<'a> {
     }
 }
 
-/// Spawns a best-effort heartbeat for a lease taken over through MCP.
-///
-/// The MCP process lives as long as the app keeps its stdio open. When that process goes
-/// away the heartbeat stops and the normal sixty-second stale sweep frees the lease.
-fn spawn_heartbeat(deps: Deps, session: SessionId, token: String) {
-    thread::spawn(move || {
-        let Ok(store) = Store::open_global(&deps.paths) else {
-            return;
-        };
-        loop {
-            thread::sleep(Duration::from_secs(HEARTBEAT_SECS));
-            let now = deps.clock.now();
-            if !matches!(store.heartbeat_lease(&session, &token, now), Ok(true)) {
-                return;
-            }
-        }
-    });
+/// Splits a loopback URL into its port and absolute path.
+fn loopback_url(url: &str) -> Option<(u16, String)> {
+    let rest = url.strip_prefix("http://127.0.0.1:")?;
+    let (port, path) = rest.split_once('/')?;
+    Some((port.parse().ok()?, format!("/{path}")))
 }
 
 /// Filters a snapshot to one project.
