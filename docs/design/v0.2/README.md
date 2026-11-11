@@ -1,8 +1,8 @@
 # v0.2 design notes — one home, many surfaces
 
 Status: current for v0.2. **`home-and-surfaces.md` is the normative, implementable specification
-for v0.2** (plan §3–§10): schemas, Rust interfaces, C0 hooks, CLI surface, snapshot schema, named
-tests and open assumptions. The other notes here are either subordinate to it or explicitly
+for v0.2** (plan §3–§10): schemas, Rust interfaces, interface hooks, CLI surface, snapshot schema,
+named tests and open assumptions. The other notes here are either subordinate to it or explicitly
 deferred.
 
 v0.2 is one **home** (a VPS) that owns one global DB and one DB per project, one node supervisor,
@@ -15,7 +15,7 @@ the loopback-only secret paste page (and the app server joined through an SSH tu
 
 | Note | Status | What it covers |
 |---|---|---|
-| [`home-and-surfaces.md`](home-and-surfaces.md) | **normative for v0.2** | The whole v0.2 spec: data model + DDL, migration, node supervisor, snapshot/fleet, capacity, remote execution, leases/takeover, app hosts/MCP/chat, control machine, secrets, lifecycle, setup, all new CLI commands, C0 hooks, named tests and open assumptions. |
+| [`home-and-surfaces.md`](home-and-surfaces.md) | **normative for v0.2** | The whole v0.2 spec: data model + DDL, migration, node supervisor, snapshot/fleet, capacity, remote execution, leases/takeover, app hosts/MCP/chat, control machine, secrets, lifecycle, setup, all new CLI commands, interface hooks, named tests and open assumptions. |
 | [`cross-node-sync.md`](cross-node-sync.md) | updated for v0.2 | The v0.1 bundle move. v0.2's remote execution (§7.2 of the spec) supersedes the "move a session to another node" slice: the session now stays on the home and only the executor moves. The remaining directory-sync and same-id questions are v0.3. |
 | [`acp-adapter.md`](acp-adapter.md) | deferred, not v0.2 delivery | An Agent Client Protocol adapter behind the existing `Adapter` trait. Design only. |
 | [`cost-dashboard.md`](cost-dashboard.md) | deferred, not v0.2 delivery | A cost dashboard on the v0.3 daemon API. Design only. |
@@ -40,39 +40,29 @@ this release.
    reconcile. The full list is in the spec §3.6.
 5. **No unqualified `inbox`/`ledger`.** Because both schemas had those names, the node-level tables
    are renamed `node_inbox`/`node_ledger`. The spec withdraws the plan's "v0.1 queries work
-   unchanged" sentence and makes C1 audit every statement; the public `Store` API stays
-   source-compatible.
+   unchanged" sentence and has the store name its database in every statement; the public `Store`
+   API stays source-compatible.
 6. **Blocking core stays blocking.** No async runtime in `vowp-core`. `vowp mcp`, the secret paste
    page and the tunnel supervisor use plain threads and `std::net`.
 7. **Tests are hermetic.** A temporary `VOWP_HOME`, a private `TMUX_TMPDIR` **and** `tmux -L
    <unique>`, unset `TMUX`/`TMUX_PANE`, fake adapters, fake SSH and fake apps. Never the operator's
    `~/.vowp`, the default tmux server, the network or a real harness.
-8. **Linux and macOS stay green.** Linux-only measurement is `cfg`-gated or faked; every merge
-   keeps the whole workspace passing on both.
+8. **Linux and macOS stay supported.** Linux-only measurement is `cfg`-gated or faked; the whole
+   workspace passes on both.
 
-## Dependency order
+## Reading order
 
-```
-B1 spec (this directory)
-   │
-   ├─ C0 skeleton ──┬─ C2 node supervisor ── E2 admission ── E3 advisor
-   │                ├─ F1 remote exec ── F2 leases ── F3 chat
-   │                ├─ D1 snapshot/fleet
-   │                ├─ D2 control/tunnels
-   │                ├─ E1 measure
-   │                ├─ G1 vault
-   │                ├─ H1 lifecycle / H2 backup
-   │                └─ F5 app hosts ── F4 orchestrator
-   │                                  └─ F6 mcp
-   └─ C1 store split (parallel with C0; both need B1)
+Read the notes in this order:
 
-I1 setup ── I1b setup verify
-```
+1. This index for the scope, the shared assumptions and the out-of-scope list.
+2. [`home-and-surfaces.md`](home-and-surfaces.md) — the normative v0.2 specification: data model,
+   supervisor, snapshot, capacity, sessions and surfaces, control machine, secrets, lifecycle and
+   setup.
+3. [`cross-node-sync.md`](cross-node-sync.md) — the v0.1 bundle move and what v0.3 leaves open.
+4. [`acp-adapter.md`](acp-adapter.md) and [`cost-dashboard.md`](cost-dashboard.md) — the deferred
+   design notes.
 
-C0 freezes every interface; C1 can run in parallel because the store split is inside
-`vowp-store` plus the `Deps::open_store` binding in `vowp-core/src/deps.rs` and the reserved
-`_node` literal in `vowp-protocol/src/ids.rs` (both C1-owned in the spec §14.1). The critical path
-is B1 → C0/C1 → F1 → F2 → F5/F6 → F4 → I1b → K1 → T1 → J1 → J2.
+The v0.1 design under [`../`](../README.md) remains the base for types, schema, sessions and CLI.
 
 ## Out of scope for v0.2
 

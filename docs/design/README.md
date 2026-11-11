@@ -23,7 +23,7 @@ v0.2 spec's section for that area before the v0.1 file; the v0.2 spec wins where
    `cli.md`) and the schema under `schema/` if you touch the database.
 5. The v0.2 spec (`v0.2/home-and-surfaces.md`) for the global/project split, supervisor, snapshot,
    capacity, surfaces/leases, remote execution, apps, MCP, control machine, secrets, lifecycle,
-   setup, the new CLI commands, C0 hooks and named tests.
+   setup, the new CLI commands, interface hooks and named tests.
 
 Names in the spec are binding: same type, table, column, command and test names. If the spec is
 ambiguous or wrong, open an issue rather than inventing a different design.
@@ -57,8 +57,8 @@ ambiguous or wrong, open an issue rather than inventing a different design.
 
 | File | Status | What it covers |
 |---|---|---|
-| [`v0.2/home-and-surfaces.md`](v0.2/home-and-surfaces.md) | **normative for v0.2** | Data model + DDL, migration, node supervisor, snapshot/fleet, capacity, remote execution, leases/takeover, app hosts/MCP/chat, control machine, secrets, lifecycle, setup, CLI, C0 hooks, named tests, open assumptions. |
-| [`v0.2/README.md`](v0.2/README.md) | current | The v0.2 note index, binding assumptions, dependency order and out-of-scope list. |
+| [`v0.2/home-and-surfaces.md`](v0.2/home-and-surfaces.md) | **normative for v0.2** | Data model + DDL, migration, node supervisor, snapshot/fleet, capacity, remote execution, leases/takeover, app hosts/MCP/chat, control machine, secrets, lifecycle, setup, CLI, interface hooks, named tests, open assumptions. |
+| [`v0.2/README.md`](v0.2/README.md) | current | The v0.2 note index, binding assumptions, reading order and out-of-scope list. |
 | [`v0.2/cross-node-sync.md`](v0.2/cross-node-sync.md) | updated for v0.2 | The v0.1 bundle move; v0.2 remote execution supersedes "move the session", leaving directory sync to v0.3. |
 | [`v0.2/acp-adapter.md`](v0.2/acp-adapter.md) | deferred | Agent Client Protocol adapter design; not v0.2 delivery. |
 | [`v0.2/cost-dashboard.md`](v0.2/cost-dashboard.md) | deferred | Cost dashboard on the v0.3 daemon API; not v0.2 delivery. |
@@ -80,7 +80,7 @@ A **window** is only a tmux window, never a surface.
 
 ## Status of the spec
 
-The v0.2 **feature set** is merged on `main`: one home, one node supervisor, the global + per-project
+The v0.2 **feature set** is implemented: one home, one node supervisor, the global + per-project
 database split, the snapshot/fleet read model, measured capacity, sessions on surfaces with leases
 and remote execution, app hosts, MCP, the chat fallback, control machines, secrets, lifecycle/backup
 and AI-first setup. That is not a claim that every item in the v0.2 specification has shipped: the

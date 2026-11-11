@@ -242,8 +242,8 @@ global DB holds `surfaces` and `leases`; rows are live state and are not rebuilt
 - A surface without the current token reads in **follow mode** and cannot write. A clean exit
   releases the lease.
 - Taking over replaces the lease row atomically, pushes `IngestAck::LeaseRevoked` on the old
-  surface's ingest stream (S2 measured 99.6–265 ms live SSH, bound < 2 s), drains a running turn for
-  up to `drain_secs` (5 s) then interrupts it, writes a capsule, records a switch with reason
+  surface's ingest stream (measured 99.6–265 ms over live SSH, bound < 2 s), drains a running turn
+  for up to `drain_secs` (5 s) then interrupts it, writes a capsule, records a switch with reason
   `takeover` when the session already has an executor, appends a `note` after the switch releases
   the log lock, and leaves the old surface in follow mode. A pre-attach session gets the note only.
 - The old surface prints:

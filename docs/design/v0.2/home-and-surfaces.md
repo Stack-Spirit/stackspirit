@@ -1,25 +1,21 @@
 # v0.2 — home, surfaces and the fleet: the implementable spec
 
-Status: current for the commands shown; **normative for v0.2**. This is the specification the v0.2 jobs implement. It covers plan
-§3–§10: the global + per-project data model, the one node supervisor, the snapshot read model,
-capacity, sessions and surfaces (including remote execution, leases, the apps, MCP and the chat
-fallback), the control machine, secrets, lifecycle/backup and AI-first setup. It also freezes the
-types, signatures, CLI surface, C0 hooks, named tests and open assumptions that the later jobs need.
+Status: current for the commands shown; **normative for v0.2**. It covers plan §3–§10: the global
++ per-project data model, the one node supervisor, the snapshot read model, capacity, sessions and
+surfaces (including remote execution, leases, the apps, MCP and the chat fallback), the control
+machine, secrets, lifecycle/backup and AI-first setup. It also fixes the types, signatures, CLI
+surface, interface hooks, named tests and open assumptions the implementation follows.
 
 Sources: the v0.2 owner decisions for this release, the v0.1 design under `docs/design/`
 (`schema.sql`, `types.md`, `sessions.md`, `loops.md`, `cli.md`, `crates/*.md`) and the v0.1 code
 as it stands in the public tree. Where this spec tightens a v0.2 decision, the tightening is stated
 here and is binding.
-Three technical questions (capacity measurement, remote-exec transport and app hosting) were still
-open when this spec was written; each place that consumes their answer is listed in §16 "Open
-assumptions" and is written so the answer can only fill in an implementation detail, not change an
-interface.
+Three technical questions (capacity measurement, remote-exec transport and app hosting) shaped the
+design; each place that depends on their answer is listed in §16 "Open assumptions" and is written
+so the answer can fill in an implementation detail, not change an interface.
 
-C0, C1 and the feature job ids in this document are the implementation-phase labels used by the
-v0.2 delivery; S1–S3 are the three technical experiments. None is user-facing.
-
-This document is public-tree material: it uses generic hosts (`vowp@home.example`), contains no
-owner infrastructure, no build history and no secret values.
+This document uses generic hosts (`vowp@home.example`), contains no owner infrastructure, no build
+history and no secret values.
 
 ---
 
@@ -183,10 +179,10 @@ project have an `inbox` and a `ledger`. In v0.2:
 **Chosen fix:** rename the node-level tables to **`node_inbox`**
 and **`node_ledger`**. The project tables keep the names `inbox` and `ledger`. There is therefore
 no table-name collision at all. This spec does **not** claim that v0.1 queries work unchanged:
-every SQL statement in `vowp-store` is reviewed by C1 and each one is assigned to exactly one
-database. The **public `Store` API stays source-compatible**, so the rest of the workspace still
-builds and its tests still pass with only two C1-owned changes outside `vowp-store`: the
-`Deps::open_store` body in `crates/vowp-core/src/deps.rs` and the reserved `_node` literal in
+every SQL statement in `vowp-store` is assigned to exactly one database. The **public `Store` API
+stays source-compatible**, so the rest of the workspace still builds and its tests still pass with
+only two changes outside `vowp-store`: the `Deps::open_store` body in
+`crates/vowp-core/src/deps.rs` and the reserved `_node` literal in
 `crates/vowp-protocol/src/ids.rs` (both in §14.1). No other crate changes.
 
 The complete rule set that replaces the draft's §3 rules 1–3:
@@ -210,9 +206,9 @@ The complete rule set that replaces the draft's §3 rules 1–3:
 ### 3.2 Global schema (`docs/design/schema/global.sql`, `PRAGMA user_version = 2`)
 
 `docs/design/schema.sql` stays in the tree as the frozen v0.1 schema; `crates/vowp-protocol/tests/`
-includes it and C1 does not own that test. C1 adds `schema/global.sql` and `schema/project.sql` next
-to it and leaves the old file byte-identical. The store's `schema_matches_enums` test moves to the
-new files.
+includes it and leaves that test unchanged. The v0.2 schema adds `schema/global.sql` and
+`schema/project.sql` next to it and leaves the old file byte-identical. The store's
+`schema_matches_enums` test moves to the new files.
 
 This is the complete DDL. Comments name the writer and the retention class. `STRICT` and the
 `CHECK` style follow v0.1; JSON columns are `TEXT` with `CHECK(json_valid(..))`.
@@ -814,9 +810,9 @@ PRAGMA user_version = 1;
 | global | `node_ledger` | node-scoped cost/switch/state rows | cost, fleet |
 | global | `surfaces`, `leases` | lease guard, takeover | ingest, MCP, chat |
 | global | `catalog` | gc, backup, project rm, release | gc, fleet |
-| global | `host_samples`, `run_usage`, `usage_estimates` | E1 | admission, advisor |
-| global | `capacity_targets`, `capacity_advice` | E2, E3 | admission, advisor, board |
-| global | `secret_index` | G1 | `secret ls` |
+| global | `host_samples`, `run_usage`, `usage_estimates` | capacity sampler | admission, advisor |
+| global | `capacity_targets`, `capacity_advice` | admission, advisor | admission, advisor, board |
+| global | `secret_index` | secret commands | `secret ls` |
 | project | `jobs`, `edges` | graph, CLI | supervisor, fleet |
 | project | `runs`, `gate_results`, `workers` | runner, gates, supervisor | board, fleet |
 | project | `loops`, `schedules` | reconcile, schedule engine | supervisor |
@@ -826,9 +822,9 @@ PRAGMA user_version = 1;
 
 **Resolved-name rule.** A statement that names a table must name exactly one of these. The store
 never writes an unqualified `inbox`, `ledger`, `jobs`, `runs` or `sessions` where a reader could
-misread which file is meant; C1 adds `main.`/`project.` prefixes at every cross-file site and a
-review checklist test (`every_sql_statement_names_its_database`) that greps the `vowp-store`
-sources for the old unqualified names.
+misread which file is meant; it writes `main.`/`project.` prefixes at every cross-file site, and a
+review checklist test (`every_sql_statement_names_its_database`) greps the `vowp-store` sources for
+the old unqualified names.
 
 ### 3.5 Types that do not change
 
@@ -862,7 +858,7 @@ insert; on update it preserves `state`, `weight`, `paused_reason` and `archived_
 
 `SessionRole` gains one additive variant, `Orchestrator` (wire name `orchestrator`). `InboxKind`
 does **not** gain a `capacity` variant: adding it would force edits in `vowp-core`'s report renderer
-outside C0's owned files. A capacity advice row is a normal `decision` inbox item (title
+outside the capacity modules. A capacity advice row is a normal `decision` inbox item (title
 `Capacity: …`, options `["apply","keep"]`) linked by `capacity_advice.inbox_id`; the category is in
 `capacity_advice`, not in the inbox enum. This is a deliberate deviation from the plan's wording
 "inbox item of kind `capacity`" and is recorded in §16.
@@ -886,8 +882,8 @@ the check that runs on write and in `Store::reconcile_cross_db`. Reads tolerate 
 | `runs.session_id` | project | `sessions.id` | session service; reconcile closes a run whose session is gone |
 | `ledger.session_id`, `ledger.run_id`, `ledger.job_id` | both | the other file | ledger writer; tolerated if the target was archived |
 | `catalog.project`, `catalog.job_id`, `catalog.session_id` | global | registry / a project | catalog writer; `gc` treats a missing target as disposable cache only if the class also says so |
-| `run_usage.project`, `run_usage.job_id` | global | registry / a project | E1 writes from a live run |
-| `run_usage.run_id` | global | `runs.id` in a project | E1 writes at run end; a missing run is kept for cost history |
+| `run_usage.project`, `run_usage.job_id` | global | registry / a project | capacity sampler writes from a live run |
+| `run_usage.run_id` | global | `runs.id` in a project | capacity sampler writes at run end; a missing run is kept for cost history |
 | `capacity_advice.inbox_id` | global | `node_inbox.id` | advisor; a missing item only means the owner dismissed it |
 | `node_inbox.job_id`, `node_inbox.project` | global | a project job / registry | L7 and capacity; a missing job leaves a notice |
 | `sessions.node`, `leases.node`, `run_usage.node`, `surfaces.node` | global | `nodes.name` | session/lease/usage writers require a registered executor node; a stale surface lease is swept |
@@ -983,7 +979,7 @@ impl Store {
 `schema_version()` is the compatibility shim: it reports **1** for both a bound project and an
 unbound global handle. It is deliberately not the global file's value; new code that means the
 global file calls `global_schema_version()` (2). This keeps `vowp-core/tests/deps.rs` and
-`vowp-cli/tests/maint.rs` green without editing them; `vowp doctor` prints both
+`vowp-cli/tests/maint.rs` valid; `vowp doctor` prints both
 (`global 2, project 1`).
 
 ```rust
@@ -1001,7 +997,7 @@ pub struct CrossDbReconcile {
 `open_memory` creates the global schema and starts unbound. `upsert_project` is the one registry
 writer that also guarantees the project DB exists: for a file-backed store it calls
 `create_project_db` (idempotent) for a newly inserted row, and for `open_memory` it attaches a lazy
-in-memory project DB. This is what keeps the v0.1 fixtures green: they do `Store::open` +
+in-memory project DB. This is what keeps the v0.1 fixtures working: they do `Store::open` +
 `upsert_project` and immediately insert jobs (`vowp-store/tests/{jobs,runs}`, `misc.rs` except its
 one multi-project FK test, `vowp-core/tests/gates_support.rs`, `vowp-cli/tests/common/mod.rs`).
 The registry row and its DB appear together; `vowp project add` does the same call and then opens
@@ -1028,7 +1024,7 @@ create `projects/<name>/project.db`. The reserved `_node` literal is accepted by
 `ProjectName::parse` (and only that literal; see §14.1); `project add`/`init` still refuse it as a
 user project.
 
-Routing for the renamed tables (binding for C1):
+Routing for the renamed tables (binding):
 
 - `insert_inbox(&InboxItem)` routes by `item.project`: `None` writes `node_inbox`, `Some(p)` writes
   the project `inbox` and returns `WrongProject` if the handle is bound elsewhere. A `job_id` with
@@ -1095,7 +1091,7 @@ Write order and idempotency:
   `ledgers_repaired += 1`;
 - lease whose session is gone → delete, `leases_dropped += 1`.
 
-The crash-injection test (§15, C1) kills a child process at each of the write steps and asserts the
+The crash-injection test (§15) kills a child process at each of the write steps and asserts the
 counts above and that no event seq is duplicated.
 
 ### 3.8 Project-scoped `Deps` (the multi-project rule)
@@ -1107,7 +1103,7 @@ The v0.1 `Deps` struct does not change and its existing struct literals in tests
 impl Deps {
     /// Opens the store bound to this `Deps`'s project.
     ///
-    /// Resolution (binding for C1), in order:
+    /// Resolution (binding), in order:
     /// 1. `config.project.name` is registered -> bind it;
     /// 2. exactly one non-reserved project is registered -> bind it (the v0.1 single-project
     ///    tests and `bundle.rs` after it registers `probe-project`);
@@ -1180,14 +1176,13 @@ Consequences (binding):
   handle bound to project A never writes project B.
 - A project-less orchestrator session uses `_node` for its run rows (below); its session, capsule
   and surface rows are global, so no project card is involved.
-- `crates/vowp-core/src/deps.rs` is **C1-owned** for this body. The signature is unchanged, so C0
-  leaves the file untouched and compiles against the v0.1 `Store::open`; C1 replaces the body
-  (the ~35-line resolution above, not a one-line call) together with the new `Store` constructors
-  in the same merge. This is the only `vowp-core` file C1 edits, and it is recorded in §14.1. C0
-  does not edit it (the §13.3 card listed it under C0; §14.1 supersedes that list).
+- `crates/vowp-core/src/deps.rs` holds this body. The signature is unchanged; the implementation
+  replaces the v0.1 `Store::open` call with the resolution above (the ~35-line body, not a one-line
+  call) together with the new `Store` constructors. This is the only `vowp-core` file the store
+  split changes, and it is recorded in §14.1.
 
 The v0.1 core tests below call project-scoped methods on a fresh temporary home and are the
-compatibility gate for this binding. None of them is edited; C1 runs all of them before merging:
+compatibility gate for this binding. None of them is edited; the store split runs all of them:
 
 | Test | What it does | Why it passes |
 |---|---|---|
@@ -1200,8 +1195,8 @@ compatibility gate for this binding. None of them is edited; C1 runs all of them
 
 This is the fix for the one place where the plan's "the split stays inside `vowp-store`" claim does
 not survive the multi-project correction: the store can only attach one project, so the **caller**
-must say which one, and `config.project.name` is the project the caller already resolved. C1 owns
-that caller body; no feature job touches `Deps` or the store binding.
+must say which one, and `config.project.name` is the project the caller already resolved. The
+caller body lives in `Deps`; no other module touches the store binding.
 
 **Reserved `_node` project.** `init`/`setup` create one hidden registry row `_node` with
 `~/.vowp/projects/_node/project.db`. It owns the `runs`/`ledger` rows of project-less sessions (an
@@ -1217,13 +1212,13 @@ orchestrator/session cards.
 
 `ProjectName::parse` accepts exactly the reserved literal `_node`; every other name still follows
 the slug rule (lowercase letters, digits and inner `-`). This is a one-line exception in
-`vowp-protocol/src/ids.rs`, C1-owned in §14.1, because the store, migration and session service
+`vowp-protocol/src/ids.rs`, recorded in §14.1, because the store, migration and session service
 must parse the reserved name; `project add`/`init` still reject `_node` as a user project.
 
 One explicit exception to `deps.open_store()`: `SessionService::run_turn` and `write_capsule` read
 the session row first and, when `sessions.project IS NULL`, open `Store::open_with_project(paths,
-"_node")` for the run/capsule project rows. Every other caller has a project already. F1 owns that
-line in `session/service.rs`.
+"_node")` for the run/capsule project rows. Every other caller has a project already. That line
+lives in `session/service.rs`.
 
 ### 3.9 Migration from v0.1 (`vowp migrate`)
 
@@ -1310,8 +1305,8 @@ one file. It is restartable. It refuses while a supervisor is running. Full step
    > `PRAGMA foreign_keys=OFF`, `BEGIN`, create `<table>_new` with the new DDL, `INSERT … SELECT`,
    > `DROP TABLE <table>`, `ALTER TABLE <table>_new RENAME TO <table>`, `COMMIT`,
    > `PRAGMA foreign_keys=ON`, `PRAGMA foreign_key_check`. The shipped v0.1→v0.2 migration does
-   > not need it because it writes fresh files; the recipe is recorded here for C1's migration of
-   > a database that is already split.
+   > not need it because it writes fresh files; the recipe is recorded here for a future migration
+   > of a database that is already split.
 
 6. **Copy the project rows.** For **each** registered project `p`, attach its staging DB as
    `project` on the same connection (`ATTACH DATABASE 'stage/projects/<p>/project.db' AS project`)
@@ -1502,8 +1497,8 @@ impl NodeSupervisor {
 }
 ```
 
-`ProjectSupervisor` is the v0.1 `Supervisor` with its `project`-specific fields; C2 may keep the
-name `Supervisor` for it behind `pub(crate)` and add `NodeSupervisor` above it. Each
+`ProjectSupervisor` is the v0.1 `Supervisor` with its `project`-specific fields; the implementation
+may keep the name `Supervisor` for it behind `pub(crate)` and add `NodeSupervisor` above it. Each
 `ProjectSupervisor` holds the per-project `Deps` from §3.8 (its own `vowp.toml` resolved with the
 node file), so `deps.open_store()` and every runner/gate/capsule path select that project's DB. The
 public command `vowp up` uses `NodeSupervisor`; unit tests of one project keep using
@@ -1513,9 +1508,8 @@ public command `vowp up` uses `NodeSupervisor`; unit tests of one project keep u
 
 - `vowp-home` session, windows: `board` (node board, all projects), `capacity`
   (`vowp __window capacity`), `orchestrator` (the default orchestrator session, if any).
-  `cmd/window.rs` accepts the `capacity` kind in C0 as a NotImplemented stub (exit 1); E2 owns the
-  renderer that prints the `capacity show` body and redraws on a TTY. This is in §14.1 because the
-  v0.1 command file otherwise rejects every kind except board/supervisor/planner/keeper/inbox/job.
+  `cmd/window.rs` accepts the `capacity` kind and renders the `capacity show` body, redrawing on a
+  TTY. The file otherwise accepts only board/supervisor/planner/keeper/inbox/job.
 - `vowp-<project>` session per active project, windows `board supervisor planner keeper inbox`
   exactly as v0.1. Job windows remain `job-<id>`.
 - All tmux calls use the private server/socket rules of `vowp-tmux`; tests use `FakeWindows` or a
@@ -1698,8 +1692,8 @@ pub struct SessionSurfaceCard {
 - `projects`: registry order `name` ascending, all states, excluding the reserved `_node` project.
   `archived` projects have an empty `running`/`queue` and only their last recorded cost.
 - `queue`: at most 200 rows per project, sorted `priority DESC, created_at ASC`; jobs in
-  `pending|ready|parked|stalled`; `waiting_reason` is the last admission/brake reason written by
-  E2, else `None`.
+  `pending|ready|parked|stalled`; `waiting_reason` is the last admission/brake reason, else
+  `None`.
 - `running`: jobs whose state holds the lock, sorted job id; `age_secs` from the open run's
   `started_at` or the state change.
 - `blocked`: `parked` and `failed` jobs with the parked reason and the last note (truncated).
@@ -1725,14 +1719,14 @@ pub struct SessionSurfaceCard {
   "projects": [
     {"name": "vowp", "path": "/srv/vowp", "state": "active", "weight": 1, "paused_reason": "",
      "jobs_by_state": {"running": 2, "ready": 3, "done": 41},
-     "running": [{"job": "v2-b1-spec", "kind": "docs", "role": "worker",
+     "running": [{"job": "docs-pass", "kind": "docs", "role": "worker",
                   "executor": "opencode:deepseek-chat", "node": "laptop",
                   "age_secs": 123, "last_event_age_secs": 4, "session_id": "01KA1V0Z7A0000000000000000"}],
-     "blocked": [], "queue": [{"job": "v2-c0-skeleton", "title": "Freeze interfaces", "kind": "build",
+     "blocked": [], "queue": [{"job": "interfaces", "title": "Document the interfaces", "kind": "build",
                                "role": "worker", "priority": 99, "state": "ready", "age_secs": 60,
                                "waiting_reason": "waiting: RAM 1.2 GB short"}],
-     "last_merge": {"job": "v2-a0-docs-truth", "at": "2026-11-10T12:00:00.000Z",
-                    "commit": "abc1234", "branch": "job/v2-a0-docs-truth"},
+     "last_merge": {"job": "release-notes", "at": "2026-11-10T12:00:00.000Z",
+                    "commit": "abc1234", "branch": "job/release-notes"},
      "gate_failures": [], "cost_today_usd": 1.23}
   ],
   "capacity": {"measured": {"at": "2026-11-10T14:02:10.000Z", "mem_total_bytes": 8589934592,
@@ -1806,35 +1800,35 @@ board` the refreshing terminal view. Both accept every project.
   - `/proc/pressure/{cpu,memory,io}` `avg10` when present;
   - on macOS or without `/proc`: only what `statvfs` and `sysctl` provide; the rest is `None` and
     `source='fallback'`. All Linux-only code is `#[cfg(target_os = "linux")]` or behind a
-    `ProcFs` trait faked in tests so macOS CI stays green.
+    `ProcFs` trait faked in tests so the macOS build keeps working.
   - store one `host_samples` row; prune 5 s rows older than 24 h and keep 1-min averages for 30
-    days (H1).
-- **Per-run usage.** Every adapter run and every command gate gets a scope. S1 (merged
-  2026-11-10) proved the cgroup v2 path on the target VPS and fixed the measurement fields:
+    days.
+- **Per-run usage.** Every adapter run and every command gate gets a scope. Measurements on the
+  target VPS proved the cgroup v2 path and fixed the measurement fields:
   - preferred: a systemd user scope per run (`systemd-run --user --scope --unit
     vowp-run-<run-id>`), reading `memory.peak`, `memory.stat` (`anon`, `file`, `kernel`) at the
     peak sample, `cpu.stat` `usage_usec` and `memory.events` (`oom_kill`) from cgroup v2;
     `source='cgroup'`. `memory.peak` is cumulative and the user cannot reset it, so per-phase
     peaks use child cgroups or separate scopes.
   - fallback: walk the process tree from `AdapterRun::pid()` (`/proc/<pid>/task/*/children`
-    recursively) every second, sum RSS and CPU deltas; `source='proc_tree'`. S1 measured it
-    overcounting warm RSS by ~31 % (shared pages counted once per process) and undercounting CPU
+    recursively) every second, sum RSS and CPU deltas; `source='proc_tree'`. Measurements show the
+    walk overcounts warm RSS by ~31 % (shared pages counted once per process) and undercounts CPU
     by 15–36 % (short-lived processes exit between samples); it also cannot see a build running
     in a Docker container. It is for keeping a node limping, not for estimates.
   - if neither is available: `source='default'`, `peak_rss_bytes = 1_500_000_000`,
     `mean_cpu_cores = 1.0`, labelled "default".
-  - E1 records one `run_usage` row per finished run with `peak_rss_bytes`, the sampled
+  - The capacity sampler records one `run_usage` row per finished run with `peak_rss_bytes`, the sampled
     `anon_peak_bytes`/`file_peak_bytes`/`kernel_peak_bytes` (NULL when not sampled), `cpu_usec`,
     `mean_cpu_cores`, `max_cpu_cores`, `build_mode` (`cold`/`warm`/`incremental`/`unknown`,
     inferred from the job target directory), `source` (`cgroup`/`proc_tree`/`default`),
     `oom_killed` from the cgroup `memory.events` `oom_kill` delta (fallback: outcome `killed` + a
     memory-heavy estimate) and `exit_code`.
-- **S1 evidence behind the defaults and reserve.** A cold `cargo test --workspace` (debug info
+- **Measurements behind the defaults and reserve.** A cold `cargo test --workspace` (debug info
   off, incremental off) peaked at **2.45 GiB** and used **300 s CPU**; warm runs peaked at
   **0.37 GiB** and **56–60 s CPU**. The build was 91.6 % of cold peak RAM and 99.6 % of cold CPU;
   on warm runs 44 % of peak RAM and 98 % of CPU. The plan's `1.5 GiB / 1 core` default is
-  plausible for a warm gate run and too low for a cold Rust build; E2 must replace it with p90
-  from real runs quickly. Disk is a first-class dimension: the 290 GB test disk was 98–100 % full
+  plausible for a warm gate run and too low for a cold Rust build; admission replaces it with p90
+  estimates from real runs as soon as they exist. Disk is a first-class dimension: the 290 GB test disk was 98–100 % full
   and builds failed with `No space left on device` / `sqlite: disk I/O error`, so keep the
   5 GB / 10 % reserve and add a per-job target-dir budget/cleanup. `MemoryHigh` is a working soft
   throttle (a 96 MiB allocation under `MemoryHigh=64M` produced 486 `high` events, no OOM kill);
@@ -1850,7 +1844,7 @@ board` the refreshing terminal view. Both accept every project.
   until a pool has 5: exact → same `(project, job_kind, harness, build_mode)` → same
   `(project, job_kind, build_mode)` → same `(job_kind, build_mode)` across projects →
   `('*','*','','','unknown')` constant. A `cold` estimate never pools into `warm`/`incremental`
-  before the constant; S1 measured a 6.6× RAM and 5× CPU gap between cold and warm. `source`
+  before the constant; measurements show a 6.6× RAM and 5× CPU gap between cold and warm. `source`
   records `measured`, `pooled` or `default`. Percentiles are nearest-rank p50/p90; integer bytes
   and milliseconds; CPU in cores as `f64`.
 
@@ -1981,7 +1975,7 @@ pub struct RunScope { /* cgroup path or root pid + baseline */ }
 impl RunScope {
     pub fn begin(deps: &Deps, run: &RunId, root_pid: u32) -> Result<RunScope, CoreError>;
     pub fn sample(&self) -> Result<ScopeSample, CoreError>;
-    /// Stops sampling and writes the run_usage row; E1 infers `build_mode` before this call.
+    /// Stops sampling and writes the run_usage row; `build_mode` is inferred before this call.
     pub fn finish(self, store: &Store, build_mode: BuildMode) -> Result<RunUsage, CoreError>;
 }
 pub struct ScopeSample {
@@ -2073,7 +2067,7 @@ Rules (deterministic; every constant is named in `capacity/admit.rs`):
    the resource reasons above.
 8. `max_workers` in `vowp.toml` is **a preference, not a cap**: it seeds the advisor's suggestion
    and `ensure_worker_slots`, but never blocks admission. The owner's `capacity set` and the RAM/CPU
-   checks are the real limits. The dispatch caps E2 passes to `plan_dispatch` are derived from
+   checks are the real limits. The dispatch caps passed to `plan_dispatch` are derived from
    `target_workers - running_runs` (and the verifier share), **not** from the idle `workers` rows;
    the `workers` table stays a board/tmux bookkeeping view and cannot veto an admitted run.
    `ensure_worker_slots` grows to `max(config.node.max_workers, target_workers)` when the target is
@@ -2260,17 +2254,17 @@ same session; only the lease holder writes.**
    the surface's own vault/environment; a missing name is a clear error naming the variable, never
    a silent empty value. The executor node owns the harness binary and any secret it injects; the
    home never sends a value over the wire. It writes every adapter event to its local spool
-   **before** putting a `RemoteLine` JSON object on stdout (S2).
+   **before** putting a `RemoteLine` JSON object on stdout.
 3. `vowp __exec` pipes those lines into `ssh <home> vowp session ingest <session> --run
    <run-id>`. The first line is `RemoteLine::Hello`, which carries the lease token from the grant;
    `ingest` validates it before accepting any event, so the token is never in argv or `ps`. It
    assigns `seq`, appends with the supplied event id and timestamp, updates the index, and acks
    `{event_id, seq}`. It also heartbeats the lease. The client keeps a **64-event in-flight
    window** and consumes acks asynchronously; it does not wait for one ack per event across a WAN
-   (S2 measured ~9 events/s with a one-event window at 80 ms RTT, versus ~230–260 events/s with a
+   (measured: ~9 events/s with a one-event window at 80 ms RTT, versus ~230–260 events/s with a
    64-event window after setup). When `surface::sweep_leases` detects a takeover, `ingest` pushes
    `IngestAck::LeaseRevoked` on the same stdout stream; the client stops input immediately and
-   follows read-only (S2: 99.6–265 ms live SSH, <2 s bound; §7.3).
+   follows read-only (measured at 99.6–265 ms over live SSH, bound to < 2 s; §7.3).
 4. The executor node is registered once with `vowp node add laptop -` (no inbound ssh target); the run row and snapshot name it. On the harness summary, `__exec` calls `vault::redact_job_artifacts` on the executor node
    (the report and raw mirror live in the executor's worktree), sends `RemoteLine::Summary`; `ingest`
    writes `cost`, `limit` or `error`, `turn.ended`, `session.executor{detach}`, finishes the project
@@ -2278,7 +2272,7 @@ same session; only the lease holder writes.**
    with `source='default'` when the executor could not measure), and acks `{run_id, done:true}`.
    The home is now the only writer and the turn is complete.
 
-**Spool, ack window and replay (S2, merged 2026-11-10).** `__exec` keeps the adapter running and
+**Spool, ack window and replay.** `__exec` keeps the adapter running and
 appends each event to `<spool>/<session>/<run>/events.jsonl`, fsyncing it **before** the send; an
 event that was not durably spooled is never sent. Acks are written to `acked.json` by event id. On
 reconnect it starts `ingest --replay` and resends every event from the first unacked one; `ingest`
@@ -2287,7 +2281,7 @@ existing seq). A known id with different content is `duplicate-conflict` and is 
 spool survives a killed client, not just a killed SSH: a new process reads `events.jsonl` +
 `acked.json` and finishes the turn. A torn final line is truncated; corruption before the last
 complete line is an error. `control_master` is an optimisation for reconnects and probes, never a
-correctness requirement: S2 measured a handshake drop from 810–953 ms to 243–256 ms at 80 ms RTT
+correctness requirement: measurements show a handshake drop from 810–953 ms to 243–256 ms at 80 ms RTT
 and a reconnect drop from 292–409 ms to 82–92 ms loopback, but per-event RTT is unchanged. A dead
 master falls back to a cold connection and the turn continues. The test kills the fake SSH process
 mid-stream (including an ack lost after append and a cut mid-line) and asserts no gap and no
@@ -2332,7 +2326,7 @@ pub enum IngestAck {
     Ack { event_id: EventId, seq: u64 },
     Duplicate { event_id: EventId, seq: u64 },
     Summary { run_id: RunId, done: bool },
-    /// Pushed by the home when a takeover revokes this run's lease (S2). The client stops
+    /// Pushed by the home when a takeover revokes this run's lease. The client stops
     /// sending events immediately; it does not wait for its next heartbeat.
     LeaseRevoked { reason: String, by: String, at: Timestamp, last_seq: u64 },
     Error { kind: ErrorKind, message: String },
@@ -2473,10 +2467,10 @@ Rules:
    executor. A pre-attach session (`sessions.executor IS NULL`, for example a fresh orchestrator
    holding the lease) has no valid `to_executor`, so it gets the note only; `switches.to_executor`
    stays non-null. **The home pushes `IngestAck::LeaseRevoked` on the active ingest channel** when
-   the takeover commits; S2 measured the notice in 99.6–265 ms live over SSH and below 2 s in the
+   the takeover commits; the notice arrives in 99.6–265 ms over live SSH and below 2 s in the
    hermetic poll, so the old surface does not wait for its next heartbeat. `surface::sweep_leases()`
-   (the C0 hook) signals the ingest writer through an in-process channel/condvar, with a ≤250 ms
-   poll as the fallback; never poll SQLite per event. The old surface's every write check also
+   signals the ingest writer through an in-process channel/condvar, with a ≤250 ms poll as the
+   fallback; never poll SQLite per event. The old surface's every write check also
    fails with `Refused("this surface is read-only; taken over by …")`. The old surface prints
    exactly:
    `Taken over by phone at 14:05. This surface is now read-only (follow mode).`
@@ -2490,7 +2484,7 @@ Rules:
 5. **Check.** `surface::check_lease(deps, store, session)` reads `VOWP_LEASE_TOKEN` (set by `chat`
    and `ingest` from the grant) and compares it. No lease → `Ok(())` (job sessions). A lease exists
    and the token is missing or wrong → `CoreError::Refused`. It is called before every write tool and
-   before every interactive turn. It is a no-op in C0.
+   before every interactive turn.
 
 **Core API** (`vowp-core/src/surface/{lease,takeover,follow}.rs`):
 
@@ -2554,7 +2548,7 @@ Three layers, exactly as plan §7.4:
 3. **Changing app/harness/model = VOWP handoff:** the app transcript is mirrored into the session
    log; `session_resume` returns the capsule + last turns.
 
-**Transcript mirror.** `surface/mirror.rs` consumes opencode's `/api/event` SSE (S3; not the
+**Transcript mirror.** `surface/mirror.rs` consumes opencode's `/api/event` SSE (not the
 `/session` web page and not the session-log endpoint) and backfills from
 `/api/experimental/session/<id>/export` or `opencode session export`; Claude uses the transcript
 importer. The cursor is stored in `~/.vowp/orchestrators/<name>/mirror.json`:
@@ -2566,7 +2560,7 @@ pub fn mirror_once(deps: &Deps, store: &Store, session: &SessionId, app: &AppHan
                    cursor: &mut MirrorCursor) -> Result<MirrorReport, CoreError>;
 ```
 
-Mapping (S3's proven table): `session.inbox.enqueued` with `item.type=user` → `user.message`;
+Mapping (the table verified against opencode v2.0.28): `session.inbox.enqueued` with `item.type=user` → `user.message`;
 `session.text.ended` (the full text; `text.started`/`text.delta` are UI-only) →
 `assistant.message`, coalesced by `assistantMessageID`; `session.tool.called` → `tool.call`,
 `session.tool.success`/`session.tool.failed` → `tool.result`; `session.usage.updated` → `cost`
@@ -2605,7 +2599,7 @@ pub struct TranscriptEntry { pub native_id: String, pub kind: TranscriptKind, pu
                              pub path: Option<String> }
 ```
 
-`opencode_host.rs` targets the **opencode v2 contract proven by S3** (2.0.28): the HTTP API lives
+`opencode_host.rs` targets the **opencode v2 contract** (2.0.28): the HTTP API lives
 under `/api/...` (`/api/event` SSE with a `server.connected` hello, `/api/mcp?location[directory]=…`,
 `/api/session`, `/api/session/<id>/message|prompt`; `/session` is the web app, not the JSON API).
 Auth is HTTP **Basic** `opencode:<token>` (a Bearer token is rejected). The preferred host is the
@@ -2622,7 +2616,7 @@ opencode pair                     # single-use link, expires in 5 minutes
 (`id`, `version`, `url`, `pid`, `password`) or VOWP manages the pair link itself. The host binds
 `127.0.0.1` only; `opencode service set hostname 0.0.0.0` is forbidden. Every host command runs
 with a private `XDG_STATE_HOME`/`XDG_DATA_HOME` under the orchestrator directory, never the
-owner's global opencode state (S3: a bare CLI attaches to the global background service and can
+owner's global opencode state (a bare CLI attaches to the global background service and can
 conflict with another job). The pair link is shown with the
 `ssh -L <local>:127.0.0.1:<p> <home>` command, treated as a secret, and never logged. The
 managed service's default location is `$HOME`, so `orchestrator` must pass
@@ -2637,18 +2631,18 @@ for the login directory, never reads it); otherwise `start` returns
 report says so. Claude Code's project-local `.mcp.json` is project-scoped and needs one-time owner
 approval; non-interactive `claude mcp list` reports `Pending approval` until then. Claude Code
 sends `server/discover` before `initialize`, so the VOWP MCP server must implement it or return a
-valid `method not found` (S3; §7.7).
+valid `method not found` (§7.7).
 
-**opencode MCP exposure is not proven (S3).** opencode v2.0.28 loaded the project-local
+**opencode MCP exposure is not proven.** opencode v2.0.28 loaded the project-local
 `opencode.json`, `opencode mcp list` and `/api/mcp` reported the server `connected`, and the dummy
 server received `initialize` + `tools/list`; but the model request's `tools` array contained only
 the built-in tools, and the model never called the MCP tool. `connected` is proof of configuration,
-not of tool availability. F5/F6 must re-test with a real provider and find the permission/config
+not of tool availability. The opencode host must re-test with a real provider and find the permission/config
 flag (or an upstream fix) before promising that the opencode orchestrator can call VOWP tools.
 Until then the orchestrator's tool path is `vowp chat` or Claude Code, and the opencode surface
 still has the mirrored transcript and lease. This is open assumption §16.20.
 
-`session_resume` context (implemented in `surface/mirror.rs`, F5):
+`session_resume` context (implemented in `surface/mirror.rs`):
 
 ```rust
 pub struct ResumeContext { pub session: Session, pub capsule: Option<Capsule>,
@@ -2727,16 +2721,16 @@ impl Orchestrator {
    instructions use generic placeholders (`<home-ssh-target>`, `<session>`); `vowp setup control`
    and `vowp tunnel` on the control machine print the concrete target, so the home never needs to
    know an owner hostname. On opencode, the MCP server may be configured and `connected` but not
-   exposed to the model in v2.0.28 (S3; §16.20); the `AGENTS.md` template and join instructions
-   must not promise tool calls until F5/F6 re-test, and the tool-capable fallbacks are Claude Code
-   (after the owner approves `.mcp.json`) and `vowp chat`.
+   exposed to the model in v2.0.28 (§16.20); the `AGENTS.md` template and join instructions must
+   not promise tool calls until the host is re-tested with a real provider, and the tool-capable
+   fallbacks are Claude Code (after the owner approves `.mcp.json`) and `vowp chat`.
 3. `orchestrator ls` reads every `orchestrator.json` and returns `[OrchestratorCard]`;
    `orchestrator stop <name>` stops the host and releases the lease (the session stays);
    `orchestrator resume <name>` starts the host again. `NodeSupervisor::startup` calls
    `Orchestrator::resume_all`; a host that cannot start is marked `degraded` and does not fail the
    node startup.
-4. Dogfood moves the current DeepSeek orchestrator into this session seeded from the handoff file
-   and a capsule; that is an operational step (T5), not new code.
+4. A migration of the current DeepSeek orchestrator into this session is seeded from the handoff
+   file and a capsule; that is an operational step, not new code.
 
 ### 7.7 `vowp mcp`
 
@@ -2777,18 +2771,18 @@ tools refuse with the takeover notice.
 
 `initialize`, `notifications/initialized`, `tools/list`, `tools/call` and `ping` are implemented;
 unknown methods return JSON-RPC `-32601`. `server/discover` is answered with a valid empty
-capability or `-32601`; Claude Code tolerates the error (S3). A tool error is
+capability or `-32601`; Claude Code tolerates the error. A tool error is
 `{"isError":true,"content":[{"type":"text","text":"<kind>: <message>"}]}`. `secret_request` returns
 a one-time URL and expiry; it never returns a value. `session_resume` with a live lease and
 `takeover=false` returns the holder notice; with `takeover=true` it calls `surface::takeover`.
 
-**Availability caveat (S3, open).** A server can be loaded and report `connected` while the
-opencode v2.0.28 model request does not include its tools (S3's `vowp_spike_echo` was never in the
-`tools` array and was never called). `vowp mcp` therefore implements and tests the protocol, and
-the config/host writes the project-local server entry, but v0.2 does not promise that an opencode
-orchestrator can call those tools until F5/F6 re-test with a real provider (open assumption
-§16.20). Claude Code's path is proven after the one-time `.mcp.json` approval; `vowp chat` is the
-tool-free fallback.
+**Availability caveat (open).** A server can be loaded and report `connected` while the opencode
+v2.0.28 model request does not include its tools (a test MCP server was never in the `tools` array
+and was never called). `vowp mcp` therefore implements and tests the protocol, and the config/host
+writes the project-local server entry, but v0.2 does not promise that an opencode orchestrator can
+call those tools until the host is re-tested with a real provider (open assumption §16.20). Claude
+Code's path is proven after the one-time `.mcp.json` approval; `vowp chat` is the tool-free
+fallback.
 
 ### 7.8 What a surface may write
 
@@ -2922,9 +2916,9 @@ pub struct Tunnel {
 ### 8.4 Phone
 
 The phone needs an SSH app and the owner's key. It runs `vowp chat` on the home over SSH; no VOWP
-install, no browser, no public port. The docs guide (`docs/guides/phone.md`) is K3's job; the spec
-fixes the behaviour: the chat surface detects a narrow terminal, disables colour, wraps at 80
-columns, and supports `/takeover` and `/follow`.
+install, no browser, no public port. The docs guide (`docs/guides/phone.md`) covers the phone
+setup; the behaviour is fixed here: the chat surface detects a narrow terminal, disables colour,
+wraps at 80 columns, and supports `/takeover` and `/follow`.
 
 ---
 
@@ -3082,7 +3076,7 @@ vowp gc [--apply] [--class <class>] [--json] [--now <RFC3339>]   # --now for tes
 - `run_output`: delete after 14 days; gzip `.jsonl`/`.stderr` after 1 day (gzip in place, keep the
   name + `.gz` and a catalog row).
 - `sample`: delete 5 s rows older than 24 h; replace minute rows older than 30 days.
-- Nightly: H1 creates an L9 schedule `gc-nightly` with `every 24h`, action
+- Nightly: lifecycle GC creates an L9 schedule `gc-nightly` with `every 24h`, action
   `command ["vowp","gc","--apply"]`, bound to the project; the node supervisor runs it once per day.
 - `--json` `GcReport`:
 
@@ -3144,7 +3138,7 @@ vowp backup --restore <dir> --to-home <dir> [--force]
   `projects`. Opening it with `Store::open_path` gives an unbound global handle;
   `Store::schema_version()` reports the compatibility 1 while `global_schema_version()` reports 2,
   and `list_projects()` returns the registered projects. This is what keeps
-  `crates/vowp-cli/tests/maint.rs::backup_creates_openable_db` green without editing it.
+  `crates/vowp-cli/tests/maint.rs::backup_creates_openable_db` proves this.
 - `secrets/` is never backed up in plain text; the manifest says it was skipped, and `--encrypt`
   does not change that rule (a secret is restored by `vowp secret set`, not from a backup).
 - Restore writes a fresh home, runs `integrity_check` and the migration row-count checks, and
@@ -3182,7 +3176,7 @@ pub struct BackupFile { pub path: String, pub bytes: u64, pub kind: String }
 
 ### 11.1 The README prompt contract
 
-The README's first section is one copyable prompt, version-pinned (K1):
+The README's first section is one copyable prompt, version-pinned:
 
 ```text
 Set up VOWP <version> for me. Read
@@ -3191,7 +3185,7 @@ and follow it exactly. Ask me only what it tells you to ask, show me the full pl
 and run it after I approve. Never ask me to paste a secret into this chat.
 ```
 
-`docs/setup/agent-setup.md` (I0/I1) is the contract every harness follows: ask once; check without
+`docs/setup/agent-setup.md` is the contract every harness follows: ask once; check without
 changing; show the whole plan once; run `vowp setup home --target <ssh-target> --apply`, then
 `vowp setup control --apply`; stop for the human hand-offs; `vowp setup verify`; report. The commands
 do the real work, so the result does not depend on which harness runs the prompt.
@@ -3256,12 +3250,12 @@ The plan never contains a secret value, a token or a private key. `requires` ent
 Global flags, exit codes, id prefixes and error JSON are unchanged from `cli.md` §1. New commands
 follow the same rules: `--json` prints one document (lists print arrays), errors are
 `{"error":{"kind","message","hint?}}` and exit codes are the v0.1 table. A command that cannot run
-exits **1** with `not implemented in this build` only in C0; no final build ships a stub (the
-existing `no_command_returns_not_implemented` test is extended). `CliError::NotImplemented` is
-already mapped to `ErrorKind::Internal`/exit 1 by `crates/vowp-cli/src/errors.rs`, and
-`crates/vowp-cli/tests/core.rs` asserts that; this spec follows the code, so C0 needs neither
-`errors.rs` nor a change to the exit-mapping assertion. C0 does own `tests/core.rs` for the
-command-list expectation in §13.5.
+exits **1** with `not implemented in this build`; no release ships a stub, and the
+`no_command_returns_not_implemented` test covers it. `CliError::NotImplemented` is already mapped
+to `ErrorKind::Internal`/exit 1 by `crates/vowp-cli/src/errors.rs`, and
+`crates/vowp-cli/tests/core.rs` asserts that; this spec follows the code and does not change the
+exit-mapping assertion. `V0_2_COMMANDS` in §13.5 is the command list, and `tests/core.rs` asserts
+it.
 
 ### 12.1 New top-level commands
 
@@ -3297,7 +3291,7 @@ Hidden commands (not in `--help`): `__exec`, `__vault-exec`, `__vault-admin`,
 | `loops` | Loop rows are per project. `loops`/`loops pause/resume` use the selected project; with more than one project and no `--project`, exit 2 listing them. `loops --all` lists every project's rows with a project column. Provider `limits` stay global, so L6 state is per project but the limit row it writes is shared. |
 | `schedule` | Schedules are per project. `schedule add/ls/pause/resume/rm` use the selected project; `--all` lists every project's rows. A node-wide `[[schedules]]` is not supported in v0.2; the node-level L9 is the `gc-nightly` command schedule in each project. |
 | `node` | On control, reads `nodes.json`; on home, unchanged plus `host`-aware rows. `node add <name> -` registers a surface-only executor node (a laptop that dials the home; the home never dials it). |
-| `chat` | Changed, not new: v0.1 already has `chat` as an alias of `session chat`. F3 adds `--executor/--node/--follow/--takeover` and the lease/remote handler; `chat` stays in `V0_1_COMMANDS`, not `V0_2_COMMANDS`. |
+| `chat` | Changed, not new: v0.1 already has `chat` as an alias of `session chat`. v0.2 adds `--executor/--node/--follow/--takeover` and the lease/remote handler; `chat` stays in `V0_1_COMMANDS`, not `V0_2_COMMANDS`. |
 
 ### 12.3 `--json` shapes for the complex commands
 
@@ -3310,7 +3304,7 @@ Hidden commands (not in `--help`): `__exec`, `__vault-exec`, `__vault-admin`,
 **`fleet queue`** row:
 
 ```json
-{"project":"vowp","job":"v2-c0-skeleton","title":"Freeze interfaces","kind":"build","role":"worker","priority":99,"state":"ready","age_secs":60,"waiting_reason":"waiting: RAM 1.2 GB short"}
+{"project":"vowp","job":"interfaces","title":"Document the interfaces","kind":"build","role":"worker","priority":99,"state":"ready","age_secs":60,"waiting_reason":"waiting: RAM 1.2 GB short"}
 ```
 
 **`project ls`** row is `ProjectEntry`; **`project add/pause/resume/archive/weight`** print the
@@ -3401,13 +3395,13 @@ not a different code path. `session lease --acquire` prints the token once; a pl
 
 ---
 
-## 13. C0: frozen interfaces and exact hook points
+## 13. Frozen interfaces and exact hook points
 
-C0 creates every module below as a **compiling stub**. Stubs return the documented empty value or
-`CoreError::Invalid("not implemented in this build")` only inside command handlers; they never fake
-a passing test. Everything in this section is binding for C0 and for the feature jobs that fill it.
+The interfaces below are frozen for v0.2. The module names, types, signatures and hook points are
+binding; an implementation may not rename them. A command that is not implemented yet returns
+`CliError::NotImplemented("...")` and exit 1; no module fakes a passing test.
 
-### 13.1 Protocol modules (C0 creates, later jobs fill)
+### 13.1 Protocol modules
 
 - `vowp-protocol/src/capacity.rs` — all types in §6.1–§6.5 (`HostSample`, `SampleSource`,
   `RunUsage`, `UsageSource`, `UsageEstimate`, `EstimateSource`, `AdmitRequest`, `AdmitDecision`,
@@ -3430,13 +3424,12 @@ a passing test. Everything in this section is binding for C0 and for the feature
 - `vowp-protocol/src/event.rs` — `SessionRole::Orchestrator` and `SwitchReason::Takeover`
   (additive; update the wire-name tests). Both enums are defined in `event.rs` (lines around 40
   and 714); `session.rs` only re-exports `SessionRole` and imports `SwitchReason`, so do **not**
-  edit `session.rs` for these variants. C0's `owns` must name `crates/vowp-protocol/src/event.rs`.
+  edit `session.rs` for these variants.
 - `vowp-protocol/src/schema.rs` — add the new types to `all_schemas()`; add `snapshot`.
 
 Core-only helper types have explicit homes: `SamplerHandle` in `capacity/sampler.rs`,
 `ScopeSample`/`ProcFs` in `capacity/scope.rs`, `AdviceTrigger` in `capacity/advisor.rs`;
-`UsageQuery`/`EstimateKey` are store types in `vowp-store/src/repo_capacity.rs`. They are declared
-by C0 as stubs and filled by E1/E2/E3/C1.
+`UsageQuery`/`EstimateKey` are store types in `vowp-store/src/repo_capacity.rs`.
 
 All new **wire** types derive `Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema`; enums
 use `#[serde(rename_all = "snake_case")]`; timestamps are `Timestamp`. Internal decision/context
@@ -3452,50 +3445,51 @@ can derive the wire traits).
 pub mod surface; pub mod vault;` and re-exports the common types at the crate root (the CLI and core use
 `vowp_protocol::Snapshot` etc.). `vowp-core/src/lib.rs` gains `pub mod capacity; pub mod fleet; pub
 mod lifecycle; pub mod surface; pub mod vault;` plus re-exports; `vowp-core/src/session/mod.rs`
-gains `pub mod remote;`. C0 owns these `lib.rs`/`mod.rs` lines so later jobs never edit them.
+gains `pub mod remote;`. These `lib.rs`/`mod.rs` lines are the single declaration point for the
+modules.
 
-### 13.2 Core modules (C0 creates; owners in parentheses)
+### 13.2 Core modules
 
 ```
 vowp-core/src/
-  capacity/mod.rs            (C0)  pub mod {sampler,usage,estimates,scope,admit,brakes,targets,fair,advisor};
-                                   pub use admit::{CapacityManager, admit}; pub use ...
-    sampler.rs               (E1)  pub fn sample(deps, store, now) -> Result<Option<HostSample>, CoreError>;
-                                   pub fn sample_host(deps) -> Result<HostSample, CoreError>;
-    usage.rs                 (E1)  pub fn record(store, usage: &RunUsage) -> Result<(), CoreError>;
-    estimates.rs             (E1)  pub fn recompute(store, now) -> Result<u32, CoreError>;
-                                   pub fn estimate_for(store, req: &AdmitRequest) -> Result<UsageEstimate, CoreError>;
-    scope.rs                 (E1)  pub struct RunScope; pub fn begin(...); impl RunScope { sample, finish }
-    admit.rs                 (E2)  pub fn admit(deps, store, req) -> Result<AdmitDecision, CoreError>;
-                                   pub fn request_for(deps, store, job: &Job) -> Result<AdmitRequest, CoreError>;
-                                   pub struct CapacityManager;
-    brakes.rs                (E2)  pub fn evaluate(store, now) -> Result<BrakeState, CoreError>;
-    targets.rs               (E2)  pub fn current(store) -> Result<CapacityTarget, CoreError>;
-                                   pub fn set(store, mode, target, override_, by, reason, now) -> Result<CapacityTarget, CoreError>;
-    fair.rs                  (E2)  pub fn order(projects: &mut Vec<ProjectEntry>, last: Option<&ProjectName>);
-    advisor.rs               (E3)  pub fn maybe_advise(deps, store, now, trigger) -> Result<Option<CapacityAdvice>, CoreError>;
-  surface/mod.rs             (C0)  pub mod {lease,takeover,follow,orchestrator,native,opencode_host,claude_remote,mirror};
-                                   pub use lease::{LeaseGuard, check_lease}; pub use takeover::takeover;
-                                   pub fn sweep_leases(deps, store, now) -> Result<u32, CoreError>;
-    lease.rs                 (F2)  LeaseGuard, AcquireLease, new_lease_token
-    takeover.rs              (F2)  takeover; returns vowp_protocol::TakeoverReport (defined in surface.rs)
-    follow.rs                (F3)  follow
-    orchestrator.rs          (F4)  Orchestrator, NewOrchestrator, OrchestratorInfo
-    native.rs                (F5)  AppHost, HostRequest, AppHandle, HostHealth, TranscriptBatch, TranscriptEntry
-    opencode_host.rs         (F5)  OpencodeHost
-    claude_remote.rs         (F5)  ClaudeRemoteHost
-    mirror.rs                (F5)  MirrorCursor, MirrorReport, mirror_once
-  fleet/mod.rs               (C0/D1) Snapshot types, build_snapshot, write_snapshot, read_snapshot, node_tick
-  lifecycle/mod.rs           (C0/H1) pub mod {classes,gc,compact,backup}; pub fn tick(...)
-    classes.rs               (H1)  classify
-    gc.rs                    (H1)  GcOptions, gc
-    compact.rs               (H1)  compact_session
-    backup.rs                (H2)  backup, restore
-  vault/mod.rs               (C0/G1) env_for, redact_event, redact_text, redact_capsule,
-                                   redact_job_artifacts, Redactor, mode
-    request.rs               (G1)  request_secret, SecretRequestServer
-  session/remote.rs          (F1)  begin_turn, ingest_lines, BeginTurn, IngestGrant, IngestReport
-  session/mod.rs             (C0)  pub mod remote; re-export ResumeContext
+  capacity/mod.rs            pub mod {sampler,usage,estimates,scope,admit,brakes,targets,fair,advisor};
+                             pub use admit::{CapacityManager, admit}; pub use ...
+    sampler.rs               pub fn sample(deps, store, now) -> Result<Option<HostSample>, CoreError>;
+                             pub fn sample_host(deps) -> Result<HostSample, CoreError>;
+    usage.rs                 pub fn record(store, usage: &RunUsage) -> Result<(), CoreError>;
+    estimates.rs             pub fn recompute(store, now) -> Result<u32, CoreError>;
+                             pub fn estimate_for(store, req: &AdmitRequest) -> Result<UsageEstimate, CoreError>;
+    scope.rs                 pub struct RunScope; pub fn begin(...); impl RunScope { sample, finish }
+    admit.rs                 pub fn admit(deps, store, req) -> Result<AdmitDecision, CoreError>;
+                             pub fn request_for(deps, store, job: &Job) -> Result<AdmitRequest, CoreError>;
+                             pub struct CapacityManager;
+    brakes.rs                pub fn evaluate(store, now) -> Result<BrakeState, CoreError>;
+    targets.rs               pub fn current(store) -> Result<CapacityTarget, CoreError>;
+                             pub fn set(store, mode, target, override_, by, reason, now) -> Result<CapacityTarget, CoreError>;
+    fair.rs                  pub fn order(projects: &mut Vec<ProjectEntry>, last: Option<&ProjectName>);
+    advisor.rs               pub fn maybe_advise(deps, store, now, trigger) -> Result<Option<CapacityAdvice>, CoreError>;
+  surface/mod.rs             pub mod {lease,takeover,follow,orchestrator,native,opencode_host,claude_remote,mirror};
+                             pub use lease::{LeaseGuard, check_lease}; pub use takeover::takeover;
+                             pub fn sweep_leases(deps, store, now) -> Result<u32, CoreError>;
+    lease.rs                 LeaseGuard, AcquireLease, new_lease_token
+    takeover.rs              takeover; returns vowp_protocol::TakeoverReport (defined in surface.rs)
+    follow.rs                follow
+    orchestrator.rs          Orchestrator, NewOrchestrator, OrchestratorInfo
+    native.rs                AppHost, HostRequest, AppHandle, HostHealth, TranscriptBatch, TranscriptEntry
+    opencode_host.rs         OpencodeHost
+    claude_remote.rs         ClaudeRemoteHost
+    mirror.rs                MirrorCursor, MirrorReport, mirror_once
+  fleet/mod.rs               Snapshot types, build_snapshot, write_snapshot, read_snapshot, node_tick
+  lifecycle/mod.rs           pub mod {classes,gc,compact,backup}; pub fn tick(...)
+    classes.rs               classify
+    gc.rs                    GcOptions, gc
+    compact.rs               compact_session
+    backup.rs                backup, restore
+  vault/mod.rs               env_for, redact_event, redact_text, redact_capsule,
+                             redact_job_artifacts, Redactor, mode
+    request.rs               request_secret, SecretRequestServer
+  session/remote.rs          begin_turn, ingest_lines, BeginTurn, IngestGrant, IngestReport
+  session/mod.rs             pub mod remote; re-export ResumeContext
 ```
 
 The exact signatures:
@@ -3552,11 +3546,10 @@ impl Redactor {
 }
 ```
 
-### 13.3 Store repository stubs (C1)
+### 13.3 Store repository API
 
-C1 creates the schema files and these empty repository modules with these signatures (bodies may
-return `StoreError::InvalidInput("not implemented")` until the owning job fills them; the tables
-exist from day one):
+The store exposes these repository methods. The schema files and tables are described in §3; the
+methods below are the supported read/write surface:
 
 ```rust
 // repo_projects.rs
@@ -3632,38 +3625,37 @@ pub fn remove_secret_index(&self, name: &SecretName) -> Result<bool, StoreError>
 
 ### 13.4 Exact hook points
 
-These are the only lines C0 adds to files it does not otherwise own. Each is a no-op in C0 and
-keeps v0.1 behaviour exactly.
+These are the only lines the v0.2 features add to files the v0.1 code already owns. Each hook is a
+no-op when its feature is disabled, so the v0.1 path behaves exactly as before.
 
 1. **`crates/vowp-core/src/loops/supervisor.rs`, `Supervisor::tick`** — immediately after
    `let paused = self.store.kv_get("paused")?...;` and before `let mut steps = Vec::new();`:
 
    ```rust
-   // C0 hooks: node-level measure, lease sweep and lifecycle tick.
-   // C2 moves these three calls to NodeSupervisor::tick before the project loop.
+   // Node-level measure, lease sweep and lifecycle tick.
    let _ = crate::capacity::sample(&self.deps, &self.store, now);
    let _ = crate::surface::sweep_leases(&self.deps, &self.store, now);
    let _ = crate::lifecycle::tick(&self.deps, &self.store, now);
    ```
 
    `sweep_leases` also signals the active ingest writer with `IngestAck::LeaseRevoked` when a
-   takeover commits (S2); C0's no-op keeps v0.1 and F2 fills the push.
+   takeover commits. The no-op leaves v0.1 unchanged until the push is enabled.
 
 2. **`crates/vowp-core/src/loops/supervisor.rs`, `Supervisor::step_dispatch`** — after
    `let job = self.store.require_job(&choice.job_id)?;` and before `apply_with(...)`:
 
    ```rust
-   // C0 hook: capacity admission. C0 returns true (admit); E2 fills dispatch::admit.
+   // Capacity admission.
    if !dispatch::admit(&self.deps, &self.store, &job)? {
        continue;
    }
    ```
 
-   **`crates/vowp-core/src/loops/dispatch.rs`** gains the C0 stub (E2 owns the body):
+   **`crates/vowp-core/src/loops/dispatch.rs`** gains the hook:
 
    ```rust
    /// Returns false when the job must wait; writes the waiting reason to jobs.note.
-   /// C0 always returns true, which keeps v0.1 dispatch unchanged.
+   /// The no-op returns true, which keeps v0.1 dispatch unchanged.
    pub(crate) fn admit(deps: &Deps, store: &Store, job: &Job) -> Result<bool, CoreError>;
    ```
 
@@ -3671,7 +3663,7 @@ keeps v0.1 behaviour exactly.
    `let start_input = vowp_protocol::StartInput {`:
 
    ```rust
-   // C0 hook: inject exactly the configured secret names (G1 fills).
+   // Inject exactly the configured secret names.
    let mut start_env = self.start_env(&executor);
    start_env.extend(crate::vault::env_for(&self.deps, &req)?);
    ```
@@ -3682,7 +3674,7 @@ keeps v0.1 behaviour exactly.
    `append_capsule_event`** — immediately before `let appended = log.append(NewEvent {`:
 
    ```rust
-   // C0 hook: exact-value redaction before the log line exists (G1 fills).
+   // Exact-value redaction before the log line exists.
    let new_event = crate::vault::redact_event(&self.deps, NewEvent { /* the event */ })?;
    ```
 
@@ -3694,7 +3686,7 @@ keeps v0.1 behaviour exactly.
    finished and before `Ok(TurnResult { .. })`:
 
    ```rust
-   // C0 hook: redact job artifacts written by the harness (report.md, raw mirror) (G1 fills).
+   // Redact job artifacts written by the harness (report.md, raw mirror).
    let _ = crate::vault::redact_job_artifacts(&self.deps, &self.store, req.job_id.as_ref());
    ```
 
@@ -3706,7 +3698,7 @@ keeps v0.1 behaviour exactly.
    `CapsuleWriter::new(...).write(...)` returns:
 
    ```rust
-   // C0 hook: redact the capsule file and body row (G1 fills).
+   // Redact the capsule file and body row.
    let capsule = crate::vault::redact_capsule(&self.deps, &self.store, &capsule)?;
    ```
 
@@ -3714,7 +3706,7 @@ keeps v0.1 behaviour exactly.
    `ingest_lines`** — before any interactive input is accepted:
 
    ```rust
-   // C0 hook: a live lease must match VOWP_LEASE_TOKEN (F2 fills).
+   // A live lease must match VOWP_LEASE_TOKEN.
    crate::surface::check_lease(&self.deps, &self.store, &req.session_id)?;
    ```
 
@@ -3726,31 +3718,31 @@ keeps v0.1 behaviour exactly.
    immediately before `steps.push(self.step("board", |this| this.step_board(now)));`:
 
    ```rust
-   // C0 hook: node snapshot after the project steps. C2 moves it after the project loop.
+   // Node snapshot after the project steps.
    let _ = crate::fleet::write_snapshot(&self.deps, &self.store, now);
    ```
 
    `fleet::node_tick` (§13.2) is a convenience wrapper with the same four calls in the same order
-   (three at the top, snapshot at the end); C2 may call it once instead of the four lines. C0's
-   bodies are no-ops.
+   (three at the top, snapshot at the end); a caller may use it once instead of the four lines.
+   The hook bodies are no-ops until their features are enabled.
 
-### 13.5 CLI stubs and the `cli.rs` freeze (C0)
+### 13.5 CLI command surface and the `cli.rs` freeze
 
-`crates/vowp-cli/src/cli.rs` is C0-owned, and it is the one place where every command variant and
-every flag is declared. C0 adds, in the same commit as the stubs:
+`crates/vowp-cli/src/cli.rs` is the one place where every command variant and every flag is
+declared. It adds:
 
 - the new top-level commands `project`, `fleet`, `capacity`, `secret`, `gc`, `tunnel`, `setup`,
   `control`, `orchestrator`, `migrate`, `mcp`, and the hidden `__exec`, `__vault-exec`,
-  `__vault-admin` (handlers in `cmd/{exec,secret}.rs`; G1/F1 fill them);
-- the hidden `SessionCommand` variants `TurnBegin` and `Ingest` (handlers in `cmd/session.rs`, F1)
-  and `Lease` and `Takeover` (handlers in the new `cmd/lease.rs`, F2);
+  `__vault-admin` (handlers in `cmd/{exec,secret}.rs`);
+- the hidden `SessionCommand` variants `TurnBegin` and `Ingest` (handlers in `cmd/session.rs`)
+  and `Lease` and `Takeover` (handlers in the new `cmd/lease.rs`);
 - the new/changed flags on existing commands: `ChatArgs` (`--executor/--node/--follow/--takeover`),
   `BackupArgs` (`--to/--offsite/--encrypt/--restore/--to-home`), `SchemaArgs` (`snapshot`),
   `LoopsArgs` (`--all`), `ScheduleArgs` (`--all`), `InitArgs`/`DoctorArgs` (project/doctor checks),
   and `WindowArgs` (the `capacity` kind);
 - a new `cmd/schema.rs` and its dispatch, moving the `schema` command out of `cmd/maint.rs`, so
-  D1's `vowp schema snapshot` has an owned file (H2 keeps `backup`/`reindex` in `maint.rs`);
-- `vowp-protocol/src/schema.rs` to C0's owns for `all_schemas()`.
+  `vowp schema snapshot` has its own file (`maint.rs` keeps `backup`/`reindex`);
+- `all_schemas()` in `vowp-protocol/src/schema.rs`.
 
 `V0_2_COMMANDS` is the exact list of new **top-level** clap names, hidden ones included because
 `Cli::command().get_subcommands()` enumerates hidden subcommands (the v0.1 `__window` already proves
@@ -3765,10 +3757,9 @@ pub const V0_2_COMMANDS: &[&str] = &[
 ];
 ```
 
-`crates/vowp-cli/tests/core.rs::help_lists_every_v0_1_command` currently asserts that the set of
-clap subcommands equals `V0_1_COMMANDS`. C0 owns that test for this one change and makes the
-expectation `V0_1_COMMANDS ∪ V0_2_COMMANDS`; the help-text loop skips names starting with `__`
-(instead of only `__window`):
+`crates/vowp-cli/tests/core.rs::help_lists_every_v0_1_command` asserts that the set of clap
+subcommands equals `V0_1_COMMANDS`. v0.2 extends the expectation to `V0_1_COMMANDS ∪
+V0_2_COMMANDS`; the help-text loop skips names starting with `__` (instead of only `__window`):
 
 ```rust
 let mut expected: Vec<String> = V0_1_COMMANDS
@@ -3787,33 +3778,32 @@ for command in V0_1_COMMANDS
 ```
 
 The test keeps its name `help_lists_every_v0_1_command` (renaming is optional); the cross-cutting
-`help_lists_every_command` in §15 is this same assertion after the final wave. No other test
+`help_lists_every_command` in §15 is the same assertion over the full command set. No other test
 enumerates the whole command list: `vowp-cli/tests/maint.rs` iterates only the v0.1 dry-invocation
 list and is unaffected.
 
 The command files:
 
 ```text
-cmd/project.rs      ProjectArgs { command: ProjectCommand }            (C0 stub; C2)
-cmd/fleet.rs        FleetArgs { command: FleetCommand }                (C0 stub; D1)
-cmd/capacity.rs     CapacityArgs { command: CapacityCommand }          (C0 stub; E2)
-cmd/secret.rs       SecretArgs { command: SecretCommand }              (C0 stub; G1)
-cmd/gc.rs           GcArgs { apply, class, now }                       (C0 stub; H1)
-cmd/tunnel.rs       TunnelArgs { command: TunnelCommand }              (C0 stub; D2)
-cmd/setup.rs        SetupArgs { command: SetupCommand }                (C0 stub; I1)
-cmd/control.rs      ControlArgs { command: ControlCommand }            (C0 stub; D2)
-cmd/orchestrator.rs OrchestratorArgs { command: OrchestratorCommand }  (C0 stub; F4)
-cmd/migrate.rs      MigrateArgs { dry_run, rollback, yes }             (C0 stub; C2)
-cmd/exec.rs         ExecArgs { grant: PathBuf, spool_dir: Option<PathBuf> } (C0 stub; F1)
-cmd/mcp.rs          McpArgs { session, surface, token_file }           (C0 stub; F6)
-cmd/lease.rs        LeaseArgs/TakeoverArgs (hidden)                    (C0 stub; F2)
-cmd/schema.rs       SchemaArgs { command }                             (C0 stub; D1)
+cmd/project.rs      ProjectArgs { command: ProjectCommand }
+cmd/fleet.rs        FleetArgs { command: FleetCommand }
+cmd/capacity.rs     CapacityArgs { command: CapacityCommand }
+cmd/secret.rs       SecretArgs { command: SecretCommand }
+cmd/gc.rs           GcArgs { apply, class, now }
+cmd/tunnel.rs       TunnelArgs { command: TunnelCommand }
+cmd/setup.rs        SetupArgs { command: SetupCommand }
+cmd/control.rs      ControlArgs { command: ControlCommand }
+cmd/orchestrator.rs OrchestratorArgs { command: OrchestratorCommand }
+cmd/migrate.rs      MigrateArgs { dry_run, rollback, yes }
+cmd/exec.rs         ExecArgs { grant: PathBuf, spool_dir: Option<PathBuf> }
+cmd/mcp.rs          McpArgs { session, surface, token_file }
+cmd/lease.rs        LeaseArgs/TakeoverArgs (hidden)
+cmd/schema.rs       SchemaArgs { command }
 ```
 
-`cmd/session.rs` is **C0-owned for the dispatch and reason stubs**, then F1/F3 own the handlers.
-The file's `SessionCommand::run` match is exhaustive over the enum, so adding the four variants
-without touching it cannot compile. C0 adds exactly these dispatch arms (plus the `reason_name` arm
-below):
+`cmd/session.rs` holds the dispatch and reason arms. The file's `SessionCommand::run` match is
+exhaustive over the enum, so adding the four variants requires updating it. It adds
+exactly these dispatch arms (plus the `reason_name` arm below):
 
 ```rust
 SessionCommand::TurnBegin(_) | SessionCommand::Ingest(_) => {
@@ -3823,16 +3813,14 @@ SessionCommand::Lease(args) => crate::cmd::lease::lease(ctx, io, args),
 SessionCommand::Takeover(args) => crate::cmd::lease::takeover(ctx, io, args),
 ```
 
-`cmd/lease.rs` is C0's stub with `pub fn lease(..)` and `pub fn takeover(..)`, both returning
-`NotImplemented`; F2 fills them without touching `cmd/session.rs`. F1 replaces the
-`TurnBegin`/`Ingest` arm with the handlers; F3 then edits the rest of the file in its wave. C0 also
-adds the missing `SwitchReason::Takeover => "takeover"` arm to the private `reason_name` match
+`cmd/lease.rs` declares `pub fn lease(..)` and `pub fn takeover(..)`; until the handlers exist they
+return `NotImplemented`. `cmd/session.rs` also adds the missing
+`SwitchReason::Takeover => "takeover"` arm to the private `reason_name` match
 (`cmd/session.rs:421-430`), which has no wildcard. `parse_reason` is a string match and needs no
 change; `takeover` is not a user-supplied `session switch --reason`.
 
-Every new handler returns `CliError::NotImplemented("...")` and **exit 1** in C0 (the current
-`errors.rs` mapping; no unowned file edit). No feature job re-adds a command; it fills the existing
-file.
+Every unimplemented handler returns `CliError::NotImplemented("...")` and **exit 1** (the current
+`errors.rs` mapping). A later change fills the existing file; it never re-adds a command.
 
 ### 13.6 CLI support types
 
@@ -3884,85 +3872,82 @@ helper.
 
 The two additive enum variants are in `crates/vowp-protocol/src/event.rs`:
 `SessionRole::Orchestrator` and `SwitchReason::Takeover`. They require updating exhaustive matches
-in `vowp-core` and tests. C0 owns both the `event.rs` edit and
-`crates/vowp-core/src/session/switch.rs` (recorded in §14.1), so it updates the match arms that the
-compiler points at without crossing its `owns`. The new arms are behaviour-preserving
-(`Orchestrator` behaves like `User` for session selection; `Takeover` maps to the existing takeover
-switch path and is rejected by `session switch` unless the surface holds the lease). Known
-exhaustive sites: `vowp-core/src/session/switch.rs::run_role` (add `Orchestrator` to the
-`Worker | User` arm) and `vowp-cli/src/cmd/session.rs::reason_name` (add
-`SwitchReason::Takeover => "takeover"`). Both files are in C0's §14.1 owns for exactly these arms;
-F1/F3 then fill the session handlers.
+in `vowp-core` and tests. The `event.rs` edit and
+`crates/vowp-core/src/session/switch.rs` (recorded in §14.1) update the match arms the compiler
+points at. The new arms are behaviour-preserving (`Orchestrator` behaves like `User` for session
+selection; `Takeover` maps to the existing takeover switch path and is rejected by `session switch`
+unless the surface holds the lease). Known exhaustive sites: `crates/vowp-core/src/session/switch.rs::run_role`
+(add `Orchestrator` to the `Worker | User` arm) and `crates/vowp-cli/src/cmd/session.rs::reason_name`
+(add `SwitchReason::Takeover => "takeover"`). Both files are in the §14.1 ownership map for exactly
+these arms.
 
 ---
 
-## 14. Module map for the feature jobs
+## 14. Module map
 
-| Job | Creates/fills |
+The table records where each part of the v0.2 design lives. The listed files are the module home
+for that area; a change to one of them changes the contract described in this document.
+
+| Area | Files |
 |---|---|
-| C0 | `cli.rs`, `cmd/mod.rs`, `cmd/schema.rs` (new), `cmd/session.rs` (dispatch/reason stubs only), `cmd/window.rs` (the `capacity` arm/stub), `vowp-protocol/src/schema.rs`, `vowp-protocol/src/event.rs` (the two enum variants), `vowp-cli/tests/core.rs` (the V0_2 expectation), and the new stub files listed in §13.5. `vowp-core/src/deps.rs` moved to C1 (§14.1). |
-| C2 | `loops/supervisor.rs` (`NodeSupervisor`), `loops/mod.rs`, `loops/reconcile.rs`, `cmd/up.rs`, `cmd/project.rs`, `cmd/migrate.rs`, `cmd/init.rs`, `cmd/loops.rs`, `cmd/schedule.rs`, `node_ctx.rs`, `scripts/vowp.service`, `framework/templates/scripts/vowp.service`, tests `loops_supervisor.rs`, `node_supervisor.rs`, `up.rs` |
-| F1 | `session/{service,switch,remote}.rs`, `cmd/{exec,session}.rs`, `ssh_stream.rs`, tests `session_run.rs`, `switch.rs`, `remote_exec.rs`, `session.rs` |
-| E1 | `capacity/{sampler,usage,estimates,scope}.rs`, `repo_capacity.rs`, `vowp-adapters/src/proc/mod.rs`, `gates/cmd.rs`, `capacity_measure.rs` |
-| D1 | `fleet/**`, `ledger/board.rs`, `cmd/{fleet,status,board,doctor,schema}.rs`, `fleet_snapshot.rs`, `status.rs`, `board.rs` |
-| D2 | `ctx.rs`, `remote.rs`, `cmd/{control,tunnel,node}.rs`, `remote.rs`, `control.rs` |
-| G1 | `vault/**`, `cmd/secret.rs`, `vault.rs` |
-| H1 | `lifecycle/{mod,classes,gc,compact}.rs`, `repo_catalog.rs`, `cmd/gc.rs`, `lifecycle.rs` |
-| H2 | `lifecycle/backup.rs`, `cmd/maint.rs` (backup/reindex only; `schema` moved to D1), `maint.rs` |
-| F2 | `surface/{lease,takeover}.rs`, `repo_surfaces.rs`, `cmd/lease.rs` (new; `session lease/takeover`), `surface_lease.rs` |
-| E2 | `capacity/{admit,brakes,targets,fair}.rs`, `loops/dispatch.rs`, `cmd/capacity.rs`, `capacity_admit.rs` |
-| F5 | `surface/{native,opencode_host,claude_remote,mirror}.rs`, `session/importer.rs`, `app_hosts.rs`, `mirror.rs` |
-| F6 | `cmd/mcp.rs`, `mcp/**`, `mcp.rs` |
-| F3 | `cmd/session.rs`, `chat/**`, `surface/follow.rs`, `session.rs`, `chat.rs` |
-| E3 | `capacity/advisor.rs`, `framework/skills/vowp-capacity-advisor/**`, `framework.rs`, `capacity_advisor.rs` |
-| F4 | `surface/orchestrator.rs`, `cmd/orchestrator.rs`, `framework/skills/vowp-orchestrator/**`, `framework/templates/ORCHESTRATOR.md`, `framework.rs`, `orchestrator.rs` |
-| I1 | `cmd/setup.rs`, `setup/**`, `scripts/install.sh`, `setup.rs` |
-| I1b | `setup/verify.rs`, `setup_verify.rs` |
+| Protocol types and CLI surface | `crates/vowp-protocol/src/{capacity,catalog,event,ops,schema,snapshot,surface,vault}.rs`; `crates/vowp-cli/src/cli.rs`, `cmd/mod.rs`, `cmd/schema.rs`, `cmd/session.rs` (dispatch/reason arms), `cmd/window.rs` (the `capacity` arm), `tests/core.rs` |
+| Node supervisor and project registry | `crates/vowp-core/src/loops/{supervisor,mod,reconcile}.rs`; `crates/vowp-cli/src/cmd/{up,project,migrate,init,loops,schedule}.rs`, `node_ctx.rs`; `scripts/vowp.service`, `framework/templates/scripts/vowp.service`; tests `loops_supervisor.rs`, `node_supervisor.rs`, `up.rs` |
+| Sessions and remote execution | `crates/vowp-core/src/session/{service,switch,remote}.rs`; `crates/vowp-cli/src/cmd/{exec,session}.rs`, `ssh_stream.rs`; tests `session_run.rs`, `switch.rs`, `remote_exec.rs`, `session.rs` |
+| Capacity measurement | `crates/vowp-core/src/capacity/{sampler,usage,estimates,scope}.rs`, `crates/vowp-store/src/repo_capacity.rs`, `crates/vowp-adapters/src/proc/mod.rs`, `crates/vowp-core/src/gates/cmd.rs`; tests `capacity_measure.rs` |
+| Snapshot and fleet | `crates/vowp-core/src/fleet/**`, `crates/vowp-core/src/ledger/board.rs`; `crates/vowp-cli/src/cmd/{fleet,status,board,doctor,schema}.rs`; tests `fleet_snapshot.rs`, `status.rs`, `board.rs` |
+| Control machine and tunnels | `crates/vowp-cli/src/{ctx,remote}.rs`, `cmd/{control,tunnel,node}.rs`; tests `remote.rs`, `control.rs` |
+| Secrets and vault | `crates/vowp-core/src/vault/**`; `crates/vowp-cli/src/cmd/secret.rs`; tests `vault.rs` |
+| Lifecycle and GC | `crates/vowp-core/src/lifecycle/{mod,classes,gc,compact}.rs`, `crates/vowp-store/src/repo_catalog.rs`; `crates/vowp-cli/src/cmd/gc.rs`; tests `lifecycle.rs` |
+| Backup and restore | `crates/vowp-core/src/lifecycle/backup.rs`; `crates/vowp-cli/src/cmd/maint.rs` (backup/reindex; `schema` lives in `cmd/schema.rs`); tests `maint.rs` |
+| Surfaces, leases and takeover | `crates/vowp-core/src/surface/{lease,takeover}.rs`, `crates/vowp-store/src/repo_surfaces.rs`; `crates/vowp-cli/src/cmd/lease.rs`; tests `surface_lease.rs` |
+| Capacity admission and brakes | `crates/vowp-core/src/capacity/{admit,brakes,targets,fair}.rs`, `crates/vowp-core/src/loops/dispatch.rs`; `crates/vowp-cli/src/cmd/capacity.rs`; tests `capacity_admit.rs` |
+| App hosts and mirror | `crates/vowp-core/src/surface/{native,opencode_host,claude_remote,mirror}.rs`, `crates/vowp-core/src/session/importer.rs`; tests `app_hosts.rs`, `mirror.rs` |
+| MCP server | `crates/vowp-cli/src/cmd/mcp.rs`, `crates/vowp-cli/src/mcp/**`; tests `mcp.rs` |
+| Chat fallback | `crates/vowp-cli/src/cmd/session.rs`, `crates/vowp-cli/src/chat/**`, `crates/vowp-core/src/surface/follow.rs`; tests `session.rs`, `chat.rs` |
+| Capacity advisor | `crates/vowp-core/src/capacity/advisor.rs`, `framework/skills/vowp-capacity-advisor/**`; tests `framework.rs`, `capacity_advisor.rs` |
+| Orchestrators | `crates/vowp-core/src/surface/orchestrator.rs`; `crates/vowp-cli/src/cmd/orchestrator.rs`, `framework/skills/vowp-orchestrator/**`, `framework/templates/ORCHESTRATOR.md`; tests `framework.rs`, `orchestrator.rs` |
+| Setup | `crates/vowp-cli/src/cmd/setup.rs`, `crates/vowp-cli/src/setup/**`, `scripts/install.sh`; tests `setup.rs` |
+| Setup verification | `crates/vowp-cli/src/setup/verify.rs`; tests `setup_verify.rs` |
 
-### 14.1 Ownership extensions required by this spec
+### 14.1 File ownership map
 
-The v0.2 card `owns` lists were written before the interfaces below were frozen. The supervisor must
-extend them (this spec cannot edit the private plan) before the named jobs start; a job must never
-edit one of these paths silently. **Where this table differs from the §13.3 card `owns`, this table
-supersedes the card wording.** In particular `cmd/session.rs`, `cmd/window.rs` and
-`vowp-cli/tests/core.rs` are C0 paths here although the card does not list them, and
-`vowp-core/src/deps.rs` is C1's although the card lists it under C0; without those changes C0
-cannot compile or pass the workspace tests, and C1 cannot make `Deps::open_store` split-aware.
+The table records where each frozen interface lives. A change to a path below changes the contract
+in this section; keep the edit in that file and update this document with it.
 
-| Path | Owner | Why |
+| Path | Area | Why |
 |---|---|---|
-| `crates/vowp-cli/src/cli.rs` | C0 | Every new top-level variant and every changed `*Args` flag, including the hidden `SessionCommand::{TurnBegin,Ingest,Lease,Takeover}`, `__vault-exec` and `__vault-admin`; F1/F2/F3/G1 only fill handlers. |
-| `crates/vowp-cli/src/cmd/mod.rs` | C0 | Declares `schema`, `lease` and the other new modules. |
-| `crates/vowp-cli/src/cmd/schema.rs` | C0 stub, D1 fills | `vowp schema snapshot`; moved out of `cmd/maint.rs` so H2 and D1 do not share a file. |
-| `crates/vowp-protocol/src/schema.rs` | C0 | `all_schemas()` must include `Snapshot` and the new types. |
-| `crates/vowp-protocol/src/ops.rs` | C0 | `FleetStatus`, `FleetQueueRow`, `Tunnel`, `MigrationReport`, `MigrationCount`; one module home for the control-plane DTOs. |
-| `crates/vowp-protocol/src/event.rs` | C0 | `SessionRole::Orchestrator` and `SwitchReason::Takeover` are defined here, not in `session.rs`. |
-| `crates/vowp-cli/src/cmd/session.rs` | C0 (dispatch/reason stubs), then F1/F3 | `SessionCommand::run` is an exhaustive match over the enum: C0 adds the four arms from §13.5 (TurnBegin/Ingest return NotImplemented; Lease/Takeover call the `cmd/lease.rs` stubs) and the missing `SwitchReason::Takeover => "takeover"` arm in `reason_name`. F1 fills TurnBegin/Ingest, F2 fills `cmd/lease.rs`, F3 fills the rest. Without this C0 cannot compile. |
-| `crates/vowp-cli/src/cmd/window.rs` | C0 (arm/stub), then E2 | `vowp __window capacity` is required by §4.4/§12.5 but the v0.1 match rejects every kind except board/supervisor/planner/keeper/inbox/job. C0 adds `"capacity"` as an accepted kind returning NotImplemented; E2 replaces it with the `capacity show` renderer. |
-| `crates/vowp-cli/tests/core.rs` | C0 | `help_lists_every_v0_1_command` enumerates every clap subcommand and compares it to `V0_1_COMMANDS`; C0 extends the expectation to `V0_1_COMMANDS ∪ V0_2_COMMANDS` (§13.5) and filters hidden names from the help-text loop. Without this the 14 new top-level names make the test fail. |
-| `crates/vowp-core/src/deps.rs` | C1 | The `open_store()` binding in §3.8. The signature does not change; the body needs C1's `Store` constructors and the `_node` fallback. C0 leaves the v0.1 `Store::open(...).with_clock(...)` line untouched so C0 compiles before C1 merges. |
-| `crates/vowp-protocol/src/ids.rs` | C1 | `ProjectName::parse` accepts exactly the reserved literal `_node`; every other leading underscore stays invalid. Needed by the `_node` DB and the migration; `project add`/`init` still refuse `_node`. |
-| `crates/vowp-core/src/session/switch.rs` | C0 | The exhaustive `SessionRole::Orchestrator` match arm required by the additive enum; without it the workspace cannot compile after C0. |
-| `crates/vowp-cli/src/cmd/init.rs` | C2 | `init` creates the project DB and `_node`, and registers the project. |
-| `crates/vowp-cli/src/cmd/loops.rs` | C2 | Loop rows are per project; `--all` and the project selection. |
-| `crates/vowp-cli/src/cmd/schedule.rs` | C2 | Schedules are per project; `--all` and the project selection. |
-| `crates/vowp-cli/src/cmd/doctor.rs` | D1 | Projects, snapshot and schema checks; G1 supplies `vault::mode`, no doctor edit. |
-| `crates/vowp-cli/src/cmd/lease.rs` | C0 stub, then F2 | `session lease` and `session takeover` handlers (`lease(..)`, `takeover(..)`); the C0 dispatch arms in `cmd/session.rs` call these stubs, so F2 fills only this file. |
-| `crates/vowp-cli/src/cmd/maint.rs` | H2 | Keeps `backup`/`reindex`; the `schema` handler moves to D1's new file. |
+| `crates/vowp-cli/src/cli.rs` | CLI surface | Every new top-level variant and every changed `*Args` flag, including the hidden `SessionCommand::{TurnBegin,Ingest,Lease,Takeover}`, `__vault-exec` and `__vault-admin`. |
+| `crates/vowp-cli/src/cmd/mod.rs` | CLI modules | Declares `schema`, `lease` and the other new modules. |
+| `crates/vowp-cli/src/cmd/schema.rs` | CLI schema | `vowp schema snapshot`; kept out of `cmd/maint.rs` so maintenance and schema changes do not share a file. |
+| `crates/vowp-protocol/src/schema.rs` | Protocol schema | `all_schemas()` must include `Snapshot` and the new types. |
+| `crates/vowp-protocol/src/ops.rs` | Control-plane DTOs | `FleetStatus`, `FleetQueueRow`, `Tunnel`, `MigrationReport`, `MigrationCount`; one module home for the control-plane DTOs. |
+| `crates/vowp-protocol/src/event.rs` | Protocol events | `SessionRole::Orchestrator` and `SwitchReason::Takeover` are defined here, not in `session.rs`. |
+| `crates/vowp-cli/src/cmd/session.rs` | Session CLI | `SessionCommand::run` is an exhaustive match over the enum: the four arms from §13.5 (TurnBegin/Ingest return NotImplemented; Lease/Takeover call the `cmd/lease.rs` functions) and the missing `SwitchReason::Takeover => "takeover"` arm in `reason_name`. The match must stay exhaustive. |
+| `crates/vowp-cli/src/cmd/window.rs` | tmux windows | `vowp __window capacity` is required by §4.4/§12.5 but the v0.1 match rejects every kind except board/supervisor/planner/keeper/inbox/job. It adds `"capacity"` as an accepted kind and renders `capacity show`. |
+| `crates/vowp-cli/tests/core.rs` | CLI tests | `help_lists_every_v0_1_command` enumerates every clap subcommand and compares it to `V0_1_COMMANDS`; v0.2 extends the expectation to `V0_1_COMMANDS ∪ V0_2_COMMANDS` (§13.5) and filters hidden names from the help-text loop. Without this the 14 new top-level names make the test fail. |
+| `crates/vowp-core/src/deps.rs` | Store binding | The `open_store()` binding in §3.8. The signature does not change; the body needs the new `Store` constructors and the `_node` fallback. |
+| `crates/vowp-protocol/src/ids.rs` | Project names | `ProjectName::parse` accepts exactly the reserved literal `_node`; every other leading underscore stays invalid. Needed by the `_node` DB and the migration; `project add`/`init` still refuse `_node`. |
+| `crates/vowp-core/src/session/switch.rs` | Switch protocol | The exhaustive `SessionRole::Orchestrator` match arm required by the additive enum. |
+| `crates/vowp-cli/src/cmd/init.rs` | Project registry | `init` creates the project DB and `_node`, and registers the project. |
+| `crates/vowp-cli/src/cmd/loops.rs` | Project loops | Loop rows are per project; `--all` and the project selection. |
+| `crates/vowp-cli/src/cmd/schedule.rs` | Project schedules | Schedules are per project; `--all` and the project selection. |
+| `crates/vowp-cli/src/cmd/doctor.rs` | Diagnostics | Projects, snapshot and schema checks; `vault::mode` supplies the secrets mode, so `doctor` itself does not read a secret. |
+| `crates/vowp-cli/src/cmd/lease.rs` | Session CLI | `session lease` and `session takeover` handlers (`lease(..)`, `takeover(..)`); the dispatch arms in `cmd/session.rs` call these functions. |
+| `crates/vowp-cli/src/cmd/maint.rs` | Maintenance | Keeps `backup`/`reindex`; the `schema` handler lives in `cmd/schema.rs`. |
 
-`crates/vowp-cli/src/errors.rs` is **not** extended: C0 stubs exit 1 through the existing
-`NotImplemented` mapping, which `tests/core.rs` already asserts. `tests/core.rs` itself is
-C0-owned only for the command-list expectation above; no other test edit is needed.
+`crates/vowp-cli/src/errors.rs` is **not** extended: unimplemented handlers exit 1 through the
+existing `NotImplemented` mapping, which `tests/core.rs` already asserts. `tests/core.rs` itself
+changes only for the command-list expectation above; no other test edit is needed.
 
 ---
 
-## 15. Named tests per feature
+## 15. Named tests per area
 
 Every test is hermetic: temporary `VOWP_HOME`, private `TMUX_TMPDIR` + `tmux -L`, fake adapters,
 fake SSH, fake apps; no network, no real harness. A test that cannot fail if the feature is wrong
 is not allowed.
 
-**C1 store split**
+**Store split and migration**
 `global_schema_loads_and_matches_enums`, `project_schema_loads_and_matches_enums`,
 `global_and_project_schemas_share_no_application_table_names`,
 `store_binds_global_plus_exactly_one_project`, `two_project_handles_never_shadow_each_other`,
@@ -3980,24 +3965,23 @@ is not allowed.
 `real_bound_handle_never_rebinds`. The v0.1 compatibility gate is the six test files/tests in §3.8,
 run unmodified: `cargo test -p vowp-core --test deps --test session_run --test capsule --test
 switch_drain --test bundle`. `crates/vowp-store/tests/misc.rs::fk_cascade_project_delete` is
-rewritten by C1 (it tests a cross-project `ON DELETE CASCADE` that no longer exists) as
-`project_delete_keeps_other_projects_rows`. `misc.rs::backup_produces_openable_copy` is updated to
-the split backup unit (the legacy `--to *.db` form is a global-only copy by §10.3, so it asserts the
+replaced by `project_delete_keeps_other_projects_rows` (the old test asserts a cross-project
+`ON DELETE CASCADE` that no longer exists). `misc.rs::backup_produces_openable_copy` covers the
+split backup unit (the legacy `--to *.db` form is a global-only copy by §10.3, so it asserts the
 global rows there and the job/ledger rows in the copied project DB). No other store test assumes
 one DB for two projects. The store-test fixtures that write project-scoped rows without a project
 row in v0.1 add the `upsert_project` call the other fixtures already have
 (`vowp-store/tests/loops.rs`), or are rewritten for the one-bound-project rule:
-`vowp-store/tests/ledger.rs` writes `proj`, `alpha` and `beta` on one store, so C1 opens one store
+`vowp-store/tests/ledger.rs` writes `proj`, `alpha` and `beta` on one store, so it opens one store
 per project (or writes `node_ledger` with `project = None`) and updates the expected totals.
-`vowp-store/tests/migrate.rs::open_creates_schema_version_1` still asserts the 19 v0.1 tables in
-`vowp.db` and expects `insert_run` to raise an FK error on an unbound store; C1 rewrites it to
-assert the global v2 schema in `vowp.db`, the project v1 schema in a created project DB, and an
-`insert_run` failure that is `NoProject` on the unbound handle. C1 owns all three files. No
-`vowp-core` or `vowp-cli` test outside the §3.8 table needs an edit: their fixtures either
-`upsert_project` (`TestEnv`, `gates_support`, `promote_support`, the scheduler fixture) or rely on
-the `_node` fallback.
+`vowp-store/tests/migrate.rs::open_creates_schema_version_1` asserted the 19 v0.1 tables in
+`vowp.db` and expected `insert_run` to raise an FK error on an unbound store; the v0.2 test
+asserts the global v2 schema in `vowp.db`, the project v1 schema in a created project DB, and an
+`insert_run` failure that is `NoProject` on the unbound handle. No `vowp-core` or `vowp-cli` test
+outside the §3.8 table needs an edit: their fixtures either `upsert_project` (`TestEnv`,
+`gates_support`, `promote_support`, the scheduler fixture) or rely on the `_node` fallback.
 
-**C2 node supervisor**
+**Node supervisor and projects**
 `one_supervisor_runs_two_projects_round_robin`, `deps_open_store_uses_the_project_config`,
 `broken_project_pauses_alone_and_others_tick`,
 `project_pause_lets_running_work_finish`, `project_resume_clears_broken_reason`,
@@ -4007,27 +3991,27 @@ the `_node` fallback.
 `tmux_home_and_project_layout`, `status_and_board_show_every_project`,
 `node_supervisor_restart_reconciles_cross_db`.
 
-**D1 snapshot/fleet**
+**Snapshot and fleet**
 `snapshot_json_validates_against_exported_schema`, `snapshot_written_atomically_every_tick`,
 `snapshot_reader_never_sees_partial_json`, `fleet_status_reads_fresh_snapshot_or_recomputes`,
 `fleet_status_json_keeps_v01_status_keys`, `fleet_queue_includes_waiting_reason`,
 `fleet_inbox_merges_node_and_project`, `board_json_compat_with_one_project`,
 `schema_snapshot_exports_versioned_schema`.
 
-**D2 control**
+**Control machine and tunnels**
 `control_init_writes_control_json`, `control_routes_status_over_fake_ssh`,
 `control_cache_serves_as_of_when_home_down`, `control_write_never_uses_cache`,
 `up_refuses_on_control`, `tunnel_open_records_pid_and_port`, `tunnel_close_kills_group`,
 `tunnel_refuses_privileged_port_without_flag`, `tunnel_list_cleans_dead_pid`.
 
-**E1 measure**
+**Capacity measurement**
 `sampler_parses_proc_meminfo_load_and_pressure`, `sampler_degrades_on_non_linux`,
 `scope_reads_cgroup_memory_peak`, `scope_records_anon_file_kernel_and_cpu_usec`,
 `scope_falls_back_to_process_tree`, `run_usage_written_for_adapter_and_gate`,
 `build_mode_cold_warm_split`, `estimates_use_exact_group_then_pool_then_default`,
 `estimates_need_five_samples`, `oom_kill_marks_run_usage`, `sampler_prunes_old_rows`.
 
-**E2 admission**
+**Capacity admission and brakes**
 `admit_blocks_when_ram_would_drop_below_reserve`, `admit_blocks_on_cpu_and_disk`,
 `admit_blocks_on_provider_limit`, `admit_blocks_at_target`, `brake_trips_on_memory_pressure`,
 `brake_clears_after_two_clean_samples`, `brake_never_signals_running_work`,
@@ -4035,14 +4019,14 @@ the `_node` fallback.
 `fairness_round_robins_by_weight`, `waiting_reason_on_board_and_queue`,
 `auto_target_uses_measured_limit`.
 
-**E3 advisor**
+**Capacity advisor**
 `advisor_writes_capacity_advice_on_timer_and_events`,
 `advisor_creates_decision_inbox_item_with_apply_keep`,
 `advisor_never_changes_target_itself`, `advisor_applies_only_after_owner_yes`,
 `advisor_report_json_includes_estimates_and_waiting`,
 `advisor_respects_the_thirty_minute_gap`.
 
-**F1 remote exec**
+**Remote execution**
 `turn_begin_writes_framing_events_and_returns_grant`,
 `remote_exec_streams_events_and_home_assigns_seq`, `remote_ingest_is_idempotent_by_event_id`,
 `exec_spools_and_fsyncs_before_send`, `ingest_ack_window_is_64_and_async`,
@@ -4051,7 +4035,7 @@ the `_node` fallback.
 `remote_probe_uses_remote_node_and_switch`, `remote_summary_writes_run_usage`,
 `lease_token_never_in_argv_or_logs`.
 
-**F2 leases**
+**Surfaces and leases**
 `lease_acquire_is_one_holder`, `heartbeat_keeps_lease_live`, `stale_lease_free_after_sixty_seconds`,
 `takeover_cuts_old_surface_within_two_seconds`, `lease_revoked_is_pushed_within_2s`,
 `takeover_drains_and_writes_capsule`,
@@ -4059,58 +4043,58 @@ the `_node` fallback.
 `follow_mode_prints_new_events_and_refuses_writes`, `lease_check_rejects_wrong_token`,
 `lease_sweep_drops_dead_surface`.
 
-**F3 chat**
+**Chat fallback**
 `chat_takes_over_and_prints_notice`, `chat_follow_mode_is_read_only`,
 `chat_slash_switch_status_capsule`, `chat_remote_executor_uses_surface_machine`,
 `chat_narrow_terminal_no_colour_or_wide_tables`, `chat_non_tty_reads_turns_until_eof`.
 
-**F4 orchestrator**
+**Orchestrators**
 `orchestrator_new_writes_only_project_local_config`,
 `orchestrator_registers_mcp_in_opencode_and_claude_configs`,
 `orchestrator_join_instructions_desktop_and_phone`, `orchestrator_role_session_is_project_less`,
 `orchestrator_new_refuses_existing_name_without_force`, `orchestrator_stop_releases_lease`,
 `orchestrator_state_survives_supervisor_restart`.
 
-**F5 app hosts/mirror**
+**App hosts and transcript mirror**
 `opencode_host_starts_and_stops_with_fake_server`, `opencode_v2_service_pair_basic_auth`,
 `opencode_mirror_maps_messages_to_events`, `mirror_reads_api_event_and_backfills_export`,
 `mirror_is_incremental_and_idempotent`, `claude_importer_maps_transcript`,
 `claude_remote_refuses_without_login`, `resume_context_builds_capsule_and_tail`,
-`app_host_fake_never_opens_a_socket`. The real-provider MCP tool-exposure re-test is an F5/F6
+`app_host_fake_never_opens_a_socket`. The real-provider MCP tool-exposure re-test is an
 acceptance check (§16.20), not a hermetic unit test.
 
-**F6 MCP**
+**MCP server**
 `mcp_initialize_and_tools_list`, `mcp_server_discover_answered`, `mcp_read_tools_return_snapshot_data`,
 `mcp_write_tool_checks_lease_and_records_actor`, `mcp_old_app_write_gets_read_only_notice`,
 `mcp_secret_request_never_returns_value`, `mcp_unknown_method_is_jsonrpc_error`,
 `mcp_works_over_scripted_stdio_client`.
 
-**G1 vault**
+**Secrets and vault**
 `secret_set_hidden_prompt_never_echoes`, `secret_ls_shows_last4_only`,
 `secret_request_page_single_use_and_expiry`, `vault_basic_mode_and_upgrade`,
 `env_for_injects_only_configured_names`, `redaction_removes_value_from_events_capsules_reports_snapshot`, `vault_admin_writes_through_helper`,
 `secret_set_without_tty_exits_5`,
 `redaction_never_logs_value_or_prefix`, `secret_scan_gate_still_passes`.
 
-**H1 lifecycle**
+**Lifecycle and GC**
 `gc_dry_run_lists_by_class_and_changes_nothing`, `gc_apply_never_deletes_protected_classes`,
 `gc_removes_run_output_after_fourteen_days`, `gc_compacts_closed_session_to_capsule_and_summary`,
 `gc_removes_merged_worktree_and_keeps_failed_seven_days`,
 `gc_prunes_host_samples_24h_full_30d_minute`, `nightly_gc_schedule_created`,
 `compacted_session_tail_and_export_are_explicit`.
 
-**H2 backup**
+**Backup and restore**
 `backup_global_and_all_project_dbs_are_openable`, `backup_rotation_seven_daily_four_weekly`,
 `backup_to_rsync_uses_argv_not_shell`, `backup_age_encryption_when_configured`,
 `restore_drill_reopens_and_counts_match`, `backup_includes_session_logs_and_blobs`.
 
-**I1 setup**
+**Setup**
 `setup_plan_lists_every_phase_command_and_file`, `setup_plan_changes_nothing`,
 `setup_plan_json_is_stable`, `setup_home_is_idempotent`, `setup_home_no_sudo_path`,
 `setup_home_stops_at_handoff_with_exit_5`, `setup_control_writes_control_home`,
 `install_sh_download_still_works`.
 
-**I1b verify**
+**Setup verification**
 `setup_verify_fixture_job_merges`, `setup_verify_snapshot_readable_from_control`,
 `setup_verify_orchestrator_answers_chat`.
 
@@ -4123,22 +4107,23 @@ acceptance check (§16.20), not a hermetic unit test.
 
 ## 16. Open assumptions and deviations
 
-These are the items the later jobs may only resolve in the direction stated; anything else is a
-follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
+These are the items the design resolves in the direction stated; anything else is a follow-up
+spec amendment.
 
-1. **S1 capacity spike (merged 2026-11-10).** S1 proved cgroup v2 user scopes and the `/proc`
-   fallback on the target VPS. This spec uses the scope when available and records
+1. **Capacity measurement.** cgroup v2 user scopes and the `/proc` fallback were proven on the
+   target VPS. This spec uses the scope when available and records
    `memory.peak`, sampled `anon`/`file`/`kernel` at the peak, `cpu.stat usage_usec` and a
    `build_mode` (`cold`/`warm`/`incremental`/`unknown`); `source='proc_tree'` is a fallback only.
-   S1 measured `/proc` overcounting warm RSS by ~31 % and undercounting CPU by 15–36 %, and
-   missing a Docker build entirely. `memory.peak` is cumulative and not user-resettable, so
-   per-phase peaks use child cgroups or separate scopes. Disk is a first-class dimension: the
-   290 GB test disk was 98–100 % full and builds failed on ENOSPC, so the 5 GB / 10 % reserve and
-   a per-job target-dir budget stay. `MemoryHigh` is a safe soft throttle; `MemoryMax` is not
-   used. The cold/warm gap is large (2.45 GiB / 300 s CPU vs 0.37 GiB / 56–60 s), so the
-   `1.5 GiB / 1 core` default is warm-only and estimates are split by `build_mode`. The only
-   interface growth is in §6.1 (`RunUsage`, `UsageEstimate`, `ScopeSample`, `usage_estimates`).
-2. **S2 remote-exec spike (merged 2026-11-10).** The transport is SSH with one `session ingest`
+   Measurements show the process-tree fallback overcounts warm RSS by ~31 % and undercounts CPU by
+   15–36 %, and misses a Docker build entirely. `memory.peak` is cumulative and not
+   user-resettable, so per-phase peaks use child cgroups or separate scopes. Disk is a first-class
+   dimension: the 290 GB test disk was 98–100 % full and builds failed on ENOSPC, so the 5 GB /
+   10 % reserve and a per-job target-dir budget stay. `MemoryHigh` is a safe soft throttle;
+   `MemoryMax` is not used. The cold/warm gap is large (2.45 GiB / 300 s CPU vs 0.37 GiB /
+   56–60 s), so the `1.5 GiB / 1 core` default is warm-only and estimates are split by
+   `build_mode`. The only interface growth is in §6.1 (`RunUsage`, `UsageEstimate`, `ScopeSample`,
+   `usage_estimates`).
+2. **Remote execution transport.** The transport is SSH with one `session ingest`
    process per run. The client writes and fsyncs every event to its spool **before** sending,
    keeps a 64-event in-flight ack window, and replays from the first unacked event; acks are
    written only after append, duplicate ids are idempotent, and a known id with different content
@@ -4148,23 +4133,23 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
    channel (99.6–265 ms live SSH, <2 s hermetic); `surface::sweep_leases()` signals the writer via
    channel/condvar with a ≤250 ms poll fallback. Per-event fsync is not required. The only wire
    growth is `IngestAck::LeaseRevoked` and `INGEST_ACK_WINDOW` in §7.2/§13.6.
-3. **S3 app-surface spike (merged 2026-11-10).** opencode v2.0.28 is the proven contract: HTTP API
+3. **App-surface contract.** opencode v2.0.28 is the proven contract: HTTP API
    under `/api/...` (`/api/event` SSE, `/api/mcp`, `/api/session`, `/api/session/<id>/message|prompt`),
    HTTP Basic `opencode:<token>`, the managed `opencode service`/`opencode pair` path with
    `$XDG_STATE_HOME/opencode/service.json`, loopback-only bind, single-use 5-minute pair links, and
    `location.directory` on session creation (the managed service defaults to `$HOME`). The mirror
    consumes `/api/event` and backfills with export. Claude Code's `.mcp.json` is project-scoped and
    needs one-time approval; Claude Code sends `server/discover` first. Claude Remote Control still
-   needs a claude.ai login; the VPS has none by the owner's choice, so `claude_remote.rs` ships the
-   refusal path and a 5-minute owner test is part of T3. The Mac desktop app click-through and a
-   real Claude Remote Control join are the two remaining owner checks; the pair/tunnel/API path is
-   proven. F5/F6 pin or version-check 2.0.28. See item 20 for the MCP tool-exposure gap.
+   needs a claude.ai login; on a home without one, `claude_remote.rs` ships the refusal path and a
+   five-minute owner check. The Mac desktop app click-through and a real Claude Remote Control join
+   are the two remaining owner checks; the pair/tunnel/API path is proven. The opencode host pins
+   or version-checks 2.0.28. See item 20 for the MCP tool-exposure gap.
 4. **Capacity inbox kind.** The plan says an inbox item of kind `capacity`. v0.2 does **not** add
-   `InboxKind::Capacity` (it would force edits outside C0's owned files); advice is a `decision`
-   item linked by `capacity_advice.inbox_id`. If the owner wants a distinct filter, v0.3 adds the
-   enum variant additively. T2 acceptance test 3 and any K4 wording must therefore look for a
-   `decision` item whose `capacity_advice.inbox_id` matches, not for an `InboxKind::Capacity` that
-   does not exist.
+   `InboxKind::Capacity` (it would force edits to the report renderer outside the capacity
+   modules); advice is a `decision` item linked by `capacity_advice.inbox_id`. If the owner wants
+   a distinct filter, v0.3 adds the enum variant additively. Acceptance tests and CLI wording must
+   therefore look for a `decision` item whose `capacity_advice.inbox_id` matches, not for an
+   `InboxKind::Capacity` that does not exist.
 5. **`max_workers` is a preference.** v0.1 treats it as a cap. v0.2 admission ignores it as a hard
    limit; the owner target and the measured checks decide. `ensure_worker_slots` still creates that
    many project slots for tmux/visible bookkeeping.
@@ -4176,9 +4161,9 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
    only the registry row. `sessions.project` keeps its text so history still says which project it
    was. This is the concrete reading of plan §3 rule 5 and §10 "keeps production records".
 8. **The v0.1 query claim is withdrawn.** Plan §3 rule 1 said v0.1 queries keep working unchanged.
-   They do not, because of the `inbox`/`ledger` collision; §3.1 documents the rename and C1 audits
-   every statement. The public `Store` API is source-compatible, which is what the rest of the
-   workspace needs.
+   They do not, because of the `inbox`/`ledger` collision; §3.1 documents the rename and the store
+   audits every statement. The public `Store` API is source-compatible, which is what the rest of
+   the workspace needs.
 9. **`board.json` compatibility.** The node supervisor writes `board.json` only when exactly one
    project is active, so v0.1 tests and scripts that read it keep working. Multi-project homes read
    `snapshot.json`.
@@ -4188,11 +4173,11 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
 11. **Snapshot size.** Queue and session cards are capped (§5.3) so a 1000-job project cannot
     produce a multi-megabyte snapshot. If the cap is hit, the snapshot is still valid; the CLI
     recomputes details from the DB on the home.
-12. **Public-tree rules.** This spec contains no owner hostname, path or key; the examples use
-    `home.example` and `vowp@home.example`. The J1 scrub still runs over it.
+12. **Public examples.** This spec contains no owner hostname, path or key; the examples use
+    `home.example` and `vowp@home.example`.
 13. **Claude Remote Control.** If a claude.ai plan login cannot be used on a VPS, the Claude surface
     is limited to Claude Code with the transcript importer; the opencode surface and `vowp chat`
-    remain the complete v0.2 story. T3 reports this honestly rather than blocking the release.
+    remain the complete v0.2 story. The release notes state this honestly; it does not block v0.2.
 14. **No new `vowp.toml` keys.** Capacity constants are compiled, not configured, in v0.2. If the
     owner wants to tune the reserve, that is a v0.2.x additive config key with a default.
 15. **Flag names that avoid the global `--home`.** The plan writes `vowp setup plan --home <target>`
@@ -4200,7 +4185,7 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
     flag. v0.2 uses `vowp setup plan|home --target <ssh-target>` and
     `vowp control init --name <home-name> <ssh-target>`; `vowp backup --restore <dir> --to-home
     <dir>`. The behaviour and JSON are exactly the plan's; only the flag spelling avoids a clap
-    conflict. K1/I1 documents the concrete commands.
+    conflict. `docs/setup/agent-setup.md` documents the concrete commands.
 16. **Reserved `_node` project.** The plan allows project-less orchestrator sessions and says `runs`
     live in project DBs. Those two rules need a home for a project-less run, so v0.2 reserves the
     hidden `_node` project and DB. It is not a user project, is hidden from `project ls`/snapshot
@@ -4212,18 +4197,18 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
     loses every conversation. This is a clarification, not a new feature.
 18. **Vault admin helper names.** The plan writes the write path as `vowp __vault-exec store|rm
     NAME`; this spec freezes `vowp __vault-admin set|rm NAME` (and keeps `__vault-exec` read-only
-    for injection). The behaviour is the same; G1's card and C0's CLI freeze must use the spec
-    names. This is recorded because it is an interface change, not a cosmetic rename.
-19. **C0 stub exit code.** The card says stubs exit 2; the current
-    `crates/vowp-cli/src/errors.rs` maps `NotImplemented` to `ErrorKind::Internal`/exit 1 and
-    `crates/vowp-cli/tests/core.rs` asserts that. This spec follows the code and freezes exit 1 so
-    C0 needs no unowned edit. The card text must be amended to 1.
-20. **opencode MCP tool exposure (S3 open).** opencode v2.0.28 loads a project-local MCP server,
+    for injection). The behaviour is the same; the CLI uses the spec names. This is recorded
+    because it is an interface change, not a cosmetic rename.
+19. **Command-list test.** `help_lists_every_v0_1_command` asserts the full clap command set;
+    v0.2 extends its expectation to `V0_1_COMMANDS ∪ V0_2_COMMANDS` and filters hidden names from
+    the help-text loop. The test keeps its name.
+20. **opencode MCP tool exposure (open).** opencode v2.0.28 loads a project-local MCP server,
     `opencode mcp list`/`/api/mcp` reports it `connected`, and the server receives
     `initialize`/`tools/list`, but the model request's `tools` array contained only the built-ins
     and the model never called the MCP tool. v0.2 therefore writes the config and implements the
     server (§7.7) but does **not** promise that the opencode orchestrator can call VOWP tools until
-    F5/F6 re-test with a real provider and find the permission/config flag or an upstream fix.
+    the host is re-tested with a real provider and finds the permission/config flag or an upstream
+    fix.
     Claude Code's path is proven after the one-time `.mcp.json` approval; `vowp chat` is the
     tool-free fallback. The `AGENTS.md` template and join instructions must not promise the tools
     before that re-test.
@@ -4234,27 +4219,26 @@ follow-up spec amendment (`v2-b2-spec-amend`, which owns this file).
   the owner sees one dry run? The spec defaults to **enabled**, because disk safety matters more
   than a surprise; `vowp gc --dry-run` is the first thing `setup verify` prints.
 - Should a capacity advice item require a typed `apply` (not just a click) in the app? v0.2 records
-  the actor and the target history; the UI decision is F6/F4's.
+  the actor and the target history; the UI decision belongs to the MCP server and the orchestrator.
 
 ---
 
-## 17. What "done" means for this card
+## 17. Specification completeness
 
-The card `v2-b1-spec` is complete when this document contains, and a reviewer can point to:
+The specification is complete when it contains, and a reviewer can point to:
 
 1. the full DDL of the global and project schemas, including every new table (§3.2–§3.3);
 2. the orchestrator correction: `node_inbox`/`node_ledger`, no cross-file FKs, validation, and the
    migration (§3.1, §3.6, §3.9);
-3. Rust signatures for every new trait, type and stub (§6, §7, §13);
-4. the exact C0 hook points and their no-op behaviour (§13.4);
+3. Rust signatures for every new trait, type and interface (§6, §7, §13);
+4. the exact hook points and their no-op behaviour (§13.4);
 5. every new CLI command with arguments and `--json` shapes (§12);
 6. the versioned snapshot JSON schema and example (§5);
-7. named tests per feature (§15);
+7. named tests per area (§15);
 8. the open assumptions and deviations (§16);
-9. the moved v0.3 notes and the updated v0.2 index (`README.md`, `../v0.3/README.md`);
-10. the updated `cross-node-sync.md` that says v0.2's remote execution supersedes the bundle-move
+9. the v0.3 notes and the v0.2 index (`README.md`, `../v0.3/README.md`);
+10. the `cross-node-sync.md` note that says v0.2's remote execution supersedes the bundle-move
     slice and what remains for v0.3.
 
-No code, schema file or test is changed by this card; C0/C1 and the feature jobs implement it. The
-workspace gates (`cargo fmt --all`, clippy, test) must still be green because this card did not touch
-them.
+This document defines the contract; it does not itself change code, schema files or tests. The
+workspace gates (`cargo fmt --all`, clippy, test) pass independently of this document.

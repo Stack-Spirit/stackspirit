@@ -64,14 +64,14 @@ systemd user scope (`systemd-run --user --scope`) and reads cgroup v2 `memory.pe
 `cpu.stat` and `memory.events`. If user cgroups are not delegated, it walks the process tree and sums
 RSS and CPU deltas. If neither works, it records a labelled default.
 
-The fallback is honest but less exact: S1 measured the process-tree walk overcounting warm shared RSS
-by about 31 % and undercounting short-lived CPU by 15–36 %. It is for keeping a node limping, not for
-precise estimates.
+The fallback is honest but less exact: the process-tree walk overcounts warm shared RSS by about
+31 % and undercounts short-lived CPU by 15–36 % in measurement. It is for keeping a node limping,
+not for precise estimates.
 
 One `run_usage` row is written per finished run with the peak and sampled memory, CPU use, duration,
 build mode (`cold`, `warm`, `incremental` or `unknown`), source, OOM flag and exit code. Build mode
-matters: a cold Rust build peaked at about 2.45 GiB and 300 s CPU in the S1 measurements, while warm
-runs peaked at about 0.37 GiB and 56–60 s CPU.
+matters: a cold Rust build peaked at about 2.45 GiB and 300 s CPU in the capacity measurements,
+while warm runs peaked at about 0.37 GiB and 56–60 s CPU.
 
 ### Estimates
 
@@ -235,8 +235,8 @@ affected jobs and opens one inbox item; it does not switch to an unlisted paid p
   carry source `proc_tree`; the estimates built from them are still labelled `measured`, `pooled` or
   `default` by sample count, never `proc_tree`. Admission still works but is less precise.
 - **A cold build with no history.** The default estimate is deliberately conservative. The first real
-  runs replace it quickly; the S1 measurements show why a blanket 1.5 GiB default is too low for a cold
-  Rust build.
+  runs replace it quickly; the capacity measurements show why a blanket 1.5 GiB default is too low
+  for a cold Rust build.
 - **One project is idle.** The advisor can propose a smaller target after sustained idle; it still does
   not apply it.
 
