@@ -1,9 +1,14 @@
-//! `vowp mcp` — the stdio MCP server. C0 stub; F6 fills the handler and the `mcp` module.
+//! `vowp mcp` — the stdio MCP server.
+//!
+//! Spec: `docs/design/v0.2/home-and-surfaces.md` §7.7. The handler only parses the frozen
+//! flags; the server lives in [`crate::mcp`].
 
 use std::path::PathBuf;
 
 use clap::Args;
+use vowp_protocol::{SessionId, SurfaceId};
 
+use crate::mcp::McpOptions;
 use crate::{CliError, Ctx, IoStreams};
 
 /// Arguments for `vowp mcp`.
@@ -21,6 +26,15 @@ pub struct McpArgs {
 }
 
 /// Runs `vowp mcp`.
-pub fn run(_ctx: &Ctx, _io: &mut dyn IoStreams, _args: &McpArgs) -> Result<i32, CliError> {
-    Err(crate::cmd::not_implemented())
+pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &McpArgs) -> Result<i32, CliError> {
+    let session = SessionId::parse(&args.session)?;
+    if args.surface.trim().is_empty() {
+        return Err(CliError::Invalid("--surface must not be empty".to_owned()));
+    }
+    let opts = McpOptions {
+        session,
+        surface: SurfaceId(args.surface.clone()),
+        token_file: args.token_file.clone(),
+    };
+    crate::mcp::serve_with_ctx(ctx, io, &opts)
 }
