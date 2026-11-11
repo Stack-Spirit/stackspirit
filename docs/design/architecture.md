@@ -181,7 +181,7 @@ refuse with exit 5 because the control machine has no local truth. A path accept
 | `[node]` | `name` | string | `"local"` | name of this node (matches `nodes.name`) |
 | | `max_workers` / `max_verifiers` | int | 4 / 2 | per-project slot preference in v0.2; the measured capacity manager and the owner target decide admission |
 | | `tick_secs` | int | 60 | L1 tick |
-| | `cwd_allow` | [string] | `[]` (= project path + worktree root only) | extra allowed working directories |
+| | `cwd_allow` | [string] | `[]` (project path, worktree root and the VOWP orchestrator root are always allowed) | extra allowed working directories |
 | | `home` | string | `~/.vowp` | VOWP_HOME |
 | | `tz_offset_minutes` | int | 0 | used to read clock-time resets in limit messages (e.g. `resets 11pm`) |
 | **`[project]`** | `name` | string, **required** | — | project name (slug) |
@@ -361,7 +361,7 @@ admitted. Schedules and loops are project rows; the node-level lifecycle schedul
 | No credential values in files | `env_pass` and setup answers hold **names**; `HarnessConfig` has no value fields. Basic mode stores `~/.vowp/secrets/<NAME>` (0600); vault mode stores under `/home/vowp-vault/secrets/<NAME>` through the helper. No command takes a value as an argument; the paste page never returns it. |
 | Exact-value redaction | VOWP knows the values it injected and replaces exact occurrences with `[REDACTED:<NAME>]` in events, capsules, report artifacts, raw run mirrors and the snapshot. Gate evidence and ledger details are not redacted in this build (documented follow-up); the secret-scan gate remains a separate backstop. Backups never include secrets. |
 | Stock binaries only | adapters spawn `claude` / `opencode` / a configured cli exactly as a user would; no token reading (`~/.claude` is never opened except the optional read-only transcript importer for `vowp session watch`, which reads session JSONL only), no spoofing, no login flow in VOWP. |
-| cwd allow-list | `Adapter::start` callers (`session::run_turn`) check `cwd` is inside the job worktree, the project path, `worktree_root` or `[node] cwd_allow`; otherwise `Refused`. |
+| cwd allow-list | `Adapter::start` callers (`session::run_turn`) check `cwd` is inside the job worktree, the project path, `worktree_root`, `[node] cwd_allow` or the VOWP-owned orchestrator root `<VOWP_HOME>/orchestrators/<name>/`; anything else, including paths elsewhere under `VOWP_HOME`, is `Refused`. |
 | Worktree isolation | one worktree per job; ownership globs enforced by the `owns_respected` gate and by dispatch-time locks (`vowp-graph`). |
 | tmux safety | tagged windows only, `vowp-` sessions only, no respawn/send-keys API exists (`vowp-tmux.md`). |
 | Guarded promotion | `promote` runs guards → serving bank → diff → approval (human default) → deploy → probe; refusals are staged (`ReleaseState::Refused`), never retried with a workaround. |
