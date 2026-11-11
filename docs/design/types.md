@@ -1457,9 +1457,10 @@ pub struct Snapshot {
 }
 ```
 
-The snapshot is derived. In this build the capacity card's `measured` is `null`, `running` is
-zeroed and a session card's `active_surface` is `null`; `vowp capacity show` is the measured report
-and the lease is live in `vowp session lease`.
+The snapshot is derived. In this build the capacity card's `measured` is `null` and
+`running.runs` is populated from the open runs, while its p90 RAM/CPU fields stay zero; a session
+card's `active_surface` is `null`. `vowp capacity show` is the measured report and the lease is live
+in `vowp session lease`.
 
 ### 16.4 Lifecycle catalog (`catalog`)
 

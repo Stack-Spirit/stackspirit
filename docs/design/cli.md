@@ -72,7 +72,7 @@ Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status"
   control machine.
 - `down`: writes `~/.vowp/stop`, waits ≤ 30 s for the lock to disappear; `--force` additionally sends SIGTERM to the pid. Running runs are interrupted and re-queued (`stalled`, not failed). Windows are left for inspection unless `--kill-windows`.
 - `status`: one screen — supervisor (pid, uptime, last tick age), every project with jobs by state, slots busy/total, planner/keeper executors, limits with reset times, cost today, inbox open count. JSON keeps the v0.1 keys and adds `home` and `projects`. Exit 0 whether or not a supervisor runs (use `--json` `running` field; `vowp status --check` exits 1 if the heartbeat is older than 3 min — the watchdog uses this).
-- `board`: refreshing dashboard (clear+redraw every `--interval`, default 2 s; `--once` prints once): every project's jobs by state with the running ones listed (job, executor, age, last event age), slots, limits, cost, inbox, last checkpoint. Reads only the DB or `snapshot.json`.
+- `board`: refreshing dashboard (clear+redraw every `--interval`, default 2 s; `--once` prints once): every project's jobs by state with the running ones listed (job, executor, age, last event age), slots, limits, cost, inbox, last checkpoint. It always recomputes from the databases; `board.json` is only a convenience copy written by the supervisor.
 
 ## 3. Planning and the graph
 
@@ -112,7 +112,7 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is the v0
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
 | `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
 | `session import <file> [--node n] [--executor <exec>] [--cwd <dir>]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached |
-| `session watch [--claude-dir <dir>] [--once]` | records interactive Claude Code transcripts (read-only importer) into canonical sessions; prints `watching N transcripts`; without `--once` it exits 2 because continuous following is not available; exit 1 if the dir is unreadable |
+| `session watch [--claude-dir <dir>] [--once]` | records interactive Claude Code transcripts (read-only importer) into canonical sessions; prints `watching N transcripts`; without `--once`, a TTY run exits 2 because continuous following is not available (non-TTY input does one pass); exit 1 if the dir is unreadable |
 | `session tail <id> [--follow] [--pretty] [--from <seq>]` | prints events (JSONL, or `--pretty` one line per event); `--follow` polls the file (200 ms) and does not take the lease. This is what job windows run (`vowp __window job <id>`). |
 
 Pretty line format: `HH:MM:SS #seq type  summary` e.g. `19:30:12 #6 tool.call  shell: cargo test`.
@@ -210,7 +210,8 @@ Reads the home's `~/.vowp/snapshot.json` (schema `vowp-snapshot/1`, exported by
 machine, `status` can fall back to the cached snapshot and prints its `as of` time; `--refresh`
 requires SSH and `--cached` never opens a connection. The JSON wrapper is
 `{"snapshot":{…},"source":"local|remote|cache","fetched_at":"…","stale":false}`. `queue` rows
-include `waiting_reason`; `inbox` rows omit bodies; `capacity` is an alias of `capacity show`.
+include `waiting_reason`; `inbox --json` prints `[InboxItem]` with the full body (the snapshot's own
+inbox cards omit it); `capacity` is an alias of `capacity show`.
 
 ### 6.3 `vowp capacity`
 
@@ -223,8 +224,9 @@ vowp capacity set [--target <n>] [--mode auto|fixed] [--override] [--reason <tex
 `show`/`report` return `CapacityReport`: the latest host sample (or none), the owner target and
 advice, running run count and p90 estimates, brakes, reserves, estimates and waiting jobs. `set`
 writes one `capacity_targets` history row. A target above the advised value needs `--override`
-(exit 5 otherwise); the brakes still apply and the board shows `owner override: 8 (advised 5)`.
-The AI advisor only proposes: it opens a `capacity` inbox item and never changes the target itself.
+(exit 5 otherwise); the brakes still apply and `capacity show` prints
+`owner override: 8 (advised 5)`. The board does not carry capacity data. The AI advisor only
+proposes: it opens a `capacity` inbox item and never changes the target itself.
 
 ### 6.4 `vowp control` and `vowp tunnel`
 
@@ -381,12 +383,14 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 `session_export_import_roundtrip_via_cli`, `session_tail_pretty_golden`, `session_switch_with_fake_adapters`, `node_ssh_argv_quoting` (builds the ssh argv without executing it; asserts quoting of args with spaces, quotes and `$`),
 `node_flag_remote_failure_exit_7` (uses a fake `ssh` script on PATH exiting 255), `reindex_after_db_delete_via_cli`, `backup_creates_openable_db`, `up_once_runs_one_tick_with_fake_adapters`, `status_check_exit_1_on_stale_heartbeat`.
 
-v0.2 adds the CLI-facing subset of the spec's named tests: `project_add_ls_pause_resume_archive_rm`,
+v0.2 adds the CLI-facing subset of the spec's named tests:
+`project_registry_add_ls_weight_pause_resume_archive_and_rm`,
 `fleet_status_reads_fresh_snapshot_or_recomputes`, `fleet_queue_includes_waiting_reason`,
 `owner_override_above_advice_is_honoured_and_shown`, `capacity_set_history_and_json`,
 `migration_rollback_restores_v01_home`, `control_init_writes_control_json`,
 `control_routes_status_over_fake_ssh`, `tunnel_open_records_pid_and_port`, `tunnel_close_kills_group`,
-`secret_set_hidden_prompt_never_echoes`, `secret_request_page_single_use_and_expiry`,
+`basic_mode_writes_lists_replaces_and_removes`, `one_time_page_serves_a_form_and_stores_exactly_one_value`,
+`one_time_page_times_out_without_a_value`, `control_routes_secret_writes_with_tty_and_requests_through_a_tunnel`,
 `gc_dry_run_lists_by_class_and_changes_nothing`, `gc_apply_never_deletes_protected_classes`,
 `backup_rotation_seven_daily_four_weekly`, `restore_drill_reopens_and_counts_match`,
 `setup_plan_lists_every_phase_command_and_file`, `setup_home_stops_at_handoff_with_exit_5`,

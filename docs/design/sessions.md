@@ -218,12 +218,16 @@ Records an interactive Claude Code session into the canonical store without runn
 3. Incremental by **line count** in this build: the importer stores the processed line count
    under `watch:<native session id>` in the node database. A later `--once` run reads the whole
    transcript, imports only lines after the stored count, and skips a transcript that is shorter or
-   unchanged. `--follow` is not available: without `--once`, a terminal run exits 2 with a message
-   to use `--once`.
-4. One canonical session per Claude uuid (created on first sight, `role=user`, title = first user message ≤ 60 chars). The importer opens Claude's files read-only and never writes them.
+   unchanged. `--follow` is not available: without `--once`, a TTY run exits 2 with a message to use
+   `--once` (non-TTY input does one pass).
+4. Each pass with new lines creates a **new canonical session** (`role=user`, title = first user
+   message ≤ 60 chars) even for the same Claude uuid. The uuid is recorded as the event source's
+   `native_session_id`, but the importer does not look it up to reuse a session. Two `--once` runs
+   therefore produce two VOWP sessions for one Claude transcript, the second holding only the lines
+   appended since the first. The importer opens Claude's files read-only and never writes them.
 5. The optional importer has no dedicated test yet; the follow-up in `../roadmap.md` (good first
-   issue 4) adds byte-offset incremental reads, `--follow` and the missing coverage. Until then,
-   `--once` is the supported form and `--follow` exits 2.
+   issue 4) adds byte-offset incremental reads, one session per native uuid, `--follow` and the
+   missing coverage. Until then, `--once` is the supported form and a TTY `--follow` exits 2.
 
 ## 8. Surfaces, leases and takeover
 

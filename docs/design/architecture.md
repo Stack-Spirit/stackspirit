@@ -105,12 +105,11 @@ Nothing in this flow is stored only in memory: killing every process and running
 ~/.vowp/
 ├─ vowp.db                     global SQLite (WAL: vowp.db-wal, vowp.db-shm) — schema/global.sql, user_version 2
 ├─ projects/<name>/project.db  one SQLite per project — schema/project.sql, user_version 1
-├─ projects/<name>/.lock       project DB writer lock (best effort; WAL is the real guard)
 ├─ config.toml                 optional node-level defaults (type `NodeFile`, types.md §11: [node] [profiles] [providers] [harnesses] [capsule] only; no [project])
 ├─ supervisor.lock             pid of the running supervisor
 ├─ heartbeat                   unix seconds (ASCII) rewritten every tick via tmp+rename (watchdog reads it; loops.md §10)
 ├─ snapshot.json               versioned fleet snapshot (`vowp-snapshot/1`, types.md §16.3) written every tick
-├─ board.json                  v0.1 compatibility copy, written only when exactly one non-reserved project is active
+├─ board.json                  v0.1 compatibility copy: one active non-reserved project, or (with no active project) one non-broken paused project
 ├─ stop                        presence = "shut down" request
 ├─ migration.json              present only while a v0.1 → v0.2 migration is in flight
 ├─ sessions/<sessionId>/       one dir per universal session (portable: copy it to another node, `vowp reindex`)

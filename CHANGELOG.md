@@ -76,8 +76,9 @@ publish step.
 
 - `vowp secret set|ls|rm|upgrade|request`, basic mode and vault-user mode through the hidden
   `vowp __vault-exec`/`__vault-admin` helpers; values are never accepted as arguments.
-- Injection by name through `env_pass` and deploy commands, exact-value redaction from events,
-  capsules, report artifacts, raw run mirrors and the snapshot, and no secrets in backups.
+- Injection by name through the harness `env_pass` (promotion/deploy commands do not receive
+  secrets in this build), exact-value redaction from events, capsules, report artifacts, raw run
+  mirrors and the snapshot, and no secrets in backups.
 - A one-time `127.0.0.1` paste page with a 10-minute expiry and single use, reachable through a
   tunnel, so a value never enters a chat transcript.
 

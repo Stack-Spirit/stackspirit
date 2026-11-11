@@ -57,6 +57,10 @@ server joined through an SSH tunnel and the one-time secret paste page.
   between those calls the app owns its transcript.
 - **No promise that every app exposes MCP tools.** opencode 2.0.28 can load the server and report it
   `connected` without exposing its tools to the model; `vowp chat` is the tool-free fallback.
+- **Secret injection only reaches harness `env_pass`.** Promotion/deploy commands run with an empty
+  environment in this build; they cannot name secrets yet (good first issue 11).
+- **`session watch` starts a new VOWP session on each pass with new lines.** It does not reuse the
+  session already mapped to the Claude uuid (good first issue 4).
 
 The detailed list of known v0.2 limitations lives in the concepts pages where the behaviour is
 described. Follow-ups suitable for a first contribution are below.
@@ -141,12 +145,14 @@ missing key.
 `docs/design/sessions.md`.
 **Problem:** the importer stores a processed **line count**, re-reads the whole transcript every time,
 and `--follow` is rejected. A transcript that grows while VOWP watches is re-read from the start, and
-a line inserted anywhere throws the count off.
-**Do:** store the byte offset and the last complete line, read only the new suffix, and poll every two
-seconds for `--follow` until interrupted. Keep `--once` behaviour and never write to Claude's files.
-**Accept:** append lines between two `--once` runs and only the new events are appended; `--follow`
-imports a growing fixture without duplicates and exits cleanly on Ctrl-C; a partial final line is not
-imported until it ends with a newline.
+a line inserted anywhere throws the count off. Each pass with new lines also creates a new VOWP
+session for the same Claude uuid instead of reusing the existing one.
+**Do:** store the byte offset and the last complete line, read only the new suffix, poll every two
+seconds for `--follow` until interrupted, and find or create one canonical session by native uuid.
+Keep `--once` behaviour and never write to Claude's files.
+**Accept:** two `--once` runs append to one session and never create a duplicate session for the same
+uuid; `--follow` imports a growing fixture without duplicates and exits cleanly on Ctrl-C; a partial
+final line is not imported until it ends with a newline.
 
 ### 5. Anchor interval schedules to their creation time
 
@@ -216,6 +222,21 @@ a command printed.
 secret-scan gate as the separate backstop.
 **Accept:** a fake command that prints an injected value leaves only `[REDACTED:<NAME>]` in
 `gate_results` and `ledger`; an uninjected value is unchanged.
+
+### 11. Inject secrets into promotion/deploy commands by name
+
+**Files:** `crates/vowp-protocol/src/config.rs`, `crates/vowp-core/src/promote/promoter.rs`,
+`crates/vowp-core/src/vault/mod.rs`, `crates/vowp-protocol/tests/config.rs`,
+`crates/vowp-core/tests/promote_pipeline.rs`.
+**Problem:** `EnvConfig` has no names-only environment list and the promoter runs deploy commands with
+`env: Vec::new()`, so a deploy cannot receive a secret that `vowp secret set` stored. Only harness
+`env_pass` is resolved by `vault::env_for` today.
+**Do:** add an optional names-only list to `EnvConfig` (for example `env_pass = ["DEPLOY_TOKEN"]`),
+resolve it through the vault helper when the promote/rollback command starts, and keep the value out
+of argv, logs, gate evidence and the release record. A missing name is a clear error, never an empty
+value.
+**Accept:** a deploy command sees its configured secret in the child environment; an unconfigured
+value is absent; the stored value never appears in the release, ledger or logs.
 
 ## How to help
 

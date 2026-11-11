@@ -80,9 +80,12 @@ A **window** is only a tmux window, never a surface.
 
 ## Status of the spec
 
-v0.2 is complete on `main`: one home, one node supervisor, the global + per-project database split,
-the snapshot/fleet read model, measured capacity, sessions on surfaces with leases and remote
-execution, app hosts, MCP, the chat fallback, control machines, secrets, lifecycle/backup and
-AI-first setup. The public HTTP+SSE daemon, web window, phone browser board, ACP adapter, cost
-dashboard, multi-user accounts and multi-home sync remain planned (v0.3 or later) and are marked as
-such in [`../roadmap.md`](../roadmap.md).
+The v0.2 **feature set** is merged on `main`: one home, one node supervisor, the global + per-project
+database split, the snapshot/fleet read model, measured capacity, sessions on surfaces with leases
+and remote execution, app hosts, MCP, the chat fallback, control machines, secrets, lifecycle/backup
+and AI-first setup. That is not a claim that every item in the v0.2 specification has shipped: the
+architecture and roadmap record the remaining follow-ups (for example gate/ledger redaction,
+deploy-command secret injection and the duplicate `session watch` session). The public HTTP+SSE
+daemon, web window, phone browser board, ACP adapter, cost dashboard, multi-user accounts and
+multi-home sync remain planned (v0.3 or later) and are marked as such in
+[`../roadmap.md`](../roadmap.md).
