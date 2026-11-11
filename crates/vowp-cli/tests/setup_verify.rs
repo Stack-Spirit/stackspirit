@@ -1,18 +1,19 @@
-//! Tests for `vowp setup verify`.
-//!
-//! Every test builds a real temporary home with `vowp init`, real git and a fake opencode
-//! script. The fixture project is registered in that home, so the checks exercise the
-//! configured store, project database and merge queue. Nothing reads the real `~/.vowp`,
-//! the default tmux server, the network or a real harness.
+// Tests for `vowp setup verify`.
+//
+// Every test builds a real temporary home with `vowp init`, real git and a fake opencode
+// script. The fixture project is registered in that home, so the checks exercise the
+// configured store, project database and merge queue. Nothing reads the real `~/.vowp`,
+// the default tmux server, the network or a real harness.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
+use std::time::Duration;
 
-use crate::cmd::setup::SetupVerifyArgs;
-use crate::setup::verify;
-use crate::{BufferIo, Ctx, Global};
 use tempfile::TempDir;
+use vowp_cli::cmd::setup::SetupVerifyArgs;
+use vowp_cli::setup::verify;
+use vowp_cli::{BufferIo, Ctx, Global};
 use vowp_protocol::{
     CapacitySnapshot, NodeName, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Session, Snapshot, SupervisorSnapshot, Timestamp,
 };
@@ -33,6 +34,9 @@ fn vowp_binary() -> PathBuf {
 
 /// Builds the real `vowp` binary once so the checks run the same code a user runs.
 fn ensure_vowp_binary() {
+    if std::env::var_os("CARGO_BIN_EXE_vowp").is_some() {
+        return;
+    }
     static BUILD: Once = Once::new();
     BUILD.call_once(|| {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -190,6 +194,13 @@ fn write_control_home(root: &Path, home: &str, fetched_at: Timestamp) {
     .expect("snapshot.meta.json");
 }
 
+/// Writes an executable script.
+fn write_script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, body).expect("write script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+}
+
 /// Returns the fixture session rows left in the home's global session index.
 ///
 /// The store has no delete-session API, so a run retains one index row. The fixture uses
@@ -281,6 +292,42 @@ fn setup_verify_fixture_runs_twice_on_one_home() {
             paths.session_dir(&session.id)
         );
     }
+}
+
+#[test]
+fn setup_verify_fixture_failure_removes_the_registered_project() {
+    let env = TestHome::new("setup-verify-cleanup");
+    let ctx = env.ctx();
+    // Force `upsert_project` to insert the row and then fail creating its database:
+    // `home/projects` must be a directory, so a regular file blocks the fixture there.
+    let projects = env.home.join("projects");
+    std::fs::remove_dir_all(&projects).expect("remove projects dir");
+    std::fs::write(&projects, b"not a directory").expect("block projects dir");
+
+    let error = verify::fixture_job_merges(&ctx).expect_err("fixture construction must fail");
+    assert!(
+        !error.to_string().is_empty(),
+        "fixture failure must carry a real error: {error}"
+    );
+    assert!(
+        !env.home.join("setup-verify").exists(),
+        "the fixture scratch area must be removed after a construction failure"
+    );
+
+    let registered = Store::open_global(&NodePaths::new(&env.home))
+        .expect("open home")
+        .list_projects()
+        .expect("list projects");
+    assert!(
+        !registered
+            .iter()
+            .any(|project| project.name.as_str().starts_with("setup-verify-job-")),
+        "a failed fixture construction must not leave a project row: {registered:?}"
+    );
+    assert!(
+        projects.is_file(),
+        "the test's blocking file must still be in place; the fixture must not move it"
+    );
 }
 
 #[test]
@@ -499,18 +546,40 @@ fn init_remote_home(root: &Path) -> (PathBuf, PathBuf, String) {
     (home, project, node)
 }
 
-#[test]
-fn setup_verify_control_runs_the_checks_on_the_home() {
-    ensure_vowp_binary();
-    let control = TempDir::new().expect("control home");
-    let remote = TempDir::new().expect("remote home");
-    let (remote_home, _remote_project, remote_node) = init_remote_home(remote.path());
-    let control_root = control.path().join("control");
-    let bin = control.path().join("bin");
-    let tmux = control.path().join("tmux");
-    std::fs::create_dir_all(&control_root).expect("control dir");
-    std::fs::create_dir_all(&bin).expect("fake bin");
-    std::fs::create_dir_all(&tmux).expect("control tmux");
+/// The fake ssh every control-path test starts from: run the remote command locally.
+const FAKE_SSH: &str = r#"#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+HOME="$FAKE_REMOTE_HOME"
+VOWP_HOME="$FAKE_REMOTE_HOME/.vowp"
+export HOME VOWP_HOME
+unset VOWP_CONTROL_HOME
+exec sh -c "$last"
+"#;
+
+/// A fake ssh whose probe succeeds but whose remote `setup verify` fails on stderr only.
+const FAILING_VERIFY_SSH: &str = r#"#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  *setup*verify*) printf 'remote verify exploded\n' >&2; exit 1 ;;
+esac
+HOME="$FAKE_REMOTE_HOME"
+VOWP_HOME="$FAKE_REMOTE_HOME/.vowp"
+export HOME VOWP_HOME
+unset VOWP_CONTROL_HOME
+exec sh -c "$last"
+"#;
+
+/// Writes `control.json` and the fake `ssh`/`sudo` used by the control-path tests.
+///
+/// The fake ssh runs the remote command on this machine with the temporary remote home.
+/// A CI runner usually has passwordless sudo, which would make the probe choose the
+/// `vowp` system user; the fake target owns its home and has no such user, so its fake
+/// sudo behaves like a target that asks for a password and setup stays the login user.
+fn write_control_transport(control_root: &Path, bin: &Path, remote_node: &str, remote_home: &Path, ssh_body: &str) {
+    std::fs::create_dir_all(control_root).expect("control dir");
+    std::fs::create_dir_all(bin).expect("fake bin");
     let config = serde_json::json!({
         "role": "control",
         "home": remote_node,
@@ -523,24 +592,24 @@ fn setup_verify_control_runs_the_checks_on_the_home() {
         serde_json::to_vec_pretty(&config).expect("control json"),
     )
     .expect("control.json");
-    let ssh = bin.join("ssh");
-    std::fs::write(
-        &ssh,
-        r#"#!/bin/sh
-last=""
-for arg in "$@"; do last="$arg"; done
-HOME="$FAKE_REMOTE_HOME"
-VOWP_HOME="$FAKE_REMOTE_HOME/.vowp"
-export HOME VOWP_HOME
-unset VOWP_CONTROL_HOME
-exec sh -c "$last"
-"#,
-    )
-    .expect("write fake ssh");
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
-    }
+    write_script(&bin.join("ssh"), ssh_body);
+    write_script(
+        &bin.join("sudo"),
+        "#!/bin/sh\nprintf 'sudo: a password is required\\n' >&2\nexit 1\n",
+    );
+}
+
+#[test]
+fn setup_verify_control_runs_the_checks_on_the_home() {
+    ensure_vowp_binary();
+    let control = TempDir::new().expect("control home");
+    let remote = TempDir::new().expect("remote home");
+    let (remote_home, _remote_project, remote_node) = init_remote_home(remote.path());
+    let control_root = control.path().join("control");
+    let bin = control.path().join("bin");
+    let tmux = control.path().join("tmux");
+    std::fs::create_dir_all(&tmux).expect("control tmux");
+    write_control_transport(&control_root, &bin, &remote_node, &remote_home, FAKE_SSH);
 
     let output = Command::new(vowp_binary())
         .args(["--json", "setup", "verify"])
@@ -585,4 +654,131 @@ exec sh -c "$last"
         remote_home.join("snapshot.json").is_file(),
         "the home checks must write a fresh snapshot on the home"
     );
+}
+
+#[test]
+fn setup_verify_control_rejects_a_stale_home_snapshot() {
+    ensure_vowp_binary();
+    let control = TempDir::new().expect("control home");
+    let remote = TempDir::new().expect("remote home");
+    let (remote_home, _remote_project, remote_node) = init_remote_home(remote.path());
+    // A previous run's valid snapshot. If the fresh write below fails, the control must
+    // not fetch this file and report it as the result of this verification.
+    let mut old = snapshot(&remote_node);
+    old.generated_at = Timestamp::now().minus(Duration::from_secs(3_600));
+    std::fs::write(
+        remote_home.join("snapshot.json"),
+        serde_json::to_vec_pretty(&old).expect("old snapshot json"),
+    )
+    .expect("old snapshot");
+    // `write_snapshot` writes through `<home>/tmp`; a read-only directory there makes
+    // the home's fresh snapshot write fail while leaving the old snapshot in place.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(remote_home.join("tmp"), std::fs::Permissions::from_mode(0o555)).expect("chmod tmp");
+    }
+
+    let control_root = control.path().join("control");
+    let bin = control.path().join("bin");
+    let tmux = control.path().join("tmux");
+    std::fs::create_dir_all(&tmux).expect("control tmux");
+    write_control_transport(&control_root, &bin, &remote_node, &remote_home, FAKE_SSH);
+    let output = Command::new(vowp_binary())
+        .args(["--json", "setup", "verify"])
+        .env("HOME", control.path())
+        .env("VOWP_CONTROL_HOME", &control_root)
+        .env("TMUX_TMPDIR", &tmux)
+        .env("NO_COLOR", "1")
+        .env("FAKE_REMOTE_HOME", remote.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_HOME")
+        .output()
+        .expect("run control setup verify");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a failed home snapshot must fail control setup verify: {stdout}\n{stderr}"
+    );
+    let outcome: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}"));
+    assert_eq!(outcome["status"], "failed", "{outcome}");
+    let checks = outcome["checks"].as_array().expect("checks array");
+    let snapshot_check = checks
+        .iter()
+        .find(|check| check["name"] == "control.snapshot")
+        .unwrap_or_else(|| panic!("missing control.snapshot: {outcome}"));
+    assert_eq!(snapshot_check["status"], "fail", "{outcome}");
+    assert!(
+        snapshot_check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("snapshot"),
+        "the failure must name the home snapshot check: {outcome}"
+    );
+    assert!(
+        !control_root.join("snapshot.json").exists(),
+        "a stale snapshot must not be cached as this run's result: {outcome}"
+    );
+}
+
+#[test]
+fn setup_verify_control_surfaces_remote_stderr() {
+    ensure_vowp_binary();
+    let control = TempDir::new().expect("control home");
+    let remote = TempDir::new().expect("remote home");
+    let remote_home = remote.path().join(".vowp");
+    let control_root = control.path().join("control");
+    let bin = control.path().join("bin");
+    let tmux = control.path().join("tmux");
+    std::fs::create_dir_all(&tmux).expect("control tmux");
+    write_control_transport(&control_root, &bin, "remote-fixture", &remote_home, FAILING_VERIFY_SSH);
+    let output = Command::new(vowp_binary())
+        .args(["--json", "setup", "verify"])
+        .env("HOME", control.path())
+        .env("VOWP_CONTROL_HOME", &control_root)
+        .env("TMUX_TMPDIR", &tmux)
+        .env("NO_COLOR", "1")
+        .env("FAKE_REMOTE_HOME", remote.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_HOME")
+        .output()
+        .expect("run control setup verify");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a failed remote verify must fail the control command: {stdout}\n{stderr}"
+    );
+    let outcome: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}"));
+    assert_eq!(outcome["status"], "failed", "{outcome}");
+    let checks = outcome["checks"].as_array().expect("checks array");
+    for name in [
+        "gc.dry_run",
+        "fixture.job_merge",
+        "control.snapshot",
+        "orchestrator.chat",
+    ] {
+        let check = checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name}: {outcome}"));
+        let detail = check["detail"].as_str().unwrap_or_default();
+        assert_eq!(check["status"], "fail", "{outcome}");
+        assert!(
+            detail.contains("remote verify exploded"),
+            "the {name} failure must surface the remote stderr: {outcome}"
+        );
+    }
 }

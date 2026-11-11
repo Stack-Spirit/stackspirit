@@ -124,6 +124,10 @@ name = "session"
 path = "crates/vowp-cli/tests/session.rs"
 
 [[test]]
+name = "setup_verify"
+path = "crates/vowp-cli/tests/setup_verify.rs"
+
+[[test]]
 name = "signals"
 path = "crates/vowp-cli/tests/signals.rs"
 

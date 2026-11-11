@@ -101,12 +101,54 @@ impl Drop for RemoveDir {
 /// checkout; the global session index rows keep the run-unique job id.
 struct Fixture {
     _scratch: Scratch,
+    _cleanup: FixtureCleanup,
     paths: NodePaths,
     project: ProjectName,
     job: JobId,
     root: PathBuf,
     repo: PathBuf,
     deps: Deps,
+}
+
+/// Removes a fixture's files and its project row when it goes out of scope.
+///
+/// `Fixture::new` builds this before registering anything, so a failure part-way through
+/// (for example `upsert_project` inserting the row before creating its database fails)
+/// still removes the row, database, session directories and checkout.
+struct FixtureCleanup {
+    paths: NodePaths,
+    project: ProjectName,
+    root: PathBuf,
+}
+
+impl FixtureCleanup {
+    /// Builds a guard for `project`, whose files live below `root`.
+    fn new(paths: NodePaths, project: ProjectName, root: PathBuf) -> Self {
+        Self { paths, project, root }
+    }
+}
+
+impl Drop for FixtureCleanup {
+    fn drop(&mut self) {
+        if let Ok(store) = Store::open_with_project(&self.paths, &self.project)
+            && let Ok(sessions) = store.list_sessions(&SessionFilter {
+                project: Some(self.project.clone()),
+                ..SessionFilter::default()
+            })
+        {
+            for session in sessions {
+                let _ = fs::remove_dir_all(self.paths.session_dir(&session.id));
+            }
+        }
+        // The store has no delete-session API, so every fixture run leaves one global
+        // session-index row. It keeps the run-unique job id, so neither a later verify nor
+        // a real job can reuse it; only the row's session directory is removed.
+        if let Ok(global) = Store::open_global(&self.paths) {
+            let _ = global.remove_project_record(&self.project);
+        }
+        let _ = fs::remove_dir_all(self.paths.project_dir(&self.project));
+        let _ = fs::remove_dir_all(&self.root);
+    }
 }
 
 impl Fixture {
@@ -117,6 +159,7 @@ impl Fixture {
         let project = ProjectName::parse(&format!("{FIXTURE_JOB_PREFIX}-{label}-{suffix}"))?;
         let job = JobId::parse(&format!("{FIXTURE_JOB_PREFIX}-{label}-{suffix}"))?;
         let root = scratch.path.clone();
+        let cleanup = FixtureCleanup::new(base.paths.clone(), project.clone(), root.clone());
         let repo = root.join("project");
         let origin = root.join("origin.git");
         fs::create_dir_all(&repo)?;
@@ -225,6 +268,7 @@ impl Fixture {
         };
         Ok(Self {
             _scratch: scratch,
+            _cleanup: cleanup,
             paths: base.paths.clone(),
             project,
             job,
@@ -232,26 +276,6 @@ impl Fixture {
             repo,
             deps,
         })
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if let Ok(store) = Store::open_with_project(&self.paths, &self.project)
-            && let Ok(sessions) = store.list_sessions(&SessionFilter {
-                project: Some(self.project.clone()),
-                ..SessionFilter::default()
-            })
-        {
-            for session in sessions {
-                let _ = fs::remove_dir_all(self.paths.session_dir(&session.id));
-            }
-        }
-        if let Ok(global) = Store::open_global(&self.paths) {
-            let _ = global.remove_project_record(&self.project);
-        }
-        let _ = fs::remove_dir_all(self.paths.project_dir(&self.project));
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -298,6 +322,7 @@ fn home_checks(ctx: &Ctx) -> Vec<SetupCheck> {
 /// Runs the home checks over SSH and adds the live control-side snapshot.
 fn control_checks(control: &ControlHome) -> Vec<SetupCheck> {
     let mut checks = Vec::new();
+    let checked_after = Timestamp::now();
     let mut remote = match remote_home_checks(control) {
         Ok(outcome) => outcome.checks,
         Err(error) => {
@@ -313,10 +338,18 @@ fn control_checks(control: &ControlHome) -> Vec<SetupCheck> {
             return checks;
         }
     };
+    // Keep the home's own snapshot result: it proves the home just wrote a fresh
+    // `snapshot.json`. Fetching the file separately can otherwise turn a failed write
+    // followed by an older valid file into a false `ok`.
+    let home_snapshot = take_check(&mut remote, "control.snapshot");
     for name in ["gc.dry_run", "fixture.job_merge"] {
         checks.push(take_check(&mut remote, name));
     }
-    push_check(&mut checks, "control.snapshot", snapshot_from_control(control));
+    push_check(
+        &mut checks,
+        "control.snapshot",
+        snapshot_from_control(control, home_snapshot, checked_after),
+    );
     checks.push(take_check(&mut remote, "orchestrator.chat"));
     checks
 }
@@ -348,8 +381,16 @@ fn remote_home_checks(control: &ControlHome) -> Result<SetupOutcome, CliError> {
         ],
     );
     let output = runner.run(&argv, None)?;
-    serde_json::from_str(&output.stdout)
-        .map_err(|error| CliError::Remote(format!("the home returned an invalid setup verify document: {error}")))
+    // A home with a failed check exits 1 but still prints its complete JSON document, so
+    // parse the document first and use its per-check results. A truly failed command has
+    // no document; its stderr is the useful part and must not be discarded.
+    serde_json::from_str(&output.stdout).map_err(|error| {
+        CliError::Remote(format!(
+            "the home returned an invalid setup verify document (exit {:?}): {error}; {}",
+            output.status,
+            output.detail()
+        ))
+    })
 }
 
 /// Returns the per-user binary `setup home` installs on the home.
@@ -579,8 +620,26 @@ pub fn snapshot_check(ctx: &Ctx) -> Result<SetupCheck, CliError> {
     Ok(result)
 }
 
+/// How far the control machine's clock may run ahead of the home's before a snapshot is
+/// treated as stale. NTP keeps real machines much closer; the allowance only avoids a
+/// false failure from ordinary clock skew.
+const SNAPSHOT_CLOCK_SKEW: Duration = Duration::from_secs(60);
+
 /// Fetches the home snapshot over SSH and writes the control cache.
-fn snapshot_from_control(control: &ControlHome) -> Result<SetupCheck, CliError> {
+fn snapshot_from_control(
+    control: &ControlHome,
+    home_check: SetupCheck,
+    checked_after: Timestamp,
+) -> Result<SetupCheck, CliError> {
+    // The home reports whether its own fresh write succeeded. Preserve a failure instead
+    // of replacing it with whatever valid `snapshot.json` happens to be left on disk.
+    if home_check.status == "fail" {
+        return Ok(check(
+            "control.snapshot",
+            "fail",
+            format!("the home's own snapshot check failed: {}", home_check.detail),
+        ));
+    }
     let mut runner = SshRunner::new(control.config.ssh_target.clone());
     let probe = probe(&mut runner, &[])?;
     let path = format!("{}/snapshot.json", control.config.remote_home.trim_end_matches('/'));
@@ -603,6 +662,20 @@ fn snapshot_from_control(control: &ControlHome) -> Result<SetupCheck, CliError> 
     }
     let snapshot: Snapshot = serde_json::from_str(&output.stdout)
         .map_err(|error| CliError::Remote(format!("the home returned an invalid snapshot: {error}")))?;
+    // Even when the home's check passed, refuse a file written before this verification
+    // started. This catches a stale file if an older home reports a check it did not run.
+    let oldest_fresh = checked_after.minus(SNAPSHOT_CLOCK_SKEW);
+    if snapshot.generated_at < oldest_fresh {
+        return Ok(check(
+            "control.snapshot",
+            "fail",
+            format!(
+                "the home snapshot was generated at {} before this check started at {}; refusing a stale snapshot",
+                snapshot.generated_at.as_rfc3339(),
+                checked_after.as_rfc3339()
+            ),
+        ));
+    }
     let fetched_at = Timestamp::now();
     let snapshot_bytes = serde_json::to_vec_pretty(&snapshot).map_err(vowp_protocol::ProtocolError::from)?;
     crate::remote::write_private(&control.root.join("snapshot.json"), &snapshot_bytes)?;
@@ -817,5 +890,10 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output, CliError>
 }
 
 #[cfg(test)]
-#[path = "../../tests/setup_verify.rs"]
-mod integration_tests;
+mod integration_tests {
+    // The test file imports the public library as `vowp_cli`, so it compiles both through
+    // this library module and as the independent `[[test]]` target.
+    use crate as vowp_cli;
+
+    include!("../../tests/setup_verify.rs");
+}
