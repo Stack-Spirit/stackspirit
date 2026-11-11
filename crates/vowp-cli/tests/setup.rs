@@ -67,25 +67,35 @@ exec sh -c "$last"
         write_exec(&self.bin.path().join("ssh"), script);
     }
 
-    /// Writes a fake `ssh` that runs each remote command from a directory that
-    /// no longer exists, so `cd .` fails as it does in a login home the target
-    /// user cannot traverse.
-    fn write_ssh_from_vanished_cwd(&self) {
+    /// Writes a fake `ssh` that runs each remote command from a directory the
+    /// process cannot search. This is the `cd .` EACCES a target user gets when
+    /// sudo inherits a 0700 login home owned by another user. A mode-000
+    /// directory gives the same failure without needing another uid; if the
+    /// running user can still search it (root), the fake ssh refuses to run
+    /// instead of silently weakening the regression.
+    fn write_ssh_from_an_unsearchable_cwd(&self) {
         let script = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
 last=""
 for arg in "$@"; do last="$arg"; done
-gone="$FAKE_REMOTE_HOME/.vanished-login"
-mkdir -p "$gone"
-cd "$gone"
-rmdir "$gone"
+locked=$(mktemp -d "$FAKE_REMOTE_HOME/.unsearchable.XXXXXX")
+cd "$locked"
+chmod 000 "$locked"
+if (cd .) 2>/dev/null; then
+  printf 'fake ssh: the locked cwd is still searchable (running as root?); cannot reproduce the cd . EACCES\n' >&2
+  chmod 700 "$locked"
+  exit 99
+fi
 HOME="$FAKE_REMOTE_HOME"
 VOWP_HOME="$FAKE_REMOTE_HOME/.vowp"
 VOWP_VAULT_HOME="$FAKE_REMOTE_HOME/vowp-vault"
 VOWP_VAULT_HELPER="$FAKE_REMOTE_HOME/vowp-vault/helper"
 PATH="$FAKE_REMOTE_BIN:$PATH"
 export HOME VOWP_HOME VOWP_VAULT_HOME VOWP_VAULT_HELPER PATH
-exec sh -c "$last"
+sh -c "$last"
+status=$?
+chmod 700 "$locked"
+exit "$status"
 "#;
         write_exec(&self.bin.path().join("ssh"), script);
     }
@@ -261,8 +271,9 @@ exit 2
     }
 
     /// Writes a fake `curl` that emits an installer for the fake `vowp` prefix.
-    /// The installer touches its inherited cwd with `cd .` like the released
-    /// installer, so it fails from a login home the target user cannot search.
+    /// Like the released installer it starts with `set -eu`, so a failed `cd .`
+    /// aborts and the setup test depends on actually starting from a searchable
+    /// directory, not only on the command log.
     fn write_fake_curl(&self) {
         let real = vowp_binary();
         let wrapper = format!(
@@ -270,7 +281,7 @@ exit 2
             shell_path(Path::new(&real))
         );
         let installer = format!(
-            "cd .\nmkdir -p \"$HOME/.local/bin\"\ncat > \"$HOME/.local/bin/vowp\" <<'VOWP_SETUP_EOF'\n{wrapper}VOWP_SETUP_EOF\nchmod 0755 \"$HOME/.local/bin/vowp\"\n"
+            "set -eu\ncd .\nmkdir -p \"$HOME/.local/bin\"\ncat > \"$HOME/.local/bin/vowp\" <<'VOWP_SETUP_EOF'\n{wrapper}VOWP_SETUP_EOF\nchmod 0755 \"$HOME/.local/bin/vowp\"\n"
         );
         let curl = format!("#!/bin/sh\ncat <<'VOWP_CURL_EOF'\n{installer}VOWP_CURL_EOF\n");
         write_exec(&self.remote_bin.path().join("curl"), &curl);
@@ -1660,7 +1671,12 @@ fn setup_home_installs_the_per_user_binary_when_only_path_vowp_exists() {
 #[test]
 fn setup_home_installs_from_a_non_traversable_login_home() {
     let machine = Machine::new();
-    machine.write_ssh_from_vanished_cwd();
+    // The fake ssh starts every remote command from a mode-000 cwd. The fake
+    // sudo does not switch uid, so this is not a real `sudo -u vowp` session;
+    // it does reproduce the EACCES `cd .` that the target user hits in a real
+    // 0700 login home, and the fake installer's `set -eu` makes the install
+    // fail unless the executor starts from `/`.
+    machine.write_ssh_from_an_unsearchable_cwd();
     machine.write_tools("password");
     machine.write_path_vowp();
     machine.write_fake_curl();
@@ -1700,7 +1716,7 @@ fn setup_home_installs_from_a_non_traversable_login_home() {
     let installed = machine.remote.path().join(".local/bin/vowp");
     assert!(
         installed.is_file(),
-        "setup must install the binary from a login home the target user cannot traverse: {}",
+        "setup must install the binary from an unsearchable login home: {}",
         installed.display()
     );
     let unit = std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/vowp.service")).expect("unit");
@@ -2125,6 +2141,60 @@ fn install_sh_runs_when_piped_from_a_vanished_login_cwd() {
     assert!(
         output.status.success(),
         "install.sh failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed = install_home.path().join(".local/bin/vowp");
+    assert!(installed.is_file(), "installed binary missing: {}", installed.display());
+    let version_output = Command::new(&installed)
+        .arg("--version")
+        .output()
+        .expect("run installed binary");
+    assert_eq!(
+        String::from_utf8_lossy(&version_output.stdout).trim(),
+        format!("vowp {version}")
+    );
+}
+
+#[test]
+fn install_sh_runs_when_piped_from_an_unsearchable_login_cwd() {
+    let version = "0.2.0";
+    let url = release_url(version);
+
+    let install_home = tempfile::tempdir().expect("temp install home");
+    let login_home = tempfile::tempdir().expect("temp login home");
+    let locked = login_home.path().join("home");
+    std::fs::create_dir_all(&locked).expect("locked login home");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh");
+    // The path is known but unsearchable, so this isolates the old `cd .` in
+    // the SCRIPT_DIR/REPO_ROOT probe from the vanished-cwd version-probe test
+    // above. As with the setup helper, refuse to pass if root can search it.
+    let command = format!(
+        "cd {locked}\n\
+         chmod 000 {locked}\n\
+         if (cd .) 2>/dev/null; then\n\
+           printf 'test setup: the locked cwd is still searchable (running as root?)\\n' >&2\n\
+           chmod 700 {locked}\n\
+           exit 99\n\
+         fi\n\
+         cat {script} | sh -s -- --download --version {version} --base-url {url} --no-service --no-cron --no-watchdog\n\
+         status=$?\n\
+         chmod 700 {locked}\n\
+         exit $status",
+        locked = shell_path(&locked),
+        script = shell_path(&script),
+        url = shell_path(Path::new(&url)),
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .env("HOME", install_home.path())
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .output()
+        .expect("run install.sh");
+    assert!(
+        output.status.success(),
+        "install.sh failed from an unsearchable cwd\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
