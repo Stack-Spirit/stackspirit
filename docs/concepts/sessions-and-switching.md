@@ -36,11 +36,13 @@ the current token can read in **follow mode** and cannot write.
 
 When a second surface wants the session, the interactive choice is a takeover:
 
-1. the lease row is replaced atomically and a `note` event is appended;
+1. the lease row is replaced atomically;
 2. the home pushes a `LeaseRevoked` notice on the old surface's ingest stream, so it stops immediately;
 3. a running turn is drained for up to five seconds, then interrupted; events already appended stay;
-4. a capsule is written and, when the executor changes, a `switch` with reason `takeover` is recorded;
-5. the old surface prints `Taken over by phone at 14:05. This surface is now read-only (follow mode).`
+4. a capsule is written and, when the session already has an executor, a `switch` with reason `takeover`
+   is recorded;
+5. the takeover `note` is appended after the switch releases the log lock;
+6. the old surface prints `Taken over by phone at 14:05. This surface is now read-only (follow mode).`
    and keeps reading new events.
 
 A pre-attach session with no executor gets the note only. `vowp chat --follow` starts read-only;
@@ -137,17 +139,18 @@ name for a generic CLI. A profile is an ordered ladder of executors; rung 0 is p
 | **claude-code** | `claude -p --output-format stream-json --verbose [--resume <id>] --model … --effort … --permission-mode …` | `--resume <native id>` | usage/session/weekly limit text and reset time, 429/overloaded, auth; repeated unknown errors become "unavailable for 15 min" |
 | **opencode** | `opencode run --format json [--session <id>] --model provider/model#variant --auto` | `--session <native id>` | 402/insufficient credit, 429, auth, context overflow |
 | **cli** (generic) | Any command with JSON or plain output plus a mapping file | per tool | exit codes and patterns from the mapping file |
-| **opencode host** | An opencode server on the home, joined through an SSH tunnel and `opencode pair` | the app's own session | the adapter classifies the mirrored events |
-| **Claude Remote Control** | Claude Code on the home, driven by the Claude apps where a claude.ai login exists | the app's own session | the adapter classifies the mirrored events |
+| **opencode host** | An opencode server on the home, joined through an SSH tunnel and `opencode pair` | the app's own session | not yet classified from the host (mirror not wired) |
+| **Claude Remote Control** | Claude Code on the home, driven by the Claude apps where a claude.ai login exists | the app's own session | not yet classified from the host (mirror not wired) |
 
 Adapters spawn stock binaries exactly as a user would. They do not read login files, spoof clients or
 forward tokens. The harness never sees tmux; the tmux window only follows the event log. The ACP adapter
 is a deferred design note, not part of v0.2 delivery.
 
-The app hosts mirror the app transcript into the same log. The mirror reads opencode's event stream and
-backfills from its session export; Claude Code uses the transcript importer. A duplicate native event id
-is skipped. `session_resume` returns the capsule and last turns when the owner changes app, device or
-model. See [home and surfaces](home-and-surfaces.md#app-surfaces-and-orchestrators).
+The transcript-mirror helpers exist but are not wired into the production hosts in this build, so app
+turns are not automatically copied into the VOWP log yet. The planned mirror reads opencode's event
+stream and backfills from its session export; Claude Code uses the transcript importer. The MCP
+`session_resume` tool currently reads the session log and capsule directly. See
+[home and surfaces](home-and-surfaces.md#app-surfaces-and-orchestrators).
 
 ## Capsules
 

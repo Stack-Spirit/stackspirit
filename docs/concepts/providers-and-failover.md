@@ -37,18 +37,21 @@ configuration are merged. A job's `profile` field selects its ladder; by default
 | `next` | Move to the next rung and stay there. No probe-back. |
 | `park` | Park the affected jobs and open an inbox item. |
 
-### One home, shared providers
+### One home, shared limit rows
 
-On a v0.2 home, provider limits are **node-wide**, not per project. The global database holds one
-`limits` row per provider, and every active project sees it:
+The global database holds one `limits` row per provider, so every project sees the same limit state and
+dispatch skips a limited provider. The follow-up action is **project-local** in this build:
 
-- a `rate` limit lowers that provider's effective concurrency for the whole node until it clears;
-- `credits` and `auth` park the affected jobs in every project and open exactly one inbox item per
-  provider and kind;
-- a `quota` limit moves the session that hit it and dispatch skips that provider until the reset; the
-  probe-back shares the same limit row, so two projects cannot hammer a limited provider independently.
+- `credits` and `auth` parking runs in the project whose supervisor handles the event and parks only
+  that project's jobs; the global `park:<provider>` request is consumed by one project tick, so another
+  project's jobs may not be parked automatically;
+- a `rate` limit updates the shared row, but the effective concurrency count is computed from one
+  project's open runs;
+- a `quota` limit moves the session that hit it, and dispatch in every project skips that provider
+  until the reset.
 
-Job cost stays attached to its project and run; the provider limit is the shared fact.
+Node-wide parking and a shared concurrency cap are code follow-ups. Job cost stays attached to its
+project and run; the limit row is the shared fact.
 
 ### Executor grammar
 
@@ -119,9 +122,9 @@ on_credits_exhausted = "park"
 max_concurrent = 1                             # keep a subscription-backed provider at one run
 ```
 
-Use your own provider keys as the table names. `max_concurrent` caps concurrent runs per provider. A
-rate limit lowers the effective cap until its reset, then restores it. Provider limits are shared by
-every project on the home; a limit is a fleet event, not a project-local one.
+Use your own provider keys as the table names. In this build `max_concurrent` caps concurrent runs per
+provider **within one project**; the limit rows are global, but the count is project-local. A rate limit
+lowers the effective cap until its reset, then restores it.
 
 **Capacity and providers are separate controls.** Capacity admission asks whether the machine can start
 another run, and it includes the provider's active limit and smallest `max_concurrent` in its target.

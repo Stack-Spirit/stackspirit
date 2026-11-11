@@ -12,15 +12,18 @@ class. Four classes are permanent by construction; five are disposable and colle
 
 | Class | Examples | Default | Derived from |
 |---|---|---|---|
-| **production** | releases, rollback snapshots, serving banks, `releases.log`, prod pointers | **Never auto-deleted** | `releases` rows, `[env.*]` paths, catalog |
+| **production** | releases, rollback snapshots, serving banks, prod pointers | **Never auto-deleted** | `releases` rows, `[env.*]` paths, catalog |
 | **truth** | global and project databases, capsules, passing gate evidence, decisions and ledger, backups, archived project data | **Never auto-deleted**; backed up | database files, `capsules/`, `gate_results`, `catalog` |
 | **open work** | worktrees of unmerged or unpushed jobs, active or open sessions, orchestrator sessions, the live lock and heartbeat | **Never auto-deleted** | `jobs` state and worktree, `sessions` state, `orchestrators/` |
 | **secrets** | `~/.vowp/secrets/`, vault files | **Never auto-deleted**; **never backed up in plain text** | secrets directory, mode file |
 | **closed session** | `log.jsonl` and blobs of an idle session whose job is done, or an explicitly closed session | Kept 30 days after the last update, then compacted to a capsule and summary | `sessions.state='closed'` or a done job |
 | **run output** | `runs/*.jsonl`, `*.stderr` | 14 days; gzip after 1 day | `runs/` and the run rows |
 | **worktree** | a job worktree | Removed after merge; a failed, cancelled or replanned job's worktree is kept 7 days | job state and worktree path |
-| **sample** | `host_samples` | 5-second rows kept for 24 hours; no automatic one-minute rollup | the table |
+| **sample** | `host_samples` | One row per supervisor tick, kept for 24 hours; no automatic one-minute rollup | the table |
 | **cache** | disposable `tmp/` files | 24 hours | `tmp/` |
+
+The release log (`releases.log`) is not currently classified; GC leaves it untouched because it is
+outside the classified set. Adding it to the catalog is a follow-up.
 
 The classification is **derived from database state wherever possible**, so no registration hook is
 needed when a run, session, worktree or sample is created. The `catalog` table adds rows for files that
@@ -37,15 +40,16 @@ vowp `gc` is a dry run by default. It lists files per class, their bytes and a f
 changes nothing. vowp `gc --apply` deletes only the five disposable classes once their expiry has
 passed:
 
-- **closed sessions:** compact first, then remove the full log and blobs;
+- **closed sessions:** compact first, then remove the full log and non-evidence blobs;
 - **run output:** gzip after one day and delete after fourteen;
 - **worktrees:** remove per the worktree rule, never the main checkout and never an open job;
 - **samples:** prune expired host-sample rows;
 - **cache:** remove expired temporary files.
 
 It never deletes production, truth, open work or secrets, even if a catalog row carries an expiry. It
-also refuses a path that escapes the home. The `--class` filter narrows a pass to one class, and
-`--json` prints the report. `--now` exists for tests and takes an RFC 3339 instant.
+refuses to delete a classified catalog or run-output path outside the home; worktree removal is allowed
+outside the home and is checked against the main checkout instead. The `--class` filter narrows a pass
+to one class, and `--json` prints the report. `--now` exists for tests and takes an RFC 3339 instant.
 
 A nightly L9 schedule, `gc-nightly`, runs vowp `gc --apply` every 24 hours for each project. The supervisor
 creates the schedule once per project if it is missing. The same tick enforces the 50 MB raw run-output
@@ -108,11 +112,11 @@ the main checkout is refused.
 
 ### Samples and cache
 
-Host samples are written every 5 seconds and kept for 24 hours. The pruner also knows how to retain
-one-minute rows for 30 days if such rows exist, but the sampler does not create them in this build; a
-minute rollup is still a follow-up. Disposable files under `tmp/` expire after 24 hours; the snapshot
-writer uses that directory for its atomic rename, so a live file is not a cache candidate until it is
-old.
+Host samples are written once per supervisor tick (60 seconds by default) and kept for 24 hours. The
+pruner also knows how to retain one-minute rows for 30 days if such rows exist, but the sampler does
+not create them in this build; a minute rollup is still a follow-up. Disposable files under `tmp/`
+expire after 24 hours; the snapshot writer uses that directory for its atomic rename, so a live file is
+not a cache candidate until it is old.
 
 ## Backup
 
@@ -136,8 +140,9 @@ tells the owner to set them again with vowp `secret set`.
 - With no destination, the backup goes to `~/.vowp/backups/<UTC timestamp>/`. Backups in that default
   directory are rotated: the newest backup per day is a daily candidate, the newest daily candidate per
   ISO week is a weekly candidate, and the union of the newest 7 daily and 4 weekly backups is kept.
-- `--to` may be a directory, a `.db` file (legacy single global-DB copy), an `user@host:path`, an
-  `rsync://` target or a git remote. `--offsite` is an explicit alias for an offsite target.
+- `--to` may be a directory, a `.db` file (legacy single global-DB copy), a `user@host:path`, an
+  `rsync://` target or a `git:<remote>` target. Only the `git:` prefix selects git; other remote-looking
+  targets go to rsync. `--offsite` is an explicit alias for an offsite target.
 - `--encrypt` runs the external `age` binary. A missing `age`, `rsync` or `git` is a clear exit 5 naming
   the binary it needs; VOWP never silently writes an unencrypted copy.
 - `--restore` stages into a sibling directory of `--to-home`, verifies every hash and row count, runs
@@ -172,7 +177,7 @@ is never deleted by GC. Production catalog rows that mention the project are kep
 | Closed session log and blobs | 30 days after close | compact to capsule + summary |
 | Raw run output | 14 days | gzip after 1 day, delete after 14 |
 | Failed/cancelled/replanned worktree | 7 days after the terminal state | remove worktree, keep branch |
-| Host samples | 24 hours (5-second rows) | prune; no minute rollup yet |
+| Host samples | 24 hours (one row per tick) | prune; no minute rollup yet |
 | Disposable temp/cache | 24 hours | delete |
 | Backups in the default directory | 7 daily + 4 weekly | rotate |
 

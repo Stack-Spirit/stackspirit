@@ -16,7 +16,7 @@ Capacity is not a spending budget and it never kills a running job. Cost is repo
 
 ```text
 measure ──────────────► admit ──────────────► brake
- every 5 s              before each run        stops new runs
+ each tick              before each run        stops new runs
  host + per-run         target, RAM, CPU,      memory pressure,
  usage + estimates      disk, provider         swap growth, disk,
                                                provider limits
@@ -34,8 +34,9 @@ it is shown as an override and the brakes still apply.
 
 ### Host samples
 
-While the supervisor runs, one sampler thread reads the host every 5 seconds and writes a
-`host_samples` row:
+While the supervisor runs, each node tick reads the host once and writes a `host_samples` row. The
+node tick is 60 seconds by default; the row's fixed `interval_secs=5` label is not a separate 5-second
+thread. The sample contains:
 
 - memory total, available and swap used, from `/proc/meminfo` on Linux;
 - load averages and CPU count; the cgroup v2 CPU quota when one is present;
@@ -50,9 +51,10 @@ checks and uses the owner's fixed target when one is set, otherwise 1. The disk 
 vowp `capacity show` prints `capacity: fallback (no /proc), target <n>` so the degradation is visible.
 Auto capacity never silently claims a measured number on such a host.
 
-Samples are written every 5 seconds and kept for 24 hours. The pruner can also retain one-minute rows
-for 30 days if they exist, but the sampler does not create them in this build; a minute rollup is still
-a follow-up. The GC pass prunes expired rows (see [data lifecycle](data-lifecycle.md)).
+Samples are written once per node tick (60 seconds by default) and kept for 24 hours. The pruner can
+also retain one-minute rows for 30 days if they exist, but the sampler does not create them in this
+build; a minute rollup is still a follow-up. The GC pass prunes expired rows (see
+[data lifecycle](data-lifecycle.md)).
 
 ### Per-run usage
 
@@ -182,7 +184,7 @@ This is a tested property, not a convention.
 | vowp `capacity show [--json]` | The current report: host, running, target/advice, brake, reserves and top estimates. |
 | vowp `capacity report [--json] [--since <duration\|date>] [--limit <n>]` | The same report, filtered for the advisor or a human review. |
 | vowp `capacity set --target <n> [--mode auto\|fixed] [--override] [--reason <text>] [--by <actor>]` | Writes one target history row. `--mode fixed` is the default and requires `--target`; `--mode auto` ignores the number and recomputes. |
-| vowp `fleet capacity [--json]` | Alias of vowp `capacity show`. |
+| vowp `fleet capacity [--json]` | The snapshot's smaller capacity card: target, advised target, run count, brake and `measured` (currently none). Use vowp `capacity show` for host, estimates, waiting jobs and limits. |
 
 vowp `capacity show` prints `host`, `target`, `running`, `brake`, `reserve`, `estimates` and `waiting`. The
 JSON document is the same `CapacityReport` the advisor reads, so a script does not have to scrape the

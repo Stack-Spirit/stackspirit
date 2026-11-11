@@ -86,7 +86,7 @@ nothing else.
 | **Harness** | An agent program: Claude Code, opencode, Codex, Gemini CLI, … |
 | **Adapter** | VOWP code that drives one harness headlessly and turns its output into canonical events. |
 | **Session** | A universal, harness-neutral conversation with a stable id and an append-only event log on the home. |
-| **Surface** | Where a person talks to a session now: an app, `vowp chat`, an MCP server or a mirror. |
+| **Surface** | Where a person talks to a session now: an app, `vowp chat` or an MCP server. |
 | **Lease** | The right of one surface to send input to one session. A lease without a heartbeat for 60 s is free. |
 | **Executor** | One concrete way to run a model: `harness:model[@effort][#variant]`, plus the node that runs it. |
 | **Profile** | A role's ordered ladder of executors (rung 0 is preferred). |
@@ -205,7 +205,7 @@ see [data lifecycle](data-lifecycle.md).
 - Sessions on every surface: leases, takeover, follow mode, remote execution with a durable spool,
   opencode and Claude app hosts, the MCP server, `vowp chat` and orchestrator sessions.
 - Control machines: vowp `control init`, snapshot cache, SSH tunnels, and phone access with an SSH app.
-- Secrets in basic or vault-user mode, injected by name and redacted by exact value.
+- Secrets in basic or vault-user mode, injected by name, with exact-value redaction in session logs, capsules, report artifacts and the snapshot.
 - Lifecycle classes, vowp `gc`, closed-session compaction, backup/restore and the nightly GC schedule.
 - AI-first setup: vowp `setup plan`, vowp `setup home` and vowp `setup control`.
 

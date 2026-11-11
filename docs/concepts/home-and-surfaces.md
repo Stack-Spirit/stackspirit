@@ -16,7 +16,7 @@ The home is normally a Linux VPS that stays on. It owns:
   leases, provider limits, capacity history, the lifecycle catalog and the node inbox and ledger;
 - **one database per project**, `~/.vowp/projects/<name>/project.db`, with that project's jobs, edges,
   runs, gate results, loops, schedules, inbox, ledger and releases;
-- every **session log** under `~/.vowp/sessions/<id>/`, including capsules, blobs and app mirrors;
+- every **session log** under `~/.vowp/sessions/<id>/`, including capsules and blobs;
 - the **node supervisor**, the capacity sampler, the tmux windows and `snapshot.json`.
 
 A `Store` handle is bound to the global database plus exactly one project database. The supervisor
@@ -150,7 +150,9 @@ The snapshot carries:
 - the supervisor state (running, pid, last tick, fail streak, version);
 - every project with state, weight, jobs by state, running jobs, blocked jobs, queue with waiting
   reasons, last merge, recent gate failures and cost today;
-- total capacity: host sample, running estimate, target and advice, brakes and reserves;
+- total capacity: target and advice, brake state, reserves and the running run count. The
+  snapshot's `measured` host sample is `null` and `running` carries zero RAM/CPU in this build;
+  vowp `capacity show` is the measured report;
 - provider limits, open inbox items, recent sessions with their active surface, and orchestrator
   cards.
 
@@ -161,7 +163,7 @@ Read commands:
 | vowp `fleet status [--refresh] [--cached]` | The node summary and snapshot wrapper. On a control machine it can fall back to the cache. |
 | vowp `fleet queue [--project] [--state]` | Every queued job with its waiting reason. |
 | vowp `fleet inbox [--project] [--all]` | Node and project inbox items, oldest first. |
-| vowp `fleet capacity` | Alias of vowp `capacity show`. |
+| vowp `fleet capacity` | The snapshot capacity card: target, advised target, run count, brake and `measured` (currently none). Use vowp `capacity show` for the full measured report. |
 | vowp `status` | The compact v0.1-compatible status plus the home and project rows. |
 | vowp `board [--once]` | The refreshing terminal board. With one project the output stays byte-compatible with v0.1. |
 
@@ -172,23 +174,25 @@ snapshot like the rest of the home state.
 ## Sessions, surfaces and leases
 
 The v0.1 session model is unchanged: one append-only log, one sequence, capsules, switch and
-export/import. v0.2 adds a transport, a lease and app mirrors. The rule is:
+export/import. v0.2 adds a transport, a lease and app-host integration. The rule is:
 
 > **Any surface can continue the same session; only the lease holder writes.**
 
-Surfaces include `vowp chat`, the opencode app, a Claude app, the `mcp` server those apps call, and
-a transcript mirror. A surface registers once and heartbeats its lease every 5 seconds. If the
+Surfaces include `vowp chat`, the opencode app, a Claude app and the `mcp` server those apps call. A
+surface registers once and heartbeats its lease every 5 seconds. If the
 heartbeat is older than 60 seconds the lease is stale and another surface may take it. A clean exit
 releases the lease.
 
 When another surface holds a live lease, opening the session asks before taking over. A takeover:
 
-1. atomically replaces the lease row and appends a `note` event;
+1. atomically replaces the lease row;
 2. pushes a `LeaseRevoked` notice on the old surface's ingest stream, so it stops writing immediately;
 3. drains a running turn for up to five seconds, then interrupts it;
 4. writes a capsule and, when the session already has an executor, records a `switch` with reason
-   `takeover` (a pre-attach session gets only the note);
-5. leaves the old surface in **follow mode**, reading new events but refusing every write.
+   `takeover`;
+5. appends the takeover `note` after the switch releases the log lock;
+6. leaves the old surface in **follow mode**, reading new events but refusing every write. A pre-attach
+   session gets the note only.
 
 The old surface prints the notice and keeps showing new events:
 
@@ -292,11 +296,13 @@ never claim a tool or join is working without checking.
 
 ### Transcript mirror and resume
 
-The app's conversation is mirrored into the same VOWP log. For opencode the mirror consumes the
-server's event stream and backfills from its session export; for Claude Code it uses the transcript
-importer. The cursor lives in `~/.vowp/orchestrators/<name>/mirror.json`. A switch to another app,
-harness or model calls `session_resume`, which returns the session, the latest capsule, the last turns
-and the lease, so the new app continues with the full picture.
+The mirror and resume helpers are implemented and tested in the core, but they are **not wired into
+the production node supervisor or app hosts in this build**. An orchestrator's app turns are therefore
+not yet copied into the VOWP log, and no `mirror.json` cursor is written in production. The planned path
+is an opencode event-stream mirror with export backfill and a Claude transcript importer, with the
+cursor under `~/.vowp/orchestrators/<name>/mirror.json`. Until that wiring lands, use the app's own
+history and `vowp session export`; the MCP `session_resume` tool reads the session log and capsule
+directly.
 
 ## MCP tools
 
@@ -349,8 +355,9 @@ putting it in a chat.
 
 Injection is by name through the harness's `env_pass` and the configured deploy commands. Because VOWP
 knows the exact values it injected, it replaces exact occurrences with `[REDACTED:<NAME>]` in events,
-capsules, reports, gate evidence, ledger details and the snapshot before writing. The secret-scan gate
-remains a separate backstop.
+capsules, report artifacts, raw run mirrors and the snapshot before writing. Gate evidence and ledger
+details are not redacted in this build, so a command gate that prints an injected secret can persist it
+there; redaction at those sinks is a follow-up. The secret-scan gate remains a separate backstop.
 
 The honest limit: any agent that can run arbitrary code in a process that holds a secret can print it.
 This design keeps values out of files an agent can read, out of transcripts and out of git; it cannot
