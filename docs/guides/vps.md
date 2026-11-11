@@ -361,13 +361,22 @@ vowp secret upgrade             # prints the one sudo command that creates the v
 
 On a control machine, `secret set/ls/rm/upgrade` route to the home over SSH; `secret request` opens a
 local tunnel so the browser sees a control-machine loopback URL. A harness receives only the names
-listed in `env_pass`; VOWP injects the values into that child's environment and redacts exact values
-before writing logs, events, capsules, reports and the snapshot.
+listed in `env_pass`; VOWP injects the values into that child's environment.
+
+Redaction is partial and timed. Event payloads and the snapshot are redacted before writing; a capsule
+is redacted after the writer returns; the job report and latest run mirror are redacted after each
+turn finishes. Supervisor logs, gate command evidence and ledger detail rows are written unredacted
+today, and a report or run mirror is still raw while the turn is running. Treat the home as sensitive
+and avoid commands that print secret values.
 
 The honest limit: any agent that can run arbitrary code in a process that holds a secret can print
-it. This design keeps secrets out of files the agent can read, out of transcripts and out of git; it
-cannot make a secret unreadable to code that is given it. Harness logins stay under the harness's own
-control. The full statement is in the [security model](../security.md#secrets).
+it. **Basic mode does not separate the value from the agent's user**: `~/.vowp/secrets/<NAME>` is mode
+0600 but owned by the runtime user, and a harness spawned as that user can read it. **Vault mode is
+the mode that separates them**: the file lives under `vowp-vault` and the runtime user cannot read it;
+only the helper injects the configured names. Neither mode encrypts the file at rest. VOWP keeps
+values out of configuration, database rows, canonical transcripts and git, but it cannot make a
+secret unreadable to code that is given it. Harness logins stay under the harness's own control. The
+full statement is in the [security model](../security.md#secrets).
 
 ## Back up and collect garbage
 

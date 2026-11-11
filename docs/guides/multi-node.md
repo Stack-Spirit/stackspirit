@@ -151,14 +151,16 @@ copying or archiving; the normal multi-device path is one home with several surf
 
 A session has one writer: the home. A surface sends turns through the home's session service, and the
 home appends events with a gapless `seq`. If the SSH connection drops during a turn, the surface keeps
-its events in a local spool and replays them when it reconnects. Ingest is idempotent by event id, so a
-replay cannot duplicate an event. This is what lets a laptop or phone lose connectivity without
-losing the conversation.
+its unacknowledged events in a local spool and replays them into the home log when it reconnects.
+Ingest is idempotent by event id, so a replay cannot duplicate an event. This is what lets a laptop or
+phone lose connectivity without losing the conversation.
 
 The practical rules:
 
 - The home stays up; do not run a second supervisor to "keep the session alive".
-- On reconnect, the surface prints the events it missed and continues from the last `seq`.
+- On reconnect, the surface replays its spool into the home log and continues from the last
+  acknowledged sequence. The chat view prints only events after the current turn's `grant.tail_seq`;
+  use `vowp session show` or `vowp session tail` to read the replayed events from the home log.
 - Do not hand-edit `log.jsonl`, a capsule or a spool file to repair a gap; report the session id and
   the first missing sequence instead.
 - A surface that does not hold the lease can read in follow mode but every write is refused with the

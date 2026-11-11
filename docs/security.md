@@ -88,9 +88,13 @@ error messages, commands and the setup plan.
 
 `~/.vowp/secrets/mode` records `vault` or `basic` (0600). `vowp secret upgrade` prints the one sudo
 command that creates the vault user and moves the files; without sudo, VOWP stays in basic mode.
-In both modes the store is **not encrypted at rest**: the Unix account permissions and disk encryption
-are the boundary. The vault user separates the value from the agent's runtime user; it is not a
-hardware keystore.
+
+**Basic mode does not separate the value from the agent's user.** The secret file is mode 0600 but
+owned by the runtime user (`vowp` or the SSH user), and the harness is spawned as that same user, so
+the harness can read `~/.vowp/secrets/<NAME>` if it tries. **Vault mode is the mode that separates
+them:** the file lives under `vowp-vault`, the runtime user cannot read it, and only the helper
+injects the configured names. Neither mode encrypts the store at rest; the Unix account permissions
+and disk encryption are the boundary. The vault user is not a hardware keystore.
 
 ### Commands
 
@@ -129,33 +133,39 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
   `__vault-admin set <NAME>` reads the value from stdin (never argv), validates the name and writes
   the file as `vowp-vault`; `rm <NAME>` unlinks it. The sudoers line names these fixed subcommands,
   not an arbitrary command.
-- In basic mode the helper is a plain exec with the same argv; the value is protected by the runtime
-  user's permissions.
+- In basic mode the helper is a plain exec with the same argv; the value is protected only by the
+  runtime user's permissions, and the harness runs as that same user.
 
 ### Redaction
 
 `vault::Redactor` loads the exact values (longest first) and replaces every exact occurrence with
-`[REDACTED:<NAME>]`. It is applied to:
+`[REDACTED:<NAME>]`. The coverage and timing are:
 
 - every event payload and `raw` before `SessionLog::append`;
+- the serialized snapshot before writing;
 - a capsule body after the writer returns and before the caller sees it;
-- job artifacts after each turn (`report.md` and the run raw mirror);
-- the serialized snapshot before writing.
+- the job report and latest run mirror after each turn finishes.
 
-It is **not** applied to gate command evidence or ledger `detail_json` today: the gate runner inserts
-`GateResult.evidence` and the ledger writer appends `detail` directly. A command gate or ledger row
-that prints an injected value can therefore store it in plain text. Avoid commands that echo secret
-values, and treat gate evidence and ledger rows as sensitive. This is a known gap tracked as a
-follow-up; do not rely on event/snapshot redaction to cover those rows.
+It is **not** applied to the supervisor log, gate command evidence or ledger `detail_json`: the
+supervisor log writer appends directly, the gate runner inserts `GateResult.evidence` directly and the
+ledger writer appends `detail` directly. A supervisor line, command gate or ledger row that prints an
+injected value can therefore store it in plain text. The report and run mirror are raw during the
+turn and only rewritten when it ends. Avoid commands that echo secret values, and treat all of these
+files as sensitive. This is a known gap tracked as a follow-up; do not rely on event/snapshot
+redaction to cover it.
 
 The redactor never logs a value or its prefix; it logs only the name. The `secret_scan` gate stays and
 runs on the public tree.
 
 ### The honest limit
 
-**Any agent that can run arbitrary code inside a process that holds a secret can print it.** This
-design keeps secrets out of files the agent can read, out of transcripts and out of git; it cannot
-make a secret unreadable to code that is given it.
+**Any agent that can run arbitrary code inside a process that holds a secret can print it.** In vault
+mode the design keeps the secret files outside the runtime user's readable tree and injects only the
+configured names. In basic mode it does not separate them: the secret file is owned by the same user
+as the harness, so a harness that reads `~/.vowp/secrets/<NAME>` can recover the value. Neither mode
+encrypts the store at rest, and neither can make a secret unreadable to code that is given it. VOWP
+still keeps values out of configuration, database rows, canonical transcripts and git; redaction is
+the backstop for exact injected values in the places listed above.
 
 Also be explicit about the edges:
 
