@@ -89,7 +89,9 @@ checks run on the private release checkout before the public tree is built.
 Every workspace package and the npm package must say `0.2.0`; historical
 release notes and acceptance records may mention earlier versions.
 
-```sh
+```bash
+set -o pipefail
+
 cargo metadata --no-deps --format-version 1 |
   python3 -c 'import json, sys
 d = json.load(sys.stdin)
@@ -114,7 +116,7 @@ node -p 'require("./packaging/npm/package.json").version'   # must be 0.2.0
 # historical mentions in otherwise current files, such as the roadmap's v0.1
 # release sentence.
 historical_line='v0\.1 public release|Upgrade from 0\.1\.0|v0\.1\.0 binary|v0\.1 home|v0\.1\.0 release'
-if git grep -nI '0\.1\.0' -- . \
+raw=$(git grep -nI '0\.1\.0' -- . \
     ':!CHANGELOG.md' \
     ':!docs/release/0.1.0.md' \
     ':!docs/release/0.2.0.md' \
@@ -130,19 +132,33 @@ if git grep -nI '0\.1\.0' -- . \
     ':!site' \
     ':!AGENTS.md' \
     ':!docs/dogfood' \
-    ':!docs/fresh-user' |
-    grep -vE "$historical_line"; then
-  echo "current-version 0.1.0 reference found (listed above)" >&2
+    ':!docs/fresh-user') || {
+  status=$?
+  if [ "$status" -ne 1 ]; then
+    echo "version grep failed (exit $status)" >&2
+    exit 1
+  fi
+  raw=
+}
+hits=
+if [ -n "$raw" ]; then
+  hits=$(printf '%s\n' "$raw" | grep -vE "$historical_line" || true)
+fi
+if [ -n "$hits" ]; then
+  printf '%s\n' "$hits" >&2
+  echo "current-version 0.1.0 reference found" >&2
   exit 1
 fi
 ```
 
-The npm line is the one deliberate cross-path check. If it prints `0.1.0`, stop:
-the package cannot publish a release that does not exist. The version grep must
-print nothing; every remaining hit must be a clearly labelled historical note or
-a non-VOWP version, otherwise fix it before building the public tree. The crate
-READMEs, the issue templates and the Homebrew README are public product files; a
-`0.1.0` hit there is current-version text, not history.
+The npm line is one deliberate cross-path check; the version grep is the other.
+If the npm line prints `0.1.0`, stop: the package cannot publish a release that
+does not exist. The version grep must print nothing; every remaining hit must be
+a clearly labelled historical note or a non-VOWP version, otherwise fix it
+before building the public tree. A failed `git grep` (for example, a typo in a
+pathspec) also stops the run instead of passing silently. The crate READMEs, the
+issue templates and the Homebrew README are public product files; a `0.1.0` hit
+there is current-version text, not history.
 
 ### 1.3 Package and npm dry runs
 
