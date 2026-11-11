@@ -13,8 +13,8 @@ ACCEPTANCE](#pending-owner-acceptance) with exact commands, expected results
 and "Not run". The rehearsal found one product gap: a project-bound
 orchestrator's own directory is outside the project's cwd allow-list, so the
 first takeover/capsule fails unless the orchestrators root is added. The
-workaround is in this record and the fix belongs in a follow-up job; it is not
-hidden in the public claim.
+workaround is in this record; job `f-cwd-allow-orchestrator` fixed the gap
+(merged as `d86ca14`), and it is not hidden in the public claim.
 
 The automatable rehearsal covered, on a temporary VOWP home on the VPS:
 
@@ -34,11 +34,14 @@ The automatable rehearsal covered, on a temporary VOWP home on the VPS:
 ## Environment
 
 - Date: 2026-11-11 (UTC).
-- Worktree: `job/v2-t5-dogfood`, rebased onto `origin/main` `e41459f`; this is
-  a docs-only branch. The rehearsal binary was built from the earlier
-  `ce4de07`; the later `f-project-path-default` commits only default
-  `project.path`, which the fixture pins explicitly, so the evidence is
-  unchanged.
+- Worktree: `job/v2-t5-dogfood`. The rehearsal and the gate evidence below are
+  from the run at `origin/main` `e41459f` (the verify-3 commit `c96d08c` was
+  based on `ad4e6a5`); the branch was later rebased onto `5fd7ca8` for review
+  and main has advanced since, but those rebases did not repeat the rehearsal
+  or change its evidence. This is a docs-only branch. The rehearsal binary was
+  built from the earlier `ce4de07`; the later `f-project-path-default` commits
+  only default `project.path`, which the fixture pins explicitly, so the
+  evidence is unchanged.
 - Binary under test: built with `cargo build -p vowp-cli --bin vowp`; it
   reports `vowp 0.1.0` (the package version during the v0.2 pre-release), SHA-256
   `a210589c34887af515d1c18d36f4d8aecfad868b092be473c47f507e06f9e795`.
@@ -90,8 +93,8 @@ cd /tmp/opencode/t5-dogfood/projects/release
 ```
 
 The fixture is an ordinary git checkout with a local bare `origin` and a
-deterministic fake worker/verifier. The rehearsal added four fixture-only
-things to its `vowp.toml`, all committed in the fixture (not in the product
+deterministic fake worker/verifier. The rehearsal added five fixture-only
+additions to its `vowp.toml`, all committed in the fixture (not in the product
 tree): `project.path` and `worktree_root` (the tested binary's session
 allow-list needs them; the later `f-project-path-default` commit defaults
 `project.path` from the checkout), a `cwd_allow` entry for the private
@@ -120,11 +123,13 @@ orchestrator dogfood (opencode, running) session 01M74Y7AA1C00NCVM2C454N7KR
 ```
 
 The app host was a real `opencode serve` process. The run's
-`.opencode/service.log` records the loopback URLs it used (`44253` and, after
-the stop/resume check, `38987`), and the resumption capture
-`evidence/opencode-host.json` / `evidence/opencode-listener.txt` records a live
-`127.0.0.1:38835` listener and its `host.json` fields. (`host.json` is removed
-by `orchestrator stop`, which is why the listener capture is kept separately.)
+`.opencode/service.log` records the loopback URLs it used: `44253` initially,
+then `38987` for the stop/resume check (its resumed join block is in
+`evidence/orchestrator-stop-resume.txt`), then `38835` for a later, separate
+resume that preserved the live `host.json` capture. The `38835` listener is
+`evidence/opencode-host.json` / `evidence/opencode-listener.txt`; it is not
+the stop/resume port. (`host.json` is removed by `orchestrator stop`, which is
+why the listener capture is kept separately.)
 `opencode pair` was not run (that is the owner's one-time step). `vowp
 orchestrator ls` reported:
 
@@ -214,7 +219,8 @@ printf '%s\n%s\n' \
 ```
 
 `fleet_status` returned the live snapshot (the orchestrator card and the
-project's jobs). A second call added a job:
+project's jobs; the read is in `evidence/mcp-read-after-takeover.jsonl`). A
+second call added a job:
 
 ```json
 {"name":"job_add","arguments":{
@@ -232,9 +238,10 @@ project's jobs). A second call added a job:
 The response identified the actor as
 `session:01M74Y7AA1C00NCVM2C454N7KR/surface:01M74Y7AAJEPDFQJ8B0T8VS2JB`, and the
 job started `pending` with the two requested gates. The same token's
-`fleet_status` read still worked after the chat surface took the lease; reads
-are deliberately allowed in follow mode. The write gate/takeover notice is the
-T3 acceptance evidence; this run did not re-run the refusal timing.
+`fleet_status` read still worked after the chat surface took the lease
+(`evidence/mcp-read-after-takeover.jsonl`); reads are deliberately allowed in
+follow mode. The write gate/takeover notice is the T3 acceptance evidence;
+this run did not re-run the refusal timing.
 
 ### 5. The release job runs and merges from the session
 
@@ -302,15 +309,16 @@ reported the result.
 ```
 
 `stop` wrote `stopped`, released the lease and kept the session. `resume`
-started the opencode host again on a new port (44253 → 38987) and a new native
-opencode session, but the VOWP session id stayed
-`01M74Y7AA1C00NCVM2C454N7KR` and the `chat:` join stayed the same.
+started the opencode host again on a new port (44253 → 38987, recorded in
+`evidence/orchestrator-stop-resume.txt`) and a new native opencode session,
+but the VOWP session id stayed `01M74Y7AA1C00NCVM2C454N7KR` and the `chat:`
+join stayed the same.
 
 ## Findings
 
-### 1. Project-bound orchestrator cwd is outside the allow-list (open item)
+### 1. Project-bound orchestrator cwd was outside the allow-list (fixed in f-cwd-allow-orchestrator)
 
-The first takeover with a capsule failed:
+The first takeover with a capsule on the rehearsal build failed:
 
 ```text
 capsule invalid after repair: refused: working directory
@@ -318,18 +326,36 @@ capsule invalid after repair: refused: working directory
 ```
 
 `Orchestrator::create` puts the session cwd in
-`~/.vowp/orchestrators/<name>/`. `SessionService::check_cwd` allows only
-`project.path`, `project.worktree_root` and `[node].cwd_allow`. A project-bound
-orchestrator therefore has a cwd that is outside every default allow-list root,
-so the switch capsule on the first takeover fails. The rehearsal added the
-orchestrators root to the fixture's `[node].cwd_allow` and the next takeover
-succeeded; the production home must do the same until this is fixed.
+`~/.vowp/orchestrators/<name>/`. At the time of the run the allow-list policy
+existed in two copies: `SessionService::check_cwd` in
+`crates/vowp-core/src/session/service.rs` (used by `run_turn` and the capsule
+writer) and a separate `check_cwd` in
+`crates/vowp-core/src/session/switch.rs` (the seeded switch and target-turn
+path). Both allowed only `project.path`, `project.worktree_root` and
+`[node].cwd_allow`, so a project-bound orchestrator's cwd was outside every
+default root. The `capsule invalid after repair` error above came from the
+switch copy.
 
-Suggested follow-up (outside this job's owns): include the orchestrators root
-in the default allow-list in `crates/vowp-core/src/session/service.rs` (or have
-`vowp setup home`/`orchestrator new` write it), with a test that creates a
-project-bound orchestrator and takes it over. This is the only product gap the
-rehearsal found.
+Job `f-cwd-allow-orchestrator` fixed it: branch commit `6603f0b`, merged as
+`d86ca14` ("core: allow the VOWP orchestrator root in session cwd checks").
+The two copies are now one shared `check_cwd` in
+`crates/vowp-core/src/session/service.rs`; both `SessionService::check_cwd`
+and `session/switch.rs` call it, and the allowed roots include
+`<VOWP_HOME>/orchestrators`. Regression tests:
+`takeover_from_orchestrator_cwd_writes_valid_capsule`,
+`seeded_switch_from_orchestrator_cwd_is_allowed` and
+`takeover_from_outside_cwd_is_refused` in `crates/vowp-core/tests/switch.rs`,
+plus `run_turn_from_orchestrator_cwd_is_allowed` in
+`crates/vowp-core/tests/session_run.rs`.
+
+The rehearsal binary predates the fix, so the rehearsal added the orchestrators
+root to the fixture's `[node].cwd_allow` and the next takeover succeeded. On a
+pre-fix build the production home must do the same; the final build does not.
+
+This was the only rehearsal failure caused by product code. Finding 2 (the
+line-oriented chat seed) is an operational gotcha and Finding 4 (the
+deterministic executor) is a rehearsal limitation; they are recorded
+separately.
 
 ### 2. Seeding a chat session is line-oriented (operational gotcha)
 
@@ -351,7 +377,14 @@ waiting: swap growing 505 MiB/min
 `vowp capacity report` showed the `swap_growth` brake active while other night
 jobs were running. The brake behaved as designed (it never killed a run). The
 rehearsal cancelled that job and used a no-review fixture job for the release
-action; review-gate end-to-end coverage is T2/T3's evidence, not this card's.
+action, so the review gate was **not re-run end to end in this card**. T2
+(`fleet-capacity.md`) used `--gates report,owns_respected` and T3
+(`surfaces.md`) covers the surface/write gate, so neither is review-gate
+evidence. The review gate's coverage is the gate tests in
+`crates/vowp-core/tests/gates_review.rs`:
+`review_gate_reads_verifier_report_verdict`,
+`review_gate_pending_when_no_verify_job_yet` and
+`review_gate_ignores_verifier_from_earlier_attempt`.
 On a busy home the orchestrator should report a brake and ask the owner before
 overriding it.
 
@@ -378,9 +411,10 @@ re-claim them. The exact T5 joins are below.
 These steps were **not run**. They are the live move and the owner's part of
 the card; a worker must not replace or simulate either. The planner's
 2026-11-11 **Owner-device scope** decision defers this step to the owner, not
-waived. Use the final build from this branch: it is docs-only, the rehearsal
-evidence is from the earlier `ce4de07` binary, and the workspace gates run on
-the rebased base `e41459f`.
+waived. Use the final build from this branch: it is docs-only and the
+rehearsal evidence is from the earlier `ce4de07` binary. This document records
+the rehearsal and the workspace gates at `e41459f`; later rebases did not
+re-run them.
 
 ### 1. Move the current orchestrator into the live VOWP home
 
@@ -390,8 +424,10 @@ VOWP project registered (`vowp project add <vowp-checkout>`). This is the
 dogfood move, not M1's production migration: M1 later keeps the same home with
 its own backup and rollback plan.
 
-Until open item 1 is fixed, add the orchestrators root to the project config so
-the first takeover capsule can be written:
+The cwd allow-list gap (Finding 1) is fixed in the final build by job
+`f-cwd-allow-orchestrator` (merged as `d86ca14`), so the orchestrators root is
+allowed without extra configuration. On a pre-fix binary only, add it to the
+project config so the first takeover capsule can be written:
 
 ```toml
 [node]
@@ -421,8 +457,10 @@ tr '\n' ' ' < ORCHESTRATOR-SEED.md |
 ```
 
 Expected result: the ACK in the session log, a capsule id on the switch, and
-no `outside the allow-list` error. If the error appears, open item 1's
-`cwd_allow` workaround is missing.
+no `outside the allow-list` error. On a pre-fix build, if the error appears,
+the `cwd_allow` workaround above is missing.
+
+**Not run.**
 
 ### 2. opencode desktop app on the Mac
 
@@ -495,17 +533,18 @@ session/surface actor, as the rehearsal's `job_add` did.
 ## Gates
 
 Docs-only branch. The record was written after the rehearsal. Commands and
-results are in the report front matter; the final gate logs are
-`/tmp/opencode/t5-dogfood/evidence/clippy.log` and
-`/tmp/opencode/t5-dogfood/evidence/cargo-test.log` on the build host.
+results are in the report front matter; the final T5 gate logs are
+`/tmp/opencode/t5-dogfood/evidence/clippy-rerun.log`,
+`/tmp/opencode/t5-dogfood/evidence/cargo-test-rerun.log` and
+`/tmp/opencode/t5-dogfood/evidence/check-links-rerun.log` on the build host.
 
 | Command | Result |
 |---|---|
-| `cargo fmt --all` and `cargo fmt --all -- --check` | exit 0 |
+| `cargo fmt --all -- --check` | exit 0 |
 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 (`Finished`, no warnings) |
 | `cargo test --workspace` | exit 0; every reported test group passed, 0 failed (2 ignored) |
 | `git diff --check` | exit 0 |
-| `bash docs/tests/check-links.sh` | exit 1 with the same four pre-existing broken links outside this file (`cost-dashboard.md` and three `docs/roadmap.md` links to moved v0.2 design pages); this file adds no broken link |
+| `bash docs/tests/check-links.sh` | at the T5 run, exit 1 with one pre-existing broken link outside this file (`docs/design/v0.2/cost-dashboard.md` → `http-api.md`), fixed later in `7a217a0`; on the current tree, exit 0 with `PASS check-links: 536 relative links in 142 files, 26 headings checked`; this file adds no broken link |
 
 Gate note: the full workspace check flaked once in
 `setup_verify_fixture_runs_twice_on_one_home` under parallel load. This is the
@@ -526,22 +565,27 @@ All paths are on the build host; they are the raw logs, not committed.
   directory, desktop/phone/chat join block.
 - `/tmp/opencode/t5-dogfood/evidence/opencode-host.json` and
   `opencode-listener.txt` — a preserved live `host.json` capture and the
-  `ss -ltn` listener row for the resumed app host.
+  `ss -ltn` listener row for the later extra resume on `127.0.0.1:38835`, not
+  the stop/resume port `38987`.
 - `/tmp/opencode/t5-dogfood/evidence/seed-chat-clean.txt` — ACK from the seeded
   session.
 - `/tmp/opencode/t5-dogfood/evidence/session-events.jsonl` and
   `session-summary.json` — 26 events, 2 turns, 1 capsule.
-- `/tmp/opencode/t5-dogfood/evidence/mcp-job-add-final.jsonl` — the
-  `fleet_status` read and `job_add` response with the session/surface actor.
+- `/tmp/opencode/t5-dogfood/evidence/mcp-job-add-final.jsonl` — the `job_add`
+  response with the session/surface actor.
+- `/tmp/opencode/t5-dogfood/evidence/mcp-read-after-takeover.jsonl` — the
+  `fleet_status` read after the chat surface took the lease.
 - `/tmp/opencode/t5-dogfood/evidence/status-chat-clean.txt` — the live release
   view with two done jobs and the merge commit.
 - `/tmp/opencode/t5-dogfood/evidence/environment.txt` — binary hash, versions,
   private socket, fleet/capacity/job states and the fixture's origin log.
 - `/tmp/opencode/t5-dogfood/evidence/orchestrator-stop-resume.txt` — stop and
-  resume with the same session id.
+  resume on port `38987` with the same session id.
 - `/tmp/opencode/t5-dogfood/evidence/cwd-allow-error.txt` — the allow-list
   failure from the first project-bound orchestrator.
 - `/tmp/opencode/t5-dogfood/evidence/clippy.log` and `cargo-test.log` — the
-  final gate logs (clippy exit 0; every test group passed, 0 failed).
+  earlier gate logs; `clippy-rerun.log`, `cargo-test-rerun.log` and
+  `check-links-rerun.log` are the final T5 rerun (clippy exit 0; every test
+  group passed, 0 failed).
 - `/tmp/opencode/t5-dogfood/seed/` — the handoff/status/capsule seed and the
   one-line form. These contain the private handoff and are not committed.
