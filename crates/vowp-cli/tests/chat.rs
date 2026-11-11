@@ -572,6 +572,14 @@ fn chat_slash_switch_status_capsule() {
         after_takeover,
         "a revoked surface wrote another switch: {switches:?}"
     );
+    let lease = store
+        .lease(&session)
+        .expect("lease query")
+        .expect("the new holder's lease");
+    assert_eq!(
+        lease.holder, "phone",
+        "the revoked surface released the new holder's lease"
+    );
     assert!(
         store.latest_capsule(&session).expect("capsules").is_some(),
         "/capsule must write a capsule"
