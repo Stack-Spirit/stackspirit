@@ -2502,13 +2502,15 @@ impl NodeSupervisor {
         self.reload_projects()?;
         let mut steps = Vec::new();
         steps.push(self.node_step("sample", |this| {
-            crate::capacity::sample(&this.deps, &this.global, now).map(|sample| {
-                if sample.is_some() {
-                    "host sampled".to_owned()
-                } else {
-                    "no sampler".to_owned()
-                }
-            })
+            crate::capacity::CapacityManager::new(this.deps.clone())
+                .sample(&this.global, now)
+                .map(|sample| {
+                    if sample.is_some() {
+                        "host sampled".to_owned()
+                    } else {
+                        "no sampler".to_owned()
+                    }
+                })
         }));
         steps.push(self.node_step("advice", |this| {
             crate::capacity::advisor::advise_tick(&this.deps, &this.global, now).map(|advice| {
@@ -2910,11 +2912,51 @@ impl NodeSupervisor {
         Ok(())
     }
 
-    /// Returns the tick order, rotated so the start offset advances each pass.
+    /// Returns the tick order: fairness weight first, then the last admitted project.
+    ///
+    /// `capacity::fair::order` sorts by weight and moves the last admitted project to the
+    /// back of its weight group. Groups with no recorded last admission keep the old
+    /// per-tick start offset so equal projects still round-robin instead of one staying first.
     fn rotation(&self) -> Vec<ProjectName> {
         if self.order.is_empty() {
             return Vec::new();
         }
+        let Ok(entries) = super::registry::project_entries(&self.global) else {
+            return self.name_rotation();
+        };
+        let mut entries: Vec<ProjectEntry> = entries
+            .into_iter()
+            .filter(|entry| self.projects.contains_key(&entry.name))
+            .collect();
+        if entries.is_empty() {
+            return self.name_rotation();
+        }
+        let last = crate::capacity::admit::last_project(&self.global).ok().flatten();
+        crate::capacity::fair::order(&mut entries, last.as_ref());
+        self.rotate_weight_groups(&mut entries, last.as_ref());
+        entries.into_iter().map(|entry| entry.name).collect()
+    }
+
+    /// Advances equal-weight groups that `capacity:last_project` does not pin.
+    fn rotate_weight_groups(&self, entries: &mut [ProjectEntry], last: Option<&ProjectName>) {
+        let mut start = 0;
+        while start < entries.len() {
+            let weight = entries[start].weight;
+            let mut end = start + 1;
+            while end < entries.len() && entries[end].weight == weight {
+                end += 1;
+            }
+            let pinned = last.is_some_and(|last| entries[start..end].iter().any(|project| &project.name == last));
+            if !pinned && end - start > 1 {
+                let offset = self.next % (end - start);
+                entries[start..end].rotate_left(offset);
+            }
+            start = end;
+        }
+    }
+
+    /// Returns the old name-order rotation, used only when the registry cannot be read.
+    fn name_rotation(&self) -> Vec<ProjectName> {
         let start = self.next % self.order.len();
         let mut order = Vec::with_capacity(self.order.len());
         order.extend(self.order[start..].iter().cloned());

@@ -12,10 +12,10 @@ use vowp_core::fleet;
 use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemRunner};
 use vowp_protocol::{
     ActiveState, Clock, Cost, Evidence, Executor, FakeClock, Gate, GateResult, HarnessKind, InboxItem, InboxKind,
-    InboxState, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind, Loop, LoopKind, NewJob, Node, NodeName,
-    ParkedReason, Project, ProjectName, ProjectState, ReportGate, Role, Run, RunId, RunPurpose, RunRole,
-    SNAPSHOT_FORMAT, SNAPSHOT_VERSION, SecretName, Session, SessionId, SessionRole, SessionState, Snapshot, Timestamp,
-    Tokens,
+    InboxState, Job, JobId, JobKind, JobState, LedgerEntry, LedgerKind, Limit, LimitRowKind, Loop, LoopKind, NewJob,
+    Node, NodeName, ParkedReason, Project, ProjectName, ProjectState, ProviderConfig, ReportGate, Role, Run, RunId,
+    RunPurpose, RunRole, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, SecretName, Session, SessionId, SessionRole, SessionState,
+    Snapshot, TargetMode, Timestamp, Tokens,
 };
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -724,6 +724,64 @@ fn capacity_card_uses_the_spec_defaults_until_a_sampler_lands() {
         capacity.brake.reasons.is_empty() && capacity.brake.since.is_none(),
         "an inactive brake carries no reasons: {:?}",
         capacity.brake
+    );
+}
+
+#[test]
+fn capacity_card_uses_the_configured_target_and_provider_brake() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let mut config = (*fixture.deps.config).clone();
+    config.providers.insert(
+        "deepseek".to_owned(),
+        ProviderConfig {
+            max_concurrent: 2,
+            on_credits_exhausted: Default::default(),
+            prices: Default::default(),
+        },
+    );
+    let mut deps = fixture.deps.clone();
+    deps.config = Arc::new(config);
+
+    let manager = vowp_core::capacity::CapacityManager::new(deps.clone());
+    let target = manager
+        .set_target(&fixture.store, TargetMode::Fixed, 2, false, "owner", "two workers")
+        .unwrap();
+    assert_eq!(target.target_workers, 2);
+    fixture
+        .store
+        .upsert_limit(&Limit {
+            provider: "deepseek".to_owned(),
+            harness: Some(HarnessKind::Opencode),
+            kind: LimitRowKind::Rate,
+            resets_at: None,
+            detail: "429".to_owned(),
+            since: now,
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .unwrap();
+
+    fleet::write_snapshot(&deps, &fixture.store, now).expect("write snapshot");
+    let snapshot = fleet::read_snapshot(&fixture.paths).expect("read snapshot");
+    assert_eq!(snapshot.capacity.target.mode, TargetMode::Fixed);
+    assert_eq!(snapshot.capacity.target.target_workers, 2);
+    assert_eq!(snapshot.capacity.target.set_by, "owner");
+    assert!(
+        snapshot.capacity.brake.active,
+        "the configured provider limit must appear in the snapshot"
+    );
+    assert!(
+        snapshot
+            .capacity
+            .brake
+            .reasons
+            .iter()
+            .any(|reason| reason.code == vowp_protocol::BrakeCode::Provider),
+        "{:?}",
+        snapshot.capacity.brake
     );
 }
 

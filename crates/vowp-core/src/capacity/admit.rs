@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use vowp_protocol::{
     AdmitDecision, AdmitRequest, CapacityAdvice, CapacityReport, CapacityTarget, HostSample, InboxId, InboxItem,
-    InboxKind, InboxState, Job, JobKind, JobState, ParkedReason, ProjectName, Run, RunRole, TargetMode, Timestamp,
-    UsageEstimate, WaitCode, WaitReason, WaitingJob, WorkerKind,
+    InboxKind, InboxState, Job, JobId, JobKind, JobState, ParkedReason, ProjectName, Run, RunRole, TargetMode,
+    Timestamp, UsageEstimate, WaitCode, WaitReason, WaitingJob, WorkerKind,
 };
 use vowp_store::StateChange;
 use vowp_store::Store;
@@ -26,6 +26,9 @@ use super::{brakes, estimates, targets};
 const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Minimum free disk kept for the node.
+///
+/// The §6.2 minimum is `max(5 GiB, 10% of the filesystem)`; `HostSample` has no filesystem
+/// total yet, so only the 5 GiB floor can be enforced here. See `brakes::MIN_DISK_BYTES`.
 pub const MIN_DISK_BYTES: u64 = 5 * GIB;
 
 /// Fraction of the CPU quota admitted runs may use.
@@ -141,7 +144,7 @@ impl CapacityManager {
             reserve_ram_bytes,
             min_disk_bytes: MIN_DISK_BYTES,
             estimates,
-            waiting: self.waiting_jobs(store)?,
+            waiting: self.waiting_jobs(store, now)?,
             limits: store.active_limits(now)?,
         })
     }
@@ -156,36 +159,51 @@ impl CapacityManager {
                 .first()
                 .map(|reason| reason.detail.clone())
                 .unwrap_or_else(|| "brake active".to_owned());
-            return Ok(AdmitDecision::Wait(WaitReason {
-                code: WaitCode::Brake,
-                detail,
-            }));
+            return self.wait(
+                store,
+                req,
+                now,
+                WaitReason {
+                    code: WaitCode::Brake,
+                    detail,
+                },
+            );
         }
 
         let limits = store.active_limits(now)?;
         if let Some(provider) = &req.provider
             && let Some(limit) = limits.iter().find(|limit| &limit.provider == provider)
         {
-            return Ok(AdmitDecision::Wait(WaitReason {
-                code: WaitCode::Provider,
-                detail: format!("provider {provider} limited: {}", limit.detail),
-            }));
+            return self.wait(
+                store,
+                req,
+                now,
+                WaitReason {
+                    code: WaitCode::Provider,
+                    detail: format!("provider {provider} limited: {}", limit.detail),
+                },
+            );
         }
 
         let target = targets::current_for(&self.deps, store, now)?;
         let running = self.running_capacity(store)?;
         if running.runs >= target.target_workers {
-            return Ok(AdmitDecision::Wait(WaitReason {
-                code: WaitCode::Target,
-                detail: format!(
-                    "{} worker(s) running; target is {}",
-                    running.runs, target.target_workers
-                ),
-            }));
+            return self.wait(
+                store,
+                req,
+                now,
+                WaitReason {
+                    code: WaitCode::Target,
+                    detail: format!(
+                        "{} worker(s) running; target is {}",
+                        running.runs, target.target_workers
+                    ),
+                },
+            );
         }
 
         let mut estimate = estimates::estimate_for(store, req)?;
-        if recent_oom(store, req, now)? {
+        if consume_oom_raise(store, req, now)? {
             let raise = estimate.ram_p90_bytes / OOM_RAISE_FRACTION;
             estimate.ram_p90_bytes = estimate.ram_p90_bytes.saturating_add(raise);
         }
@@ -198,10 +216,15 @@ impl CapacityManager {
             let free_after = sample.mem_available_bytes.saturating_sub(estimate.ram_p90_bytes);
             if free_after < reserve {
                 let short = reserve.saturating_sub(free_after);
-                return Ok(AdmitDecision::Wait(WaitReason {
-                    code: WaitCode::Ram,
-                    detail: format!("RAM {:.1} GB short", short as f64 / GIB as f64),
-                }));
+                return self.wait(
+                    store,
+                    req,
+                    now,
+                    WaitReason {
+                        code: WaitCode::Ram,
+                        detail: format!("RAM {:.1} GB short", short as f64 / GIB as f64),
+                    },
+                );
             }
             let quota = sample
                 .cpu_quota_cores
@@ -211,10 +234,15 @@ impl CapacityManager {
             if demand / quota > CPU_HEADROOM {
                 let allowed = quota * CPU_HEADROOM;
                 let short = (demand - allowed).max(0.0);
-                return Ok(AdmitDecision::Wait(WaitReason {
-                    code: WaitCode::Cpu,
-                    detail: format!("CPU {short:.2} core(s) short"),
-                }));
+                return self.wait(
+                    store,
+                    req,
+                    now,
+                    WaitReason {
+                        code: WaitCode::Cpu,
+                        detail: format!("CPU {short:.2} core(s) short"),
+                    },
+                );
             }
         }
 
@@ -228,17 +256,23 @@ impl CapacityManager {
                     .disk_free_worktrees_bytes
                     .map(|free| free.min(sample.disk_free_home_bytes))
                     .unwrap_or(sample.disk_free_home_bytes);
-                return Ok(AdmitDecision::Wait(WaitReason {
-                    code: WaitCode::Disk,
-                    detail: format!(
-                        "disk {:.1} GB free; minimum is {:.1} GB",
-                        free as f64 / GIB as f64,
-                        MIN_DISK_BYTES as f64 / GIB as f64
-                    ),
-                }));
+                return self.wait(
+                    store,
+                    req,
+                    now,
+                    WaitReason {
+                        code: WaitCode::Disk,
+                        detail: format!(
+                            "disk {:.1} GB free; minimum is {:.1} GB",
+                            free as f64 / GIB as f64,
+                            MIN_DISK_BYTES as f64 / GIB as f64
+                        ),
+                    },
+                );
             }
         }
 
+        self.clear_wait(store, req)?;
         store.kv_set(LAST_PROJECT_KEY, req.project.as_str())?;
         if target.target_workers > self.deps.config.node.max_workers {
             self.ensure_worker_slots(store, target.target_workers)?;
@@ -322,6 +356,56 @@ impl CapacityManager {
         Ok(())
     }
 
+    /// Records the first wait time and returns the wait decision.
+    ///
+    /// `dispatch::admit` rewrites the note every tick, so the note timestamp cannot tell
+    /// when the job first waited. The `kv` marker keeps that instant stable until the job
+    /// is admitted (or the note disappears).
+    fn wait(
+        &self,
+        store: &Store,
+        req: &AdmitRequest,
+        now: Timestamp,
+        reason: WaitReason,
+    ) -> Result<AdmitDecision, CoreError> {
+        if let Some(job) = &req.job {
+            let key = wait_key(&req.project, job);
+            if store.kv_get(&key)?.is_none() {
+                store.kv_set(&key, &now.as_rfc3339())?;
+            }
+        }
+        Ok(AdmitDecision::Wait(reason))
+    }
+
+    /// Removes the first-wait marker after a successful admission.
+    fn clear_wait(&self, store: &Store, req: &AdmitRequest) -> Result<(), CoreError> {
+        if let Some(job) = &req.job {
+            store.kv_delete(&wait_key(&req.project, job))?;
+        }
+        Ok(())
+    }
+
+    /// Returns the first wait instant for one job, creating the marker when it is missing.
+    fn wait_since(
+        &self,
+        store: &Store,
+        project: &ProjectName,
+        job: &Job,
+        now: Timestamp,
+    ) -> Result<Timestamp, CoreError> {
+        let key = wait_key(project, &job.id);
+        if let Some(text) = store.kv_get(&key)?
+            && let Ok(since) = Timestamp::parse(&text)
+        {
+            return Ok(since);
+        }
+        // A note written before this marker existed still gets a stable instant; the old
+        // `updated_at` is the best first-wait estimate and the next rewrite will not move it.
+        let since = if job.updated_at <= now { job.updated_at } else { now };
+        store.kv_set(&key, &since.as_rfc3339())?;
+        Ok(since)
+    }
+
     /// Recomputes estimates at most once a minute.
     fn refresh_estimates(&self, store: &Store, now: Timestamp) -> Result<(), CoreError> {
         const KEY: &str = "capacity:estimates_at";
@@ -359,25 +443,29 @@ impl CapacityManager {
     }
 
     /// Collects jobs whose note carries the E2 waiting line.
-    fn waiting_jobs(&self, store: &Store) -> Result<Vec<WaitingJob>, CoreError> {
+    fn waiting_jobs(&self, store: &Store, now: Timestamp) -> Result<Vec<WaitingJob>, CoreError> {
         let mut waiting = Vec::new();
         for (project, job) in all_jobs(store)? {
+            let key = wait_key(&project, &job.id);
             let note = job.note.trim();
             let Some(detail) = note.strip_prefix("waiting:") else {
+                // The note was cleared (or never existed); a later wait starts a new clock.
+                store.kv_delete(&key)?;
                 continue;
             };
             let detail = detail.trim();
             if detail.is_empty() {
+                store.kv_delete(&key)?;
                 continue;
             }
             waiting.push(WaitingJob {
-                project,
+                project: project.clone(),
                 job: job.id.clone(),
                 reason: WaitReason {
                     code: wait_code(detail),
                     detail: detail.to_owned(),
                 },
-                since: job.updated_at,
+                since: self.wait_since(store, &project, &job, now)?,
             });
         }
         Ok(waiting)
@@ -457,6 +545,9 @@ impl CapacityManager {
                     JobState::Parked,
                     &StateChange {
                         note: Some("parked: kernel OOM-killed this run; the next estimate is raised 25%".to_owned()),
+                        // `ParkedReason` has no OOM variant; `Manual` is the only schema value
+                        // that means a human must look. A `Resources` variant is a protocol
+                        // follow-up, not something this job may invent.
                         parked_reason: Some(ParkedReason::Manual),
                     },
                 )?;
@@ -468,7 +559,7 @@ impl CapacityManager {
                 kind: InboxKind::Notice,
                 title: format!("OOM killed: {job_id}"),
                 body: format!(
-                    "The kernel OOM killer ended run {} for job {job_id} (peak {} bytes). The job is parked and its RAM estimate is raised by 25% for the next admission.",
+                    "The kernel OOM killer ended run {} for job {job_id} (peak {} bytes). The job is parked and its RAM estimate is raised by 25% for the next same-project, same-kind admission.",
                     row.run_id, row.peak_rss_bytes
                 ),
                 options: Vec::new(),
@@ -551,8 +642,12 @@ fn all_jobs(store: &Store) -> Result<Vec<(ProjectName, Job)>, CoreError> {
     Ok(jobs)
 }
 
-/// Returns whether a recent run of the same project and kind was OOM-killed.
-fn recent_oom(store: &Store, req: &AdmitRequest, now: Timestamp) -> Result<bool, CoreError> {
+/// Returns whether an OOM kill still owes this project/kind one raised estimate.
+///
+/// The 24 h window is a cap on how stale the evidence may be, not a promise to raise every
+/// admission for a day: the first matching admission consumes the row so only the next
+/// same-project, same-kind request gets the 25% raise.
+fn consume_oom_raise(store: &Store, req: &AdmitRequest, now: Timestamp) -> Result<bool, CoreError> {
     let rows = store.run_usage_for_group(
         &vowp_store::repo_capacity::UsageQuery {
             project: Some(req.project.clone()),
@@ -562,7 +657,27 @@ fn recent_oom(store: &Store, req: &AdmitRequest, now: Timestamp) -> Result<bool,
         },
         50,
     )?;
-    Ok(rows.iter().any(|row| row.oom_killed))
+    for row in rows.into_iter().filter(|row| row.oom_killed) {
+        let key = format!("capacity:oom_raise:{}", row.run_id);
+        if store.kv_get(&key)?.is_none() {
+            store.kv_set(&key, "1")?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Returns the most recently admitted project for fairness ordering.
+pub(crate) fn last_project(store: &Store) -> Result<Option<ProjectName>, CoreError> {
+    let Some(text) = store.kv_get(LAST_PROJECT_KEY)? else {
+        return Ok(None);
+    };
+    Ok(ProjectName::parse(&text).ok())
+}
+
+/// Returns the `kv` key that stores one job's first wait instant.
+fn wait_key(project: &ProjectName, job: &JobId) -> String {
+    format!("capacity:waiting:{}:{}", project.as_str(), job.as_str())
 }
 
 /// Maps a waiting detail back onto its stable code for the snapshot.

@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 use vowp_core::capacity::{self, CapacityManager};
+use vowp_core::loops::NodeSupervisor;
 use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
-    AdmitDecision, CapacityTarget, Cost, EstimateSource, FakeClock, HarnessKind, HostSample, Job, JobId, JobKind,
-    Limit, LimitRowKind, MemoryLog, NewJob, NodeName, Project, ProjectEntry, ProjectName, ProjectState, Role, Run,
-    RunId, RunPurpose, RunRole, SampleSource, TargetMode, Timestamp, UsageEstimate, VowpConfig, WaitCode,
+    AdmitDecision, AdmitRequest, BuildMode, CapacityTarget, Clock, Cost, EstimateSource, FakeClock, HarnessKind,
+    HostSample, InboxState, Job, JobId, JobKind, JobState, Limit, LimitRowKind, MemoryLog, NewJob, NodeName,
+    ParkedReason, Project, ProjectEntry, ProjectName, ProjectState, Role, Run, RunId, RunPurpose, RunRole, RunUsage,
+    SampleSource, TargetMode, Timestamp, UsageEstimate, UsageSource, VowpConfig, WaitCode,
 };
 use vowp_store::{NodePaths, Store};
 
@@ -23,13 +25,17 @@ fn now() -> Timestamp {
 }
 
 fn test_deps(root: &Path, project: &ProjectName) -> Deps {
+    test_deps_with_clock(root, project, FakeClock::at(now()))
+}
+
+fn test_deps_with_clock(root: &Path, project: &ProjectName, clock: FakeClock) -> Deps {
     let mut config = VowpConfig::with_defaults_for_tests();
     config.project.name = project.clone();
     Deps {
         paths: NodePaths::new(root),
         config: Arc::new(config),
         node: NodeName::parse("local").unwrap(),
-        clock: Arc::new(FakeClock::at(now())),
+        clock: Arc::new(clock),
         log: Arc::new(MemoryLog::new()),
         adapters: Arc::new(AdapterRegistry::new()),
         windows: Arc::new(vowp_tmux::fake::FakeWindows::new()),
@@ -138,10 +144,14 @@ fn healthy_sample(at: Timestamp) -> HostSample {
 }
 
 fn seed_estimate(store: &Store, project: &ProjectName, ram_p90: u64, cpu_p90: f64) {
+    seed_estimate_kind(store, project, JobKind::Build, ram_p90, cpu_p90);
+}
+
+fn seed_estimate_kind(store: &Store, project: &ProjectName, kind: JobKind, ram_p90: u64, cpu_p90: f64) {
     store
         .upsert_usage_estimate(&UsageEstimate {
             project: Some(project.clone()),
-            job_kind: Some(JobKind::Build),
+            job_kind: Some(kind),
             harness: Some(HarnessKind::Opencode),
             model: Some("deepseek/deepseek-flash".to_owned()),
             build_mode: None,
@@ -157,6 +167,36 @@ fn seed_estimate(store: &Store, project: &ProjectName, ram_p90: u64, cpu_p90: f6
         .unwrap();
 }
 
+fn insert_oom_usage(store: &Store, project: &ProjectName, kind: JobKind, job: Option<&JobId>, at: Timestamp) {
+    store
+        .upsert_run_usage(&RunUsage {
+            run_id: RunId::new(),
+            project: project.clone(),
+            job_id: job.cloned(),
+            job_kind: Some(kind),
+            role: RunRole::Worker,
+            harness: Some(HarnessKind::Opencode),
+            model: Some("deepseek/deepseek-flash".to_owned()),
+            provider: Some("deepseek".to_owned()),
+            node: NodeName::parse("local").unwrap(),
+            started_at: at,
+            ended_at: at.plus(Duration::from_secs(1)),
+            duration_ms: 1_000,
+            peak_rss_bytes: 2 * GIB,
+            anon_peak_bytes: Some(GIB),
+            file_peak_bytes: None,
+            kernel_peak_bytes: None,
+            cpu_usec: 1_000_000,
+            mean_cpu_cores: 1.0,
+            max_cpu_cores: 2.0,
+            build_mode: BuildMode::Unknown,
+            source: UsageSource::ProcTree,
+            oom_killed: true,
+            exit_code: None,
+        })
+        .unwrap();
+}
+
 fn fixture() -> (tempfile::TempDir, Deps, Store, ProjectName, Job) {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("node");
@@ -166,6 +206,62 @@ fn fixture() -> (tempfile::TempDir, Deps, Store, ProjectName, Job) {
     let job = insert_job(&store, &project, "job-one");
     let deps = test_deps(&root, &project);
     (tmp, deps, store, project, job)
+}
+
+/// One temporary node with real project checkouts for [`NodeSupervisor`] tests.
+struct NodeEnv {
+    _tmp: tempfile::TempDir,
+    paths: NodePaths,
+    deps: Deps,
+    store: Store,
+    projects: Vec<ProjectName>,
+}
+
+fn node_env(projects: &[(&str, u8)]) -> NodeEnv {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let paths = NodePaths::new(&root);
+    paths.ensure().unwrap();
+    let clock = FakeClock::at(now());
+    let store = Store::open(&paths).unwrap().with_clock(Arc::new(clock.clone()));
+    let mut names = Vec::new();
+    for (name, weight) in projects {
+        let name = ProjectName::parse(name).unwrap();
+        let dir = tmp.path().join(name.as_str());
+        std::fs::create_dir_all(dir.join(".vowp/jobs")).unwrap();
+        let mut config = VowpConfig::with_defaults_for_tests();
+        config.project.name = name.clone();
+        config.project.path = Some(dir.display().to_string());
+        config.project.worktree_root = Some(tmp.path().join("worktrees").display().to_string());
+        std::fs::write(dir.join("vowp.toml"), toml::to_string_pretty(&config).unwrap()).unwrap();
+        store
+            .upsert_project(&Project {
+                name: name.clone(),
+                path: dir.display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::to_value(&config).unwrap(),
+                created_at: now(),
+                updated_at: now(),
+            })
+            .unwrap();
+        if *weight != 1 {
+            store.set_project_weight(&name, *weight).unwrap();
+        }
+        names.push(name);
+    }
+    let deps = test_deps_with_clock(&root, &names[0], clock);
+    NodeEnv {
+        _tmp: tmp,
+        paths,
+        deps,
+        store,
+        projects: names,
+    }
+}
+
+fn order_names(supervisor: &NodeSupervisor) -> Vec<String> {
+    supervisor.order().into_iter().map(|name| name.to_string()).collect()
 }
 
 fn request(deps: &Deps, store: &Store, job: &Job) -> vowp_protocol::AdmitRequest {
@@ -191,7 +287,7 @@ fn admit_blocks_when_ram_would_drop_below_reserve() {
 }
 
 #[test]
-fn admit_blocks_on_cpu_and_disk() {
+fn admit_blocks_on_cpu_then_low_disk_brake() {
     let (_tmp, deps, store, _project, job) = fixture();
     store
         .insert_host_sample(&sample(now(), 8 * GIB, 7 * GIB, 0, Some(0.0), 50 * GIB, Some(0.5)))
@@ -212,7 +308,20 @@ fn admit_blocks_on_cpu_and_disk() {
         ))
         .unwrap();
     let decision = manager.admit(&store, &request(&deps, &store, &job), now()).unwrap();
-    assert_eq!(wait_code(decision), WaitCode::Disk);
+    assert_eq!(
+        wait_code(decision),
+        WaitCode::Brake,
+        "a single low disk sample brakes before the admission disk rule runs"
+    );
+    let brake = capacity::brakes::evaluate(&store, now()).unwrap();
+    assert!(
+        brake
+            .reasons
+            .iter()
+            .any(|reason| reason.code == vowp_protocol::BrakeCode::DiskLow),
+        "{:?}",
+        brake.reasons
+    );
 }
 
 #[test]
@@ -308,6 +417,35 @@ fn brake_clears_after_two_clean_samples() {
 }
 
 #[test]
+fn disk_brake_trips_on_one_low_sample_and_clears_after_two_clean_ones() {
+    let (_tmp, _deps, store, _project, _job) = fixture();
+    store
+        .insert_host_sample(&sample(now(), 8 * GIB, 6 * GIB, 0, Some(0.0), GIB, Some(4.0)))
+        .unwrap();
+    let low = capacity::brakes::evaluate(&store, now()).unwrap();
+    assert!(low.active, "§6.3 reads a single low disk sample as DiskLow");
+    assert!(
+        low.reasons
+            .iter()
+            .any(|reason| reason.code == vowp_protocol::BrakeCode::DiskLow),
+        "{:?}",
+        low.reasons
+    );
+
+    store
+        .insert_host_sample(&healthy_sample(now().plus(Duration::from_secs(5))))
+        .unwrap();
+    let one_clean = capacity::brakes::evaluate(&store, now().plus(Duration::from_secs(5))).unwrap();
+    assert!(one_clean.active, "one clean sample must not clear the brake");
+
+    store
+        .insert_host_sample(&healthy_sample(now().plus(Duration::from_secs(10))))
+        .unwrap();
+    let two_clean = capacity::brakes::evaluate(&store, now().plus(Duration::from_secs(10))).unwrap();
+    assert!(!two_clean.active, "two clean samples clear the disk brake");
+}
+
+#[test]
 fn brake_never_signals_running_work() {
     let (_tmp, _deps, store, _project, job) = fixture();
     let run_id = RunId::new();
@@ -396,6 +534,91 @@ fn capacity_set_history_and_json() {
 }
 
 #[test]
+fn oom_raise_applies_once_to_the_matching_project_and_kind() {
+    let (_tmp, deps, store, project, job) = fixture();
+    store
+        .insert_host_sample(&sample(now(), 8 * GIB, 2 * GIB, 0, Some(0.0), 50 * GIB, Some(4.0)))
+        .unwrap();
+    seed_estimate_kind(&store, &project, JobKind::Build, GIB, 1.0);
+    seed_estimate_kind(&store, &project, JobKind::Verify, GIB, 1.0);
+    // Keep the seeded estimates; a fresh recompute would pool the OOM row's default and
+    // hide which admission paid the raise.
+    store.kv_set("capacity:estimates_at", &now().as_rfc3339()).unwrap();
+    insert_oom_usage(
+        &store,
+        &project,
+        JobKind::Build,
+        None,
+        now().minus(Duration::from_secs(60)),
+    );
+
+    let manager = CapacityManager::new(deps.clone());
+    let build = request(&deps, &store, &job);
+    let mut verify = build.clone();
+    verify.kind = JobKind::Verify;
+
+    let unrelated = manager.admit(&store, &verify, now()).unwrap();
+    assert_eq!(
+        unrelated,
+        AdmitDecision::Admit,
+        "a different kind must not consume the Build raise"
+    );
+
+    let first = manager.admit(&store, &build, now()).unwrap();
+    assert_eq!(
+        wait_code(first),
+        WaitCode::Ram,
+        "the next matching admission pays the 25% raise"
+    );
+    let second = manager.admit(&store, &build, now()).unwrap();
+    assert_eq!(
+        second,
+        AdmitDecision::Admit,
+        "the raise is consumed after one matching admission, not held for 24 h"
+    );
+}
+
+#[test]
+fn node_tick_parks_an_oom_killed_job() {
+    let env = node_env(&[("alpha", 1)]);
+    let project = env.projects[0].clone();
+    let job = insert_job(&env.store, &project, "oom-job");
+    insert_oom_usage(
+        &env.store,
+        &project,
+        JobKind::Build,
+        Some(&job.id),
+        now().minus(Duration::from_secs(60)),
+    );
+
+    let mut supervisor = NodeSupervisor::new(env.deps.clone()).unwrap();
+    supervisor.startup().unwrap();
+    let report = supervisor.tick().unwrap();
+    assert!(
+        report.projects.contains_key(&project),
+        "the project ticks: {:?}",
+        report.skipped
+    );
+
+    let project_store = Store::open_with_project(&env.paths, &project).unwrap();
+    let parked = project_store.require_job(&job.id).unwrap();
+    assert_eq!(parked.state, JobState::Parked);
+    assert_eq!(parked.parked_reason, Some(ParkedReason::Manual));
+    assert!(
+        parked.note.contains("OOM-killed"),
+        "the parked note explains the kill: {:?}",
+        parked.note
+    );
+    let inbox = env.store.list_inbox(Some(InboxState::Open)).unwrap();
+    assert!(
+        inbox
+            .iter()
+            .any(|item| item.project.as_ref() == Some(&project) && item.title.starts_with("OOM killed:")),
+        "{inbox:?}"
+    );
+}
+
+#[test]
 fn fairness_round_robins_by_weight() {
     let entry = |name: &str, weight: u8| ProjectEntry {
         name: ProjectName::parse(name).unwrap(),
@@ -430,6 +653,47 @@ fn fairness_round_robins_by_weight() {
 }
 
 #[test]
+fn supervisor_rotation_puts_weight_first_and_reads_last_project() {
+    let env = node_env(&[("alpha", 1), ("beta", 10), ("delta", 1)]);
+    let supervisor = NodeSupervisor::new(env.deps.clone()).unwrap();
+    assert_eq!(
+        order_names(&supervisor),
+        ["beta", "alpha", "delta"],
+        "weight 10 ticks before the weight-1 projects"
+    );
+
+    env.store.insert_host_sample(&healthy_sample(now())).unwrap();
+    let manager = CapacityManager::new(env.deps.clone());
+    let admitted = manager
+        .admit(
+            &env.store,
+            &AdmitRequest {
+                project: ProjectName::parse("alpha").unwrap(),
+                job: None,
+                kind: JobKind::Build,
+                role: RunRole::Worker,
+                harness: None,
+                model: None,
+                provider: None,
+                node: NodeName::parse("local").unwrap(),
+            },
+            now(),
+        )
+        .unwrap();
+    assert_eq!(admitted, AdmitDecision::Admit);
+    assert_eq!(
+        env.store.kv_get("capacity:last_project").unwrap().as_deref(),
+        Some("alpha"),
+        "an admission records the project for the next rotation"
+    );
+    assert_eq!(
+        order_names(&supervisor),
+        ["beta", "delta", "alpha"],
+        "the last admitted project moves behind its equal-weight peer"
+    );
+}
+
+#[test]
 fn waiting_reason_on_board_and_queue() {
     let (_tmp, deps, store, _project, job) = fixture();
     store
@@ -455,6 +719,58 @@ fn waiting_reason_on_board_and_queue() {
     let admitted = vowp_core::loops::dispatch::admit(&deps, &store, &job).unwrap();
     assert!(admitted);
     assert_eq!(store.require_job(&job.id).unwrap().note, "");
+}
+
+#[test]
+fn waiting_since_keeps_the_first_wait_across_note_rewrites() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let project = ProjectName::parse("test").unwrap();
+    let clock = FakeClock::at(now());
+    let store = Store::open(&NodePaths::new(&root))
+        .unwrap()
+        .with_clock(Arc::new(clock.clone()));
+    register_project(&store, &project);
+    let job = insert_job(&store, &project, "job-wait");
+    let deps = test_deps_with_clock(&root, &project, clock.clone());
+    store
+        .insert_host_sample(&sample(now(), 8 * GIB, 2 * GIB, 0, Some(0.0), 50 * GIB, Some(4.0)))
+        .unwrap();
+
+    assert!(!vowp_core::loops::dispatch::admit(&deps, &store, &job).unwrap());
+    let first = store.require_job(&job.id).unwrap();
+    assert!(first.note.starts_with("waiting: RAM"));
+
+    clock.advance(Duration::from_secs(5));
+    store
+        .insert_host_sample(&sample(
+            clock.now(),
+            8 * GIB,
+            2 * GIB,
+            0,
+            Some(0.0),
+            50 * GIB,
+            Some(4.0),
+        ))
+        .unwrap();
+    assert!(!vowp_core::loops::dispatch::admit(&deps, &store, &job).unwrap());
+    let second = store.require_job(&job.id).unwrap();
+    assert!(
+        second.updated_at > first.updated_at,
+        "the dispatch note rewrite moves updated_at"
+    );
+
+    let report = CapacityManager::new(deps.clone()).report(&store, clock.now()).unwrap();
+    let waiting = report
+        .waiting
+        .iter()
+        .find(|waiting| waiting.job == job.id)
+        .expect("the job is waiting");
+    assert_eq!(
+        waiting.since,
+        now(),
+        "since is the first wait, not the last note rewrite"
+    );
 }
 
 #[test]
@@ -487,6 +803,24 @@ fn fallback_host_keeps_auto_at_one() {
     assert_eq!(
         target.set_by, "supervisor",
         "the fallback target is labelled as the supervisor's, not measured"
+    );
+}
+
+#[test]
+fn fallback_sample_skips_ram_and_cpu_admission() {
+    let (_tmp, deps, store, _project, job) = fixture();
+    let mut fallback = healthy_sample(now());
+    fallback.source = SampleSource::Fallback;
+    fallback.mem_total_bytes = 0;
+    fallback.mem_available_bytes = 0;
+    store.insert_host_sample(&fallback).unwrap();
+
+    let manager = CapacityManager::new(deps.clone());
+    let decision = manager.admit(&store, &request(&deps, &store, &job), now()).unwrap();
+    assert_eq!(
+        decision,
+        AdmitDecision::Admit,
+        "a host without /proc must not turn the zeroed memory fields into a RAM wait"
     );
 }
 

@@ -116,7 +116,7 @@ fn build_snapshot_with_redactor(
     let limits = global.active_limits(now)?;
     let sessions = session_cards(global, now, redactor)?;
     let orchestrators = orchestrator_cards(deps.paths.root());
-    let target = crate::capacity::targets::current(store)?;
+    let target = crate::capacity::targets::current_for(deps, store, now)?;
     let capacity = CapacitySnapshot {
         measured: None,
         running: RunningCapacity {
@@ -125,7 +125,7 @@ fn build_snapshot_with_redactor(
         },
         advised_target: target.advised_workers,
         target,
-        brake: crate::capacity::evaluate(store, now)?,
+        brake: crate::capacity::brakes::evaluate_with_config(deps, store, now)?,
         reserve_ram_bytes: GIB,
         min_disk_bytes: 5 * GIB,
     };
@@ -229,7 +229,7 @@ pub fn read_snapshot(paths: &NodePaths) -> Result<Snapshot, CoreError> {
 
 /// Runs the four node-level hooks in the tick order.
 pub fn node_tick(deps: &Deps, store: &Store, now: Timestamp) -> Result<(), CoreError> {
-    let _ = crate::capacity::sample(deps, store, now)?;
+    let _ = crate::capacity::CapacityManager::new(deps.clone()).sample(store, now)?;
     let _ = crate::surface::sweep_leases(deps, store, now)?;
     crate::lifecycle::tick(deps, store, now)?;
     write_snapshot(deps, store, now)

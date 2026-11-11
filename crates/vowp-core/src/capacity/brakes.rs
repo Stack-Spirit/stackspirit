@@ -19,6 +19,11 @@ pub const MEMORY_PRESSURE_AVG10: f64 = 10.0;
 pub const SWAP_GROWTH_BYTES_PER_MIN: u64 = 64 * 1024 * 1024;
 
 /// Minimum free disk before the disk brake trips.
+///
+/// §6.2 wants `max(5 GiB, 10% of the filesystem)`. `HostSample` currently carries free
+/// bytes only, not the filesystem total, so this build can enforce the 5 GiB floor but not
+/// the percentage; adding `disk_total_home_bytes`/`disk_total_worktrees_bytes` is the
+/// protocol change needed before the percentage can be implemented honestly.
 pub const MIN_DISK_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// How far back the brake reads host samples.
@@ -128,17 +133,16 @@ fn sample_reasons(samples: &[HostSample]) -> Vec<BrakeReason> {
             }
         }
     }
-    if samples.len() >= 2 {
-        // Two consecutive low readings keep one noisy `statvfs` from braking the node; the
-        // admission disk check still sees the single latest sample immediately.
-        let tail = &samples[samples.len() - 2..];
+    if let Some(sample) = samples.last() {
+        // §6.3 reads one low sample as `DiskLow`; disk pressure can fill a filesystem
+        // between samples, and the admission disk check already trusts the latest sample.
         let low = |sample: &HostSample| {
             sample.disk_free_home_bytes < MIN_DISK_BYTES
                 || sample
                     .disk_free_worktrees_bytes
                     .is_some_and(|free| free < MIN_DISK_BYTES)
         };
-        if tail.iter().all(low) {
+        if low(sample) {
             reasons.push(BrakeReason {
                 code: BrakeCode::DiskLow,
                 detail: "free disk below 5 GiB".to_owned(),
