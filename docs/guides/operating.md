@@ -261,8 +261,8 @@ open work or secrets. The nightly `gc-nightly` schedule runs `vowp gc --apply` o
 project.
 
 After compaction, `session show --events` and `session tail` on that session exit 3 with
-`session compacted to capsule <id>; use 'session show --capsule'`. `session show --capsule`, resume
-and export still work; export writes the capsule with an empty event tail and says so. There is no
+`session compacted to capsule <id>; use 'session show --capsule'`. `session show --capsule` and
+export still work; export writes the capsule with an empty event tail and says so. There is no
 full-log replay after compaction.
 
 ## Secrets

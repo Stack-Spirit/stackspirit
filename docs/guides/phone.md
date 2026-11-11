@@ -13,7 +13,8 @@ so losing the phone loses a window, not the conversation.
 - An SSH app that can hold a private key (Termius, Blink, Prompt and similar apps all work).
 - Key-only login to the home. Password login should already be disabled.
 - The `vowp` binary installed for the runtime user on the home (the setup does this).
-- A session id: the name printed by `vowp orchestrator new`, or a row in `vowp session ls`.
+- A session id: the name printed by `vowp orchestrator new`, or a row in `vowp session ls` for a
+  project-bound session.
 
 The phone never runs the supervisor, opens a database or installs a service. If you want the app
 surfaces instead of the terminal, the opencode phone client and the Claude mobile app can join the
@@ -48,8 +49,10 @@ vowp session ls
 ```
 
 `orchestrator ls` prints `NAME APP STATE SESSION`; the session column is what you pass to `chat`.
-`session ls` lists every session, including job sessions. A session id can be shortened to a unique
-prefix of at least six characters; an ambiguous prefix exits 2 and lists the candidates.
+`session ls` lists the selected project's sessions, including job sessions; a project-less
+orchestrator session appears in `orchestrator ls` and usually has no row in `session ls`. A session
+id can be shortened to a unique prefix of at least six characters; an ambiguous prefix exits 2 and
+lists the candidates.
 
 If no orchestrator exists yet, create the chat surface on the home (or from the control machine):
 
@@ -127,7 +130,7 @@ with a tunnel. Never paste a key into the chat, a report or an issue. The honest
 | `vowp: command not found` | Use the absolute path `~/.local/bin/vowp`, or add `~/.local/bin` to the login shell's `PATH`. |
 | "vowp home is not initialised" | You are not on the home account. Connect to the runtime user, or pass `--home <dir>` if the home is non-default. |
 | `no control configuration` | That is a control-machine command. The phone path runs `vowp chat` **on** the home, not `vowp control`. |
-| `session ... not found` | Use a longer unique prefix or the full id from `vowp session ls`. |
+| `session ... not found` | Use a longer unique prefix, or the full id from `vowp session ls` or `vowp orchestrator ls`. |
 | `Active on laptop ... Take over?` | Answer `y`, or use `--takeover`; otherwise the phone stays read-only. |
 | `This surface is read-only` | Another surface holds the lease. Use `/takeover` or `--takeover` to take it. |
 | Text wraps badly | Keep the app font at a readable size; the surface itself wraps at 80 columns and does not need a wide terminal. |

@@ -49,8 +49,8 @@ exits 2 and lists the candidates. Jobs need the full slug.
 
 A session that has been compacted by `vowp gc --apply` no longer has a full log. `session tail` and
 `session show --events` exit 3 with `session compacted to capsule <id>; use 'session show
---capsule'`. `session show --capsule`, `session resume` and `session export` still work; export
-writes an empty event tail and says so.
+--capsule'`. `session show --capsule` and `session export` still work; export writes an empty event
+tail and says so.
 
 ## Create and chat
 
@@ -159,8 +159,8 @@ native tool calls are never replayed.
 
 Useful flags:
 
-- `--reason user|limit|crash|failover|context|probe_back|takeover` records why the switch happened.
-  The default is `user`.
+- `--reason user|limit|crash|failover|context|probe_back` records why the switch happened. The
+  default is `user`.
 - `--node <name>` switches to an executor on another node. The session is exported and imported on
   the target, and both sides record the node transition. In v0.2 the normal multi-device path is one
   home with several surfaces; the bundle path is for a copy or archive.
