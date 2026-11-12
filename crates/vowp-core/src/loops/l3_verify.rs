@@ -194,6 +194,7 @@ pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summa
          Judge only against evidence and the brief; run the commands yourself; do not edit files.\n\
          Use the write tool to write the report file at {report_path}; do not only print it in chat.\n\
          The report needs front-matter `job`, `status: done`, `branch`, `commits`, `tests`, `verdict: pass|fail` and `findings`.\n\
+         `tests:` must be a single string (for example `cargo test …: 15 passed, 0 failed`) or a map with `command`, `passed` and `failed`. Never write `tests:` as a YAML list. When you ran multiple commands, put them all in the one string, or use the map form for the main command and put the rest in the report body.\n\
          `findings` is a YAML list of strings, one string per finding; each string names the file, command, expected and actual. Do not use YAML maps/objects for findings. Use `findings: []` when the verdict is pass.\n\
          Report `status: done` when you finished judging.\n\
          Job: {job_id}",
@@ -305,7 +306,7 @@ mod tests {
 
     use vowp_protocol::{
         FakeClock, Job, JobId, JobKind, JobLoop, JobState, MemoryLog, NewJob, NodeName, Project, ProjectName, Report,
-        Role, Timestamp, VowpConfig,
+        Role, TestsField, Timestamp, VowpConfig,
     };
     use vowp_store::{NodePaths, Store};
 
@@ -447,6 +448,66 @@ mod tests {
         let report = Report::parse(sample).expect("a string finding must parse through the report gate");
         assert_eq!(report.front_matter.findings.len(), 1);
         assert!(report.front_matter.findings[0].contains("crates/vowp-core/src/loops/l3_verify.rs"));
+    }
+
+    #[test]
+    fn verify_prompt_requires_tests_shape() {
+        let job = sample_verify_job();
+
+        let prompt = verify_prompt(
+            &job,
+            ".vowp/jobs/demo-verify-0/brief.md",
+            &[],
+            "git diff main...job/demo",
+        );
+
+        assert!(
+            prompt.contains("`tests:` must be a single string"),
+            "prompt must require a single string for tests: {prompt}"
+        );
+        assert!(
+            prompt.contains("or a map with `command`, `passed` and `failed`"),
+            "prompt must allow the map form for tests: {prompt}"
+        );
+        assert!(
+            prompt.contains("Never write `tests:` as a YAML list"),
+            "prompt must forbid a YAML list for tests: {prompt}"
+        );
+        assert!(
+            prompt.contains("put them all in the one string"),
+            "prompt must say to combine multiple commands in one string: {prompt}"
+        );
+        assert!(
+            prompt.contains("put the rest in the report body"),
+            "prompt must say to put other commands in the report body: {prompt}"
+        );
+
+        let sample = concat!(
+            "---\n",
+            "job: demo-verify-0\n",
+            "status: done\n",
+            "branch: job/demo\n",
+            "commits: [\"abc1234\"]\n",
+            "tests: \"cargo test: 1 passed\"\n",
+            "verdict: pass\n",
+            "findings: []\n",
+            "---\n",
+            "judged\n",
+        );
+        let report = Report::parse(sample).expect("the instructed tests string must parse");
+        assert_eq!(
+            report.front_matter.tests,
+            Some(TestsField::Text("cargo test: 1 passed".to_owned()))
+        );
+
+        let list_sample = sample.replace(
+            "tests: \"cargo test: 1 passed\"",
+            "tests:\n  - \"cargo test: 1 passed\"",
+        );
+        assert!(
+            Report::parse(&list_sample).is_err(),
+            "a YAML list for tests must be rejected"
+        );
     }
 
     #[test]
