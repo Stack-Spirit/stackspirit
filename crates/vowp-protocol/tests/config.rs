@@ -70,6 +70,20 @@ fn config_example_parses() {
 }
 
 #[test]
+fn env_build_commands_parse_and_default_empty() {
+    let config = parse(&format!(
+        "{BASE}\n[env.prod]\ncheckout = \"~/prod\"\nbuild = [\"make build\"]\n"
+    ));
+    assert_eq!(config.env["prod"].build, ["make build"]);
+
+    let config = parse(&format!("{BASE}\n[env.work]\ncheckout = \"~/work\"\n"));
+    assert!(config.env["work"].build.is_empty());
+
+    // An environment still rejects unknown keys.
+    reject(&format!("{BASE}\n[env.bad]\ncheckout = \"~/bad\"\nnot_a_key = true\n"));
+}
+
+#[test]
 fn config_rejects_unknown_fields_and_bad_values() {
     parse(BASE); // the baseline must be valid, or the cases below prove nothing.
 

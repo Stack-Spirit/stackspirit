@@ -157,6 +157,14 @@ Exported by `vowp schema VowpConfig` and generated from the protocol types in
           "default": "human",
           "description": "Who approves a promotion."
         },
+        "build": {
+          "default": [],
+          "description": "Commands run in the checkout by the `build` guard; empty means the\n`[merge].check_cmds` / `[project].check_cmds` fallback.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "checkout": {
           "description": "Checkout directory for this environment.",
           "type": "string"

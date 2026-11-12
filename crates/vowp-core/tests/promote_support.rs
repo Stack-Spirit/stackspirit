@@ -77,6 +77,7 @@ pub fn config_for(repo: &Path) -> VowpConfig {
 pub fn env_config(checkout: &Path) -> EnvConfig {
     EnvConfig {
         checkout: checkout.display().to_string(),
+        build: Vec::new(),
         deploy: Vec::new(),
         guards: Vec::new(),
         approval: Approval::Human,
