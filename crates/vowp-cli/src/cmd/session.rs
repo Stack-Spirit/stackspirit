@@ -5,10 +5,11 @@
 //! at least six characters.
 
 use std::io::{BufRead, BufReader, Write as _};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use time::{OffsetDateTime, macros::format_description};
@@ -28,7 +29,7 @@ use vowp_store::{SessionFilter, Store};
 
 use crate::cli::{
     ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionExportArgs, SessionImportArgs, SessionLsArgs,
-    SessionNewArgs, SessionShowArgs, SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
+    SessionNewArgs, SessionPullArgs, SessionShowArgs, SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
 };
 use crate::node_ctx::NodeRole;
 use crate::output::{Table, local_time_at, print_json};
@@ -45,6 +46,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SessionCommand) -> Resul
         SessionCommand::Capsule(args) => capsule(ctx, io, args),
         SessionCommand::Export(args) => export(ctx, io, args),
         SessionCommand::Import(args) => import(ctx, io, args),
+        SessionCommand::Pull(args) => pull(ctx, io, args),
         SessionCommand::Watch(args) => watch(ctx, io, args),
         SessionCommand::Tail(args) => tail(ctx, io, args),
         SessionCommand::TurnBegin(args) => turn_begin(ctx, io, args),
@@ -84,6 +86,13 @@ pub fn maybe_run_remote(
     let crate::cli::Command::Session { command } = command else {
         return Ok(None);
     };
+    // `session pull` runs in this process: it fetches one bundle from the named source node,
+    // verifies it and imports a local child. Its first positional argument is the source,
+    // so it must not reach the generic `--node` SSH redirect below.
+    if let SessionCommand::Pull(args) = command {
+        let ctx = Ctx::build(global, io)?;
+        return Ok(Some(pull(&ctx, io, args)?));
+    }
     // The hidden session interfaces run on the home that owns the session. Their `--node`
     // names the executor or surface, not a redirect target, so they must not go through the
     // generic `--node` SSH redirect below.
@@ -301,6 +310,128 @@ fn remote_import(ctx: &Ctx, io: &mut dyn IoStreams, target: &str, args: &Session
         writeln!(io.out(), "{}", session.id)?;
     }
     Ok(0)
+}
+
+/// JSON shape for a cross-node pull.
+#[derive(Debug, serde::Serialize)]
+struct PullOutput {
+    node: NodeName,
+    source_session: SessionId,
+    child_session: SessionId,
+}
+
+/// Pulls a session bundle from another node and imports it as a local child.
+///
+/// The bundle is captured from the remote `session export` stdout, staged in a private
+/// temporary directory and verified by [`bundle::from_json`] before [`bundle::import`]
+/// creates anything. A failed remote run, malformed bundle or checksum mismatch therefore
+/// imports nothing. There is no same-id import: the child's parent is the source session.
+fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32, CliError> {
+    let node = NodeName::parse(&args.node)?;
+    let store = ctx.store()?;
+    let row = store.require_node(&node)?;
+    if row.is_local {
+        return Err(CliError::Invalid(format!(
+            "node {node} is local; use `vowp session export` and `vowp session import` for a local copy"
+        )));
+    }
+    let target = row
+        .ssh_target
+        .as_deref()
+        .ok_or_else(|| CliError::Invalid(format!("node {node} has no ssh target")))?;
+
+    let mut remote = remote_prefix(ctx);
+    remote.extend([
+        "session".to_owned(),
+        "export".to_owned(),
+        args.session.clone(),
+        "--out".to_owned(),
+        "-".to_owned(),
+    ]);
+    let run = run_remote_capture(target, &remote, None)?;
+    if run.code != 0 {
+        return relay_failure(io, &run);
+    }
+
+    let staged = StagedBundle::write(&run.stdout)?;
+    let bundle = bundle::from_json(&staged.read()?)?;
+    let source = bundle.session.id.clone();
+    let child = bundle::import(ctx.deps(), &bundle, None, None)?;
+    if ctx.json() {
+        print_json(
+            io,
+            &PullOutput {
+                node,
+                source_session: source,
+                child_session: child,
+            },
+        )?;
+    } else {
+        writeln!(io.out(), "pulled session {source} from {node} as child {child}")?;
+    }
+    Ok(0)
+}
+
+/// One pulled bundle staged in a private temporary directory until import.
+struct StagedBundle {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl StagedBundle {
+    /// Writes `text` into a fresh private temporary directory.
+    fn write(text: &str) -> Result<Self, CliError> {
+        let dir = private_temp_dir()?;
+        let staged = Self {
+            path: dir.join("bundle.json"),
+            dir,
+        };
+        std::fs::write(&staged.path, text)?;
+        std::fs::set_permissions(&staged.path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(staged)
+    }
+
+    /// Reads the staged document back for verification and import.
+    fn read(&self) -> Result<String, CliError> {
+        Ok(std::fs::read_to_string(&self.path)?)
+    }
+}
+
+impl Drop for StagedBundle {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// Creates a fresh private directory under the OS temporary root.
+fn private_temp_dir() -> Result<PathBuf, CliError> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let base = std::env::temp_dir();
+    for _ in 0..32 {
+        let name = format!(
+            "vowp-pull-{}-{}-{}",
+            std::process::id(),
+            Timestamp::now().unix_millis(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = base.join(name);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => match std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)) {
+                Ok(()) => return Ok(dir),
+                Err(error) => {
+                    let _ = std::fs::remove_dir(&dir);
+                    return Err(error.into());
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(CliError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a private temporary directory for the pulled bundle",
+    )))
 }
 
 /// Moves a session to a remote node: export locally, import remotely, switch there.

@@ -224,6 +224,26 @@ Common rejections:
 | `bundle too new` | `protocol_version` is newer than this binary. |
 | `checksum mismatch` | The JSON was edited or truncated. Nothing was created. |
 
+## Pull from another node
+
+```sh
+vowp session pull <node> <session>
+vowp session pull vps 01KA1V0Z7A0000000000000000
+vowp --json session pull vps 01KA1V0Z7A0000000000000000
+```
+
+`pull` exports the bundle from the named node over the existing SSH transport, stages it in a
+private temporary directory, verifies the format, protocol version and sha256 checksum locally,
+then imports it as a child session. It prints the source id and the new child id; `--json` prints
+`{"node","source_session","child_session"}`. The child follows the same rules as `session import`:
+a new id, `parent_session_id` set to the source, a title ending in `(imported)`, and a first turn
+seeded from the bundle capsule and tail.
+
+The source must be a remote node. A failed ssh/remote export, a truncated bundle or a checksum
+mismatch leaves the local home unchanged. This is a one-way snapshot, not a move: the source is
+not modified or locked, and there is no same-id import, directory copy, push, merge, lease
+handling or offline retry queue. For a local file copy use `session export` and `session import`.
+
 ## Watch an interactive Claude Code session
 
 ```sh

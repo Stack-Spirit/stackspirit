@@ -112,6 +112,7 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is the v0
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
 | `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
 | `session import <file> [--node n] [--executor <exec>] [--cwd <dir>]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached |
+| `session pull <node> <session>` | runs on the local machine: exports the bundle from `node` over ssh, stages it in a private temporary directory, verifies format/protocol/checksum, imports a **child** (`parent_session_id` = source id) and prints both ids. JSON `{"node","source_session","child_session"}`. A failed remote run, malformed bundle or checksum mismatch imports nothing. |
 | `session watch [--claude-dir <dir>] [--once] [--follow]` | records interactive Claude Code transcripts (read-only, byte-offset importer) into one canonical session per Claude uuid; prints `watching N transcripts`; `--follow` polls every two seconds until Ctrl-C, and a TTY run without `--once` or `--follow` follows the same way; `--once`, and a non-TTY run without `--follow`, make one incremental pass; exit 1 if the dir is unreadable |
 | `session tail <id> [--follow] [--pretty] [--from <seq>]` | prints events (JSONL, or `--pretty` one line per event); `--follow` polls the file (200 ms) and does not take the lease. This is what job windows run (`vowp __window job <id>`). |
 
@@ -370,7 +371,7 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 2. Build argv: the original args with `--node <name>` removed. If the command is interactive (`attach`, `session chat`, `chat`, `board` without `--once`) add `-t`.
 3. Execute `ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <ssh_target> vowp <argv…>` with stdin/stdout/stderr inherited; the remote exit code is returned unchanged; ssh failure (exit 255) ⇒ exit 7 with `{"error":{"kind":"remote",…}}` under `--json`.
 4. Arguments are passed as a single remote command string built with POSIX single-quote escaping (`shell_quote`, shared with `vowp-tmux`); no argument is ever interpolated unquoted.
-5. `session import` with `--node n`: the bundle file is streamed over ssh stdin (`vowp session import - …`); `session export --node n` writes the bundle locally from the remote's stdout.
+5. `session import` with `--node n`: the bundle file is streamed over ssh stdin (`vowp session import - …`); `session export --node n` writes the bundle locally from the remote's stdout. `session pull <node> <session>` uses that remote export, verifies the bundle locally and imports the child here; the pull never runs on the remote node.
 6. Cross-node `session switch --to … --node server`: the target's adapter is probed with `vowp --node server doctor --json` before the source is touched. v0.1's bundle move remains available as explicit export/import; v0.2 remote execution keeps the session on the home and moves only the executor (`sessions.md` §9).
 7. On a control machine, commands without `--node` are sent to the configured home target; the rules are in §1 and `v0.2/home-and-surfaces.md` §8.
 
@@ -398,4 +399,7 @@ v0.2 adds the CLI-facing subset of the spec's named tests:
 `setup_verify_fixture_job_merges`, `orchestrator_new_writes_only_project_local_config`,
 `mcp_write_tool_checks_lease_and_records_actor`, `chat_follow_mode_is_read_only`,
 `remote_ingest_is_idempotent_by_event_id`. The full per-feature list is in
-`v0.2/home-and-surfaces.md` §15.
+`v0.2/home-and-surfaces.md` §15. The v0.3 pull slice adds
+`session_pull_imports_a_child_and_prints_both_ids`,
+`session_pull_refuses_a_corrupt_bundle_before_importing` and
+`session_pull_reports_a_failed_remote_export_and_imports_nothing`.

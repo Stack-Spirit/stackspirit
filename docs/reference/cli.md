@@ -53,6 +53,7 @@ python3 docs/reference/check-reference.py
 | [`vowp session capsule`](#vowp-session-capsule) | Write a capsule now |
 | [`vowp session export`](#vowp-session-export) | Export a session bundle |
 | [`vowp session import`](#vowp-session-import) | Import a session bundle |
+| [`vowp session pull`](#vowp-session-pull) | Pull a session bundle from another node |
 | [`vowp session watch`](#vowp-session-watch) | Record interactive Claude Code transcripts |
 | [`vowp session tail`](#vowp-session-tail) | Print a session's event log |
 | [`vowp session turn-begin`](#vowp-session-turn-begin) | Hidden: begin a remote turn and print its grant |
@@ -690,6 +691,7 @@ Commands:
   capsule  Write a capsule now
   export   Export a session bundle
   import   Import a session bundle
+  pull     Pull a session bundle from another node
   watch    Record interactive Claude Code transcripts
   tail     Print a session's event log
 
@@ -878,6 +880,27 @@ Options:
       --node <NAME>          Node to import on
       --executor <EXECUTOR>  Executor for the child session
       --cwd <DIR>            Working directory
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp session pull`
+
+```text
+Pull a session bundle from another node
+
+Usage: vowp session pull [OPTIONS] <NODE> <SESSION>
+
+Arguments:
+  <NODE>     Node that owns the source session
+  <SESSION>  Source session id or unique prefix
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal

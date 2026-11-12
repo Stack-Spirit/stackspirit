@@ -396,11 +396,17 @@ fn remote_node(env: &common::TestEnv) -> RemoteNode {
 }
 
 /// Runs the real binary with the local home/project and a remote `VOWP_HOME`.
+///
+/// `TMPDIR` is a per-test directory so a command that stages a remote document in a
+/// temporary file can prove it removed that file before returning.
 fn run_cli(env: &common::TestEnv, remote: &RemoteNode, args: &[&str]) -> std::process::Output {
+    let tmp = env.home_path().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("tmp dir");
     let path = format!("{}:/usr/bin:/bin", remote.bin.path().display());
     env.command(env!("CARGO_BIN_EXE_vowp"))
         .env("PATH", path)
         .env("VOWP_HOME", remote.home.path())
+        .env("TMPDIR", &tmp)
         .arg("--home")
         .arg(env.home_path())
         .arg("--project")
@@ -593,6 +599,177 @@ fn session_cross_node_export_import_switch_via_fake_ssh() {
         }),
         "{remote_switches:?}"
     );
+}
+
+/// Exports one session from a home without going through `--node`.
+fn export_text_in(env: &common::TestEnv, home: &Path, id: &str) -> String {
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("VOWP_HOME", home)
+        .arg("--home")
+        .arg(home)
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["session", "export", id, "--out", "-"])
+        .output()
+        .expect("export session");
+    assert!(
+        output.status.success(),
+        "session export failed: {}",
+        output_text(&output.stderr)
+    );
+    output_text(&output.stdout)
+}
+
+/// Replaces a fixture's fake `ssh` with a script that ignores its argv.
+fn install_ssh(remote: &RemoteNode, body: &str) {
+    let ssh = remote.bin.path().join("ssh");
+    std::fs::write(&ssh, body).expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
+}
+
+/// Returns how many sessions the local index holds.
+fn local_session_count(env: &common::TestEnv) -> usize {
+    env.store()
+        .list_sessions(&vowp_store::SessionFilter::default())
+        .expect("local sessions")
+        .len()
+}
+
+/// Fails when the pull's temporary staging directory still holds anything.
+fn assert_temp_clean(env: &common::TestEnv) {
+    let tmp = env.home_path().join("tmp");
+    let entries = std::fs::read_dir(&tmp)
+        .expect("tmp dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tmp entries");
+    assert!(
+        entries.is_empty(),
+        "pull left files in its temporary directory: {entries:?}"
+    );
+}
+
+#[test]
+fn session_pull_imports_a_child_and_prints_both_ids() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote session");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+    assert_eq!(local_session_count(&env), 0, "the source must start remote-only");
+
+    let output = run_cli(&env, &remote, &["session", "pull", "vps", &source]);
+    assert!(output.status.success(), "pull failed: {}", output_text(&output.stderr));
+    let stdout = output_text(&output.stdout);
+    assert!(stdout.contains(&source), "the source id is missing: {stdout}");
+    let child = stdout
+        .split_whitespace()
+        .last()
+        .expect("child id in the pull output")
+        .to_owned();
+    let child_id = vowp_protocol::SessionId::parse(&child).expect("child id");
+    assert_ne!(child_id, source_id, "pull imported the source id instead of a child");
+
+    let store = env.store();
+    let child_row = store.require_session(&child_id).expect("local child");
+    assert_eq!(
+        child_row.parent_session_id.as_ref(),
+        Some(&source_id),
+        "the child's parent_session_id must be the source id"
+    );
+    assert_eq!(child_row.title, "remote session (imported)");
+    assert!(
+        store.session(&source_id).expect("source lookup").is_none(),
+        "pull must not create a same-id local session"
+    );
+    drop(store);
+    let remote_store = vowp_store::Store::open(&vowp_store::NodePaths::new(remote.home.path())).expect("remote store");
+    assert!(
+        remote_store.session(&child_id).expect("child lookup").is_none(),
+        "the imported child must be local, not on the source node"
+    );
+    assert_temp_clean(&env);
+
+    // The JSON document names both ids and the source node.
+    let output = run_cli(&env, &remote, &["--json", "session", "pull", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "json pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(output_text(&output.stdout).trim()).expect("pull JSON");
+    assert_eq!(value["node"], "vps");
+    assert_eq!(value["source_session"], source);
+    let json_child = value["child_session"].as_str().expect("child_session");
+    let json_child_id = vowp_protocol::SessionId::parse(json_child).expect("json child id");
+    assert_ne!(json_child_id, source_id);
+    let store = env.store();
+    let json_child_row = store.require_session(&json_child_id).expect("local json child");
+    assert_eq!(json_child_row.parent_session_id.as_ref(), Some(&source_id));
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_refuses_a_corrupt_bundle_before_importing() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote session");
+    let bundle = export_text_in(&env, remote.home.path(), &source);
+    let corrupted = bundle.replacen("\"title\": \"remote session\"", "\"title\": \"tampered session\"", 1);
+    assert_ne!(corrupted, bundle, "the test did not change the bundle");
+    let bundle_path = env.project_path().join("corrupt-bundle.json");
+    std::fs::write(&bundle_path, &corrupted).expect("corrupt bundle");
+    install_ssh(
+        &remote,
+        &format!("#!/bin/sh\ncat '{}'\nexit 0\n", bundle_path.display()),
+    );
+
+    let output = run_cli(&env, &remote, &["session", "pull", "vps", &source]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a corrupt bundle must be a local invalid-input failure: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains("checksum mismatch"),
+        "the checksum failure was not reported: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        local_session_count(&env),
+        0,
+        "a corrupt bundle created a local session before verification"
+    );
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_reports_a_failed_remote_export_and_imports_nothing() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let missing = "missing-session";
+
+    let output = run_cli(&env, &remote, &["session", "pull", "vps", missing]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the remote not-found exit code must be relayed: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains(&format!("session {missing}")),
+        "the remote error was not reported: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        local_session_count(&env),
+        0,
+        "a failed remote export created a local session"
+    );
+    assert_temp_clean(&env);
 }
 
 /// The executor every remote-exec CLI test uses.

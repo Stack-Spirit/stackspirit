@@ -488,6 +488,8 @@ pub enum SessionCommand {
     Export(SessionExportArgs),
     /// Import a session bundle.
     Import(SessionImportArgs),
+    /// Pull a session bundle from another node.
+    Pull(SessionPullArgs),
     /// Record interactive Claude Code transcripts.
     Watch(SessionWatchArgs),
     /// Print a session's event log.
@@ -631,6 +633,15 @@ pub struct SessionImportArgs {
     /// Working directory.
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
+}
+
+/// Arguments for `vowp session pull`.
+#[derive(Debug, Clone, Args)]
+pub struct SessionPullArgs {
+    /// Node that owns the source session.
+    pub node: String,
+    /// Source session id or unique prefix.
+    pub session: String,
 }
 
 /// Arguments for `vowp session watch`.

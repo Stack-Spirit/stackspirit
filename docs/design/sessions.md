@@ -218,6 +218,23 @@ Rust (in `vowp-core::session::bundle`): `pub struct Bundle { format: String, pro
 5. The first `run_turn` on `S'` uses `seed_prompt(capsule, tail_from_bundle, tail_turns, next_input)` (§4).
 6. Importing the same bundle twice creates two independent children (no dedupe); the origin session is never modified.
 
+### 6.4 Pull from another node (v0.3 first slice)
+
+`vowp session pull <node> <session>` runs on the local machine. It looks up `node` in the local
+registry and runs `vowp session export <session> --out -` on that node with the same `--project`
+argument as the other remote session commands. The stdout bundle is staged in a private temporary
+directory, parsed and verified by `bundle::from_json` (format, protocol version and sha256
+checksum), and then imported through the same path as `session import`: a fresh child whose
+`parent_session_id` is the source id. The command prints the source and child ids; `--json` prints
+`{"node", "source_session", "child_session"}`. The staged file and its directory are removed on
+every path.
+
+A failed remote export returns the remote exit code and output. A malformed, truncated or
+checksum-mismatched bundle returns a local invalid-input error. In both cases nothing is imported.
+The source must be a remote node; a local node is refused with a hint to use export/import. This
+slice deliberately has no same-id import, duplicate/reindex collision rules, directory copy, push,
+bidirectional sync/merge, lease interaction or daemon/offline transport.
+
 ## 7. `vowp session watch` importer
 
 Records an interactive Claude Code session into the canonical store without running it. **Read-only** on Claude's files.

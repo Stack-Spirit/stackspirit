@@ -29,8 +29,9 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
 
 ## What remains for v0.3
 
-- **`session pull <node> <session>` / `session push`** as convenience wrappers around the existing
-  bundle and `--node` transport, for two-home or offline use.
+- **`session push <node> <session>`** as the remaining convenience wrapper around the existing
+  bundle and `--node` transport, for two-home or offline use. `session pull <node> <session>` landed
+  in the first slice below.
 - **Directory copy.** Copy `sessions/<id>/` (log, blobs, capsules, `adapters.json`) with a manifest,
   checksums and a size cap, then run `vowp reindex`; preserve the full log rather than the bundle's
   capsule + tail.
@@ -75,12 +76,22 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
 6. **Lease interaction.** A session pulled to a second home cannot have two live leases. v0.3 must
    define whether a pull requires the source lease to be released or is a read-only snapshot.
 
-## First v0.3 slice
+## First v0.3 slice (implemented)
 
-Add `session pull <node> <session>` that calls the remote export over the existing SSH argv builder,
-writes the bundle to a temporary file, imports it as a child and prints both session ids. Test with
-the existing fake-`ssh` harness and a temporary remote home; the test must fail if the bundle
-checksum is not verified or if the child's `parent_session_id` is wrong.
+`vowp session pull <node> <session>` calls the remote `session export --out -` over the existing
+SSH argv/capture path, stages the bundle in a private temporary directory, verifies its format,
+protocol version and checksum with `bundle::from_json`, and imports it as a local child through the
+same path as `session import`. It prints the source and child ids (`--json`:
+`{"node","source_session","child_session"}`) and removes the staged file on every path. A failed
+remote run, malformed/truncated bundle or checksum mismatch imports nothing; a local node is
+refused.
 
-No directory copy, no daemon transport and no bidirectional merge in the first slice. This is
-independent of v0.2 and does not block the v0.2 release.
+The tests use the existing fake-`ssh` harness and a temporary remote home:
+`session_pull_imports_a_child_and_prints_both_ids`,
+`session_pull_refuses_a_corrupt_bundle_before_importing` and
+`session_pull_reports_a_failed_remote_export_and_imports_nothing`. The checksum test fails if
+verification is removed, and the success test fails if the child's `parent_session_id` is wrong.
+
+Still out of scope for this slice: same-id import and duplicate/reindex collision rules, directory
+copy, `session push`, bidirectional sync/merge, daemon transport, lease interaction and offline
+queueing. This is independent of v0.2 and does not block the v0.2 release.
