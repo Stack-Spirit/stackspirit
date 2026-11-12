@@ -744,8 +744,11 @@ impl SessionService {
 
 /// Checks `cwd` against the shared session allow-list.
 ///
-/// The allowed roots are the project path, the worktree root, `[node].cwd_allow` and the
-/// VOWP-owned orchestrator root `<VOWP_HOME>/orchestrators`. Orchestrator sessions run in
+/// The allowed roots are the project path, the effective worktree root, `[node].cwd_allow`
+/// and the VOWP-owned orchestrator root `<VOWP_HOME>/orchestrators`. The effective worktree
+/// root is `[project].worktree_root` when set, or the default sibling
+/// `<repo>/../<repo-name>-wt` when it is unset; [`crate::loops::worktree_root`] is the single
+/// source of that rule. Orchestrator sessions run in
 /// `<VOWP_HOME>/orchestrators/<name>/`, so a takeover or repair must accept that directory
 /// even though it is outside the project checkout.
 ///
@@ -755,9 +758,11 @@ pub(crate) fn check_cwd(deps: &Deps, cwd: &str) -> Result<(), CoreError> {
     let path = Path::new(cwd);
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(project) = &deps.config.project.path {
-        roots.push(PathBuf::from(project));
-    }
-    if let Some(root) = &deps.config.project.worktree_root {
+        let project = PathBuf::from(project);
+        // Share dispatch's configured-or-default rule so the allow-list cannot drift.
+        roots.push(crate::loops::worktree_root(deps, &project));
+        roots.push(project);
+    } else if let Some(root) = &deps.config.project.worktree_root {
         roots.push(PathBuf::from(root));
     }
     roots.extend(deps.config.node.cwd_allow.iter().map(PathBuf::from));
