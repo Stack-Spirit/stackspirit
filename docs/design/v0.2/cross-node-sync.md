@@ -117,7 +117,7 @@ The tests are `same_id_import_keeps_the_origin_id_without_a_parent`,
 `same_id_import_rejects_a_duplicate_event_id_before_writing`,
 `child_import_still_creates_a_child_with_the_parent` and the CLI tests
 `session_pull_same_id_imports_the_origin_id_without_a_parent`,
-`session_pull_same_id_refuses_an_existing_session_without_mutating_it`,
+`session_pull_same_id_reports_divergence_without_mutating_it`,
 `session_pull_same_id_refuses_a_corrupt_bundle_before_importing` and
 `session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import`.
 
@@ -157,7 +157,7 @@ compacted source has no `log.jsonl` and is refused with a hint to use the bundle
 
 Tests: `session_pull_full_imports_the_origin_id_with_the_full_log` (full log beyond the 20-event
 bundle tail, blob, capsule, `adapters.json`, manifest verification and `vowp reindex`),
-`session_pull_full_refuses_an_existing_session_without_mutating_it`,
+`session_pull_full_reports_divergence_without_mutating_it`,
 `session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`,
 `session_pull_full_refuses_an_over_cap_snapshot_before_copying`,
 `session_pull_full_reports_a_failed_remote_export_and_imports_nothing`, and the store tests

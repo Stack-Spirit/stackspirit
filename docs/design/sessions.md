@@ -310,7 +310,7 @@ and its child session are unchanged.
    `{"node","source_session","full_session","files","bytes"}`.
 
 Named tests: `session_pull_full_imports_the_origin_id_with_the_full_log`,
-`session_pull_full_refuses_an_existing_session_without_mutating_it`,
+`session_pull_full_reports_divergence_without_mutating_it`,
 `session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`,
 `session_pull_full_refuses_an_over_cap_snapshot_before_copying`,
 `session_pull_full_reports_a_failed_remote_export_and_imports_nothing` and the store tests
@@ -523,7 +523,7 @@ The tests live in `crates/vowp-store.md` §6 (log, blob, reindex) and `crates/vo
 | §6.5 fake-ssh pull in both modes | `session_pull_same_id_imports_the_origin_id_without_a_parent`, `session_pull_imports_a_child_and_prints_both_ids` | cli |
 | §6.5 corrupted bundle fails before any write | `same_id_import_rejects_a_corrupt_bundle_before_writing`, `session_pull_same_id_refuses_a_corrupt_bundle_before_importing` | core, cli |
 | §6.6 full pull keeps the origin id and the full log, with manifest checksums | `session_pull_full_imports_the_origin_id_with_the_full_log` | cli |
-| §6.6 full pull refuses a present id without touching it | `session_pull_full_refuses_an_existing_session_without_mutating_it` | cli |
+| §6.6 full pull refuses a present id without touching it | `session_pull_full_reports_divergence_without_mutating_it` | cli |
 | §6.6 corrupt or over-cap full pull leaves no final directory | `session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`, `session_pull_full_refuses_an_over_cap_snapshot_before_copying` | cli |
 | §6.6 manifest validation, size cap and digest verification | `session_dir_manifest_verifies_and_detects_corruption`, `session_dir_manifest_refuses_a_directory_over_the_size_cap`, `session_dir_manifest_rejects_traversal_and_reserved_paths` | store |
 | §1 log, blob and reindex rules | the `log_*`, `blob_*`, `reindex_*` tests of vowp-store.md §6 | store |
