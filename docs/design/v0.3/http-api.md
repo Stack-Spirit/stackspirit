@@ -1,6 +1,6 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: the read API (including session detail and single-capsule reads), the
+Status: the read API (including session detail, single-capsule reads and the node list), the
 per-session SSE stream, the board snapshot SSE stream and the one token-gated inbox answer
 write are implemented in `crates/vowp-daemon`; the rest of this note is design. The daemon
 is **not** part of v0.2 and is not wired into `vowp up` yet. Nothing here is implemented in
@@ -58,6 +58,10 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   sends one `event: resync` frame with `{"after_seq":<n>}` naming the newest readable cursor,
   or the client's own cursor when nothing is readable, and closes; the client may reconnect
   with that cursor. The stream is read-only and has no token, lease or poll fallback.
+- `/api/v1/nodes` — a `NodePage` of the exact stored `Node` objects, ordered by name, from the
+  served project's read-only store; `total` is the item count and `next` is `null`. Node
+  registration, removal and probing stay CLI-only: this route is read-only and adds no SSH,
+  probe or write path.
 - `/api/v1/inbox?state=open|answered|dismissed` — an `InboxPage` over the served project;
   `state` defaults to `open`. Token-free.
 - `POST /api/v1/inbox/{id}/answer` — the only write. The JSON body is
@@ -74,7 +78,7 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
-`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`,
+`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`, `NodePage`,
 `SessionDetail`, `EventPage`, `InboxPage`, `InboxAnswerRequest`, `CostReport`, `CostRow`,
 `CostTotal`, `ApiError` and `ApiErrorBody`. Failures use the same `ApiError` shape as
 `vowp --json` errors and map to `400` for an invalid filter, id or body, `401` for a
@@ -91,11 +95,11 @@ response, and rotation is a daemon restart with a new value. The page keeps it i
 `sessionStorage` and clears it on `401`.
 
 Still later: every other write endpoint (job retry/park/cancel, session switch, capsule
-edits), the reconnect UI on the pages that still poll, the cost dashboard page, nodes,
-`vowp up` integration and the remaining browser pages. There are no placeholder routes for
-any of them. The per-session SSE stream is implemented and used by the session detail page;
-the board stream is implemented and used by the board page; the inbox answer form is
-implemented and uses the one write route.
+edits), the reconnect UI on the pages that still poll, the cost dashboard page, node
+add/remove/probe, `vowp up` integration and the remaining browser pages. There are no
+placeholder routes for any of them. The per-session SSE stream is implemented and used by the
+session detail page; the board stream is implemented and used by the board page; the inbox
+answer form is implemented and uses the one write route.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -122,8 +126,8 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   implemented. The answer is the one write and is gated by the daemon token.
 - `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape;
   implemented in this slice.
-- `GET /api/v1/nodes` — **later slice**: node name, SSH target, last seen, version and probe state.
-  The web-window `/nodes` page needs it, but the window's first slice has no nodes page.
+- `GET /api/v1/nodes` — a `NodePage` of the exact stored nodes, ordered by name; implemented
+  read-only in this slice for the web-window `/nodes` page.
 - `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — one capsule belonging to the session;
   implemented in this slice. The window's capsule view remains later.
 - `POST /api/v1/jobs/{id}/retry|park|cancel` — enqueue the existing
@@ -132,10 +136,10 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   `vowp session switch`. The v0.1 request queue has no switch variant, so this is the one write that
   needs its own daemon-side call and cancellation story.
 
-The node list is a **later slice**, not part of the first API slice: the web-window first slice is
-a static shell and read-only board page with no nodes page, so it does not call it. Do not add a
-placeholder route for it. The single-capsule route is implemented read-only in this slice; the
-capsule web view is later.
+The node list is implemented read-only in this slice: it serves the existing `Store::list_nodes`
+rows and the web-window `/nodes` page reads them. Do not add a placeholder route for a future
+node write; adding, removing or probing nodes and any SSH or exec path remain out of scope. The
+single-capsule route is implemented read-only in this slice; the capsule web view is later.
 
 A write response returns the affected row or the request id; consumers poll or wait for the next
 event. The inbox answer write returns the answered `InboxItem` with `202 Accepted`; the
@@ -167,6 +171,9 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   the canonical limit class (`quota`, `credits`, `rate`, `context`, `auth` or `unavailable`) and
   `resets_at` is an RFC 3339 time or null.
 - `Page<T> { items, next, total }` for lists.
+- `NodePage` = `Page<Node>` — the `/api/v1/nodes` document. Each item is the exact stored
+  `Node` (`name`, `ssh_target`, `is_local`, `capabilities`, `last_seen_at`, `created_at`),
+  ordered by name; `next` is null and `Node` keeps its existing shape and schema.
 - `SessionDetail { session, latest_capsule, lineage }` — the `/api/v1/sessions/{id}` document.
   `session` is the exact `Session`, `latest_capsule` is the capsule with the highest `at_seq`
   (or null when the session has none), and `lineage` is the parent-session chain, nearest
@@ -190,10 +197,10 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
-`SessionDetail`, `InboxAnswerRequest` and `ApiError` to `all_schemas()` rather than hand-writing
-JSON examples. Export the concrete page instantiations the API serves (`JobPage`, `SessionPage`,
-`EventPage` and `InboxPage`) and `CostReport` alongside their item types, and keep the SSE frame as
-the one explicit schema exception above.
+`SessionDetail`, `NodePage`, `InboxAnswerRequest` and `ApiError` to `all_schemas()` rather than
+hand-writing JSON examples. Export the concrete page instantiations the API serves (`JobPage`,
+`SessionPage`, `NodePage`, `EventPage` and `InboxPage`) and `CostReport` alongside their item
+types, and keep the SSE frame as the one explicit schema exception above.
 
 ## Existing crates it builds on
 

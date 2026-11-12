@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 
 use crate::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
-    InboxAnswerRequest, InboxPage, JobPage, Page, SessionDetail, SessionPage,
+    InboxAnswerRequest, InboxPage, JobPage, NodePage, Page, SessionDetail, SessionPage,
 };
 use crate::capacity::{
     BrakeState, CapacityAdvice, CapacityReport, CapacitySnapshot, CapacityTarget, HostSample, RunUsage,
@@ -133,6 +133,7 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("Page", schema_value::<Page<serde_json::Value>>());
     schemas.insert("JobPage", schema_value::<JobPage>());
     schemas.insert("SessionPage", schema_value::<SessionPage>());
+    schemas.insert("NodePage", schema_value::<NodePage>());
     schemas.insert("SessionDetail", schema_value::<SessionDetail>());
     schemas.insert("EventPage", schema_value::<EventPage>());
     schemas.insert("InboxAnswerRequest", schema_value::<InboxAnswerRequest>());

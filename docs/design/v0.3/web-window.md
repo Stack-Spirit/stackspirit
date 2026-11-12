@@ -1,8 +1,8 @@
 # v0.3 — web / PWA window
 
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
-board, session, capsule, cost and inbox pages and the token-gated inbox answer are implemented;
-the rest of this note is design. v0.1 has no browser UI and no listening socket.
+board, session, capsule, cost, inbox and nodes pages and the token-gated inbox answer are
+implemented; the rest of this note is design. v0.1 has no browser UI and no listening socket.
 
 ## Goal
 
@@ -45,16 +45,16 @@ CLI (the queue has no switch variant).
   implemented first slice deliberately skips the build step: it is one hand-written
   `index.html` with inline CSS and vanilla JavaScript.
 - Routes: `/` (board), `/sessions`, `/sessions/:id`, `/sessions/:id/capsules/:capsuleId`,
-  `/nodes`, `/cost`, `/inbox`. The first slice implements `/`, `/sessions`, `/sessions/:id`,
-  `/sessions/:id/capsules/:capsuleId`, `/cost` and `/inbox`; `/nodes` is later.
+  `/nodes`, `/cost`, `/inbox`. The first slice implements all of them, with `/nodes` a
+  read-only node list and no node mutation or SSH path.
 - PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
 - The write token is kept in `sessionStorage`, never in a URL. The inbox page shows a one-field
   unlock panel when no token is stored; a `401` clears it and shows the panel again. Rotating the
   token means restarting the daemon with a new `VOWP_API_TOKEN`, then unlocking again.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
   The session timeline uses the per-session stream with `after_seq` resume. The board uses the
-  snapshot `/api/v1/board/stream` with reconnect and polling fallback. The cost and inbox pages
-  still poll every five seconds.
+  snapshot `/api/v1/board/stream` with reconnect and polling fallback. The cost, inbox and nodes
+  pages still poll every five seconds.
 
 ## Open questions
 
@@ -152,12 +152,21 @@ items." There is no dismiss or other write action. The page links to the other p
 `<noscript>The inbox page requires JavaScript.</noscript>`, and never prints a home path, token
 value or provider secret.
 
+The nodes page is `crates/vowp-daemon/web/nodes.html`, served at `GET /nodes`. It fetches
+`GET /api/v1/nodes` on load and every five seconds and renders a table of name, SSH target (or
+`-`), local/remote, last seen, version from `capabilities.vowp` and a compact capabilities/probe
+summary built only from the stored fields. It shows "No nodes." for an empty list; a failed fetch
+shows an error line and keeps the last list and timestamp visible. The page is read-only: it has
+no add, remove or probe control and no SSH, exec or write path. It links to the board, sessions,
+cost and inbox, carries `<noscript>The nodes page requires JavaScript.</noscript>`, and never
+prints a home path, token or provider secret.
+
 There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
-`crates/vowp-daemon/tests/board_page.rs`, `session_page.rs`, `capsule_page.rs` and
-`cost_inbox_pages.rs` are HTTP-only tests over a temporary home and a real `127.0.0.1:0` listener,
-and `tests/sse.rs` reads real chunked stream bodies. The board-page test pins the stream path, the
-`board` and `heartbeat` handlers, the "Reconnecting..." text and the polling fallback without
-running a browser. The session-page test pins the stream path, the `after_seq` resume, the
+`crates/vowp-daemon/tests/board_page.rs`, `session_page.rs`, `capsule_page.rs`,
+`cost_inbox_pages.rs` and `nodes_page.rs` are HTTP-only tests over a temporary home and a real
+`127.0.0.1:0` listener, and `tests/sse.rs` reads real chunked stream bodies. The board-page test
+pins the stream path, the `board` and `heartbeat` handlers, the "Reconnecting..." text and the
+polling fallback without running a browser. The session-page test pins the stream path, the `after_seq` resume, the
 `session` and `heartbeat` handlers, the reconnect text and the polling fallback. It also pins the
 session-detail path, the capsule field labels, the lineage links, the "View capsule" link and the
 no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data
@@ -167,9 +176,12 @@ session back link, the `<noscript>` fallback and the absence of paths or secrets
 checks that an unknown session or capsule is the API's `404` behind the page's not-found text. The
 inbox-page test pins the answer form, the `Authorization: Bearer` header, the `sessionStorage`
 unlock, the queued message, the `401` and `503` lines, and the absence of a token in the URL; the
-answer API test proves the write itself.
+answer API test proves the write itself. The nodes-page test pins the `/api/v1/nodes` fetch, the
+node column labels, the empty and failed-fetch messages and the `<noscript>` fallback, and reads
+the same endpoint to prove the page's data source is a schema-valid `NodePage` of the stored
+local and remote nodes.
 
-Still later: `/nodes`, the cost dashboard and charts, the reconnect UI on the pages that still
+Still later: the cost dashboard and charts, the reconnect UI on the pages that still
 poll, executor switching, dismiss and the other write actions, PWA installability and a token
 rotation service. Markdown rendering, capsule editing and capsule writes remain out of scope.
 The API routes and their fallback are otherwise unchanged; unknown non-API paths still return the

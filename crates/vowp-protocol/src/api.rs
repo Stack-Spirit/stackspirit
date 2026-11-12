@@ -21,7 +21,7 @@ use crate::ids::{JobId, NodeName, ProjectName, SessionId};
 use crate::inbox::InboxItem;
 use crate::job::Job;
 use crate::limit::LimitRowKind;
-use crate::session::Session;
+use crate::session::{Node, Session};
 use crate::time::Timestamp;
 
 /// The `/api/v1/health` document.
@@ -122,6 +122,9 @@ pub type JobPage = Page<Job>;
 
 /// One page of [`Session`] objects.
 pub type SessionPage = Page<Session>;
+
+/// One page of [`Node`] objects.
+pub type NodePage = Page<Node>;
 
 /// Largest parent-session chain returned in [`SessionDetail::lineage`].
 pub const MAX_LINEAGE: usize = 32;

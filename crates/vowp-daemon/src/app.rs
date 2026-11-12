@@ -24,7 +24,7 @@ use vowp_core::ledger::BoardSnapshot;
 use vowp_core::requests::{self, Request};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
-    Health, InboxAnswerRequest, InboxPage, JobPage, MAX_LINEAGE, SessionDetail, SessionPage,
+    Health, InboxAnswerRequest, InboxPage, JobPage, MAX_LINEAGE, NodePage, SessionDetail, SessionPage,
 };
 use vowp_protocol::{
     Capsule, CapsuleId, ErrorKind, InboxId, InboxItem, InboxState, NodeName, ProjectName, Session, SessionId,
@@ -205,6 +205,17 @@ impl ApiState {
         }
     }
 
+    /// Returns the served project's registered nodes, ordered by name.
+    fn nodes(&self) -> Result<NodePage, ApiFailure> {
+        let store = self.open()?;
+        let nodes = store.list_nodes().map_err(|_| store_failure())?;
+        Ok(NodePage {
+            total: usize_to_u64(nodes.len()),
+            items: nodes,
+            next: None,
+        })
+    }
+
     /// Returns the served project's inbox items in `state`.
     fn inbox(&self, state: InboxState) -> Result<InboxPage, ApiFailure> {
         let store = self.open()?;
@@ -360,9 +371,9 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
-/// `/sessions/{id}/capsules/{capsule_id}`, the static cost and inbox pages at `/cost` and
-/// `/inbox`, plus the API under `/api/v1`. The only non-GET API route is the token-gated
-/// inbox answer write.
+/// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox and nodes pages at `/cost`,
+/// `/inbox` and `/nodes`, plus the API under `/api/v1`. The only non-GET API route is the
+/// token-gated inbox answer write.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -372,6 +383,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/sessions/{id}/capsules/{capsule_id}", get(capsule_page))
         .route("/cost", get(cost_page))
         .route("/inbox", get(inbox_page))
+        .route("/nodes", get(nodes_page))
         .route("/api/v1/health", get(health))
         .route("/api/v1/board", get(board))
         .route("/api/v1/board/stream", get(board_stream))
@@ -383,6 +395,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/sessions/{id}/events/stream", get(session_events_stream))
         .route("/api/v1/inbox", get(inbox))
         .route("/api/v1/inbox/{id}/answer", post(answer_inbox))
+        .route("/api/v1/nodes", get(nodes))
         .route("/api/v1/cost", get(cost))
         .fallback(unknown_endpoint)
         .with_state(state)
@@ -467,6 +480,18 @@ async fn inbox_page() -> Html<&'static str> {
     Html(INBOX_PAGE)
 }
 
+/// The embedded static nodes shell, served read-only at `/nodes`.
+const NODES_PAGE: &str = include_str!("../web/nodes.html");
+
+/// Serves the static nodes shell; it fetches `/api/v1/nodes` on load and every five seconds.
+///
+/// The page renders each stored node's name, SSH target, local/remote flag, last-seen time,
+/// `capabilities.vowp` version and a compact capabilities/probe summary. It is read-only: no
+/// add, remove or probe control and no SSH or write path is offered.
+async fn nodes_page() -> Html<&'static str> {
+    Html(NODES_PAGE)
+}
+
 /// Returns the health document for the served project.
 async fn health(State(state): State<ApiState>) -> Json<Health> {
     Json(Health {
@@ -530,6 +555,12 @@ async fn session_capsule(
     let capsule_id = CapsuleId::parse(&capsule_id).map_err(|_| ApiFailure::invalid("invalid capsule id"))?;
     let capsule = blocking(move || state.capsule(&session_id, &capsule_id)).await?;
     Ok(Json(capsule))
+}
+
+/// Lists the served project's registered nodes.
+async fn nodes(State(state): State<ApiState>) -> Result<Json<NodePage>, ApiFailure> {
+    let page = blocking(move || state.nodes()).await?;
+    Ok(Json(page))
 }
 
 /// Lists the served project's inbox items in one state.

@@ -71,6 +71,7 @@ python3 docs/reference/check-reference.py
 | `MigrationReport` | [migration-report.md](migration-report.md) |
 | `NewJob` | [new-job.md](new-job.md) |
 | `Node` | [node.md](node.md) |
+| `NodePage` | [node-page.md](node-page.md) |
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
 | `Page` | [page.md](page.md) |
 | `Profile` | [profile.md](profile.md) |

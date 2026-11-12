@@ -5,13 +5,14 @@ The loopback HTTP API for one VOWP project.
 `vowp-daemon [--home <dir>] [--project <name>] [--port <n>]` opens an existing VOWP home
 read-only for its GET endpoints (and writable-but-non-creating for the one answer write),
 serves the static board page at `GET /` and its phone alias `GET /board`, the
-static session list at `GET /sessions`, session detail at `GET /sessions/{id}` and the
-individual capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, and the API endpoints
-`GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`,
-`/api/v1/jobs`, `/api/v1/sessions`,
+static session list at `GET /sessions`, session detail at `GET /sessions/{id}`, the
+individual capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the read-only nodes
+page at `GET /nodes`, and the API endpoints `GET /api/v1/health`, `/api/v1/board`,
+`/api/v1/board/stream`, `/api/v1/jobs`, `/api/v1/sessions`,
 `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox`,
-`POST /api/v1/inbox/{id}/answer` and `/api/v1/cost`, and binds `127.0.0.1` only. The default
+`/api/v1/nodes`, `POST /api/v1/inbox/{id}/answer` and `/api/v1/cost`, and binds
+`127.0.0.1` only. The default
 port is `0`, so the operating system
 picks an ephemeral port and the binary prints the bound address. Session detail returns the
 exact `Session`, its latest capsule (or null) and at most 32 parent links, nearest parent
@@ -43,6 +44,12 @@ The board stream at `/api/v1/board/stream` sends the exact `Board` document as a
 periodic `event: heartbeat` frames; it has no cursor, resume or resync. The board and session
 detail pages use their streams. The session-list, cost and inbox pages still poll their JSON
 endpoints; their reconnect UI is later.
+
+The nodes page fetches `/api/v1/nodes` on load and every five seconds and renders each stored
+node's name, SSH target, local/remote flag, last-seen time, `capabilities.vowp` version and a
+compact capabilities/probe summary. It is read-only: no add, remove or probe control and no SSH
+path; an empty list shows "No nodes." and a failed fetch keeps the last list and timestamp with
+an error line.
 
 The cost page renders grouped ledger rows and totals with a `by` selector. The inbox page
 renders open, answered and dismissed items with a state selector. Its open items carry the one

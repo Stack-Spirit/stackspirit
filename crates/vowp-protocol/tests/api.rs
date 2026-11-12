@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
-    InboxAnswerRequest, InboxPage, JobPage, Page, SessionDetail, SessionPage,
+    InboxAnswerRequest, InboxPage, JobPage, NodePage, Page, SessionDetail, SessionPage,
 };
 use vowp_protocol::schema::schema_for_name;
 use vowp_protocol::{
@@ -123,6 +123,11 @@ fn concrete_page_aliases_serialise_their_item_type() {
         next: None,
         total: 0,
     };
+    let nodes: NodePage = Page {
+        items: Vec::new(),
+        next: None,
+        total: 0,
+    };
     let events: EventPage = Page {
         items: Vec::new(),
         next: None,
@@ -136,6 +141,7 @@ fn concrete_page_aliases_serialise_their_item_type() {
     for page in [
         serde_json::to_value(jobs).expect("job page"),
         serde_json::to_value(sessions).expect("session page"),
+        serde_json::to_value(nodes).expect("node page"),
         serde_json::to_value(events).expect("event page"),
         serde_json::to_value(inbox).expect("inbox page"),
     ] {
@@ -581,6 +587,7 @@ fn api_documents_are_exported_schemas() {
         "Page",
         "JobPage",
         "SessionPage",
+        "NodePage",
         "SessionDetail",
         "EventPage",
         "InboxAnswerRequest",

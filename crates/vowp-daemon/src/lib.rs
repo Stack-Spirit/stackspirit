@@ -2,12 +2,13 @@
 //!
 //! The v0.3 slice serves the static board page at `GET /` and `GET /board`, the static
 //! session list and detail pages at `GET /sessions` and `GET /sessions/{id}`, the static
-//! capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the static cost and inbox pages
-//! at `GET /cost` and `GET /inbox`, and the API endpoints `GET /api/v1/health`,
-//! `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`, `/api/v1/sessions`,
-//! `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
-//! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
-//! `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints. The session detail
+//! capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the static cost, inbox and nodes
+//! pages at `GET /cost`, `GET /inbox` and `GET /nodes`, and the API endpoints
+//! `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`,
+//! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
+//! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox`,
+//! `/api/v1/nodes` and `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints.
+//! The session detail
 //! contains the exact `Session`, its latest capsule and at most 32 parent links, nearest
 //! parent first; the capsule route answers only for a capsule belonging to that session.
 //! The per-session stream sends stored `EventEnvelope` frames with periodic heartbeats and a
@@ -24,7 +25,8 @@
 //! metadata and structured fields read-only.
 //! The cost page renders grouped ledger rows and totals with a `by` selector. The inbox page
 //! renders open, answered and dismissed items with a state selector, and its answer form is
-//! the only browser write.
+//! the only browser write. The nodes page fetches the stored nodes from `/api/v1/nodes` on
+//! load and every five seconds and renders them read-only, with no add, remove or probe path.
 //!
 //! Reads are token-free. `POST /api/v1/inbox/{id}/answer` requires
 //! `Authorization: Bearer <VOWP_API_TOKEN>` and answers `503` when the daemon was started
