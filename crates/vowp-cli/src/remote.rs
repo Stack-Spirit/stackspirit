@@ -342,6 +342,10 @@ impl RemoteStream {
     }
 
     /// Kills the remote command, reaps it and returns its exit code and stderr.
+    ///
+    /// A status without a code means this call's own kill ended the process. That is a
+    /// deliberate local abort, not a remote failure, so it becomes exit code 0 and the
+    /// caller's local error stays authoritative.
     pub fn abort(mut self) -> Result<RemoteExit, CliError> {
         let _ = self.child.kill();
         let status = self
@@ -349,6 +353,12 @@ impl RemoteStream {
             .wait()
             .map_err(|error| CliError::Remote(format!("ssh {}: {error}", self.target)))?;
         let stderr = self.stderr.join().unwrap_or_default();
+        if status.code().is_none() {
+            return Ok(RemoteExit {
+                code: 0,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
+        }
         finish_stream(&self.target, status, stderr)
     }
 }

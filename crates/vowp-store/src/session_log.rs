@@ -1095,7 +1095,8 @@ pub fn verify_session_dir(paths: &NodePaths, id: &SessionId, manifest: &SessionD
         });
     }
 
-    let report = SessionLog::open_read(paths, id)?.verify()?;
+    let log = SessionLog::open_read(paths, id)?;
+    let report = log.verify()?;
     if !report.is_ok() {
         return Err(StoreError::Corrupt {
             path: paths.log_path(id).display().to_string(),
@@ -1103,6 +1104,7 @@ pub fn verify_session_dir(paths: &NodePaths, id: &SessionId, manifest: &SessionD
             reason: format!("session log is not clean: {}", report.problems.join("; ")),
         });
     }
+    verify_session_dir_blobs(paths, id, &log)?;
     if paths.adapters_json_path(id).is_file() {
         crate::session_files::read_adapters_json(paths, id)?;
     }
@@ -1114,6 +1116,48 @@ pub fn verify_session_dir(paths: &NodePaths, id: &SessionId, manifest: &SessionD
                 line: None,
                 reason: format!("capsule belongs to session {}, not {id}", capsule.session_id),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a session log that names a blob the snapshot's `blobs/` does not contain.
+///
+/// A full pull never invents a placeholder for a missing blob: the source log and its blob
+/// files must match exactly before the staged directory is renamed into place.
+fn verify_session_dir_blobs(paths: &NodePaths, id: &SessionId, log: &SessionLogReader) -> Result<(), StoreError> {
+    let blobs = BlobStore::new(paths.blobs_dir(id));
+    for item in log.iter()? {
+        let event = item?;
+        let Ok(body) = event.envelope.body() else {
+            continue;
+        };
+        let references: Vec<&str> = match &body {
+            EventBody::UserMessage(payload) => payload
+                .attachments
+                .iter()
+                .map(|reference| reference.sha256.as_str())
+                .collect(),
+            EventBody::ToolResult(payload) => payload
+                .output_ref
+                .iter()
+                .map(|reference| reference.sha256.as_str())
+                .collect(),
+            EventBody::FileChange(payload) => payload
+                .diff_ref
+                .iter()
+                .map(|reference| reference.sha256.as_str())
+                .collect(),
+            _ => Vec::new(),
+        };
+        for sha256 in references {
+            if !blobs.exists(sha256) {
+                return Err(StoreError::Corrupt {
+                    path: paths.log_path(id).display().to_string(),
+                    line: None,
+                    reason: format!("event {} references a missing blob: {sha256}", event.envelope.seq),
+                });
+            }
         }
     }
     Ok(())

@@ -704,6 +704,40 @@ fn append_spilled_tool_result(home: &Path, id: &str, output: &str) -> (String, V
     (sha256, output.as_bytes().to_vec())
 }
 
+/// Appends one indexed tool result whose blob reference has no file under `blobs/`.
+fn append_dangling_tool_result(home: &Path, id: &str, sha256: &str) {
+    let paths = vowp_store::NodePaths::new(home);
+    let session = vowp_protocol::SessionId::parse(id).expect("session id");
+    let store = vowp_store::Store::open(&paths).expect("store");
+    let log = SessionLog::open(&paths, &session, std::sync::Arc::new(vowp_protocol::SystemClock)).expect("log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::Tool,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: None,
+                node: None,
+                native_session_id: None,
+            },
+            body: EventBody::ToolResult(vowp_protocol::ToolResult {
+                call_id: "call-dangling-blob".to_owned(),
+                ok: true,
+                output: None,
+                output_ref: Some(vowp_protocol::BlobRef {
+                    sha256: sha256.to_owned(),
+                    bytes: 4,
+                    preview: "gone".to_owned(),
+                }),
+                exit_code: Some(0),
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append dangling tool result");
+    store.index_event(&index_row(&appended)).expect("index tool result");
+    log.sync().expect("sync");
+}
+
 /// Returns how many sessions the local index holds.
 fn local_session_count(env: &common::TestEnv) -> usize {
     env.store()
@@ -1237,6 +1271,63 @@ fn session_pull_full_refuses_an_existing_session_without_mutating_it() {
 }
 
 #[test]
+fn session_pull_full_prefix_of_an_existing_session_keeps_the_local_conflict() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote full session");
+    append_user_message(remote.home.path(), &source, "keep this event");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "first full pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let local_paths = vowp_store::NodePaths::new(env.home_path());
+    let before = std::fs::read(local_paths.log_path(&source_id)).expect("full-pull log bytes");
+
+    let manifest = vowp_store::session_log::SessionDirManifest {
+        format: vowp_store::session_log::SESSION_DIR_FORMAT.to_owned(),
+        origin: source_id.clone(),
+        files: vec![vowp_store::session_log::SessionDirFile {
+            path: "log.jsonl".to_owned(),
+            bytes: 0,
+            sha256: "0".repeat(64),
+        }],
+    };
+    let mut stream = serde_json::to_vec(&manifest).expect("manifest JSON");
+    stream.push(b'\n');
+    let stream_path = env.project_path().join("existing-full.snapshot");
+    std::fs::write(&stream_path, stream).expect("existing snapshot");
+    // A prefix is resolved by the manifest, so the local present-id check runs while the
+    // source stream is still open; the deliberate abort must not mask the conflict.
+    install_ssh(
+        &remote,
+        &format!("#!/bin/sh\ncat '{}'\nexec sleep 30\n", stream_path.display()),
+    );
+    let prefix = &source[..10];
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", prefix]);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "a present-id full pull must conflict: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains("already exists"),
+        "the conflict was not explained: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(local_paths.log_path(&source_id)).expect("full-pull log bytes"),
+        before,
+        "a refused prefix full pull rewrote the existing log"
+    );
+    assert_temp_clean(&env);
+}
+
+#[test]
 fn session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory() {
     let env = common::TestEnv::new();
     configure(&env);
@@ -1281,6 +1372,39 @@ fn session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory() {
 }
 
 #[test]
+fn session_pull_full_refuses_a_log_with_a_missing_blob() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "dangling blob session");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+    let missing = "b".repeat(64);
+    append_dangling_tool_result(remote.home.path(), &source, &missing);
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", &source]);
+    assert!(
+        !output.status.success(),
+        "a log with a missing blob must be refused: {}",
+        output_text(&output.stderr)
+    );
+    let stderr = output_text(&output.stderr);
+    assert!(
+        stderr.contains("missing blob"),
+        "the dangling reference was not reported: {stderr}"
+    );
+    assert!(
+        stderr.contains(&missing),
+        "the missing blob hash was not named: {stderr}"
+    );
+    assert!(
+        !env.home_path().join("sessions").join(source_id.as_str()).exists(),
+        "a refused full pull left a final session directory"
+    );
+    assert_eq!(local_session_count(&env), 0);
+    assert_temp_clean(&env);
+}
+
+#[test]
 fn session_pull_full_refuses_an_over_cap_snapshot_before_copying() {
     let env = common::TestEnv::new();
     configure(&env);
@@ -1300,9 +1424,11 @@ fn session_pull_full_refuses_an_over_cap_snapshot_before_copying() {
     stream.push(b'\n');
     let stream_path = env.project_path().join("over-cap-full.snapshot");
     std::fs::write(&stream_path, stream).expect("over-cap snapshot");
+    // Keep the source alive until the client aborts it, so the local size check always
+    // races a running stream rather than a process that has already exited.
     install_ssh(
         &remote,
-        &format!("#!/bin/sh\ncat '{}'\nexit 0\n", stream_path.display()),
+        &format!("#!/bin/sh\ncat '{}'\nexec sleep 30\n", stream_path.display()),
     );
 
     let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", id.as_str()]);
