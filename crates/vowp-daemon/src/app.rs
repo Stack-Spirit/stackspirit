@@ -168,12 +168,14 @@ impl ApiState {
     }
 }
 
-/// Builds the router: the static board page at `/` and its phone alias `/board`, plus the
-/// API under `/api/v1`.
+/// Builds the router: the static board page at `/` and its phone alias `/board`, the static
+/// session pages at `/sessions` and `/sessions/{id}`, plus the API under `/api/v1`.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
         .route("/board", get(board_page))
+        .route("/sessions", get(sessions_page))
+        .route("/sessions/{id}", get(sessions_page))
         .route("/api/v1/health", get(health))
         .route("/api/v1/board", get(board))
         .route("/api/v1/jobs", get(jobs))
@@ -207,6 +209,18 @@ const BOARD_PAGE: &str = include_str!("../web/index.html");
 /// rules make it usable on a phone without a separate page or a second API mapping.
 async fn board_page() -> Html<&'static str> {
     Html(BOARD_PAGE)
+}
+
+/// The embedded static session shell, served read-only at `/sessions` and `/sessions/{id}`.
+const SESSIONS_PAGE: &str = include_str!("../web/sessions.html");
+
+/// Serves the static sessions shell.
+///
+/// The page reads its own path: `/sessions` renders the read-only session list and
+/// `/sessions/{id}` renders one session's metadata and a polling event timeline. Both
+/// routes serve the same shell; only the two read-only API endpoints are fetched.
+async fn sessions_page() -> Html<&'static str> {
+    Html(SESSIONS_PAGE)
 }
 
 /// Returns the health document for the served project.

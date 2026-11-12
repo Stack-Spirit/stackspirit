@@ -47,6 +47,8 @@
   h1 { margin: 0; font-size: 1.65rem; }
   h2 { margin: 0 0 .6rem; font-size: 1rem; }
   .page-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; justify-content: space-between; }
+  .page-nav { margin: .15rem 0 0; font-weight: 600; }
+  .page-nav a { color: var(--accent); }
   .card {
     background: var(--card);
     border: 1px solid var(--line);
@@ -113,6 +115,7 @@
     <div>
       <h1>VOWP board</h1>
       <p id="project" class="muted">Project: unknown</p>
+      <nav class="page-nav" aria-label="Pages"><a href="/sessions">Sessions</a></nav>
     </div>
     <p id="updated" class="muted" aria-live="polite">Last updated: waiting for first load</p>
   </header>

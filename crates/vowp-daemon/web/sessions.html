@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOWP sessions</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #f6f5f1;
+    --card: #ffffff;
+    --ink: #1f2421;
+    --muted: #5c6660;
+    --line: #d8d5cc;
+    --accent: #16855b;
+    --warn: #a33a1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #161a18;
+      --card: #1e2421;
+      --ink: #edf0ec;
+      --muted: #a2ada6;
+      --line: #343c37;
+      --accent: #55d39b;
+      --warn: #ff9b7a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.45;
+    overflow-x: hidden;
+  }
+  main {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 1.5rem 1rem 3rem;
+    display: grid;
+    gap: 1rem;
+  }
+  main > * { min-width: 0; }
+  h1 { margin: 0; font-size: 1.65rem; }
+  h2 { margin: 0 0 .6rem; font-size: 1rem; }
+  a { color: var(--accent); }
+  .page-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; justify-content: space-between; }
+  .page-nav { margin: .15rem 0 0; font-weight: 600; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: .6rem;
+    padding: .9rem 1rem;
+    min-width: 0;
+  }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+  .cards { display: grid; gap: .6rem; margin: 0; padding: 0; list-style: none; }
+  .session-card, .event-card { border: 1px solid var(--line); border-radius: .5rem; padding: .65rem .75rem; min-width: 0; }
+  .session-head, .event-head { display: flex; flex-wrap: wrap; gap: .4rem .7rem; align-items: center; margin: 0 0 .45rem; }
+  .session-link { font-weight: 700; overflow-wrap: anywhere; }
+  .badge {
+    display: inline-block;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .05rem .55rem;
+    color: var(--accent);
+    font-size: .8rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+    text-transform: uppercase;
+  }
+  .facts { display: grid; grid-template-columns: 1fr; gap: .35rem .9rem; margin: 0; }
+  @media (min-width: 420px) {
+    .facts { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  }
+  .fact { min-width: 0; }
+  .fact dt { color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
+  .fact dd { margin: 0; overflow-wrap: anywhere; }
+  .event-summary { margin: 0; overflow-wrap: anywhere; }
+  .error {
+    margin: 0;
+    padding: .65rem .9rem;
+    border: 1px solid var(--warn);
+    border-radius: .5rem;
+    color: var(--warn);
+    background: var(--card);
+    font-weight: 600;
+  }
+  [hidden] { display: none !important; }
+  @media (max-width: 360px) {
+    main { padding: .75rem .5rem 2rem; gap: .65rem; }
+    .card { padding: .7rem .75rem; border-radius: .5rem; }
+    h1 { font-size: 1.3rem; }
+    .cards { gap: .6rem; }
+    .session-card, .event-card { padding: .55rem .6rem; }
+    .facts { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main id="sessions">
+  <header class="page-head">
+    <div>
+      <nav class="page-nav" aria-label="Pages"><a href="/">← Board</a></nav>
+      <h1 id="heading">Sessions</h1>
+      <p id="subtitle" class="muted">Read-only session list.</p>
+    </div>
+    <p id="updated" class="muted" aria-live="polite">Last updated: waiting for first load</p>
+  </header>
+
+  <p id="error" class="error" role="alert" hidden></p>
+
+  <section id="list-view" aria-labelledby="list-heading">
+    <h2 id="list-heading">Session list</h2>
+    <ul id="list" class="cards">
+      <li class="session-card muted">
+        <dl class="facts">
+          <div class="fact"><dt>ID</dt><dd>Loading…</dd></div>
+          <div class="fact"><dt>Title</dt><dd>–</dd></div>
+          <div class="fact"><dt>Project</dt><dd>–</dd></div>
+          <div class="fact"><dt>Job</dt><dd>–</dd></div>
+          <div class="fact"><dt>Role</dt><dd>–</dd></div>
+          <div class="fact"><dt>State</dt><dd>–</dd></div>
+          <div class="fact"><dt>Executor</dt><dd>–</dd></div>
+          <div class="fact"><dt>Last seq</dt><dd>–</dd></div>
+          <div class="fact"><dt>Updated</dt><dd>–</dd></div>
+        </dl>
+      </li>
+    </ul>
+  </section>
+
+  <section id="detail-view" aria-labelledby="detail-heading" hidden>
+    <div class="card">
+      <h2 id="detail-heading">Session</h2>
+      <dl id="meta" class="facts">
+        <div class="fact"><dt>ID</dt><dd>Loading…</dd></div>
+        <div class="fact"><dt>Title</dt><dd>–</dd></div>
+        <div class="fact"><dt>Project</dt><dd>–</dd></div>
+        <div class="fact"><dt>Job</dt><dd>–</dd></div>
+        <div class="fact"><dt>Role</dt><dd>–</dd></div>
+        <div class="fact"><dt>State</dt><dd>–</dd></div>
+        <div class="fact"><dt>Executor</dt><dd>–</dd></div>
+        <div class="fact"><dt>Node</dt><dd>–</dd></div>
+        <div class="fact"><dt>Last seq</dt><dd>–</dd></div>
+        <div class="fact"><dt>Created</dt><dd>–</dd></div>
+        <div class="fact"><dt>Updated</dt><dd>–</dd></div>
+      </dl>
+    </div>
+
+    <div class="card">
+      <h2 id="events-heading">Event timeline</h2>
+      <ul id="events" class="cards">
+        <li class="event-card muted">
+          <dl class="facts">
+            <div class="fact"><dt>Seq</dt><dd>Loading…</dd></div>
+            <div class="fact"><dt>Time</dt><dd>–</dd></div>
+            <div class="fact"><dt>Type</dt><dd>–</dd></div>
+            <div class="fact"><dt>Actor</dt><dd>–</dd></div>
+            <div class="fact"><dt>Summary</dt><dd>–</dd></div>
+          </dl>
+        </li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<noscript>The session view requires JavaScript.</noscript>
+
+<script>
+(() => {
+  "use strict";
+
+  const REFRESH_MS = 5000;
+  const EVENT_LIMIT = 200;
+  const errorLine = document.getElementById("error");
+  const updatedLine = document.getElementById("updated");
+  const heading = document.getElementById("heading");
+  const subtitle = document.getElementById("subtitle");
+  const listView = document.getElementById("list-view");
+  const detailView = document.getElementById("detail-view");
+  const list = document.getElementById("list");
+  const meta = document.getElementById("meta");
+  const events = document.getElementById("events");
+
+  const sessionId = pathSessionId();
+  const detailMode = sessionId !== null;
+  let lastUpdated = null;
+  let lastSeq = 0;
+
+  function pathSessionId() {
+    const parts = window.location.pathname.split("/").filter((part) => part.length > 0);
+    if (parts.length < 2 || parts[0] !== "sessions") return null;
+    try {
+      return decodeURIComponent(parts[1]);
+    } catch (_error) {
+      return parts[1];
+    }
+  }
+
+  function formatTime(value) {
+    if (value === null || value === undefined || value === "") return "unknown";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString();
+  }
+
+  function formatValue(value, fallback) {
+    if (value === null || value === undefined || value === "") return fallback;
+    return String(value);
+  }
+
+  function fact(label, value, mono) {
+    const row = document.createElement("div");
+    row.className = "fact";
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    detail.textContent = value;
+    if (mono) detail.className = "mono";
+    row.append(term, detail);
+    return row;
+  }
+
+  function emptyItem(message) {
+    const item = document.createElement("li");
+    item.className = "muted";
+    item.textContent = message;
+    return item;
+  }
+
+  function markUpdated() {
+    lastUpdated = new Date();
+    updatedLine.textContent = "Last updated: " + lastUpdated.toLocaleString();
+  }
+
+  function clearError() {
+    errorLine.hidden = true;
+    errorLine.textContent = "";
+  }
+
+  function showError(message) {
+    errorLine.textContent = message;
+    errorLine.hidden = false;
+  }
+
+  function failureText(what, error) {
+    const detail = error && error.message ? error.message : "the daemon may be down";
+    const when = lastUpdated ? " Showing data from " + lastUpdated.toLocaleString() + "." : "";
+    return "Could not load " + what + " (" + detail + ")." + when;
+  }
+
+  async function fetchSessions() {
+    const response = await fetch("/api/v1/sessions");
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const page = await response.json();
+    return Array.isArray(page.items) ? page.items : [];
+  }
+
+  function renderSession(session) {
+    const item = document.createElement("li");
+    item.className = "session-card";
+
+    const head = document.createElement("p");
+    head.className = "session-head";
+    const link = document.createElement("a");
+    link.className = "session-link";
+    link.href = "/sessions/" + encodeURIComponent(session.id);
+    link.textContent = formatValue(session.title, formatValue(session.id, "session"));
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = formatValue(session.state, "unknown");
+    head.append(link, badge);
+
+    const facts = document.createElement("dl");
+    facts.className = "facts";
+    facts.append(
+      fact("ID", formatValue(session.id, "unknown"), true),
+      fact("Title", formatValue(session.title, "untitled"), false),
+      fact("Project", formatValue(session.project, "none"), true),
+      fact("Job", formatValue(session.job_id, "none"), true),
+      fact("Role", formatValue(session.role, "none"), false),
+      fact("State", formatValue(session.state, "unknown"), false),
+      fact("Executor", formatValue(session.executor, "none"), true),
+      fact("Last seq", formatValue(session.last_seq, "–"), false),
+      fact("Updated", formatTime(session.updated_at), false)
+    );
+    item.append(head, facts);
+    return item;
+  }
+
+  function renderList(sessions) {
+    list.replaceChildren();
+    if (sessions.length === 0) {
+      list.appendChild(emptyItem("No sessions."));
+      return;
+    }
+    for (const session of sessions) list.appendChild(renderSession(session));
+  }
+
+  function executorText(value) {
+    if (!value || !value.executor) return "none";
+    return value.node ? value.executor + " on " + value.node : String(value.executor);
+  }
+
+  function clip(text, limit) {
+    const oneLine = String(text == null ? "" : text).split(/\s+/).filter(Boolean).join(" ");
+    if (oneLine.length <= limit) return oneLine;
+    return oneLine.slice(0, limit - 1) + "…";
+  }
+
+  function compactJson(value) {
+    try {
+      const text = JSON.stringify(value);
+      return text === undefined ? "" : text;
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function eventSummary(event) {
+    const payload = event.payload || {};
+    switch (event.type) {
+      case "user.message":
+      case "assistant.message":
+      case "assistant.reasoning":
+      case "note":
+        return clip(payload.text, 200);
+      case "error":
+        return clip((payload.kind || "error") + ": " + (payload.message || ""), 200);
+      case "tool.call":
+        return clip((payload.name || "tool") + " " + compactJson(payload.input), 200);
+      case "tool.result":
+        return clip((payload.call_id || "tool") + ": " + (payload.ok ? "ok" : "failed"), 200);
+      case "session.created":
+        return clip("session created: " + (payload.title || "untitled"), 200);
+      case "session.executor":
+        return clip((payload.action || "attach") + " " + (payload.executor || "") + " on " + (payload.node || ""), 200);
+      case "turn.started":
+        return clip("turn " + (payload.turn ?? "?") + " started", 200);
+      case "turn.ended":
+        return clip("turn " + (payload.turn ?? "?") + " ended: " + (payload.stop_reason || ""), 200);
+      case "file.change":
+        return clip((payload.op || "change") + " " + (payload.path || ""), 200);
+      case "plan": {
+        const items = Array.isArray(payload.items)
+          ? payload.items.map((item) => (item.status || "") + ": " + (item.text || "")).join("; ")
+          : "";
+        return clip("plan: " + items, 200);
+      }
+      case "limit":
+        return clip("limit " + (payload.provider || "") + ": " + (payload.message || ""), 200);
+      case "cost":
+        return payload.cost && payload.cost.usd !== null && payload.cost.usd !== undefined
+          ? clip("cost $" + Number(payload.cost.usd).toFixed(4), 200)
+          : "cost unknown";
+      case "switch":
+        return clip("switch " + executorText(payload.from) + " -> " + executorText(payload.to), 200);
+      case "capsule":
+        return clip("capsule " + (payload.capsule_id || ""), 200);
+      default:
+        return clip(compactJson(payload), 200);
+    }
+  }
+
+  function appendEvent(event) {
+    const item = document.createElement("li");
+    item.className = "event-card";
+
+    const head = document.createElement("p");
+    head.className = "event-head";
+    const seq = document.createElement("span");
+    seq.className = "badge";
+    seq.textContent = "#" + event.seq;
+    const type = document.createElement("span");
+    type.className = "mono";
+    type.textContent = formatValue(event.type, "event");
+    const actor = document.createElement("span");
+    actor.className = "muted";
+    actor.textContent = formatValue(event.actor, "unknown");
+    const time = document.createElement("time");
+    time.className = "muted";
+    if (event.ts) time.dateTime = event.ts;
+    time.textContent = formatTime(event.ts);
+    head.append(seq, type, actor, time);
+
+    const summary = document.createElement("p");
+    summary.className = "event-summary";
+    summary.textContent = eventSummary(event);
+    item.append(head, summary);
+    events.appendChild(item);
+  }
+
+  function renderMeta(session) {
+    meta.replaceChildren(
+      fact("ID", formatValue(session.id, "unknown"), true),
+      fact("Title", formatValue(session.title, "untitled"), false),
+      fact("Project", formatValue(session.project, "none"), true),
+      fact("Job", formatValue(session.job_id, "none"), true),
+      fact("Role", formatValue(session.role, "none"), false),
+      fact("State", formatValue(session.state, "unknown"), false),
+      fact("Executor", formatValue(session.executor, "none"), true),
+      fact("Node", formatValue(session.node, "unknown"), true),
+      fact("Last seq", formatValue(session.last_seq, "–"), false),
+      fact("Created", formatTime(session.created_at), false),
+      fact("Updated", formatTime(session.updated_at), false)
+    );
+  }
+
+  async function fetchNewEvents() {
+    let after = lastSeq;
+    for (;;) {
+      const url =
+        "/api/v1/sessions/" +
+        encodeURIComponent(sessionId) +
+        "/events?after_seq=" +
+        after +
+        "&limit=" +
+        EVENT_LIMIT;
+      const response = await fetch(url);
+      if (response.status === 404) {
+        showError("Session " + sessionId + " not found.");
+        return false;
+      }
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const page = await response.json();
+      const items = Array.isArray(page.items) ? page.items : [];
+      for (const event of items) {
+        if (typeof event.seq !== "number" || event.seq <= lastSeq) continue;
+        appendEvent(event);
+        lastSeq = event.seq;
+      }
+      if (page.next === null || page.next === undefined || items.length === 0 || page.next <= after) break;
+      after = page.next;
+    }
+    return true;
+  }
+
+  async function refreshList() {
+    try {
+      const sessions = await fetchSessions();
+      renderList(sessions);
+      markUpdated();
+      clearError();
+    } catch (error) {
+      showError(failureText("the session list", error));
+    }
+  }
+
+  async function refreshDetail() {
+    try {
+      const sessions = await fetchSessions();
+      const session = sessions.find((item) => item.id === sessionId);
+      if (!session) {
+        showError("Session " + sessionId + " not found.");
+        return;
+      }
+      renderMeta(session);
+      const loaded = await fetchNewEvents();
+      if (!loaded) return;
+      markUpdated();
+      clearError();
+    } catch (error) {
+      showError(failureText("the session", error));
+    }
+  }
+
+  if (detailMode) {
+    heading.textContent = "Session";
+    subtitle.textContent = "Session " + sessionId;
+    listView.hidden = true;
+    detailView.hidden = false;
+    refreshDetail();
+    setInterval(refreshDetail, REFRESH_MS);
+  } else {
+    heading.textContent = "Sessions";
+    subtitle.textContent = "Read-only session list.";
+    refreshList();
+    setInterval(refreshList, REFRESH_MS);
+  }
+})();
+</script>
+</body>
+</html>

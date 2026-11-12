@@ -38,6 +38,7 @@ fn board_page_serves_the_static_page_and_the_fixture_board() {
         "Inbox open",
         "Last checkpoint",
         "Last updated",
+        "href=\"/sessions\"",
         "<noscript>The board requires JavaScript.</noscript>",
     ] {
         assert!(page.body.contains(needle), "page is missing {needle:?}");

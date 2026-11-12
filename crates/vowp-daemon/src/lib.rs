@@ -1,10 +1,12 @@
 //! The VOWP daemon: a read-only loopback HTTP API over one existing VOWP home.
 //!
 //! The first v0.3 slice serves the static read-only board page at `GET /` and `GET /board`,
+//! the static session list and detail pages at `GET /sessions` and `GET /sessions/{id}`,
 //! and the API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`,
 //! `/api/v1/sessions` and `/api/v1/sessions/{id}/events` with the same `vowp-protocol`
-//! objects the CLI prints. The same page is the phone board: its card layout is usable at a
-//! 360 px viewport.
+//! objects the CLI prints. The board page is also the phone board: its card layout is usable
+//! at a 360 px viewport. The session pages fetch the two read-only session endpoints, poll
+//! for new events and never write.
 //! It opens the home with [`vowp_store::Store::open_read_only`], never creates, migrates or
 //! writes a home, and binds `127.0.0.1` only.
 //!
