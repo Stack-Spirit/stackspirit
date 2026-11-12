@@ -8,10 +8,13 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 use vowp_protocol::api::{
-    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, EventPage, Health, JobPage, Page, SessionPage,
+    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health, InboxPage,
+    JobPage, Page, SessionPage,
 };
 use vowp_protocol::schema::schema_for_name;
-use vowp_protocol::{ErrorKind, JobId, LimitRowKind, NodeName, ProjectName, Timestamp};
+use vowp_protocol::{
+    ErrorKind, InboxId, InboxItem, InboxKind, InboxState, JobId, LimitRowKind, NodeName, ProjectName, Timestamp, Tokens,
+};
 
 /// Fixed test instant.
 fn epoch() -> Timestamp {
@@ -124,10 +127,16 @@ fn concrete_page_aliases_serialise_their_item_type() {
         next: None,
         total: 0,
     };
+    let inbox: InboxPage = Page {
+        items: Vec::new(),
+        next: None,
+        total: 0,
+    };
     for page in [
         serde_json::to_value(jobs).expect("job page"),
         serde_json::to_value(sessions).expect("session page"),
         serde_json::to_value(events).expect("event page"),
+        serde_json::to_value(inbox).expect("inbox page"),
     ] {
         assert_eq!(page, json!({ "items": [], "next": null, "total": 0 }));
     }
@@ -296,6 +305,194 @@ fn board_schemas_have_the_documented_fields() {
 }
 
 #[test]
+fn inbox_page_carries_items_and_the_page_envelope() {
+    let item = InboxItem {
+        id: InboxId::new(),
+        project: Some(ProjectName::parse("vowp").expect("project")),
+        job_id: Some(JobId::parse("job-a").expect("job id")),
+        kind: InboxKind::Question,
+        title: "Which way?".to_owned(),
+        body: "Pick one".to_owned(),
+        options: vec!["left".to_owned(), "right".to_owned()],
+        state: InboxState::Open,
+        answer: None,
+        answered_by: None,
+        created_at: epoch(),
+        answered_at: None,
+    };
+    let page: InboxPage = Page {
+        items: vec![item.clone()],
+        next: None,
+        total: 1,
+    };
+    let value = serde_json::to_value(&page).expect("inbox page JSON");
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["next"], Value::Null);
+    assert_eq!(value["items"][0]["id"], json!(item.id.as_str()));
+    assert_eq!(value["items"][0]["state"], json!("open"));
+    assert_eq!(value["items"][0]["created_at"], json!("2026-01-01T00:00:00.000Z"));
+    assert_eq!(
+        serde_json::from_value::<InboxPage>(value).expect("inbox page roundtrip"),
+        page
+    );
+}
+
+#[test]
+fn cost_report_matches_the_cli_json_shape() {
+    let report = CostReport {
+        by: "job".to_owned(),
+        rows: vec![
+            CostRow {
+                key: "job-a".to_owned(),
+                runs: 2,
+                usd: Some(0.5),
+                tokens: Tokens {
+                    input: 100,
+                    output: 10,
+                    ..Tokens::default()
+                },
+                source: "mixed".to_owned(),
+                unknown_entries: 1,
+            },
+            CostRow {
+                key: "job-b".to_owned(),
+                runs: 1,
+                usd: None,
+                tokens: Tokens {
+                    input: 12,
+                    output: 3,
+                    ..Tokens::default()
+                },
+                source: "unknown".to_owned(),
+                unknown_entries: 1,
+            },
+        ],
+        total: CostTotal {
+            runs: 3,
+            usd: Some(0.5),
+            tokens: Tokens {
+                input: 112,
+                output: 13,
+                ..Tokens::default()
+            },
+            source: "mixed".to_owned(),
+            unknown_entries: 2,
+        },
+    };
+    let value = serde_json::to_value(&report).expect("cost report JSON");
+    assert_eq!(
+        value,
+        json!({
+            "by": "job",
+            "rows": [
+                {
+                    "key": "job-a",
+                    "runs": 2,
+                    "usd": 0.5,
+                    "tokens": {
+                        "input": 100,
+                        "output": 10,
+                        "reasoning": 0,
+                        "cache_read": 0,
+                        "cache_write": 0,
+                    },
+                    "source": "mixed",
+                    "unknown_entries": 1,
+                },
+                {
+                    "key": "job-b",
+                    "runs": 1,
+                    "usd": null,
+                    "tokens": {
+                        "input": 12,
+                        "output": 3,
+                        "reasoning": 0,
+                        "cache_read": 0,
+                        "cache_write": 0,
+                    },
+                    "source": "unknown",
+                    "unknown_entries": 1,
+                },
+            ],
+            "total": {
+                "runs": 3,
+                "usd": 0.5,
+                "tokens": {
+                    "input": 112,
+                    "output": 13,
+                    "reasoning": 0,
+                    "cache_read": 0,
+                    "cache_write": 0,
+                },
+                "source": "mixed",
+                "unknown_entries": 2,
+            },
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<CostReport>(value).expect("cost report roundtrip"),
+        report
+    );
+}
+
+#[test]
+fn inbox_and_cost_schemas_have_the_documented_fields() {
+    let inbox = schema_for_name("InboxPage").expect("InboxPage is exported");
+    for field in ["items", "next", "total"] {
+        assert!(
+            inbox["properties"].get(field).is_some(),
+            "InboxPage schema has no {field} property: {inbox}"
+        );
+    }
+
+    let report = schema_for_name("CostReport").expect("CostReport is exported");
+    for field in ["by", "rows", "total"] {
+        assert!(
+            report["properties"].get(field).is_some(),
+            "CostReport schema has no {field} property: {report}"
+        );
+        assert!(
+            report["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!(field))),
+            "CostReport schema does not require {field}: {report}"
+        );
+    }
+
+    let row = schema_for_name("CostRow").expect("CostRow is exported");
+    for field in ["key", "runs", "usd", "tokens", "source", "unknown_entries"] {
+        assert!(
+            row["properties"].get(field).is_some(),
+            "CostRow schema has no {field} property: {row}"
+        );
+    }
+    for field in ["key", "runs", "tokens", "source", "unknown_entries"] {
+        assert!(
+            row["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!(field))),
+            "CostRow schema does not require {field}: {row}"
+        );
+    }
+
+    let total = schema_for_name("CostTotal").expect("CostTotal is exported");
+    for field in ["runs", "usd", "tokens", "source", "unknown_entries"] {
+        assert!(
+            total["properties"].get(field).is_some(),
+            "CostTotal schema has no {field} property: {total}"
+        );
+    }
+    for field in ["runs", "tokens", "source", "unknown_entries"] {
+        assert!(
+            total["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!(field))),
+            "CostTotal schema does not require {field}: {total}"
+        );
+    }
+}
+
+#[test]
 fn api_documents_are_exported_schemas() {
     for name in [
         "Health",
@@ -306,6 +503,10 @@ fn api_documents_are_exported_schemas() {
         "JobPage",
         "SessionPage",
         "EventPage",
+        "InboxPage",
+        "CostReport",
+        "CostRow",
+        "CostTotal",
         "ApiError",
         "ApiErrorBody",
     ] {

@@ -34,7 +34,7 @@ crates/vowp-protocol/
   src/loops.rs        // Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
   src/release.rs      // Release, ReleaseState, GuardResult
   src/config.rs       // VowpConfig and sub-structs
-  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, SessionPage, EventPage, ApiError
+  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, SessionPage, EventPage, InboxPage, CostReport, CostRow, CostTotal, ApiError
   src/adapter.rs      // Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
   src/services.rs     // SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
   src/schema.rs       // all_schemas, schema_for_name
@@ -117,9 +117,11 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"ApiError"`, `"ApiErrorBody"`, `"BackupFile"`, `"BackupReport"`, `"Board"`, `"BoardLimit"`,
     `"BoardRun"`, `"BlockedJobCard"`, `"BrakeState"`,
     `"BriefFrontMatter"`, `"CapacityAdvice"`, `"CapacityReport"`, `"CapacitySnapshot"`, `"CapacityTarget"`,
-    `"Capsule"`, `"CapsuleDraft"`, `"CatalogEntry"`, `"Cost"`, `"Edge"`, `"EventEnvelope"`, `"EventPage"`,
+    `"Capsule"`, `"CapsuleDraft"`, `"CatalogEntry"`, `"Cost"`, `"CostReport"`, `"CostRow"`,
+    `"CostTotal"`, `"Edge"`, `"EventEnvelope"`, `"EventPage"`,
     `"Evidence"`, `"FleetQueueRow"`, `"FleetStatus"`, `"Gate"`, `"GateFailureCard"`, `"GateResult"`,
-    `"GcClassReport"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxItem"`, `"InboxSummary"`,
+    `"GcClassReport"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxItem"`, `"InboxPage"`,
+    `"InboxSummary"`,
     `"IngestAck"`, `"Job"`, `"JobPage"`, `"JobPatch"`, `"JoinInstructions"`, `"Lease"`, `"LeaseStatus"`,
     `"LedgerEntry"`, `"Limit"`, `"Loop"`, `"MergeCard"`, `"MigrationCount"`, `"MigrationReport"`, `"NewJob"`,
     `"Node"`, `"OrchestratorCard"`, `"Page"`, `"Profile"`, `"Project"`, `"ProjectEntry"`,

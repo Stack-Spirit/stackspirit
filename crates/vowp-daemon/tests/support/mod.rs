@@ -5,6 +5,10 @@
 //! The server listens on `127.0.0.1:0` inside the test process. Nothing here touches the
 //! real home, the network beyond loopback, a tmux server or a harness.
 
+// Each integration test compiles this module separately and uses only the fixture and
+// helpers it needs, so the unused subset is expected rather than dead production code.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -13,7 +17,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use vowp_daemon::{ApiState, select_project, serve_with_shutdown};
+use vowp_daemon::{ApiState, ProjectSelection, select_project, serve_with_shutdown};
 use vowp_protocol::{
     Cost, Executor, FakeClock, HarnessKind, InboxId, InboxItem, InboxKind, InboxState, JobId, JobKind, Limit,
     LimitRowKind, NewJob, NodeName, Project, ProjectName, Role, Run, RunId, RunPurpose, RunRole, Session, SessionId,
@@ -28,6 +32,8 @@ pub struct BoardFixture {
     pub paths: NodePaths,
     /// The one registered project.
     pub project: ProjectName,
+    /// Node named by the project's registered config.
+    pub node: NodeName,
     /// The job that is running.
     pub running_job: JobId,
     /// Executor recorded for the running job.
@@ -221,6 +227,7 @@ impl BoardFixture {
             _tmp: tmp,
             paths,
             project,
+            node,
             running_job: running.id,
             run_executor: run_executor.to_string(),
             limit_resets_at,
@@ -260,7 +267,18 @@ impl Server {
     pub fn start(fixture: &BoardFixture) -> Self {
         let selection = select_project(&fixture.paths, None).expect("project selection");
         assert_eq!(selection.project, fixture.project);
-        let state = ApiState::new(&fixture.paths, &selection);
+        assert_eq!(selection.node, fixture.node);
+        Self::start_with(&fixture.paths, selection)
+    }
+
+    /// Starts the daemon for any temporary home with exactly one registered project.
+    pub fn start_for(paths: &NodePaths) -> Self {
+        let selection = select_project(paths, None).expect("project selection");
+        Self::start_with(paths, selection)
+    }
+
+    fn start_with(paths: &NodePaths, selection: ProjectSelection) -> Self {
+        let state = ApiState::new(paths, &selection);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let thread = std::thread::spawn(move || {

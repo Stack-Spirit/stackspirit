@@ -109,6 +109,10 @@ const LISTED_TYPES: &[&str] = &[
     "JobPage",
     "SessionPage",
     "EventPage",
+    "InboxPage",
+    "CostReport",
+    "CostRow",
+    "CostTotal",
     "ApiError",
     "ApiErrorBody",
 ];

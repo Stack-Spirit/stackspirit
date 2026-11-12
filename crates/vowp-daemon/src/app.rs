@@ -15,14 +15,15 @@ use axum::{Json, Router};
 use tokio::net::TcpListener;
 use vowp_core::ledger::BoardSnapshot;
 use vowp_protocol::api::{
-    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, EventPage, Health, JobPage, SessionPage,
+    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
+    Health, InboxPage, JobPage, SessionPage,
 };
-use vowp_protocol::{ErrorKind, NodeName, ProjectName, SessionId, Timestamp, VowpConfig};
+use vowp_protocol::{ErrorKind, InboxState, NodeName, ProjectName, SessionId, Timestamp, VowpConfig};
 use vowp_store::session_log::SessionLog;
-use vowp_store::{JobFilter, NodePaths, SessionFilter, Store};
+use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, SessionFilter, Store};
 
 use crate::config::ProjectSelection;
-use crate::filters::{self, EventQuery};
+use crate::filters::{self, CostQuerySpec, EventQuery};
 
 /// State shared by every request handler.
 #[derive(Debug, Clone)]
@@ -69,6 +70,34 @@ impl ApiState {
             items: sessions,
             next: None,
         })
+    }
+
+    /// Returns the served project's inbox items in `state`.
+    fn inbox(&self, state: InboxState) -> Result<InboxPage, ApiFailure> {
+        let store = self.open()?;
+        let items = store.list_inbox(Some(state)).map_err(|_| store_failure())?;
+        Ok(InboxPage {
+            total: usize_to_u64(items.len()),
+            items,
+            next: None,
+        })
+    }
+
+    /// Returns the served project's cost report grouped and bounded by `spec`.
+    fn cost(&self, spec: CostQuerySpec) -> Result<CostReport, ApiFailure> {
+        let store = self.open()?;
+        let rows = store
+            .cost_totals(
+                &CostQuery {
+                    since: spec.since,
+                    until: spec.until,
+                    project: Some(self.project.clone()),
+                    job_id: None,
+                },
+                spec.group,
+            )
+            .map_err(|_| store_failure())?;
+        Ok(build_cost_report(spec.by, rows))
     }
 
     /// Returns one page of the session's log read from disk.
@@ -181,6 +210,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/sessions", get(sessions))
         .route("/api/v1/sessions/{id}/events", get(session_events))
+        .route("/api/v1/inbox", get(inbox))
+        .route("/api/v1/cost", get(cost))
         .fallback(unknown_endpoint)
         .with_state(state)
 }
@@ -255,6 +286,20 @@ async fn sessions(State(state): State<ApiState>, RawQuery(query): RawQuery) -> R
     }
     let page = blocking(move || state.sessions(&filter)).await?;
     Ok(Json(page))
+}
+
+/// Lists the served project's inbox items in one state.
+async fn inbox(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Json<InboxPage>, ApiFailure> {
+    let filter = filters::inbox_state(query.as_deref()).map_err(ApiFailure::invalid)?;
+    let page = blocking(move || state.inbox(filter)).await?;
+    Ok(Json(page))
+}
+
+/// Returns the served project's cost report as the `vowp cost --json` document.
+async fn cost(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Json<CostReport>, ApiFailure> {
+    let spec = filters::cost_query(query.as_deref()).map_err(ApiFailure::invalid)?;
+    let report = blocking(move || state.cost(spec)).await?;
+    Ok(Json(report))
 }
 
 /// Returns one page of a session's exact stored events.
@@ -346,6 +391,75 @@ fn board_failure() -> ApiFailure {
         ErrorKind::Db,
         "could not read the project board",
     )
+}
+
+/// Reduces store rows into the exact `vowp cost --json` document.
+///
+/// This mirrors `vowp_cli::cmd::cost::build_report`: tokens sum, known USD sums, unknown
+/// entries stay separate and the source name derives from the entry counts.
+fn build_cost_report(by: &'static str, rows: Vec<StoreCostRow>) -> CostReport {
+    let mut total_tokens = vowp_protocol::Tokens::default();
+    let mut total_usd = 0.0_f64;
+    let mut total_runs = 0_u64;
+    let mut receipt = 0_u64;
+    let mut price_table = 0_u64;
+    let mut unknown = 0_u64;
+
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            total_tokens.add(&row.tokens);
+            total_usd += row.usd;
+            total_runs += row.entries;
+            receipt += row.receipt_entries;
+            price_table += row.price_table_entries;
+            unknown += row.unknown_entries;
+            ApiCostRow {
+                key: row.key,
+                runs: row.entries,
+                usd: known_usd(row.usd, row.entries, row.unknown_entries),
+                tokens: row.tokens,
+                source: source_name(row.receipt_entries, row.price_table_entries, row.unknown_entries).to_owned(),
+                unknown_entries: row.unknown_entries,
+            }
+        })
+        .collect();
+
+    CostReport {
+        by: by.to_owned(),
+        rows,
+        total: CostTotal {
+            runs: total_runs,
+            usd: known_usd(total_usd, total_runs, unknown),
+            tokens: total_tokens,
+            source: source_name(receipt, price_table, unknown).to_owned(),
+            unknown_entries: unknown,
+        },
+    }
+}
+
+/// Returns the known USD amount, or `None` when every entry is unknown.
+fn known_usd(usd: f64, entries: u64, unknown: u64) -> Option<f64> {
+    if entries > 0 && unknown >= entries {
+        None
+    } else {
+        Some(usd)
+    }
+}
+
+/// Derives the source name from the receipt/price-table/unknown entry counts.
+fn source_name(receipt: u64, price_table: u64, unknown: u64) -> &'static str {
+    let present = [receipt > 0, price_table > 0, unknown > 0]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    match (present, receipt > 0, price_table > 0, unknown > 0) {
+        (0, _, _, _) => "unknown",
+        (1, true, false, false) => "receipt",
+        (1, false, true, false) => "price-table",
+        (1, false, false, true) => "unknown",
+        _ => "mixed",
+    }
 }
 
 /// Reads `<home>/heartbeat` as Unix seconds, or `None` when absent or unreadable.

@@ -36,6 +36,9 @@ python3 docs/reference/check-reference.py
 | `CapsuleDraft` | [capsule-draft.md](capsule-draft.md) |
 | `CatalogEntry` | [catalog-entry.md](catalog-entry.md) |
 | `Cost` | [cost.md](cost.md) |
+| `CostReport` | [cost-report.md](cost-report.md) |
+| `CostRow` | [cost-row.md](cost-row.md) |
+| `CostTotal` | [cost-total.md](cost-total.md) |
 | `Edge` | [edge.md](edge.md) |
 | `EventEnvelope` | [event-envelope.md](event-envelope.md) |
 | `EventPage` | [event-page.md](event-page.md) |
@@ -50,6 +53,7 @@ python3 docs/reference/check-reference.py
 | `Health` | [health.md](health.md) |
 | `HostSample` | [host-sample.md](host-sample.md) |
 | `InboxItem` | [inbox-item.md](inbox-item.md) |
+| `InboxPage` | [inbox-page.md](inbox-page.md) |
 | `InboxSummary` | [inbox-summary.md](inbox-summary.md) |
 | `IngestAck` | [ingest-ack.md](ingest-ack.md) |
 | `Job` | [job.md](job.md) |

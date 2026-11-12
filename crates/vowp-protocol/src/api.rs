@@ -12,9 +12,11 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::cost::Tokens;
 use crate::error::ErrorKind;
 use crate::event::EventEnvelope;
 use crate::ids::{JobId, NodeName, ProjectName};
+use crate::inbox::InboxItem;
 use crate::job::Job;
 use crate::limit::LimitRowKind;
 use crate::session::Session;
@@ -121,6 +123,55 @@ pub type SessionPage = Page<Session>;
 
 /// One page of [`EventEnvelope`] objects.
 pub type EventPage = Page<EventEnvelope>;
+
+/// One page of [`InboxItem`] objects.
+pub type InboxPage = Page<InboxItem>;
+
+/// The `/api/v1/cost` document.
+///
+/// This is exactly the JSON shape `vowp cost --json` prints: one row per grouped key and
+/// a totals row. An unknown USD amount stays `null`; it is never rendered as zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CostReport {
+    /// Dimension the rows are grouped by: `job`, `role`, `provider`, `model` or `day`.
+    pub by: String,
+    /// Grouped cost rows, ordered by known USD descending then key ascending.
+    pub rows: Vec<CostRow>,
+    /// Totals across every row.
+    pub total: CostTotal,
+}
+
+/// One grouped row in a [`CostReport`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CostRow {
+    /// Job id, role, provider, model or `YYYY-MM-DD` day, depending on the grouping.
+    pub key: String,
+    /// Cost entries in this group (receipt, price-table and unknown combined).
+    pub runs: u64,
+    /// Sum of known USD amounts; `null` when every entry is unknown.
+    pub usd: Option<f64>,
+    /// Token usage across the grouped entries.
+    pub tokens: Tokens,
+    /// `receipt`, `price-table`, `unknown` or `mixed`, derived from the entry sources.
+    pub source: String,
+    /// Entries whose USD amount is unknown (never counted as free).
+    pub unknown_entries: u64,
+}
+
+/// The totals row in a [`CostReport`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CostTotal {
+    /// Cost entries across every group.
+    pub runs: u64,
+    /// Sum of known USD amounts; `null` when every entry is unknown.
+    pub usd: Option<f64>,
+    /// Token usage across every group.
+    pub tokens: Tokens,
+    /// `receipt`, `price-table`, `unknown` or `mixed`, derived from the entry sources.
+    pub source: String,
+    /// Entries whose USD amount is unknown (never counted as free).
+    pub unknown_entries: u64,
+}
 
 /// The error document returned by every failed API request.
 ///

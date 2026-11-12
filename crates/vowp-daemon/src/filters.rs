@@ -7,14 +7,28 @@
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use vowp_protocol::{JobId, JobKind, JobState, ProjectName, Role, SessionState};
-use vowp_store::{JobFilter, SessionFilter};
+use time::macros::format_description;
+use vowp_protocol::{InboxState, JobId, JobKind, JobState, ProjectName, Role, SessionState, Timestamp};
+use vowp_store::{CostGroup, JobFilter, SessionFilter};
 
 /// Default number of events returned by one request.
 pub const DEFAULT_EVENT_LIMIT: u32 = 200;
 
 /// Largest number of events one request may return.
 pub const MAX_EVENT_LIMIT: u32 = 1000;
+
+/// The grouping and bounds from a cost request.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CostQuerySpec {
+    /// Dimension to group by.
+    pub group: CostGroup,
+    /// Its snake_case wire name, echoed in the report's `by` field.
+    pub by: &'static str,
+    /// Include entries at or after this instant.
+    pub since: Option<Timestamp>,
+    /// Include entries at or before this instant.
+    pub until: Option<Timestamp>,
+}
 
 /// The event cursor and page size from a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +80,60 @@ pub(crate) fn session_filter(raw: Option<&str>) -> Result<SessionFilter, String>
         state,
         limit: None,
     })
+}
+
+/// Parses the inbox state filter, defaulting to `open`.
+pub(crate) fn inbox_state(raw: Option<&str>) -> Result<InboxState, String> {
+    let pairs = pairs(raw);
+    match single_value(&pairs, "state").map(str::trim) {
+        Some(value) if !value.is_empty() => parse_enum(value, "inbox state"),
+        _ => Ok(InboxState::Open),
+    }
+}
+
+/// Parses the cost grouping and time bounds.
+pub(crate) fn cost_query(raw: Option<&str>) -> Result<CostQuerySpec, String> {
+    let pairs = pairs(raw);
+    let (group, by) = match single_value(&pairs, "by")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("job")
+    {
+        "job" => (CostGroup::Job, "job"),
+        "role" => (CostGroup::Role, "role"),
+        "provider" => (CostGroup::Provider, "provider"),
+        "model" => (CostGroup::Model, "model"),
+        "day" => (CostGroup::Day, "day"),
+        other => {
+            return Err(format!(
+                "unknown cost dimension {other:?} (job, role, provider, model or day)"
+            ));
+        }
+    };
+    let since = time_value(&pairs, "since")?;
+    let until = time_value(&pairs, "until")?;
+    Ok(CostQuerySpec {
+        group,
+        by,
+        since,
+        until,
+    })
+}
+
+/// Parses one optional `since`/`until` as RFC 3339 or a `YYYY-MM-DD` UTC midnight.
+fn time_value(pairs: &[(String, String)], name: &str) -> Result<Option<Timestamp>, String> {
+    match single_value(pairs, name).map(str::trim) {
+        Some(value) if !value.is_empty() => parse_cost_time(value, name).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// Parses an RFC 3339 timestamp or a calendar date at UTC midnight.
+fn parse_cost_time(value: &str, name: &str) -> Result<Timestamp, String> {
+    if let Ok(date) = time::Date::parse(value, format_description!("[year]-[month]-[day]")) {
+        return Ok(Timestamp::from_unix_secs(date.midnight().assume_utc().unix_timestamp()));
+    }
+    Timestamp::parse(value).map_err(|_| format!("invalid {name} {value:?}; use RFC 3339 or YYYY-MM-DD"))
 }
 
 /// Parses the per-session event cursor and page size.
@@ -242,5 +310,46 @@ mod tests {
     fn unknown_query_keys_are_ignored() {
         let filter = job_filter(Some("future=1&state=pending")).expect("filter");
         assert_eq!(filter.states, vec![JobState::Pending]);
+    }
+
+    #[test]
+    fn inbox_state_defaults_to_open_and_rejects_unknown_values() {
+        assert_eq!(inbox_state(None).expect("default"), InboxState::Open);
+        assert_eq!(inbox_state(Some("state=")).expect("empty"), InboxState::Open);
+        assert_eq!(
+            inbox_state(Some("state=answered")).expect("answered"),
+            InboxState::Answered
+        );
+        assert_eq!(
+            inbox_state(Some("state=dismissed")).expect("dismissed"),
+            InboxState::Dismissed
+        );
+        assert!(inbox_state(Some("state=nope")).is_err());
+    }
+
+    #[test]
+    fn cost_query_defaults_and_parses_groups_and_bounds() {
+        let query = cost_query(None).expect("defaults");
+        assert_eq!(query.group, CostGroup::Job);
+        assert_eq!(query.by, "job");
+        assert_eq!(query.since, None);
+        assert_eq!(query.until, None);
+
+        let query = cost_query(Some("by=role&since=2026-01-03&until=2026-01-04T12:00:00.000Z")).expect("explicit");
+        assert_eq!(query.group, CostGroup::Role);
+        assert_eq!(query.by, "role");
+        assert_eq!(
+            query.since,
+            Some(Timestamp::parse("2026-01-03T00:00:00.000Z").expect("since"))
+        );
+        assert_eq!(
+            query.until,
+            Some(Timestamp::parse("2026-01-04T12:00:00.000Z").expect("until"))
+        );
+
+        assert_eq!(cost_query(Some("by=")).expect("empty by").group, CostGroup::Job);
+        assert!(cost_query(Some("by=nope")).is_err());
+        assert!(cost_query(Some("since=nope")).is_err());
+        assert!(cost_query(Some("until=2026-13-01")).is_err());
     }
 }

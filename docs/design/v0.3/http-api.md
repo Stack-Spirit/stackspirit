@@ -30,10 +30,15 @@ Served endpoints, all `GET` and JSON:
 - `/api/v1/sessions/{id}/events?after_seq=<n>&limit=<n>` — an `EventPage` of exact stored
   `EventEnvelope` objects, in sequence order; the default limit is 200 and the cap is 1000.
   A full page's `next` is the cursor for the next `after_seq`.
+- `/api/v1/inbox?state=open|answered|dismissed` — an `InboxPage` over the served project;
+  `state` defaults to `open`.
+- `/api/v1/cost?by=day|job|role|provider|model&since=&until=` — the exact `vowp cost --json`
+  document over the served project. `by` defaults to `job`; `since` and `until` accept RFC 3339
+  or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
 `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`,
-`EventPage`, `ApiError` and `ApiErrorBody`.
+`EventPage`, `InboxPage`, `CostReport`, `CostRow`, `CostTotal`, `ApiError` and `ApiErrorBody`.
 Failures use the same `ApiError` shape as `vowp --json` errors and map to `400` for an
 invalid filter or id, `404` for an unknown session and `500` for a store, config or I/O
 failure.
@@ -43,8 +48,8 @@ no privileged action to protect; do not add a placeholder auth layer. A token mu
 with the first write endpoint or a non-loopback listener.
 
 Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
-SSE, inbox, cost, nodes, capsules, the auth token, `vowp up` integration and the browser
-UI (including the static board page). There are no placeholder routes for any of them.
+SSE, the cost dashboard page, nodes, capsules, the auth token, `vowp up` integration and the
+remaining browser pages. There are no placeholder routes for any of them.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -65,8 +70,10 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
 - `GET /api/v1/board` — the JSON shape already printed by `vowp board --json` (`at`, `project`,
   `jobs`, `running`, `slots_busy`, `slots_total`, `planner`, `keeper`, `limits`,
   `cost_today_usd`, `inbox_open`, `last_checkpoint`).
-- `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer.
-- `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape.
+- `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer; the read route
+  is implemented in this slice and the answer write is later.
+- `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape;
+  implemented in this slice.
 - `GET /api/v1/nodes` — **later slice**: node name, SSH target, last seen, version and probe state.
   The web-window `/nodes` page needs it, but the window's first slice has no nodes page.
 - `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — **later slice**: one capsule for the window's
@@ -109,6 +116,13 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   the canonical limit class (`quota`, `credits`, `rate`, `context`, `auth` or `unavailable`) and
   `resets_at` is an RFC 3339 time or null.
 - `Page<T> { items, next, total }` for lists.
+- `InboxPage` = `Page<InboxItem>` — one inbox list page.
+- `CostReport { by, rows, total }` — the exact `vowp cost --json` document. `by` echoes the
+  grouping; `rows` and `total` split known USD, token usage, source and unknown-entry counts.
+- `CostRow { key, runs, usd, tokens, source, unknown_entries }` — one grouped cost row.
+  `usd` is null when every entry is unknown, and `source` is `receipt`, `price-table`,
+  `unknown` or `mixed`.
+- `CostTotal { runs, usd, tokens, source, unknown_entries }` — the totals row.
 - `ApiError { error: { kind, message, hint? } }` — the same shape as `vowp --json` errors.
 - An SSE frame with `event: session` / `event: board` / `event: heartbeat` and the JSON data line.
   This is a `text/event-stream` frame, not a JSON document, so it has no schema of its own: the
@@ -117,8 +131,9 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`
 and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the concrete page
-instantiations the API serves (for example `JobPage`, `SessionPage`, `InboxPage` and `CostPage`)
-alongside their item types, and keep the SSE frame as the one explicit schema exception above.
+instantiations the API serves (`JobPage`, `SessionPage`, `EventPage` and `InboxPage`) and
+`CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
+exception above.
 
 ## Existing crates it builds on
 
@@ -152,12 +167,14 @@ alongside their item types, and keep the SSE frame as the one explicit schema ex
 ## First-issue-sized slice
 
 Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
-`GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions` and
-`GET /api/v1/sessions/{id}/events?after_seq=`. It binds `127.0.0.1:0` in tests, uses a
-temporary store with jobs in several states, one running job and session, a limit, an open
-inbox item and a checkpoint, and asserts that every JSON document validates against its
-exported schema — including `Board`, `BoardRun` and `BoardLimit` for the board. No write
-endpoints and no SSE yet. The first-slice section above lists what is still later.
+`GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions`,
+`GET /api/v1/sessions/{id}/events?after_seq=`, `GET /api/v1/inbox?state=` and
+`GET /api/v1/cost?by=&since=&until=`. It binds `127.0.0.1:0` in tests, uses a temporary store
+with jobs in several states, one running job and session, a limit, open/answered inbox items,
+cost ledger rows from every source and a checkpoint, and asserts that every JSON document
+validates against its exported schema — including `Board`, `BoardRun` and `BoardLimit` for the
+board, `InboxPage` for the inbox and `CostReport` for cost. No write endpoints and no SSE yet.
+The first-slice section above lists what is still later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.
