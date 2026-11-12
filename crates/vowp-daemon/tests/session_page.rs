@@ -564,6 +564,11 @@ fn session_page_renders_the_capsule_and_lineage_from_the_detail_api() {
         "capsuleBody.hidden = false;",
         "capsuleEmpty.hidden = true;",
         "capsuleEmpty.hidden = false;",
+        // The panel links to the individual capsule page.
+        "View capsule",
+        "id=\"capsule-link\"",
+        "capsuleLink.href =",
+        "\"/capsules/\"",
         ">Parent lineage</h2>",
         "No parent sessions.",
         "renderLineage(detail.lineage, sessions)",

@@ -176,6 +176,7 @@
       <h2 id="capsule-heading">Capsule</h2>
       <p id="capsule-empty" class="muted" hidden>No capsule yet.</p>
       <div id="capsule-body" hidden>
+        <p><a id="capsule-link" class="session-link" href="/sessions">View capsule</a></p>
         <dl id="capsule-meta" class="facts">
           <div class="fact"><dt>Capsule ID</dt><dd>–</dd></div>
           <div class="fact"><dt>At seq</dt><dd>–</dd></div>
@@ -272,6 +273,7 @@
   const events = document.getElementById("events");
   const capsuleEmpty = document.getElementById("capsule-empty");
   const capsuleBody = document.getElementById("capsule-body");
+  const capsuleLink = document.getElementById("capsule-link");
   const capsuleMeta = document.getElementById("capsule-meta");
   const capsuleIntent = document.getElementById("capsule-intent");
   const capsuleConstraints = document.getElementById("capsule-constraints");
@@ -697,6 +699,11 @@
     }
     capsuleEmpty.hidden = true;
     capsuleBody.hidden = false;
+    capsuleLink.href =
+      "/sessions/" +
+      encodeURIComponent(capsule.session_id) +
+      "/capsules/" +
+      encodeURIComponent(capsule.capsule_id);
     capsuleMeta.replaceChildren(
       fact("Capsule ID", formatValue(capsule.capsule_id, "unknown"), true),
       fact("At seq", formatValue(capsule.at_seq, "–"), false),

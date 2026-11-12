@@ -313,14 +313,16 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 }
 
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
-/// session pages at `/sessions` and `/sessions/{id}`, the static cost and inbox pages at
-/// `/cost` and `/inbox`, plus the API under `/api/v1`.
+/// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
+/// `/sessions/{id}/capsules/{capsule_id}`, the static cost and inbox pages at `/cost` and
+/// `/inbox`, plus the API under `/api/v1`.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
         .route("/board", get(board_page))
         .route("/sessions", get(sessions_page))
         .route("/sessions/{id}", get(sessions_page))
+        .route("/sessions/{id}/capsules/{capsule_id}", get(capsule_page))
         .route("/cost", get(cost_page))
         .route("/inbox", get(inbox_page))
         .route("/api/v1/health", get(health))
@@ -376,6 +378,19 @@ const SESSIONS_PAGE: &str = include_str!("../web/sessions.html");
 /// same shell; only the read-only session and event endpoints are fetched.
 async fn sessions_page() -> Html<&'static str> {
     Html(SESSIONS_PAGE)
+}
+
+/// The embedded static capsule shell, served read-only at
+/// `/sessions/{id}/capsules/{capsule_id}`.
+const CAPSULE_PAGE: &str = include_str!("../web/capsule.html");
+
+/// Serves the static capsule shell.
+///
+/// The page reads its own path and fetches only
+/// `/api/v1/sessions/{id}/capsules/{capsuleId}`. It renders the capsule's metadata and
+/// structured fields read-only: no Markdown parser, editor or write control is involved.
+async fn capsule_page() -> Html<&'static str> {
+    Html(CAPSULE_PAGE)
 }
 
 /// The embedded static cost shell, served read-only at `/cost`.

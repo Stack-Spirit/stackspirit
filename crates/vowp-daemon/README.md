@@ -4,8 +4,9 @@ The read-only loopback HTTP API for one VOWP project.
 
 `vowp-daemon [--home <dir>] [--project <name>] [--port <n>]` opens an existing VOWP home
 read-only, serves the static board page at `GET /` and its phone alias `GET /board`, the
-static session list at `GET /sessions` and session detail at `GET /sessions/{id}`, and the
-API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`,
+static session list at `GET /sessions`, session detail at `GET /sessions/{id}` and the
+individual capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, and the API endpoints
+`GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`,
 `/api/v1/jobs`, `/api/v1/sessions`,
 `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
@@ -26,8 +27,11 @@ timeline. The timeline first fetches `/api/v1/sessions/{id}/events?after_seq=`, 
 `/api/v1/sessions/{id}/events/stream?after_seq=` and appends `session` frames while using
 `heartbeat` frames only to refresh the live line. A stream error or close shows a visible
 reconnecting state, starts the five-second polling fallback at the same cursor and retries
-the stream with bounded backoff; a browser without `EventSource` polls only. No Node or
-TypeScript build step is involved.
+the stream with bounded backoff; a browser without `EventSource` polls only. The session
+detail panel links to `/sessions/{id}/capsules/{capsule_id}`, which fetches
+`/api/v1/sessions/{id}/capsules/{capsuleId}` and renders the capsule's metadata and
+structured fields read-only, with a visible not-found line when the API answers 404. No Node
+or TypeScript build step is involved.
 
 The per-session stream at `/api/v1/sessions/{id}/events/stream?after_seq=` sends one
 `event: session` frame per stored `EventEnvelope`, a periodic `event: heartbeat` frame and a

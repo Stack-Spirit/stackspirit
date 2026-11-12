@@ -2,7 +2,8 @@
 //!
 //! The first v0.3 slice serves the static read-only board page at `GET /` and `GET /board`,
 //! the static session list and detail pages at `GET /sessions` and `GET /sessions/{id}`,
-//! the static cost and inbox pages at `GET /cost` and `GET /inbox`, and the API endpoints
+//! the static capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the static cost and
+//! inbox pages at `GET /cost` and `GET /inbox`, and the API endpoints
 //! `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`,
 //! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 //! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
@@ -18,7 +19,9 @@
 //! state with bounded-backoff retry and a five-second polling fallback until the stream
 //! opens. The session list page fetches `/api/v1/sessions`; the detail page loads its
 //! metadata and a first event page, then follows the per-session SSE stream, with a visible
-//! reconnect state, bounded-backoff retry and a five-second polling fallback.
+//! reconnect state, bounded-backoff retry and a five-second polling fallback. The capsule page
+//! fetches one capsule from `/api/v1/sessions/{id}/capsules/{capsuleId}` and renders its
+//! metadata and structured fields read-only.
 //! The pages never write. The cost page renders grouped ledger rows and totals
 //! with a `by` selector, and the inbox page renders open, answered and dismissed items with a
 //! state selector; both only fetch the read-only cost and inbox endpoints.

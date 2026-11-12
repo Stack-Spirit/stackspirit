@@ -12,7 +12,8 @@ tunnel. It should answer the questions an operator asks from a browser without o
 - **Sessions** — filter by project, job, role and state; show executor, last event and last capsule.
 - **Session view** — an event timeline with live updates, lineage, a capsule panel, and an **executor
   switcher** that sends the same switch request as `vowp session switch`.
-- **Capsule view** — the latest capsule rendered as Markdown, with its `at_seq`, trigger and executor.
+- **Capsule view** — the capsule's metadata and structured fields (`at_seq`, trigger, `from`
+  executor, intent, constraints, decisions, state, files, gotchas and open questions).
 - **Board** — job counts, running jobs, slot occupancy, limits, today's cost and open inbox count.
 
 The board uses the same JSON shape as `vowp board --json`; the session list and event timeline use
@@ -42,8 +43,8 @@ executor runs the same `SessionOps::switch` path as the CLI (the queue has no sw
   implemented first slice deliberately skips the build step: it is one hand-written
   `index.html` with inline CSS and vanilla JavaScript.
 - Routes: `/` (board), `/sessions`, `/sessions/:id`, `/sessions/:id/capsules/:capsuleId`,
-  `/nodes`, `/cost`, `/inbox`. The first slice implements `/`, `/sessions`, `/sessions/:id`, `/cost`
-  and `/inbox`; the individual capsule route and `/nodes` are later.
+  `/nodes`, `/cost`, `/inbox`. The first slice implements `/`, `/sessions`, `/sessions/:id`,
+  `/sessions/:id/capsules/:capsuleId`, `/cost` and `/inbox`; `/nodes` is later.
 - PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
 - The token is kept in memory or `sessionStorage`, not in a URL. A 401 shows a one-field unlock page.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
@@ -99,12 +100,27 @@ not-found line. On `/sessions/{id}` the page also fetches `GET /api/v1/sessions/
 session-detail document. When the session has a capsule, it renders the capsule id, `at_seq`,
 trigger, `from` executor, intent, constraints, decisions (`what`, `why`, `at_seq`), state (done,
 in progress, blocked, next steps), files (path and action), gotchas and open questions in a
-read-only panel with no edit control. When the latest capsule is null the panel says "No capsule
+read-only panel with no edit control, and the panel's "View capsule" link opens
+`/sessions/{id}/capsules/{capsule_id}`. When the latest capsule is null the panel says "No capsule
 yet." The page renders the parent lineage returned by the API as a compact chain of links to
 `/sessions/{id}`, using the session-list titles when they are available and the id otherwise, and
 says "No parent sessions." when the chain is empty. The page carries
 `<noscript>The session view requires JavaScript.</noscript>`, links back to the board and to
 cost and inbox, and never prints a token, home path or provider secret.
+
+The capsule page is `crates/vowp-daemon/web/capsule.html`, served at
+`GET /sessions/{id}/capsules/{capsule_id}`. The shell reads its own path and fetches
+`GET /api/v1/sessions/{id}/capsules/{capsuleId}`. It renders the capsule id, session id (linked to
+`/sessions/{id}`), created time, `at_seq`, trigger, the `from` executor with its harness, model and
+profile when present, intent, constraints, decisions (`what`, `why`, `at_seq`), state (done, in
+progress, blocked, next steps), files (path and action), gotchas, open questions and one compact
+telemetry line. The page is read-only: it has no Markdown parser, capsule editor or write control.
+An unknown session or capsule is the API's `404`, which the page shows as a visible "Capsule not
+found." line while keeping its back link; any other failed fetch shows an error line and still
+leaves the static shell loaded. The page links to the board, the session, cost and inbox, carries
+`<noscript>The capsule page requires JavaScript.</noscript>`, and never prints a home path, auth
+token or provider secret. Markdown rendering, capsule editing and capsule writes remain out of
+scope.
 
 The cost page is `crates/vowp-daemon/web/cost.html`, served at `GET /cost`. It fetches
 `GET /api/v1/cost?by=<group>` on load and every five seconds. The selector offers job, day, role,
@@ -126,18 +142,22 @@ There is no answer, dismiss or other write action. The page links to the other p
 provider secret.
 
 There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
-`crates/vowp-daemon/tests/board_page.rs`, `session_page.rs` and `cost_inbox_pages.rs` are HTTP-only
-tests over a temporary home and a real `127.0.0.1:0` listener, and `tests/sse.rs` reads real
-chunked stream bodies. The board-page test pins the stream path, the `board` and `heartbeat`
-handlers, the "Reconnecting..." text and the polling fallback without running a browser. The
-session-page test pins the stream path, the `after_seq` resume, the
+`crates/vowp-daemon/tests/board_page.rs`, `session_page.rs`, `capsule_page.rs` and
+`cost_inbox_pages.rs` are HTTP-only tests over a temporary home and a real `127.0.0.1:0` listener,
+and `tests/sse.rs` reads real chunked stream bodies. The board-page test pins the stream path, the
+`board` and `heartbeat` handlers, the "Reconnecting..." text and the polling fallback without
+running a browser. The session-page test pins the stream path, the `after_seq` resume, the
 `session` and `heartbeat` handlers, the reconnect text and the polling fallback. It also pins the
-session-detail path, the capsule field labels, the lineage links and the no-capsule branch, and
-fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data source.
+session-detail path, the capsule field labels, the lineage links, the "View capsule" link and the
+no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data
+source. The capsule-page test pins the capsule API path, the metadata and section labels, the
+session back link, the `<noscript>` fallback and the absence of paths or secrets, fetches
+`/api/v1/sessions/{id}/capsules/{capsuleId}` in the same test to prove the page's data source, and
+checks that an unknown session or capsule is the API's `404` behind the page's not-found text.
 
-Still later: the separate capsule route/page (the single-capsule API exists), `/nodes`, inbox
-answering, the cost dashboard and charts, the reconnect UI on the pages that still poll,
-executor switching, write actions, PWA installability and the auth token.
+Still later: `/nodes`, inbox answering, the cost dashboard and charts, the reconnect UI on the
+pages that still poll, executor switching, write actions, PWA installability and the auth token.
+Markdown rendering, capsule editing and capsule writes remain out of scope.
 The API routes and their fallback are otherwise unchanged; unknown non-API paths still return the
 API's JSON 404.
 
