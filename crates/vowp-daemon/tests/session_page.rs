@@ -1,10 +1,12 @@
 //! Hermetic session-page tests: a temporary home, a real loopback listener and real GETs.
 //!
 //! The session page is static HTML that fetches `/api/v1/sessions` and, on the detail
-//! route, `/api/v1/sessions/{id}/events?after_seq=`. These tests pin the list and timeline
-//! markup, the five-second polling calls, the `<noscript>` fallback and the absence of
-//! paths or secrets, then fetch the same fixture through the API to prove the page's data
-//! source. No browser, Node runtime, harness or real home is involved.
+//! route, opens the per-session SSE stream after an initial
+//! `/api/v1/sessions/{id}/events?after_seq=` fetch. These tests pin the list and timeline
+//! markup, the SSE resume and heartbeat handling, the visible reconnect state, the
+//! five-second polling fallback, the `<noscript>` fallback and the absence of paths or
+//! secrets, then fetch the same fixture through the API to prove the page's data source.
+//! No browser, Node runtime, harness or real home is involved.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -441,4 +443,53 @@ fn session_page_shows_the_fixture_events() {
     // Unknown non-page paths still use the API's JSON 404 fallback.
     let unknown = get(server.address, &format!("/sessions/{}/extra", fixture.session_id));
     assert_eq!(unknown.status, 404, "body: {}", unknown.body);
+}
+
+#[test]
+fn session_page_streams_events_and_falls_back_to_polling() {
+    let fixture = Fixture::new();
+    let server = Server::start(&fixture);
+
+    let page = get(server.address, &format!("/sessions/{}", fixture.session_id));
+    assert_shell(&page, &fixture);
+
+    for needle in [
+        // The page opens the per-session SSE endpoint after the initial fetch and
+        // resumes from the last sequence it rendered.
+        "function streamUrl(after)",
+        "\"/events/stream?after_seq=\"",
+        "new EventSource(streamUrl(lastSeq))",
+        // `session` frames append events; `heartbeat` frames only refresh the live line.
+        "addEventListener(\"session\"",
+        "addEventListener(\"heartbeat\"",
+        "addEventListener(\"resync\"",
+        "if (!renderEvent(event)) return;",
+        "markHeartbeat(at);",
+        "function renderEvent(event)",
+        "renderedSeqs",
+        "function markHeartbeat(",
+        // An error or close shows the reconnect state, starts the existing poll, retries
+        // the stream with bounded backoff and stops the poll once the stream opens.
+        "Reconnecting",
+        "function startFallbackPolling()",
+        "function stopFallbackPolling()",
+        "setInterval(refreshDetail, REFRESH_MS)",
+        "\"/events?after_seq=\"",
+        "function scheduleRetry()",
+        "RETRY_MIN_MS",
+        "RETRY_MAX_MS",
+        "clearTimeout",
+        // A browser without EventSource says so and polls only.
+        "Live updates unavailable in this browser",
+        "typeof EventSource !== \"function\"",
+    ] {
+        assert!(page.body.contains(needle), "session page is missing {needle:?}");
+    }
+
+    // The fallback uses the same cursor as the stream and only appends newer events, so a
+    // reconnect cannot duplicate a timeline row.
+    assert!(
+        page.body.contains("let after = lastSeq;"),
+        "the polling fallback must resume at the last rendered sequence"
+    );
 }

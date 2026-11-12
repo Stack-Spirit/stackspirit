@@ -287,8 +287,9 @@ const SESSIONS_PAGE: &str = include_str!("../web/sessions.html");
 /// Serves the static sessions shell.
 ///
 /// The page reads its own path: `/sessions` renders the read-only session list and
-/// `/sessions/{id}` renders one session's metadata and a polling event timeline. Both
-/// routes serve the same shell; only the two read-only API endpoints are fetched.
+/// `/sessions/{id}` renders one session's metadata, then follows the per-session SSE stream
+/// and falls back to polling when the stream is unavailable or drops. Both routes serve the
+/// same shell; only the read-only session and event endpoints are fetched.
 async fn sessions_page() -> Html<&'static str> {
     Html(SESSIONS_PAGE)
 }

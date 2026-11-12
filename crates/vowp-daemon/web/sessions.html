@@ -57,6 +57,11 @@
     min-width: 0;
   }
   .muted { color: var(--muted); }
+  .status { display: grid; gap: .2rem; justify-items: start; }
+  .live { margin: 0; font-weight: 600; }
+  .live[data-state="live"] { color: var(--accent); }
+  .live[data-state="reconnecting"],
+  .live[data-state="error"] { color: var(--warn); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
   .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0; padding: 0; list-style: none; }
   .cards { display: grid; gap: .6rem; margin: 0; padding: 0; list-style: none; }
@@ -115,7 +120,10 @@
       <h1 id="heading">Sessions</h1>
       <p id="subtitle" class="muted">Read-only session list.</p>
     </div>
-    <p id="updated" class="muted" aria-live="polite">Last updated: waiting for first load</p>
+    <div class="status">
+      <p id="updated" class="muted" aria-live="polite">Last updated: waiting for first load</p>
+      <p id="live" class="muted live" aria-live="polite" hidden>Live updates: connecting…</p>
+    </div>
   </header>
 
   <p id="error" class="error" role="alert" hidden></p>
@@ -182,8 +190,11 @@
 
   const REFRESH_MS = 5000;
   const EVENT_LIMIT = 200;
+  const RETRY_MIN_MS = 1000;
+  const RETRY_MAX_MS = 15000;
   const errorLine = document.getElementById("error");
   const updatedLine = document.getElementById("updated");
+  const liveLine = document.getElementById("live");
   const heading = document.getElementById("heading");
   const subtitle = document.getElementById("subtitle");
   const listView = document.getElementById("list-view");
@@ -194,8 +205,17 @@
 
   const sessionId = pathSessionId();
   const detailMode = sessionId !== null;
+  const renderedSeqs = new Set();
   let lastUpdated = null;
   let lastSeq = 0;
+  let eventsLoaded = false;
+  let emptyRow = null;
+  let eventSource = null;
+  let retryTimer = null;
+  let retryDelay = RETRY_MIN_MS;
+  let fallbackTimer = null;
+  let refreshing = false;
+  let sessionMissing = false;
 
   function pathSessionId() {
     const parts = window.location.pathname.split("/").filter((part) => part.length > 0);
@@ -257,6 +277,141 @@
     const detail = error && error.message ? error.message : "the daemon may be down";
     const when = lastUpdated ? " Showing data from " + lastUpdated.toLocaleString() + "." : "";
     return "Could not load " + what + " (" + detail + ")." + when;
+  }
+
+  function setLive(message, state) {
+    liveLine.textContent = message;
+    liveLine.dataset.state = state;
+    liveLine.hidden = false;
+  }
+
+  function markHeartbeat(value) {
+    lastUpdated = new Date();
+    updatedLine.textContent = "Last updated: " + lastUpdated.toLocaleString() + " (heartbeat)";
+    const at = value === null || value === undefined || value === "" ? lastUpdated.toLocaleString() : formatTime(value);
+    setLive("Live updates: streaming · heartbeat " + at, "live");
+  }
+
+  function closeStream() {
+    if (eventSource === null) return;
+    const source = eventSource;
+    eventSource = null;
+    source.onopen = null;
+    source.onerror = null;
+    source.close();
+  }
+
+  function clearRetry() {
+    if (retryTimer === null) return;
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  function stopFallbackPolling() {
+    if (fallbackTimer === null) return;
+    clearInterval(fallbackTimer);
+    fallbackTimer = null;
+  }
+
+  function startFallbackPolling() {
+    if (fallbackTimer !== null) return;
+    fallbackTimer = setInterval(refreshDetail, REFRESH_MS);
+  }
+
+  function scheduleRetry() {
+    if (retryTimer !== null || sessionMissing) return;
+    const delay = retryDelay;
+    retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      startStream();
+    }, delay);
+  }
+
+  function markSessionMissing() {
+    sessionMissing = true;
+    clearRetry();
+    stopFallbackPolling();
+    closeStream();
+    setLive("Live updates: stopped because the session was not found.", "error");
+  }
+
+  function streamUrl(after) {
+    return "/api/v1/sessions/" + encodeURIComponent(sessionId) + "/events/stream?after_seq=" + after;
+  }
+
+  function handleStreamFailure() {
+    closeStream();
+    if (sessionMissing) return;
+    setLive("Reconnecting to live updates… polling every 5 seconds.", "reconnecting");
+    startFallbackPolling();
+    scheduleRetry();
+    refreshDetail();
+  }
+
+  function startStream() {
+    if (sessionMissing) return;
+    clearRetry();
+    closeStream();
+    if (typeof EventSource !== "function") {
+      setLive("Live updates unavailable in this browser; polling every 5 seconds.", "polling");
+      startFallbackPolling();
+      return;
+    }
+    let source;
+    try {
+      source = new EventSource(streamUrl(lastSeq));
+    } catch (_error) {
+      setLive("Live updates could not start; polling every 5 seconds.", "reconnecting");
+      startFallbackPolling();
+      scheduleRetry();
+      return;
+    }
+    eventSource = source;
+    source.onopen = () => {
+      clearRetry();
+      setLive("Live updates: streaming", "live");
+      stopFallbackPolling();
+      refreshDetail();
+    };
+    source.addEventListener("session", (message) => {
+      let event;
+      try {
+        event = JSON.parse(message.data);
+      } catch (_error) {
+        return;
+      }
+      retryDelay = RETRY_MIN_MS;
+      if (!renderEvent(event)) return;
+      markUpdated();
+      clearError();
+    });
+    source.addEventListener("heartbeat", (message) => {
+      let at = null;
+      try {
+        at = JSON.parse(message.data).at;
+      } catch (_error) {
+        at = null;
+      }
+      retryDelay = RETRY_MIN_MS;
+      markHeartbeat(at);
+    });
+    source.addEventListener("resync", (message) => {
+      let cursor = null;
+      try {
+        const value = JSON.parse(message.data);
+        if (typeof value.after_seq === "number") cursor = value.after_seq;
+      } catch (_error) {
+        cursor = null;
+      }
+      if (cursor !== null) lastSeq = cursor;
+      setLive("Reconnecting after a log resync… polling every 5 seconds.", "reconnecting");
+      handleStreamFailure();
+    });
+    source.onerror = () => {
+      if (eventSource !== source) return;
+      handleStreamFailure();
+    };
   }
 
   async function fetchSessions() {
@@ -400,6 +555,18 @@
     events.appendChild(item);
   }
 
+  function renderEvent(event) {
+    if (typeof event.seq !== "number" || renderedSeqs.has(event.seq)) return false;
+    if (emptyRow !== null) {
+      emptyRow.remove();
+      emptyRow = null;
+    }
+    appendEvent(event);
+    renderedSeqs.add(event.seq);
+    if (event.seq > lastSeq) lastSeq = event.seq;
+    return true;
+  }
+
   function renderMeta(session) {
     meta.replaceChildren(
       fact("ID", formatValue(session.id, "unknown"), true),
@@ -434,13 +601,17 @@
       if (!response.ok) throw new Error("HTTP " + response.status);
       const page = await response.json();
       const items = Array.isArray(page.items) ? page.items : [];
-      for (const event of items) {
-        if (typeof event.seq !== "number" || event.seq <= lastSeq) continue;
-        appendEvent(event);
-        lastSeq = event.seq;
+      if (!eventsLoaded) {
+        eventsLoaded = true;
+        events.replaceChildren();
       }
+      for (const event of items) renderEvent(event);
       if (page.next === null || page.next === undefined || items.length === 0 || page.next <= after) break;
       after = page.next;
+    }
+    if (eventsLoaded && events.childElementCount === 0) {
+      emptyRow = emptyItem("No events.");
+      events.appendChild(emptyRow);
     }
     return true;
   }
@@ -457,21 +628,40 @@
   }
 
   async function refreshDetail() {
+    if (refreshing) return "busy";
+    refreshing = true;
     try {
       const sessions = await fetchSessions();
       const session = sessions.find((item) => item.id === sessionId);
       if (!session) {
         showError("Session " + sessionId + " not found.");
-        return;
+        markSessionMissing();
+        return "missing";
       }
+      sessionMissing = false;
       renderMeta(session);
       const loaded = await fetchNewEvents();
-      if (!loaded) return;
+      if (!loaded) {
+        markSessionMissing();
+        return "missing";
+      }
       markUpdated();
       clearError();
+      return "ok";
     } catch (error) {
       showError(failureText("the session", error));
+      return "failed";
+    } finally {
+      refreshing = false;
     }
+  }
+
+  async function loadDetail() {
+    const result = await refreshDetail();
+    if (result === "missing") return;
+    setLive("Live updates: connecting…", "connecting");
+    if (result !== "ok") startFallbackPolling();
+    startStream();
   }
 
   if (detailMode) {
@@ -479,8 +669,8 @@
     subtitle.textContent = "Session " + sessionId;
     listView.hidden = true;
     detailView.hidden = false;
-    refreshDetail();
-    setInterval(refreshDetail, REFRESH_MS);
+    liveLine.hidden = false;
+    loadDetail();
   } else {
     heading.textContent = "Sessions";
     subtitle.textContent = "Read-only session list.";

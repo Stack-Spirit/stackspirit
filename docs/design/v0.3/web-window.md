@@ -46,7 +46,7 @@ executor runs the same `SessionOps::switch` path as the CLI (the queue has no sw
 - PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
 - The token is kept in memory or `sessionStorage`, not in a URL. A 401 shows a one-field unlock page.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
-  The implemented board and session slices are polling only, every five seconds.
+  The session timeline uses it. The board and the other pages still poll every five seconds.
 
 ## Open questions
 
@@ -77,13 +77,20 @@ The session pages are the same kind of embedded static shell,
 shell reads its own path. On `/sessions` it fetches `GET /api/v1/sessions` and renders a card
 list with id, title, project, job, role, state, executor, last seq and updated time; each row
 links to `/sessions/{id}`. On `/sessions/{id}` it fetches the session list to find the metadata
-and `GET /api/v1/sessions/{id}/events?after_seq=<n>&limit=200`, then renders the metadata and an
-event timeline of seq, time, type, actor and a compact summary. It polls every five seconds with
-`after_seq` set to the last rendered sequence, appends only newer events and keeps the last data
-and its "last updated" time on failure. A 404 or a failed fetch shows a visible error or
-not-found line, and the page carries
-`<noscript>The session view requires JavaScript.</noscript>`. It links back to the board and to
-cost and inbox. The timeline never prints a token, home path or provider secret.
+and `GET /api/v1/sessions/{id}/events?after_seq=<n>&limit=200`, renders the metadata and the
+event timeline of seq, time, type, actor and a compact summary, then opens
+`EventSource('/api/v1/sessions/{id}/events/stream?after_seq=<last rendered seq>')`. It appends
+`session` frames in sequence order and ignores sequences already on screen, so a reconnect does
+not duplicate a row. `heartbeat` frames update the visible "live updates / last updated" line
+and are never rendered as timeline rows. On a stream error or close the page shows a visible
+"Reconnecting..." state, starts its five-second polling fallback at `after_seq=<last>`, and
+retries the stream with bounded exponential backoff; a successful stream open stops the
+fallback. A `resync` frame moves the resume cursor to the readable cursor it names. If
+`EventSource` is unavailable the page says so and polls only. A failed fetch or stream keeps the
+last rendered events and timestamps visible, and a 404 or failed fetch shows a visible error or
+not-found line. The page carries
+`<noscript>The session view requires JavaScript.</noscript>`, links back to the board and to
+cost and inbox, and never prints a token, home path or provider secret.
 
 The cost page is `crates/vowp-daemon/web/cost.html`, served at `GET /cost`. It fetches
 `GET /api/v1/cost?by=<group>` on load and every five seconds. The selector offers job, day, role,
@@ -106,12 +113,15 @@ provider secret.
 
 There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
 `crates/vowp-daemon/tests/board_page.rs`, `session_page.rs` and `cost_inbox_pages.rs` are HTTP-only
-tests over a temporary home and a real `127.0.0.1:0` listener.
+tests over a temporary home and a real `127.0.0.1:0` listener, and `tests/sse.rs` reads real
+chunked stream bodies. The session-page test pins the stream path, the `after_seq` resume, the
+`session` and `heartbeat` handlers, the reconnect text and the polling fallback without running a
+browser.
 
-Still later: the capsule view, `/nodes`, inbox answering, the cost dashboard and charts, SSE live
-updates in the window pages, executor switching, write actions, PWA installability and the auth
-token. The per-session SSE endpoint exists, but the pages above poll. The API routes and their
-fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.
+Still later: the capsule view, `/nodes`, inbox answering, the cost dashboard and charts, the
+board/global SSE stream, the reconnect UI on the pages that still poll, executor switching, write
+actions, PWA installability and the auth token. The API routes and their fallback are otherwise
+unchanged; unknown non-API paths still return the API's JSON 404.
 
 The app must never print a token value, a home path or a provider secret; the board only contains the
 fields already shown by `vowp board`, and the session pages only the fields already shown by

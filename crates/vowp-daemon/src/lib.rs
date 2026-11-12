@@ -8,8 +8,10 @@
 //! `/api/v1/inbox` and `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints.
 //! The per-session stream sends stored `EventEnvelope` frames with periodic heartbeats and a
 //! bounded per-client batch. The board page is also the phone board: its card layout is
-//! usable at a 360 px viewport. The session pages fetch the two read-only session endpoints,
-//! poll for new events and never write. The cost page renders grouped ledger rows and totals
+//! usable at a 360 px viewport. The session list page fetches `/api/v1/sessions`; the detail
+//! page loads its metadata and a first event page, then follows the per-session SSE stream,
+//! with a visible reconnect state, bounded-backoff retry and a five-second polling fallback.
+//! The pages never write. The cost page renders grouped ledger rows and totals
 //! with a `by` selector, and the inbox page renders open, answered and dismissed items with a
 //! state selector; both only fetch the read-only cost and inbox endpoints.
 //! It opens the home with [`vowp_store::Store::open_read_only`], never creates, migrates or
