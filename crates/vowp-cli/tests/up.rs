@@ -1,7 +1,8 @@
 //! `vowp up`, `vowp down`, `plan` and tmux-layout tests.
 //!
 //! Everything is hermetic: temporary node homes, temporary git repositories, fake adapters
-//! and a private tmux socket (`-L vowp-test-…`) killed by a guard on drop.
+//! and a private tmux socket (`-L vowp-t-…`) killed by a guard on drop. Names stay short
+//! because macOS caps a Unix socket path at 104 bytes.
 //!
 //! The first `TestEnv` and each direct private-server test run
 //! [`common::sweep_stale_test_servers_once`] before starting tmux. A test process killed
@@ -1651,17 +1652,24 @@ impl Drop for TmuxGuard {
 
 static SOCKET_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Starts a guarded `vowp-test-…` private server, or returns `None` without tmux.
+/// Returns a short, unique private socket name for one test server.
+///
+/// tmux builds the socket path as `<TMUX_TMPDIR>/tmux-<uid>/<socket>`, and
+/// macOS limits a Unix socket path to 104 bytes. A long temporary directory
+/// plus a long test name otherwise fails with `File name too long` before the
+/// server starts, so keep this name deliberately short.
+fn private_socket_name() -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0)
+        ^ SOCKET_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u32;
+    format!("vowp-t-{}-{nonce:08x}", std::process::id())
+}
+
+/// Starts a guarded `vowp-t-…` private server, or returns `None` without tmux.
 fn private_tmux_guard() -> Option<TmuxGuard> {
-    let socket = format!(
-        "vowp-test-{}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0),
-        SOCKET_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
+    let socket = private_socket_name();
     let dir = tempfile::tempdir().expect("private tmux dir");
     let tmux = Tmux::in_private_dir(socket, dir.path()).expect("private tmux manager");
     common::assert_private_tmux(&tmux, dir.path());
@@ -1670,6 +1678,26 @@ fn private_tmux_guard() -> Option<TmuxGuard> {
         return None;
     }
     Some(TmuxGuard { tmux, _dir: dir })
+}
+
+#[test]
+fn private_tmux_socket_path_fits_the_platform_limit() {
+    let dir = tempfile::tempdir().expect("private tmux dir");
+    // tmux resolves TMUX_TMPDIR before building the socket path; on macOS a
+    // /var/folders path becomes /private/var/folders and gains eight bytes.
+    let dir = std::fs::canonicalize(dir.path()).expect("canonical tmux dir");
+    let uid = Command::new("id").arg("-u").output().expect("run id -u");
+    assert!(uid.status.success(), "id -u did not succeed");
+    let uid = String::from_utf8(uid.stdout).expect("id -u output is utf-8");
+    let path = dir.join(format!("tmux-{}", uid.trim())).join(private_socket_name());
+    // `sun_path` holds the trailing NUL: 104 bytes on macOS, 108 on Linux.
+    let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
+    let actual = path.as_os_str().len() + 1;
+    assert!(
+        actual <= limit,
+        "private tmux socket path is {actual} bytes (limit {limit}): {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -1700,6 +1728,13 @@ fn tmux_layout_created_on_private_socket() {
 
 #[test]
 fn stale_server_sweep_kills_a_server_whose_private_dir_is_gone() {
+    // The shared sweep discovers servers through `/proc`, which only Linux has.
+    // On macOS it sees no servers at all, so this test would assert a kill the
+    // helper cannot perform; skip it there and keep the Linux coverage.
+    if !cfg!(target_os = "linux") {
+        eprintln!("SKIP: the stale-server sweep reads /proc and is Linux-only");
+        return;
+    }
     common::sweep_stale_test_servers_once();
     let Some(guard) = private_tmux_guard() else {
         return;
