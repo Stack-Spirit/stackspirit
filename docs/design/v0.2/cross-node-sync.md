@@ -35,8 +35,6 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
 - **Directory copy.** Copy `sessions/<id>/` (log, blobs, capsules, `adapters.json`) with a manifest,
   checksums and a size cap, then run `vowp reindex`; preserve the full log rather than the bundle's
   capsule + tail.
-- **Same-id import.** A pull that preserves the origin id when it is absent locally. This needs
-  duplicate detection and reindex collision rules.
 - **Divergence reporting, never a silent merge.** If both sides advanced the same session, report
   the two heads and require an explicit choice.
 - **Daemon transport.** The optional second transport after the v0.3 HTTP API exists. SSH stays the
@@ -62,9 +60,10 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
 
 ## Open questions (v0.3)
 
-1. **Child vs same id.** Preserving the origin id simplifies lineage but makes duplicate detection
-   and `reindex` collisions a new problem. v0.3 starts with the v0.1 child rule and adds a
-   same-id flag only after the duplicate tests exist.
+1. **Child vs same id.** The v0.1 child rule is still the default. The second slice adds an
+   explicit `--same-id` mode: it preserves the origin id only when it is absent locally, refuses a
+   duplicate, and treats a `reindex` event-id collision as a conflict. An automatic choice between
+   the two modes is still open; divergence needs the two-head report below.
 2. **Direction.** Explicit `pull`/`push` first; a bidirectional `session sync` only with a visible
    divergence report. Never guess a merge.
 3. **Blobs.** A directory copy needs a size limit, a progress display and a clear "blob
@@ -92,6 +91,32 @@ The tests use the existing fake-`ssh` harness and a temporary remote home:
 `session_pull_reports_a_failed_remote_export_and_imports_nothing`. The checksum test fails if
 verification is removed, and the success test fails if the child's `parent_session_id` is wrong.
 
-Still out of scope for this slice: same-id import and duplicate/reindex collision rules, directory
-copy, `session push`, bidirectional sync/merge, daemon transport, lease interaction and offline
-queueing. This is independent of v0.2 and does not block the v0.2 release.
+Still out of scope for this slice: directory copy, `session push`, bidirectional sync/merge, daemon
+transport, lease interaction and offline queueing. This is independent of v0.2 and does not block
+the v0.2 release.
+
+## Second v0.3 slice (implemented)
+
+`vowp session import <file> --same-id` and `vowp session pull <node> <session> --same-id` keep the
+origin session id instead of creating a child. The mode is refused with exit 4 when the id already
+exists locally as a row or as `sessions/<id>/`; the existing session is never overwritten or
+merged. A same-id session has no parent. The importer writes a fresh `session.created`, copies the
+whole bundle tail into the log with original event ids and timestamps (sequence numbers are
+reassigned contiguously), attaches the bundle capsule, writes inline blobs and runs `reindex`.
+A duplicate event id anywhere in the index is a conflict, not a warning. The default child import
+and its output are unchanged; `--same-id` pull JSON is
+`{"node","source_session","same_id_session"}`.
+
+The tests are `same_id_import_keeps_the_origin_id_without_a_parent`,
+`same_id_import_refuses_an_existing_session_and_changes_nothing`,
+`same_id_import_rejects_a_duplicate_event_id_before_writing`,
+`child_import_still_creates_a_child_with_the_parent` and the CLI tests
+`session_pull_same_id_imports_the_origin_id_without_a_parent`,
+`session_pull_same_id_refuses_an_existing_session_without_mutating_it`,
+`session_pull_same_id_refuses_a_corrupt_bundle_before_importing` and
+`session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import`.
+
+Still out of scope: directory copy, divergence reporting (two heads), merge, bidirectional sync,
+`session push`, lease interaction and offline queueing. A same-id pull is still a one-way snapshot;
+the source is neither modified nor locked. The bundle carries only the replayable tail, so the
+local log is a partial copy even though it keeps the origin id.

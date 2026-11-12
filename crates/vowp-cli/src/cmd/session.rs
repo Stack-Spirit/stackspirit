@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use time::{OffsetDateTime, macros::format_description};
-use vowp_core::session::bundle;
+use vowp_core::session::bundle::{self, ImportMode};
 use vowp_core::session::importer::{ImportCursor, import_file, line_uuid};
 use vowp_core::session::remote::{BeginTurn, IngestGrant, IngestSession, begin_turn};
 use vowp_core::session::service::SessionService;
@@ -299,6 +299,9 @@ fn remote_import(ctx: &Ctx, io: &mut dyn IoStreams, target: &str, args: &Session
     if let Some(cwd) = &args.cwd {
         remote.extend(["--cwd".to_owned(), cwd.display().to_string()]);
     }
+    if args.same_id {
+        remote.push("--same-id".to_owned());
+    }
     let run = run_remote_capture(target, &remote, Some(&text))?;
     if run.code != 0 {
         return relay_failure(io, &run);
@@ -313,19 +316,26 @@ fn remote_import(ctx: &Ctx, io: &mut dyn IoStreams, target: &str, args: &Session
 }
 
 /// JSON shape for a cross-node pull.
+///
+/// The default child mode serialises `child_session`; `--same-id` serialises
+/// `same_id_session` instead, so existing consumers keep their exact document.
 #[derive(Debug, serde::Serialize)]
 struct PullOutput {
     node: NodeName,
     source_session: SessionId,
-    child_session: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_session: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    same_id_session: Option<SessionId>,
 }
 
-/// Pulls a session bundle from another node and imports it as a local child.
+/// Pulls a session bundle from another node and imports it locally.
 ///
 /// The bundle is captured from the remote `session export` stdout, staged in a private
-/// temporary directory and verified by [`bundle::from_json`] before [`bundle::import`]
+/// temporary directory and verified by [`bundle::from_json`] before [`bundle::import_with_mode`]
 /// creates anything. A failed remote run, malformed bundle or checksum mismatch therefore
-/// imports nothing. There is no same-id import: the child's parent is the source session.
+/// imports nothing. The default creates a child whose parent is the source; `--same-id`
+/// keeps the source id and refuses a duplicate instead of overwriting.
 fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32, CliError> {
     let node = NodeName::parse(&args.node)?;
     let store = ctx.store()?;
@@ -356,18 +366,33 @@ fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32
     let staged = StagedBundle::write(&run.stdout)?;
     let bundle = bundle::from_json(&staged.read()?)?;
     let source = bundle.session.id.clone();
-    let child = bundle::import(ctx.deps(), &bundle, None, None)?;
-    if ctx.json() {
-        print_json(
-            io,
-            &PullOutput {
-                node,
-                source_session: source,
-                child_session: child,
-            },
-        )?;
+    let mode = if args.same_id {
+        ImportMode::SameId
     } else {
-        writeln!(io.out(), "pulled session {source} from {node} as child {child}")?;
+        ImportMode::Child
+    };
+    let imported = bundle::import_with_mode(ctx.deps(), &bundle, None, None, mode)?;
+    if ctx.json() {
+        let output = if args.same_id {
+            PullOutput {
+                node,
+                source_session: source.clone(),
+                child_session: None,
+                same_id_session: Some(imported.clone()),
+            }
+        } else {
+            PullOutput {
+                node,
+                source_session: source.clone(),
+                child_session: Some(imported.clone()),
+                same_id_session: None,
+            }
+        };
+        print_json(io, &output)?;
+    } else if args.same_id {
+        writeln!(io.out(), "pulled session {source} from {node} with same id {imported}")?;
+    } else {
+        writeln!(io.out(), "pulled session {source} from {node} as child {imported}")?;
     }
     Ok(0)
 }
@@ -1228,7 +1253,12 @@ fn import(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionImportArgs) -> Result
         }),
         None => None,
     };
-    let id = bundle::import(ctx.deps(), &bundle, executor, args.cwd.as_deref())?;
+    let mode = if args.same_id {
+        ImportMode::SameId
+    } else {
+        ImportMode::Child
+    };
+    let id = bundle::import_with_mode(ctx.deps(), &bundle, executor, args.cwd.as_deref(), mode)?;
     let store = ctx.store()?;
     let session = store.require_session(&id)?;
     if ctx.json() {

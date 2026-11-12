@@ -371,6 +371,7 @@ pub fn add_adapter_mapping(paths: &NodePaths, id: &SessionId, m: AdapterMapping)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReindexReport { pub sessions: u32, pub events: u64, pub capsules: u32, pub natives: u32, pub torn_tails: u32, pub problems: Vec<String> }
 /// Rebuild the index tables for one session (Some) or every directory under sessions/ (None): see rule 8.
+/// A duplicate event id in one log or across sessions is `StoreError::Conflict` before any row changes.
 pub fn reindex(store: &Store, paths: &NodePaths, session: Option<&SessionId>) -> Result<ReindexReport, StoreError>;
 ```
 
@@ -406,13 +407,14 @@ pub fn reindex(store: &Store, paths: &NodePaths, session: Option<&SessionId>) ->
 
 8. `reindex(store, paths, session)` algorithm, per session directory `<id>` whose name parses as `SessionId` (others are skipped with a problem line):
    1. `SessionLogReader::iter()` over `log.jsonl`; a torn tail is ignored and counted; corruption (rule 5) → the session is skipped, problem recorded, other sessions continue.
-   2. In **one transaction** per session: delete that session's `session_events` and `session_natives` rows (**not** `capsules`, `sessions`, `runs`, `switches`, `ledger`: `switches.capsule_id` has `ON DELETE SET NULL`, so deleting capsule rows would silently clear every switch→capsule link);
+   2. Check event ids **before touching the index**: an id repeated in this log, or one already owned by another session in `session_events`, returns `StoreError::Conflict` (`duplicate event id` / `already belongs to session`); no rows are changed. `session_events.id` is unique across the whole index, so this is a conflict, not a problem line.
+   3. In **one transaction** per session: delete that session's `session_events` and `session_natives` rows (**not** `capsules`, `sessions`, `runs`, `switches`, `ledger`: `switches.capsule_id` has `ON DELETE SET NULL`, so deleting capsule rows would silently clear every switch→capsule link);
       then for each event insert the `session_events` row; track `last_seq`, `log_bytes`, `updated_at = last event ts`.
-   3. Rebuild the `sessions` row **if missing** (db deleted): from `session.created` (title, cwd, project, job_id, role, parent) and the latest `session.executor`
+   4. Rebuild the `sessions` row **if missing** (db deleted): from `session.created` (title, cwd, project, job_id, role, parent) and the latest `session.executor`
       (`executor` string, `node`), `state = idle` (or `closed` if a trailing `note` text `closed`; v0.1 always `idle`). If the row exists, only `last_seq`, `log_bytes`, `updated_at`, `executor` are refreshed.
-   4. `session_natives` rebuilt from every `session.executor` attach event carrying `native_session_id` (`first_seq` = that event's seq), then merged with `adapters.json` (union).
-   5. `capsules` **upserted** from `capsules/*.json` with `INSERT … ON CONFLICT(id) DO UPDATE` (never `INSERT OR REPLACE`/delete, which would fire the FK action); invalid files → problem line, skipped; capsule rows whose file is missing are left untouched and reported as a problem; `sessions.last_capsule_id` = latest by `at_seq`.
-   6. `switches` rows missing from the DB are re-created from `switch` events (`state = completed`, `to_node` = the `to.node` or this node); existing rows untouched (their `capsule_id` is preserved; a re-created row's `capsule_id` comes from the `switch` event's `capsule_id`, set only if that capsule row exists).
+   5. `session_natives` rebuilt from every `session.executor` attach event carrying `native_session_id` (`first_seq` = that event's seq), then merged with `adapters.json` (union).
+   6. `capsules` **upserted** from `capsules/*.json` with `INSERT … ON CONFLICT(id) DO UPDATE` (never `INSERT OR REPLACE`/delete, which would fire the FK action); invalid files → problem line, skipped; capsule rows whose file is missing are left untouched and reported as a problem; `sessions.last_capsule_id` = latest by `at_seq`.
+   7. `switches` rows missing from the DB are re-created from `switch` events (`state = completed`, `to_node` = the `to.node` or this node); existing rows untouched (their `capsule_id` is preserved; a re-created row's `capsule_id` comes from the `switch` event's `capsule_id`, set only if that capsule row exists).
    Result: after `rm vowp.db && Store::open && reindex(None)`, `sessions`, `session_events`, `session_natives`, `capsules` (and lineage `switches`) equal the pre-deletion rows
    except fields that only the DB held (`sessions.state` of in-flight sessions, `job_id` when the creating event lacks it). **Content is never lost.**
 9. `reindex` is idempotent: running twice yields identical tables (test `reindex_is_idempotent`).
@@ -505,6 +507,8 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `reindex_is_idempotent` | run twice; tables identical |
 | `reindex_single_session_leaves_others` | modifying one log then `reindex(Some(id))` updates only that session's rows |
 | `reindex_skips_corrupt_session` | one session with a corrupt middle line: reported in `problems`, others indexed |
+| `reindex_rejects_an_event_id_owned_by_another_session` | the second session's log reuses an indexed event id → `StoreError::Conflict` (`already belongs to session`), no row or events for the rejected session |
+| `reindex_rejects_a_duplicate_event_id_in_one_log` | one log repeats an event id → `StoreError::Conflict` (`duplicate event id`), no indexed events |
 | `paths_layout` | `NodePaths::new("/x")` produces every path exactly as listed in §3.1 (no I/O); `from_env` honours `VOWP_HOME` (test sets the env var inside a mutex-guarded section) and errors with neither set |
 
 ## 7. Out of scope / v0.2

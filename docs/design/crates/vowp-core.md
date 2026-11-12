@@ -138,6 +138,8 @@ pub fn apply_direct(deps: &Deps, store: &Store, req: &Request) -> Result<(), Cor
 pub struct SessionService { /* Deps, session-level locks map */ }
 impl SessionService {
     pub fn new(deps: Deps) -> Self;
+    pub fn create_session(&self, req: NewSession) -> Result<SessionId, CoreError>;  // fresh ULID; delegates to create_session_with_id
+    pub fn create_session_with_id(&self, id: SessionId, req: NewSession, created_at: Timestamp) -> Result<SessionId, CoreError>;  // same-id import; conflict when the row or log exists, log created with create_new before the row; stamps the row and session.created with created_at
     pub fn recover(&self, store: &Store) -> Result<RecoveryReport, CoreError>;      // startup: resolve `switches` rows left in 'started', close dangling runs (sessions.md §5, crash recovery)
     pub fn switch(&self, req: &SwitchRequest) -> Result<Switch, CoreError>;         // opens Deps::open_store
     pub fn switch_with_store(&self, store: &Store, req: &SwitchRequest) -> Result<Switch, CoreError>;   // daemon: caller supplies a writable, non-creating store
@@ -191,7 +193,9 @@ pub mod bundle {
     pub struct Bundle { /* fields per sessions.md §6.1 */ }
     pub fn export(deps: &Deps, session: &SessionId, tail: usize) -> Result<Bundle, CoreError>;
     pub fn to_json(b: &Bundle) -> Result<String, CoreError>;  pub fn from_json(s: &str) -> Result<Bundle, CoreError>;  // verifies checksum + format
+    pub enum ImportMode { Child, SameId }
     pub fn import(deps: &Deps, b: &Bundle, executor: Option<ExecutorRef>, cwd: Option<&std::path::Path>) -> Result<SessionId, CoreError>;   // child session; cwd = `vowp session import --cwd`
+    pub fn import_with_mode(deps: &Deps, b: &Bundle, executor: Option<ExecutorRef>, cwd: Option<&std::path::Path>, mode: ImportMode) -> Result<SessionId, CoreError>;   // SameId: origin id only when absent, no parent, copies the tail with contiguous local seqs
 }
 pub mod importer { /* optional (nice-to-have): ClaudeTranscriptImporter::scan_once(dir) -> ImportReport, read-only, incremental by byte offset; parses each transcript file with vowp_adapters::claude_code::import_transcript(path, tz_offset_minutes) (crates/vowp-adapters.md §5) */ }
 ```
@@ -204,6 +208,7 @@ Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode
 `switch_happy_path_events_rows_and_lineage`, `switch_target_probe_fails_stays_on_source`, `switch_drain_timeout_interrupts_after_5s_fakeclock`, `switch_seed_rejected_retries_capsule_only_then_aborts`,
 `switch_with_store_guards_from_the_supplied_store_without_opening_deps`, `switch_with_store_completes_on_the_supplied_store`,
 `recover_started_switch_never_attached_is_aborted`, `recover_started_switch_attached_is_completed`, `bundle_export_import_roundtrip_child_session`, `bundle_checksum_mismatch_rejected`, `bundle_unknown_format_rejected`, `bundle_inlines_small_blobs_only`,
+`same_id_import_keeps_the_origin_id_without_a_parent`, `same_id_import_refuses_an_existing_session_and_changes_nothing`, `same_id_import_rejects_a_duplicate_event_id_before_writing`, `same_id_import_rejects_a_corrupt_bundle_before_writing`, `child_import_still_creates_a_child_with_the_parent`,
 `failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content` (end-to-end with two fake adapters).
 
 `tests/switch_drain.rs` covers the bounded-drain hook: `drain_is_bounded_when_writer_never_released`

@@ -882,6 +882,7 @@ Options:
       --cwd <DIR>            Working directory
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --same-id              Keep the bundle's session id; refuse when it already exists locally
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
@@ -901,6 +902,7 @@ Arguments:
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
+      --same-id              Keep the source session id; refuse when it already exists locally
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal

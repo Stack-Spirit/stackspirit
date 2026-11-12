@@ -232,8 +232,42 @@ every path.
 A failed remote export returns the remote exit code and output. A malformed, truncated or
 checksum-mismatched bundle returns a local invalid-input error. In both cases nothing is imported.
 The source must be a remote node; a local node is refused with a hint to use export/import. This
-slice deliberately has no same-id import, duplicate/reindex collision rules, directory copy, push,
-bidirectional sync/merge, lease interaction or daemon/offline transport.
+slice deliberately has no same-id import (see §6.5), directory copy, push, bidirectional sync/merge,
+lease interaction or daemon/offline transport.
+
+### 6.5 Same-id import (v0.3 second slice)
+
+`vowp session import <file> --same-id` and `vowp session pull <node> <session> --same-id` keep the
+origin session id instead of creating a child. The default import and pull paths are unchanged.
+
+1. Verify the bundle exactly as in §6.3 step 1 before looking at local state. A checksum, format,
+   protocol-version or event-body failure creates nothing.
+2. Refuse with exit 4 when the origin id already exists locally as a `sessions` row or a
+   `sessions/<id>/` directory. The existing row, log and index are not touched. Never overwrite and
+   never merge.
+3. Check every event id in the bundle tail: an id repeated inside the bundle or already present in
+   `session_events` is a conflict. This check runs before the log is created, so a duplicate id
+   leaves no session directory.
+4. Create the session with the origin id, no parent, the bundle's title, role, project/job (when
+   those rows exist locally) and the same cwd rule as §6.3 step 2. The log is created with
+   `create_new`, so two racing imports cannot both succeed.
+5. Append a fresh `session.created` (parent `NULL`) followed by every other replayable event in the
+   bundle tail. Event ids and timestamps are preserved; `seq` is reassigned contiguously from 1
+   because the bundle carries only a tail, not the full origin log. A bundle that includes its own
+   `session.created` contributes its metadata, not a second created event.
+6. Write the bundle capsule with its original capsule id under the origin session id, set its
+   `at_seq` to the last copied tail seq, append the `capsule` event, write inline blobs with digest
+   verification and run `reindex(Some(id))` in one transaction. A `reindex` collision (duplicate
+   event id) is a conflict, never a warning.
+7. Do not write the child `import.json` sidecar: the tail events are already in the log, and the
+   first turn uses the normal capsule + complete-turn seed. A compacted bundle keeps its capsule,
+   empty tail and `compacted_at`.
+8. The output keeps the default shape in child mode. Same-id human output is
+   `pulled session <source> from <node> with same id <id>`; JSON is
+   `{"node","source_session","same_id_session"}`.
+
+Out of scope for this slice: directory copy of `sessions/<id>/`, divergence reporting (two heads),
+merge, bidirectional sync, `session push`, lease interaction and an offline retry queue.
 
 ## 7. `vowp session watch` importer
 
@@ -388,6 +422,12 @@ The tests live in `crates/vowp-store.md` §6 (log, blob, reindex) and `crates/vo
 | §6 export → import round trip (child session, 4 setup events, seed text) | `bundle_export_import_roundtrip_child_session` | core |
 | §6 tampered bundle / unknown format rejected, nothing created | `bundle_checksum_mismatch_rejected`, `bundle_unknown_format_rejected` | core |
 | §6 only blobs ≤ 64 KiB inlined (60 KB yes, 70 KB no) | `bundle_inlines_small_blobs_only` | core |
+| §6.5 same-id absent → origin id, no parent, log/index read back | `same_id_import_keeps_the_origin_id_without_a_parent` | core |
+| §6.5 same-id present → conflict, existing row/log unchanged | `same_id_import_refuses_an_existing_session_and_changes_nothing` | core |
+| §6.5 duplicate event id → conflict before any write | `same_id_import_rejects_a_duplicate_event_id_before_writing` | core |
+| §6.5 default import still creates a child with the parent | `child_import_still_creates_a_child_with_the_parent` | core |
+| §6.5 fake-ssh pull in both modes | `session_pull_same_id_imports_the_origin_id_without_a_parent`, `session_pull_imports_a_child_and_prints_both_ids` | cli |
+| §6.5 corrupted bundle fails before any write | `same_id_import_rejects_a_corrupt_bundle_before_writing`, `session_pull_same_id_refuses_a_corrupt_bundle_before_importing` | core, cli |
 | §1 log, blob and reindex rules | the `log_*`, `blob_*`, `reindex_*` tests of vowp-store.md §6 | store |
 | §8 lease acquire, heartbeat, stale sweep, exact holder | `lease_acquire_is_one_holder`, `heartbeat_keeps_lease_live`, `stale_lease_free_after_sixty_seconds` | core |
 | §8 takeover cuts off the old surface within 2 s | `takeover_cuts_old_surface_within_two_seconds`, `lease_revoked_is_pushed_within_2s` | core |

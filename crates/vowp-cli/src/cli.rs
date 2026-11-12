@@ -633,6 +633,9 @@ pub struct SessionImportArgs {
     /// Working directory.
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
+    /// Keep the bundle's session id; refuse when it already exists locally.
+    #[arg(long)]
+    pub same_id: bool,
 }
 
 /// Arguments for `vowp session pull`.
@@ -642,6 +645,9 @@ pub struct SessionPullArgs {
     pub node: String,
     /// Source session id or unique prefix.
     pub session: String,
+    /// Keep the source session id; refuse when it already exists locally.
+    #[arg(long)]
+    pub same_id: bool,
 }
 
 /// Arguments for `vowp session watch`.

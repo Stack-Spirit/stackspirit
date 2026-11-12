@@ -64,9 +64,29 @@ impl SessionService {
 
     /// Creates a session: index row, log directory and the `session.created` event.
     pub fn create_session(&self, req: NewSession) -> Result<SessionId, CoreError> {
-        let store = self.deps.open_store()?;
-        let id = SessionId::new();
         let now = self.deps.clock.now();
+        self.create_session_with_id(SessionId::new(), req, now)
+    }
+
+    /// Creates a session with a caller-supplied id and creation time, for a same-id bundle import.
+    ///
+    /// The id is used only when neither an index row nor a log file exists for it, so an
+    /// import can never overwrite an existing session. `SessionLog::create` opens
+    /// `log.jsonl` with `create_new`, which is the race-safe gate; the row is written only
+    /// after the log exists.
+    pub fn create_session_with_id(
+        &self,
+        id: SessionId,
+        req: NewSession,
+        created_at: Timestamp,
+    ) -> Result<SessionId, CoreError> {
+        let store = self.deps.open_store()?;
+        if store.session(&id)?.is_some() || self.deps.paths.log_path(&id).is_file() {
+            return Err(CoreError::Store(StoreError::Conflict(format!(
+                "session {id} already exists; refusing to overwrite"
+            ))));
+        }
+        let log = SessionLog::create(&self.deps.paths, &id, self.deps.clock.clone())?;
         let session = Session {
             id: id.clone(),
             project: req.project.clone(),
@@ -81,12 +101,11 @@ impl SessionService {
             last_seq: 0,
             last_capsule_id: None,
             log_bytes: 0,
-            created_at: now,
-            updated_at: now,
+            created_at,
+            updated_at: created_at,
         };
         store.upsert_session(&session)?;
 
-        let log = SessionLog::create(&self.deps.paths, &id, self.deps.clock.clone())?;
         let body = EventBody::SessionCreated(vowp_protocol::SessionCreated {
             title: req.title,
             cwd: session.cwd.clone(),
@@ -95,7 +114,7 @@ impl SessionService {
             role: Some(req.role),
             parent_session_id: req.parent,
         });
-        self.append(&store, &log, HarnessKind::Vowp, body, None, None)?;
+        self.append_event(&store, &log, HarnessKind::Vowp, body, Some(created_at), None, None)?;
         log.sync()?;
         Ok(id)
     }

@@ -216,6 +216,18 @@ the child is seeded with the bundle capsule and tail. Importing the same bundle 
 independent children; the origin is never modified. A compacted origin exports its capsule with an
 empty event tail and says so.
 
+`import --same-id` keeps the bundle's session id instead of creating a child:
+
+```sh
+vowp session import planner.vowp-bundle.json --same-id
+```
+
+The import is refused with exit 4 when that id already exists locally (a session row or a session
+directory). Nothing is overwritten or merged. A same-id import has no parent, writes a fresh
+`session.created`, copies the rest of the bundle tail into the log (event ids and timestamps are
+preserved; local sequence numbers are contiguous) and attaches the bundle capsule. A duplicate
+event id is a conflict, not a warning. A compacted bundle keeps its capsule and an empty tail.
+
 Common rejections:
 
 | Error | Meaning |
@@ -230,6 +242,7 @@ Common rejections:
 vowp session pull <node> <session>
 vowp session pull vps 01KA1V0Z7A0000000000000000
 vowp --json session pull vps 01KA1V0Z7A0000000000000000
+vowp session pull --same-id vps 01KA1V0Z7A0000000000000000
 ```
 
 `pull` exports the bundle from the named node over the existing SSH transport, stages it in a
@@ -239,10 +252,16 @@ then imports it as a child session. It prints the source id and the new child id
 a new id, `parent_session_id` set to the source, a title ending in `(imported)`, and a first turn
 seeded from the bundle capsule and tail.
 
+`pull --same-id` keeps the source id when it is absent locally, with no parent and the same log and
+capsule rules as `session import --same-id`. It prints `pulled session <source> from <node> with
+same id <id>`; `--json` prints `{"node","source_session","same_id_session"}`. If the id is already
+present locally the pull exits 4 and changes nothing.
+
 The source must be a remote node. A failed ssh/remote export, a truncated bundle or a checksum
 mismatch leaves the local home unchanged. This is a one-way snapshot, not a move: the source is
-not modified or locked, and there is no same-id import, directory copy, push, merge, lease
-handling or offline retry queue. For a local file copy use `session export` and `session import`.
+not modified or locked. Directory copy, push, bidirectional sync/merge, divergence reporting,
+lease handling and an offline retry queue remain out of scope. For a local file copy use
+`session export` and `session import`.
 
 ## Watch an interactive Claude Code session
 

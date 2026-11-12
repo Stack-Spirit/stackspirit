@@ -628,6 +628,34 @@ fn install_ssh(remote: &RemoteNode, body: &str) {
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
 }
 
+/// Appends one indexed user message to a session in `home`.
+fn append_user_message(home: &Path, id: &str, text: &str) {
+    let paths = vowp_store::NodePaths::new(home);
+    let session = vowp_protocol::SessionId::parse(id).expect("session id");
+    let store = vowp_store::Store::open(&paths).expect("store");
+    let log = SessionLog::open(&paths, &session, std::sync::Arc::new(vowp_protocol::SystemClock)).expect("log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::User,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: None,
+                node: None,
+                native_session_id: None,
+            },
+            body: EventBody::UserMessage(vowp_protocol::UserMessage {
+                text: text.to_owned(),
+                attachments: Vec::new(),
+                note: None,
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append user message");
+    store.index_event(&index_row(&appended)).expect("index user message");
+    log.sync().expect("sync");
+}
+
 /// Returns how many sessions the local index holds.
 fn local_session_count(env: &common::TestEnv) -> usize {
     env.store()
@@ -770,6 +798,211 @@ fn session_pull_reports_a_failed_remote_export_and_imports_nothing() {
         "a failed remote export created a local session"
     );
     assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_same_id_imports_the_origin_id_without_a_parent() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote session");
+    append_user_message(remote.home.path(), &source, "copy this event");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+    assert_eq!(local_session_count(&env), 0, "the source must start remote-only");
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--same-id", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "same-id pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let stdout = output_text(&output.stdout);
+    assert!(stdout.contains(&source), "the source id is missing: {stdout}");
+    assert!(stdout.contains("same id"), "{stdout}");
+
+    let store = env.store();
+    let row = store.require_session(&source_id).expect("same-id session");
+    assert!(row.parent_session_id.is_none(), "same-id import must not keep a parent");
+    assert_eq!(row.title, "remote session", "the origin title is kept unchanged");
+    assert_eq!(row.node, env.config.node.name);
+    drop(store);
+
+    let paths = vowp_store::NodePaths::new(env.home_path());
+    let events = SessionLog::open_read(&paths, &source_id)
+        .expect("same-id log")
+        .read_all()
+        .expect("same-id events");
+    assert_eq!(
+        events.first().map(|event| event.event_type),
+        Some(EventType::SessionCreated)
+    );
+    assert!(matches!(
+        events[0].body().expect("created body"),
+        EventBody::SessionCreated(payload) if payload.parent_session_id.is_none()
+    ));
+    assert!(
+        events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::UserMessage(payload)) if payload.text == "copy this event"
+        )),
+        "the bundle tail was not copied into the same-id log: {events:?}"
+    );
+    assert!(
+        !env.home_path()
+            .join("sessions")
+            .join(&source)
+            .join("import.json")
+            .exists(),
+        "a same-id import must not write a child seed sidecar"
+    );
+
+    let store = env.store();
+    let indexed = store.event_rows(&source_id, 0, 100).expect("index events");
+    assert_eq!(indexed.len(), events.len(), "the index mirrors the imported log");
+    assert!(store.latest_capsule(&source_id).expect("capsule query").is_some());
+    drop(store);
+    assert_temp_clean(&env);
+
+    // The JSON document names the same-id session and has no child field in this mode.
+    let second = new_session_in(&env, remote.home.path(), "json same id");
+    let output = run_cli(
+        &env,
+        &remote,
+        &["--json", "session", "pull", "--same-id", "vps", &second],
+    );
+    assert!(
+        output.status.success(),
+        "json same-id pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(output_text(&output.stdout).trim()).expect("pull JSON");
+    assert_eq!(value["node"], "vps");
+    assert_eq!(value["source_session"], second);
+    assert_eq!(value["same_id_session"], second);
+    assert!(
+        value.get("child_session").is_none(),
+        "same-id output must not name a child: {value}"
+    );
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_same_id_refuses_an_existing_session_without_mutating_it() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote session");
+    append_user_message(remote.home.path(), &source, "keep this event");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--same-id", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "first same-id pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let log_path = env.home_path().join("sessions").join(&source).join("log.jsonl");
+    let before_log = std::fs::read(&log_path).expect("same-id log bytes");
+    let store = env.store();
+    let before_row = store.require_session(&source_id).expect("same-id row");
+    drop(store);
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--same-id", "vps", &source]);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "a duplicate same-id import must conflict: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains("already exists"),
+        "the conflict was not explained: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&log_path).expect("same-id log bytes"),
+        before_log,
+        "a refused same-id import rewrote the existing log"
+    );
+    let store = env.store();
+    let after_row = store.require_session(&source_id).expect("same-id row");
+    assert_eq!(after_row.last_seq, before_row.last_seq);
+    assert_eq!(after_row.updated_at, before_row.updated_at);
+    assert_eq!(local_session_count(&env), 1);
+    drop(store);
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_same_id_refuses_a_corrupt_bundle_before_importing() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote session");
+    let bundle = export_text_in(&env, remote.home.path(), &source);
+    let corrupted = bundle.replacen("\"title\": \"remote session\"", "\"title\": \"tampered session\"", 1);
+    assert_ne!(corrupted, bundle, "the test did not change the bundle");
+    let bundle_path = env.project_path().join("corrupt-same-id-bundle.json");
+    std::fs::write(&bundle_path, &corrupted).expect("corrupt bundle");
+    install_ssh(
+        &remote,
+        &format!("#!/bin/sh\ncat '{}'\nexit 0\n", bundle_path.display()),
+    );
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--same-id", "vps", &source]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a corrupt bundle must be a local invalid-input failure: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains("checksum mismatch"),
+        "the checksum failure was not reported: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        local_session_count(&env),
+        0,
+        "a corrupt same-id bundle created a local session before verification"
+    );
+    assert!(
+        !env.home_path().join("sessions").join(&source).exists(),
+        "a corrupt same-id bundle wrote a session directory"
+    );
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote session");
+    append_user_message(remote.home.path(), &source, "local import event");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+    let bundle = export_text_in(&env, remote.home.path(), &source);
+    let bundle_path = env.project_path().join("same-id.vowp-bundle.json");
+    std::fs::write(&bundle_path, bundle).expect("bundle");
+
+    let (code, stdout, stderr) = env.run(&["session", "import", bundle_path.to_str().expect("path"), "--same-id"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), source);
+    let store = env.store();
+    let row = store.require_session(&source_id).expect("same-id session");
+    assert!(row.parent_session_id.is_none());
+    drop(store);
+
+    let log_path = env.home_path().join("sessions").join(&source).join("log.jsonl");
+    let before_log = std::fs::read(&log_path).expect("same-id log");
+    let (code, _, stderr) = env.run(&["session", "import", bundle_path.to_str().expect("path"), "--same-id"]);
+    assert_eq!(code, 4, "a duplicate same-id import must conflict: {stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert_eq!(
+        std::fs::read(&log_path).expect("same-id log"),
+        before_log,
+        "a refused same-id import rewrote the existing log"
+    );
 }
 
 /// The executor every remote-exec CLI test uses.
