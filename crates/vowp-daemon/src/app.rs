@@ -1,14 +1,21 @@
 //! The axum application: state, routes and request handlers.
 //!
 //! Read requests open their own read-only [`vowp_store::Store`] against the served home. The
-//! one write, `POST /api/v1/inbox/{id}/answer`, opens the same home with
-//! [`vowp_store::Store::open_writable`], which never creates or migrates it. The store handle
-//! is `Send` but not `Sync`, so a shared handle would serialize requests or require a lock;
-//! opening per request also gives each request a fresh WAL view. The blocking SQLite and
-//! JSONL work runs on `tokio::task::spawn_blocking`.
+//! two writes, `POST /api/v1/inbox/{id}/answer` and `POST /api/v1/sessions/{id}/switch`,
+//! open the same home with [`vowp_store::Store::open_writable`], which never creates or
+//! migrates it. The store handle is `Send` but not `Sync`, so a shared handle would serialize
+//! requests or require a lock; opening per request also gives each request a fresh WAL view.
+//! The blocking SQLite and JSONL work runs on `tokio::task::spawn_blocking`.
+//!
+//! The switch runs the same [`SessionService::switch_with_store`] protocol as
+//! `vowp session switch`; the daemon builds one real [`Deps`] at startup and shares it in
+//! [`ApiState`]. Tests replace it with fake adapters and a fake window manager so no real
+//! harness or tmux server starts.
 
 use std::convert::Infallible;
+use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -20,21 +27,27 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
 use tokio::net::TcpListener;
+use vowp_core::deps::SystemRng;
 use vowp_core::ledger::BoardSnapshot;
 use vowp_core::requests::{self, Request};
+use vowp_core::session::service::SessionService;
+use vowp_core::{AdapterRegistry, CoreError, Deps, SystemGit, SystemRunner};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
     Health, InboxAnswerRequest, InboxPage, JobPage, MAX_LINEAGE, NodePage, SessionDetail, SessionPage,
+    SessionSwitchRequest,
 };
 use vowp_protocol::{
-    Capsule, CapsuleId, ErrorKind, InboxId, InboxItem, InboxState, NodeName, ProjectName, Session, SessionId,
-    Timestamp, VowpConfig,
+    Capsule, CapsuleId, ErrorKind, Executor, ExecutorRef, InboxId, InboxItem, InboxState, NodeName, ProjectName,
+    Session, SessionId, SessionState, Switch, SwitchReason, SwitchRequest, SystemClock, Timestamp, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, SessionFilter, Store, StoreError};
+use vowp_tmux::{Tmux, WindowManager};
 
 use crate::auth::{self, ApiToken};
 use crate::config::ProjectSelection;
+use crate::error::DaemonError;
 use crate::filters::{self, CostQuerySpec, EventQuery};
 use crate::stream;
 
@@ -42,7 +55,7 @@ use crate::stream;
 const MAX_ANSWER_BYTES: usize = 10_000;
 
 /// State shared by every request handler.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiState {
     paths: NodePaths,
     project: ProjectName,
@@ -52,6 +65,20 @@ pub struct ApiState {
     stream_heartbeat: Duration,
     board_poll: Duration,
     write_token: Option<ApiToken>,
+    session_deps: Option<Arc<Deps>>,
+}
+
+impl fmt::Debug for ApiState {
+    /// Renders the non-sensitive configuration; paths, the token and dependencies stay hidden.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiState")
+            .field("project", &self.project)
+            .field("node", &self.node)
+            .field("schema_version", &self.schema_version)
+            .field("write_token", &self.write_token)
+            .field("switch_deps", &self.session_deps.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ApiState {
@@ -66,6 +93,7 @@ impl ApiState {
             stream_heartbeat: stream::HEARTBEAT_INTERVAL,
             board_poll: stream::BOARD_POLL_INTERVAL,
             write_token: None,
+            session_deps: None,
         }
     }
 
@@ -75,6 +103,16 @@ impl ApiState {
     /// fixed token so they never touch the process environment.
     pub fn with_api_token(mut self, token: Option<ApiToken>) -> Self {
         self.write_token = token;
+        self
+    }
+
+    /// Returns this state with the session-switch dependencies replaced.
+    ///
+    /// The binary passes [`build_deps`]; tests pass a [`Deps`] with fake adapters and a fake
+    /// window manager, so a switch test never starts a real harness or tmux server. Without
+    /// dependencies the switch route answers `500` and no other route is affected.
+    pub fn with_session_deps(mut self, deps: Deps) -> Self {
+        self.session_deps = Some(Arc::new(deps));
         self
     }
 
@@ -146,6 +184,68 @@ impl ApiState {
             requests::push(&store, &Request::AnswerInbox { id: id.clone() }).map_err(|_| request_write_failure())?;
         }
         Ok(answered)
+    }
+
+    /// Switches one session through the same service as `vowp session switch`.
+    ///
+    /// The guards mirror the CLI: a running turn needs `force`, a switching or closed
+    /// session is a conflict, and a target provider with an active limit is refused. The
+    /// switch may drain an active turn for up to five seconds; it runs on the caller's
+    /// blocking thread. The store is opened writable and never creates or migrates a home.
+    fn switch_session(
+        &self,
+        id: &SessionId,
+        target: Executor,
+        reason: SwitchReason,
+        force: bool,
+    ) -> Result<Switch, ApiFailure> {
+        let store = self.open_writable()?;
+        let session = store
+            .session(id)
+            .map_err(|_| store_failure())?
+            .ok_or_else(|| ApiFailure::not_found(format!("session {id} not found")))?;
+        match session.state {
+            SessionState::Running if !force => {
+                return Err(ApiFailure::conflict(format!(
+                    "session {id} is running a turn; pass force to drain and stop it"
+                )));
+            }
+            SessionState::Switching => {
+                return Err(ApiFailure::conflict(format!("session {id} is already switching")));
+            }
+            SessionState::Closed => {
+                return Err(ApiFailure::conflict(format!("session {id} is closed; cannot switch")));
+            }
+            SessionState::Idle | SessionState::Running | SessionState::Blocked => {}
+        }
+        // The fixture clock wins so a hermetic test can control the active-limit window;
+        // the production daemon has no injected clock and reads the store's system clock.
+        let now = self
+            .session_deps
+            .as_ref()
+            .map_or_else(|| store.clock().now(), |deps| deps.clock.now());
+        let provider = target.provider();
+        if store
+            .active_limits(now)
+            .map_err(|_| store_failure())?
+            .iter()
+            .any(|limit| limit.provider == provider)
+        {
+            return Err(ApiFailure::conflict(format!("provider {provider} is limited")));
+        }
+        let deps = self.session_deps.clone().ok_or_else(switch_deps_failure)?;
+        let request = SwitchRequest {
+            session_id: id.clone(),
+            to: ExecutorRef {
+                executor: target,
+                node: None,
+            },
+            reason,
+            drain_secs: 5,
+        };
+        SessionService::new((*deps).clone())
+            .switch_with_store(&store, &request)
+            .map_err(switch_failure)
     }
 
     /// Returns the jobs matching `filter`.
@@ -345,6 +445,52 @@ impl ApiState {
     }
 }
 
+/// Builds the real session dependencies for the selected home and project.
+///
+/// This mirrors the CLI context construction without depending on the CLI crate: the real
+/// adapter registry, tmux window manager, git and command runner, system
+/// clock, null log and system RNG. The registered project config is parsed, validated and
+/// filled with the registry path when it omits one, matching the read handlers. The function
+/// only reads an existing home; it never creates or migrates one.
+pub fn build_deps(paths: &NodePaths, selection: &ProjectSelection) -> Result<Deps, DaemonError> {
+    let store = Store::open_read_only(paths, Some(&selection.project)).map_err(DaemonError::from_store)?;
+    let project = store
+        .project(&selection.project)
+        .map_err(DaemonError::from_store)?
+        .ok_or_else(|| DaemonError::Config("the selected project is not registered".to_owned()))?;
+    let mut config: VowpConfig = serde_json::from_value(project.config)
+        .map_err(|_| DaemonError::Config("the project configuration could not be read".to_owned()))?;
+    if config.project.name != selection.project {
+        return Err(DaemonError::Config(
+            "the project configuration names a different project".to_owned(),
+        ));
+    }
+    config
+        .validate()
+        .map_err(|_| DaemonError::Config("the project configuration is invalid".to_owned()))?;
+    if config.project.path.is_none() {
+        config.project.path = Some(project.path);
+    }
+    let config = Arc::new(config);
+    let cmd: Arc<dyn vowp_core::CommandRunner> = Arc::new(SystemRunner);
+    let git = Arc::new(SystemGit::new(Arc::clone(&cmd)));
+    let windows: Arc<dyn WindowManager> = Arc::new(Tmux::for_home(paths.root()));
+    let adapters = AdapterRegistry::from_config(&config)
+        .map_err(|_| DaemonError::Config("the project harness configuration is unusable".to_owned()))?;
+    Ok(Deps {
+        paths: paths.clone(),
+        config,
+        node: selection.node.clone(),
+        clock: Arc::new(SystemClock),
+        log: Arc::new(vowp_protocol::NullLog),
+        adapters: Arc::new(adapters),
+        windows,
+        git,
+        cmd,
+        rng: Arc::new(SystemRng::new()),
+    })
+}
+
 /// Walks the stored parent-session links, nearest parent first, bounded by [`MAX_LINEAGE`].
 ///
 /// The walk stops when a parent row is missing, so a dangling `parent_session_id` ends the
@@ -373,7 +519,8 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
 /// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox and nodes pages at `/cost`,
 /// `/inbox` and `/nodes`, the PWA manifest, icon and service worker, plus the API under
-/// `/api/v1`. The only non-GET API route is the token-gated inbox answer write.
+/// `/api/v1`. The only non-GET API routes are the token-gated inbox answer and session switch
+/// writes.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -396,6 +543,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/sessions/{id}/capsules/{capsule_id}", get(session_capsule))
         .route("/api/v1/sessions/{id}/events", get(session_events))
         .route("/api/v1/sessions/{id}/events/stream", get(session_events_stream))
+        .route("/api/v1/sessions/{id}/switch", post(switch_session))
         .route("/api/v1/inbox", get(inbox))
         .route("/api/v1/inbox/{id}/answer", post(answer_inbox))
         .route("/api/v1/nodes", get(nodes))
@@ -634,6 +782,28 @@ async fn answer_inbox(
     Ok((StatusCode::ACCEPTED, Json(answered)))
 }
 
+/// Switches one local session through the same service as the CLI.
+///
+/// The bearer token is checked before the id, body or store is read. A daemon without
+/// `VOWP_API_TOKEN` answers `503`; a missing or wrong token is `401`. An invalid id, body or
+/// `to` value is `400`, an unknown session is `404`, and the running/switch/closed/limit
+/// guards are `409`. The response is the completed `Switch`; a failed switch returns an
+/// `ApiError` and never claims the executor moved.
+async fn switch_session(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Switch>, ApiFailure> {
+    authorize(&state, &headers)?;
+    let id = SessionId::parse(&id).map_err(|_| ApiFailure::invalid("invalid session id"))?;
+    let request: SessionSwitchRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiFailure::invalid("the request body must be {\"to\":\"<executor>\"}"))?;
+    let target = Executor::parse(&request.to).map_err(|_| ApiFailure::invalid("invalid target executor"))?;
+    let switch = blocking(move || state.switch_session(&id, target, request.reason, request.force)).await?;
+    Ok(Json(switch))
+}
+
 /// Checks the daemon write token before a handler reads the request body or store.
 ///
 /// The comparison is constant-time over the candidate and the configured token is never
@@ -782,6 +952,38 @@ fn store_write_failure() -> ApiFailure {
         ErrorKind::Db,
         "could not open the project database for writing",
     )
+}
+
+/// A path-free `500` when the daemon was built without session-switch dependencies.
+fn switch_deps_failure() -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Config,
+        "session switching is not configured on this daemon",
+    )
+}
+
+/// Maps a failed switch onto a documented status without leaking a home path.
+///
+/// The guards run before the service; these mappings cover a state race and the switch
+/// protocol's own abort. A probe or harness detail can contain a binary or home path, so the
+/// response keeps a stable, path-free message instead of echoing the internal error.
+fn switch_failure(error: CoreError) -> ApiFailure {
+    match error {
+        CoreError::NotFound(_) => ApiFailure::not_found("session not found"),
+        CoreError::Store(StoreError::NotFound { what: "session", .. }) => ApiFailure::not_found("session not found"),
+        CoreError::Store(StoreError::Conflict(message)) => ApiFailure::conflict(message),
+        CoreError::Invalid(message) => ApiFailure::conflict(message),
+        CoreError::Limited(_) => ApiFailure::conflict("the target provider is limited"),
+        CoreError::SwitchAborted(_) => {
+            ApiFailure::conflict("the switch was aborted; the session stayed on its previous executor")
+        }
+        other => ApiFailure::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            other.kind(),
+            "the session could not be switched",
+        ),
+    }
 }
 
 /// Maps a failed inbox update onto its documented status without leaking a path.

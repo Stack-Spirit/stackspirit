@@ -1,8 +1,8 @@
 //! Command-line options and project selection for the daemon.
 //!
-//! Reads open the home with [`vowp_store::Store::open_read_only`]. The one write (inbox
-//! answer) uses [`vowp_store::Store::open_writable`]; neither path creates or migrates a
-//! home.
+//! Reads open the home with [`vowp_store::Store::open_read_only`]. The two writes (inbox
+//! answer and session switch) use [`vowp_store::Store::open_writable`]; neither path creates
+//! or migrates a home.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -16,9 +16,10 @@ use crate::error::DaemonError;
 pub const USAGE: &str = "\
 Usage: vowp-daemon [--home <dir>] [--project <name>] [--port <n>]
 
-Serves the VOWP loopback HTTP API for one project. Reads are token-free. The only
-write is POST /api/v1/inbox/{id}/answer, enabled by VOWP_API_TOKEN (missing or
-empty disables it). The listener binds 127.0.0.1 only.
+Serves the VOWP loopback HTTP API for one project. Reads are token-free. The two
+writes are POST /api/v1/inbox/{id}/answer and POST /api/v1/sessions/{id}/switch,
+enabled by VOWP_API_TOKEN (missing or empty disables them). The listener binds
+127.0.0.1 only.
 
 Options:
   --home <dir>      VOWP home (default: $VOWP_HOME, else $HOME/.vowp)

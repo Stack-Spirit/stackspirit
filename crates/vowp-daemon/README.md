@@ -3,14 +3,15 @@
 The loopback HTTP API for one VOWP project.
 
 `vowp-daemon [--home <dir>] [--project <name>] [--port <n>]` opens an existing VOWP home
-read-only for its GET endpoints (and writable-but-non-creating for the one answer write),
+read-only for its GET endpoints (and writable-but-non-creating for the two writes),
 serves the static board page at `GET /` and its phone alias `GET /board`, the
 static session list at `GET /sessions`, session detail at `GET /sessions/{id}`, the
 individual capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the read-only nodes
 page at `GET /nodes`, and the API endpoints `GET /api/v1/health`, `/api/v1/board`,
 `/api/v1/board/stream`, `/api/v1/jobs`, `/api/v1/sessions`,
 `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
-`/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox`,
+`/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`,
+`POST /api/v1/sessions/{id}/switch`, `/api/v1/inbox`,
 `/api/v1/nodes`, `POST /api/v1/inbox/{id}/answer` and `/api/v1/cost`, and binds
 `127.0.0.1` only. The default
 port is `0`, so the operating system
@@ -33,8 +34,9 @@ reconnecting state, starts the five-second polling fallback at the same cursor a
 the stream with bounded backoff; a browser without `EventSource` polls only. The session
 detail panel links to `/sessions/{id}/capsules/{capsule_id}`, which fetches
 `/api/v1/sessions/{id}/capsules/{capsuleId}` and renders the capsule's metadata and
-structured fields read-only, with a visible not-found line when the API answers 404. No Node
-or TypeScript build step is involved.
+structured fields read-only, with a visible not-found line when the API answers 404. The
+session detail page also carries the token-gated executor switch form. No Node or TypeScript
+build step is involved.
 
 The per-session stream at `/api/v1/sessions/{id}/events/stream?after_seq=` sends one
 `event: session` frame per stored `EventEnvelope`, a periodic `event: heartbeat` frame and a
@@ -51,21 +53,32 @@ compact capabilities/probe summary. It is read-only: no add, remove or probe con
 path; an empty list shows "No nodes." and a failed fetch keeps the last list and timestamp with
 an error line.
 
-The cost page renders grouped ledger rows and totals with a `by` selector. The inbox page
-renders open, answered and dismissed items with a state selector. Its open items carry the one
-browser write: a select of the item's options plus a free-text input (or only a text input when
-there are no options) and an Answer button. A token unlock panel keeps `VOWP_API_TOKEN` in
-`sessionStorage`, never in the URL; `401` clears it, `503` shows the writes-disabled message and
-`202` shows "Answer queued; the supervisor applies it on the next tick" and refreshes the list.
-Reads work without a token.
+The session detail page also carries the executor switch form: the current executor, a target
+executor input in `vowp session switch --to` syntax, a reason select, a force checkbox with a
+visible drain warning and a result line. It posts `{"to","reason","force"}` to
+`/api/v1/sessions/{id}/switch` with the same bearer token, shows "Switching…" while the switch
+may drain for up to five seconds, then shows the returned `Switch` state/error and refreshes
+the session. The server applies the CLI guards: an unknown session is `404`, a running session
+without `force`, a switching or closed session, and a limited target provider are `409`, and an
+invalid body or executor is `400`. A failed switch never claims the executor moved.
 
-Reads are token-free. `POST /api/v1/inbox/{id}/answer` is the only write and requires
-`Authorization: Bearer <VOWP_API_TOKEN>`. The binary reads the variable at startup; missing or
-empty disables writes with `503` and leaves reads available. The token is compared in constant
-time and never logged, echoed or put in a URL; rotate it by restarting the daemon. The handler
-opens the existing home with `Store::open_writable` (never `Store::open`), writes the same item
-answer and `answer_inbox` request row as `vowp inbox answer`, and leaves job state to the
-supervisor. The listener is loopback-only; this is not TLS or a multi-user login.
+The cost page renders grouped ledger rows and totals with a `by` selector. The inbox page
+renders open, answered and dismissed items with a state selector. Its open items carry the
+other browser write: a select of the item's options plus a free-text input (or only a text input
+when there are no options) and an Answer button. A token unlock panel on both pages keeps
+`VOWP_API_TOKEN` in `sessionStorage`, never in the URL; `401` clears it, `503` shows the
+writes-disabled message and `202` shows "Answer queued; the supervisor applies it on the next
+tick" and refreshes the list. Reads work without a token.
+
+Reads are token-free. `POST /api/v1/inbox/{id}/answer` and
+`POST /api/v1/sessions/{id}/switch` require `Authorization: Bearer <VOWP_API_TOKEN>`. The binary
+reads the variable at startup; missing or empty disables writes with `503` and leaves reads
+available. The token is compared in constant time and never logged, echoed or put in a URL;
+rotate it by restarting the daemon. Both handlers open the existing home with
+`Store::open_writable` (never `Store::open`): the answer writes the same item update and
+`answer_inbox` request row as `vowp inbox answer` and leaves job state to the supervisor; the
+switch runs the same `SessionService` switch as `vowp session switch` and never creates or
+migrates a home. The listener is loopback-only; this is not TLS or a multi-user login.
 
 The API serves the same `vowp-protocol` objects the CLI prints. Spec:
 [`docs/design/v0.3/http-api.md`](../../docs/design/v0.3/http-api.md).

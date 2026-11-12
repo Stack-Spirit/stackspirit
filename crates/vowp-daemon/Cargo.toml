@@ -33,6 +33,7 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "t
 vowp-core = { version = "0.2.0", path = "../vowp-core" }
 vowp-protocol = { version = "0.2.0", path = "../vowp-protocol" }
 vowp-store = { version = "0.2.0", path = "../vowp-store" }
+vowp-tmux = { version = "0.2.0", path = "../vowp-tmux" }
 
 [lints]
 workspace = true

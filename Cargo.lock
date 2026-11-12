@@ -1920,6 +1920,7 @@ dependencies = [
  "vowp-core",
  "vowp-protocol",
  "vowp-store",
+ "vowp-tmux",
 ]
 
 [[package]]

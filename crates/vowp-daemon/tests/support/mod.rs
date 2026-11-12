@@ -284,6 +284,11 @@ impl Server {
 
     fn start_with(paths: &NodePaths, selection: ProjectSelection, token: Option<&str>) -> Self {
         let state = ApiState::new(paths, &selection).with_api_token(token.map(ApiToken::new));
+        Self::start_with_state(state)
+    }
+
+    /// Starts the daemon with an already-built state, which tests use to inject fakes.
+    pub fn start_with_state(state: ApiState) -> Self {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let thread = std::thread::spawn(move || {

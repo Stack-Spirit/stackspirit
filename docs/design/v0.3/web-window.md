@@ -1,9 +1,9 @@
 # v0.3 — web / PWA window
 
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
-board, session, capsule, cost, inbox and nodes pages, the token-gated inbox answer and the PWA
-manifest/service-worker shell are implemented; the rest of this note is design. v0.1 has no
-browser UI and no listening socket.
+board, session, capsule, cost, inbox and nodes pages, the token-gated inbox answer and local
+session switch, and the PWA manifest/service-worker shell are implemented; the rest of this
+note is design. v0.1 has no browser UI and no listening socket.
 
 ## Goal
 
@@ -19,10 +19,11 @@ tunnel. It should answer the questions an operator asks from a browser without o
 - **Board** — job counts, running jobs, slot occupancy, limits, today's cost and open inbox count.
 
 The board uses the same JSON shape as `vowp board --json`; the session list and event timeline use
-the API from [`http-api.md`](http-api.md). Reads are token-free. Answering an inbox item is the one
-browser write in this slice: it uses the existing request queue behind the daemon bearer token.
-Switching an executor remains later and, when added, runs the same `SessionOps::switch` path as the
-CLI (the queue has no switch variant).
+the API from [`http-api.md`](http-api.md). Reads are token-free. This slice has two browser
+writes: answering an inbox item uses the existing request queue behind the daemon bearer token,
+and the session detail page switches the local executor through the same `SessionService` switch
+as the CLI (the queue has no switch variant). The switch is local-node only, requires the token,
+and shows the drain and its blocked result.
 
 ## Non-goals
 
@@ -50,9 +51,10 @@ CLI (the queue has no switch variant).
   `/nodes` a read-only node list and no node mutation or SSH path.
 - PWA manifest and a small hand-written service worker; cache only the static shell, never cache
   event data as authoritative.
-- The write token is kept in `sessionStorage`, never in a URL. The inbox page shows a one-field
-  unlock panel when no token is stored; a `401` clears it and shows the panel again. Rotating the
-  token means restarting the daemon with a new `VOWP_API_TOKEN`, then unlocking again.
+- The write token is kept in `sessionStorage`, never in a URL. The inbox page and the session
+  switch form show a one-field unlock panel when no token is stored; a `401` clears it and shows
+  the panel again. Rotating the token means restarting the daemon with a new `VOWP_API_TOKEN`,
+  then unlocking again.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
   The session timeline uses the per-session stream with `after_seq` resume. The board uses the
   snapshot `/api/v1/board/stream` with reconnect and polling fallback. The cost, inbox and nodes
@@ -65,8 +67,9 @@ CLI (the queue has no switch variant).
 2. **Asset embedding.** The first slice embeds one hand-written `web/index.html` with
    `include_str!`, so the binary carries the page and `cargo build` needs no asset step. Decide
    later whether a built `web/dist` is embedded at release time or served from disk in development.
-3. **Write scope.** Is executor switching safe from a browser before a live-input/queue design exists?
-   The switch protocol drains an active turn; the UI must show the drain and its `blocked` result.
+3. **Write scope.** Resolved for the local switch: it is allowed only behind the daemon write
+   token and an explicit `force` before it drains and stops a running turn. The form shows the
+   drain state and the returned `blocked` result. A run queue and live input remain later.
 4. **Mobile vs desktop.** The phone board is a separate note; decide whether it is the same app at a
    narrow width or a dedicated route with less data.
 
@@ -110,9 +113,17 @@ read-only panel with no edit control, and the panel's "View capsule" link opens
 `/sessions/{id}/capsules/{capsule_id}`. When the latest capsule is null the panel says "No capsule
 yet." The page renders the parent lineage returned by the API as a compact chain of links to
 `/sessions/{id}`, using the session-list titles when they are available and the id otherwise, and
-says "No parent sessions." when the chain is empty. The page carries
+says "No parent sessions." when the chain is empty. The detail page also carries the executor
+switcher: the current executor, a target input in `vowp session switch --to` syntax, a reason
+select, a force checkbox with a visible drain warning, the shared token unlock panel and a
+result line. Submitting posts `{to, reason, force}` to
+`POST /api/v1/sessions/{id}/switch` with `Authorization: Bearer` and shows "Switching…" while
+the current turn may drain for up to five seconds. A `200` shows the returned `Switch` state
+and `error` and refreshes the session; a failed request shows the `ApiError` message and never
+claims the executor moved. The token stays in `sessionStorage`, a `401` clears it and a `503`
+shows the disabled line; it is never put in the URL. The page carries
 `<noscript>The session view requires JavaScript.</noscript>`, links back to the board and to
-cost and inbox, and never prints a token, home path or provider secret.
+cost and inbox, and never prints the token value, the home path or a provider secret.
 
 The capsule page is `crates/vowp-daemon/web/capsule.html`, served at
 `GET /sessions/{id}/capsules/{capsule_id}`. The shell reads its own path and fetches
@@ -199,7 +210,10 @@ polling fallback without running a browser. The session-page test pins the strea
 `session` and `heartbeat` handlers, the reconnect text and the polling fallback. It also pins the
 session-detail path, the capsule field labels, the lineage links, the "View capsule" link and the
 no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data
-source. The capsule-page test pins the capsule API path, the metadata and section labels, the
+source. It also pins the switch route, the `Authorization: Bearer` header, the shared
+`vowp-api-token` storage key, the force warning and the visible state/error line, and proves the
+page and its API response never contain the token value or home path. The capsule-page test pins
+the capsule API path, the metadata and section labels, the
 session back link, the `<noscript>` fallback and the absence of paths or secrets, fetches
 `/api/v1/sessions/{id}/capsules/{capsuleId}` in the same test to prove the page's data source, and
 checks that an unknown session or capsule is the API's `404` behind the page's not-found text. The
@@ -213,7 +227,7 @@ the service-worker headers, checks the bounded `SHELL` list and the API/SSE bypa
 every page shell links and registers the service worker without printing a home path or token.
 
 Still later: the cost dashboard and charts, the reconnect UI on the pages that still
-poll, executor switching, dismiss and the other write actions, and a token rotation service.
+poll, cross-node switching, dismiss and the other write actions, and a token rotation service.
 Offline data entry, offline event data and push notifications remain out of scope. Markdown
 rendering, capsule editing and capsule writes remain out of scope. The API routes and their
 fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.

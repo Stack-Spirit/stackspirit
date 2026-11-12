@@ -105,6 +105,37 @@
     background: var(--card);
     font-weight: 600;
   }
+  .switch-form { display: grid; gap: .55rem; max-width: 34rem; }
+  .switch-form label { font-weight: 600; }
+  .switch-form input[type="text"],
+  .switch-form input[type="password"],
+  .switch-form select {
+    width: 100%;
+    padding: .45rem .55rem;
+    border: 1px solid var(--line);
+    border-radius: .4rem;
+    background: var(--paper);
+    color: var(--ink);
+    font: inherit;
+  }
+  .switch-form button {
+    justify-self: start;
+    padding: .45rem .9rem;
+    border: 1px solid var(--accent);
+    border-radius: .4rem;
+    background: var(--accent);
+    color: var(--paper);
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .switch-form button:disabled { opacity: .6; cursor: progress; }
+  .switch-check { display: flex; gap: .5rem; align-items: flex-start; font-weight: 600; }
+  .switch-check input { margin-top: .25rem; }
+  .warning { margin: 0; color: var(--warn); font-weight: 600; }
+  .switch-status { margin: .7rem 0 0; font-weight: 600; }
+  .switch-status[data-state="error"] { color: var(--warn); }
+  .switch-status[data-state="done"] { color: var(--accent); }
   [hidden] { display: none !important; }
   @media (max-width: 360px) {
     main { padding: .75rem .5rem 2rem; gap: .65rem; }
@@ -172,6 +203,40 @@
         <div class="fact"><dt>Created</dt><dd>–</dd></div>
         <div class="fact"><dt>Updated</dt><dd>–</dd></div>
       </dl>
+    </div>
+
+    <div class="card" id="switch-panel" aria-labelledby="switch-heading">
+      <h2 id="switch-heading">Switch executor</h2>
+      <p id="switch-current" class="muted">Current executor: loading…</p>
+      <section id="switch-unlock" aria-labelledby="switch-unlock-heading" hidden>
+        <p id="switch-unlock-heading"><strong>Unlock switching</strong></p>
+        <p class="muted">Paste the daemon write token. It stays in this tab's sessionStorage and is never put in the URL.</p>
+        <form id="switch-unlock-form" class="switch-form">
+          <label for="switch-token">Token</label>
+          <input id="switch-token" name="token" type="password" autocomplete="off" spellcheck="false">
+          <button type="submit">Save token</button>
+        </form>
+      </section>
+      <form id="switch-form" class="switch-form">
+        <label for="switch-to">Target executor</label>
+        <input id="switch-to" name="to" type="text" autocomplete="off" spellcheck="false"
+               placeholder="opencode:deepseek/deepseek-flash#max" required>
+        <label for="switch-reason">Reason</label>
+        <select id="switch-reason" name="reason">
+          <option value="user" selected>User request</option>
+          <option value="limit">Provider limit</option>
+          <option value="context">Context window</option>
+          <option value="failover">Failover</option>
+          <option value="takeover">Takeover</option>
+        </select>
+        <label class="switch-check" for="switch-force">
+          <input id="switch-force" name="force" type="checkbox">
+          <span>Force a running turn to drain and stop</span>
+        </label>
+        <p class="warning">Forcing a switch lets the current turn drain for up to five seconds, then stops it. The result may be a blocked session rather than a clean handoff.</p>
+        <button id="switch-submit" type="submit">Switch executor</button>
+      </form>
+      <p id="switch-status" class="switch-status" role="status" aria-live="polite" hidden></p>
     </div>
 
     <div class="card" id="capsule-panel" aria-labelledby="capsule-heading">
@@ -263,6 +328,7 @@
   const EVENT_LIMIT = 200;
   const RETRY_MIN_MS = 1000;
   const RETRY_MAX_MS = 15000;
+  const TOKEN_KEY = "vowp-api-token";
   const errorLine = document.getElementById("error");
   const updatedLine = document.getElementById("updated");
   const liveLine = document.getElementById("live");
@@ -289,6 +355,16 @@
   const capsuleQuestions = document.getElementById("capsule-questions");
   const lineageList = document.getElementById("lineage");
   const lineageEmpty = document.getElementById("lineage-empty");
+  const switchCurrent = document.getElementById("switch-current");
+  const switchUnlock = document.getElementById("switch-unlock");
+  const switchUnlockForm = document.getElementById("switch-unlock-form");
+  const switchToken = document.getElementById("switch-token");
+  const switchForm = document.getElementById("switch-form");
+  const switchTo = document.getElementById("switch-to");
+  const switchReason = document.getElementById("switch-reason");
+  const switchForce = document.getElementById("switch-force");
+  const switchSubmit = document.getElementById("switch-submit");
+  const switchStatus = document.getElementById("switch-status");
 
   const sessionId = pathSessionId();
   const detailMode = sessionId !== null;
@@ -380,6 +456,116 @@
     const detail = error && error.message ? error.message : "the daemon may be down";
     const when = lastUpdated ? " Showing data from " + lastUpdated.toLocaleString() + "." : "";
     return "Could not load " + what + " (" + detail + ")." + when;
+  }
+
+  function storedToken() {
+    try {
+      return window.sessionStorage.getItem(TOKEN_KEY) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function setStoredToken(value) {
+    try {
+      if (value) {
+        window.sessionStorage.setItem(TOKEN_KEY, value);
+      } else {
+        window.sessionStorage.removeItem(TOKEN_KEY);
+      }
+    } catch {
+      // A browser with storage disabled cannot unlock; reads still work.
+    }
+    updateSwitchUnlock();
+  }
+
+  function updateSwitchUnlock() {
+    switchUnlock.hidden = storedToken() !== "";
+  }
+
+  function showSwitchStatus(message, state) {
+    switchStatus.textContent = message;
+    switchStatus.dataset.state = state;
+    switchStatus.hidden = false;
+  }
+
+  function hideSwitchStatus() {
+    switchStatus.textContent = "";
+    switchStatus.hidden = true;
+    delete switchStatus.dataset.state;
+  }
+
+  async function errorDetail(response) {
+    try {
+      const body = await response.json();
+      if (body && body.error && body.error.message) return body.error.message;
+    } catch {
+      // Fall back to the status when the body is not the API error document.
+    }
+    return "HTTP " + response.status;
+  }
+
+  function describeSwitch(result) {
+    const from = formatValue(result.from_executor, "none");
+    const to = formatValue(result.to_executor, "unknown");
+    const capsule = result.capsule_id ? " (capsule " + result.capsule_id + ")" : "";
+    let text = "Switch " + formatValue(result.state, "unknown") + ": " + from + " -> " + to + capsule;
+    if (result.error) text += ". Error: " + result.error;
+    return text;
+  }
+
+  async function submitSwitch(event) {
+    event.preventDefault();
+    const token = storedToken();
+    if (!token) {
+      updateSwitchUnlock();
+      showError("Unlock switching with the daemon write token first.");
+      return;
+    }
+    const to = switchTo.value.trim();
+    if (!to) {
+      showError("Enter a target executor, for example opencode:deepseek/deepseek-flash#max.");
+      return;
+    }
+    hideSwitchStatus();
+    clearError();
+    switchSubmit.disabled = true;
+    showSwitchStatus("Switching… the current turn may drain for up to five seconds.", "working");
+    try {
+      const response = await fetch("/api/v1/sessions/" + encodeURIComponent(sessionId) + "/switch", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          to,
+          reason: switchReason.value,
+          force: switchForce.checked,
+        }),
+      });
+      if (response.status === 200) {
+        const switched = await response.json();
+        showSwitchStatus(describeSwitch(switched), switched.error ? "error" : "done");
+        await refreshDetail();
+        return;
+      }
+      if (response.status === 401) {
+        setStoredToken("");
+        showSwitchStatus("The token was rejected. Unlock with the current daemon write token.", "error");
+        return;
+      }
+      if (response.status === 503) {
+        showSwitchStatus("Writes are disabled: the daemon was started without VOWP_API_TOKEN.", "error");
+        return;
+      }
+      showSwitchStatus("Could not switch the session (" + (await errorDetail(response)) + ").", "error");
+    } catch (error) {
+      const detail = error && error.message ? error.message : "the daemon may be down";
+      showSwitchStatus("Could not switch the session (" + detail + ").", "error");
+    } finally {
+      switchSubmit.disabled = false;
+    }
   }
 
   function setLive(message, state) {
@@ -691,6 +877,7 @@
       fact("Created", formatTime(session.created_at), false),
       fact("Updated", formatTime(session.updated_at), false)
     );
+    switchCurrent.textContent = "Current executor: " + formatValue(session.executor, "none");
   }
 
   function renderCapsule(capsule) {
@@ -856,6 +1043,21 @@
     if (result !== "ok") startFallbackPolling();
     startStream();
   }
+
+  switchForm.addEventListener("submit", submitSwitch);
+  switchUnlockForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = switchToken.value.trim();
+    if (!value) {
+      showError("Enter the daemon write token.");
+      return;
+    }
+    setStoredToken(value);
+    switchToken.value = "";
+    clearError();
+    showSwitchStatus("Token saved for this tab.", "done");
+  });
+  updateSwitchUnlock();
 
   if (detailMode) {
     heading.textContent = "Session";

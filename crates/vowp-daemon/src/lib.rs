@@ -6,8 +6,9 @@
 //! pages at `GET /cost`, `GET /inbox` and `GET /nodes`, and the API endpoints
 //! `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`,
 //! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
-//! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox`,
-//! `/api/v1/nodes` and `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints.
+//! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`,
+//! `/api/v1/sessions/{id}/switch`, `/api/v1/inbox`, `/api/v1/nodes` and `/api/v1/cost` with
+//! the same `vowp-protocol` objects the CLI prints.
 //! The session detail
 //! contains the exact `Session`, its latest capsule and at most 32 parent links, nearest
 //! parent first; the capsule route answers only for a capsule belonging to that session.
@@ -23,19 +24,22 @@
 //! reconnect state, bounded-backoff retry and a five-second polling fallback. The capsule page
 //! fetches one capsule from `/api/v1/sessions/{id}/capsules/{capsuleId}` and renders its
 //! metadata and structured fields read-only.
-//! The cost page renders grouped ledger rows and totals with a `by` selector. The inbox page
-//! renders open, answered and dismissed items with a state selector, and its answer form is
-//! the only browser write. The nodes page fetches the stored nodes from `/api/v1/nodes` on
-//! load and every five seconds and renders them read-only, with no add, remove or probe path.
+//! The session detail page also carries the token-gated executor switch form. The cost page
+//! renders grouped ledger rows and totals with a `by` selector. The inbox page renders open,
+//! answered and dismissed items with a state selector, and its answer form is one of the two
+//! browser writes. The nodes page fetches the stored nodes from `/api/v1/nodes` on load and
+//! every five seconds and renders them read-only, with no add, remove or probe path.
 //!
-//! Reads are token-free. `POST /api/v1/inbox/{id}/answer` requires
-//! `Authorization: Bearer <VOWP_API_TOKEN>` and answers `503` when the daemon was started
-//! without a token. The handler opens the home writable with
-//! [`vowp_store::Store::open_writable`], writes the same item update and `answer_inbox`
-//! request row as `vowp inbox answer`, and leaves job state to the supervisor. It never calls
-//! `Store::open`, so it never creates or migrates a home. Every other request uses
-//! [`vowp_store::Store::open_read_only`]. The listener binds `127.0.0.1` only, and the daemon
-//! never prints a home path, token or secret.
+//! Reads are token-free. `POST /api/v1/inbox/{id}/answer` and
+//! `POST /api/v1/sessions/{id}/switch` require `Authorization: Bearer <VOWP_API_TOKEN>` and
+//! answer `503` when the daemon was started without a token. The answer handler opens the
+//! home writable with [`vowp_store::Store::open_writable`], writes the same item update and
+//! `answer_inbox` request row as `vowp inbox answer`, and leaves job state to the supervisor.
+//! The switch handler runs the same `SessionService` switch as `vowp session switch` over a
+//! writable store, with the CLI's running/switch/closed/limit guards and a five-second drain.
+//! Neither write calls `Store::open`, so neither creates or migrates a home. Every other
+//! request uses [`vowp_store::Store::open_read_only`]. The listener binds `127.0.0.1` only,
+//! and the daemon never prints a home path, token or secret.
 //!
 //! Spec: `docs/design/v0.3/http-api.md`.
 
@@ -49,7 +53,7 @@ mod error;
 mod filters;
 mod stream;
 
-pub use app::{ApiState, router, serve, serve_with_shutdown};
+pub use app::{ApiState, build_deps, router, serve, serve_with_shutdown};
 pub use auth::ApiToken;
 pub use config::{Invocation, Options, ProjectSelection, USAGE, parse_invocation, select_project};
 pub use error::DaemonError;

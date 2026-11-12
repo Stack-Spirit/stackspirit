@@ -361,7 +361,7 @@ fn inbox_page_serves_the_shell_and_the_fixture_items() {
         "window.sessionStorage.setItem(TOKEN_KEY, value)",
         "window.sessionStorage.removeItem(TOKEN_KEY)",
         "sessionStorage",
-        // The answer form posts JSON to the one write route with a bearer header.
+        // The answer form posts JSON to the answer write route with a bearer header.
         "input.type = \"text\"",
         "input.maxLength = MAX_ANSWER_BYTES",
         "form.appendChild(select)",

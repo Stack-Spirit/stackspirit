@@ -394,7 +394,9 @@ fn assert_shell(page: &HttpResponse, fixture: &Fixture) {
     let home = fixture.paths.root().display().to_string();
     assert!(!page.body.contains(&home), "page leaked the home path");
     let lowered = page.body.to_ascii_lowercase();
-    for forbidden in ["token", "secret", "api_key", "apikey"] {
+    // The switch form legitimately carries the token unlock and Authorization code; only
+    // actual secret values and unrelated secret formats are forbidden.
+    for forbidden in ["secret", "api_key", "apikey"] {
         assert!(
             !lowered.contains(forbidden),
             "session page must not mention {forbidden:?}"
@@ -523,6 +525,49 @@ fn session_page_shows_the_fixture_events() {
     // Unknown non-page paths still use the API's JSON 404 fallback.
     let unknown = get(server.address, &format!("/sessions/{}/extra", fixture.session_id));
     assert_eq!(unknown.status, 404, "body: {}", unknown.body);
+}
+
+#[test]
+fn session_page_pins_the_token_gated_switch_form() {
+    let fixture = Fixture::new();
+    let server = Server::start(&fixture);
+
+    let page = get(server.address, &format!("/sessions/{}", fixture.session_id));
+    assert_shell(&page, &fixture);
+    for needle in [
+        "id=\"switch-panel\"",
+        "id=\"switch-form\"",
+        "id=\"switch-unlock-form\"",
+        "TOKEN_KEY = \"vowp-api-token\"",
+        "function storedToken()",
+        "id=\"switch-token\"",
+        "Authorization: \"Bearer \" + token",
+        "fetch(\"/api/v1/sessions/\" + encodeURIComponent(sessionId) + \"/switch\"",
+        "method: \"POST\"",
+        "force: switchForce.checked",
+        "id=\"switch-force\"",
+        "drain for up to five seconds",
+        "id=\"switch-status\"",
+        "function describeSwitch(result)",
+        "result.error",
+        "await refreshDetail()",
+        "Current executor:",
+    ] {
+        assert!(page.body.contains(needle), "switch form is missing {needle:?}");
+    }
+
+    assert!(
+        !page.body.contains("token="),
+        "session page must not put the token in a query string"
+    );
+    assert!(
+        !page.body.contains("searchParams.set(\"token\""),
+        "session page must not put the token in the URL"
+    );
+    assert!(
+        !page.body.contains("test-write-token"),
+        "session page must not embed a token value"
+    );
 }
 
 #[test]

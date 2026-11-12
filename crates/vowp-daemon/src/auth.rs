@@ -1,8 +1,8 @@
-//! The bearer token that gates the daemon's one write endpoint.
+//! The bearer token that gates the daemon's write endpoints.
 //!
-//! The value comes from `VOWP_API_TOKEN` at startup. Missing or empty disables writes; the
-//! token is never logged, echoed, or accepted from a URL. The type has a redacted [`Debug`]
-//! and compares candidate values without an early exit.
+//! The value comes from `VOWP_API_TOKEN` at startup. Missing or empty disables both writes;
+//! the token is never logged, echoed, or accepted from a URL. The type has a redacted
+//! [`Debug`] and compares candidate values without an early exit.
 
 use std::fmt;
 
@@ -11,8 +11,9 @@ use axum::http::header::AUTHORIZATION;
 
 /// The daemon's write token, read from `VOWP_API_TOKEN`.
 ///
-/// Reads stay token-free. Only `POST /api/v1/inbox/{id}/answer` checks this value, and a
-/// daemon started without it answers `503`.
+/// Reads stay token-free. Only `POST /api/v1/inbox/{id}/answer` and
+/// `POST /api/v1/sessions/{id}/switch` check this value, and a daemon started without it
+/// answers `503`.
 #[derive(Clone)]
 pub struct ApiToken(String);
 
