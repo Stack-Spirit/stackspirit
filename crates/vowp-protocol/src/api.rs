@@ -3,10 +3,12 @@
 //! Spec: `docs/design/v0.3/http-api.md`. The API serves the same `vowp-protocol`
 //! objects the CLI prints; these are only the transport documents layered on top.
 //!
-//! Reads are token-free. The only write is `POST /api/v1/inbox/{id}/answer`, gated by the
-//! daemon's bearer token (`VOWP_API_TOKEN`); its request body is [`InboxAnswerRequest`] and
-//! its response reuses [`InboxItem`]. The per-session and board SSE streams are transports
-//! in `vowp-daemon`, not document types here. The listener stays loopback-only.
+//! Reads are token-free. The two writes are `POST /api/v1/inbox/{id}/answer` and
+//! `POST /api/v1/sessions/{id}/switch`, both gated by the daemon's bearer token
+//! (`VOWP_API_TOKEN`). Their request bodies are [`InboxAnswerRequest`] and
+//! [`SessionSwitchRequest`]; the answer response reuses [`InboxItem`] and the switch
+//! response reuses [`Switch`]. The per-session and board SSE streams are transports in
+//! `vowp-daemon`, not document types here. The listener stays loopback-only.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::capsule::Capsule;
 use crate::cost::Tokens;
 use crate::error::ErrorKind;
-use crate::event::EventEnvelope;
+use crate::event::{EventEnvelope, SwitchReason};
 use crate::ids::{JobId, NodeName, ProjectName, SessionId};
 use crate::inbox::InboxItem;
 use crate::job::Job;
@@ -159,6 +161,29 @@ pub type InboxPage = Page<InboxItem>;
 pub struct InboxAnswerRequest {
     /// Answer text to store on the inbox item.
     pub answer: String,
+}
+
+/// Request body for `POST /api/v1/sessions/{id}/switch`.
+///
+/// `to` uses the same `vowp session switch --to` executor syntax the CLI parses. The server
+/// rejects an invalid executor with `400`, defaults `reason` to [`SwitchReason::User`] and
+/// defaults `force` to false. A running session needs `force` before it may be drained and
+/// stopped. The response is the completed [`Switch`]; no separate response type is introduced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSwitchRequest {
+    /// Target executor in `harness:model[@effort][#variant]` syntax.
+    pub to: String,
+    /// Why the switch happens; defaults to a human request.
+    #[serde(default = "default_switch_reason")]
+    pub reason: SwitchReason,
+    /// Allow switching a session whose turn is still running.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Returns the default switch reason for a web request.
+fn default_switch_reason() -> SwitchReason {
+    SwitchReason::User
 }
 
 /// The `/api/v1/cost` document.

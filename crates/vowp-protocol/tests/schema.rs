@@ -112,6 +112,7 @@ const LISTED_TYPES: &[&str] = &[
     "SessionDetail",
     "EventPage",
     "InboxAnswerRequest",
+    "SessionSwitchRequest",
     "InboxPage",
     "CostReport",
     "CostRow",

@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
-    InboxAnswerRequest, InboxPage, JobPage, NodePage, Page, SessionDetail, SessionPage,
+    InboxAnswerRequest, InboxPage, JobPage, NodePage, Page, SessionDetail, SessionPage, SessionSwitchRequest,
 };
 use vowp_protocol::schema::schema_for_name;
 use vowp_protocol::{
     ErrorKind, InboxId, InboxItem, InboxKind, InboxState, JobId, LimitRowKind, NodeName, ProjectName, Session,
-    SessionId, SessionState, Timestamp, Tokens,
+    SessionId, SessionState, SwitchReason, Timestamp, Tokens,
 };
 
 /// Fixed test instant.
@@ -423,6 +423,62 @@ fn inbox_answer_request_has_one_required_answer_field() {
 }
 
 #[test]
+fn session_switch_request_defaults_reason_and_force_and_has_a_schema() {
+    let minimal = serde_json::from_value::<SessionSwitchRequest>(json!({
+        "to": "opencode:deepseek/deepseek-flash#max"
+    }))
+    .expect("minimal switch request");
+    assert_eq!(minimal.to, "opencode:deepseek/deepseek-flash#max");
+    assert_eq!(minimal.reason, SwitchReason::User);
+    assert!(!minimal.force);
+
+    let request = SessionSwitchRequest {
+        to: "claude-code:claude-sonnet-5-5@medium".to_owned(),
+        reason: SwitchReason::Context,
+        force: true,
+    };
+    let value = serde_json::to_value(&request).expect("switch request JSON");
+    assert_eq!(
+        value,
+        json!({
+            "to": "claude-code:claude-sonnet-5-5@medium",
+            "reason": "context",
+            "force": true,
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionSwitchRequest>(value).expect("switch request roundtrip"),
+        request
+    );
+
+    let schema = schema_for_name("SessionSwitchRequest").expect("SessionSwitchRequest is exported");
+    for field in ["to", "reason", "force"] {
+        assert!(
+            schema["properties"].get(field).is_some(),
+            "SessionSwitchRequest schema has no {field} property: {schema}"
+        );
+    }
+    assert!(
+        schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("to"))),
+        "SessionSwitchRequest schema does not require to: {schema}"
+    );
+    assert!(
+        !schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("reason")) || required.contains(&json!("force"))),
+        "reason and force must be optional: {schema}"
+    );
+    // The generated schema carries the default reason so a client can see it.
+    let reason = schema["properties"]["reason"].to_string();
+    assert!(
+        reason.contains("user"),
+        "SessionSwitchRequest reason schema does not show the user default: {schema}"
+    );
+}
+
+#[test]
 fn cost_report_matches_the_cli_json_shape() {
     let report = CostReport {
         by: "job".to_owned(),
@@ -591,6 +647,7 @@ fn api_documents_are_exported_schemas() {
         "SessionDetail",
         "EventPage",
         "InboxAnswerRequest",
+        "SessionSwitchRequest",
         "InboxPage",
         "CostReport",
         "CostRow",

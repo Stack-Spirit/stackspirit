@@ -94,6 +94,7 @@ python3 docs/reference/check-reference.py
 | `SessionDetail` | [session-detail.md](session-detail.md) |
 | `SessionPage` | [session-page.md](session-page.md) |
 | `SessionSurfaceCard` | [session-surface-card.md](session-surface-card.md) |
+| `SessionSwitchRequest` | [session-switch-request.md](session-switch-request.md) |
 | `Snapshot` | [snapshot.md](snapshot.md) |
 | `SupervisorSnapshot` | [supervisor-snapshot.md](supervisor-snapshot.md) |
 | `Surface` | [surface.md](surface.md) |
