@@ -103,29 +103,68 @@ fn parent_workspace(store: &Store, job: &Job) -> Result<Option<(JobId, String, S
     Ok(None)
 }
 
-/// Writes the job brief if it is missing; an existing planner-written brief is never touched.
+/// Writes the job brief if the worktree does not already have one.
+///
+/// Precedence:
+/// 1. an existing worktree brief is never overwritten;
+/// 2. otherwise the project-checkout copy at `<repo>/<job.brief>` is copied byte-for-byte,
+///    generated front matter included;
+/// 3. otherwise a generated one-line fallback is written.
+///
+/// The project checkout is resolved the same way dispatch resolves it: the configured
+/// `[project].path`, or the project row when the config omits it.
 pub(crate) fn write_brief(deps: &Deps, job: &Job, worktree: &Path) -> Result<(), CoreError> {
     let path = worktree.join(&job.brief);
     if path.is_file() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| CoreError::Io {
-            path: parent.display().to_string(),
+    let source = project_checkout(deps, job)?.join(&job.brief);
+    if source.is_file() {
+        ensure_parent(&path)?;
+        std::fs::copy(&source, &path).map_err(|source| CoreError::Io {
+            path: path.display().to_string(),
             source,
         })?;
+        return Ok(());
     }
+    write_generated_brief(job, &path)
+}
+
+/// Resolves the project's main checkout, matching `Supervisor::start_run`'s `repo`.
+fn project_checkout(deps: &Deps, job: &Job) -> Result<PathBuf, CoreError> {
+    if let Some(path) = &deps.config.project.path {
+        return Ok(PathBuf::from(path));
+    }
+    let store = deps.open_store()?;
+    super::main_repo(deps, &store, &job.project)
+}
+
+/// Writes the generated one-line fallback when the brief path is missing.
+fn write_generated_brief(job: &Job, path: &Path) -> Result<(), CoreError> {
+    if path.is_file() {
+        return Ok(());
+    }
+    ensure_parent(path)?;
     let body = format!(
         "Do job {job}. Read AGENTS.md first, change only the paths in `owns`, commit on the job branch, run the gates, and write the report at {report}.\n",
         job = job.id,
         report = job.report,
     );
     let brief = Brief::from_job(job, &body);
-    std::fs::write(&path, brief.render()).map_err(|source| CoreError::Io {
+    std::fs::write(path, brief.render()).map_err(|source| CoreError::Io {
         path: path.display().to_string(),
         source,
-    })?;
-    let _ = deps;
+    })
+}
+
+/// Creates the brief's parent directory when it is missing.
+fn ensure_parent(path: &Path) -> Result<(), CoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| CoreError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
     Ok(())
 }
 
@@ -235,7 +274,7 @@ pub(crate) fn create_child_job(
 }
 
 /// Creates the decision job for an exhausted `parent` and blocks its dependents.
-pub(crate) fn create_decision_job(deps: &Deps, store: &Store, parent: &Job) -> Result<Job, CoreError> {
+pub(crate) fn create_decision_job(_deps: &Deps, store: &Store, parent: &Job) -> Result<Job, CoreError> {
     let id = JobId::parse(&format!("{}-decision", parent.id))?;
     if let Some(existing) = store.job(&id)? {
         return Ok(existing);
@@ -273,7 +312,9 @@ pub(crate) fn create_decision_job(deps: &Deps, store: &Store, parent: &Job) -> R
     if let Some(worktree) = &parent.worktree {
         let path = PathBuf::from(worktree);
         if path.is_dir() {
-            write_brief(deps, &decision, &path)?;
+            // A decision job has no planner-written project copy in hand, so it keeps the
+            // generated fallback rather than consulting the parent's project checkout.
+            write_generated_brief(&decision, &path.join(&decision.brief))?;
         }
     }
     Ok(store.require_job(&decision.id)?)
