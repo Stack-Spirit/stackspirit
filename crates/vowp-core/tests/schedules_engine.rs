@@ -496,6 +496,93 @@ fn tick_arms_schedule_without_next_run() {
 }
 
 #[test]
+fn interval_keeps_creation_anchor_across_ticks() {
+    let mut config = VowpConfig::with_defaults_for_tests();
+    config.schedules = vec![vowp_protocol::ScheduleConfig {
+        name: "phase".to_owned(),
+        cron: None,
+        every: Some("every 30m".to_owned()),
+        tz: Some("UTC".to_owned()),
+        missed: Some(MissedPolicy::RunOnce),
+        action: ScheduleAction::Loop {
+            loop_name: "l4-planner".to_owned(),
+        },
+    }];
+    let fixture = Fixture::new(config.clone());
+    let created = timestamp("2026-11-09T10:07:00Z");
+    fixture.clock.set(created);
+    fixture.engine.sync_from_config(&fixture.store, &config).expect("sync");
+
+    let schedule = fixture.store.schedule("phase").expect("lookup").expect("schedule");
+    assert_eq!(schedule.created_at, created);
+    assert_eq!(schedule.next_run_at, Some(timestamp("2026-11-09T10:37:00Z")));
+
+    // Neither startup nor an ordinary tick before 10:37 may move the occurrence.
+    fixture.clock.set(timestamp("2026-11-09T10:20:00Z"));
+    let now = fixture.clock.now();
+    assert!(
+        fixture
+            .engine
+            .catch_up(&fixture.store, now)
+            .expect("catch up")
+            .is_empty()
+    );
+    assert!(fixture.engine.tick(&fixture.store, now).expect("tick").is_empty());
+    let armed = fixture.store.schedule("phase").expect("lookup").expect("schedule");
+    assert_eq!(armed.next_run_at, Some(timestamp("2026-11-09T10:37:00Z")));
+
+    // At 10:37 it fires and re-arms on the same creation phase.
+    fixture.clock.set(timestamp("2026-11-09T10:37:00Z"));
+    let now = fixture.clock.now();
+    let due = fixture.engine.tick(&fixture.store, now).expect("due tick");
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].due_at, timestamp("2026-11-09T10:37:00Z"));
+    fixture.engine.fire(&fixture.store, &due[0]).expect("fire");
+    let rearmed = fixture.store.schedule("phase").expect("lookup").expect("schedule");
+    assert_eq!(rearmed.next_run_at, Some(timestamp("2026-11-09T11:07:00Z")));
+}
+
+#[test]
+fn tick_arms_unarmed_schedule_from_created_at() {
+    let fixture = Fixture::new(VowpConfig::with_defaults_for_tests());
+    fixture.clock.set(timestamp("2026-11-09T10:07:00Z"));
+    fixture.schedule(
+        "unarmed",
+        "every 30m",
+        fixture.job_template("unarmed"),
+        MissedPolicy::RunOnce,
+        None,
+    );
+
+    fixture.clock.set(timestamp("2026-11-09T10:20:00Z"));
+    let now = fixture.clock.now();
+    assert!(fixture.engine.tick(&fixture.store, now).expect("tick").is_empty());
+    let armed = fixture.store.schedule("unarmed").expect("lookup").expect("schedule");
+    assert_eq!(armed.next_run_at, Some(timestamp("2026-11-09T10:37:00Z")));
+}
+
+#[test]
+fn catch_up_rearms_from_created_at() {
+    let fixture = Fixture::new(VowpConfig::with_defaults_for_tests());
+    fixture.clock.set(timestamp("2026-11-09T10:07:00Z"));
+    fixture.schedule(
+        "missed",
+        "every 30m",
+        fixture.job_template("missed"),
+        MissedPolicy::RunOnce,
+        Some(timestamp("2026-11-09T10:37:00Z")),
+    );
+
+    fixture.clock.set(timestamp("2026-11-09T12:00:00Z"));
+    let now = fixture.clock.now();
+    let due = fixture.engine.catch_up(&fixture.store, now).expect("catch up");
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].due_at, timestamp("2026-11-09T10:37:00Z"));
+    let rearmed = fixture.store.schedule("missed").expect("lookup").expect("schedule");
+    assert_eq!(rearmed.next_run_at, Some(timestamp("2026-11-09T12:07:00Z")));
+}
+
+#[test]
 fn loop_action_pushes_run_loop_request() {
     let fixture = Fixture::new(VowpConfig::with_defaults_for_tests());
     let now = fixture.clock.now();
