@@ -4,7 +4,7 @@
 //! append-only log; the rows here are the store index. Ids are accepted by unique prefix of
 //! at least six characters.
 
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{BufRead, BufReader, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -24,15 +24,21 @@ use vowp_protocol::{
     SessionId, SessionRole, SessionState, Switch, SwitchEvent, SwitchId, SwitchReason, SwitchState, Timestamp,
     ToolCall, ToolResult, UserMessage,
 };
-use vowp_store::session_log::SessionLog;
-use vowp_store::{SessionFilter, Store};
+use vowp_store::reindex::reindex;
+use vowp_store::session_log::{
+    SESSION_DIR_MAX_BYTES, SessionDirManifest, SessionLog, session_dir_manifest, verify_session_dir,
+    write_session_dir_manifest,
+};
+use vowp_store::{NodePaths, SessionFilter, Store};
 
 use crate::cli::{
-    ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionExportArgs, SessionImportArgs, SessionLsArgs,
-    SessionNewArgs, SessionPullArgs, SessionShowArgs, SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
+    ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionDirExportArgs, SessionExportArgs, SessionImportArgs,
+    SessionLsArgs, SessionNewArgs, SessionPullArgs, SessionShowArgs, SessionSwitchArgs, SessionTailArgs,
+    SessionWatchArgs,
 };
 use crate::node_ctx::NodeRole;
 use crate::output::{Table, local_time_at, print_json};
+use crate::remote::{RemoteExit, RemoteStream};
 use crate::{CliError, Ctx, IoStreams};
 
 /// Runs one session subcommand.
@@ -47,6 +53,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SessionCommand) -> Resul
         SessionCommand::Export(args) => export(ctx, io, args),
         SessionCommand::Import(args) => import(ctx, io, args),
         SessionCommand::Pull(args) => pull(ctx, io, args),
+        SessionCommand::DirExport(args) => dir_export(ctx, io, args),
         SessionCommand::Watch(args) => watch(ctx, io, args),
         SessionCommand::Tail(args) => tail(ctx, io, args),
         SessionCommand::TurnBegin(args) => turn_begin(ctx, io, args),
@@ -331,24 +338,17 @@ struct PullOutput {
 
 /// Pulls a session bundle from another node and imports it locally.
 ///
-/// The bundle is captured from the remote `session export` stdout, staged in a private
-/// temporary directory and verified by [`bundle::from_json`] before [`bundle::import_with_mode`]
-/// creates anything. A failed remote run, malformed bundle or checksum mismatch therefore
-/// imports nothing. The default creates a child whose parent is the source; `--same-id`
-/// keeps the source id and refuses a duplicate instead of overwriting.
+/// The default path captures a bundle from the remote `session export` stdout, stages it in
+/// a private temporary directory and verifies it by [`bundle::from_json`] before
+/// [`bundle::import_with_mode`] creates anything. A failed remote run, malformed bundle or
+/// checksum mismatch therefore imports nothing. The default creates a child whose parent is
+/// the source; `--same-id` keeps the source id and refuses a duplicate instead of
+/// overwriting. `--full` instead copies the whole session directory; see [`pull_full`].
 fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32, CliError> {
-    let node = NodeName::parse(&args.node)?;
-    let store = ctx.store()?;
-    let row = store.require_node(&node)?;
-    if row.is_local {
-        return Err(CliError::Invalid(format!(
-            "node {node} is local; use `vowp session export` and `vowp session import` for a local copy"
-        )));
+    let (node, target) = pull_target(ctx, &args.node)?;
+    if args.full {
+        return pull_full(ctx, io, &node, &target, args);
     }
-    let target = row
-        .ssh_target
-        .as_deref()
-        .ok_or_else(|| CliError::Invalid(format!("node {node} has no ssh target")))?;
 
     let mut remote = remote_prefix(ctx);
     remote.extend([
@@ -358,7 +358,7 @@ fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32
         "--out".to_owned(),
         "-".to_owned(),
     ]);
-    let run = run_remote_capture(target, &remote, None)?;
+    let run = run_remote_capture(&target, &remote, None)?;
     if run.code != 0 {
         return relay_failure(io, &run);
     }
@@ -397,6 +397,341 @@ fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32
     Ok(0)
 }
 
+/// Resolves the source node and refuses a local node before any remote work.
+fn pull_target(ctx: &Ctx, node: &str) -> Result<(NodeName, String), CliError> {
+    let node = NodeName::parse(node)?;
+    let store = ctx.store()?;
+    let row = store.require_node(&node)?;
+    if row.is_local {
+        return Err(CliError::Invalid(format!(
+            "node {node} is local; use `vowp session export` and `vowp session import` for a local copy"
+        )));
+    }
+    let target = row
+        .ssh_target
+        .ok_or_else(|| CliError::Invalid(format!("node {node} has no ssh target")))?;
+    Ok((node, target))
+}
+
+/// JSON shape for `session pull --full`.
+#[derive(Debug, serde::Serialize)]
+struct FullPullOutput {
+    node: NodeName,
+    source_session: SessionId,
+    full_session: SessionId,
+    files: usize,
+    bytes: u64,
+}
+
+/// Pulls the full `sessions/<id>/` directory and imports it under the origin id.
+///
+/// The remote side streams one manifest line followed by the file bodies. The manifest is
+/// checked for the size cap and the local id before a staging directory is created; every
+/// digest is verified before the staged directory is renamed into place. The source is
+/// never modified and no lease is moved: the caller must leave it quiescent.
+fn pull_full(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    node: &NodeName,
+    target: &str,
+    args: &SessionPullArgs,
+) -> Result<i32, CliError> {
+    // A full id can be refused before contacting the source; a prefix is resolved by the
+    // remote manifest and checked again below.
+    if let Ok(id) = SessionId::parse(&args.session)
+        && local_session_present(ctx, &id)?
+    {
+        return Err(full_exists(&id));
+    }
+
+    let mut remote = remote_prefix(ctx);
+    remote.extend([
+        "session".to_owned(),
+        "dir-export".to_owned(),
+        args.session.clone(),
+        "--max-bytes".to_owned(),
+        SESSION_DIR_MAX_BYTES.to_string(),
+    ]);
+    let mut stream = RemoteStream::spawn(target, &remote)?;
+    let line = match read_manifest_line(stream.stdout()) {
+        Ok(line) => line,
+        Err(error) => return finish_stream_error(io, stream, error),
+    };
+    let manifest: SessionDirManifest = match serde_json::from_slice(&line) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return finish_stream_error(
+                io,
+                stream,
+                CliError::Invalid(format!("remote sent an invalid session directory manifest: {error}")),
+            );
+        }
+    };
+    if let Err(error) = manifest.validate() {
+        return finish_stream_error(io, stream, error.into());
+    }
+    if let Ok(requested) = SessionId::parse(&args.session)
+        && manifest.origin != requested
+    {
+        return finish_stream_error(
+            io,
+            stream,
+            CliError::Invalid(format!(
+                "remote resolved session {} but the pull named {requested}",
+                manifest.origin
+            )),
+        );
+    }
+
+    let origin = manifest.origin.clone();
+    if local_session_present(ctx, &origin)? {
+        return finish_stream_error(io, stream, full_exists(&origin));
+    }
+    let bytes = manifest.total_bytes();
+    if bytes > SESSION_DIR_MAX_BYTES {
+        return finish_stream_error(
+            io,
+            stream,
+            CliError::Invalid(format!(
+                "session {origin} is {bytes} bytes; the full pull limit is {SESSION_DIR_MAX_BYTES} bytes"
+            )),
+        );
+    }
+
+    let staged = StagedSession::create(ctx, &origin)?;
+    let mut copy_error = None;
+    for file in &manifest.files {
+        if let Err(error) = copy_stream_file(stream.stdout(), &staged.dir().join(&file.path), file.bytes) {
+            copy_error = Some(error);
+            break;
+        }
+    }
+    if copy_error.is_none() {
+        let mut trailing = [0_u8; 1];
+        match stream.stdout().read(&mut trailing) {
+            Ok(0) => {}
+            Ok(_) => {
+                copy_error = Some(CliError::Invalid(
+                    "remote sent trailing bytes after the session directory snapshot".to_owned(),
+                ));
+            }
+            Err(error) => copy_error = Some(error.into()),
+        }
+    }
+    if let Some(error) = copy_error {
+        return finish_stream_error(io, stream, error);
+    }
+    let finished = stream.finish()?;
+    if finished.code != 0 {
+        return relay_remote_exit(io, finished);
+    }
+    verify_session_dir(&staged.paths, &origin, &manifest)?;
+    write_session_dir_manifest(&staged.paths, &origin, &manifest)?;
+
+    let final_dir = ctx.paths().session_dir(&origin);
+    if let Some(parent) = final_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if final_dir.exists() {
+        return Err(full_exists(&origin));
+    }
+    std::fs::rename(staged.dir(), &final_dir)?;
+
+    let store = ctx.store()?;
+    let report = match reindex(&store, ctx.paths(), Some(&origin)) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&final_dir);
+            return Err(error.into());
+        }
+    };
+    if report.sessions != 1 {
+        let _ = std::fs::remove_dir_all(&final_dir);
+        let detail = if report.problems.is_empty() {
+            "reindex did not index the pulled session".to_owned()
+        } else {
+            report.problems.join("; ")
+        };
+        return Err(CliError::Conflict(format!(
+            "full pull of {origin} was not indexed cleanly: {detail}"
+        )));
+    }
+    // An absent local project or job row is the only expected warning: reindex keeps the
+    // session and leaves those foreign keys null. The index row exists, so removing the
+    // directory here would leave a dangling session.
+    for problem in &report.problems {
+        writeln!(io.err(), "warning: {problem}")?;
+    }
+
+    let file_count = manifest.files.len();
+    if ctx.json() {
+        print_json(
+            io,
+            &FullPullOutput {
+                node: node.clone(),
+                source_session: origin.clone(),
+                full_session: origin,
+                files: file_count,
+                bytes,
+            },
+        )?;
+    } else {
+        writeln!(
+            io.out(),
+            "pulled session {origin} from {node} as a full directory snapshot ({file_count} files, {bytes} bytes)"
+        )?;
+    }
+    Ok(0)
+}
+
+/// Returns whether a session id already exists locally as a row or a directory.
+fn local_session_present(ctx: &Ctx, id: &SessionId) -> Result<bool, CliError> {
+    Ok(ctx.store()?.session(id)?.is_some() || ctx.paths().session_dir(id).exists())
+}
+
+/// The refusal for a full pull whose id already exists locally.
+fn full_exists(id: &SessionId) -> CliError {
+    CliError::Conflict(format!(
+        "session {id} already exists locally; --full refuses to overwrite"
+    ))
+}
+
+/// Upper bound on one manifest line; larger streams are not trusted.
+const PULL_MANIFEST_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Reads the first newline-terminated line of the remote snapshot stream.
+fn read_manifest_line(reader: &mut BufReader<std::process::ChildStdout>) -> Result<Vec<u8>, CliError> {
+    let mut line = Vec::new();
+    let read = reader
+        .by_ref()
+        .take(PULL_MANIFEST_MAX_BYTES + 1)
+        .read_until(b'\n', &mut line)?;
+    if read == 0 {
+        return Err(CliError::Invalid(
+            "remote sent no session directory manifest".to_owned(),
+        ));
+    }
+    if line.len() as u64 > PULL_MANIFEST_MAX_BYTES {
+        return Err(CliError::Invalid(format!(
+            "remote session directory manifest is larger than {PULL_MANIFEST_MAX_BYTES} bytes"
+        )));
+    }
+    if !line.ends_with(b"\n") {
+        return Err(CliError::Invalid(
+            "remote session directory manifest has no terminator".to_owned(),
+        ));
+    }
+    line.pop();
+    Ok(line)
+}
+
+/// Copies exactly `bytes` from the snapshot stream into one staged file.
+fn copy_stream_file(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    path: &Path,
+    bytes: u64,
+) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    let copied = std::io::copy(&mut reader.by_ref().take(bytes), &mut file)?;
+    if copied != bytes {
+        return Err(CliError::Invalid(format!(
+            "remote session directory stream ended early for {}: expected {bytes} bytes, got {copied}",
+            path.display()
+        )));
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Aborts a snapshot stream and relays a remote failure when the source produced one.
+fn finish_stream_error(io: &mut dyn IoStreams, stream: RemoteStream, error: CliError) -> Result<i32, CliError> {
+    let exit = stream.abort()?;
+    if exit.code != 0 {
+        return relay_remote_exit(io, exit);
+    }
+    Err(error)
+}
+
+/// Prints a failed remote stream's stderr and returns its exit code.
+fn relay_remote_exit(io: &mut dyn IoStreams, exit: RemoteExit) -> Result<i32, CliError> {
+    if !exit.stderr.is_empty() {
+        ia_write(io.err(), &exit.stderr)?;
+    }
+    Ok(exit.code)
+}
+
+/// One full session directory staged under `<home>/tmp` until it is verified.
+struct StagedSession {
+    root: PathBuf,
+    paths: NodePaths,
+    id: SessionId,
+}
+
+impl StagedSession {
+    /// Creates a fresh private staging root containing `sessions/<id>/`.
+    fn create(ctx: &Ctx, id: &SessionId) -> Result<Self, CliError> {
+        let staging_base = ctx.paths().tmp_dir();
+        std::fs::create_dir_all(&staging_base)?;
+        let root = private_dir_in(&staging_base, "session-pull")?;
+        let paths = NodePaths::new(&root);
+        std::fs::create_dir_all(paths.session_dir(id))?;
+        Ok(Self {
+            root,
+            paths,
+            id: id.clone(),
+        })
+    }
+
+    /// Returns the staged `sessions/<id>/` path.
+    fn dir(&self) -> PathBuf {
+        self.paths.session_dir(&self.id)
+    }
+}
+
+impl Drop for StagedSession {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Streams one full session directory for `session pull --full`.
+///
+/// The first line is the JSON manifest; the remaining bytes are the listed files in
+/// manifest order. Nothing is written to local state on the source and no lock is taken.
+fn dir_export(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionDirExportArgs) -> Result<i32, CliError> {
+    let store = ctx.store()?;
+    let session = resolve_session(&store, &args.id)?;
+    if !ctx.paths().log_path(&session.id).is_file() {
+        return Err(CliError::Invalid(format!(
+            "session {} has no log.jsonl (it was compacted); use the bundle pull, which carries its capsule",
+            session.id
+        )));
+    }
+    let max_bytes = args.max_bytes.unwrap_or(SESSION_DIR_MAX_BYTES);
+    let manifest = session_dir_manifest(ctx.paths(), &session.id, max_bytes)?;
+
+    let line = serde_json::to_vec(&manifest)
+        .map_err(|error| CliError::Invalid(format!("cannot encode session directory manifest: {error}")))?;
+    io.out().write_all(&line)?;
+    io.out().write_all(b"\n")?;
+    for file in &manifest.files {
+        let path = ctx.paths().session_dir(&session.id).join(&file.path);
+        let mut source = std::fs::File::open(&path)?;
+        let copied = std::io::copy(&mut Read::by_ref(&mut source).take(file.bytes), io.out())?;
+        if copied != file.bytes {
+            return Err(CliError::Invalid(format!(
+                "session {} file {} changed while it was copied",
+                session.id, file.path
+            )));
+        }
+    }
+    io.out().flush()?;
+    Ok(0)
+}
+
 /// One pulled bundle staged in a private temporary directory until import.
 struct StagedBundle {
     dir: PathBuf,
@@ -431,11 +766,15 @@ impl Drop for StagedBundle {
 
 /// Creates a fresh private directory under the OS temporary root.
 fn private_temp_dir() -> Result<PathBuf, CliError> {
+    private_dir_in(&std::env::temp_dir(), "vowp-pull")
+}
+
+/// Creates a fresh 0700 directory named `<prefix>-<pid>-<millis>-<counter>` under `base`.
+fn private_dir_in(base: &Path, prefix: &str) -> Result<PathBuf, CliError> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-    let base = std::env::temp_dir();
     for _ in 0..32 {
         let name = format!(
-            "vowp-pull-{}-{}-{}",
+            "{prefix}-{}-{}-{}",
             std::process::id(),
             Timestamp::now().unix_millis(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
@@ -455,7 +794,7 @@ fn private_temp_dir() -> Result<PathBuf, CliError> {
     }
     Err(CliError::Io(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
-        "could not create a private temporary directory for the pulled bundle",
+        format!("could not create a private temporary directory for {prefix}"),
     )))
 }
 

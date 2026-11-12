@@ -243,6 +243,8 @@ vowp session pull <node> <session>
 vowp session pull vps 01KA1V0Z7A0000000000000000
 vowp --json session pull vps 01KA1V0Z7A0000000000000000
 vowp session pull --same-id vps 01KA1V0Z7A0000000000000000
+vowp session pull --full vps 01KA1V0Z7A0000000000000000
+vowp --json session pull --full vps 01KA1V0Z7A0000000000000000
 ```
 
 `pull` exports the bundle from the named node over the existing SSH transport, stages it in a
@@ -257,11 +259,27 @@ capsule rules as `session import --same-id`. It prints `pulled session <source> 
 same id <id>`; `--json` prints `{"node","source_session","same_id_session"}`. If the id is already
 present locally the pull exits 4 and changes nothing.
 
-The source must be a remote node. A failed ssh/remote export, a truncated bundle or a checksum
-mismatch leaves the local home unchanged. This is a one-way snapshot, not a move: the source is
-not modified or locked. Directory copy, push, bidirectional sync/merge, divergence reporting,
-lease handling and an offline retry queue remain out of scope. For a local file copy use
-`session export` and `session import`.
+`pull --full` copies the whole `sessions/<id>/` directory instead of the bundle: the full event
+log, every blob, the capsule files and `adapters.json`. It always keeps the source id (there is no
+child and `--full` cannot be combined with `--same-id`) and refuses with exit 4 when that id
+already exists locally as a session row or a session directory; the local copy is left untouched.
+The files arrive as a `vowp-session-dir-v1` manifest plus raw bytes, are written into a private
+staging directory and checked against the manifest's byte sizes and sha256 digests before the
+directory is renamed into `sessions/<id>/`. The resulting directory contains `manifest.json` for
+inspection. A failed copy, digest mismatch, corrupt log or over-cap directory leaves no final
+`sessions/<id>/` and no staging directory. `vowp reindex` then registers the session.
+
+The full-pull limit is 1 GiB (1 073 741 824 bytes), checked from the remote file sizes before
+anything is copied. There is no partial copy and no placeholder for missing blobs: an over-cap or
+unreadable session is refused. A compacted source has no log to copy and is refused; use the bundle
+pull for it.
+
+Both pull modes are one-way, read-only snapshots: the source is not modified or locked and no live
+lease is migrated. For `--full`, leave the source lease released or quiescent while it runs and run
+the same build on both nodes. A failed ssh/remote read, truncated stream or checksum mismatch
+leaves the local home unchanged. Push, bidirectional sync/merge, divergence reporting, live lease
+migration and an offline retry queue remain out of scope. For a local file copy use `session
+export` and `session import`.
 
 ## Watch an interactive Claude Code session
 

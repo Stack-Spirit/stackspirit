@@ -488,8 +488,11 @@ pub enum SessionCommand {
     Export(SessionExportArgs),
     /// Import a session bundle.
     Import(SessionImportArgs),
-    /// Pull a session bundle from another node.
+    /// Pull a session from another node.
     Pull(SessionPullArgs),
+    /// Hidden: stream a full session directory snapshot.
+    #[command(name = "dir-export", hide = true)]
+    DirExport(SessionDirExportArgs),
     /// Record interactive Claude Code transcripts.
     Watch(SessionWatchArgs),
     /// Print a session's event log.
@@ -648,6 +651,19 @@ pub struct SessionPullArgs {
     /// Keep the source session id; refuse when it already exists locally.
     #[arg(long)]
     pub same_id: bool,
+    /// Copy the full session directory (log, blobs, capsules, adapters.json).
+    #[arg(long, conflicts_with = "same_id")]
+    pub full: bool,
+}
+
+/// Arguments for the hidden `vowp session dir-export` stream.
+#[derive(Debug, Clone, Args)]
+pub struct SessionDirExportArgs {
+    /// Session id or unique prefix.
+    pub id: String,
+    /// Refuse before hashing when the session directory exceeds this many bytes.
+    #[arg(long, value_name = "N")]
+    pub max_bytes: Option<u64>,
 }
 
 /// Arguments for `vowp session watch`.

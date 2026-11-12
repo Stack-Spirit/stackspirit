@@ -601,18 +601,22 @@ fn session_cross_node_export_import_switch_via_fake_ssh() {
     );
 }
 
-/// Exports one session from a home without going through `--node`.
-fn export_text_in(env: &common::TestEnv, home: &Path, id: &str) -> String {
-    let output = env
-        .command(env!("CARGO_BIN_EXE_vowp"))
+/// Runs one CLI command against an explicit home and the shared test project.
+fn run_in_home(env: &common::TestEnv, home: &Path, args: &[&str]) -> std::process::Output {
+    env.command(env!("CARGO_BIN_EXE_vowp"))
         .env("VOWP_HOME", home)
         .arg("--home")
         .arg(home)
         .arg("--project")
         .arg(env.project_path())
-        .args(["session", "export", id, "--out", "-"])
+        .args(args)
         .output()
-        .expect("export session");
+        .expect("run vowp")
+}
+
+/// Exports one session from a home without going through `--node`.
+fn export_text_in(env: &common::TestEnv, home: &Path, id: &str) -> String {
+    let output = run_in_home(env, home, &["session", "export", id, "--out", "-"]);
     assert!(
         output.status.success(),
         "session export failed: {}",
@@ -654,6 +658,50 @@ fn append_user_message(home: &Path, id: &str, text: &str) {
         .expect("append user message");
     store.index_event(&index_row(&appended)).expect("index user message");
     log.sync().expect("sync");
+}
+
+/// Appends one indexed tool result large enough to spill into `blobs/`.
+///
+/// Returns the blob digest and the exact output bytes.
+fn append_spilled_tool_result(home: &Path, id: &str, output: &str) -> (String, Vec<u8>) {
+    assert!(
+        output.len() > vowp_protocol::BLOB_SPILL_BYTES,
+        "the fixture must spill, not stay inline"
+    );
+    let paths = vowp_store::NodePaths::new(home);
+    let session = vowp_protocol::SessionId::parse(id).expect("session id");
+    let store = vowp_store::Store::open(&paths).expect("store");
+    let log = SessionLog::open(&paths, &session, std::sync::Arc::new(vowp_protocol::SystemClock)).expect("log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::Tool,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: None,
+                node: None,
+                native_session_id: None,
+            },
+            body: EventBody::ToolResult(vowp_protocol::ToolResult {
+                call_id: "call-full-pull".to_owned(),
+                ok: true,
+                output: Some(output.to_owned()),
+                output_ref: None,
+                exit_code: Some(0),
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append tool result");
+    let sha256 = match appended.envelope.body().expect("tool result body") {
+        EventBody::ToolResult(result) => {
+            assert!(result.output.is_none(), "the oversized output stayed inline");
+            result.output_ref.expect("spilled blob reference").sha256
+        }
+        other => panic!("expected a tool result, got {other:?}"),
+    };
+    store.index_event(&index_row(&appended)).expect("index tool result");
+    log.sync().expect("sync");
+    (sha256, output.as_bytes().to_vec())
 }
 
 /// Returns how many sessions the local index holds.
@@ -711,6 +759,14 @@ fn session_pull_imports_a_child_and_prints_both_ids() {
         "pull must not create a same-id local session"
     );
     drop(store);
+    assert!(
+        !env.home_path()
+            .join("sessions")
+            .join(&child)
+            .join("manifest.json")
+            .exists(),
+        "the default bundle pull must not write a directory manifest"
+    );
     let remote_store = vowp_store::Store::open(&vowp_store::NodePaths::new(remote.home.path())).expect("remote store");
     assert!(
         remote_store.session(&child_id).expect("child lookup").is_none(),
@@ -969,6 +1025,329 @@ fn session_pull_same_id_refuses_a_corrupt_bundle_before_importing() {
     assert!(
         !env.home_path().join("sessions").join(&source).exists(),
         "a corrupt same-id bundle wrote a session directory"
+    );
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_full_imports_the_origin_id_with_the_full_log() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "full remote session");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+
+    // More than the 20-event bundle tail, so the default pull could not carry this prefix.
+    for index in 0..25 {
+        append_user_message(remote.home.path(), &source, &format!("remote event {index:02}"));
+    }
+    let big_output = format!(
+        "spilled full-pull output {}",
+        "x".repeat(vowp_protocol::BLOB_SPILL_BYTES + 64)
+    );
+    let (blob_sha, blob_bytes) = append_spilled_tool_result(remote.home.path(), &source, &big_output);
+    let capsule = run_in_home(&env, remote.home.path(), &["session", "capsule", &source]);
+    assert!(
+        capsule.status.success(),
+        "remote capsule failed: {}",
+        output_text(&capsule.stderr)
+    );
+
+    let remote_paths = vowp_store::NodePaths::new(remote.home.path());
+    vowp_store::session_files::add_adapter_mapping(
+        &remote_paths,
+        &source_id,
+        vowp_store::session_files::AdapterMapping {
+            harness: HarnessKind::Opencode,
+            native_session_id: "ses_full_pull_native".to_owned(),
+            node: NodeName::parse("vps").expect("node"),
+            first_seq: 2,
+            created_at: Timestamp::now(),
+        },
+    )
+    .expect("remote adapters");
+    let remote_events = SessionLog::open_read(&remote_paths, &source_id)
+        .expect("remote log")
+        .read_all()
+        .expect("remote events");
+    let remote_capsules =
+        vowp_store::session_files::list_capsule_files(&remote_paths, &source_id).expect("remote capsules");
+    assert!(
+        remote_events.len() > 20,
+        "the fixture needs more events than the bundle tail: {}",
+        remote_events.len()
+    );
+    assert_eq!(remote_capsules.len(), 1, "the fixture must have one capsule file");
+    let remote_adapters = std::fs::read(remote_paths.adapters_json_path(&source_id)).expect("remote adapters bytes");
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "full pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let stdout = output_text(&output.stdout);
+    assert!(stdout.contains(&source), "the source id is missing: {stdout}");
+    assert!(
+        stdout.contains("full directory snapshot"),
+        "the full mode was not reported: {stdout}"
+    );
+
+    let local_paths = vowp_store::NodePaths::new(env.home_path());
+    let store = env.store();
+    let row = store.require_session(&source_id).expect("full-pull row");
+    assert!(
+        row.parent_session_id.is_none(),
+        "a full pull imports under the origin id without a parent"
+    );
+    assert_eq!(row.title, "full remote session");
+    assert_eq!(row.node, env.config.node.name);
+    drop(store);
+
+    let local_events = SessionLog::open_read(&local_paths, &source_id)
+        .expect("local log")
+        .read_all()
+        .expect("local events");
+    assert_eq!(
+        local_events.len(),
+        remote_events.len(),
+        "the full log was not preserved"
+    );
+    assert!(
+        local_events.iter().any(|event| matches!(
+            event.body(),
+            Ok(EventBody::UserMessage(payload)) if payload.text == "remote event 00"
+        )),
+        "the prefix earlier than the bundle tail is missing"
+    );
+    let result = local_events
+        .iter()
+        .find_map(|event| match event.body() {
+            Ok(EventBody::ToolResult(result)) => Some(result),
+            _ => None,
+        })
+        .expect("spilled tool result");
+    assert_eq!(
+        result.output_ref.expect("blob reference").sha256,
+        blob_sha,
+        "the copied event still points at its blob"
+    );
+    assert_eq!(
+        std::fs::read(local_paths.blobs_dir(&source_id).join(&blob_sha)).expect("local blob"),
+        blob_bytes
+    );
+    assert_eq!(
+        vowp_store::session_files::list_capsule_files(&local_paths, &source_id)
+            .expect("local capsules")
+            .len(),
+        remote_capsules.len()
+    );
+    assert_eq!(
+        std::fs::read(local_paths.adapters_json_path(&source_id)).expect("local adapters"),
+        remote_adapters
+    );
+
+    let manifest = vowp_store::session_log::read_session_dir_manifest(&local_paths.session_manifest_path(&source_id))
+        .expect("directory manifest");
+    assert_eq!(manifest.origin, source_id);
+    assert!(
+        manifest.files.len() >= 4,
+        "log, adapters, blob and capsule must be listed: {manifest:?}"
+    );
+    vowp_store::session_log::verify_session_dir(&local_paths, &source_id, &manifest).expect("manifest checksums");
+
+    let (code, stdout, stderr) = env.run(&["reindex"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("reindexed 1 sessions"), "{stdout}");
+    assert_temp_clean(&env);
+
+    // The JSON document names the full session and has no child/same-id field.
+    let second = new_session_in(&env, remote.home.path(), "full json session");
+    append_user_message(remote.home.path(), &second, "json event");
+    let output = run_cli(&env, &remote, &["--json", "session", "pull", "--full", "vps", &second]);
+    assert!(
+        output.status.success(),
+        "json full pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(output_text(&output.stdout).trim()).expect("full pull JSON");
+    assert_eq!(value["node"], "vps");
+    assert_eq!(value["source_session"], second);
+    assert_eq!(value["full_session"], second);
+    assert!(value["files"].as_u64().expect("files") >= 1, "{value}");
+    assert!(value["bytes"].as_u64().expect("bytes") > 0, "{value}");
+    assert!(value.get("child_session").is_none(), "{value}");
+    assert!(value.get("same_id_session").is_none(), "{value}");
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_full_refuses_an_existing_session_without_mutating_it() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let source = new_session_in(&env, remote.home.path(), "remote full session");
+    append_user_message(remote.home.path(), &source, "keep this event");
+    let source_id = vowp_protocol::SessionId::parse(&source).expect("source id");
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "first full pull failed: {}",
+        output_text(&output.stderr)
+    );
+    let local_paths = vowp_store::NodePaths::new(env.home_path());
+    let log_path = local_paths.log_path(&source_id);
+    let manifest_path = local_paths.session_manifest_path(&source_id);
+    let before_log = std::fs::read(&log_path).expect("full-pull log bytes");
+    let before_manifest = std::fs::read(&manifest_path).expect("full-pull manifest bytes");
+    let store = env.store();
+    let before_row = store.require_session(&source_id).expect("full-pull row");
+    drop(store);
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", &source]);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "a duplicate full pull must conflict: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains("already exists"),
+        "the conflict was not explained: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&log_path).expect("full-pull log bytes"),
+        before_log,
+        "a refused full pull rewrote the existing log"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("full-pull manifest bytes"),
+        before_manifest,
+        "a refused full pull rewrote the existing manifest"
+    );
+    let store = env.store();
+    let after_row = store.require_session(&source_id).expect("full-pull row");
+    assert_eq!(after_row.last_seq, before_row.last_seq);
+    assert_eq!(after_row.updated_at, before_row.updated_at);
+    assert_eq!(local_session_count(&env), 1);
+    drop(store);
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let id = vowp_protocol::SessionId::new();
+    let manifest = vowp_store::session_log::SessionDirManifest {
+        format: vowp_store::session_log::SESSION_DIR_FORMAT.to_owned(),
+        origin: id.clone(),
+        files: vec![vowp_store::session_log::SessionDirFile {
+            path: "log.jsonl".to_owned(),
+            bytes: 4,
+            sha256: "0".repeat(64),
+        }],
+    };
+    let mut stream = serde_json::to_vec(&manifest).expect("manifest JSON");
+    stream.push(b'\n');
+    stream.extend_from_slice(b"junk");
+    let stream_path = env.project_path().join("corrupt-full.snapshot");
+    std::fs::write(&stream_path, stream).expect("corrupt snapshot");
+    install_ssh(
+        &remote,
+        &format!("#!/bin/sh\ncat '{}'\nexit 0\n", stream_path.display()),
+    );
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", id.as_str()]);
+    assert!(
+        !output.status.success(),
+        "a corrupt snapshot must fail: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains("sha256 mismatch"),
+        "the digest failure was not reported: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        !env.home_path().join("sessions").join(id.as_str()).exists(),
+        "a corrupt full pull left a final session directory"
+    );
+    assert_eq!(local_session_count(&env), 0);
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_full_refuses_an_over_cap_snapshot_before_copying() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let id = vowp_protocol::SessionId::new();
+    let limit = vowp_store::session_log::SESSION_DIR_MAX_BYTES;
+    let manifest = vowp_store::session_log::SessionDirManifest {
+        format: vowp_store::session_log::SESSION_DIR_FORMAT.to_owned(),
+        origin: id.clone(),
+        files: vec![vowp_store::session_log::SessionDirFile {
+            path: "log.jsonl".to_owned(),
+            bytes: limit + 1,
+            sha256: "0".repeat(64),
+        }],
+    };
+    let mut stream = serde_json::to_vec(&manifest).expect("manifest JSON");
+    stream.push(b'\n');
+    let stream_path = env.project_path().join("over-cap-full.snapshot");
+    std::fs::write(&stream_path, stream).expect("over-cap snapshot");
+    install_ssh(
+        &remote,
+        &format!("#!/bin/sh\ncat '{}'\nexit 0\n", stream_path.display()),
+    );
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", id.as_str()]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an over-cap full pull must be an invalid-input failure: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains(&format!("{limit} bytes")),
+        "the size limit was not named: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        !env.home_path().join("sessions").join(id.as_str()).exists(),
+        "an over-cap full pull left a final session directory"
+    );
+    assert_eq!(local_session_count(&env), 0);
+    assert_temp_clean(&env);
+}
+
+#[test]
+fn session_pull_full_reports_a_failed_remote_export_and_imports_nothing() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let remote = remote_node(&env);
+    let missing = "missing-full-session";
+
+    let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", missing]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the remote not-found exit code must be relayed: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stderr).contains(&format!("session {missing}")),
+        "the remote error was not reported: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        local_session_count(&env),
+        0,
+        "a failed remote directory export created a local session"
     );
     assert_temp_clean(&env);
 }

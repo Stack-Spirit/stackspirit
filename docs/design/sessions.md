@@ -25,6 +25,7 @@ integration. It does not add a second session type or a second transcript store.
     blobs/<sha256>                 spilled tool output, diffs, attachments (content addressed)
     capsules/<at_seq:010>-<ulid>.json   authoritative capsule files
     adapters.json                  {"natives":[{harness,native_session_id,node,first_seq,created_at}]} append-only
+    manifest.json                  optional; written by `session pull --full`, informational only
   orchestrators/<name>/            orchestrator.json (0600), app config, lease token, mirror.json
   runs/<runId>.jsonl               raw harness stdout mirror on the home (debug only, compressed/rotated)
   logs/supervisor.log  backups/  tmp/
@@ -232,8 +233,8 @@ every path.
 A failed remote export returns the remote exit code and output. A malformed, truncated or
 checksum-mismatched bundle returns a local invalid-input error. In both cases nothing is imported.
 The source must be a remote node; a local node is refused with a hint to use export/import. This
-slice deliberately has no same-id import (see §6.5), directory copy, push, bidirectional sync/merge,
-lease interaction or daemon/offline transport.
+slice deliberately has no same-id import (see §6.5) or directory copy (see §6.6); push,
+bidirectional sync/merge, lease interaction and daemon/offline transport remain out of scope.
 
 ### 6.5 Same-id import (v0.3 second slice)
 
@@ -266,8 +267,60 @@ origin session id instead of creating a child. The default import and pull paths
    `pulled session <source> from <node> with same id <id>`; JSON is
    `{"node","source_session","same_id_session"}`.
 
-Out of scope for this slice: directory copy of `sessions/<id>/`, divergence reporting (two heads),
-merge, bidirectional sync, `session push`, lease interaction and an offline retry queue.
+Out of scope for this slice: directory copy of `sessions/<id>/` (see §6.6), divergence reporting
+(two heads), merge, bidirectional sync, `session push`, lease interaction and an offline retry
+queue.
+
+### 6.6 Full directory pull (v0.3 third slice)
+
+`vowp session pull <node> <session> --full` copies the raw `sessions/<id>/` directory instead of a
+bundle. It always keeps the origin id and has no `--same-id` combination; the default bundle pull
+and its child session are unchanged.
+
+1. The local side runs the source's hidden `session dir-export <session>` over the existing SSH
+   argv path. Its stdout is one JSON manifest line followed by the file bytes in manifest order.
+   The command is read-only: it takes no session lock, writes nothing and moves no lease.
+2. The manifest is `vowp-session-dir-v1`:
+   `{"format":"vowp-session-dir-v1","origin":"<id>","files":[{"path":"log.jsonl","bytes":N,
+   "sha256":"<64 lowercase hex>"}]}`. Paths are relative, `/`-separated and limited to `log.jsonl`,
+   `adapters.json`, `blobs/<sha256>` and `capsules/<name>.json`; traversal, duplicates,
+   `.lock`, `import.json` and `manifest.json` are refused.
+3. The cap is 1 GiB (`SESSION_DIR_MAX_BYTES` = 1 073 741 824 bytes). The source checks the total
+   from file sizes before hashing and the local side checks it again from the manifest before
+   staging; an over-cap pull fails with the limit named and copies nothing. A missing or oversized
+   blob is never replaced by a placeholder in this slice: the pull refuses instead.
+4. The origin id must be absent locally as a `sessions` row and as `sessions/<id>/`. A present id
+   is exit 4 and the existing row, log, index and directory are untouched. There is no child, no
+   parent and no bundle rewrite.
+5. Files are written into a private staging directory under `<home>/tmp` containing
+   `sessions/<id>/`. Every size and sha256 is checked, the staged log must verify cleanly, and
+   `adapters.json` and every capsule file must parse and belong to the id. A failure removes the
+   staging directory and leaves no final `sessions/<id>/`.
+6. Only after verification is the manifest written into the staged directory as `manifest.json`
+   and the directory renamed to `sessions/<id>/`. The pull then runs `reindex(Some(id))`. A reindex
+   failure removes the new directory and fails; expected warnings (for example an absent local
+   project or job row) leave the session indexed with a null foreign key and are printed on stderr.
+7. A compacted source has no `log.jsonl` and is refused with a hint to use the bundle pull, which
+   carries its capsule. A torn or corrupt source log is also refused rather than copied.
+8. The source lease must be released or quiescent: this is a one-way snapshot, not a lease move,
+   and no live lease is migrated or cut off. Both nodes must run a build that has the hidden
+   export command.
+9. Human output is `pulled session <id> from <node> as a full directory snapshot (<n> files,
+   <bytes> bytes)`; JSON is
+   `{"node","source_session","full_session","files","bytes"}`.
+
+Named tests: `session_pull_full_imports_the_origin_id_with_the_full_log`,
+`session_pull_full_refuses_an_existing_session_without_mutating_it`,
+`session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`,
+`session_pull_full_refuses_an_over_cap_snapshot_before_copying`,
+`session_pull_full_reports_a_failed_remote_export_and_imports_nothing` and the store tests
+`session_dir_manifest_verifies_and_detects_corruption`,
+`session_dir_manifest_refuses_a_directory_over_the_size_cap` and
+`session_dir_manifest_rejects_traversal_and_reserved_paths`.
+
+Still out of scope: divergence reporting (two heads), merge, bidirectional sync, `session push`,
+live lease migration, a daemon transport, offline queueing, a progress display, blob deduplication
+and a CLI size-limit flag.
 
 ## 7. `vowp session watch` importer
 
@@ -428,6 +481,10 @@ The tests live in `crates/vowp-store.md` §6 (log, blob, reindex) and `crates/vo
 | §6.5 default import still creates a child with the parent | `child_import_still_creates_a_child_with_the_parent` | core |
 | §6.5 fake-ssh pull in both modes | `session_pull_same_id_imports_the_origin_id_without_a_parent`, `session_pull_imports_a_child_and_prints_both_ids` | cli |
 | §6.5 corrupted bundle fails before any write | `same_id_import_rejects_a_corrupt_bundle_before_writing`, `session_pull_same_id_refuses_a_corrupt_bundle_before_importing` | core, cli |
+| §6.6 full pull keeps the origin id and the full log, with manifest checksums | `session_pull_full_imports_the_origin_id_with_the_full_log` | cli |
+| §6.6 full pull refuses a present id without touching it | `session_pull_full_refuses_an_existing_session_without_mutating_it` | cli |
+| §6.6 corrupt or over-cap full pull leaves no final directory | `session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`, `session_pull_full_refuses_an_over_cap_snapshot_before_copying` | cli |
+| §6.6 manifest validation, size cap and digest verification | `session_dir_manifest_verifies_and_detects_corruption`, `session_dir_manifest_refuses_a_directory_over_the_size_cap`, `session_dir_manifest_rejects_traversal_and_reserved_paths` | store |
 | §1 log, blob and reindex rules | the `log_*`, `blob_*`, `reindex_*` tests of vowp-store.md §6 | store |
 | §8 lease acquire, heartbeat, stale sweep, exact holder | `lease_acquire_is_one_holder`, `heartbeat_keeps_lease_live`, `stale_lease_free_after_sixty_seconds` | core |
 | §8 takeover cuts off the old surface within 2 s | `takeover_cuts_old_surface_within_two_seconds`, `lease_revoked_is_pushed_within_2s` | core |

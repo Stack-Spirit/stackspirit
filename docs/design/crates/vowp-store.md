@@ -31,7 +31,7 @@ crates/vowp-store/
   src/repo_ledger.rs    // ledger, cost_totals
   src/repo_misc.rs      // inbox, limits, releases, kv, requests
   src/blobs.rs          // BlobStore
-  src/session_log.rs    // SessionLog, NewEvent, VerifyReport, lockfile
+  src/session_log.rs    // SessionLog, NewEvent, VerifyReport, lockfile, full-pull manifest/verification
   src/session_files.rs  // capsule files, adapters.json
   src/reindex.rs        // reindex
   tests/*.rs
@@ -59,6 +59,7 @@ impl NodePaths {
     pub fn blobs_dir(&self, id: &SessionId) -> PathBuf;                  // .../blobs
     pub fn capsules_dir(&self, id: &SessionId) -> PathBuf;               // .../capsules
     pub fn adapters_json_path(&self, id: &SessionId) -> PathBuf;         // .../adapters.json
+    pub fn session_manifest_path(&self, id: &SessionId) -> PathBuf;      // .../manifest.json (full pull only)
     pub fn logs_dir(&self) -> PathBuf;                                   // <root>/logs         (supervisor.log, ...)
     pub fn runs_dir(&self) -> PathBuf;                                   // <root>/runs/<run-id>.jsonl raw harness output mirror
     pub fn run_raw_path(&self, id: &RunId) -> PathBuf;
@@ -294,6 +295,8 @@ impl BlobStore {
     pub fn exists(&self, sha256: &str) -> bool;
     pub fn path_of(&self, sha256: &str) -> PathBuf;                     // rejects non-hex / wrong length with InvalidInput (path traversal guard)
 }
+/// Lowercase hex SHA-256 of one file, read in bounded chunks (used by full-pull manifests).
+pub fn sha256_file(path: &std::path::Path) -> Result<String, StoreError>;
 ```
 
 ### 3.6 SessionLog (`session_log.rs`)
@@ -352,6 +355,29 @@ pub struct IndexedEvent { pub envelope: EventEnvelope, pub byte_offset: u64, pub
 
 Plus `pub fn index_row(a: &AppendedEvent) -> EventIndexRow` (builds the `session_events` row: harness/model from `source`, `summary` from `EventBody::summary()`).
 
+Full session-directory snapshots (`session pull --full`) use the same module:
+
+```rust
+pub const SESSION_DIR_FORMAT: &str = "vowp-session-dir-v1";
+pub const SESSION_DIR_MAX_BYTES: u64 = 1_073_741_824;                  // 1 GiB default cap
+pub const SESSION_DIR_MANIFEST: &str = "manifest.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDirFile { pub path: String, pub bytes: u64, pub sha256: String }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDirManifest { pub format: String, pub origin: SessionId, pub files: Vec<SessionDirFile> }
+impl SessionDirManifest {
+    pub fn validate(&self) -> Result<(), StoreError>;                  // format, safe layout, digests, sorted unique paths, log.jsonl present
+    pub fn total_bytes(&self) -> u64;                                  // saturating sum of declared sizes
+}
+/// Size check first, then hash; the listing is log.jsonl, optional adapters.json, blobs/<sha256>, capsules/*.json.
+pub fn session_dir_manifest(paths: &NodePaths, id: &SessionId, max_bytes: u64) -> Result<SessionDirManifest, StoreError>;
+pub fn read_session_dir_manifest(path: &std::path::Path) -> Result<SessionDirManifest, StoreError>;
+pub fn write_session_dir_manifest(paths: &NodePaths, id: &SessionId, m: &SessionDirManifest) -> Result<PathBuf, StoreError>;
+/// Re-hash every listed file, require the manifest set to equal the directory set, verify the log, adapters and capsules.
+pub fn verify_session_dir(paths: &NodePaths, id: &SessionId, m: &SessionDirManifest) -> Result<(), StoreError>;
+```
+
 ### 3.7 Session files and reindex
 
 ```rust
@@ -402,6 +428,12 @@ pub fn reindex(store: &Store, paths: &NodePaths, session: Option<&SessionId>) ->
 
 7. Blob names are lowercase hex SHA-256 of the exact bytes; `put` is idempotent; writes are atomic (tmp in the same dir, fsync file, rename, fsync dir). `get` re-hashes.
    Capsule and adapters.json writes use the same atomic recipe through `NodePaths::tmp_dir()`-independent temp files in the target directory (rename must stay on one filesystem).
+   A full-pull directory may also carry `manifest.json` (format `vowp-session-dir-v1`). It lists only
+   the content files with their byte sizes and lowercase sha256 digests; `reindex` ignores it. A
+   snapshot is written into a staging directory, `verify_session_dir` re-hashes every listed file
+   and requires the manifest set to equal the actual set (plus a clean log and valid capsules), and
+   only then is the directory renamed to `sessions/<id>/`. A file that is missing, extra, resized
+   or changed is a `Corrupt` error.
 
 ### 4.3 Reindex
 
@@ -510,6 +542,10 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `reindex_rejects_an_event_id_owned_by_another_session` | the second session's log reuses an indexed event id → `StoreError::Conflict` (`already belongs to session`), no row or events for the rejected session |
 | `reindex_rejects_a_duplicate_event_id_in_one_log` | one log repeats an event id → `StoreError::Conflict` (`duplicate event id`), no indexed events |
 | `paths_layout` | `NodePaths::new("/x")` produces every path exactly as listed in §3.1 (no I/O); `from_env` honours `VOWP_HOME` (test sets the env var inside a mutex-guarded section) and errors with neither set |
+| `sha256_file_matches_the_blob_name_written_by_put` | a file written by `BlobStore::put` hashes to the blob name returned by `put` |
+| `session_dir_manifest_verifies_and_detects_corruption` | a log+blob manifest verifies, `manifest.json` round-trips, a same-size changed blob is `Corrupt` (`sha256 mismatch`) and an extra blob file is `Corrupt` (`not listed`) |
+| `session_dir_manifest_refuses_a_directory_over_the_size_cap` | `session_dir_manifest(..., max_bytes=1)` refuses a larger session with `InvalidInput` naming the limit |
+| `session_dir_manifest_rejects_traversal_and_reserved_paths` | `..`, absolute paths, `manifest.json`, `.lock`, `import.json`, non-digest blob names, non-JSON capsule names and `summary.md` are refused |
 
 ## 7. Out of scope / v0.2
 

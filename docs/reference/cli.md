@@ -53,7 +53,7 @@ python3 docs/reference/check-reference.py
 | [`vowp session capsule`](#vowp-session-capsule) | Write a capsule now |
 | [`vowp session export`](#vowp-session-export) | Export a session bundle |
 | [`vowp session import`](#vowp-session-import) | Import a session bundle |
-| [`vowp session pull`](#vowp-session-pull) | Pull a session bundle from another node |
+| [`vowp session pull`](#vowp-session-pull) | Pull a session from another node |
 | [`vowp session watch`](#vowp-session-watch) | Record interactive Claude Code transcripts |
 | [`vowp session tail`](#vowp-session-tail) | Print a session's event log |
 | [`vowp session turn-begin`](#vowp-session-turn-begin) | Hidden: begin a remote turn and print its grant |
@@ -691,7 +691,7 @@ Commands:
   capsule  Write a capsule now
   export   Export a session bundle
   import   Import a session bundle
-  pull     Pull a session bundle from another node
+  pull     Pull a session from another node
   watch    Record interactive Claude Code transcripts
   tail     Print a session's event log
 
@@ -892,7 +892,7 @@ Options:
 #### `vowp session pull`
 
 ```text
-Pull a session bundle from another node
+Pull a session from another node
 
 Usage: vowp session pull [OPTIONS] <NODE> <SESSION>
 
@@ -903,6 +903,7 @@ Arguments:
 Options:
       --json                 Print one machine-readable JSON document on stdout
       --same-id              Keep the source session id; refuse when it already exists locally
+      --full                 Copy the full session directory (log, blobs, capsules, adapters.json)
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal

@@ -112,7 +112,7 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is the v0
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
 | `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
 | `session import <file> [--node n] [--executor <exec>] [--cwd <dir>] [--same-id]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached. `--same-id` keeps the bundle id only when no local row or session directory exists, writes no parent and copies the bundle tail into the log; a present id is exit 4 and nothing is changed. |
-| `session pull <node> <session> [--same-id]` | runs on the local machine: exports the bundle from `node` over ssh, stages it in a private temporary directory, verifies format/protocol/checksum, imports a **child** (`parent_session_id` = source id) and prints both ids. JSON `{"node","source_session","child_session"}`. With `--same-id` it imports under the source id with no parent and JSON `{"node","source_session","same_id_session"}`; a present id is exit 4. A failed remote run, malformed bundle or checksum mismatch imports nothing. |
+| `session pull <node> <session> [--same-id \| --full]` | runs on the local machine: exports the bundle from `node` over ssh, stages it in a private temporary directory, verifies format/protocol/checksum, imports a **child** (`parent_session_id` = source id) and prints both ids. JSON `{"node","source_session","child_session"}`. With `--same-id` it imports under the source id with no parent and JSON `{"node","source_session","same_id_session"}`; a present id is exit 4. With `--full` it streams the whole `sessions/<id>/` directory (full log, blobs, capsules, `adapters.json`) as a `vowp-session-dir-v1` manifest plus file bytes, requires the id to be absent locally, verifies every digest and size (1 GiB cap) before the final rename, reindexes, and prints JSON `{"node","source_session","full_session","files","bytes"}`; it never creates a child or rewrites a bundle. A failed remote run, malformed/truncated/corrupt snapshot, over-cap directory or checksum mismatch imports nothing and leaves no `sessions/<id>/`. |
 | `session watch [--claude-dir <dir>] [--once] [--follow]` | records interactive Claude Code transcripts (read-only, byte-offset importer) into one canonical session per Claude uuid; prints `watching N transcripts`; `--follow` polls every two seconds until Ctrl-C, and a TTY run without `--once` or `--follow` follows the same way; `--once`, and a non-TTY run without `--follow`, make one incremental pass; exit 1 if the dir is unreadable |
 | `session tail <id> [--follow] [--pretty] [--from <seq>]` | prints events (JSONL, or `--pretty` one line per event); `--follow` polls the file (200 ms) and does not take the lease. This is what job windows run (`vowp __window job <id>`). |
 
@@ -129,10 +129,10 @@ events. See `sessions.md` §8–§11.
 ### Hidden session interfaces
 
 These are implementation interfaces, not help-listed user commands. `vowp session turn-begin`,
-`vowp session ingest`, `vowp session lease` and `vowp session takeover` are hidden subcommands of
-`vowp session`; `vowp __exec`, `vowp __vault-exec` and `vowp __vault-admin` are hidden top-level
-commands. They still accept `--json` where a document is printed; the streaming ones print one JSON
-object per line.
+`vowp session ingest`, `vowp session lease`, `vowp session takeover` and `vowp session dir-export`
+are hidden subcommands of `vowp session`; `vowp __exec`, `vowp __vault-exec` and
+`vowp __vault-admin` are hidden top-level commands. They still accept `--json` where a document is
+printed; the streaming ones print one JSON object per line.
 
 ```
 vowp session turn-begin <session> --executor <exec> --purpose <p> --node <n> --request <file|->
@@ -140,7 +140,11 @@ vowp __exec --grant <file> [--spool-dir <dir>]
 vowp session ingest <session> --run <run-id> [--replay] [--json]
 vowp session lease <session> [--acquire <kind> --holder <h> --node <n>] [--json]
 vowp session takeover <session> --kind <kind> --holder <h> --node <n> [--json]
+vowp session dir-export <session> [--max-bytes <n>]
 ```
+
+`dir-export` is the source half of `session pull --full`: it prints one `vowp-session-dir-v1`
+manifest line and then the listed file bytes on stdout. It is read-only and takes no session lock.
 
 `turn-begin` reads a request document (lease token, prompt, executor, purpose, node) and prints a
 `TurnGrant`; `__exec` runs the adapter on the executor machine, spools every event before sending
@@ -371,7 +375,7 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 2. Build argv: the original args with `--node <name>` removed. If the command is interactive (`attach`, `session chat`, `chat`, `board` without `--once`) add `-t`.
 3. Execute `ssh -o BatchMode=yes -o ConnectTimeout=10 [-t] <ssh_target> vowp <argv…>` with stdin/stdout/stderr inherited; the remote exit code is returned unchanged; ssh failure (exit 255) ⇒ exit 7 with `{"error":{"kind":"remote",…}}` under `--json`.
 4. Arguments are passed as a single remote command string built with POSIX single-quote escaping (`shell_quote`, shared with `vowp-tmux`); no argument is ever interpolated unquoted.
-5. `session import` with `--node n`: the bundle file is streamed over ssh stdin (`vowp session import - …`); `session export --node n` writes the bundle locally from the remote's stdout. `session pull <node> <session>` uses that remote export, verifies the bundle locally and imports the child here; the pull never runs on the remote node. `--same-id` on either command is forwarded to the importer and preserves the source id only when it is absent locally.
+5. `session import` with `--node n`: the bundle file is streamed over ssh stdin (`vowp session import - …`); `session export --node n` writes the bundle locally from the remote's stdout. `session pull <node> <session>` uses that remote export, verifies the bundle locally and imports the child here; the pull never runs on the remote node. `--same-id` on either command is forwarded to the importer and preserves the source id only when it is absent locally. `session pull --full` instead calls the remote hidden `session dir-export` and streams the manifest plus raw directory files; it stages, verifies and reindexes locally under the source id only when absent. The remote is never modified or locked by either pull.
 6. Cross-node `session switch --to … --node server`: the target's adapter is probed with `vowp --node server doctor --json` before the source is touched. v0.1's bundle move remains available as explicit export/import; v0.2 remote execution keeps the session on the home and moves only the executor (`sessions.md` §9).
 7. On a control machine, commands without `--node` are sent to the configured home target; the rules are in §1 and `v0.2/home-and-surfaces.md` §8.
 
@@ -406,4 +410,10 @@ v0.2 adds the CLI-facing subset of the spec's named tests:
 `session_pull_same_id_imports_the_origin_id_without_a_parent`,
 `session_pull_same_id_refuses_an_existing_session_without_mutating_it`,
 `session_pull_same_id_refuses_a_corrupt_bundle_before_importing` and
-`session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import`.
+`session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import`. The full-directory slice
+adds `session_pull_full_imports_the_origin_id_with_the_full_log`,
+`session_pull_full_refuses_an_existing_session_without_mutating_it`,
+`session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`,
+`session_pull_full_refuses_an_over_cap_snapshot_before_copying` and
+`session_pull_full_reports_a_failed_remote_export_and_imports_nothing`; the default child path
+remains `session_pull_imports_a_child_and_prints_both_ids`.

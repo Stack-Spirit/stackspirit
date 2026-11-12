@@ -32,9 +32,10 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
 - **`session push <node> <session>`** as the remaining convenience wrapper around the existing
   bundle and `--node` transport, for two-home or offline use. `session pull <node> <session>` landed
   in the first slice below.
-- **Directory copy.** Copy `sessions/<id>/` (log, blobs, capsules, `adapters.json`) with a manifest,
-  checksums and a size cap, then run `vowp reindex`; preserve the full log rather than the bundle's
-  capsule + tail.
+- **Directory copy.** Landed in the third slice below as `session pull <node> <session> --full`:
+  it copies `sessions/<id>/` (log, blobs, capsules, `adapters.json`) with a manifest, checksums and
+  a 1 GiB cap, then runs `vowp reindex`; the full log is preserved rather than the bundle's capsule
+  + tail.
 - **Divergence reporting, never a silent merge.** If both sides advanced the same session, report
   the two heads and require an explicit choice.
 - **Daemon transport.** The optional second transport after the v0.3 HTTP API exists. SSH stays the
@@ -66,14 +67,16 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
    the two modes is still open; divergence needs the two-head report below.
 2. **Direction.** Explicit `pull`/`push` first; a bidirectional `session sync` only with a visible
    divergence report. Never guess a merge.
-3. **Blobs.** A directory copy needs a size limit, a progress display and a clear "blob
-   unavailable" marker for the rest.
+3. **Blobs.** The full pull refuses a session whose declared file sizes exceed the 1 GiB limit
+   before copying anything; there is no partial copy and no "blob unavailable" placeholder. A
+   progress display and a configurable limit remain open.
 4. **Auth and paths.** The remote home, project and cwd may differ. The bundle already carries
    `cwd`; import must keep the existing allow-list check.
 5. **Offline queue.** A push that fails should be retryable without duplicating a child; decide
    whether the request is idempotent by content checksum.
-6. **Lease interaction.** A session pulled to a second home cannot have two live leases. v0.3 must
-   define whether a pull requires the source lease to be released or is a read-only snapshot.
+6. **Lease interaction.** The full pull is a read-only snapshot: it takes no lock and migrates no
+   lease. The operator must leave the source lease released or quiescent while it runs; a live
+   source lease is not cut off and enforcement remains open.
 
 ## First v0.3 slice (implemented)
 
@@ -116,7 +119,51 @@ The tests are `same_id_import_keeps_the_origin_id_without_a_parent`,
 `session_pull_same_id_refuses_a_corrupt_bundle_before_importing` and
 `session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import`.
 
-Still out of scope: directory copy, divergence reporting (two heads), merge, bidirectional sync,
-`session push`, lease interaction and offline queueing. A same-id pull is still a one-way snapshot;
-the source is neither modified nor locked. The bundle carries only the replayable tail, so the
-local log is a partial copy even though it keeps the origin id.
+Still out of scope for this slice: directory copy (landed in the third slice below), divergence
+reporting (two heads), merge, bidirectional sync, `session push`, lease interaction and offline
+queueing. A same-id pull is still a one-way snapshot; the source is neither modified nor locked.
+The bundle carries only the replayable tail, so the local log is a partial copy even though it
+keeps the origin id.
+
+## Third v0.3 slice (implemented)
+
+`vowp session pull <node> <session> --full` copies the raw session directory instead of a bundle.
+The local side runs the source's hidden `session dir-export` over the same SSH argv path; the first
+line of its stdout is a `vowp-session-dir-v1` manifest (`origin`, and `files` with each relative
+path, byte size and lowercase sha256), followed by the file bytes in manifest order. The layout is
+`log.jsonl`, optional `adapters.json`, `blobs/<sha256>` and `capsules/<name>.json`; `.lock`,
+`import.json` and a previous `manifest.json` are never copied.
+
+The default cap is 1 GiB (`SESSION_DIR_MAX_BYTES`, 1 073 741 824 bytes). The source checks it from
+file sizes before hashing and the local side checks the manifest total again before creating
+staging, so an over-cap session fails with the limit named and copies nothing. There is no
+blob-unavailable placeholder in this slice: the pull refuses rather than importing a partial
+session.
+
+A full pull always keeps the origin id and never creates a child or rewrites a bundle. The id must
+be absent locally as a row and as `sessions/<id>/`; a present id is exit 4 and leaves the existing
+copy untouched. The files are written into a private staging directory under `<home>/tmp`, every
+digest is checked, the staged log is verified (a torn tail or corrupt line is refused), the
+manifest is written into the directory, and only then is `sessions/<id>/` renamed into place. A
+failed copy, digest, size or verification leaves no `sessions/<id>/` and no staging directory.
+After the rename `vowp reindex` rebuilds the index; a reindex that does not index the session
+removes the new directory and fails.
+
+The pull is read-only at the source: it takes no log lock and moves no lease. The source lease must
+be released or quiescent, and both nodes must run a build with the hidden export command. A
+compacted source has no `log.jsonl` and is refused with a hint to use the bundle pull.
+
+Tests: `session_pull_full_imports_the_origin_id_with_the_full_log` (full log beyond the 20-event
+bundle tail, blob, capsule, `adapters.json`, manifest verification and `vowp reindex`),
+`session_pull_full_refuses_an_existing_session_without_mutating_it`,
+`session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`,
+`session_pull_full_refuses_an_over_cap_snapshot_before_copying`,
+`session_pull_full_reports_a_failed_remote_export_and_imports_nothing`, and the store tests
+`session_dir_manifest_verifies_and_detects_corruption`,
+`session_dir_manifest_refuses_a_directory_over_the_size_cap` and
+`session_dir_manifest_rejects_traversal_and_reserved_paths`. The default child pull remains
+`session_pull_imports_a_child_and_prints_both_ids`.
+
+Still out of scope: divergence reporting (two heads), merge, bidirectional sync, `session push`,
+live lease migration, a daemon transport, offline queueing, a progress display, blob deduplication
+and a configurable size limit.
