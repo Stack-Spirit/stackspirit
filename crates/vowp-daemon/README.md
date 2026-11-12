@@ -3,14 +3,14 @@
 The read-only loopback HTTP API for one VOWP project.
 
 `vowp-daemon [--home <dir>] [--project <name>] [--port <n>]` opens an existing VOWP home
-read-only, serves the static board page at `GET /` and the API endpoints
-`GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`, `/api/v1/sessions` and
+read-only, serves the static board page at `GET /` and its phone alias `GET /board`, and the
+API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`, `/api/v1/sessions` and
 `/api/v1/sessions/{id}/events`, and binds `127.0.0.1` only. The default port is `0`, so
 the operating system picks an ephemeral port and the binary prints the bound address.
 
 The board page is plain HTML, CSS and vanilla JavaScript embedded in the binary with
-`include_str!`; it fetches `/api/v1/board` on load and every five seconds. No Node or
-TypeScript build step is involved.
+`include_str!`; it fetches `/api/v1/board` on load and every five seconds and its card
+layout is usable at a 360 px viewport. No Node or TypeScript build step is involved.
 
 This is the first v0.3 slice: there is no token, no write endpoint and no SSE. The listener
 is loopback-only and nothing writes, so there is no privileged action to authenticate. A

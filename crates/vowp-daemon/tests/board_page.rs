@@ -96,7 +96,7 @@ fn board_page_serves_the_static_page_and_the_fixture_board() {
     assert_eq!(board.inbox_open, 1);
     assert_eq!(board.last_checkpoint, Some(fixture.checkpoint));
 
-    // Only `/` is the new page route; the API fallback still answers unknown paths.
+    // `/` and `/board` are the page routes; the API fallback still answers unknown paths.
     let missing = get(server.address, "/not-the-board");
     assert_eq!(missing.status, 404, "body: {}", missing.body);
 }
