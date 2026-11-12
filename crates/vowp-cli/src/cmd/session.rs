@@ -1122,9 +1122,10 @@ const CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 
 /// Records interactive Claude Code transcripts (the optional v0.1 importer).
 ///
-/// A plain terminal run follows the transcript tree every two seconds until Ctrl-C;
-/// `--once`, or a non-TTY run without it, makes one incremental pass so scripts and
-/// tests do not hang. Every file is opened read-only.
+/// `--follow`, or a plain terminal run without `--once`, follows the transcript tree
+/// every two seconds until Ctrl-C; `--once`, or a non-TTY run without `--follow`, makes
+/// one incremental pass so scripts and tests do not hang. Every file is opened
+/// read-only.
 fn watch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionWatchArgs) -> Result<i32, CliError> {
     let dir = args.claude_dir.clone().unwrap_or_else(default_claude_dir);
     if !dir.is_dir() {
@@ -1133,7 +1134,7 @@ fn watch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionWatchArgs) -> Result<i
             format!("Claude transcript directory {} is unreadable", dir.display()),
         )));
     }
-    let follow = !args.once && io.is_tty();
+    let follow = args.follow || (!args.once && io.is_tty());
     let (transcripts, imported) = if follow {
         let count = transcript_files(&dir)?.len();
         if !ctx.json() {

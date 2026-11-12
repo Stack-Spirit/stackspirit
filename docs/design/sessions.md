@@ -213,7 +213,7 @@ Rust (in `vowp-core::session::bundle`): `pub struct Bundle { format: String, pro
 
 Records an interactive Claude Code session into the canonical store without running it. **Read-only** on Claude's files.
 
-1. Locate transcripts: `~/.claude/projects/<mangled-cwd>/<claude-session-uuid>.jsonl` (read from `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`; the path is a flag/config input, never assumed in tests). `vowp session watch [--claude-dir <dir>] [--once]` (the flag names the transcripts root, default `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`; cli.md §4).
+1. Locate transcripts: `~/.claude/projects/<mangled-cwd>/<claude-session-uuid>.jsonl` (read from `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`; the path is a flag/config input, never assumed in tests). `vowp session watch [--claude-dir <dir>] [--once] [--follow]` (the flag names the transcripts root, default `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`; cli.md §4).
 2. Map each Claude transcript line to events (`harness=claude-code`, `native_session_id` = uuid): user text → `user.message`; assistant text blocks → `assistant.message`; `thinking` blocks → `assistant.reasoning` (`replayable=false`); `tool_use` → `tool.call`; `tool_result` → `tool.result` (spill > 8192 bytes); usage → `cost` (`source: unknown`, tokens only — subscription sessions have no receipt); unknown line types are skipped and counted.
 3. **Incremental by byte offset.** The importer keeps an `ImportCursor { offset, last_uuid }`
    in the node database under `watch:<native session id>`, as JSON. A pass opens the transcript
@@ -226,10 +226,11 @@ Records an interactive Claude Code session into the canonical store without runn
 4. **One canonical session per Claude uuid.** The first pass with new lines looks up the canonical
    session mapped to `(claude-code, uuid)` in `session_natives`, creates it when missing
    (`role=user`, title = first user message ≤ 60 chars) and records the mapping; later passes append
-   only the new events to that same session. A plain TTY run without `--once` follows: it polls
-   every two seconds, imports newly completed lines, and exits cleanly on Ctrl-C. `--once`, and a
-   non-TTY run without it, make one incremental pass so scripts and tests do not hang. The importer
-   never writes to Claude's transcript tree.
+   only the new events to that same session. `--follow` follows: it polls every two seconds,
+   imports newly completed lines, and exits cleanly on Ctrl-C. A plain TTY run without `--once` or
+   `--follow` follows the same way. `--once`, and a non-TTY run without `--follow`, make one
+   incremental pass so scripts and tests do not hang. The importer never writes to Claude's
+   transcript tree.
 5. Coverage lives in `crates/vowp-cli/tests/session.rs` (growing fixture, partial final line,
    follow loop, legacy marker and one-session rule) and `crates/vowp-core/src/session/importer.rs`
    (complete-line and truncation cursor behaviour).

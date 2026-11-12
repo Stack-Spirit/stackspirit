@@ -228,17 +228,23 @@ Common rejections:
 
 ```sh
 vowp session watch --once
+vowp session watch --follow
 vowp session watch --once --claude-dir ~/.claude
 ```
 
-`session watch` is an optional importer. `--once` scans `*.jsonl` files under `--claude-dir`
-(default `$CLAUDE_CONFIG_DIR`, else `~/.claude`). For a transcript with new lines it creates a
-canonical session and records user text, assistant text and tool calls; other line types are skipped.
-It reads transcripts read-only and never writes to Claude's files. The processed line count is stored
-in the node database under `watch:<native session id>`; a later scan imports only lines after that
-count, and a transcript that is shorter or unchanged is skipped rather than restarted. Continuous
-following is not available: in a terminal, `session watch` without `--once` exits 2 with a message to
-use `--once`. Run it from cron for repeated scans.
+`session watch` is an optional importer. It scans `*.jsonl` files under `--claude-dir`
+(default `$CLAUDE_CONFIG_DIR`, else `~/.claude`) and records user text, assistant text and tool
+calls; other line types are skipped. It reads transcripts read-only and never writes to Claude's
+files. The importer stores a byte cursor (offset plus the last complete line's id) in the node
+database under `watch:<native session id>`, so a later pass imports only newly completed lines. A
+partial final line waits for its newline, and a transcript that shrank below the cursor restarts at
+zero. One Claude native uuid maps to one canonical VOWP session (`role=user`, title from the first
+user message); later passes append only new events and never create a second session.
+
+`--once` makes one incremental pass. `--follow` polls every two seconds until Ctrl-C, importing
+newly completed lines; a terminal run without `--once` or `--follow` follows the same way. A non-TTY
+run without `--follow` makes one pass even when `--once` is omitted, so scripts do not hang. Run it
+from cron with `--once` for repeated scans.
 
 ## When to switch
 

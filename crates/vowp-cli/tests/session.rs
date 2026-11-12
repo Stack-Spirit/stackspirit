@@ -7,8 +7,6 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use vowp_protocol::{
@@ -1879,6 +1877,49 @@ fn session_watch_once_migrates_a_legacy_line_count_marker() {
     assert_eq!(cursor["last_uuid"], "a1");
 }
 
+/// Returns the message texts of the one project session, or an empty list while it is
+/// still being created (the row can be visible before the log file exists).
+fn project_message_texts(env: &common::TestEnv) -> Vec<String> {
+    let sessions = project_sessions(env);
+    if sessions.len() != 1 {
+        return Vec::new();
+    }
+    let paths = vowp_store::NodePaths::new(env.home_path());
+    let Ok(log) = SessionLog::open_read(&paths, &sessions[0].id) else {
+        return Vec::new();
+    };
+    let Ok(events) = log.read_all() else {
+        return Vec::new();
+    };
+    message_texts(&events)
+}
+
+/// Sleeps until `condition` holds, failing the test if `child` exits first or time runs out.
+fn wait_for_session_watch(
+    child: &mut std::process::Child,
+    stderr_path: &Path,
+    what: &str,
+    condition: impl Fn() -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if condition() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("watch status") {
+            let stderr = std::fs::read_to_string(stderr_path).unwrap_or_default();
+            panic!("session watch --follow exited before {what}: {status:?}\n{stderr}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stderr = std::fs::read_to_string(stderr_path).unwrap_or_default();
+            panic!("timed out waiting for {what}\n{stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn session_watch_follow_imports_a_line_appended_after_startup() {
     let env = common::TestEnv::new();
@@ -1895,35 +1936,66 @@ fn session_watch_follow_imports_a_line_appended_after_startup() {
         ),
     );
 
-    let io = vowp_cli::BufferIo::new("");
-    let ctx = vowp_cli::Ctx::build(&env.global(false), &io).expect("build context");
-    let stop = Arc::new(AtomicBool::new(false));
-    let append_path = path.clone();
-    let stop_after_append = Arc::clone(&stop);
-    let appender = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
-        append_claude_line(
-            &append_path,
-            &claude_line(
-                "user",
-                "u2",
-                "native-follow",
-                serde_json::json!("appended while following"),
-                "2026-11-12T13:00:01Z",
-            ),
-        );
-        // Leave several poll windows for the loop to import the line, then stop it the
-        // same way the SIGINT flag does.
-        std::thread::sleep(Duration::from_millis(700));
-        stop_after_append.store(true, Ordering::SeqCst);
+    let stdout_path = env.project_path().join("watch-follow.stdout");
+    let stderr_path = env.project_path().join("watch-follow.stderr");
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["session", "watch", "--follow", "--claude-dir"])
+        .arg(&dir)
+        .stdout(std::fs::File::create(&stdout_path).expect("watch stdout"))
+        .stderr(std::fs::File::create(&stderr_path).expect("watch stderr"));
+    let mut child = command.spawn().expect("spawn session watch --follow");
+
+    // The explicit flag must follow even though stdin/stdout are not a terminal, so the
+    // process stays alive after the first pass instead of exiting.
+    wait_for_session_watch(&mut child, &stderr_path, "the first transcript line", || {
+        project_message_texts(&env) == vec!["user:before startup".to_owned()]
     });
 
-    let (transcripts, imported) =
-        vowp_cli::cmd::session::watch_until(&ctx, &dir, Duration::from_millis(50), &|| stop.load(Ordering::SeqCst))
-            .expect("follow loop");
-    appender.join().expect("appender");
-    assert_eq!(transcripts, 1);
-    assert_eq!(imported, 2, "the follow loop missed the appended line");
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u2",
+            "native-follow",
+            serde_json::json!("appended while following"),
+            "2026-11-12T13:00:01Z",
+        ),
+    );
+    wait_for_session_watch(&mut child, &stderr_path, "the appended transcript line", || {
+        project_message_texts(&env).contains(&"user:appended while following".to_owned())
+    });
+
+    // Ctrl-C flips the interrupt flag; the pass in flight finishes and the command exits 0.
+    let signal = std::process::Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send SIGINT");
+    assert!(signal.success(), "kill -INT failed: {signal:?}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("watch status") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "session watch --follow did not stop on SIGINT\n{}",
+                std::fs::read_to_string(&stderr_path).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(status.success(), "session watch --follow exited {status:?}\n{stderr}");
+    let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    assert!(stdout.contains("watching 1 transcripts"), "{stdout}");
 
     let sessions = project_sessions(&env);
     assert_eq!(sessions.len(), 1, "follow must reuse the one canonical session");

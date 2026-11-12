@@ -898,6 +898,7 @@ Options:
       --json                 Print one machine-readable JSON document on stdout
       --node <NAME>          Run the command on that node over ssh
       --once                 Scan once instead of following
+      --follow               Follow new transcript lines until interrupted
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal

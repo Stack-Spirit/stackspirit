@@ -642,6 +642,9 @@ pub struct SessionWatchArgs {
     /// Scan once instead of following.
     #[arg(long)]
     pub once: bool,
+    /// Follow new transcript lines until interrupted.
+    #[arg(long)]
+    pub follow: bool,
 }
 
 /// Arguments for `vowp session tail`.
