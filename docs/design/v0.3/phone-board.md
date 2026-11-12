@@ -1,8 +1,9 @@
 # v0.3 — phone-friendly board
 
 Status: the read-only card board is implemented in v0.3 by `vowp-daemon` at `GET /board` (the
-same shell is also at `/`). PWA install, session detail, inbox answer and push notifications remain
-later. The rest of this note is the design that led there.
+same shell is also at `/`). The PWA shell, session detail and inbox answer are implemented; push
+notifications remain later. A phone reaches the board through the same SSH tunnel as the web
+window, and the rest of this note is the design that led there.
 
 ## Goal
 
@@ -78,11 +79,36 @@ visible. With JavaScript disabled, `<noscript>` says the board requires JavaScri
 embeds a home path, a token or a provider secret.
 
 The implementation is one hand-written `crates/vowp-daemon/web/index.html` embedded with
-`include_str!`, with no build step, PWA manifest or service worker. The HTTP-only test is
+`include_str!`, with no build step. The HTTP-only test is
 `crates/vowp-daemon/tests/phone_board.rs`: it starts a real `127.0.0.1:0` listener over a temporary
 home and asserts the card markup, the field labels, the `<noscript>` text, the narrow-viewport rule,
 and the fixture's running job, limit reset and unknown cost from the same API.
 
-Still later: the PWA manifest and service worker, push notifications, the read-only session-detail
-sheet with recent events and gate results, and answering inbox items. The board remains read-only,
-and `GET /api/v1/board` and its schema are unchanged.
+## Reaching it from a phone (implemented)
+
+On the home, `vowp up` prints the loopback window URL and the control-machine command for the
+actual daemon port:
+
+```text
+web window: http://127.0.0.1:54321/
+remote window: vowp tunnel open window --remote-port 54321
+  local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)
+```
+
+With the home configured as a control machine (`vowp control init --name home
+<home-ssh-target>`), run the printed `vowp tunnel open window --remote-port 54321` on the phone
+or laptop and open the local loopback URL it prints. `/board` is the same PWA shell as `/`, and
+its 360 px card layout is the phone view. The daemon still binds `127.0.0.1` on the home; the
+existing SSH forward is the only path, no public port is opened, and the firewall allows only
+SSH. Pass `--local-port <n>` when a fixed local URL is wanted; otherwise the command prints the
+chosen port.
+
+Reads are token-free. When an inbox answer or session switch needs a write, enter
+`VOWP_API_TOKEN` in the page's unlock panel; the page keeps it in `sessionStorage`, never in the
+URL, and clears it on `401`. The value is the one the daemon inherited from the home's `vowp up`
+environment. The PWA shell caches static pages only and bypasses `/api/` and `/stream` requests,
+so board data is never served from the cache as authoritative. Push notifications remain later.
+
+Still later: push notifications and any native app. The PWA manifest, service worker, session
+detail page and inbox answer are implemented; the board's first slice stays read-only, and
+`GET /api/v1/board` and its schema are unchanged.

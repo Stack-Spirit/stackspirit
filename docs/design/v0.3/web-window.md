@@ -3,8 +3,9 @@
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
 board, session, capsule, cost, inbox and nodes pages, the cost chart, the token-gated inbox answer
 and local session switch, and the PWA manifest/service-worker shell are implemented. `vowp up`
-starts the serving `vowp-daemon` as a separate child process and prints the window address; the
-rest of this note is design. v0.1 has no browser UI and no listening socket.
+starts the serving `vowp-daemon` as a separate child process, prints the window address and the
+actual-port `vowp tunnel open window` hint, and the rest of this note is design. v0.1 has no
+browser UI and no listening socket.
 
 ## Goal
 
@@ -91,12 +92,46 @@ and its timestamp visible. The page uses text labels as well as colour and carri
 `<noscript>` message. It links to `/sessions`, `/cost` and `/inbox`.
 
 `vowp up` starts this daemon for the window as a separate `vowp-daemon` child process, prints
-`web window: http://127.0.0.1:<port>/`, and stops the child on `vowp down` or SIGINT/SIGTERM.
-The child inherits `VOWP_API_TOKEN`, so the page's token unlock and the two writes work without
-a second token store. The window is optional: a missing daemon binary warns and the supervisor
-keeps running. The window serves one project (the checkout `up` runs from, or the only active
-project); an ambiguous home leaves it off with a warning. The process shape, address file and
-shutdown details are in [`http-api.md`](http-api.md#starting-the-window-from-vowp-up-implemented).
+`web window: http://127.0.0.1:<port>/` together with the exact `vowp tunnel open window
+--remote-port <port>` hint for that address, and stops the child on `vowp down` or
+SIGINT/SIGTERM. The child inherits `VOWP_API_TOKEN`, so the page's token unlock and the two
+writes work without a second token store. The window is optional: a missing daemon binary warns
+and the supervisor keeps running. The window serves one project (the checkout `up` runs from,
+or the only active project); an ambiguous home leaves it off with a warning. The process shape,
+address file and shutdown details are in
+[`http-api.md`](http-api.md#starting-the-window-from-vowp-up-implemented).
+
+### Reaching the window from a laptop or phone (implemented)
+
+The daemon stays bound to `127.0.0.1` on the home. On the home, `vowp up` prints:
+
+```text
+web window: http://127.0.0.1:54321/
+remote window: vowp tunnel open window --remote-port 54321
+  local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)
+```
+
+On the laptop or phone, configure the home once as a control machine (`vowp control init --name
+home <home-ssh-target>`) and run the printed command:
+
+```sh
+vowp tunnel open window --remote-port 54321
+```
+
+That starts the existing managed SSH forward and prints the chosen local loopback port, for
+example `tunnel window open: 127.0.0.1:41023 -> 127.0.0.1:54321 (pid …)`. Open
+`http://127.0.0.1:41023/` in the browser. Pass `--local-port <n>` when a fixed local port is
+wanted. The tunnel is opened from the machine that will use it; it adds no listener on the home
+and no public port. The home's only inbound service remains SSH, and the home's firewall needs no
+rule for the daemon.
+
+The same page is the PWA at any width. On a phone, use `/board` for the narrow card board (the
+same shell is also at `/`) and add the tunnel's local URL to the home screen. Reads need no
+token. `VOWP_API_TOKEN` is set in the environment that runs `vowp up` (for example the systemd
+unit), inherited by the daemon, and typed into a page's unlock panel; the page keeps it in
+`sessionStorage` and only the inbox answer and session switch writes use it. The value is never
+put in a URL, logged or returned by the API. Rotating the token means restarting the daemon with
+a new value and unlocking again.
 
 The session pages are the same kind of embedded static shell,
 `crates/vowp-daemon/web/sessions.html`, served at `GET /sessions` and `GET /sessions/{id}`. The
@@ -245,6 +280,9 @@ the same endpoint to prove the page's data source is a schema-valid `NodePage` o
 local and remote nodes. The PWA test parses the manifest, pins the three asset content types and
 the service-worker headers, checks the bounded `SHELL` list and the API/SSE bypass, and asserts
 every page shell links and registers the service worker without printing a home path or token.
+The CLI `up` tests pin the printed window URL and the actual-port
+`vowp tunnel open window --remote-port <port>` hint, and prove a missing daemon warns without
+printing a hint.
 
 Still later: the reconnect UI on the pages that still poll, cross-node switching, dismiss and the
 other write actions, and a token rotation service.

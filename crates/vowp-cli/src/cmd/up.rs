@@ -144,6 +144,32 @@ fn parse_web_window_address(line: &str) -> Option<String> {
     Some(format!("{}/", address.trim_end_matches('/')))
 }
 
+/// Returns the loopback port from a printed window address.
+///
+/// [`parse_web_window_address`] only admits `http://127.0.0.1:<port>/`, so a malformed
+/// tail means no hint rather than a guessed port.
+fn web_window_port(address: &str) -> Option<u16> {
+    let port = address.strip_prefix("http://127.0.0.1:")?.trim_end_matches('/');
+    port.parse::<u16>().ok().filter(|port| *port != 0)
+}
+
+/// Prints the window URL and the control-machine tunnel command for its actual port.
+///
+/// The local port is chosen by `vowp tunnel open` on the control machine, so the second
+/// line shows the local URL shape instead of inventing a port. An address without a
+/// usable port prints only the window URL.
+fn print_web_window(io: &mut dyn IoStreams, address: &str) -> Result<(), CliError> {
+    writeln!(io.out(), "web window: {address}")?;
+    if let Some(port) = web_window_port(address) {
+        writeln!(io.out(), "remote window: vowp tunnel open window --remote-port {port}")?;
+        writeln!(
+            io.out(),
+            "  local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)"
+        )?;
+    }
+    Ok(())
+}
+
 /// Selects the one project the optional web window serves.
 ///
 /// A checkout named by `--project` (or the current directory) wins. Without one, the home
@@ -794,7 +820,7 @@ where
     };
     if !json {
         if let Some(address) = web_window.as_ref().and_then(WebWindow::address) {
-            writeln!(io.out(), "web window: {address}")?;
+            print_web_window(io, address)?;
         }
     }
     // The supervisor waits up to `tick_secs` between ticks; a cancellation alone
@@ -1099,7 +1125,7 @@ fn run_detached(
     } else {
         writeln!(io.out(), "supervisor started (pid {pid})")?;
         if let Some(address) = &web_window {
-            writeln!(io.out(), "web window: {address}")?;
+            print_web_window(io, address)?;
         }
     }
     if web_window.is_none() {
@@ -1358,6 +1384,17 @@ mod tests {
         let stdout = io.stdout();
         assert!(stdout.contains("1/2 steps ok"), "{stdout}");
         assert!(stdout.contains("degraded demo/harvest: disk full"), "{stdout}");
+    }
+
+    #[test]
+    fn window_ports_come_only_from_the_loopback_url() {
+        assert_eq!(web_window_port("http://127.0.0.1:54321/"), Some(54321));
+        assert_eq!(web_window_port("http://127.0.0.1:1"), Some(1));
+        assert_eq!(web_window_port("http://127.0.0.1:0/"), None);
+        assert_eq!(web_window_port("http://127.0.0.1:/"), None);
+        assert_eq!(web_window_port("http://192.0.2.1:54321/"), None);
+        assert_eq!(web_window_port("https://127.0.0.1:54321/"), None);
+        assert_eq!(web_window_port("http://127.0.0.1:99999/"), None);
     }
 
     #[test]

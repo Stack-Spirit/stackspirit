@@ -1429,6 +1429,23 @@ fn up_starts_daemon_with_home_project_port_and_token() {
         "the window address was not surfaced; stdout:\n{}",
         supervisor.stdout()
     );
+    let stdout = supervisor.stdout();
+    assert!(
+        stdout.contains("remote window: vowp tunnel open window --remote-port 54321"),
+        "the tunnel hint must carry the daemon's actual port; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("local URL: http://127.0.0.1:<local-port>/"),
+        "the tunnel hint must show the local URL shape; stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("test-token"),
+        "the supervisor output must not leak the token: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&env.home_path().display().to_string()),
+        "the supervisor output must not leak the home path: {stdout}"
+    );
     assert!(
         eventually(|| env.home_path().join("web-window").is_file()),
         "the foreground supervisor publishes the address for a detached parent"
@@ -1546,6 +1563,16 @@ fn up_warns_and_continues_when_the_daemon_binary_is_missing() {
     assert!(
         !supervisor.stdout().contains("web window:"),
         "no address is surfaced without a daemon; stdout:\n{}",
+        supervisor.stdout()
+    );
+    assert!(
+        !supervisor.stdout().contains("remote window:"),
+        "a missing daemon must not advertise a tunnel; stdout:\n{}",
+        supervisor.stdout()
+    );
+    assert!(
+        !supervisor.stdout().contains("--remote-port"),
+        "a missing daemon must not print a bogus port; stdout:\n{}",
         supervisor.stdout()
     );
     assert!(!env.home_path().join("web-window").exists());
@@ -2492,6 +2519,14 @@ fn detached_up_surfaces_the_web_window_and_down_stops_the_daemon() {
     assert!(
         stdout.contains("web window: http://127.0.0.1:54321/"),
         "the detached caller prints the address published by its foreground child: {stdout}"
+    );
+    assert!(
+        stdout.contains("remote window: vowp tunnel open window --remote-port 54321"),
+        "the detached caller prints the tunnel hint with the actual port: {stdout}"
+    );
+    assert!(
+        stdout.contains("local URL: http://127.0.0.1:<local-port>/"),
+        "the detached caller shows the local URL shape: {stdout}"
     );
     assert!(eventually(|| fake.pid().is_some()), "the fake daemon did not start");
     let daemon_pid = fake.pid().expect("daemon pid");

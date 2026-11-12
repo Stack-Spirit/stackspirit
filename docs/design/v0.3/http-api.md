@@ -150,6 +150,28 @@ can print the same line, and removes the file on shutdown. A missing or unstarta
 prints `warning: web window not started: …` and the supervisor keeps running: the window is
 optional, the supervisor is not. `up --once` runs one tick and starts no daemon.
 
+After the daemon reports its address, the human `vowp up` output also carries the
+control-machine command for that actual port and the local URL shape:
+
+```text
+web window: http://127.0.0.1:54321/
+remote window: vowp tunnel open window --remote-port 54321
+  local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)
+```
+
+The command is the existing `vowp tunnel open` managed SSH forward. It runs on the laptop or
+phone that will use the window and forwards a local loopback port to the home's loopback daemon
+port. The daemon stays bound to `127.0.0.1`, the home's only inbound service remains SSH, and
+there is no public bind, TLS terminator, relay or second listener. The hint is printed only when
+the daemon reported an address: a missing daemon warns and prints no port or tunnel command.
+`vowp up --json` keeps the address in `web_window` and prints no human lines.
+
+The browser opens the tunnel's local loopback URL, not a home URL, so the write token is never
+part of a URL. `VOWP_API_TOKEN` is inherited by the daemon from the environment `vowp up` runs
+in; the page stores the value it is given in `sessionStorage` and uses it only for the inbox
+answer and session switch writes. Reads stay token-free. Rotation is a daemon restart with a new
+value followed by an unlock; there is no token file or second store.
+
 On its shutdown path (normal stop file, first SIGINT/SIGTERM, supervisor error or early
 startup failure) the foreground supervisor sends SIGTERM to the daemon, waits up to five
 seconds, escalates to SIGKILL, reaps the child and removes the address file. No daemon child
@@ -335,8 +357,10 @@ executors. The page tests pin the switch form, `Authorization: Bearer` use, `ses
 the force warning, the state/error line and the absence of a token in the URL. The inbox page
 test pins the answer form and its queued message. The `vowp up` tests pin the daemon child's
 `--home`/`--project`/`--port` arguments, inherited `VOWP_API_TOKEN`, the printed address, the
-detached address file, SIGTERM/`down` shutdown without an orphan, and the warning-and-continue
-path when the binary is missing. Every other write endpoint remains later.
+exact `vowp tunnel open window --remote-port <port>` hint with the daemon's actual port, the
+detached address file and hint, SIGTERM/`down` shutdown without an orphan, and the
+warning-and-continue path when the binary is missing (including no tunnel hint). Every other
+write endpoint remains later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.
