@@ -4,19 +4,24 @@
 //! append-only log; the rows here are the store index. Ids are accepted by unique prefix of
 //! at least six characters.
 
-use std::io::Write as _;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use time::{OffsetDateTime, macros::format_description};
 use vowp_core::session::bundle;
+use vowp_core::session::importer::{ImportCursor, import_file, line_uuid};
 use vowp_core::session::remote::{BeginTurn, IngestGrant, IngestSession, begin_turn};
 use vowp_core::session::service::SessionService;
+use vowp_core::surface::native::{TranscriptEntry, TranscriptKind};
 use vowp_protocol::{
-    Actor, AttachAction, CapsuleTrigger, EventBody, EventEnvelope, EventSource, Executor, ExecutorRef, HarnessKind,
-    NewSession, NodeName, RunPurpose, Session, SessionId, SessionRole, SessionState, Switch, SwitchEvent, SwitchId,
-    SwitchReason, SwitchState, Timestamp,
+    Actor, AssistantMessage, AssistantReasoning, AttachAction, CapsuleTrigger, Cost, CostEvent, CostSource, EventBody,
+    EventEnvelope, EventSource, Executor, ExecutorRef, HarnessKind, NewSession, NodeName, RunPurpose, Session,
+    SessionId, SessionRole, SessionState, Switch, SwitchEvent, SwitchId, SwitchReason, SwitchState, Timestamp,
+    ToolCall, ToolResult, UserMessage,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{SessionFilter, Store};
@@ -1103,7 +1108,23 @@ fn import(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionImportArgs) -> Result
     Ok(0)
 }
 
+/// Two-second poll interval for the follow mode.
+const WATCH_POLL: Duration = Duration::from_secs(2);
+
+/// How often the follow wait re-checks the interrupt flag.
+const WATCH_WAIT_SLICE: Duration = Duration::from_millis(100);
+
+/// Executor recorded for a session imported from Claude Code.
+const CLAUDE_EXECUTOR: &str = "claude-code:claude-sonnet-5-5@medium";
+
+/// Model recorded on imported Claude events.
+const CLAUDE_MODEL: &str = "claude-sonnet-5-5";
+
 /// Records interactive Claude Code transcripts (the optional v0.1 importer).
+///
+/// A plain terminal run follows the transcript tree every two seconds until Ctrl-C;
+/// `--once`, or a non-TTY run without it, makes one incremental pass so scripts and
+/// tests do not hang. Every file is opened read-only.
 fn watch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionWatchArgs) -> Result<i32, CliError> {
     let dir = args.claude_dir.clone().unwrap_or_else(default_claude_dir);
     if !dir.is_dir() {
@@ -1112,24 +1133,22 @@ fn watch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionWatchArgs) -> Result<i
             format!("Claude transcript directory {} is unreadable", dir.display()),
         )));
     }
-    if !args.once && io.is_tty() {
-        return Err(CliError::Invalid(
-            "session watch --follow is not available in this build; use --once".to_owned(),
-        ));
-    }
-    let transcripts = transcript_files(&dir)?;
-    // The optional importer records new transcript lines once and stores the processed line
-    // count next to the node. Its parser is deliberately small: only the event-bearing line
-    // types are mapped, and unknown lines are skipped.
-    let mut imported = 0;
-    for path in &transcripts {
-        imported += import_transcript(ctx, path)?;
-    }
+    let follow = !args.once && io.is_tty();
+    let (transcripts, imported) = if follow {
+        let count = transcript_files(&dir)?.len();
+        if !ctx.json() {
+            writeln!(io.out(), "watching {count} transcripts (press Ctrl-C to stop)")?;
+        }
+        let interrupted = interrupt_flag()?;
+        watch_until(ctx, &dir, WATCH_POLL, &|| interrupted.load(Ordering::SeqCst))?
+    } else {
+        watch_pass(ctx, &dir)?
+    };
     if ctx.json() {
         print_json(
             io,
             &serde_json::json!({
-                "watching": transcripts.len(),
+                "watching": transcripts,
                 "imported": imported,
                 "dir": dir.display().to_string(),
             }),
@@ -1137,8 +1156,7 @@ fn watch(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionWatchArgs) -> Result<i
     } else {
         writeln!(
             io.out(),
-            "watching {} transcripts ({imported} events imported)",
-            transcripts.len()
+            "watching {transcripts} transcripts ({imported} events imported)"
         )?;
     }
     Ok(0)
@@ -1153,7 +1171,7 @@ fn default_claude_dir() -> PathBuf {
 }
 
 /// Lists `*.jsonl` transcript files recursively under `dir`.
-fn transcript_files(dir: &std::path::Path) -> Result<Vec<PathBuf>, CliError> {
+fn transcript_files(dir: &Path) -> Result<Vec<PathBuf>, CliError> {
     let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(path) = stack.pop() {
@@ -1171,46 +1189,222 @@ fn transcript_files(dir: &std::path::Path) -> Result<Vec<PathBuf>, CliError> {
     Ok(files)
 }
 
-/// Imports one Claude transcript file into a canonical session.
-fn import_transcript(ctx: &Ctx, path: &std::path::Path) -> Result<usize, CliError> {
-    let text = std::fs::read_to_string(path)?;
-    let Some(first) = text
-        .lines()
-        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-    else {
+/// Runs one incremental pass over every transcript under `dir`.
+fn watch_pass(ctx: &Ctx, dir: &Path) -> Result<(usize, usize), CliError> {
+    let transcripts = transcript_files(dir)?;
+    let store = ctx.store()?;
+    let mut imported = 0;
+    for path in &transcripts {
+        imported += import_transcript(ctx, &store, path)?;
+    }
+    Ok((transcripts.len(), imported))
+}
+
+/// Repeats [`watch_pass`] every `poll` until `stop` returns true.
+///
+/// Public so integration tests can inject a short poll and a stop flag. The command
+/// passes [`WATCH_POLL`] and a flag set by SIGINT/SIGTERM, so Ctrl-C ends the loop
+/// after the pass in flight and returns `0`.
+#[doc(hidden)]
+pub fn watch_until(
+    ctx: &Ctx,
+    dir: &Path,
+    poll: Duration,
+    stop: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<(usize, usize), CliError> {
+    let mut imported = 0;
+    let mut transcripts = 0;
+    loop {
+        if stop() {
+            break;
+        }
+        let (count, events) = watch_pass(ctx, dir)?;
+        transcripts = count;
+        imported += events;
+        if stop() {
+            break;
+        }
+        wait_for_stop(poll, stop);
+    }
+    Ok((transcripts, imported))
+}
+
+/// Sleeps for up to `poll`, returning early when `stop` observes an interrupt.
+fn wait_for_stop(poll: Duration, stop: &dyn Fn() -> bool) {
+    let deadline = Instant::now() + poll;
+    while !stop() {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(WATCH_WAIT_SLICE.min(deadline - now));
+    }
+}
+
+/// Registers SIGINT/SIGTERM to flip one interrupt flag.
+fn interrupt_flag() -> Result<Arc<AtomicBool>, CliError> {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        signal_hook::flag::register(signal, Arc::clone(&interrupted))?;
+    }
+    Ok(interrupted)
+}
+
+/// Imports one Claude transcript file into its one canonical session.
+fn import_transcript(ctx: &Ctx, store: &Store, path: &Path) -> Result<usize, CliError> {
+    let Some(native) = transcript_native_id(path)? else {
         return Ok(0);
     };
-    let native = first
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    if native.is_empty() {
-        return Ok(0);
-    }
-    let store = ctx.store()?;
     let marker_key = format!("watch:{native}");
-    let processed: usize = store
-        .kv_get(&marker_key)?
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= processed {
+    let (mut cursor, legacy_marker) = load_cursor(store, &marker_key, path)?;
+    let start_offset = cursor.offset;
+    let batch = import_file(path, &mut cursor)?;
+    let cursor_moved = cursor.offset != start_offset;
+    if batch.entries.is_empty() {
+        if cursor_moved || legacy_marker {
+            save_cursor(store, &marker_key, &cursor)?;
+        }
         return Ok(0);
     }
-    let title = lines
-        .iter()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find_map(|value| {
-            (value.get("type").and_then(serde_json::Value::as_str) == Some("user"))
-                .then(|| {
-                    value
-                        .get("message")
-                        .and_then(|message| message.get("content"))
-                        .and_then(|content| content.as_str())
-                        .map(|text| text.chars().take(60).collect::<String>())
+
+    let session = canonical_session(ctx, store, &native, &batch.entries)?;
+    let log =
+        SessionLog::open(ctx.paths(), &session.id, ctx.deps().clock.clone()).map_err(vowp_core::CoreError::from)?;
+    let harness = HarnessKind::ClaudeCode;
+    let mut imported = 0;
+    for line in &batch.lines {
+        for entry in &line.entries {
+            // The native-id map makes a re-read idempotent, including after a crash
+            // before the cursor was saved or a file that was rewritten in place.
+            if store.native_event(&session.id, harness, &entry.native_id)?.is_some() {
+                continue;
+            }
+            let Some((body, actor)) = transcript_event(entry) else {
+                continue;
+            };
+            let appended = log
+                .append(vowp_store::session_log::NewEvent {
+                    actor,
+                    source: EventSource {
+                        harness,
+                        model: Some(CLAUDE_MODEL.to_owned()),
+                        node: Some(ctx.config().node.name.clone()),
+                        native_session_id: Some(native.clone()),
+                    },
+                    body,
+                    raw: Some(line.value.clone()),
+                    ts: None,
                 })
-                .flatten()
+                .map_err(vowp_core::CoreError::from)?;
+            store.index_event(&vowp_store::session_log::index_row(&appended))?;
+            store.insert_native_event(
+                &session.id,
+                harness,
+                &entry.native_id,
+                &appended.envelope.id,
+                appended.envelope.ts,
+            )?;
+            imported += 1;
+        }
+    }
+    log.sync().map_err(vowp_core::CoreError::from)?;
+    if cursor_moved || imported > 0 || legacy_marker {
+        save_cursor(store, &marker_key, &cursor)?;
+    }
+    Ok(imported)
+}
+
+/// Returns the Claude native session uuid from a transcript's JSON lines.
+fn transcript_native_id(path: &Path) -> Result<Option<String>, CliError> {
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let native = value
+            .get("session_id")
+            .or_else(|| value.get("sessionId"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !native.is_empty() {
+            return Ok(Some(native.to_owned()));
+        }
+    }
+}
+
+/// Loads a cursor and reports whether the stored marker is not already a JSON cursor.
+///
+/// The value is JSON under `watch:<native>`. A bare integer is the v0.1 line count:
+/// it is converted to the byte offset after that many complete lines so an upgrade
+/// does not re-import the prefix. A line count past the end of a truncated file
+/// starts over from zero. An unreadable marker starts over and is rewritten.
+fn load_cursor(store: &Store, key: &str, path: &Path) -> Result<(ImportCursor, bool), CliError> {
+    let Some(value) = store.kv_get(key)? else {
+        return Ok((ImportCursor::default(), false));
+    };
+    let value = value.trim();
+    if value.starts_with('{') {
+        return Ok((serde_json::from_str(value).unwrap_or_default(), true));
+    }
+    let Ok(lines) = value.parse::<usize>() else {
+        return Ok((ImportCursor::default(), true));
+    };
+    Ok((legacy_cursor(path, lines)?, true))
+}
+
+/// Converts a v0.1 processed-line count into a byte cursor.
+fn legacy_cursor(path: &Path, lines: usize) -> Result<ImportCursor, CliError> {
+    if lines == 0 {
+        return Ok(ImportCursor::default());
+    }
+    let bytes = std::fs::read(path)?;
+    let mut offset = 0usize;
+    let mut last_uuid = None;
+    for _ in 0..lines {
+        let Some(relative) = bytes[offset..].iter().position(|byte| *byte == b'\n') else {
+            return Ok(ImportCursor::default());
+        };
+        let end = offset + relative;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes[offset..end]) {
+            if let Some(uuid) = line_uuid(&value) {
+                last_uuid = Some(uuid);
+            }
+        }
+        offset = end + 1;
+    }
+    Ok(ImportCursor {
+        offset: u64::try_from(offset).map_err(|_| CliError::Invalid("transcript is too large".to_owned()))?,
+        last_uuid,
+    })
+}
+
+/// Persists one cursor in the node database.
+fn save_cursor(store: &Store, key: &str, cursor: &ImportCursor) -> Result<(), CliError> {
+    let value = serde_json::to_string(cursor)
+        .map_err(|error| CliError::Invalid(format!("cannot encode watch cursor: {error}")))?;
+    store.kv_set(key, &value)?;
+    Ok(())
+}
+
+/// Finds the one canonical session for a Claude uuid, creating it on the first pass.
+fn canonical_session(ctx: &Ctx, store: &Store, native: &str, entries: &[TranscriptEntry]) -> Result<Session, CliError> {
+    if let Some(session) = store.session_for_native(HarnessKind::ClaudeCode, native)? {
+        return Ok(session);
+    }
+    let title = entries
+        .iter()
+        .find_map(|entry| match entry.kind {
+            TranscriptKind::UserMessage => entry
+                .text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| text.chars().take(60).collect::<String>()),
+            _ => None,
         })
         .unwrap_or_else(|| format!("claude {native}"));
     let service = SessionService::new(ctx.deps().clone());
@@ -1221,92 +1415,77 @@ fn import_transcript(ctx: &Ctx, path: &std::path::Path) -> Result<usize, CliErro
         title,
         cwd: ctx.project_root().to_path_buf(),
         parent: None,
-        executor: Some(Executor::parse("claude-code:claude-sonnet-5-5@medium")?),
+        executor: Some(Executor::parse(CLAUDE_EXECUTOR)?),
     })?;
-    let log = SessionLog::open(ctx.paths(), &id, ctx.deps().clock.clone()).map_err(vowp_core::CoreError::from)?;
-    let mut imported = 0;
-    for line in &lines[processed..] {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(body) = transcript_body(&value) {
-            let appended = log
-                .append(vowp_store::session_log::NewEvent {
-                    actor: match body {
-                        EventBody::AssistantMessage(_) | EventBody::ToolCall(_) => vowp_protocol::Actor::Assistant,
-                        _ => vowp_protocol::Actor::User,
-                    },
-                    source: vowp_protocol::EventSource {
-                        harness: vowp_protocol::HarnessKind::ClaudeCode,
-                        model: Some("claude-sonnet-5-5".to_owned()),
-                        node: Some(ctx.config().node.name.clone()),
-                        native_session_id: Some(native.clone()),
-                    },
-                    body,
-                    raw: Some(value),
-                    ts: None,
-                })
-                .map_err(vowp_core::CoreError::from)?;
-            store.index_event(&vowp_store::session_log::index_row(&appended))?;
-            imported += 1;
-        }
-    }
-    log.sync().map_err(vowp_core::CoreError::from)?;
-    store.kv_set(&marker_key, &lines.len().to_string())?;
-    Ok(imported)
+    let session = store.require_session(&id)?;
+    store.upsert_native(
+        &id,
+        HarnessKind::ClaudeCode,
+        native,
+        &ctx.config().node.name,
+        session.last_seq.saturating_add(1),
+    )?;
+    Ok(session)
 }
 
-/// Maps one Claude transcript line to a canonical event body.
-fn transcript_body(value: &serde_json::Value) -> Option<EventBody> {
-    let kind = value.get("type").and_then(serde_json::Value::as_str)?;
-    match kind {
-        "user" => {
-            let text = value
-                .get("message")
-                .and_then(|message| message.get("content"))
-                .and_then(serde_json::Value::as_str)?;
-            Some(EventBody::UserMessage(vowp_protocol::UserMessage {
-                text: text.to_owned(),
+/// Maps one transcript entry to a canonical event body and actor.
+fn transcript_event(entry: &TranscriptEntry) -> Option<(EventBody, Actor)> {
+    let mapped = match entry.kind {
+        TranscriptKind::UserMessage => (
+            EventBody::UserMessage(UserMessage {
+                text: entry.text.clone()?,
                 attachments: Vec::new(),
                 note: None,
-            }))
+            }),
+            Actor::User,
+        ),
+        TranscriptKind::AssistantMessage => (
+            EventBody::AssistantMessage(AssistantMessage {
+                text: entry.text.clone()?,
+            }),
+            Actor::Assistant,
+        ),
+        TranscriptKind::Reasoning => (
+            EventBody::AssistantReasoning(AssistantReasoning {
+                text: entry.text.clone()?,
+            }),
+            Actor::Assistant,
+        ),
+        TranscriptKind::ToolCall => (
+            EventBody::ToolCall(ToolCall {
+                call_id: entry.call_id.clone().unwrap_or_else(|| entry.native_id.clone()),
+                name: entry.tool.clone().unwrap_or_else(|| "tool".to_owned()),
+                input: entry.input.clone().unwrap_or(serde_json::Value::Null),
+            }),
+            Actor::Assistant,
+        ),
+        TranscriptKind::ToolResult => (
+            EventBody::ToolResult(ToolResult {
+                call_id: entry.call_id.clone().unwrap_or_else(|| entry.native_id.clone()),
+                ok: entry.ok.unwrap_or(true),
+                output: entry.output.clone(),
+                output_ref: None,
+                exit_code: None,
+            }),
+            Actor::Tool,
+        ),
+        TranscriptKind::Cost => {
+            let tokens = entry.tokens.unwrap_or_default();
+            let cost = match entry.usd {
+                Some(usd) => Cost::receipt(usd, tokens),
+                None => Cost {
+                    usd: None,
+                    tokens,
+                    source: CostSource::Unknown,
+                },
+            };
+            (EventBody::Cost(CostEvent { cost, run_id: None }), Actor::System)
         }
-        "assistant" => {
-            let blocks = value
-                .get("message")
-                .and_then(|message| message.get("content"))
-                .and_then(serde_json::Value::as_array)?;
-            for block in blocks {
-                match block.get("type").and_then(serde_json::Value::as_str) {
-                    Some("text") => {
-                        if let Some(text) = block.get("text").and_then(serde_json::Value::as_str) {
-                            return Some(EventBody::AssistantMessage(vowp_protocol::AssistantMessage {
-                                text: text.to_owned(),
-                            }));
-                        }
-                    }
-                    Some("tool_use") => {
-                        return Some(EventBody::ToolCall(vowp_protocol::ToolCall {
-                            call_id: block
-                                .get("id")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_owned(),
-                            name: block
-                                .get("name")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_owned(),
-                            input: block.get("input").cloned().unwrap_or(serde_json::Value::Null),
-                        }));
-                    }
-                    _ => {}
-                }
-            }
-            None
+        TranscriptKind::TurnStarted | TranscriptKind::TurnEnded | TranscriptKind::Error | TranscriptKind::Note => {
+            return None;
         }
-        _ => None,
-    }
+    };
+    Some(mapped)
 }
 
 /// Prints a session's event log as JSONL or pretty lines.

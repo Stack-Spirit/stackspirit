@@ -7,6 +7,8 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use vowp_protocol::{
@@ -1555,5 +1557,388 @@ fn session_ingest_json_stdout_is_only_acks() {
         acks.iter()
             .any(|ack| matches!(ack, vowp_protocol::IngestAck::Summary { done: true, .. })),
         "no summary ack: {acks:?}"
+    );
+}
+
+/// Creates a temporary Claude transcript tree and returns its root.
+fn claude_transcripts(env: &common::TestEnv) -> std::path::PathBuf {
+    let dir = env.project_path().join("claude-projects");
+    std::fs::create_dir_all(dir.join("mangled-cwd")).expect("transcript dir");
+    dir
+}
+
+/// One fake Claude transcript line.
+fn claude_line(kind: &str, uuid: &str, native: &str, content: serde_json::Value, timestamp: &str) -> String {
+    serde_json::json!({
+        "type": kind,
+        "uuid": uuid,
+        "sessionId": native,
+        "timestamp": timestamp,
+        "message": {"role": kind, "content": content},
+    })
+    .to_string()
+}
+
+/// Appends one complete line to a transcript fixture.
+fn append_claude_line(path: &Path, line: &str) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open transcript");
+    writeln!(file, "{line}").expect("append transcript");
+}
+
+/// Runs one `session watch --once` pass over `dir`.
+fn watch_once(env: &common::TestEnv, dir: &Path) -> (i32, String, String) {
+    env.run(&[
+        "session",
+        "watch",
+        "--once",
+        "--claude-dir",
+        dir.to_str().expect("transcript path"),
+    ])
+}
+
+/// Returns the session rows recorded for the test project.
+fn project_sessions(env: &common::TestEnv) -> Vec<vowp_protocol::Session> {
+    env.store()
+        .list_sessions(&vowp_store::SessionFilter {
+            project: Some(env.config.project.name.clone()),
+            ..vowp_store::SessionFilter::default()
+        })
+        .expect("sessions")
+}
+
+/// Returns the mapped user/assistant texts in log order.
+fn message_texts(events: &[vowp_protocol::EventEnvelope]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::UserMessage(payload)) => Some(format!("user:{}", payload.text)),
+            Ok(EventBody::AssistantMessage(payload)) => Some(format!("assistant:{}", payload.text)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Reads one session's canonical log.
+fn watched_events(env: &common::TestEnv, id: &vowp_protocol::SessionId) -> Vec<vowp_protocol::EventEnvelope> {
+    SessionLog::open_read(&vowp_store::NodePaths::new(env.home_path()), id)
+        .expect("open session log")
+        .read_all()
+        .expect("read session log")
+}
+
+/// Returns the stored watch cursor for one Claude native id.
+fn stored_cursor(env: &common::TestEnv, native: &str) -> serde_json::Value {
+    let marker = env
+        .store()
+        .kv_get(&format!("watch:{native}"))
+        .expect("read watch marker")
+        .expect("watch marker");
+    serde_json::from_str(&marker).unwrap_or_else(|error| panic!("watch marker is not JSON ({error}): {marker}"))
+}
+
+#[test]
+fn session_watch_once_appends_to_one_session_without_duplicates() {
+    let env = common::TestEnv::new();
+    let dir = claude_transcripts(&env);
+    let path = dir.join("mangled-cwd").join("claude-1.jsonl");
+    let long_first = "q".repeat(70);
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u1",
+            "native-1",
+            serde_json::json!(long_first),
+            "2026-11-12T10:00:00Z",
+        ),
+    );
+    append_claude_line(
+        &path,
+        &claude_line(
+            "assistant",
+            "a1",
+            "native-1",
+            serde_json::json!([{"type": "text", "text": "first answer"}]),
+            "2026-11-12T10:00:01Z",
+        ),
+    );
+    let transcript_before = std::fs::read(&path).expect("read transcript");
+
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("watching 1 transcripts"), "{stdout}");
+    assert!(stdout.contains("2 events imported"), "{stdout}");
+
+    // An unchanged second pass imports nothing and must not create another session.
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("0 events imported"), "{stdout}");
+
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u2",
+            "native-1",
+            serde_json::json!("second question"),
+            "2026-11-12T10:00:02Z",
+        ),
+    );
+    append_claude_line(
+        &path,
+        &claude_line(
+            "assistant",
+            "a2",
+            "native-1",
+            serde_json::json!([{"type": "text", "text": "second answer"}]),
+            "2026-11-12T10:00:03Z",
+        ),
+    );
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("2 events imported"), "{stdout}");
+
+    let sessions = project_sessions(&env);
+    assert_eq!(sessions.len(), 1, "one native uuid must map to one session");
+    let session = &sessions[0];
+    assert_eq!(session.role, Some(vowp_protocol::SessionRole::User));
+    assert_eq!(
+        session.title,
+        "q".repeat(60),
+        "the title must be the first user message capped at 60 chars"
+    );
+    assert_eq!(
+        env.store()
+            .session_for_native(HarnessKind::ClaudeCode, "native-1")
+            .expect("native lookup")
+            .map(|row| row.id),
+        Some(session.id.clone()),
+        "the native uuid does not resolve to the canonical session"
+    );
+    assert!(
+        env.store()
+            .natives_of(&session.id)
+            .expect("natives")
+            .iter()
+            .any(|native| native.native_session_id == "native-1"),
+        "the native uuid was not recorded"
+    );
+
+    let events = watched_events(&env, &session.id);
+    assert_eq!(
+        message_texts(&events),
+        vec![
+            format!("user:{}", "q".repeat(70)),
+            "assistant:first answer".to_owned(),
+            "user:second question".to_owned(),
+            "assistant:second answer".to_owned(),
+        ],
+        "a growing transcript must append only the new lines"
+    );
+    let transcript_after = std::fs::read(&path).expect("read transcript again");
+    assert_eq!(
+        &transcript_after[..transcript_before.len()],
+        transcript_before.as_slice(),
+        "the importer changed the first two transcript lines"
+    );
+
+    let cursor = stored_cursor(&env, "native-1");
+    assert_eq!(cursor["last_uuid"], "a2");
+    assert_eq!(
+        cursor["offset"].as_u64(),
+        Some(std::fs::metadata(&path).expect("metadata").len()),
+        "the cursor does not point at the end of the complete lines"
+    );
+}
+
+#[test]
+fn session_watch_once_waits_for_a_complete_final_line() {
+    let env = common::TestEnv::new();
+    let dir = claude_transcripts(&env);
+    let path = dir.join("mangled-cwd").join("partial.jsonl");
+    let first = claude_line(
+        "user",
+        "u1",
+        "native-partial",
+        serde_json::json!("complete line"),
+        "2026-11-12T11:00:00Z",
+    );
+    let partial = claude_line(
+        "assistant",
+        "a1",
+        "native-partial",
+        serde_json::json!([{"type": "text", "text": "partial answer"}]),
+        "2026-11-12T11:00:01Z",
+    );
+    std::fs::write(&path, format!("{first}\n{partial}")).expect("write partial transcript");
+
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("1 events imported"), "{stdout}");
+
+    // The partial final line stays unread on later passes and in the cursor.
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("0 events imported"), "{stdout}");
+    let sessions = project_sessions(&env);
+    assert_eq!(sessions.len(), 1);
+    let events = watched_events(&env, &sessions[0].id);
+    assert_eq!(message_texts(&events), vec!["user:complete line".to_owned()]);
+    let before_newline = std::fs::metadata(&path).expect("metadata").len() - partial.len() as u64;
+    assert_eq!(
+        stored_cursor(&env, "native-partial")["offset"].as_u64(),
+        Some(before_newline)
+    );
+
+    // Completing the partial line makes exactly that one line importable.
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open transcript");
+        writeln!(file).expect("complete partial line");
+    }
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("1 events imported"), "{stdout}");
+
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u2",
+            "native-partial",
+            serde_json::json!("after newline"),
+            "2026-11-12T11:00:02Z",
+        ),
+    );
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("1 events imported"), "{stdout}");
+
+    let events = watched_events(&env, &sessions[0].id);
+    assert_eq!(
+        message_texts(&events),
+        vec![
+            "user:complete line".to_owned(),
+            "assistant:partial answer".to_owned(),
+            "user:after newline".to_owned(),
+        ],
+        "completing the partial line must import it exactly once"
+    );
+}
+
+#[test]
+fn session_watch_once_migrates_a_legacy_line_count_marker() {
+    let env = common::TestEnv::new();
+    let dir = claude_transcripts(&env);
+    let path = dir.join("mangled-cwd").join("legacy.jsonl");
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u1",
+            "native-legacy",
+            serde_json::json!("already imported"),
+            "2026-11-12T12:00:00Z",
+        ),
+    );
+    append_claude_line(
+        &path,
+        &claude_line(
+            "assistant",
+            "a1",
+            "native-legacy",
+            serde_json::json!([{"type": "text", "text": "new line"}]),
+            "2026-11-12T12:00:01Z",
+        ),
+    );
+    let store = env.store();
+    store.kv_set("watch:native-legacy", "1").expect("seed legacy marker");
+    drop(store);
+
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("1 events imported"), "{stdout}");
+
+    let sessions = project_sessions(&env);
+    assert_eq!(sessions.len(), 1);
+    let events = watched_events(&env, &sessions[0].id);
+    assert_eq!(
+        message_texts(&events),
+        vec!["assistant:new line".to_owned()],
+        "the old line count must be converted to a byte offset, not re-imported"
+    );
+    let cursor = stored_cursor(&env, "native-legacy");
+    assert_eq!(cursor["last_uuid"], "a1");
+}
+
+#[test]
+fn session_watch_follow_imports_a_line_appended_after_startup() {
+    let env = common::TestEnv::new();
+    let dir = claude_transcripts(&env);
+    let path = dir.join("mangled-cwd").join("follow.jsonl");
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u1",
+            "native-follow",
+            serde_json::json!("before startup"),
+            "2026-11-12T13:00:00Z",
+        ),
+    );
+
+    let io = vowp_cli::BufferIo::new("");
+    let ctx = vowp_cli::Ctx::build(&env.global(false), &io).expect("build context");
+    let stop = Arc::new(AtomicBool::new(false));
+    let append_path = path.clone();
+    let stop_after_append = Arc::clone(&stop);
+    let appender = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        append_claude_line(
+            &append_path,
+            &claude_line(
+                "user",
+                "u2",
+                "native-follow",
+                serde_json::json!("appended while following"),
+                "2026-11-12T13:00:01Z",
+            ),
+        );
+        // Leave several poll windows for the loop to import the line, then stop it the
+        // same way the SIGINT flag does.
+        std::thread::sleep(Duration::from_millis(700));
+        stop_after_append.store(true, Ordering::SeqCst);
+    });
+
+    let (transcripts, imported) =
+        vowp_cli::cmd::session::watch_until(&ctx, &dir, Duration::from_millis(50), &|| stop.load(Ordering::SeqCst))
+            .expect("follow loop");
+    appender.join().expect("appender");
+    assert_eq!(transcripts, 1);
+    assert_eq!(imported, 2, "the follow loop missed the appended line");
+
+    let sessions = project_sessions(&env);
+    assert_eq!(sessions.len(), 1, "follow must reuse the one canonical session");
+    let events = watched_events(&env, &sessions[0].id);
+    assert_eq!(
+        message_texts(&events),
+        vec![
+            "user:before startup".to_owned(),
+            "user:appended while following".to_owned(),
+        ]
+    );
+    let cursor = stored_cursor(&env, "native-follow");
+    assert_eq!(cursor["last_uuid"], "u2");
+    assert_eq!(
+        cursor["offset"].as_u64(),
+        Some(std::fs::metadata(&path).expect("metadata").len())
     );
 }

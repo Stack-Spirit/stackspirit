@@ -209,25 +209,30 @@ Rust (in `vowp-core::session::bundle`): `pub struct Bundle { format: String, pro
 5. The first `run_turn` on `S'` uses `seed_prompt(capsule, tail_from_bundle, tail_turns, next_input)` (§4).
 6. Importing the same bundle twice creates two independent children (no dedupe); the origin session is never modified.
 
-## 7. `vowp session watch` importer (v0.1 optional / nice-to-have)
+## 7. `vowp session watch` importer
 
 Records an interactive Claude Code session into the canonical store without running it. **Read-only** on Claude's files.
 
 1. Locate transcripts: `~/.claude/projects/<mangled-cwd>/<claude-session-uuid>.jsonl` (read from `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`; the path is a flag/config input, never assumed in tests). `vowp session watch [--claude-dir <dir>] [--once]` (the flag names the transcripts root, default `$CLAUDE_CONFIG_DIR` or `$HOME/.claude`; cli.md §4).
 2. Map each Claude transcript line to events (`harness=claude-code`, `native_session_id` = uuid): user text → `user.message`; assistant text blocks → `assistant.message`; `thinking` blocks → `assistant.reasoning` (`replayable=false`); `tool_use` → `tool.call`; `tool_result` → `tool.result` (spill > 8192 bytes); usage → `cost` (`source: unknown`, tokens only — subscription sessions have no receipt); unknown line types are skipped and counted.
-3. Incremental by **line count** in this build: the importer stores the processed line count
-   under `watch:<native session id>` in the node database. A later `--once` run reads the whole
-   transcript, imports only lines after the stored count, and skips a transcript that is shorter or
-   unchanged. `--follow` is not available: without `--once`, a TTY run exits 2 with a message to use
-   `--once` (non-TTY input does one pass).
-4. Each pass with new lines creates a **new canonical session** (`role=user`, title = first user
-   message ≤ 60 chars) even for the same Claude uuid. The uuid is recorded as the event source's
-   `native_session_id`, but the importer does not look it up to reuse a session. Two `--once` runs
-   therefore produce two VOWP sessions for one Claude transcript, the second holding only the lines
-   appended since the first. The importer opens Claude's files read-only and never writes them.
-5. The optional importer has no dedicated test yet; the follow-up in `../roadmap.md` (good first
-   issue 4) adds byte-offset incremental reads, one session per native uuid, `--follow` and the
-   missing coverage. Until then, `--once` is the supported form and a TTY `--follow` exits 2.
+3. **Incremental by byte offset.** The importer keeps an `ImportCursor { offset, last_uuid }`
+   in the node database under `watch:<native session id>`, as JSON. A pass opens the transcript
+   read-only, seeks to `offset` and consumes complete lines only: a final line without its `\n`
+   stays unread until the newline arrives. `last_uuid` names the last complete line that carried an
+   app-side id. A file that shrank below the cursor restarts at offset 0. The old v0.1 marker was a
+   bare processed-line count; it is converted to the byte offset after that many complete lines, so
+   upgrading does not re-import the prefix. Each imported entry also records its app-side id in
+   `native_events`, which makes a re-read after a crash idempotent.
+4. **One canonical session per Claude uuid.** The first pass with new lines looks up the canonical
+   session mapped to `(claude-code, uuid)` in `session_natives`, creates it when missing
+   (`role=user`, title = first user message ≤ 60 chars) and records the mapping; later passes append
+   only the new events to that same session. A plain TTY run without `--once` follows: it polls
+   every two seconds, imports newly completed lines, and exits cleanly on Ctrl-C. `--once`, and a
+   non-TTY run without it, make one incremental pass so scripts and tests do not hang. The importer
+   never writes to Claude's transcript tree.
+5. Coverage lives in `crates/vowp-cli/tests/session.rs` (growing fixture, partial final line,
+   follow loop, legacy marker and one-session rule) and `crates/vowp-core/src/session/importer.rs`
+   (complete-line and truncation cursor behaviour).
 
 ## 8. Surfaces, leases and takeover
 
