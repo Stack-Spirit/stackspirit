@@ -193,7 +193,9 @@ pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summa
          Gate evidence for this attempt:\n{evidence}\
          Judge only against evidence and the brief; run the commands yourself; do not edit files.\n\
          Use the write tool to write the report file at {report_path}; do not only print it in chat.\n\
-         The report needs front-matter `job`, `status: done`, `branch`, `commits`, `tests`, `verdict: pass|fail` and `findings` (on fail, a list of concrete, checkable problems: file, command, expected, actual). Report `status: done` when you finished judging.\n\
+         The report needs front-matter `job`, `status: done`, `branch`, `commits`, `tests`, `verdict: pass|fail` and `findings`.\n\
+         `findings` is a YAML list of strings, one string per finding; each string names the file, command, expected and actual. Do not use YAML maps/objects for findings. Use `findings: []` when the verdict is pass.\n\
+         Report `status: done` when you finished judging.\n\
          Job: {job_id}",
         job_id = job.id,
         project = job.project,
@@ -302,8 +304,8 @@ mod tests {
     use std::sync::Arc;
 
     use vowp_protocol::{
-        FakeClock, Job, JobId, JobKind, JobLoop, JobState, MemoryLog, NewJob, NodeName, Project, ProjectName, Role,
-        Timestamp, VowpConfig,
+        FakeClock, Job, JobId, JobKind, JobLoop, JobState, MemoryLog, NewJob, NodeName, Project, ProjectName, Report,
+        Role, Timestamp, VowpConfig,
     };
     use vowp_store::{NodePaths, Store};
 
@@ -329,10 +331,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn verify_prompt_names_the_report_file() {
+    fn sample_verify_job() -> Job {
         let ts = Timestamp::parse("2026-11-12T00:00:00Z").expect("timestamp");
-        let job = Job {
+        Job {
             id: JobId::parse("demo-verify-0").expect("id"),
             project: ProjectName::parse("demo").expect("project"),
             title: "verify demo".to_owned(),
@@ -360,7 +361,12 @@ mod tests {
             state_changed_at: ts,
             created_at: ts,
             updated_at: ts,
-        };
+        }
+    }
+
+    #[test]
+    fn verify_prompt_names_the_report_file() {
+        let job = sample_verify_job();
 
         let prompt = verify_prompt(
             &job,
@@ -391,6 +397,56 @@ mod tests {
                 "prompt must name the front-matter field {field}: {prompt}"
             );
         }
+    }
+
+    #[test]
+    fn verify_prompt_requires_string_findings() {
+        let job = sample_verify_job();
+
+        let prompt = verify_prompt(
+            &job,
+            ".vowp/jobs/demo-verify-0/brief.md",
+            &[],
+            "git diff main...job/demo",
+        );
+
+        assert!(
+            prompt.contains("`findings` is a YAML list of strings, one string per finding"),
+            "prompt must require one string per finding: {prompt}"
+        );
+        assert!(
+            prompt.contains("each string names the file, command, expected and actual"),
+            "prompt must say what each finding string contains: {prompt}"
+        );
+        assert!(
+            prompt.contains("Do not use YAML maps/objects for findings"),
+            "prompt must forbid YAML maps/objects for findings: {prompt}"
+        );
+        assert!(
+            prompt.contains("Use `findings: []` when the verdict is pass"),
+            "prompt must show the empty list for a pass: {prompt}"
+        );
+        assert!(
+            !prompt.contains("a list of concrete, checkable problems"),
+            "prompt must not invite structured finding maps: {prompt}"
+        );
+
+        let sample = concat!(
+            "---\n",
+            "job: demo-verify-0\n",
+            "status: done\n",
+            "branch: job/demo\n",
+            "commits: [\"abc1234\"]\n",
+            "tests: \"cargo test -p vowp-core --lib verify_prompt: 2 passed\"\n",
+            "verdict: fail\n",
+            "findings:\n",
+            "  - \"crates/vowp-core/src/loops/l3_verify.rs: `cargo test --lib verify_prompt` expected 1 passed, actual 0\"\n",
+            "---\n",
+            "judged\n",
+        );
+        let report = Report::parse(sample).expect("a string finding must parse through the report gate");
+        assert_eq!(report.front_matter.findings.len(), 1);
+        assert!(report.front_matter.findings[0].contains("crates/vowp-core/src/loops/l3_verify.rs"));
     }
 
     #[test]
