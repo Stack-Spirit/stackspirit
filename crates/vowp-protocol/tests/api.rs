@@ -9,11 +9,12 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health, InboxPage,
-    JobPage, Page, SessionPage,
+    JobPage, Page, SessionDetail, SessionPage,
 };
 use vowp_protocol::schema::schema_for_name;
 use vowp_protocol::{
-    ErrorKind, InboxId, InboxItem, InboxKind, InboxState, JobId, LimitRowKind, NodeName, ProjectName, Timestamp, Tokens,
+    ErrorKind, InboxId, InboxItem, InboxKind, InboxState, JobId, LimitRowKind, NodeName, ProjectName, Session,
+    SessionId, SessionState, Timestamp, Tokens,
 };
 
 /// Fixed test instant.
@@ -139,6 +140,59 @@ fn concrete_page_aliases_serialise_their_item_type() {
         serde_json::to_value(inbox).expect("inbox page"),
     ] {
         assert_eq!(page, json!({ "items": [], "next": null, "total": 0 }));
+    }
+}
+
+#[test]
+fn session_detail_serialises_metadata_capsule_and_lineage() {
+    let parent = SessionId::new();
+    let root = SessionId::new();
+    let session = Session {
+        id: SessionId::new(),
+        project: Some(ProjectName::parse("vowp").expect("project")),
+        job_id: None,
+        role: None,
+        title: "detail session".to_owned(),
+        parent_session_id: Some(parent.clone()),
+        node: NodeName::parse("local").expect("node"),
+        cwd: "/work/vowp".to_owned(),
+        state: SessionState::Idle,
+        executor: None,
+        last_seq: 0,
+        last_capsule_id: None,
+        log_bytes: 0,
+        created_at: epoch(),
+        updated_at: epoch(),
+    };
+    let detail = SessionDetail {
+        session: session.clone(),
+        latest_capsule: None,
+        lineage: vec![parent.clone(), root.clone()],
+    };
+    let value = serde_json::to_value(&detail).expect("session detail JSON");
+    assert_eq!(value["session"]["id"], json!(session.id.as_str()));
+    assert_eq!(value["session"]["parent_session_id"], json!(parent.as_str()));
+    assert_eq!(value["latest_capsule"], Value::Null);
+    assert_eq!(value["lineage"], json!([parent.as_str(), root.as_str()]));
+    assert_eq!(
+        serde_json::from_value::<SessionDetail>(value.clone()).expect("session detail roundtrip"),
+        detail
+    );
+
+    let schema = schema_for_name("SessionDetail").expect("SessionDetail is exported");
+    for field in ["session", "latest_capsule", "lineage"] {
+        assert!(
+            schema["properties"].get(field).is_some(),
+            "SessionDetail schema has no {field} property: {schema}"
+        );
+    }
+    for field in ["session", "lineage"] {
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!(field))),
+            "SessionDetail schema does not require {field}: {schema}"
+        );
     }
 }
 
@@ -502,6 +556,7 @@ fn api_documents_are_exported_schemas() {
         "Page",
         "JobPage",
         "SessionPage",
+        "SessionDetail",
         "EventPage",
         "InboxPage",
         "CostReport",

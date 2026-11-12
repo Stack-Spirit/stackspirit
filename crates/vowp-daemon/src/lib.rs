@@ -4,8 +4,11 @@
 //! the static session list and detail pages at `GET /sessions` and `GET /sessions/{id}`,
 //! the static cost and inbox pages at `GET /cost` and `GET /inbox`,
 //! and the API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`,
-//! `/api/v1/sessions`, `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`,
-//! `/api/v1/inbox` and `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints.
+//! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
+//! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
+//! `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints. The session detail
+//! contains the exact `Session`, its latest capsule and at most 32 parent links, nearest
+//! parent first; the capsule route answers only for a capsule belonging to that session.
 //! The per-session stream sends stored `EventEnvelope` frames with periodic heartbeats and a
 //! bounded per-client batch. The board page is also the phone board: its card layout is
 //! usable at a 360 px viewport. The session list page fetches `/api/v1/sessions`; the detail

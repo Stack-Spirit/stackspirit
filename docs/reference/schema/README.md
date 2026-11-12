@@ -89,6 +89,7 @@ python3 docs/reference/check-reference.py
 | `SecretInfo` | [secret-info.md](secret-info.md) |
 | `SecretRequest` | [secret-request.md](secret-request.md) |
 | `Session` | [session.md](session.md) |
+| `SessionDetail` | [session-detail.md](session-detail.md) |
 | `SessionPage` | [session-page.md](session-page.md) |
 | `SessionSurfaceCard` | [session-surface-card.md](session-surface-card.md) |
 | `Snapshot` | [snapshot.md](snapshot.md) |

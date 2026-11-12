@@ -1,8 +1,9 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: the first read-only slice and the per-session SSE stream are implemented in
-`crates/vowp-daemon`; the rest of this note is design. The daemon is **not** part of v0.2 and
-is not wired into `vowp up` yet. Nothing here is implemented in v0.1.
+Status: the read-only API (including session detail and single-capsule reads) and the
+per-session SSE stream are implemented in `crates/vowp-daemon`; the rest of this note is
+design. The daemon is **not** part of v0.2 and is not wired into `vowp up` yet. Nothing here
+is implemented in v0.1.
 
 ## First slice (implemented)
 
@@ -27,6 +28,12 @@ Served endpoints, all `GET`; every response is JSON except the SSE stream:
 - `/api/v1/jobs?state=&kind=&role=` — a `JobPage`; `state` may repeat or be comma-separated.
 - `/api/v1/sessions?project=&job=&state=` — a `SessionPage`; `project` defaults to the
   served project.
+- `/api/v1/sessions/{id}` — a `SessionDetail`: the exact `Session`, its latest capsule by
+  `at_seq` (or null) and its parent lineage, nearest parent first, bounded at 32 entries and
+  stopped when a parent row is missing or a parent session repeats.
+- `/api/v1/sessions/{id}/capsules/{capsuleId}` — the exact stored `Capsule` when it belongs
+  to that session; an unknown session, unknown capsule or a capsule of another session is
+  `404`.
 - `/api/v1/sessions/{id}/events?after_seq=<n>&limit=<n>` — an `EventPage` of exact stored
   `EventEnvelope` objects, in sequence order; the default limit is 200 and the cap is 1000.
   A full page's `next` is the cursor for the next `after_seq`.
@@ -49,20 +56,20 @@ Served endpoints, all `GET`; every response is JSON except the SSE stream:
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
 `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`,
-`EventPage`, `InboxPage`, `CostReport`, `CostRow`, `CostTotal`, `ApiError` and `ApiErrorBody`.
-Failures use the same `ApiError` shape as `vowp --json` errors and map to `400` for an
-invalid filter or id, `404` for an unknown session and `500` for a store, config or I/O
-failure.
+`SessionDetail`, `EventPage`, `InboxPage`, `CostReport`, `CostRow`, `CostTotal`, `ApiError`
+and `ApiErrorBody`. Failures use the same `ApiError` shape as `vowp --json` errors and map to
+`400` for an invalid filter or id, `404` for an unknown session or capsule and `500` for a
+store, config or I/O failure.
 
 **No token in this slice.** Nothing writes and the listener is loopback-only, so there is
 no privileged action to protect; do not add a placeholder auth layer. A token must land
 with the first write endpoint or a non-loopback listener.
 
 Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
-the board/global SSE stream, the browser reconnect UI, the cost dashboard page, nodes,
-capsules, the auth token, `vowp up` integration and the remaining browser pages. There are
-no placeholder routes for any of them. The per-session SSE stream is implemented; it is not
-used by the session pages yet.
+the board/global SSE stream, the browser reconnect UI, the cost dashboard page, nodes, the
+capsule web view, the auth token, `vowp up` integration and the remaining browser pages.
+There are no placeholder routes for any of them. The per-session SSE stream is implemented
+and used by the session detail page.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -89,17 +96,18 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   implemented in this slice.
 - `GET /api/v1/nodes` — **later slice**: node name, SSH target, last seen, version and probe state.
   The web-window `/nodes` page needs it, but the window's first slice has no nodes page.
-- `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — **later slice**: one capsule for the window's
-  capsule view; the window's first slice has no sessions page.
+- `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — one capsule belonging to the session;
+  implemented in this slice. The window's capsule view remains later.
 - `POST /api/v1/jobs/{id}/retry|park|cancel` — enqueue the existing
   `vowp_core::requests::Request`; do not duplicate the state machine.
 - `POST /api/v1/sessions/{id}/switch` — run the same `SessionOps::switch` path as
   `vowp session switch`. The v0.1 request queue has no switch variant, so this is the one write that
   needs its own daemon-side call and cancellation story.
 
-The node list and the single-capsule route are **later slices**, not part of the first API slice: the
-web-window first slice is a static shell and read-only board page with no sessions page and no nodes
-page, so it does not call them. Do not add placeholder routes for them to the first slice.
+The node list is a **later slice**, not part of the first API slice: the web-window first slice is
+a static shell and read-only board page with no nodes page, so it does not call it. Do not add a
+placeholder route for it. The single-capsule route is implemented read-only in this slice; the
+capsule web view is later.
 
 A write response returns the affected row or the request id; consumers poll or wait for the next
 event. A browser action must never apply a state transition directly.
@@ -129,6 +137,11 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   the canonical limit class (`quota`, `credits`, `rate`, `context`, `auth` or `unavailable`) and
   `resets_at` is an RFC 3339 time or null.
 - `Page<T> { items, next, total }` for lists.
+- `SessionDetail { session, latest_capsule, lineage }` — the `/api/v1/sessions/{id}` document.
+  `session` is the exact `Session`, `latest_capsule` is the capsule with the highest `at_seq`
+  (or null when the session has none), and `lineage` is the parent-session chain, nearest
+  parent first, at most 32 entries, stopped when a parent row is missing or a parent session
+  repeats, or when the bound is hit.
 - `InboxPage` = `Page<InboxItem>` — one inbox list page.
 - `CostReport { by, rows, total }` — the exact `vowp cost --json` document. `by` echoes the
   grouping; `rows` and `total` split known USD, token usage, source and unknown-entry counts.
@@ -143,10 +156,10 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `{ after_seq }` for the one recovery `resync` frame. The later board stream reuses this frame
   shape with `event: board` and a `Board` data line.
 
-`vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`
-and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the concrete page
-instantiations the API serves (`JobPage`, `SessionPage`, `EventPage` and `InboxPage`) and
-`CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
+`vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
+`SessionDetail` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the
+concrete page instantiations the API serves (`JobPage`, `SessionPage`, `EventPage` and `InboxPage`)
+and `CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
 exception above.
 
 ## Existing crates it builds on
@@ -184,16 +197,18 @@ exception above.
 
 Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
 `GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions`,
+`GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/capsules/{capsuleId}`,
 `GET /api/v1/sessions/{id}/events?after_seq=`,
 `GET /api/v1/sessions/{id}/events/stream?after_seq=`, `GET /api/v1/inbox?state=` and
 `GET /api/v1/cost?by=&since=&until=`. It binds `127.0.0.1:0` in tests, uses a temporary store
-with jobs in several states, one running job and session, a limit, open/answered inbox items,
-cost ledger rows from every source and a checkpoint, and asserts that every JSON document
-validates against its exported schema — including `Board`, `BoardRun` and `BoardLimit` for the
-board, `InboxPage` for the inbox and `CostReport` for cost. The SSE test uses a real loopback
-listener, a short injected heartbeat interval, exact `EventEnvelope` frame comparisons and a
-live append through `SessionLog::open`. No write endpoints and no board stream yet. The
-first-slice section above lists what is still later.
+with jobs in several states, one running job and a parent/child session chain with a capsule
+and a bounded long chain, a limit, open/answered inbox items, cost ledger rows from every
+source and a checkpoint, and asserts that every JSON document validates against its exported
+schema — including `SessionDetail` for the session detail, `Capsule` for the capsule read,
+`Board`, `BoardRun` and `BoardLimit` for the board, `InboxPage` for the inbox and `CostReport`
+for cost. The SSE test uses a real loopback listener, a short injected heartbeat interval,
+exact `EventEnvelope` frame comparisons and a live append through `SessionLog::open`. No write
+endpoints and no board stream yet. The first-slice section above lists what is still later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

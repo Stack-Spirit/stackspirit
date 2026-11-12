@@ -20,9 +20,11 @@ use tokio::net::TcpListener;
 use vowp_core::ledger::BoardSnapshot;
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
-    Health, InboxPage, JobPage, SessionPage,
+    Health, InboxPage, JobPage, MAX_LINEAGE, SessionDetail, SessionPage,
 };
-use vowp_protocol::{ErrorKind, InboxState, NodeName, ProjectName, SessionId, Timestamp, VowpConfig};
+use vowp_protocol::{
+    Capsule, CapsuleId, ErrorKind, InboxState, NodeName, ProjectName, Session, SessionId, Timestamp, VowpConfig,
+};
 use vowp_store::session_log::SessionLog;
 use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, SessionFilter, Store};
 
@@ -104,6 +106,41 @@ impl ApiState {
             items: sessions,
             next: None,
         })
+    }
+
+    /// Returns one session's metadata, latest capsule and bounded parent lineage.
+    ///
+    /// An unknown session is a `404`; a store failure is a path-free `500`. The lineage
+    /// follows `parent_session_id` from the nearest parent outwards and stops on a missing
+    /// parent row or after [`MAX_LINEAGE`] entries.
+    fn session_detail(&self, id: &SessionId) -> Result<SessionDetail, ApiFailure> {
+        let store = self.open()?;
+        let session = store
+            .session(id)
+            .map_err(|_| store_failure())?
+            .ok_or_else(|| ApiFailure::not_found(format!("session {id} not found")))?;
+        let latest_capsule = store.latest_capsule(id).map_err(|_| store_failure())?;
+        let lineage = lineage(&store, &session)?;
+        Ok(SessionDetail {
+            session,
+            latest_capsule,
+            lineage,
+        })
+    }
+
+    /// Returns one capsule only when it belongs to the path session.
+    ///
+    /// Unknown sessions, unknown capsules and capsules stored for another session are all
+    /// `404`, so a caller cannot use this route to read a capsule across sessions.
+    fn capsule(&self, session_id: &SessionId, capsule_id: &CapsuleId) -> Result<Capsule, ApiFailure> {
+        let store = self.open()?;
+        if store.session(session_id).map_err(|_| store_failure())?.is_none() {
+            return Err(ApiFailure::not_found(format!("session {session_id} not found")));
+        }
+        match store.capsule(capsule_id).map_err(|_| store_failure())? {
+            Some(capsule) if capsule.session_id == *session_id => Ok(capsule),
+            _ => Err(ApiFailure::not_found(format!("capsule {capsule_id} not found"))),
+        }
     }
 
     /// Returns the served project's inbox items in `state`.
@@ -232,6 +269,30 @@ impl ApiState {
     }
 }
 
+/// Walks the stored parent-session links, nearest parent first, bounded by [`MAX_LINEAGE`].
+///
+/// The walk stops when a parent row is missing, so a dangling `parent_session_id` ends the
+/// chain instead of failing the request. It also stops when a parent session repeats, and
+/// the bound caps a longer chain.
+fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailure> {
+    let mut lineage = Vec::new();
+    let mut next = session.parent_session_id.clone();
+    while lineage.len() < MAX_LINEAGE {
+        let Some(parent_id) = next else {
+            break;
+        };
+        let Some(parent) = store.session(&parent_id).map_err(|_| store_failure())? else {
+            break;
+        };
+        if lineage.contains(&parent.id) {
+            break;
+        }
+        next = parent.parent_session_id;
+        lineage.push(parent.id);
+    }
+    Ok(lineage)
+}
+
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static cost and inbox pages at
 /// `/cost` and `/inbox`, plus the API under `/api/v1`.
@@ -247,6 +308,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/board", get(board))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/sessions", get(sessions))
+        .route("/api/v1/sessions/{id}", get(session_detail))
+        .route("/api/v1/sessions/{id}/capsules/{capsule_id}", get(session_capsule))
         .route("/api/v1/sessions/{id}/events", get(session_events))
         .route("/api/v1/sessions/{id}/events/stream", get(session_events_stream))
         .route("/api/v1/inbox", get(inbox))
@@ -349,6 +412,27 @@ async fn sessions(State(state): State<ApiState>, RawQuery(query): RawQuery) -> R
     }
     let page = blocking(move || state.sessions(&filter)).await?;
     Ok(Json(page))
+}
+
+/// Returns one session's metadata, latest capsule and bounded parent lineage.
+async fn session_detail(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionDetail>, ApiFailure> {
+    let id = SessionId::parse(&id).map_err(|_| ApiFailure::invalid("invalid session id"))?;
+    let detail = blocking(move || state.session_detail(&id)).await?;
+    Ok(Json(detail))
+}
+
+/// Returns one capsule belonging to the path session.
+async fn session_capsule(
+    State(state): State<ApiState>,
+    Path((session_id, capsule_id)): Path<(String, String)>,
+) -> Result<Json<Capsule>, ApiFailure> {
+    let session_id = SessionId::parse(&session_id).map_err(|_| ApiFailure::invalid("invalid session id"))?;
+    let capsule_id = CapsuleId::parse(&capsule_id).map_err(|_| ApiFailure::invalid("invalid capsule id"))?;
+    let capsule = blocking(move || state.capsule(&session_id, &capsule_id)).await?;
+    Ok(Json(capsule))
 }
 
 /// Lists the served project's inbox items in one state.

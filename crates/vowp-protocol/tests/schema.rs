@@ -108,6 +108,7 @@ const LISTED_TYPES: &[&str] = &[
     "Page",
     "JobPage",
     "SessionPage",
+    "SessionDetail",
     "EventPage",
     "InboxPage",
     "CostReport",

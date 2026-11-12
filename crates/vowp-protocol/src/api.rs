@@ -3,19 +3,21 @@
 //! Spec: `docs/design/v0.3/http-api.md`. The API serves the same `vowp-protocol`
 //! objects the CLI prints; these are only the transport documents layered on top.
 //!
-//! The first slice is read-only: it has no token, no write endpoint and no SSE stream.
-//! The listener is loopback-only, so there is no privileged action to authenticate. A
-//! token must be added before this API grows a write endpoint or a non-loopback listener.
+//! The API is read-only: it has no token and no write endpoint. The per-session SSE stream
+//! is a transport in `vowp-daemon`, not a document type here. The listener is
+//! loopback-only, so there is no privileged action to authenticate. A token must be added
+//! before this API grows a write endpoint or a non-loopback listener.
 
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::capsule::Capsule;
 use crate::cost::Tokens;
 use crate::error::ErrorKind;
 use crate::event::EventEnvelope;
-use crate::ids::{JobId, NodeName, ProjectName};
+use crate::ids::{JobId, NodeName, ProjectName, SessionId};
 use crate::inbox::InboxItem;
 use crate::job::Job;
 use crate::limit::LimitRowKind;
@@ -120,6 +122,24 @@ pub type JobPage = Page<Job>;
 
 /// One page of [`Session`] objects.
 pub type SessionPage = Page<Session>;
+
+/// Largest parent-session chain returned in [`SessionDetail::lineage`].
+pub const MAX_LINEAGE: usize = 32;
+
+/// The `/api/v1/sessions/{id}` document: metadata, latest capsule and parent lineage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionDetail {
+    /// The session's metadata row.
+    pub session: Session,
+    /// Capsule with the highest `at_seq` for the session, or `null` when none exists.
+    pub latest_capsule: Option<Capsule>,
+    /// Parent session chain, nearest parent first.
+    ///
+    /// The chain follows [`Session::parent_session_id`] and stops when a parent row is
+    /// missing or a parent repeats, or after [`MAX_LINEAGE`] entries, whichever comes
+    /// first.
+    pub lineage: Vec<SessionId>,
+}
 
 /// One page of [`EventEnvelope`] objects.
 pub type EventPage = Page<EventEnvelope>;

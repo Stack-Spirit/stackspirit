@@ -6,9 +6,12 @@ The read-only loopback HTTP API for one VOWP project.
 read-only, serves the static board page at `GET /` and its phone alias `GET /board`, the
 static session list at `GET /sessions` and session detail at `GET /sessions/{id}`, and the
 API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`, `/api/v1/sessions`,
+`/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
 `/api/v1/cost`, and binds `127.0.0.1` only. The default port is `0`, so the operating system
-picks an ephemeral port and the binary prints the bound address.
+picks an ephemeral port and the binary prints the bound address. Session detail returns the
+exact `Session`, its latest capsule (or null) and at most 32 parent links, nearest parent
+first; the capsule route returns only a capsule that belongs to the path session.
 
 The board and session pages are plain HTML, CSS and vanilla JavaScript embedded in the
 binary with `include_str!`; the board fetches `/api/v1/board` on load and every five
