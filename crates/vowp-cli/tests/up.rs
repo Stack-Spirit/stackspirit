@@ -2,6 +2,14 @@
 //!
 //! Everything is hermetic: temporary node homes, temporary git repositories, fake adapters
 //! and a private tmux socket (`-L vowp-test-…`) killed by a guard on drop.
+//!
+//! The first `TestEnv` and each direct private-server test run
+//! [`common::sweep_stale_test_servers_once`] before starting tmux. A test process killed
+//! by a timeout or the OOM killer never runs its `Drop`, so its server would otherwise
+//! outlive the temporary home and keep every `vowp __window` pane polling. The sweep only
+//! removes `vowp-test` servers whose private path is gone, never `vowp-home`, the default
+//! socket, `vowp-night` or `vowp-orchestrator`. The board test also proves that killing a
+//! private server takes its `vowp __window board` pane down with it.
 
 mod common;
 
@@ -21,7 +29,7 @@ use vowp_protocol::{
 };
 use vowp_store::{NodePaths, Store, StoreError};
 use vowp_tmux::fake::FakeWindows;
-use vowp_tmux::{Tmux, WindowManager};
+use vowp_tmux::{Tmux, WindowManager, WindowSpec};
 
 /// Runs one git command in `dir` and asserts success.
 fn git(dir: &Path, args: &[&str]) {
@@ -656,15 +664,20 @@ fn decode_hex(value: &str) -> Vec<u8> {
 /// and the full workspace runs these tests beside other heavy test binaries. Five seconds
 /// was too tight under that load; the extra headroom does not hide a stuck supervisor
 /// because the predicate still has to become true.
-fn eventually(mut predicate: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(30);
+fn eventually(predicate: impl FnMut() -> bool) -> bool {
+    eventually_within(Duration::from_secs(30), predicate)
+}
+
+/// Polls `predicate` for up to `timeout`.
+fn eventually_within(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if predicate() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    false
+    predicate()
 }
 
 /// A fake adapter that records `StartInput`s and finishes immediately with an `Ok` summary.
@@ -1005,6 +1018,15 @@ impl SignalEnv {
     }
 }
 
+impl Drop for SignalEnv {
+    fn drop(&mut self) {
+        // `--no-tmux` skips the node layout, but dispatching a job still creates
+        // `vowp-<project>` and its scratch/job windows. The supervisor is killed
+        // before this field-level drop, so no later tick can recreate the server.
+        common::kill_private_server_for_home(self.home.path());
+    }
+}
+
 #[test]
 fn up_once_runs_one_tick_with_fake_adapters() {
     let home = tempfile::tempdir().expect("temp home");
@@ -1240,25 +1262,34 @@ impl Drop for TmuxGuard {
     }
 }
 
-#[test]
-fn tmux_layout_created_on_private_socket() {
+static SOCKET_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Starts a guarded `vowp-test-…` private server, or returns `None` without tmux.
+fn private_tmux_guard() -> Option<TmuxGuard> {
     let socket = format!(
-        "vowp-test-{}-{}",
+        "vowp-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.subsec_nanos())
-            .unwrap_or(0)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0),
+        SOCKET_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let dir = tempfile::tempdir().expect("private tmux dir");
     let tmux = Tmux::in_private_dir(socket, dir.path()).expect("private tmux manager");
+    common::assert_private_tmux(&tmux, dir.path());
     if !tmux.has_tmux() {
         eprintln!("SKIP: tmux not installed");
-        return;
+        return None;
     }
-    let guard = TmuxGuard {
-        tmux: tmux.clone(),
-        _dir: dir,
+    Some(TmuxGuard { tmux, _dir: dir })
+}
+
+#[test]
+fn tmux_layout_created_on_private_socket() {
+    common::sweep_stale_test_servers_once();
+    let Some(guard) = private_tmux_guard() else {
+        return;
     };
     let cwd = tempfile::tempdir().expect("temp cwd");
     let program = vec!["sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()];
@@ -1278,6 +1309,121 @@ fn tmux_layout_created_on_private_socket() {
     vowp_cli::cmd::up::ensure_project_windows(&guard.tmux, "n09b-test", Some(cwd.path()), &program)
         .expect("second layout");
     assert_eq!(guard.tmux.list_windows("vowp-n09b-test").expect("windows").len(), 5);
+}
+
+#[test]
+fn stale_server_sweep_kills_a_server_whose_private_dir_is_gone() {
+    common::sweep_stale_test_servers_once();
+    let Some(guard) = private_tmux_guard() else {
+        return;
+    };
+    guard.tmux.ensure_session("vowp-test").expect("private session");
+    let pid = guard
+        .tmux
+        .server_pid()
+        .expect("server pid")
+        .expect("private server is running");
+
+    // Simulate a test process killed before its Drop: the home and TMUX_TMPDIR
+    // disappear, but the daemonized server and its panes stay behind.
+    std::fs::remove_dir_all(guard._dir.path()).expect("remove the private tmux dir");
+    common::sweep_stale_test_servers();
+
+    assert!(
+        eventually(|| !process_alive(pid)),
+        "the sweep left stale private server {pid} running"
+    );
+    assert!(
+        !guard
+            .tmux
+            .session_exists("vowp-test")
+            .expect("probe the private socket"),
+        "the stale session still answers on its private socket"
+    );
+}
+
+#[test]
+fn stale_server_sweep_keeps_a_live_private_server() {
+    common::sweep_stale_test_servers_once();
+    let Some(guard) = private_tmux_guard() else {
+        return;
+    };
+    guard.tmux.ensure_session("vowp-test").expect("private session");
+    let pid = guard
+        .tmux
+        .server_pid()
+        .expect("server pid")
+        .expect("private server is running");
+
+    common::sweep_stale_test_servers();
+
+    assert_eq!(
+        guard.tmux.server_pid().expect("probe the private socket"),
+        Some(pid),
+        "the sweep killed a server whose private directory still exists"
+    );
+    assert!(
+        guard.tmux.session_exists("vowp-test").expect("session probe"),
+        "the live test session survived the sweep"
+    );
+}
+
+#[test]
+fn window_board_exits_when_its_tmux_server_is_killed() {
+    common::sweep_stale_test_servers_once();
+    let env = common::TestEnv::new();
+    let Some(guard) = private_tmux_guard() else {
+        return;
+    };
+    guard.tmux.ensure_session("vowp-test").expect("private session");
+
+    // Ignore SIGHUP (and the other common teardown signals) so only the
+    // follower's own liveness check can end the loop.
+    let argv = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "trap '' HUP INT TERM; exec \"$@\"".to_owned(),
+        "sh".to_owned(),
+        env!("CARGO_BIN_EXE_vowp").to_owned(),
+        "--home".to_owned(),
+        env.home_path().display().to_string(),
+        "--project".to_owned(),
+        env.project_path().display().to_string(),
+        "__window".to_owned(),
+        "board".to_owned(),
+    ];
+    guard
+        .tmux
+        .new_window(
+            "vowp-test",
+            "board",
+            &WindowSpec {
+                argv,
+                cwd: None,
+                env: Vec::new(),
+            },
+        )
+        .expect("board window");
+    let windows = guard.tmux.list_windows("vowp-test").expect("list windows");
+    let pane_pid = windows
+        .iter()
+        .find(|window| window.name == "board")
+        .and_then(|window| window.pane_pid)
+        .expect("the board pane has a pid");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        process_alive(pane_pid),
+        "the board pane exited before its server was killed instead of following"
+    );
+
+    guard
+        .tmux
+        .kill_server_for_tests()
+        .expect("kill the private tmux server");
+    assert!(
+        eventually_within(Duration::from_secs(5), || !process_alive(pane_pid)),
+        "the __window board pane {pane_pid} outlived its tmux server"
+    );
 }
 
 /// Writes the fake planner harness, its mapping and a config that uses it.
