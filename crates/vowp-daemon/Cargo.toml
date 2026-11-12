@@ -1,0 +1,39 @@
+[package]
+name = "vowp-daemon"
+description = "The read-only loopback HTTP API for VOWP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation = "https://docs.rs/vowp-daemon"
+readme = "README.md"
+keywords = ["vowp", "daemon", "http", "api", "loopback"]
+categories = ["web-programming::http-server", "development-tools"]
+include = ["src/**", "README.md", "Cargo.toml"]
+
+[lib]
+name = "vowp_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vowp-daemon"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros"] }
+vowp-protocol = { version = "0.2.0", path = "../vowp-protocol" }
+vowp-store = { version = "0.2.0", path = "../vowp-store" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.61.1", default-features = false }
+tempfile = "3.27.0"

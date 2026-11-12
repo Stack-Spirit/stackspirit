@@ -18,6 +18,8 @@ python3 docs/reference/check-reference.py
 
 | Type | Page |
 |---|---|
+| `ApiError` | [api-error.md](api-error.md) |
+| `ApiErrorBody` | [api-error-body.md](api-error-body.md) |
 | `BackupFile` | [backup-file.md](backup-file.md) |
 | `BackupReport` | [backup-report.md](backup-report.md) |
 | `BlockedJobCard` | [blocked-job-card.md](blocked-job-card.md) |
@@ -33,6 +35,7 @@ python3 docs/reference/check-reference.py
 | `Cost` | [cost.md](cost.md) |
 | `Edge` | [edge.md](edge.md) |
 | `EventEnvelope` | [event-envelope.md](event-envelope.md) |
+| `EventPage` | [event-page.md](event-page.md) |
 | `Evidence` | [evidence.md](evidence.md) |
 | `FleetQueueRow` | [fleet-queue-row.md](fleet-queue-row.md) |
 | `FleetStatus` | [fleet-status.md](fleet-status.md) |
@@ -41,11 +44,13 @@ python3 docs/reference/check-reference.py
 | `GateResult` | [gate-result.md](gate-result.md) |
 | `GcClassReport` | [gc-class-report.md](gc-class-report.md) |
 | `GcReport` | [gc-report.md](gc-report.md) |
+| `Health` | [health.md](health.md) |
 | `HostSample` | [host-sample.md](host-sample.md) |
 | `InboxItem` | [inbox-item.md](inbox-item.md) |
 | `InboxSummary` | [inbox-summary.md](inbox-summary.md) |
 | `IngestAck` | [ingest-ack.md](ingest-ack.md) |
 | `Job` | [job.md](job.md) |
+| `JobPage` | [job-page.md](job-page.md) |
 | `JobPatch` | [job-patch.md](job-patch.md) |
 | `JoinInstructions` | [join-instructions.md](join-instructions.md) |
 | `Lease` | [lease.md](lease.md) |
@@ -59,6 +64,7 @@ python3 docs/reference/check-reference.py
 | `NewJob` | [new-job.md](new-job.md) |
 | `Node` | [node.md](node.md) |
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
+| `Page` | [page.md](page.md) |
 | `Profile` | [profile.md](profile.md) |
 | `Project` | [project.md](project.md) |
 | `ProjectEntry` | [project-entry.md](project-entry.md) |
@@ -76,6 +82,7 @@ python3 docs/reference/check-reference.py
 | `SecretInfo` | [secret-info.md](secret-info.md) |
 | `SecretRequest` | [secret-request.md](secret-request.md) |
 | `Session` | [session.md](session.md) |
+| `SessionPage` | [session-page.md](session-page.md) |
 | `SessionSurfaceCard` | [session-surface-card.md](session-surface-card.md) |
 | `Snapshot` | [snapshot.md](snapshot.md) |
 | `SupervisorSnapshot` | [supervisor-snapshot.md](supervisor-snapshot.md) |

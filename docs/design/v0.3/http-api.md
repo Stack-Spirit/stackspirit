@@ -1,8 +1,49 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: moved from `docs/design/v0.2/` by the v0.2 spec. This note is design only and is **not** part
-of v0.2; v0.2 uses the opencode/Claude apps and `vowp chat` as its surfaces, and the supervisor opens
-no socket. Nothing here is implemented in v0.1.
+Status: the first read-only slice is implemented in `crates/vowp-daemon`; the rest of this
+note is design. The daemon is **not** part of v0.2 and is not wired into `vowp up` yet.
+Nothing here is implemented in v0.1.
+
+## First slice (implemented)
+
+`crates/vowp-daemon` ships a library and the `vowp-daemon` binary:
+
+`vowp-daemon [--home <dir>] [--project <name>] [--port <n>]`
+
+It resolves the home from `--home`, `VOWP_HOME`, then `$HOME/.vowp`; selects the only
+non-reserved registered project (or the one named by `--project`, with a clear error when
+zero or several are registered); reads the node name from that project's registered
+`vowp.toml` config; and opens the home with `Store::open_read_only`. It never creates,
+migrates or writes a home. The listener binds `127.0.0.1` only, defaults to port `0` and
+prints the bound address.
+
+Served endpoints, all `GET` and JSON:
+
+- `/api/v1/health` — binary version, node, project, project schema version and the
+  supervisor heartbeat from `<home>/heartbeat` (`null` when absent, unreadable or stopped).
+- `/api/v1/jobs?state=&kind=&role=` — a `JobPage`; `state` may repeat or be comma-separated.
+- `/api/v1/sessions?project=&job=&state=` — a `SessionPage`; `project` defaults to the
+  served project.
+- `/api/v1/sessions/{id}/events?after_seq=<n>&limit=<n>` — an `EventPage` of exact stored
+  `EventEnvelope` objects, in sequence order; the default limit is 200 and the cap is 1000.
+  A full page's `next` is the cursor for the next `after_seq`.
+
+The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
+`Health`, `Page<T>`, `JobPage`, `SessionPage`, `EventPage`, `ApiError` and `ApiErrorBody`.
+Failures use the same `ApiError` shape as `vowp --json` errors and map to `400` for an
+invalid filter or id, `404` for an unknown session and `500` for a store or I/O failure.
+
+**No token in this slice.** Nothing writes and the listener is loopback-only, so there is
+no privileged action to protect; do not add a placeholder auth layer. A token must land
+with the first write endpoint or a non-loopback listener.
+
+Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
+SSE, board, inbox, cost, nodes, capsules, the auth token, `vowp up` integration and the
+browser UI. There are no placeholder routes for any of them.
+
+Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
+no real home, harness, tmux server or network beyond loopback. Every returned document is
+validated against its exported JSON Schema, not just round-tripped through serde.
 
 ## Goal
 
@@ -104,10 +145,12 @@ alongside their item types, and keep the SSE frame as the one explicit schema ex
 
 ## First-issue-sized slice
 
-Add `crates/vowp-daemon` with a binary/entry point that opens an existing node home read-only and
-serves `GET /api/v1/health`, `GET /api/v1/jobs`, `GET /api/v1/sessions` and
-`GET /api/v1/sessions/{id}/events?after_seq=`. Bind `127.0.0.1:0` in tests, use a temporary store with
-two jobs and one session, and assert that the JSON validates against the exported `Job`, `Session` and
-`EventEnvelope` schemas. No write endpoints and no SSE yet.
+Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
+`GET /api/v1/health`, `GET /api/v1/jobs`, `GET /api/v1/sessions` and
+`GET /api/v1/sessions/{id}/events?after_seq=`. It binds `127.0.0.1:0` in tests, uses a
+temporary store with two jobs and one session, and asserts that the JSON validates against
+the exported `Job`, `Session` and `EventEnvelope` schemas. No write endpoints and no SSE
+yet. The first-slice section above lists what is still later.
 
-Tests are hermetic: temporary `NodePaths`, a fake clock, no network, no real harness.
+Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
+harness and no tmux.
