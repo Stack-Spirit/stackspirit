@@ -177,6 +177,14 @@ Exported by `vowp schema VowpConfig` and generated from the protocol types in
           },
           "type": "array"
         },
+        "env_pass": {
+          "default": [],
+          "description": "Environment-variable **names** to resolve from the vault and pass to the\nserving-bank, deploy, probe and rollback commands; never values.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "guards": {
           "default": [],
           "description": "Guards that must pass before deployment.",

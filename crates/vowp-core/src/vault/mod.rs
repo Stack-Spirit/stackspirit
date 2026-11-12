@@ -136,6 +136,33 @@ pub fn env_for(deps: &Deps, req: &TurnRequest) -> Result<Vec<(String, String)>, 
     Ok(result)
 }
 
+/// Resolves exactly the configured secret names for one promotion environment.
+///
+/// Unlike [`env_for`], which warns and skips, a name that is invalid or not stored is a
+/// hard error naming the variable: a promotion must never run with a silently empty value.
+/// Duplicate names resolve once. The returned pairs are meant for
+/// [`crate::deps::CommandSpec::env`] and are never logged.
+pub fn env_for_names(deps: &Deps, names: &[String]) -> Result<Vec<(String, String)>, CoreError> {
+    let layout = Layout::from_deps(deps);
+    let mut result: Vec<(String, String)> = Vec::new();
+    for configured in names {
+        let name = SecretName::parse(configured)
+            .map_err(|_| CoreError::Invalid(format!("invalid secret name in env_pass: {configured}")))?;
+        if result.iter().any(|(existing, _)| existing == name.as_str()) {
+            continue;
+        }
+        match read_value_impl(deps, &layout, &name)? {
+            Some(value) => result.push((name.to_string(), value)),
+            None => {
+                return Err(CoreError::Invalid(format!(
+                    "secret {name} named in env_pass is not set"
+                )));
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Stores one secret value and returns its metadata.
 ///
 /// Basic mode writes the file atomically with mode 0600; vault-user mode sends the value on

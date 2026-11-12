@@ -131,8 +131,13 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 - A harness run's `env_pass` is a list of **names**. VOWP resolves each name from the secret store
   when a value is set there, and otherwise forwards it from the process environment of the machine
   running the turn; the home session service and the remote `__exec` path both do this. A name that
-  cannot be resolved is a warning on the home path and an error on a remote surface. The promoter
-  still runs `[env.*]` deploy/probe commands with no added secret environment.
+  cannot be resolved is a warning on the home path and an error on a remote surface. Promotion
+  commands use the separate `[env.<name>].env_pass` list, also names only. The promoter resolves
+  those names from the store once at the start of `promote` and `rollback`, before anything is
+  banked or deployed, and passes the values only through the child environments of the serving
+  bank, deploy, probe and rollback commands. A configured name that is not stored is an error that
+  names the variable and aborts the operation before a command runs; harness `env_pass` keeps its
+  warn-and-skip behaviour.
 - `__vault-exec` is the hidden read/inject helper: `__vault-exec --env NAME -- <cmd…>` reads the
   named file and execs `<cmd…>` as `vowp-vault` with that one variable set. It is not limited to
   `env_pass` names: any stored name works, and the command runs with the vault user's access. The
