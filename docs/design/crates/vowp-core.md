@@ -139,15 +139,21 @@ pub struct SessionService { /* Deps, session-level locks map */ }
 impl SessionService {
     pub fn new(deps: Deps) -> Self;
     pub fn recover(&self, store: &Store) -> Result<RecoveryReport, CoreError>;      // startup: resolve `switches` rows left in 'started', close dangling runs (sessions.md §5, crash recovery)
+    pub fn switch(&self, req: &SwitchRequest) -> Result<Switch, CoreError>;         // opens Deps::open_store
+    pub fn switch_with_store(&self, store: &Store, req: &SwitchRequest) -> Result<Switch, CoreError>;   // daemon: caller supplies a writable, non-creating store
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport { pub switches_completed: u32, pub switches_aborted: u32, pub runs_closed: u32, pub sessions_unlocked: u32 }
 impl vowp_protocol::SessionOps for SessionService { /* create_session, run_turn, switch, write_capsule */ }
 ```
 
-Delegation is explicit: `SessionService::switch` calls `switch::run_switch`, and
-`SessionService::recover` calls `recovery::recover`. The `SessionOps::switch` impl calls the inherent
-`SessionService::switch`, so the trait, the CLI and the loops share one switch implementation.
+Delegation is explicit: `SessionService::switch` calls `switch::run_switch` (which opens
+`Deps::open_store`), `SessionService::switch_with_store` calls `switch::run_switch_with_store`
+over the caller's store, and `SessionService::recover` calls `recovery::recover`. The
+`SessionOps::switch` impl calls the inherent `SessionService::switch`, so the trait, the CLI and
+the loops share one switch implementation. The daemon is the store-injected caller: it opens the
+existing home with `Store::open_writable` and passes that handle, so a web switch has the same
+rows and events as the CLI but cannot create or migrate a home.
 
 `run_turn` algorithm (numbered, normative):
 1. Check `cwd` against the allow-list (`Refused` otherwise). Resolve adapter via `AdapterRegistry::get`; missing → `ServiceError::Failed("harness not installed")`.
@@ -174,7 +180,8 @@ pub mod switch {
     pub trait DrainSleeper: Send + Sync { fn sleep(&self, duration: std::time::Duration); }
     /// Production sleeper: blocks the current thread. [`run_switch`] uses it.
     pub struct SystemSleeper;
-    pub fn run_switch(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError>;        // sessions.md §5
+    pub fn run_switch(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError>;        // sessions.md §5; opens Deps::open_store
+    pub fn run_switch_with_store(deps: &Deps, store: &Store, req: &SwitchRequest, cancel: &CancelToken) -> Result<Switch, CoreError>;   // daemon path; uses the supplied store
     pub fn run_switch_with_sleeper(deps: &Deps, req: &SwitchRequest, cancel: &CancelToken, sleeper: &dyn DrainSleeper) -> Result<Switch, CoreError>;   // public test hook for deterministic drain deadlines
     pub fn run_switch_with_input(deps: &Deps, req: &SwitchRequest, next_input: &str, cancel: &CancelToken) -> Result<Switch, CoreError>;   // seeded failover/context variant
     // Drain waits are bounded by DrainDeadline (injected clock plus a monotonic backstop).
@@ -195,6 +202,7 @@ Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode
 `capsule_prompt_golden`, `capsule_parse_draft_with_fences_and_prose`, `capsule_write_valid_first_try`, `capsule_compaction_keeps_first_user_and_last_20` (oversize input drops tool results first; never the first user message or the last 20 events), `capsule_write_repairs_once_then_ok`, `capsule_write_twice_invalid_keeps_previous_and_logs_error_event`,
 `capsule_debounce_120s_except_manual_switch_limit_export`, `seed_prompt_golden_with_two_turn_tail`, `seed_prompt_never_contains_tool_calls_as_native`,
 `switch_happy_path_events_rows_and_lineage`, `switch_target_probe_fails_stays_on_source`, `switch_drain_timeout_interrupts_after_5s_fakeclock`, `switch_seed_rejected_retries_capsule_only_then_aborts`,
+`switch_with_store_guards_from_the_supplied_store_without_opening_deps`, `switch_with_store_completes_on_the_supplied_store`,
 `recover_started_switch_never_attached_is_aborted`, `recover_started_switch_attached_is_completed`, `bundle_export_import_roundtrip_child_session`, `bundle_checksum_mismatch_rejected`, `bundle_unknown_format_rejected`, `bundle_inlines_small_blobs_only`,
 `failover_roundtrip_claude_to_opencode_and_back_preserves_capsule_content` (end-to-end with two fake adapters).
 

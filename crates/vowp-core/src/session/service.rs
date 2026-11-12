@@ -472,9 +472,19 @@ impl SessionService {
     /// Switches a session to another executor (a pure switch: the seed is delivered next turn).
     ///
     /// The protocol lives in [`crate::session::switch`]; this method is the service boundary
-    /// used by `SessionOps` and the CLI.
+    /// used by `SessionOps` and the CLI. It opens the store through [`Deps::open_store`].
     pub fn switch(&self, req: &SwitchRequest) -> Result<Switch, CoreError> {
         switch::run_switch(&self.deps, req, &CancelToken::default())
+    }
+
+    /// Switches a session over an already-open, writable store.
+    ///
+    /// The daemon uses this after opening the existing home with
+    /// [`vowp_store::Store::open_writable`], so a web switch has the same protocol and rows
+    /// as the CLI but cannot create or migrate the home. The store must belong to the same
+    /// home and project as [`Deps::paths`](crate::deps::Deps::paths).
+    pub fn switch_with_store(&self, store: &Store, req: &SwitchRequest) -> Result<Switch, CoreError> {
+        switch::run_switch_with_store(&self.deps, store, req, &CancelToken::default())
     }
 
     /// Checks session `cwd` against the shared allow-list.

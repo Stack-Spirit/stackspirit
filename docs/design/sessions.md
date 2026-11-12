@@ -164,6 +164,15 @@ Failure handling:
 
 The log is never rewritten; a switch only appends events. Lineage = `switches` rows + `switch` events + `parent_session_id` across nodes.
 
+The daemon's `POST /api/v1/sessions/{id}/switch` runs this same protocol through
+`SessionService::switch_with_store` and `switch::run_switch_with_store`, over a store the
+daemon opened with `Store::open_writable` (never `Store::open`). The HTTP handler applies the
+CLI's `switch_to` guards before the service call: an unknown session is `404`, a running
+session without `force` is `409`, a `switching` or `closed` session is `409`, and an active
+limit on the target provider is `409`; an invalid body or executor is `400`. The switch is
+local-node only, uses `drain_secs: 5`, and returns the completed `Switch`; a failed switch is
+an error and leaves the previous executor attached under the abort rules above.
+
 ## 6. Export / import (cross-node, v0.1)
 
 `vowp session export <id> [--tail N] [--out file | -o file]` writes a **single JSON file** (no archive dependency): `vowp-bundle-v1`.
