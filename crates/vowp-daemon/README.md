@@ -5,7 +5,8 @@ The read-only loopback HTTP API for one VOWP project.
 `vowp-daemon [--home <dir>] [--project <name>] [--port <n>]` opens an existing VOWP home
 read-only, serves the static board page at `GET /` and its phone alias `GET /board`, the
 static session list at `GET /sessions` and session detail at `GET /sessions/{id}`, and the
-API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`, `/api/v1/sessions`,
+API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`,
+`/api/v1/jobs`, `/api/v1/sessions`,
 `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
 `/api/v1/cost`, and binds `127.0.0.1` only. The default port is `0`, so the operating system
@@ -14,8 +15,12 @@ exact `Session`, its latest capsule (or null) and at most 32 parent links, neare
 first; the capsule route returns only a capsule that belongs to the path session.
 
 The board and session pages are plain HTML, CSS and vanilla JavaScript embedded in the
-binary with `include_str!`; the board fetches `/api/v1/board` on load and every five
-seconds, and its card layout is usable at a 360 px viewport. `/sessions` fetches
+binary with `include_str!`; the board fetches `/api/v1/board` on load, then follows
+`/api/v1/board/stream` and keeps a five-second polling fallback, and its card layout is
+usable at a 360 px viewport. A `board` frame replaces the board and updates the last-updated
+time; a `heartbeat` frame updates only the live line. A stream error or close shows a
+visible "Reconnecting..." state, retries with bounded backoff and keeps polling until a
+stream opens; a browser without `EventSource` polls only. `/sessions` fetches
 `/api/v1/sessions`; `/sessions/{id}` shows one session's metadata and a read-only event
 timeline. The timeline first fetches `/api/v1/sessions/{id}/events?after_seq=`, then opens
 `/api/v1/sessions/{id}/events/stream?after_seq=` and appends `session` frames while using
@@ -27,9 +32,11 @@ TypeScript build step is involved.
 The per-session stream at `/api/v1/sessions/{id}/events/stream?after_seq=` sends one
 `event: session` frame per stored `EventEnvelope`, a periodic `event: heartbeat` frame and a
 single `event: resync` frame if the log was compacted away or truncated behind the cursor.
-The session detail page uses it. The board, session-list, cost and inbox pages still poll
-their JSON endpoints; the board/global SSE stream and the reconnect UI on those pages are
-later.
+The board stream at `/api/v1/board/stream` sends the exact `Board` document as an
+`event: board` frame on open and whenever the snapshot changes apart from its `at`, plus
+periodic `event: heartbeat` frames; it has no cursor, resume or resync. The board and session
+detail pages use their streams. The session-list, cost and inbox pages still poll their JSON
+endpoints; their reconnect UI is later.
 
 This is the first v0.3 slice: there is no token and no write endpoint. The listener is
 loopback-only and nothing writes, so there is no privileged action to authenticate. A token

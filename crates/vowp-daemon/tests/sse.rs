@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use vowp_daemon::{ApiState, select_project, serve_with_shutdown};
+use vowp_protocol::api::Board;
 use vowp_protocol::{
     Actor, Clock, EventBody, EventEnvelope, EventSource, FakeClock, HarnessKind, JobId, JobKind, NewJob, NodeName,
     Project, ProjectName, Role, Session, SessionId, SessionRole, SessionState, Timestamp, UserMessage, VowpConfig,
@@ -141,6 +142,87 @@ impl Fixture {
     }
 }
 
+/// A temporary home whose board has no live runs, so only a row change moves it.
+struct BoardStreamFixture {
+    _tmp: TempDir,
+    paths: NodePaths,
+    project: ProjectName,
+    pending_job: JobId,
+}
+
+impl BoardStreamFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = NodePaths::new(tmp.path());
+        let clock = FakeClock::at(epoch());
+        let store = Store::open(&paths)
+            .expect("open store")
+            .with_clock(Arc::new(clock.clone()));
+        let project = ProjectName::parse("board-proj").expect("project name");
+        let node = NodeName::parse("test-node").expect("node name");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+
+        let mut config = VowpConfig::with_defaults_for_tests();
+        config.node.name = node;
+        config.project.name = project.clone();
+        config.project.path = Some(project_dir.display().to_string());
+        config.validate().expect("valid fixture config");
+        store
+            .upsert_project(&Project {
+                name: project.clone(),
+                path: project_dir.display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::to_value(&config).expect("config JSON"),
+                created_at: clock.now(),
+                updated_at: clock.now(),
+            })
+            .expect("project row");
+
+        let pending = store
+            .insert_job(&project, &new_job("job-a", JobKind::Build, Role::Worker), "test")
+            .expect("pending job");
+        let done = store
+            .insert_job(&project, &new_job("job-b", JobKind::Test, Role::Verifier), "test")
+            .expect("done job");
+        store
+            .set_job_state(
+                &done.id,
+                vowp_protocol::JobState::Done,
+                &StateChange {
+                    note: None,
+                    parked_reason: None,
+                },
+            )
+            .expect("done job state");
+        drop(store);
+
+        Self {
+            _tmp: tmp,
+            paths,
+            project,
+            pending_job: pending.id,
+        }
+    }
+
+    /// Moves the pending job to done through a writable store.
+    fn complete_pending_job(&self) {
+        let store = Store::open(&self.paths).expect("open writable store");
+        store
+            .set_job_state(
+                &self.pending_job,
+                vowp_protocol::JobState::Done,
+                &StateChange {
+                    note: None,
+                    parked_reason: None,
+                },
+            )
+            .expect("complete pending job");
+        drop(store);
+    }
+}
+
 fn append(log: &SessionLog, text: &str) -> vowp_store::session_log::AppendedEvent {
     log.append(NewEvent {
         actor: Actor::User,
@@ -194,7 +276,23 @@ impl Server {
         let selection = select_project(&fixture.paths, None).expect("project selection");
         assert_eq!(selection.project, fixture.project);
         assert_eq!(selection.node, fixture.node);
-        let state = ApiState::new(&fixture.paths, &selection).with_stream_intervals(poll, heartbeat);
+        Self::start_with_selection(&fixture.paths, selection, poll, heartbeat)
+    }
+
+    fn start_for(paths: &NodePaths, poll: Duration, heartbeat: Duration) -> Self {
+        let selection = select_project(paths, None).expect("project selection");
+        Self::start_with_selection(paths, selection, poll, heartbeat)
+    }
+
+    fn start_with_selection(
+        paths: &NodePaths,
+        selection: vowp_daemon::ProjectSelection,
+        poll: Duration,
+        heartbeat: Duration,
+    ) -> Self {
+        let state = ApiState::new(paths, &selection)
+            .with_stream_intervals(poll, heartbeat)
+            .with_board_poll_interval(poll);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let thread = std::thread::spawn(move || {
@@ -500,6 +598,122 @@ fn assert_no_home_or_token(text: &str, home: &str) {
     assert!(
         !text.to_ascii_lowercase().contains("token"),
         "response leaked a token: {text}"
+    );
+}
+
+/// Asserts that `value` validates against the exported schema for `name`.
+fn assert_schema(name: &str, value: &Value) {
+    let schema =
+        vowp_protocol::schema::schema_for_name(name).unwrap_or_else(|| panic!("schema {name} is not exported"));
+    let validator =
+        jsonschema::validator_for(&schema).unwrap_or_else(|error| panic!("schema {name} is invalid: {error}"));
+    if !validator.is_valid(value) {
+        let errors = validator
+            .iter_errors(value)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        panic!("{name} document does not validate: {errors:?}\n{value}");
+    }
+}
+
+/// Asserts that a streamed board is the served document apart from its `at` time.
+fn assert_board_matches(mut streamed: Board, served: &Board) {
+    streamed.at = served.at;
+    assert_eq!(
+        &streamed, served,
+        "the streamed board must match GET /api/v1/board apart from at"
+    );
+}
+
+#[test]
+fn board_stream_sends_initial_changed_snapshots_and_heartbeats() {
+    let fixture = BoardStreamFixture::new();
+    let server = Server::start_for(&fixture.paths, Duration::from_millis(10), Duration::from_millis(50));
+    let home = fixture.paths.root().display().to_string();
+
+    let response = get(server.address, "/api/v1/board");
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_no_home_or_token(&response.body, &home);
+    let served: Board = serde_json::from_str(&response.body).expect("Board");
+
+    let mut client = SseClient::open(server.address, "/api/v1/board/stream");
+    assert_eq!(client.status, 200);
+    let content_type = client.content_type.as_deref().unwrap_or_default();
+    assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+
+    let first = client.next_frame(Duration::from_secs(5)).expect("initial board frame");
+    assert_eq!(first.event.as_deref(), Some("board"));
+    assert_no_home_or_token(&first.data, &home);
+    let first_value = first.json();
+    assert_schema("Board", &first_value);
+    let first_board: Board = serde_json::from_value(first_value).expect("Board");
+    assert_eq!(first_board.project, fixture.project);
+    assert_board_matches(first_board, &served);
+
+    // With no row change the moving wall-clock `at` alone must not produce another board
+    // frame; the short heartbeat interval is the next frame.
+    let heartbeat = client.next_frame(Duration::from_secs(2)).expect("first heartbeat");
+    assert_eq!(
+        heartbeat.event.as_deref(),
+        Some("heartbeat"),
+        "a moving `at` alone must not send a board frame: {}",
+        heartbeat.data
+    );
+    assert_no_home_or_token(&heartbeat.data, &home);
+    assert!(heartbeat_time(&heartbeat) <= Timestamp::now());
+
+    fixture.complete_pending_job();
+    // A heartbeat may still be due while the writable store commits; ignore those and
+    // assert the first board frame after the change carries the new snapshot.
+    let changed = loop {
+        let frame = client
+            .next_frame(Duration::from_secs(5))
+            .expect("board or heartbeat frame");
+        match frame.event.as_deref() {
+            Some("heartbeat") => continue,
+            Some("board") => break frame,
+            other => panic!("unexpected stream frame {other:?}: {}", frame.data),
+        }
+    };
+    assert_eq!(changed.event.as_deref(), Some("board"));
+    assert_no_home_or_token(&changed.data, &home);
+    let changed_value = changed.json();
+    assert_schema("Board", &changed_value);
+    let changed_board: Board = serde_json::from_value(changed_value).expect("Board");
+    assert_ne!(changed_board.jobs, served.jobs, "the row change must move the board");
+    assert_eq!(changed_board.jobs.get("done"), Some(&2));
+    assert_eq!(changed_board.jobs.get("pending").copied().unwrap_or(0), 0);
+
+    let response = get(server.address, "/api/v1/board");
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let current: Board = serde_json::from_str(&response.body).expect("Board");
+    assert_board_matches(changed_board, &current);
+
+    let heartbeat = client.next_frame(Duration::from_secs(2)).expect("second heartbeat");
+    assert_eq!(heartbeat.event.as_deref(), Some("heartbeat"));
+    assert_no_home_or_token(&heartbeat.data, &home);
+
+    drop(client);
+}
+
+#[test]
+fn board_stream_closes_when_a_snapshot_cannot_be_collected() {
+    let fixture = BoardStreamFixture::new();
+    let server = Server::start_for(&fixture.paths, Duration::from_millis(10), Duration::from_secs(60));
+    let mut client = SseClient::open(server.address, "/api/v1/board/stream");
+    assert_eq!(client.status, 200);
+    let first = client.next_frame(Duration::from_secs(5)).expect("initial board frame");
+    assert_eq!(first.event.as_deref(), Some("board"));
+
+    let store = Store::open(&fixture.paths).expect("open writable store");
+    let mut project = store.require_project(&fixture.project).expect("project row");
+    project.config = serde_json::json!({ "project": { "name": "board-proj" } });
+    store.upsert_project(&project).expect("invalid project row");
+    drop(store);
+
+    assert!(
+        client.next_frame(Duration::from_secs(5)).is_none(),
+        "the board stream must close cleanly after a collect error"
     );
 }
 

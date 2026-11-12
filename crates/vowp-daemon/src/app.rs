@@ -41,6 +41,7 @@ pub struct ApiState {
     schema_version: i64,
     stream_poll: Duration,
     stream_heartbeat: Duration,
+    board_poll: Duration,
 }
 
 impl ApiState {
@@ -53,6 +54,7 @@ impl ApiState {
             schema_version: selection.schema_version,
             stream_poll: stream::POLL_INTERVAL,
             stream_heartbeat: stream::HEARTBEAT_INTERVAL,
+            board_poll: stream::BOARD_POLL_INTERVAL,
         }
     }
 
@@ -66,6 +68,15 @@ impl ApiState {
         self
     }
 
+    /// Returns this state with the board snapshot poll interval replaced.
+    ///
+    /// The daemon polls the board every second in production; integration tests shorten
+    /// the interval so the first and changed snapshots arrive quickly.
+    pub fn with_board_poll_interval(mut self, poll: Duration) -> Self {
+        self.board_poll = poll;
+        self
+    }
+
     /// Returns the served home.
     pub(crate) fn paths(&self) -> &NodePaths {
         &self.paths
@@ -74,6 +85,11 @@ impl ApiState {
     /// Returns the interval between SSE log polls.
     pub(crate) fn stream_poll_interval(&self) -> Duration {
         self.stream_poll
+    }
+
+    /// Returns the interval between board snapshot polls.
+    pub(crate) fn board_poll_interval(&self) -> Duration {
+        self.board_poll
     }
 
     /// Returns the interval between SSE heartbeat frames.
@@ -231,7 +247,10 @@ impl ApiState {
     }
 
     /// Returns the board snapshot as the exact `vowp board --json` document.
-    fn board(&self) -> Result<Board, ApiFailure> {
+    ///
+    /// The handler and the board SSE stream both collect through this method, so a stream
+    /// frame and `GET /api/v1/board` are built by the same code path.
+    pub(crate) fn board(&self) -> Result<Board, ApiFailure> {
         let store = self.open()?;
         let config = self.config(&store)?;
         let snapshot = BoardSnapshot::collect(&store, &config, store.clock().now()).map_err(|_| board_failure())?;
@@ -306,6 +325,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/inbox", get(inbox_page))
         .route("/api/v1/health", get(health))
         .route("/api/v1/board", get(board))
+        .route("/api/v1/board/stream", get(board_stream))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/sessions", get(sessions))
         .route("/api/v1/sessions/{id}", get(session_detail))
@@ -336,7 +356,8 @@ where
 /// The embedded static board page, served read-only at `/` and `/board`.
 const BOARD_PAGE: &str = include_str!("../web/index.html");
 
-/// Serves the static board page; it fetches `/api/v1/board` and polls every five seconds.
+/// Serves the static board page; it fetches `/api/v1/board`, follows the board stream and
+/// keeps a five-second poll fallback.
 ///
 /// The same shell is served at `/` and `/board`. Its card layout and `max-width: 360px`
 /// rules make it usable on a phone without a separate page or a second API mapping.
@@ -395,6 +416,16 @@ async fn health(State(state): State<ApiState>) -> Json<Health> {
 async fn board(State(state): State<ApiState>) -> Result<Json<Board>, ApiFailure> {
     let board = blocking(move || state.board()).await?;
     Ok(Json(board))
+}
+
+/// Streams the board snapshot as server-sent `board` frames with periodic heartbeats.
+///
+/// The stream has no cursor or resume: every `board` frame is the exact current
+/// `GET /api/v1/board` document, and a frame is sent only when that document changes apart
+/// from its `at` timestamp. A failed snapshot collection ends the stream cleanly so the page
+/// reconnects and falls back to polling.
+async fn board_stream(State(state): State<ApiState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    stream::board_response(state)
 }
 
 /// Lists jobs matching the query filters.

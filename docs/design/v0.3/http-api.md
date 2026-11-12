@@ -1,9 +1,9 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: the read-only API (including session detail and single-capsule reads) and the
-per-session SSE stream are implemented in `crates/vowp-daemon`; the rest of this note is
-design. The daemon is **not** part of v0.2 and is not wired into `vowp up` yet. Nothing here
-is implemented in v0.1.
+Status: the read-only API (including session detail and single-capsule reads), the
+per-session SSE stream and the board snapshot SSE stream are implemented in
+`crates/vowp-daemon`; the rest of this note is design. The daemon is **not** part of v0.2
+and is not wired into `vowp up` yet. Nothing here is implemented in v0.1.
 
 ## First slice (implemented)
 
@@ -18,13 +18,22 @@ zero or several are registered); reads the node name from that project's registe
 migrates or writes a home. The listener binds `127.0.0.1` only, defaults to port `0` and
 prints the bound address.
 
-Served endpoints, all `GET`; every response is JSON except the SSE stream:
+Served endpoints, all `GET`; every response is JSON except the two SSE streams:
 
 - `/api/v1/health` — binary version, node, project, project schema version and the
   supervisor heartbeat from `<home>/heartbeat` (`null` when absent, unreadable or stopped).
 - `/api/v1/board` — the exact `vowp board --json` document, computed from
   `BoardSnapshot::collect` against the served project's read-only store and registered
   `VowpConfig`.
+- `/api/v1/board/stream` — a `text/event-stream` response. The first frame is
+  `event: board` with the exact `Board` JSON from `GET /api/v1/board`; the snapshot is then
+  collected once per second and another `event: board` frame is sent only when the document
+  changes apart from its wall-clock `at`. An `event: heartbeat` frame with
+  `{"at":"<RFC 3339>"}` is sent every 15 seconds. There is no cursor, `after_seq`, resume,
+  merge or resync: the board is a self-contained snapshot. Each poll opens and drops its own
+  read-only store on `spawn_blocking`, so no handle is held between polls and a slow client
+  waits for the next snapshot. A collect error ends the stream cleanly; the page reconnects
+  and keeps its five-second polling fallback. The board still has no write or auth surface.
 - `/api/v1/jobs?state=&kind=&role=` — a `JobPage`; `state` may repeat or be comma-separated.
 - `/api/v1/sessions?project=&job=&state=` — a `SessionPage`; `project` defaults to the
   served project.
@@ -66,10 +75,11 @@ no privileged action to protect; do not add a placeholder auth layer. A token mu
 with the first write endpoint or a non-loopback listener.
 
 Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
-the board/global SSE stream, the browser reconnect UI, the cost dashboard page, nodes, the
+the reconnect UI on the pages that still poll, the cost dashboard page, nodes, the
 capsule web view, the auth token, `vowp up` integration and the remaining browser pages.
 There are no placeholder routes for any of them. The per-session SSE stream is implemented
-and used by the session detail page.
+and used by the session detail page; the board stream is implemented and used by the board
+page.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -90,6 +100,8 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
 - `GET /api/v1/board` — the JSON shape already printed by `vowp board --json` (`at`, `project`,
   `jobs`, `running`, `slots_busy`, `slots_total`, `planner`, `keeper`, `limits`,
   `cost_today_usd`, `inbox_open`, `last_checkpoint`).
+- `GET /api/v1/board/stream` — SSE `board` frames carrying the exact `Board` document when it
+  changes, plus `heartbeat` frames; no cursor or resume.
 - `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer; the read route
   is implemented in this slice and the answer write is later.
 - `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape;
@@ -150,11 +162,12 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `unknown` or `mixed`.
 - `CostTotal { runs, usd, tokens, source, unknown_entries }` — the totals row.
 - `ApiError { error: { kind, message, hint? } }` — the same shape as `vowp --json` errors.
-- An SSE frame with `event: session` / `event: heartbeat` / `event: resync` and the JSON data line.
-  This is a `text/event-stream` frame, not a JSON document, so it has no schema of its own: the
-  `data:` line is an exact `EventEnvelope` for `session`, `{ at }` for `heartbeat`, and
-  `{ after_seq }` for the one recovery `resync` frame. The later board stream reuses this frame
-  shape with `event: board` and a `Board` data line.
+- An SSE frame with `event: session` / `event: board` / `event: heartbeat` / `event: resync`
+  and the JSON data line. This is a `text/event-stream` frame, not a JSON document, so it has
+  no schema of its own: the `data:` line is an exact `EventEnvelope` for `session`, the exact
+  `Board` document for `board`, `{ at }` for `heartbeat`, and `{ after_seq }` for the one
+  recovery `resync` frame. The board stream uses `board` and `heartbeat` only; it has no
+  `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
 `SessionDetail` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the
@@ -184,19 +197,25 @@ exception above.
    story; an in-supervisor thread reuses the heartbeat and `BoardSnapshot`.
 2. **Scope.** One project per daemon (matching one supervisor per project home), or every project in
    the node database? Default to one project and make it explicit in the URL or a `--project` flag.
-3. **Cursor semantics.** `session_events.seq` is per session; the ledger has a global autoincrement
-   id. A board stream needs a merge policy. Start with per-session SSE and board polling.
+3. **Cursor semantics.** Resolved for the board stream: the board is a self-contained
+   snapshot, so `GET /api/v1/board/stream` sends the exact `Board` document as a `board`
+   frame whenever its content changes apart from `at`, with no cursor, `after_seq`, event
+   merge or `resync`. `session_events.seq` remains per session for the timeline stream and
+   the ledger has a global autoincrement id; no global event log is introduced.
 4. **Token storage.** A random token in `<home>/api-token` (0600) or an environment variable? How is it
    rotated? Never log the value; never put it in a URL.
-5. **Backpressure.** Answered for the per-session stream: each poll reads at most 256 events,
-   the response stream yields one frame at a time and lets HTTP backpressure slow the client, and
-   a cursor that falls behind a truncated log gets one `resync` frame and a clean close. The
-   board stream will need the same policy when it lands.
+5. **Backpressure.** Answered for both streams. Each session poll reads at most 256 events,
+   the response stream yields one frame at a time and lets HTTP backpressure slow the client,
+   and a cursor that falls behind a truncated log gets one `resync` frame and a clean close.
+   The board stream collects one snapshot per poll, holds no store between polls and sends a
+   frame only when the snapshot changes, so a slow client only ever waits for the next
+   snapshot.
 
 ## First-issue-sized slice
 
 Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
-`GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions`,
+`GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/board/stream`, `GET /api/v1/jobs`,
+`GET /api/v1/sessions`,
 `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/capsules/{capsuleId}`,
 `GET /api/v1/sessions/{id}/events?after_seq=`,
 `GET /api/v1/sessions/{id}/events/stream?after_seq=`, `GET /api/v1/inbox?state=` and
@@ -206,9 +225,12 @@ and a bounded long chain, a limit, open/answered inbox items, cost ledger rows f
 source and a checkpoint, and asserts that every JSON document validates against its exported
 schema — including `SessionDetail` for the session detail, `Capsule` for the capsule read,
 `Board`, `BoardRun` and `BoardLimit` for the board, `InboxPage` for the inbox and `CostReport`
-for cost. The SSE test uses a real loopback listener, a short injected heartbeat interval,
-exact `EventEnvelope` frame comparisons and a live append through `SessionLog::open`. No write
-endpoints and no board stream yet. The first-slice section above lists what is still later.
+for cost. The SSE tests use a real loopback listener and short injected intervals: the
+session stream compares exact `EventEnvelope` frames and appends live through
+`SessionLog::open`; the board stream validates its `board` frames against the `Board` schema,
+compares them with `GET /api/v1/board` apart from `at`, changes a job row through a writable
+store to receive the next snapshot, and observes heartbeats while the snapshot is stable. No
+write endpoints yet. The first-slice section above lists what is still later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

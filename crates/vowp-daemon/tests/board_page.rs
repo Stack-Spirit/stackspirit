@@ -1,9 +1,10 @@
 //! Hermetic board-page tests: a temporary home, a real loopback listener and real GETs.
 //!
 //! The page is static HTML, so these tests pin that the daemon serves it as `text/html`,
-//! that it carries the board markup and the `/api/v1/board` fetch, and that the same
-//! fixture backs the API with the expected job counts and running job. No browser or Node
-//! runtime is involved, and nothing touches the real home or a harness.
+//! that it carries the board markup, the `/api/v1/board` fetch and the board SSE stream with
+//! its reconnect and polling fallback, and that the same fixture backs the API with the
+//! expected job counts and running job. No browser or Node runtime is involved, and nothing
+//! touches the real home or a harness.
 
 mod support;
 
@@ -28,6 +29,15 @@ fn board_page_serves_the_static_page_and_the_fixture_board() {
     for needle in [
         "id=\"board\"",
         "fetch(\"/api/v1/board\")",
+        "const STREAM_URL = \"/api/v1/board/stream\";",
+        "new EventSource(STREAM_URL)",
+        "addEventListener(\"board\"",
+        "addEventListener(\"heartbeat\"",
+        "REFRESH_MS = 5000",
+        "startFallbackPolling",
+        "stopFallbackPolling",
+        "Reconnecting...",
+        "typeof EventSource !== \"function\"",
         "Job counts",
         "Running jobs",
         "Slots",
@@ -38,6 +48,7 @@ fn board_page_serves_the_static_page_and_the_fixture_board() {
         "Inbox open",
         "Last checkpoint",
         "Last updated",
+        "Live updates",
         "href=\"/sessions\"",
         "<noscript>The board requires JavaScript.</noscript>",
     ] {

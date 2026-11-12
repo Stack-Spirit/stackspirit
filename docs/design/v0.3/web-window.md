@@ -47,7 +47,9 @@ executor runs the same `SessionOps::switch` path as the CLI (the queue has no sw
 - PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
 - The token is kept in memory or `sessionStorage`, not in a URL. A 401 shows a one-field unlock page.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
-  The session timeline uses it. The board and the other pages still poll every five seconds.
+  The session timeline uses the per-session stream with `after_seq` resume. The board uses the
+  snapshot `/api/v1/board/stream` with reconnect and polling fallback. The cost and inbox pages
+  still poll every five seconds.
 
 ## Open questions
 
@@ -65,13 +67,17 @@ executor runs the same `SessionOps::switch` path as the CLI (the queue has no sw
 
 `vowp-daemon` serves a static, read-only board page at `GET /`. The page is
 `crates/vowp-daemon/web/index.html`, embedded in the binary with `include_str!` and returned as
-`text/html`. It fetches `GET /api/v1/board` on load and every five seconds, and renders the
-project, job counts by state, running jobs (job, executor, age, last event age), slots busy/total,
-planner and keeper, active limits with reset times, today's cost (`unknown` when the API reports
-null), the open inbox count, the last checkpoint and a visible "last updated" time. A failed fetch
-shows an error line and keeps the last board and its timestamp visible. The page uses text labels
-as well as colour and carries a `<noscript>` message. It links to `/sessions`, `/cost` and
-`/inbox`.
+`text/html`. It fetches `GET /api/v1/board` on load and renders the project, job counts by
+state, running jobs (job, executor, age, last event age), slots busy/total, planner and keeper,
+active limits with reset times, today's cost (`unknown` when the API reports null), the open
+inbox count, the last checkpoint and a visible "last updated" time. After that initial fetch it
+opens `EventSource('/api/v1/board/stream')`. A `board` frame replaces the whole board document
+and updates "last updated"; a `heartbeat` frame updates only the live line. On a stream error
+or close the page shows a visible "Reconnecting..." state, retries with bounded exponential
+backoff and keeps the five-second polling fallback until a stream open succeeds. If
+`EventSource` is unavailable the page polls only. A failed fetch or stream keeps the last board
+and its timestamp visible. The page uses text labels as well as colour and carries a
+`<noscript>` message. It links to `/sessions`, `/cost` and `/inbox`.
 
 The session pages are the same kind of embedded static shell,
 `crates/vowp-daemon/web/sessions.html`, served at `GET /sessions` and `GET /sessions/{id}`. The
@@ -122,15 +128,16 @@ provider secret.
 There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
 `crates/vowp-daemon/tests/board_page.rs`, `session_page.rs` and `cost_inbox_pages.rs` are HTTP-only
 tests over a temporary home and a real `127.0.0.1:0` listener, and `tests/sse.rs` reads real
-chunked stream bodies. The session-page test pins the stream path, the `after_seq` resume, the
-`session` and `heartbeat` handlers, the reconnect text and the polling fallback without running a
-browser. It also pins the session-detail path, the capsule field labels, the lineage links and the
-no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data
-source.
+chunked stream bodies. The board-page test pins the stream path, the `board` and `heartbeat`
+handlers, the "Reconnecting..." text and the polling fallback without running a browser. The
+session-page test pins the stream path, the `after_seq` resume, the
+`session` and `heartbeat` handlers, the reconnect text and the polling fallback. It also pins the
+session-detail path, the capsule field labels, the lineage links and the no-capsule branch, and
+fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data source.
 
 Still later: the separate capsule route/page (the single-capsule API exists), `/nodes`, inbox
-answering, the cost dashboard and charts, the board/global SSE stream, the reconnect UI on the
-pages that still poll, executor switching, write actions, PWA installability and the auth token.
+answering, the cost dashboard and charts, the reconnect UI on the pages that still poll,
+executor switching, write actions, PWA installability and the auth token.
 The API routes and their fallback are otherwise unchanged; unknown non-API paths still return the
 API's JSON 404.
 

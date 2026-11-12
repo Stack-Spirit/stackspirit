@@ -2,18 +2,23 @@
 //!
 //! The first v0.3 slice serves the static read-only board page at `GET /` and `GET /board`,
 //! the static session list and detail pages at `GET /sessions` and `GET /sessions/{id}`,
-//! the static cost and inbox pages at `GET /cost` and `GET /inbox`,
-//! and the API endpoints `GET /api/v1/health`, `/api/v1/board`, `/api/v1/jobs`,
+//! the static cost and inbox pages at `GET /cost` and `GET /inbox`, and the API endpoints
+//! `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`,
 //! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 //! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
 //! `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints. The session detail
 //! contains the exact `Session`, its latest capsule and at most 32 parent links, nearest
 //! parent first; the capsule route answers only for a capsule belonging to that session.
 //! The per-session stream sends stored `EventEnvelope` frames with periodic heartbeats and a
-//! bounded per-client batch. The board page is also the phone board: its card layout is
-//! usable at a 360 px viewport. The session list page fetches `/api/v1/sessions`; the detail
-//! page loads its metadata and a first event page, then follows the per-session SSE stream,
-//! with a visible reconnect state, bounded-backoff retry and a five-second polling fallback.
+//! bounded per-client batch. The board stream sends the exact running `Board` document when
+//! its content changes, plus heartbeats, and has no cursor or resume.
+//!
+//! The board page is also the phone board: its card layout is usable at a 360 px viewport.
+//! It loads `/api/v1/board`, follows `/api/v1/board/stream`, and keeps a visible reconnect
+//! state with bounded-backoff retry and a five-second polling fallback until the stream
+//! opens. The session list page fetches `/api/v1/sessions`; the detail page loads its
+//! metadata and a first event page, then follows the per-session SSE stream, with a visible
+//! reconnect state, bounded-backoff retry and a five-second polling fallback.
 //! The pages never write. The cost page renders grouped ledger rows and totals
 //! with a `by` selector, and the inbox page renders open, answered and dismissed items with a
 //! state selector; both only fetch the read-only cost and inbox endpoints.

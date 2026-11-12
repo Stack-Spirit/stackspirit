@@ -1,11 +1,12 @@
-//! The per-session server-sent event stream.
+//! The server-sent event streams: one per session and one for the board snapshot.
 //!
-//! Every frame is written as it becomes available; the log is polled in short blocking
-//! batches on `spawn_blocking`, so no store or log handle is held for the lifetime of the
-//! response. One poll reads at most [`STREAM_BATCH`] events, which keeps the per-client
-//! buffer bounded even when the writer is far ahead of the reader. A client that outlives
-//! a compacted, removed or truncated log receives one `resync` frame with a recoverable
-//! cursor and the stream closes.
+//! Every frame is written as it becomes available; the log or board is polled in short
+//! blocking batches on `spawn_blocking`, so no store or log handle is held for the lifetime
+//! of the response. One session poll reads at most [`STREAM_BATCH`] events, which keeps the
+//! per-client buffer bounded even when the writer is far ahead of the reader. A client that
+//! outlives a compacted, removed or truncated log receives one `resync` frame with a
+//! recoverable cursor and the stream closes. The board stream sends snapshot frames and
+//! heartbeats only; it has no cursor and never holds a store between polls.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -16,6 +17,7 @@ use futures_util::Stream;
 use futures_util::stream;
 use serde_json::json;
 use tokio::time::{Instant, sleep};
+use vowp_protocol::api::Board;
 use vowp_protocol::{EventEnvelope, SessionId, Timestamp};
 use vowp_store::NodePaths;
 use vowp_store::session_log::SessionLog;
@@ -27,6 +29,9 @@ pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Production interval between session-log polls.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Production interval between board snapshot polls.
+pub(crate) const BOARD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Most events one poll may hand to the frame stream.
 pub(crate) const STREAM_BATCH: usize = 256;
@@ -203,4 +208,96 @@ fn resync_event(after_seq: u64) -> Event {
     Event::default()
         .event("resync")
         .data(json!({ "after_seq": after_seq }).to_string())
+}
+
+/// Builds the SSE response for the board snapshot stream.
+///
+/// The first poll always sends one `board` frame. Later polls send a frame only when the
+/// snapshot changed apart from its wall-clock `at`, and a heartbeat keeps the connection
+/// visibly alive while the board is stable.
+pub(crate) fn board_response(state: ApiState) -> Sse<impl Stream<Item = Result<Event, Infallible>> + Send> {
+    let poll_interval = state.board_poll_interval();
+    let heartbeat_interval = state.stream_heartbeat_interval();
+    let cursor = BoardStreamState {
+        state,
+        last_board: None,
+        poll_interval,
+        heartbeat_interval,
+        next_heartbeat: Instant::now() + heartbeat_interval,
+        poll_due: true,
+        done: false,
+    };
+    Sse::new(stream::unfold(cursor, next_board_frame))
+}
+
+/// State carried between board SSE frames.
+struct BoardStreamState {
+    state: ApiState,
+    last_board: Option<Board>,
+    poll_interval: Duration,
+    heartbeat_interval: Duration,
+    next_heartbeat: Instant,
+    poll_due: bool,
+    done: bool,
+}
+
+/// Produces the next board frame, sleeping or polling only when no ready frame exists.
+async fn next_board_frame(mut state: BoardStreamState) -> Option<(Result<Event, Infallible>, BoardStreamState)> {
+    loop {
+        if state.done {
+            return None;
+        }
+
+        let now = Instant::now();
+        if now >= state.next_heartbeat {
+            state.next_heartbeat = now + state.heartbeat_interval;
+            return Some((Ok(heartbeat_event()), state));
+        }
+        if !state.poll_due {
+            let wait = state
+                .poll_interval
+                .min(state.next_heartbeat.saturating_duration_since(now));
+            sleep(wait).await;
+            state.poll_due = true;
+            continue;
+        }
+
+        state.poll_due = false;
+        let api = state.state.clone();
+        match tokio::task::spawn_blocking(move || api.board()).await {
+            Ok(Ok(board)) => {
+                if state.last_board.as_ref().is_none_or(|last| board_changed(last, &board)) {
+                    state.last_board = Some(board.clone());
+                    let Some(event) = board_event(&board) else {
+                        state.done = true;
+                        return None;
+                    };
+                    return Some((Ok(event), state));
+                }
+            }
+            // A board collect error ends the stream cleanly; the page reconnects and falls
+            // back to its five-second polling until a stream opens again.
+            _ => {
+                state.done = true;
+                return None;
+            }
+        }
+    }
+}
+
+/// Returns whether `current` differs from `previous` apart from the snapshot time.
+///
+/// The board's `at` moves on every collect. It is liveness, not content: the heartbeat
+/// carries liveness without replacing the board, so a moving `at` alone sends no frame.
+fn board_changed(previous: &Board, current: &Board) -> bool {
+    let mut previous = previous.clone();
+    previous.at = current.at;
+    previous != *current
+}
+
+/// Encodes one board snapshot as a `board` frame.
+fn board_event(board: &Board) -> Option<Event> {
+    serde_json::to_string(board)
+        .ok()
+        .map(|data| Event::default().event("board").data(data))
 }
