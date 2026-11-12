@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOWP board</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #f6f5f1;
+    --card: #ffffff;
+    --ink: #1f2421;
+    --muted: #5c6660;
+    --line: #d8d5cc;
+    --accent: #16855b;
+    --warn: #a33a1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #161a18;
+      --card: #1e2421;
+      --ink: #edf0ec;
+      --muted: #a2ada6;
+      --line: #343c37;
+      --accent: #55d39b;
+      --warn: #ff9b7a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.45;
+  }
+  main {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 1.5rem 1rem 3rem;
+    display: grid;
+    gap: 1rem;
+  }
+  h1 { margin: 0; font-size: 1.65rem; }
+  h2 { margin: 0 0 .6rem; font-size: 1rem; }
+  .page-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; justify-content: space-between; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: .6rem;
+    padding: .9rem 1rem;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 1rem; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .value { margin: .2rem 0; font-size: 1.45rem; font-weight: 700; }
+  .value.small { font-size: 1.05rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+  .chip { display: flex; gap: .4rem; align-items: baseline; border: 1px solid var(--line); border-radius: 999px; padding: .2rem .7rem; }
+  .chip .count { color: var(--accent); font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: .4rem .5rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .error {
+    margin: 0;
+    padding: .65rem .9rem;
+    border: 1px solid var(--warn);
+    border-radius: .5rem;
+    color: var(--warn);
+    background: var(--card);
+    font-weight: 600;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main id="board">
+  <header class="page-head">
+    <div>
+      <h1>VOWP board</h1>
+      <p id="project" class="muted">Project: unknown</p>
+    </div>
+    <p id="updated" class="muted" aria-live="polite">Last updated: waiting for first load</p>
+  </header>
+
+  <p id="error" class="error" role="alert" hidden></p>
+
+  <section class="card" aria-labelledby="counts-heading">
+    <h2 id="counts-heading">Job counts</h2>
+    <ul id="counts" class="chips"><li class="muted">Loading…</li></ul>
+  </section>
+
+  <section class="card" aria-labelledby="running-heading">
+    <h2 id="running-heading">Running jobs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Job</th>
+          <th scope="col">Executor</th>
+          <th scope="col">Age</th>
+          <th scope="col">Last event age</th>
+        </tr>
+      </thead>
+      <tbody id="running"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <div class="grid">
+    <section class="card" aria-labelledby="slots-heading">
+      <h2 id="slots-heading">Slots</h2>
+      <p id="slots" class="value">–</p>
+      <p class="muted">Worker and verifier slots busy / total.</p>
+    </section>
+    <section class="card" aria-labelledby="cost-heading">
+      <h2 id="cost-heading">Cost today</h2>
+      <p id="cost" class="value">unknown</p>
+      <p class="muted">USD recorded today (UTC); unknown means no total is known.</p>
+    </section>
+    <section class="card" aria-labelledby="inbox-heading">
+      <h2 id="inbox-heading">Inbox open</h2>
+      <p id="inbox" class="value">–</p>
+      <p class="muted">Inbox items waiting for an answer.</p>
+    </section>
+    <section class="card" aria-labelledby="checkpoint-heading">
+      <h2 id="checkpoint-heading">Last checkpoint</h2>
+      <p id="checkpoint" class="value small">–</p>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card" aria-labelledby="planner-heading">
+      <h2 id="planner-heading">Planner</h2>
+      <p id="planner" class="mono">not configured</p>
+    </section>
+    <section class="card" aria-labelledby="keeper-heading">
+      <h2 id="keeper-heading">Keeper</h2>
+      <p id="keeper" class="mono">not configured</p>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="limits-heading">
+    <h2 id="limits-heading">Limits</h2>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Provider</th>
+          <th scope="col">Kind</th>
+          <th scope="col">Resets</th>
+        </tr>
+      </thead>
+      <tbody id="limits"><tr><td colspan="3" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </section>
+</main>
+
+<noscript>The board requires JavaScript.</noscript>
+
+<script>
+(() => {
+  "use strict";
+
+  const REFRESH_MS = 5000;
+  const errorLine = document.getElementById("error");
+  const updatedLine = document.getElementById("updated");
+  let lastUpdated = null;
+
+  function text(id, value) {
+    document.getElementById(id).textContent = value;
+  }
+
+  function formatAge(secs) {
+    if (secs === null || secs === undefined) return "unknown";
+    const value = Number(secs);
+    if (!Number.isFinite(value) || value < 0) return "unknown";
+    if (value < 60) return Math.round(value) + "s";
+    const minutes = Math.round(value / 60);
+    if (minutes < 60) return minutes + "m";
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? hours + "h " + rest + "m" : hours + "h";
+  }
+
+  function formatTime(value) {
+    if (value === null || value === undefined) return "unknown";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString();
+  }
+
+  function formatCost(value) {
+    if (value === null || value === undefined) return "unknown";
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return "unknown";
+    return "$" + amount.toFixed(2);
+  }
+
+  function fillTable(id, rows, columns, emptyText) {
+    const body = document.getElementById(id);
+    body.replaceChildren();
+    if (rows.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = columns;
+      cell.className = "muted";
+      cell.textContent = emptyText;
+      row.appendChild(cell);
+      body.appendChild(row);
+      return;
+    }
+    for (const values of rows) {
+      const row = document.createElement("tr");
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      }
+      body.appendChild(row);
+    }
+  }
+
+  function renderCounts(jobs) {
+    const list = document.getElementById("counts");
+    list.replaceChildren();
+    const entries = Object.entries(jobs || {});
+    if (entries.length === 0) {
+      const item = document.createElement("li");
+      item.className = "muted";
+      item.textContent = "No jobs.";
+      list.appendChild(item);
+      return;
+    }
+    for (const [state, count] of entries) {
+      const item = document.createElement("li");
+      item.className = "chip";
+      const number = document.createElement("span");
+      number.className = "count";
+      number.textContent = String(count);
+      const label = document.createElement("span");
+      label.textContent = state;
+      item.append(number, label);
+      list.appendChild(item);
+    }
+  }
+
+  function render(data) {
+    text("project", "Project: " + (data.project || "unknown"));
+    renderCounts(data.jobs);
+
+    const running = Array.isArray(data.running) ? data.running : [];
+    fillTable("running", running.map((run) => [
+      run.job || "unknown",
+      run.executor || "unknown",
+      formatAge(run.age_secs),
+      formatAge(run.last_event_age_secs),
+    ]), 4, "No running jobs.");
+
+    text("slots", (data.slots_busy ?? "?") + " / " + (data.slots_total ?? "?") + " busy");
+    text("planner", data.planner || "not configured");
+    text("keeper", data.keeper || "not configured");
+
+    const limits = Array.isArray(data.limits) ? data.limits : [];
+    fillTable("limits", limits.map((limit) => [
+      limit.provider || "unknown",
+      limit.kind || "unknown",
+      limit.resets_at ? formatTime(limit.resets_at) : "no reset time",
+    ]), 3, "No active limits.");
+
+    text("cost", formatCost(data.cost_today_usd));
+    text("inbox", String(data.inbox_open ?? "?"));
+    text("checkpoint", data.last_checkpoint ? formatTime(data.last_checkpoint) : "none");
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch("/api/v1/board");
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const data = await response.json();
+      lastUpdated = new Date();
+      render(data);
+      updatedLine.textContent = "Last updated: " + lastUpdated.toLocaleString();
+      errorLine.hidden = true;
+      errorLine.textContent = "";
+    } catch (error) {
+      const detail = error && error.message ? error.message : "the daemon may be down";
+      const when = lastUpdated ? " Showing data from " + lastUpdated.toLocaleString() + "." : "";
+      errorLine.textContent = "Could not load the board (" + detail + ")." + when;
+      errorLine.hidden = false;
+    }
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

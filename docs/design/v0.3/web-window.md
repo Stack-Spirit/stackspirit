@@ -38,31 +38,46 @@ executor runs the same `SessionOps::switch` path as the CLI (the queue has no sw
 
 ## Shape
 
-- TypeScript, built to static assets and served by the daemon; no runtime Node dependency.
+- TypeScript, built to static assets and served by the daemon; no runtime Node dependency. The
+  implemented first slice deliberately skips the build step: it is one hand-written
+  `index.html` with inline CSS and vanilla JavaScript.
 - Routes: `/` (board), `/sessions`, `/sessions/:id`, `/sessions/:id/capsules/:capsuleId`,
   `/nodes`, `/cost`, `/inbox`.
 - PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
 - The token is kept in memory or `sessionStorage`, not in a URL. A 401 shows a one-field unlock page.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
+  The implemented board slice is polling only, every five seconds.
 
 ## Open questions
 
 1. **Frontend stack.** Plain TypeScript + a small DOM helper is enough for the first slice and avoids a
    build-tool decision. Pick a framework only when the session timeline needs it.
-2. **Asset embedding.** Serve `web/dist` from disk in development and embed the built files in the
-   binary for release, or always serve from a directory? Embedding keeps one binary but adds a build
-   step to `cargo build`.
+2. **Asset embedding.** The first slice embeds one hand-written `web/index.html` with
+   `include_str!`, so the binary carries the page and `cargo build` needs no asset step. Decide
+   later whether a built `web/dist` is embedded at release time or served from disk in development.
 3. **Write scope.** Is executor switching safe from a browser before a live-input/queue design exists?
    The switch protocol drains an active turn; the UI must show the drain and its `blocked` result.
 4. **Mobile vs desktop.** The phone board is a separate note; decide whether it is the same app at a
    narrow width or a dedicated route with less data.
 
-## First-issue-sized slice
+## First slice (implemented)
 
-Serve a static `index.html` and a read-only board page from the daemon: fetch `/api/v1/board` and
-render job counts, running jobs, slots, limits and cost. Add a fixture test that starts the daemon on
-`127.0.0.1:0`, opens the board route with a temporary store and asserts the snapshot values. No
-sessions page, no SSE and no write action yet.
+`vowp-daemon` serves a static, read-only board page at `GET /`. The page is
+`crates/vowp-daemon/web/index.html`, embedded in the binary with `include_str!` and returned as
+`text/html`. It fetches `GET /api/v1/board` on load and every five seconds, and renders the
+project, job counts by state, running jobs (job, executor, age, last event age), slots busy/total,
+planner and keeper, active limits with reset times, today's cost (`unknown` when the API reports
+null), the open inbox count, the last checkpoint and a visible "last updated" time. A failed fetch
+shows an error line and keeps the last board and its timestamp visible. The page uses text labels
+as well as colour and carries a `<noscript>` message.
+
+There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
+`crates/vowp-daemon/tests/board_page.rs` is an HTTP-only test over a temporary home and a real
+`127.0.0.1:0` listener.
+
+Still later: `/sessions`, `/sessions/:id`, the capsule view, `/nodes`, `/cost`, `/inbox`, SSE,
+write actions, PWA installability and the auth token. The API routes and their fallback are
+unchanged; unknown non-API paths still return the API's JSON 404.
 
 The app must never print a token value, a home path or a provider secret; the board only contains the
 fields already shown by `vowp board`.

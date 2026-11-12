@@ -12,7 +12,7 @@ documentation = "https://docs.rs/vowp-daemon"
 readme = "README.md"
 keywords = ["vowp", "daemon", "http", "api", "loopback"]
 categories = ["web-programming::http-server", "development-tools"]
-include = ["src/**", "README.md", "Cargo.toml"]
+include = ["src/**", "web/**", "README.md", "Cargo.toml"]
 
 [lib]
 name = "vowp_daemon"

@@ -9,7 +9,7 @@ use std::future::Future;
 
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use tokio::net::TcpListener;
@@ -168,9 +168,10 @@ impl ApiState {
     }
 }
 
-/// Builds the API router.
+/// Builds the router: the static board page at `/` plus the API under `/api/v1`.
 pub fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/", get(board_page))
         .route("/api/v1/health", get(health))
         .route("/api/v1/board", get(board))
         .route("/api/v1/jobs", get(jobs))
@@ -193,6 +194,14 @@ where
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
         .await
+}
+
+/// The embedded static board page, served read-only at `/`.
+const BOARD_PAGE: &str = include_str!("../web/index.html");
+
+/// Serves the static board page; it fetches `/api/v1/board` and polls every five seconds.
+async fn board_page() -> Html<&'static str> {
+    Html(BOARD_PAGE)
 }
 
 /// Returns the health document for the served project.
