@@ -16,6 +16,7 @@
     --line: #d8d5cc;
     --accent: #16855b;
     --warn: #a33a1f;
+    --track: #e7e4db;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -26,6 +27,7 @@
       --line: #343c37;
       --accent: #55d39b;
       --warn: #ff9b7a;
+      --track: #2b332e;
     }
   }
   * { box-sizing: border-box; }
@@ -78,6 +80,16 @@
   th { color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
   td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   tfoot td { font-weight: 700; border-bottom: none; }
+  .chart-figure { margin: 0 0 .75rem; }
+  .chart-caption { display: flex; flex-wrap: wrap; gap: .15rem .6rem; align-items: baseline; color: var(--muted); font-size: .85rem; }
+  .chart-title { color: var(--ink); font-weight: 700; }
+  .chart { display: grid; gap: .4rem; margin: .55rem 0 0; }
+  .chart-row { display: grid; grid-template-columns: minmax(5rem, 9rem) minmax(0, 1fr) auto; gap: .5rem; align-items: center; font-size: .85rem; }
+  .chart-key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chart-track { display: block; height: .85rem; border-radius: .25rem; background: var(--track); overflow: hidden; }
+  .chart-bar { display: block; height: 100%; border-radius: .25rem; background: var(--accent); }
+  .chart-value { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .chart-empty { margin: 0; }
   .error {
     margin: 0;
     padding: .65rem .9rem;
@@ -93,6 +105,7 @@
     .card { padding: .7rem .75rem; border-radius: .5rem; }
     h1 { font-size: 1.3rem; }
     th, td { padding: .35rem .4rem; }
+    .chart-row { grid-template-columns: minmax(4rem, 6.5rem) minmax(0, 1fr) auto; gap: .35rem; }
   }
 </style>
 </head>
@@ -129,6 +142,16 @@
       </div>
     </div>
     <p class="muted">Unknown costs are shown as <strong>?</strong> and never counted as zero.</p>
+    <figure class="chart-figure">
+      <figcaption class="chart-caption">
+        <span id="chart-title" class="chart-title">Known USD by <span id="chart-by-label">job</span></span>
+        <span id="chart-summary">Waiting for the first report.</span>
+      </figcaption>
+      <div id="chart" class="chart" role="img" aria-labelledby="chart-title" aria-describedby="chart-summary">
+        <p class="chart-empty muted">Waiting for the first report.</p>
+      </div>
+    </figure>
+    <p id="chart-unknown" class="muted chart-unknown" hidden></p>
     <div class="table-wrap">
       <table>
         <thead>
@@ -164,6 +187,10 @@
   const byLabel = document.getElementById("by-label");
   const rowsBody = document.getElementById("rows");
   const totalFoot = document.getElementById("total");
+  const chart = document.getElementById("chart");
+  const chartSummary = document.getElementById("chart-summary");
+  const chartByLabel = document.getElementById("chart-by-label");
+  const chartUnknown = document.getElementById("chart-unknown");
   let lastUpdated = null;
 
   const initial = new URLSearchParams(window.location.search).get("by");
@@ -204,6 +231,103 @@
     return row;
   }
 
+  // Returns the row's known USD, or null when the API reports it as unknown.
+  // Unknown amounts never become zero and never enter the chart scale.
+  function knownUsd(item) {
+    if (item.usd === null || item.usd === undefined) return null;
+    const amount = Number(item.usd);
+    return Number.isFinite(amount) && amount >= 0 ? amount : null;
+  }
+
+  function chartRow(key, label, amount, max) {
+    const row = document.createElement("div");
+    row.className = "chart-row";
+    const name = document.createElement("span");
+    name.className = "chart-key mono";
+    name.textContent = key || "unknown";
+    name.title = key || "unknown";
+    const track = document.createElement("span");
+    track.className = "chart-track";
+    const bar = document.createElement("span");
+    bar.className = "chart-bar";
+    bar.style.width = (max > 0 ? Math.min(100, (amount / max) * 100) : 0) + "%";
+    track.appendChild(bar);
+    const value = document.createElement("span");
+    value.className = "chart-value";
+    value.textContent = label;
+    row.append(name, track, value);
+    return row;
+  }
+
+  function chartSummaryText(known, unknown, group) {
+    if (known.length === 0) {
+      const suffix = unknown.length === 0
+        ? "."
+        : "; " + unknown.length + (unknown.length === 1 ? " row has" : " rows have") + " unknown USD.";
+      return "No known USD to chart by " + group + suffix;
+    }
+    let largest = known[0];
+    for (const entry of known) {
+      if (entry.amount > largest.amount) largest = entry;
+    }
+    const charted = known.length === 1 ? "1 row charted" : known.length + " rows charted";
+    const summary = "Known USD by " + group + ": " + charted + ", largest " +
+      (largest.item.key || "unknown") + " at " +
+      formatUsd(largest.item.usd, largest.item.unknown_entries, largest.item.runs) + ".";
+    if (unknown.length === 0) return summary;
+    return summary + " " + unknown.length +
+      (unknown.length === 1 ? " row has" : " rows have") +
+      " unknown USD and " + (unknown.length === 1 ? "is" : "are") + " not charted.";
+  }
+
+  function renderChart(rows, group) {
+    chartByLabel.textContent = group;
+    chart.replaceChildren();
+    chartUnknown.textContent = "";
+    chartUnknown.hidden = true;
+
+    const known = [];
+    const unknown = [];
+    for (const item of rows) {
+      const amount = knownUsd(item);
+      if (amount === null) {
+        unknown.push(item);
+      } else {
+        known.push({ item, amount });
+      }
+    }
+
+    if (rows.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "chart-empty muted";
+      empty.textContent = "No cost entries.";
+      chart.appendChild(empty);
+      chartSummary.textContent = "No cost entries.";
+      return;
+    }
+
+    if (known.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "chart-empty muted";
+      empty.textContent = "No known USD to chart.";
+      chart.appendChild(empty);
+    } else {
+      let max = 0;
+      for (const entry of known) max = Math.max(max, entry.amount);
+      for (const entry of known) {
+        const label = formatUsd(entry.item.usd, entry.item.unknown_entries, entry.item.runs);
+        chart.appendChild(chartRow(entry.item.key, label, entry.amount, max));
+      }
+    }
+
+    chartSummary.textContent = chartSummaryText(known, unknown, group);
+    if (unknown.length > 0) {
+      chartUnknown.textContent = "Unknown USD (not charted): " +
+        unknown.map((item) => item.key || "unknown").join(", ");
+      chartUnknown.hidden = false;
+    }
+  }
+
   function render(report) {
     by = GROUPS.includes(report.by) ? report.by : by;
     bySelect.value = by;
@@ -211,6 +335,7 @@
     rowsBody.replaceChildren();
 
     const rows = Array.isArray(report.rows) ? report.rows : [];
+    renderChart(rows, by);
     if (rows.length === 0) {
       const row = document.createElement("tr");
       const empty = cell("No cost entries.", "muted");

@@ -4,7 +4,8 @@
 // SSE streams and event data always go to the network and are never cached here.
 "use strict";
 
-const CACHE_NAME = "vowp-shell-v1";
+// Bumped from v1 when the cost page gained its chart; activate deletes old caches.
+const CACHE_NAME = "vowp-shell-v2";
 const SHELL = [
   "/",
   "/board",

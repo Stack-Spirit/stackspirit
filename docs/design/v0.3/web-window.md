@@ -1,9 +1,9 @@
 # v0.3 — web / PWA window
 
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
-board, session, capsule, cost, inbox and nodes pages, the token-gated inbox answer and local
-session switch, and the PWA manifest/service-worker shell are implemented; the rest of this
-note is design. v0.1 has no browser UI and no listening socket.
+board, session, capsule, cost, inbox and nodes pages, the cost chart, the token-gated inbox answer
+and local session switch, and the PWA manifest/service-worker shell are implemented; the rest of
+this note is design. v0.1 has no browser UI and no listening socket.
 
 ## Goal
 
@@ -142,12 +142,19 @@ scope.
 The cost page is `crates/vowp-daemon/web/cost.html`, served at `GET /cost`. It fetches
 `GET /api/v1/cost?by=<group>` on load and every five seconds. The selector offers job, day, role,
 provider and model (default job), and the URL keeps the chosen value. The page renders the grouped
-rows and the total with key, runs, USD, token usage, source and unknown-entry count. A null USD
-total is shown as `?` and never as zero, and the page states that unknown costs stay unknown. A
-failed fetch shows an error line and keeps the last report and timestamp visible; an empty report
-shows "No cost entries." There are no charts and no price-table editing. The page links to the
-board, sessions and inbox, carries `<noscript>The cost page requires JavaScript.</noscript>`, and
-never prints a home path, token or provider secret.
+rows and the total with key, runs, USD, token usage, source and unknown-entry count. Above the
+table, a responsive inline CSS bar chart shows the known USD for the selected grouping as
+horizontal bars labelled with the row keys and scaled to the largest known row; the figure carries
+a visible caption and a `role="img"` label/summary for assistive technology. A row whose USD is
+null is never drawn as zero or included in the scale: the chart lists those keys under "Unknown USD
+(not charted)" and the table keeps showing `?`. The chart is rebuilt from the same report when the
+selector changes and on the five-second refresh, while the table remains the full accessible data
+view. A null USD total is shown as `?` and never as zero, and the page states that unknown costs
+stay unknown. A failed fetch shows an error line and keeps the last report, chart and timestamp
+visible; an empty report shows "No cost entries." in the chart and the table. Price-table editing
+remains out of scope. The page links to the board, sessions and inbox, carries
+`<noscript>The cost page requires JavaScript.</noscript>`, and never prints a home path, token or
+provider secret.
 
 The inbox page is `crates/vowp-daemon/web/inbox.html`, served at `GET /inbox`. It fetches
 `GET /api/v1/inbox?state=open` on load and every five seconds. The state selector adds all,
@@ -186,11 +193,12 @@ prints a home path, token or provider secret.
   `Service-Worker-Allowed: /`, so it can control the root scope and updates are revalidated.
 
 The service worker is hand-written with no build step. On install it opens cache
-`vowp-shell-v1` and caches a bounded `SHELL` list: `/`, `/board`, `/sessions`, `/cost`,
-`/inbox`, `/nodes`, `/manifest.webmanifest` and `/icon.svg`. On activate it deletes every other
-cache version. The fetch handler bypasses `/api/` and any `/stream` URL (and any request whose
-`Accept` names `text/event-stream`) entirely: those requests go to the network only and are never
-cached. Navigations are network-first with a cached shell fallback, and other same-origin GET
+`vowp-shell-v2` and caches a bounded `SHELL` list: `/`, `/board`, `/sessions`, `/cost`,
+`/inbox`, `/nodes`, `/manifest.webmanifest` and `/icon.svg`. The version was bumped from v1 when
+the cost page gained its chart, so existing clients replace the older shell; on activate the worker
+deletes every other cache version. The fetch handler bypasses `/api/` and any `/stream` URL (and
+any request whose `Accept` names `text/event-stream`) entirely: those requests go to the network
+only and are never cached. Navigations are network-first with a cached shell fallback, and other same-origin GET
 shell/assets are cache-first with a background network update. Dynamic session and capsule
 navigations are therefore read live and only fall back to the cached session or board shell when
 the daemon is unreachable. API responses, SSE frames and event data are never cached as
@@ -204,9 +212,12 @@ Every page shell links `/manifest.webmanifest`, carries
 There is no Node or TypeScript build step and no browser test:
 `crates/vowp-daemon/tests/board_page.rs`, `session_page.rs`, `capsule_page.rs`,
 `cost_inbox_pages.rs`, `nodes_page.rs` and `pwa.rs` are HTTP-only tests over a temporary home and
-a real `127.0.0.1:0` listener, and `tests/sse.rs` reads real chunked stream bodies. The board-page
-test pins the stream path, the `board` and `heartbeat` handlers, the "Reconnecting..." text and the
-polling fallback without running a browser. The session-page test pins the stream path, the `after_seq` resume, the
+a real `127.0.0.1:0` listener, and `tests/sse.rs` reads real chunked stream bodies. The cost-page
+test pins the inline chart container and its accessible label, the selector and five-second
+refresh wiring, the unknown-row and empty-report paths, and the no-external-library rule, then
+reads `/api/v1/cost` in the same test to prove the chart's data source includes known rows and a
+null USD row. The board-page test pins the stream path, the `board` and `heartbeat` handlers, the
+"Reconnecting..." text and the polling fallback without running a browser. The session-page test pins the stream path, the `after_seq` resume, the
 `session` and `heartbeat` handlers, the reconnect text and the polling fallback. It also pins the
 session-detail path, the capsule field labels, the lineage links, the "View capsule" link and the
 no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data
@@ -226,8 +237,8 @@ local and remote nodes. The PWA test parses the manifest, pins the three asset c
 the service-worker headers, checks the bounded `SHELL` list and the API/SSE bypass, and asserts
 every page shell links and registers the service worker without printing a home path or token.
 
-Still later: the cost dashboard and charts, the reconnect UI on the pages that still
-poll, cross-node switching, dismiss and the other write actions, and a token rotation service.
+Still later: the reconnect UI on the pages that still poll, cross-node switching, dismiss and the
+other write actions, and a token rotation service.
 Offline data entry, offline event data and push notifications remain out of scope. Markdown
 rendering, capsule editing and capsule writes remain out of scope. The API routes and their
 fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.

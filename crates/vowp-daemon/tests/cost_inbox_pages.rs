@@ -255,6 +255,7 @@ fn cost_page_serves_the_shell_and_the_fixture_report() {
     for needle in [
         "id=\"cost\"",
         "id=\"by\"",
+        "id=\"chart-by-label\"",
         "<option value=\"job\" selected>",
         "<option value=\"day\">",
         "<option value=\"role\">",
@@ -271,6 +272,22 @@ fn cost_page_serves_the_shell_and_the_fixture_report() {
         "<th>Unknown</th>",
         "Unknown costs are shown as",
         "never counted as zero",
+        // The inline chart shows known USD and labels its unknown rows separately.
+        "id=\"chart\"",
+        "role=\"img\"",
+        "aria-labelledby=\"chart-title\"",
+        "aria-describedby=\"chart-summary\"",
+        "Known USD by",
+        "id=\"chart-unknown\"",
+        "Unknown USD (not charted)",
+        "No known USD to chart.",
+        "renderChart(rows, by)",
+        "chartByLabel.textContent = group",
+        "const amount = knownUsd(item)",
+        "if (amount === null)",
+        "unknown.push(item)",
+        "bar.style.width = (max > 0 ? Math.min(100, (amount / max) * 100) : 0) + \"%\"",
+        "bySelect.addEventListener(\"change\"",
         "No cost entries.",
         "Last updated",
         "href=\"/\"",
@@ -281,9 +298,14 @@ fn cost_page_serves_the_shell_and_the_fixture_report() {
         assert!(page.body.contains(needle), "cost page is missing {needle:?}");
     }
     assert_no_home_or_auth_token(&page, &fixture);
+    assert!(
+        !page.body.contains("<script src="),
+        "the chart must be inline and load no external library"
+    );
 
-    // The page's data source is the cost API; the same fixture must return the rows and
-    // totals the page renders, including a null USD total for an all-unknown group.
+    // The page's data source is the cost API and therefore the chart's only data source;
+    // the same fixture must return the rows and totals the chart scales, including a null
+    // USD row for an all-unknown group.
     let response = support::get(server.address, "/api/v1/cost?by=job");
     assert_eq!(response.status, 200, "body: {}", response.body);
     let report: CostReport = serde_json::from_str(&response.body).expect("CostReport");

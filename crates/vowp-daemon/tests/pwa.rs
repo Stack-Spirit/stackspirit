@@ -130,7 +130,7 @@ fn service_worker_caches_only_the_shell_and_bypasses_api_and_streams() {
     let body = &response.body;
 
     for needle in [
-        "const CACHE_NAME = \"vowp-shell-v1\";",
+        "const CACHE_NAME = \"vowp-shell-v2\";",
         "const SHELL = [",
         "caches.open(CACHE_NAME)",
         "cache.addAll(SHELL)",
