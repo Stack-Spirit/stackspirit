@@ -7,9 +7,10 @@
 //! [`common::sweep_stale_test_servers_once`] before starting tmux. A test process killed
 //! by a timeout or the OOM killer never runs its `Drop`, so its server would otherwise
 //! outlive the temporary home and keep every `vowp __window` pane polling. The sweep only
-//! removes `vowp-test` servers whose private path is gone, never `vowp-home`, the default
-//! socket, `vowp-night` or `vowp-orchestrator`. The board test also proves that killing a
-//! private server takes its `vowp __window board` pane down with it.
+//! removes private servers whose session is `vowp-…` and whose private path is gone, never
+//! `vowp-home`, the default socket, `vowp-night` or `vowp-orchestrator`. The board test
+//! also proves that killing a private server takes its `vowp __window board` pane down
+//! with it.
 
 mod common;
 
@@ -559,6 +560,7 @@ struct V01Env {
 
 impl V01Env {
     fn new(name: &str) -> Self {
+        common::sweep_stale_test_servers_once();
         let home = tempfile::tempdir().expect("v0.1 home");
         let project = tempfile::tempdir().expect("v0.1 project");
         let mut config = vowp_protocol::VowpConfig::with_defaults_for_tests();
@@ -613,6 +615,22 @@ impl V01Env {
         let value = serde_json::from_str(&stdout)
             .unwrap_or_else(|error| panic!("stdout is not JSON ({error}): {stdout:?}; stderr: {stderr:?}"));
         (code, value, stderr)
+    }
+}
+
+impl Drop for V01Env {
+    fn drop(&mut self) {
+        // `up --once --no-tmux` still creates the `vowp-<project>` session.
+        common::kill_private_server_for_home(self.home.path());
+    }
+}
+
+/// Kills the private tmux server owned by a temporary home when the test ends.
+struct HomeTmuxGuard(PathBuf);
+
+impl Drop for HomeTmuxGuard {
+    fn drop(&mut self) {
+        common::kill_private_server_for_home(&self.0);
     }
 }
 
@@ -1317,7 +1335,7 @@ fn stale_server_sweep_kills_a_server_whose_private_dir_is_gone() {
     let Some(guard) = private_tmux_guard() else {
         return;
     };
-    guard.tmux.ensure_session("vowp-test").expect("private session");
+    guard.tmux.ensure_session("vowp-legacy").expect("private session");
     let pid = guard
         .tmux
         .server_pid()
@@ -1336,9 +1354,9 @@ fn stale_server_sweep_kills_a_server_whose_private_dir_is_gone() {
     assert!(
         !guard
             .tmux
-            .session_exists("vowp-test")
+            .session_exists("vowp-legacy")
             .expect("probe the private socket"),
-        "the stale session still answers on its private socket"
+        "the stale project session still answers on its private socket"
     );
 }
 
@@ -1348,7 +1366,7 @@ fn stale_server_sweep_keeps_a_live_private_server() {
     let Some(guard) = private_tmux_guard() else {
         return;
     };
-    guard.tmux.ensure_session("vowp-test").expect("private session");
+    guard.tmux.ensure_session("vowp-one").expect("private session");
     let pid = guard
         .tmux
         .server_pid()
@@ -1363,8 +1381,8 @@ fn stale_server_sweep_keeps_a_live_private_server() {
         "the sweep killed a server whose private directory still exists"
     );
     assert!(
-        guard.tmux.session_exists("vowp-test").expect("session probe"),
-        "the live test session survived the sweep"
+        guard.tmux.session_exists("vowp-one").expect("session probe"),
+        "the live project session survived the sweep"
     );
 }
 
@@ -2578,7 +2596,9 @@ fn project_by_path_canonicalizes_symlinked_checkouts() {
 
 #[test]
 fn up_once_from_the_home_after_init_ticks_every_project() {
+    common::sweep_stale_test_servers_once();
     let home = tempfile::tempdir().expect("home");
+    let _home_guard = HomeTmuxGuard(home.path().to_path_buf());
     let first = git_repo();
     let second = git_repo();
     let bin = env!("CARGO_BIN_EXE_vowp");

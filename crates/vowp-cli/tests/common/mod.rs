@@ -237,13 +237,14 @@ pub fn sweep_stale_test_servers_once() {
 /// Kills leftover private test tmux servers whose temporary home was deleted.
 ///
 /// The sweep reads `/proc/<pid>/cmdline` and only considers a process whose argv
-/// starts with `tmux -L vowp-…` and whose `-s` session is a test session
-/// (`vowp-test` or `vowp-test-…`). It reads that server's `TMUX_TMPDIR` from
-/// `/proc/<pid>/environ`; a server whose directory or parent home still exists is
-/// left alone. The default socket and the `vowp-home`, `vowp-night` and
-/// `vowp-orchestrator` sessions are never candidates. Stale candidates get
-/// `SIGTERM`, then `SIGKILL` if they do not exit; the process command line is
-/// re-checked before each signal so a recycled pid is not touched.
+/// starts with `tmux -L vowp-…` and whose `-s` session is a `vowp-…` session. A
+/// test server uses `vowp-test…`, while `up --no-tmux` creates project sessions
+/// named `vowp-<project>` (for example `vowp-one`); both are candidates. It reads
+/// that server's `TMUX_TMPDIR` from `/proc/<pid>/environ`; a server whose directory
+/// or parent home still exists is left alone. The default socket and the
+/// `vowp-home`, `vowp-night` and `vowp-orchestrator` sessions are never candidates.
+/// Stale candidates get `SIGTERM`, then `SIGKILL` if they do not exit; the process
+/// command line is re-checked before each signal so a recycled pid is not touched.
 pub fn sweep_stale_test_servers() {
     for server in private_test_servers() {
         if stale_private_path(&server.tmpdir) {
@@ -252,7 +253,7 @@ pub fn sweep_stale_test_servers() {
     }
 }
 
-/// Enumerates the running `tmux -L vowp-… -s vowp-test…` servers.
+/// Enumerates the running `tmux -L vowp-… -s vowp-…` servers.
 fn private_test_servers() -> Vec<PrivateTestServer> {
     let mut servers = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -271,7 +272,7 @@ fn private_test_servers() -> Vec<PrivateTestServer> {
         let Some(session) = session_argument(&argv) else {
             continue;
         };
-        if !is_test_session(&session) || is_reserved_session(&session) {
+        if !is_private_session(&session) || is_reserved_session(&session) {
             continue;
         }
         let Some(tmpdir) = process_tmpdir(pid) else {
@@ -345,9 +346,12 @@ fn process_tmpdir(pid: u32) -> Option<PathBuf> {
     None
 }
 
-/// Whether a private `vowp-test` session name is in scope for the sweep.
-fn is_test_session(session: &str) -> bool {
-    session == "vowp-test" || session.starts_with("vowp-test-")
+/// Whether a private `vowp-…` session name is in scope for the sweep.
+///
+/// Project sessions are named `vowp-<project>`, so limiting the sweep to
+/// `vowp-test…` would leave every server created by `up --no-tmux` behind.
+fn is_private_session(session: &str) -> bool {
+    session.starts_with("vowp-")
 }
 
 /// Sessions that belong to the real units and must never be swept.
