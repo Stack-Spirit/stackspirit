@@ -21,6 +21,9 @@ Served endpoints, all `GET` and JSON:
 
 - `/api/v1/health` — binary version, node, project, project schema version and the
   supervisor heartbeat from `<home>/heartbeat` (`null` when absent, unreadable or stopped).
+- `/api/v1/board` — the exact `vowp board --json` document, computed from
+  `BoardSnapshot::collect` against the served project's read-only store and registered
+  `VowpConfig`.
 - `/api/v1/jobs?state=&kind=&role=` — a `JobPage`; `state` may repeat or be comma-separated.
 - `/api/v1/sessions?project=&job=&state=` — a `SessionPage`; `project` defaults to the
   served project.
@@ -29,17 +32,19 @@ Served endpoints, all `GET` and JSON:
   A full page's `next` is the cursor for the next `after_seq`.
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
-`Health`, `Page<T>`, `JobPage`, `SessionPage`, `EventPage`, `ApiError` and `ApiErrorBody`.
+`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`,
+`EventPage`, `ApiError` and `ApiErrorBody`.
 Failures use the same `ApiError` shape as `vowp --json` errors and map to `400` for an
-invalid filter or id, `404` for an unknown session and `500` for a store or I/O failure.
+invalid filter or id, `404` for an unknown session and `500` for a store, config or I/O
+failure.
 
 **No token in this slice.** Nothing writes and the listener is loopback-only, so there is
 no privileged action to protect; do not add a placeholder auth layer. A token must land
 with the first write endpoint or a non-loopback listener.
 
 Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
-SSE, board, inbox, cost, nodes, capsules, the auth token, `vowp up` integration and the
-browser UI. There are no placeholder routes for any of them.
+SSE, inbox, cost, nodes, capsules, the auth token, `vowp up` integration and the browser
+UI (including the static board page). There are no placeholder routes for any of them.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -101,7 +106,8 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
 - `BoardRun { job, executor, age_secs, last_event_age_secs }` — one running job in `Board.running`.
   `executor` and `last_event_age_secs` are nullable.
 - `BoardLimit { provider, kind, resets_at }` — the reduced limit row in `Board.limits`; `kind` is
-  the canonical limit class and `resets_at` is an RFC 3339 time or null.
+  the canonical limit class (`quota`, `credits`, `rate`, `context`, `auth` or `unavailable`) and
+  `resets_at` is an RFC 3339 time or null.
 - `Page<T> { items, next, total }` for lists.
 - `ApiError { error: { kind, message, hint? } }` — the same shape as `vowp --json` errors.
 - An SSE frame with `event: session` / `event: board` / `event: heartbeat` and the JSON data line.
@@ -146,11 +152,12 @@ alongside their item types, and keep the SSE frame as the one explicit schema ex
 ## First-issue-sized slice
 
 Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
-`GET /api/v1/health`, `GET /api/v1/jobs`, `GET /api/v1/sessions` and
+`GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions` and
 `GET /api/v1/sessions/{id}/events?after_seq=`. It binds `127.0.0.1:0` in tests, uses a
-temporary store with two jobs and one session, and asserts that the JSON validates against
-the exported `Job`, `Session` and `EventEnvelope` schemas. No write endpoints and no SSE
-yet. The first-slice section above lists what is still later.
+temporary store with jobs in several states, one running job and session, a limit, an open
+inbox item and a checkpoint, and asserts that every JSON document validates against its
+exported schema — including `Board`, `BoardRun` and `BoardLimit` for the board. No write
+endpoints and no SSE yet. The first-slice section above lists what is still later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

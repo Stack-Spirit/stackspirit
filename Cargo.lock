@@ -1915,6 +1915,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "vowp-core",
  "vowp-protocol",
  "vowp-store",
 ]

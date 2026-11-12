@@ -102,6 +102,9 @@ const LISTED_TYPES: &[&str] = &[
     "MigrationCount",
     // v0.3 loopback HTTP API documents.
     "Health",
+    "Board",
+    "BoardRun",
+    "BoardLimit",
     "Page",
     "JobPage",
     "SessionPage",

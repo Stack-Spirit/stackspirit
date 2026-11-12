@@ -23,6 +23,9 @@ python3 docs/reference/check-reference.py
 | `BackupFile` | [backup-file.md](backup-file.md) |
 | `BackupReport` | [backup-report.md](backup-report.md) |
 | `BlockedJobCard` | [blocked-job-card.md](blocked-job-card.md) |
+| `Board` | [board.md](board.md) |
+| `BoardLimit` | [board-limit.md](board-limit.md) |
+| `BoardRun` | [board-run.md](board-run.md) |
 | `BrakeState` | [brake-state.md](brake-state.md) |
 | `BriefFrontMatter` | [brief-front-matter.md](brief-front-matter.md) |
 | `CapacityAdvice` | [capacity-advice.md](capacity-advice.md) |

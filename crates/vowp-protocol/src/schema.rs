@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 
-use crate::api::{ApiError, ApiErrorBody, EventPage, Health, JobPage, Page, SessionPage};
+use crate::api::{ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, EventPage, Health, JobPage, Page, SessionPage};
 use crate::capacity::{
     BrakeState, CapacityAdvice, CapacityReport, CapacitySnapshot, CapacityTarget, HostSample, RunUsage,
     RunningCapacity, UsageEstimate, WaitReason, WaitingJob,
@@ -124,6 +124,9 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("MigrationCount", schema_value::<MigrationCount>());
     // v0.3 loopback HTTP API documents.
     schemas.insert("Health", schema_value::<Health>());
+    schemas.insert("Board", schema_value::<Board>());
+    schemas.insert("BoardRun", schema_value::<BoardRun>());
+    schemas.insert("BoardLimit", schema_value::<BoardLimit>());
     schemas.insert("Page", schema_value::<Page<serde_json::Value>>());
     schemas.insert("JobPage", schema_value::<JobPage>());
     schemas.insert("SessionPage", schema_value::<SessionPage>());

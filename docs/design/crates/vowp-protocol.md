@@ -34,7 +34,7 @@ crates/vowp-protocol/
   src/loops.rs        // Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
   src/release.rs      // Release, ReleaseState, GuardResult
   src/config.rs       // VowpConfig and sub-structs
-  src/api.rs          // v0.3 loopback API documents: Health, Page<T>, JobPage, SessionPage, EventPage, ApiError
+  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, SessionPage, EventPage, ApiError
   src/adapter.rs      // Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
   src/services.rs     // SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
   src/schema.rs       // all_schemas, schema_for_name
@@ -114,7 +114,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     provider referenced by a ladder executor need not be declared; env guards known names or `script:`/`no_active_jobs:` prefix; cron strings
     parse with the `cron` crate is checked in vowp-core `ScheduleSpec::parse`; here only: `cron`/`every` XOR, exactly 5 whitespace-separated cron fields, `every` pattern, tz format, unique names).
 12. **Schema export**: `all_schemas()` keys are the Rust type names. The exported set is
-    `"ApiError"`, `"ApiErrorBody"`, `"BackupFile"`, `"BackupReport"`, `"BlockedJobCard"`, `"BrakeState"`,
+    `"ApiError"`, `"ApiErrorBody"`, `"BackupFile"`, `"BackupReport"`, `"Board"`, `"BoardLimit"`,
+    `"BoardRun"`, `"BlockedJobCard"`, `"BrakeState"`,
     `"BriefFrontMatter"`, `"CapacityAdvice"`, `"CapacityReport"`, `"CapacitySnapshot"`, `"CapacityTarget"`,
     `"Capsule"`, `"CapsuleDraft"`, `"CatalogEntry"`, `"Cost"`, `"Edge"`, `"EventEnvelope"`, `"EventPage"`,
     `"Evidence"`, `"FleetQueueRow"`, `"FleetStatus"`, `"Gate"`, `"GateFailureCard"`, `"GateResult"`,

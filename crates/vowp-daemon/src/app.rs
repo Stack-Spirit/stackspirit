@@ -13,8 +13,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use tokio::net::TcpListener;
-use vowp_protocol::api::{ApiError, ApiErrorBody, EventPage, Health, JobPage, SessionPage};
-use vowp_protocol::{ErrorKind, NodeName, ProjectName, SessionId, Timestamp};
+use vowp_core::ledger::BoardSnapshot;
+use vowp_protocol::api::{
+    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, EventPage, Health, JobPage, SessionPage,
+};
+use vowp_protocol::{ErrorKind, NodeName, ProjectName, SessionId, Timestamp, VowpConfig};
 use vowp_store::session_log::SessionLog;
 use vowp_store::{JobFilter, NodePaths, SessionFilter, Store};
 
@@ -104,12 +107,72 @@ impl ApiState {
             next,
         })
     }
+
+    /// Returns the served project's registered [`VowpConfig`], filled from its registry row.
+    ///
+    /// The registry JSON is written by `vowp init`; a project registered without `[project].path`
+    /// (`vowp init` leaves it out) falls back to the registry path, matching the CLI and the
+    /// supervisor so `last_checkpoint` reads the project's own checkout.
+    fn config(&self, store: &Store) -> Result<VowpConfig, ApiFailure> {
+        let project = store
+            .project(&self.project)
+            .map_err(|_| store_failure())?
+            .ok_or_else(config_failure)?;
+        let mut config: VowpConfig = serde_json::from_value(project.config).map_err(|_| config_failure())?;
+        if config.project.name != self.project {
+            return Err(config_failure());
+        }
+        config.validate().map_err(|_| config_failure())?;
+        if config.project.path.is_none() {
+            config.project.path = Some(project.path);
+        }
+        Ok(config)
+    }
+
+    /// Returns the board snapshot as the exact `vowp board --json` document.
+    fn board(&self) -> Result<Board, ApiFailure> {
+        let store = self.open()?;
+        let config = self.config(&store)?;
+        let snapshot = BoardSnapshot::collect(&store, &config, store.clock().now()).map_err(|_| board_failure())?;
+        Ok(Board {
+            at: snapshot.at,
+            project: snapshot.project,
+            jobs: snapshot.jobs_by_state,
+            running: snapshot
+                .running
+                .iter()
+                .map(|run| BoardRun {
+                    job: run.job.clone(),
+                    executor: run.executor.as_ref().map(ToString::to_string),
+                    age_secs: run.age_secs,
+                    last_event_age_secs: run.last_event_age_secs,
+                })
+                .collect(),
+            slots_busy: snapshot.slots_busy,
+            slots_total: snapshot.slots_total,
+            planner: snapshot.planner_executor.as_ref().map(ToString::to_string),
+            keeper: snapshot.keeper_executor.as_ref().map(ToString::to_string),
+            limits: snapshot
+                .limits
+                .iter()
+                .map(|limit| BoardLimit {
+                    provider: limit.provider.clone(),
+                    kind: limit.kind,
+                    resets_at: limit.resets_at,
+                })
+                .collect(),
+            cost_today_usd: snapshot.cost_today.usd,
+            inbox_open: snapshot.inbox_open,
+            last_checkpoint: snapshot.last_checkpoint,
+        })
+    }
 }
 
 /// Builds the API router.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/board", get(board))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/sessions", get(sessions))
         .route("/api/v1/sessions/{id}/events", get(session_events))
@@ -141,6 +204,12 @@ async fn health(State(state): State<ApiState>) -> Json<Health> {
         schema_version: state.schema_version,
         heartbeat: read_heartbeat(&state.paths),
     })
+}
+
+/// Returns the served project's board as the `vowp board --json` document.
+async fn board(State(state): State<ApiState>) -> Result<Json<Board>, ApiFailure> {
+    let board = blocking(move || state.board()).await?;
+    Ok(Json(board))
 }
 
 /// Lists jobs matching the query filters.
@@ -230,6 +299,24 @@ fn store_failure() -> ApiFailure {
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorKind::Db,
         "could not read the project database",
+    )
+}
+
+/// A path-free `500` for an unreadable or invalid registered project config.
+fn config_failure() -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Config,
+        "the project configuration could not be read",
+    )
+}
+
+/// A path-free `500` for a board snapshot that could not be collected.
+fn board_failure() -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Db,
+        "could not read the project board",
     )
 }
 
