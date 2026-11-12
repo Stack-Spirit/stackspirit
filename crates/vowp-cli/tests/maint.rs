@@ -3,6 +3,7 @@
 mod common;
 
 use vowp_cli::cli::V0_1_COMMANDS;
+use vowp_cli::BufferIo;
 
 #[test]
 fn backup_creates_openable_db() {
@@ -71,6 +72,47 @@ fn schema_lists_names_and_prints_one_document() {
 
     let (code, _, _) = env.run(&["schema", "NoSuchType"]);
     assert_eq!(code, 3);
+}
+
+#[test]
+fn schema_works_without_an_initialised_home() {
+    let home = tempfile::tempdir().expect("fresh home");
+    let home_text = home.path().display().to_string();
+    let run = |args: &[&str]| {
+        let mut full = vec!["vowp".to_owned(), "--home".to_owned(), home_text.clone()];
+        full.extend(args.iter().map(|value| (*value).to_owned()));
+        let mut io = BufferIo::new("");
+        let code = vowp_cli::run(full, &mut io);
+        (code, io.stdout(), io.stderr())
+    };
+
+    // `schema` reads only static protocol types, so a fresh home needs no `vowp init`.
+    let schemas = vowp_protocol::schema::all_schemas();
+    let names: Vec<String> = schemas.keys().map(|name| (*name).to_owned()).collect();
+
+    let (code, stdout, stderr) = run(&["schema"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, format!("{}\n", names.join("\n")));
+
+    let (code, stdout, stderr) = run(&["--json", "schema"]);
+    assert_eq!(code, 0, "{stderr}");
+    let listed: Vec<String> = serde_json::from_str(&stdout).expect("schema names JSON");
+    assert_eq!(listed, names);
+
+    let (code, stdout, stderr) = run(&["schema", "Job"]);
+    assert_eq!(code, 0, "{stderr}");
+    let job: serde_json::Value = serde_json::from_str(&stdout).expect("Job schema JSON");
+    assert_eq!(job, schemas["Job"]);
+
+    let (code, stdout, stderr) = run(&["schema", "snapshot"]);
+    assert_eq!(code, 0, "{stderr}");
+    let snapshot: serde_json::Value = serde_json::from_str(&stdout).expect("snapshot schema JSON");
+    assert_eq!(snapshot, schemas["Snapshot"]);
+
+    // The early path covers `schema` only: project-scoped commands still need the home.
+    let (code, _stdout, stderr) = run(&["job", "ls"]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("run `vowp init`"), "{stderr}");
 }
 
 #[test]
