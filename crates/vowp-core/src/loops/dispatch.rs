@@ -111,14 +111,14 @@ fn parent_workspace(store: &Store, job: &Job) -> Result<Option<(JobId, String, S
 ///    generated front matter included;
 /// 3. otherwise a generated one-line fallback is written.
 ///
-/// The project checkout is resolved the same way dispatch resolves it: the configured
-/// `[project].path`, or the project row when the config omits it.
-pub(crate) fn write_brief(deps: &Deps, job: &Job, worktree: &Path) -> Result<(), CoreError> {
+/// `repo` is the project's main checkout, passed by the caller (`Supervisor::start_run`
+/// already resolves it for the worktree).
+pub(crate) fn write_brief(job: &Job, worktree: &Path, repo: &Path) -> Result<(), CoreError> {
     let path = worktree.join(&job.brief);
     if path.is_file() {
         return Ok(());
     }
-    let source = project_checkout(deps, job)?.join(&job.brief);
+    let source = repo.join(&job.brief);
     if source.is_file() {
         ensure_parent(&path)?;
         std::fs::copy(&source, &path).map_err(|source| CoreError::Io {
@@ -128,15 +128,6 @@ pub(crate) fn write_brief(deps: &Deps, job: &Job, worktree: &Path) -> Result<(),
         return Ok(());
     }
     write_generated_brief(job, &path)
-}
-
-/// Resolves the project's main checkout, matching `Supervisor::start_run`'s `repo`.
-fn project_checkout(deps: &Deps, job: &Job) -> Result<PathBuf, CoreError> {
-    if let Some(path) = &deps.config.project.path {
-        return Ok(PathBuf::from(path));
-    }
-    let store = deps.open_store()?;
-    super::main_repo(deps, &store, &job.project)
 }
 
 /// Writes the generated one-line fallback when the brief path is missing.
