@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOWP cost</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #f6f5f1;
+    --card: #ffffff;
+    --ink: #1f2421;
+    --muted: #5c6660;
+    --line: #d8d5cc;
+    --accent: #16855b;
+    --warn: #a33a1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #161a18;
+      --card: #1e2421;
+      --ink: #edf0ec;
+      --muted: #a2ada6;
+      --line: #343c37;
+      --accent: #55d39b;
+      --warn: #ff9b7a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.45;
+    overflow-x: hidden;
+  }
+  main {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 1.5rem 1rem 3rem;
+    display: grid;
+    gap: 1rem;
+  }
+  main > * { min-width: 0; }
+  h1 { margin: 0; font-size: 1.65rem; }
+  h2 { margin: 0; font-size: 1rem; }
+  a { color: var(--accent); }
+  .page-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; justify-content: space-between; }
+  .page-nav { margin: .15rem 0 0; font-weight: 600; }
+  .page-nav a { margin-right: .75rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: .6rem;
+    padding: .9rem 1rem;
+    min-width: 0;
+  }
+  .toolbar { display: flex; flex-wrap: wrap; gap: .5rem .75rem; align-items: center; justify-content: space-between; margin-bottom: .5rem; }
+  .picker { display: flex; flex-wrap: wrap; gap: .35rem .5rem; align-items: center; }
+  .picker label { color: var(--muted); font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  select {
+    background: var(--card);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: .4rem;
+    padding: .25rem .45rem;
+    font: inherit;
+  }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .4rem .55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tfoot td { font-weight: 700; border-bottom: none; }
+  .error {
+    margin: 0;
+    padding: .65rem .9rem;
+    border: 1px solid var(--warn);
+    border-radius: .5rem;
+    color: var(--warn);
+    background: var(--card);
+    font-weight: 600;
+  }
+  [hidden] { display: none !important; }
+  @media (max-width: 360px) {
+    main { padding: .75rem .5rem 2rem; gap: .65rem; }
+    .card { padding: .7rem .75rem; border-radius: .5rem; }
+    h1 { font-size: 1.3rem; }
+    th, td { padding: .35rem .4rem; }
+  }
+</style>
+</head>
+<body>
+<main id="cost">
+  <header class="page-head">
+    <div>
+      <h1>VOWP cost</h1>
+      <nav class="page-nav" aria-label="Pages">
+        <a href="/">Board</a>
+        <a href="/sessions">Sessions</a>
+        <a href="/cost" aria-current="page">Cost</a>
+        <a href="/inbox">Inbox</a>
+      </nav>
+      <p class="muted">Read-only ledger totals grouped by <span id="by-label">job</span>.</p>
+    </div>
+    <p id="updated" class="muted" aria-live="polite">Last updated: waiting for first load</p>
+  </header>
+
+  <p id="error" class="error" role="alert" hidden></p>
+
+  <section class="card" aria-labelledby="cost-heading">
+    <div class="toolbar">
+      <h2 id="cost-heading">Cost report</h2>
+      <div class="picker">
+        <label for="by">Group by</label>
+        <select id="by" name="by">
+          <option value="job" selected>Job</option>
+          <option value="day">Day</option>
+          <option value="role">Role</option>
+          <option value="provider">Provider</option>
+          <option value="model">Model</option>
+        </select>
+      </div>
+    </div>
+    <p class="muted">Unknown costs are shown as <strong>?</strong> and never counted as zero.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Runs</th>
+            <th>USD</th>
+            <th>Tokens</th>
+            <th>Source</th>
+            <th>Unknown</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="6" class="muted">Loading…</td></tr>
+        </tbody>
+        <tfoot id="total" hidden></tfoot>
+      </table>
+    </div>
+  </section>
+</main>
+
+<noscript>The cost page requires JavaScript.</noscript>
+
+<script>
+(() => {
+  "use strict";
+
+  const REFRESH_MS = 5000;
+  const GROUPS = ["job", "day", "role", "provider", "model"];
+  const errorLine = document.getElementById("error");
+  const updatedLine = document.getElementById("updated");
+  const bySelect = document.getElementById("by");
+  const byLabel = document.getElementById("by-label");
+  const rowsBody = document.getElementById("rows");
+  const totalFoot = document.getElementById("total");
+  let lastUpdated = null;
+
+  const initial = new URLSearchParams(window.location.search).get("by");
+  let by = GROUPS.includes(initial) ? initial : "job";
+  bySelect.value = by;
+
+  function cell(value, className) {
+    const element = document.createElement("td");
+    element.textContent = value;
+    if (className) element.className = className;
+    return element;
+  }
+
+  function formatUsd(value, unknownEntries, runs) {
+    if (value === null || value === undefined) return "?";
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return "?";
+    const text = "$" + amount.toFixed(2);
+    return unknownEntries > 0 && unknownEntries < runs ? text + "+?" : text;
+  }
+
+  function tokenTotal(tokens) {
+    const counts = tokens || {};
+    return ["input", "output", "reasoning", "cache_read", "cache_write"]
+      .reduce((sum, key) => sum + Number(counts[key] || 0), 0);
+  }
+
+  function totalRow(total) {
+    const row = document.createElement("tr");
+    row.append(
+      cell("Total"),
+      cell(String(total.runs ?? 0), "num"),
+      cell(formatUsd(total.usd, total.unknown_entries, total.runs), "num"),
+      cell(String(tokenTotal(total.tokens)), "num"),
+      cell(total.source || "unknown"),
+      cell(String(total.unknown_entries ?? 0), "num")
+    );
+    return row;
+  }
+
+  function render(report) {
+    by = GROUPS.includes(report.by) ? report.by : by;
+    bySelect.value = by;
+    byLabel.textContent = by;
+    rowsBody.replaceChildren();
+
+    const rows = Array.isArray(report.rows) ? report.rows : [];
+    if (rows.length === 0) {
+      const row = document.createElement("tr");
+      const empty = cell("No cost entries.", "muted");
+      empty.colSpan = 6;
+      row.appendChild(empty);
+      rowsBody.appendChild(row);
+    } else {
+      for (const item of rows) {
+        const row = document.createElement("tr");
+        row.append(
+          cell(item.key || "unknown", "mono"),
+          cell(String(item.runs ?? 0), "num"),
+          cell(formatUsd(item.usd, item.unknown_entries, item.runs), "num"),
+          cell(String(tokenTotal(item.tokens)), "num"),
+          cell(item.source || "unknown"),
+          cell(String(item.unknown_entries ?? 0), "num")
+        );
+        rowsBody.appendChild(row);
+      }
+    }
+
+    if (report.total) {
+      totalFoot.replaceChildren(totalRow(report.total));
+      totalFoot.hidden = false;
+    } else {
+      totalFoot.hidden = true;
+    }
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch("/api/v1/cost?by=" + encodeURIComponent(by));
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const report = await response.json();
+      render(report);
+      lastUpdated = new Date();
+      updatedLine.textContent = "Last updated: " + lastUpdated.toLocaleString();
+      errorLine.hidden = true;
+      errorLine.textContent = "";
+    } catch (error) {
+      const detail = error && error.message ? error.message : "the daemon may be down";
+      const when = lastUpdated ? " Showing data from " + lastUpdated.toLocaleString() + "." : "";
+      errorLine.textContent = "Could not load the cost report (" + detail + ")." + when;
+      errorLine.hidden = false;
+    }
+  }
+
+  bySelect.addEventListener("change", () => {
+    by = GROUPS.includes(bySelect.value) ? bySelect.value : "job";
+    const url = new URL(window.location.href);
+    if (by === "job") {
+      url.searchParams.delete("by");
+    } else {
+      url.searchParams.set("by", by);
+    }
+    window.history.replaceState(null, "", url);
+    refresh();
+  });
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

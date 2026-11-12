@@ -69,7 +69,8 @@ project, job counts by state, running jobs (job, executor, age, last event age),
 planner and keeper, active limits with reset times, today's cost (`unknown` when the API reports
 null), the open inbox count, the last checkpoint and a visible "last updated" time. A failed fetch
 shows an error line and keeps the last board and its timestamp visible. The page uses text labels
-as well as colour and carries a `<noscript>` message. It links to `/sessions`.
+as well as colour and carries a `<noscript>` message. It links to `/sessions`, `/cost` and
+`/inbox`.
 
 The session pages are the same kind of embedded static shell,
 `crates/vowp-daemon/web/sessions.html`, served at `GET /sessions` and `GET /sessions/{id}`. The
@@ -81,16 +82,36 @@ event timeline of seq, time, type, actor and a compact summary. It polls every f
 `after_seq` set to the last rendered sequence, appends only newer events and keeps the last data
 and its "last updated" time on failure. A 404 or a failed fetch shows a visible error or
 not-found line, and the page carries
-`<noscript>The session view requires JavaScript.</noscript>`. It links back to the board. The
-timeline never prints a token, home path or provider secret.
+`<noscript>The session view requires JavaScript.</noscript>`. It links back to the board and to
+cost and inbox. The timeline never prints a token, home path or provider secret.
+
+The cost page is `crates/vowp-daemon/web/cost.html`, served at `GET /cost`. It fetches
+`GET /api/v1/cost?by=<group>` on load and every five seconds. The selector offers job, day, role,
+provider and model (default job), and the URL keeps the chosen value. The page renders the grouped
+rows and the total with key, runs, USD, token usage, source and unknown-entry count. A null USD
+total is shown as `?` and never as zero, and the page states that unknown costs stay unknown. A
+failed fetch shows an error line and keeps the last report and timestamp visible; an empty report
+shows "No cost entries." There are no charts and no price-table editing. The page links to the
+board, sessions and inbox, carries `<noscript>The cost page requires JavaScript.</noscript>`, and
+never prints a home path, token or provider secret.
+
+The inbox page is `crates/vowp-daemon/web/inbox.html`, served at `GET /inbox`. It fetches
+`GET /api/v1/inbox?state=open` on load and every five seconds. The state selector adds all,
+answered and dismissed; "all" fetches the three API states and merges their lists. The page
+renders id, kind, job, title, age, state, options and a short body preview. A failed fetch shows an
+error line and keeps the last list and timestamp visible; an empty list shows "No inbox items."
+There is no answer, dismiss or other write action. The page links to the other pages, carries
+`<noscript>The inbox page requires JavaScript.</noscript>`, and never prints a home path, token or
+provider secret.
 
 There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
-`crates/vowp-daemon/tests/board_page.rs` and `crates/vowp-daemon/tests/session_page.rs` are
-HTTP-only tests over a temporary home and a real `127.0.0.1:0` listener.
+`crates/vowp-daemon/tests/board_page.rs`, `session_page.rs` and `cost_inbox_pages.rs` are HTTP-only
+tests over a temporary home and a real `127.0.0.1:0` listener.
 
-Still later: the capsule view, `/nodes`, `/cost`, `/inbox`, SSE, executor switching, write
-actions, PWA installability and the auth token. The API routes and their fallback are otherwise
-unchanged; unknown non-API paths still return the API's JSON 404.
+Still later: the capsule view, `/nodes`, inbox answering, the cost dashboard and charts, SSE live
+updates in the window pages, executor switching, write actions, PWA installability and the auth
+token. The per-session SSE endpoint exists, but the pages above poll. The API routes and their
+fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.
 
 The app must never print a token value, a home path or a provider secret; the board only contains the
 fields already shown by `vowp board`, and the session pages only the fields already shown by

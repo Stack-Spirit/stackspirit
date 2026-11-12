@@ -233,13 +233,16 @@ impl ApiState {
 }
 
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
-/// session pages at `/sessions` and `/sessions/{id}`, plus the API under `/api/v1`.
+/// session pages at `/sessions` and `/sessions/{id}`, the static cost and inbox pages at
+/// `/cost` and `/inbox`, plus the API under `/api/v1`.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
         .route("/board", get(board_page))
         .route("/sessions", get(sessions_page))
         .route("/sessions/{id}", get(sessions_page))
+        .route("/cost", get(cost_page))
+        .route("/inbox", get(inbox_page))
         .route("/api/v1/health", get(health))
         .route("/api/v1/board", get(board))
         .route("/api/v1/jobs", get(jobs))
@@ -288,6 +291,29 @@ const SESSIONS_PAGE: &str = include_str!("../web/sessions.html");
 /// routes serve the same shell; only the two read-only API endpoints are fetched.
 async fn sessions_page() -> Html<&'static str> {
     Html(SESSIONS_PAGE)
+}
+
+/// The embedded static cost shell, served read-only at `/cost`.
+const COST_PAGE: &str = include_str!("../web/cost.html");
+
+/// Serves the static cost shell; it fetches `/api/v1/cost?by=` on load and every five seconds.
+///
+/// The `by` selector offers job, day, role, provider and model. The page renders the grouped
+/// rows and totals, shows `?` for an unknown USD total and never treats it as zero, and has no
+/// charts or price-table editing.
+async fn cost_page() -> Html<&'static str> {
+    Html(COST_PAGE)
+}
+
+/// The embedded static inbox shell, served read-only at `/inbox`.
+const INBOX_PAGE: &str = include_str!("../web/inbox.html");
+
+/// Serves the static inbox shell; it fetches `/api/v1/inbox?state=` on load and every five seconds.
+///
+/// The state selector offers open, all, answered and dismissed; `all` fetches the three API
+/// states and merges their items. The page only reads: there is no answer or dismiss action.
+async fn inbox_page() -> Html<&'static str> {
+    Html(INBOX_PAGE)
 }
 
 /// Returns the health document for the served project.
