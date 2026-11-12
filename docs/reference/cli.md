@@ -2361,7 +2361,7 @@ Options:
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --repository <PATH>    A repository path on the home to register; repeatable [alias: --repo]
-      --harness <NAME>       A harness the workers should use (`opencode`, `claude-code`); repeatable
+      --harness <NAME>       A harness the workers should use (`opencode`, `claude-code`, `acp`); repeatable
       --no-color             Disable colour even when stdout is a terminal
       --provider <NAME>      A provider name the chosen harnesses use; repeatable, never a key
   -q, --quiet                Suppress non-essential human output
@@ -2391,7 +2391,7 @@ Options:
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
       --repository <PATH>    A repository path on the home to register; repeatable [alias: --repo]
-      --harness <NAME>       A harness the workers should use (`opencode`, `claude-code`); repeatable
+      --harness <NAME>       A harness the workers should use (`opencode`, `claude-code`, `acp`); repeatable
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
       --provider <NAME>      A provider name the chosen harnesses use; repeatable, never a key
       --secret <NAME>        A secret name to check for; repeatable, never a value

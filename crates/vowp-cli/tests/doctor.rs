@@ -6,10 +6,13 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 
-use vowp_protocol::{Executor, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, VowpConfig};
+use vowp_protocol::{
+    Executor, HarnessConfig, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, VowpConfig,
+};
 
 /// Provider key variables the tests remove so the runner's environment cannot leak in.
 const PROVIDER_KEY_VARIABLES: &[&str] = &["CLAUDE_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"];
@@ -34,7 +37,6 @@ const FAKE_TOOLS: &[(&str, &str)] = &[
 
 /// Creates an executable fake `PATH` directory from `FAKE_TOOLS`.
 fn fake_bin() -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("fake bin");
     for (name, body) in FAKE_TOOLS {
         let path = dir.path().join(name);
@@ -211,6 +213,48 @@ fn doctor_accepts_valid_schedules() {
     let schedules = find_check(&value, "schedules");
     assert_eq!(schedules["status"], "ok", "{schedules}");
     assert_eq!(schedules["detail"], "2 schedules parse", "{schedules}");
+}
+
+#[test]
+fn doctor_probes_a_configured_acp_harness() {
+    let env = common::TestEnv::new();
+    let binary = env.project_path().join("fake-acp");
+    std::fs::write(&binary, "#!/bin/sh\nexit 0\n").expect("write fake ACP server");
+    let mut permissions = std::fs::metadata(&binary).expect("stat fake ACP server").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&binary, permissions).expect("chmod fake ACP server");
+
+    let mut config = env.config.clone();
+    config.harnesses.insert(
+        "acp".to_owned(),
+        HarnessConfig {
+            binary: Some(binary.to_string_lossy().into_owned()),
+            ..HarnessConfig::default()
+        },
+    );
+    let acp: Executor = "acp:claude-code-acp".parse().expect("ACP executor parses");
+    for profile in config.profiles.values_mut() {
+        profile.ladder = vec![acp.clone()];
+    }
+    write_config(&env, &config);
+
+    let bin = fake_bin();
+    let output = run_doctor(&env, bin.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a configured ACP server must not fail doctor; stderr: {}; stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor prints JSON");
+    assert_eq!(value["ok"], true, "{value}");
+    let harness = find_check(&value, "harness:acp");
+    assert_eq!(harness["status"], "ok", "{harness}");
+    let detail = harness["detail"].as_str().expect("detail");
+    assert!(detail.contains("fake-acp"), "the configured binary is probed: {detail}");
+    let profiles = find_check(&value, "profiles");
+    assert_eq!(profiles["status"], "ok", "{profiles}");
 }
 
 #[test]

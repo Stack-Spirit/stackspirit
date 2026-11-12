@@ -115,9 +115,15 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
     if let Some(registry) = &registry {
         check_harness(registry, HarnessKind::ClaudeCode, "claude-code", &mut checks);
         check_harness(registry, HarnessKind::Opencode, "opencode", &mut checks);
+        if config_uses_harness(config.as_ref(), HarnessKind::Acp) {
+            check_harness(registry, HarnessKind::Acp, "acp", &mut checks);
+        }
     } else {
         checks.push("harness:claude-code", CheckStatus::Fail, "adapter registry unavailable");
         checks.push("harness:opencode", CheckStatus::Fail, "adapter registry unavailable");
+        if config_uses_harness(config.as_ref(), HarnessKind::Acp) {
+            checks.push("harness:acp", CheckStatus::Fail, "adapter registry unavailable");
+        }
     }
 
     check_profiles(registry.as_ref(), config.as_ref(), &mut checks);
@@ -458,6 +464,21 @@ fn check_schedules(config: Option<&VowpConfig>, checks: &mut Checks) {
     } else {
         checks.push("schedules", CheckStatus::Fail, problems.join("; "));
     }
+}
+
+/// Returns true when `[harnesses.<name>]` exists or a profile rung uses the harness.
+///
+/// `claude-code` and `opencode` are always probed; optional harnesses such as `acp` are
+/// probed only when the project configures them, so a missing optional server is not a
+/// doctor failure for projects that do not use it.
+fn config_uses_harness(config: Option<&VowpConfig>, harness: HarnessKind) -> bool {
+    config.is_some_and(|config| {
+        config.harnesses.contains_key(harness.as_str())
+            || config
+                .profiles
+                .values()
+                .any(|profile| profile.ladder.iter().any(|executor| executor.harness == harness))
+    })
 }
 
 /// Probes one harness binary through its adapter.

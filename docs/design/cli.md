@@ -56,7 +56,7 @@ Human: `initialised project vowp at /path (8 files written, 2 skipped)`. JSON: `
 
 ### `vowp doctor`
 Checks (each `ok|warn|fail` with detail): `home` writable; `db` opens + `integrity_check` + schema version; `schema` matches the binary; `projects` each have an openable project DB; `snapshot` is writable; `git` version; `tmux` version (warn if absent); harness probes via adapters
-(`claude`, `opencode`, each `Adapter::probe`); `vowp.toml` parses + validates and every `[[schedules]]` cron/interval/timezone parses with `ScheduleSpec::parse` (an invalid entry fails the `schedules` check with the schedule name and error); profile ladders resolve to installed harnesses; providers reachable **only by env-var-name presence** (`PROVIDER_API_KEY` set? — never prints the value, never calls the network);
+(`claude`, `opencode`, each `Adapter::probe`; `acp` only when `[harnesses.acp]` or an ACP profile rung is configured); `vowp.toml` parses + validates and every `[[schedules]]` cron/interval/timezone parses with `ScheduleSpec::parse` (an invalid entry fails the `schedules` check with the schedule name and error); profile ladders resolve to installed harnesses; providers reachable **only by env-var-name presence** (`PROVIDER_API_KEY` set? — never prints the value, never calls the network);
 `systemd --user` unit and cron watchdog installed (warn only); supervisor running; disk space ≥ 1 GB.
 Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status":"ok","detail":"tmux 3.4"}]}`.
 

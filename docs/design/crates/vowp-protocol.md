@@ -90,10 +90,10 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 4. **Ids.** ULID ids: 26 chars `[0-9A-HJKMNP-TV-Z]`, uppercase on output; parsing accepts lowercase and normalises to uppercase.
    `CapsuleId` = `cap_` + ULID. Slugs (`JobId`, `NodeName`, `ProjectName`): `^[a-z0-9][a-z0-9-]{0,63}$`, no trailing `-`.
    `new()` is monotonic within one process (shared `Mutex<ulid::Generator>`; on overflow in the same ms, wait 1 ms and retry).
-5. **Executor grammar.** `harness ":" model [ "@" effort ] [ "#" variant ]`. `harness` ∈ {claude-code, opencode, cli, vowp}.
+5. **Executor grammar.** `harness ":" model [ "@" effort ] [ "#" variant ]`. `harness` ∈ {claude-code, opencode, cli, acp, vowp}.
    `model` non-empty, chars `[A-Za-z0-9._:/-]`. `effort`/`variant` `[a-z0-9_-]+`. `@effort` is only valid for `claude-code`, `#variant`
    only for `opencode`; both → `InvalidExecutor`. `Display(parse(s)) == s` for all valid `s` with canonical order (`@` before `#`).
-   `provider()`: claude-code → `"claude"`; opencode → text before the first `/` (whole model if no `/`); cli → model.
+   `provider()`: claude-code → `"claude"`; opencode → text before the first `/` (whole model if no `/`); cli/acp → model.
 6. **`Profile::validate`**: ladder non-empty; no duplicate executor; every executor `validate`d; `node` slug-valid if set.
    **`Profile::pick(limited, now)`**: iterate rungs in order; skip a rung when `limited[provider]` is `None` (indefinite) or
    `Some(t)` with `t > now`; return the first remaining `(index, &Executor)`; `None` if all are skipped.
@@ -150,8 +150,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `timestamp_normalises_offsets` | `"2026-11-08T21:25:47+02:00"` equals `"2026-11-08T19:25:47.000Z"` |
 | `timestamp_ordering_matches_strings` | proptest: `a<b ⇔ a.as_rfc3339()<b.as_rfc3339()` |
 | `fake_clock_advances` | `FakeClock::at(t)`, `advance(90s)` → `now()==t+90s`; clones share state |
-| `executor_parse_table` | valid: the three examples in types.md §3 + `opencode:anthropic/claude-x#high`; invalid: no colon, `@` on opencode, `#` on claude-code, empty model, unknown harness, `claude-code:m@Hi` → `InvalidExecutor`; each valid one `to_string()` back to input |
-| `executor_provider_and_model_arg` | `provider()` = `claude` for claude-code, the text before `/` for opencode, the model/entry name for cli; `model_arg()` round-trips the model and optional variant |
+| `executor_parse_table` | valid: the three examples in types.md §3 + `opencode:anthropic/claude-x#high` + `acp:claude-code-acp`; invalid: no colon, `@` on opencode, `#` on claude-code, `@`/`#` on acp, empty model, unknown harness, `claude-code:m@Hi` → `InvalidExecutor`; each valid one `to_string()` back to input |
+| `executor_provider_and_model_arg` | `provider()` = `claude` for claude-code, the text before `/` for opencode, the model/entry name for cli and acp; `model_arg()` round-trips the model and optional variant |
 | `executor_serde_is_string` | `serde_json::to_string(&e)` is a JSON string equal to Display; deserialising bad string errors |
 | `profile_validate_rejects_empty_and_duplicates` | empty ladder, duplicate rung → error |
 | `profile_pick_skips_limited_rungs` | 2-rung ladder: claude limited until future → rung 1; limited until past → rung 0; `None` (indefinite) → skipped; both limited → `None` |

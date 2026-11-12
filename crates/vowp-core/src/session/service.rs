@@ -497,6 +497,7 @@ impl SessionService {
         let key = match executor.harness {
             HarnessKind::ClaudeCode => "claude-code",
             HarnessKind::Opencode => "opencode",
+            HarnessKind::Acp => "acp",
             HarnessKind::Cli => executor.model.as_str(),
             HarnessKind::Vowp => return None,
         };

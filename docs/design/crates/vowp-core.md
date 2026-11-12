@@ -67,10 +67,10 @@ impl Deps { pub fn open_store(&self) -> Result<vowp_store::Store, CoreError>; } 
 pub trait Rng: Send + Sync { fn jitter_secs(&self, max: u64) -> u64; }          // SystemRng (time-seeded xorshift) / FixedRng(n) in tests
 
 /// Maps HarnessKind (+ `[harnesses.*]` config) to a ready adapter. Fakes: `AdapterRegistry::with(kind, Arc<dyn Adapter>)`.
-pub struct AdapterRegistry { /* BTreeMap<String, Arc<dyn Adapter>> keyed by "claude-code" | "opencode" | "cli:<name>" */ }
+pub struct AdapterRegistry { /* BTreeMap<String, Arc<dyn Adapter>> keyed by "claude-code" | "opencode" | "acp" | "cli:<name>" */ }
 impl AdapterRegistry {
     pub fn new() -> Self;
-    pub fn from_config(cfg: &vowp_protocol::VowpConfig) -> Result<Self, CoreError>;   // builds ClaudeCodeAdapter/OpencodeAdapter/CliAdapter from [harnesses.*], tz_offset_minutes
+    pub fn from_config(cfg: &vowp_protocol::VowpConfig) -> Result<Self, CoreError>;   // builds ClaudeCodeAdapter/OpencodeAdapter/AcpAdapter/CliAdapter from [harnesses.*], tz_offset_minutes
     pub fn with(self, key: &str, adapter: std::sync::Arc<dyn vowp_protocol::Adapter>) -> Self;
     pub fn get(&self, exec: &vowp_protocol::Executor) -> Option<std::sync::Arc<dyn vowp_protocol::Adapter>>;
 }

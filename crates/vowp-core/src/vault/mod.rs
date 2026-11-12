@@ -1014,6 +1014,7 @@ fn harness_config<'a>(deps: &'a Deps, harness: HarnessKind, model: &str) -> Opti
     let key = match harness {
         HarnessKind::ClaudeCode => "claude-code",
         HarnessKind::Opencode => "opencode",
+        HarnessKind::Acp => "acp",
         HarnessKind::Cli => model,
         HarnessKind::Vowp => return None,
     };
