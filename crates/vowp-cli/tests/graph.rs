@@ -83,6 +83,74 @@ fn graph_export_import_roundtrip() {
     assert_eq!(value["conflicts"].as_array().expect("conflicts").len(), 3);
 }
 
+/// Returns the `(id, state)` pairs of a serialised job array.
+fn ids_and_states(jobs: &[serde_json::Value]) -> Vec<(String, String)> {
+    jobs.iter()
+        .map(|job| {
+            (
+                job["id"].as_str().expect("job id").to_owned(),
+                job["state"].as_str().expect("job state").to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn graph_json_matches_job_ls_and_keeps_needs_edge() {
+    let env = common::TestEnv::new();
+    env.insert_job("a-job", "Alpha", JobKind::Build, &[]);
+    env.insert_job("b-job", "Beta", JobKind::Build, &["a-job"]);
+
+    let (code, graph, stderr) = env.run_json(&["graph"]);
+    assert_eq!(code, 0, "{stderr}");
+    let jobs = graph["jobs"].as_array().expect("jobs array");
+    let edges = graph["edges"].as_array().expect("edges array");
+
+    // Jobs are ordered by id and serialised like the `job ls --json` objects.
+    assert_eq!(
+        jobs.iter()
+            .map(|job| job["id"].as_str().expect("job id"))
+            .collect::<Vec<_>>(),
+        ["a-job", "b-job"]
+    );
+    // Edges keep the store/graph order: the stored needs edge for b-job.
+    assert_eq!(edges.len(), 1, "{graph}");
+    assert_eq!(edges[0]["src"], "b-job");
+    assert_eq!(edges[0]["dst"], "a-job");
+    assert_eq!(edges[0]["kind"], "needs");
+
+    let (code, listed, stderr) = env.run_json(&["job", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    let listed = listed.as_array().expect("job ls array");
+    let mut graph_jobs = ids_and_states(jobs);
+    graph_jobs.sort();
+    let mut listed_jobs = ids_and_states(listed);
+    listed_jobs.sort();
+    assert_eq!(graph_jobs.len(), 2);
+    assert_eq!(graph_jobs, listed_jobs);
+    assert_eq!(
+        graph_jobs,
+        vec![
+            ("a-job".to_owned(), "pending".to_owned()),
+            ("b-job".to_owned(), "pending".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn graph_json_mermaid_prints_only_mermaid() {
+    let env = common::TestEnv::new();
+    env.insert_job("a-job", "Alpha", JobKind::Build, &[]);
+
+    let (code, stdout, stderr) = env.run(&["graph", "--json", "--mermaid"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "graph TD\n    a_job[\"a-job (pending)\"]\n");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "mermaid output must not be JSON: {stdout:?}"
+    );
+}
+
 #[test]
 fn graph_mermaid_renders_every_edge_kind() {
     let env = common::TestEnv::new();
