@@ -1,5 +1,11 @@
 //! Secret storage, injection and redaction.
 //!
+//! Exact stored values are replaced with `[REDACTED:<NAME>]` in event payloads and raw
+//! mirrors, capsules, job reports, run mirrors, the snapshot, command-gate evidence
+//! (including spilled output blobs) and ledger entries written through
+//! [`crate::ledger::Ledger::record`] before those rows are stored. The secret-scan gate
+//! remains a separate backstop.
+//!
 //! Values are files, never rows: basic mode keeps them in `<VOWP_HOME>/secrets/<NAME>` owned
 //! by the current user, and vault-user mode keeps them in
 //! `$VOWP_VAULT_HOME/secrets/<NAME>` (default `/home/vowp-vault/secrets`) owned by
@@ -192,6 +198,22 @@ pub fn redact_text(deps: &Deps, text: &str) -> String {
             deps.log
                 .log(Level::Error, "vault", &format!("redaction unavailable: {error}"));
             "[REDACTED: secret values unavailable]".to_owned()
+        }
+    }
+}
+
+/// Redacts exact secret values from raw bytes.
+///
+/// This is the byte-oriented counterpart of [`redact_text`], for artifacts that may not be
+/// valid UTF-8. If the secrets cannot be loaded, the whole byte string is replaced instead
+/// of risking a leak; the error is logged without a value.
+pub(crate) fn redact_bytes(deps: &Deps, bytes: &[u8]) -> Vec<u8> {
+    match Redactor::load(deps) {
+        Ok(redactor) => redactor.redact_bytes(bytes),
+        Err(error) => {
+            deps.log
+                .log(Level::Error, "vault", &format!("redaction unavailable: {error}"));
+            b"[REDACTED: secret values unavailable]".to_vec()
         }
     }
 }
@@ -413,7 +435,7 @@ impl Redactor {
     }
 
     /// Redacts string values inside one JSON value without touching object keys.
-    fn redact_value(&self, value: &mut Value) {
+    pub(crate) fn redact_value(&self, value: &mut Value) {
         match value {
             Value::String(text) => *text = self.redact(text),
             Value::Array(items) => {
