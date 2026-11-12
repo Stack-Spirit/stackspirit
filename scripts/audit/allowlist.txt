@@ -15,6 +15,8 @@
 ipv4|*|127.0.0.1|Loopback address, public by definition and used in the security docs.
 # 0.0.0.0 is the wildcard bind address, not a host or an owner address.
 ipv4|*|0.0.0.0|Wildcard bind address in a test fixture and the v0.2 design example.
+# RFC 5737 TEST-NET-1 is reserved for documentation and cannot name a real host.
+ipv4|crates/vowp-cli/src/cmd/up.rs|192.0.2.1|RFC 5737 TEST-NET-1 address in a negative web-window test.
 
 # Conventional placeholder homes used by tests and documentation. These are
 # not accounts on any machine.
@@ -55,6 +57,7 @@ private_host|crates/vowp-core/tests/gates_secret.rs|env.local|Filename `.env.loc
 # keep the scanner quiet about its own control file; they match only that path.
 private_host|scripts/audit/allowlist.txt|store.local|Text of an allowlist entry, not a hostname.
 private_host|scripts/audit/allowlist.txt|env.local|Text of an allowlist entry, not a hostname.
+ipv4|scripts/audit/allowlist.txt|192.0.2.1|Text of an allowlist entry; TEST-NET-1 is documentation-only.
 
 # The only token-shaped finding in the old history is a fake PEM header in a
 # historical test fixture. History is not published, so it stays informational

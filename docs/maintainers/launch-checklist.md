@@ -40,10 +40,10 @@ version from `Cargo.toml` or the npm package.
       issues are the support entry point.
 - [ ] Do not publish a Homebrew tap for 0.3.0. `packaging/homebrew/vowp.rb` is a
       template; the tap remains an owner decision for a later release.
-- [ ] The npm package version must be `0.3.0` before step 8. If it still says
-      `0.2.0`, stop and have the release owner bump the package version, its
-      README status line, `packaging/npm/test/package.test.js` and the archive
-      names in `packaging/npm/test/tar.test.js` before the npm publish.
+- [ ] The npm package version must be `0.3.0` before step 8. The public-release
+      sweep sets the package version, its README status line,
+      `packaging/npm/test/package.test.js` and the archive names in
+      `packaging/npm/test/tar.test.js`; a leftover `0.2.0` stops the run.
 - [ ] The owner accepts that the browser, phone and real-ACP checks are marked
       "not run" in `docs/release/0.3.0.md` unless the owner performs them from
       the release build; they are not waived.
@@ -119,7 +119,8 @@ cargo run -q -p vowp-cli --bin vowp -- --version   # vowp 0.3.0
 node -p 'require("./packaging/npm/package.json").version'   # must be 0.3.0
 
 # No current-version 0.2.0 reference may remain in a public file. Historical
-# release notes, the upgrade section of docs/release/0.3.0.md, third-party
+# release notes, the upgrade section of docs/release/0.3.0.md, design and
+# generated-schema examples, historical roadmap sections, third-party
 # dependency versions and test fixtures are excluded. The line filter keeps
 # historical mentions in otherwise current files.
 historical_line='v0\.2 public release|Upgrade from 0\.2\.0|v0\.2\.0 binary|v0\.2 home|v0\.2\.0 release|v0\.2 command surface'
@@ -128,14 +129,20 @@ raw=$(git grep -nI '0\.2\.0' -- . \
     ':!docs/release/0.1.0.md' \
     ':!docs/release/0.2.0.md' \
     ':!docs/release/0.3.0.md' \
+    ':!docs/design/cli.md' \
+    ':!docs/design/v0.2' \
+    ':!docs/reference/schema' \
+    ':!docs/roadmap.md' \
     ':!docs/maintainers' \
     ':!Cargo.lock' \
     ':!THIRD-PARTY-LICENSES.md' \
     ':!crates/*/tests/*' \
+    ':!crates/vowp-protocol/src/snapshot.rs' \
     ':!scripts/acceptance' \
     ':!scripts/audit' \
     ':!scripts/dogfood' \
     ':!scripts/fresh-user' \
+    ':!scripts/release/license-texts' \
     ':!scripts/spikes' \
     ':!site' \
     ':!AGENTS.md' \
@@ -161,20 +168,20 @@ fi
 ```
 
 The npm line is one deliberate cross-path check; the version grep is the other.
-If the npm line prints `0.2.0`, stop: the release-preparation job can only edit
-the paths it owns, so the owner/orchestrator must bump
-`packaging/npm/package.json`, `packaging/npm/README.md` and the two npm test
-expectations before step 8. A failed `git grep` (for example, a typo in a
-pathspec) also stops the run instead of passing silently. The crate READMEs,
-the issue templates and the Homebrew README are public product files; a
-`0.2.0` hit there is current-version text, not history.
+If the npm line prints `0.2.0`, stop: the public-release sweep set the package
+and its README to `0.3.0`, so a leftover is a failed sweep, not a release-tag
+decision. A failed `git grep` (for example, a typo in a pathspec) also stops the
+run instead of passing silently. The crate READMEs, the issue templates and the
+Homebrew README are public product files; a `0.2.0` hit there is current-version
+text that the sweep missed, not history.
 
 The release-preparation job owns `Cargo.toml`, `crates/*/Cargo.toml`,
 `Cargo.lock`, `CHANGELOG.md`, `docs/release/**`, `scripts/release/**` and this
-file. The README setup prompt, `docs/setup/`, `docs/guides/install.md`,
-`SECURITY.md`, the crate READMEs, the issue-template placeholders and
-`packaging/npm/**` are outside that job. Any current-version hit in those files
-is an owner/orchestrator pre-flight edit, not a release-tag decision.
+file. The public-release sweep owns the README setup prompt, `docs/setup/`,
+`docs/guides/install.md`, `SECURITY.md`, the crate READMEs, the issue-template
+placeholders and `packaging/npm/**`; it set their current-version text to
+`0.3.0`. Re-run the checks; a remaining current-version `0.2.0` hit is a
+pre-flight failure to fix before tagging.
 
 ### 1.3 Package and npm dry runs
 
@@ -209,11 +216,10 @@ bash scripts/tests/run.sh
 ```
 
 Both must exit 0. The docs check covers relative links and the documented CLI
-commands. If `check-commands.sh` reports that
-`docs/design/v0.2/acp-adapter.md` has no `Status:` declaration, that page is
-outside the release-preparation job's owned paths: add its
-`Status: current` line (or an equivalent declaration the checker accepts),
-re-run the check and commit the fix before tagging.
+commands. The public-release sweep added the checker-recognised
+`Status: current` line to `docs/design/v0.2/acp-adapter.md`; if
+`check-commands.sh` reports a missing status again, fix the page and re-run the
+check before tagging.
 
 ### 1.5 Manual private-data review
 
@@ -226,9 +232,10 @@ git grep -nI 'v2-[a-z0-9]' -- crates framework packaging README.md \
   docs/tests docs/reference docs/guides docs/concepts docs/setup docs/design
 ```
 
-The remaining `vowp-night` hits are the product/workflow name in `AGENTS.md`
-and the audit text that searches for it. The `v2-*` check must find no shipping
-job id in a source comment, fixture or public document. Do not reintroduce
+The remaining `vowp-night` hits are the product/workflow name in `AGENTS.md`,
+this checklist's review command and the audit text that searches for it. The
+`v2-*` check must find no shipping job id in a source comment, fixture or
+public document. Do not reintroduce
 private hostnames, home directories, costs or session names. Review the new
 v0.3 pages for a real browser address, a home path, a token value or a private
 hostname before tagging.
@@ -254,12 +261,12 @@ test -s THIRD-PARTY-LICENSES.md
 binary, `LICENSE`, `README.md` or `THIRD-PARTY-LICENSES.md` is missing or empty.
 
 The root `THIRD-PARTY-LICENSES.md` is outside the release-preparation job's
-owned paths. Its generator now knows the `MIT-0` identifier used by
-`borrow-or-share` (a `jsonschema` test dependency), so `--check` reports only
-that the root bundle is stale. **The owner/orchestrator must run the generator,
-review the diff and commit the refreshed bundle before tagging**; a release
-prepared from the stale bundle fails the workflow's licence check. The archive
-dry run uses the checked-in bundle as-is.
+owned paths. The public-release sweep regenerated it with the generator, which
+now knows the `MIT-0` identifier used by `borrow-or-share`, and `--check`
+passes. **Re-run the generator and `--check` before tagging**; if the bundle is
+stale, review the diff and commit the refreshed bundle. A release prepared from
+a stale bundle fails the workflow's licence check. The archive dry run uses the
+checked-in bundle as-is.
 
 **Do not build the public release commit until every item in 1.1–1.6 passes or
 the owner records a decision in the launch log.**

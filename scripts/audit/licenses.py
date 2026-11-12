@@ -22,6 +22,7 @@ from pathlib import Path
 # least one branch of every OR is allowed (for example Apache-2.0 OR BSL-1.0).
 ALLOWED = {
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "ISC",
     "Zlib",

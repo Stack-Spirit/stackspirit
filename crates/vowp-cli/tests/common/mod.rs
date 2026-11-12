@@ -10,7 +10,7 @@
 //! `vowp __window` pane keeps polling. [`sweep_stale_test_servers_once`] runs at test
 //! start, before the first private server exists, and kills only the leftovers. It never
 //! touches a server whose private directory still exists, the default socket, or the
-//! `vowp-home`, `vowp-night` and `vowp-orchestrator` sessions.
+//! `vowp-home`, `vowp-ops` and `vowp-orchestrator` sessions.
 
 #![allow(dead_code)]
 
@@ -245,7 +245,7 @@ pub fn sweep_stale_test_servers_once() {
 /// `vowp-one`); both are candidates. It reads that server's `TMUX_TMPDIR` from
 /// `/proc/<pid>/environ` on Linux or from `ps -E` elsewhere; a server whose directory
 /// or parent home still exists is left alone. The default socket and the
-/// `vowp-home`, `vowp-night` and `vowp-orchestrator` sessions are never candidates.
+/// `vowp-home`, `vowp-ops` and `vowp-orchestrator` sessions are never candidates.
 /// Stale candidates get `SIGTERM`, then `SIGKILL` if they do not exit; the process
 /// command line is re-checked before each signal so a recycled pid is not touched.
 pub fn sweep_stale_test_servers() {
@@ -487,7 +487,7 @@ fn is_private_session(session: &str) -> bool {
 
 /// Sessions that belong to the real units and must never be swept.
 fn is_reserved_session(session: &str) -> bool {
-    matches!(session, "vowp-home" | "vowp-night" | "vowp-orchestrator")
+    matches!(session, "vowp-home" | "vowp-ops" | "vowp-orchestrator")
 }
 
 /// Whether the server's private directory, or the home containing it, is gone.

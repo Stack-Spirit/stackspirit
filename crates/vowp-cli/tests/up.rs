@@ -9,7 +9,7 @@
 //! by a timeout or the OOM killer never runs its `Drop`, so its server would otherwise
 //! outlive the temporary home and keep every `vowp __window` pane polling. The sweep only
 //! removes private servers whose session is `vowp-…` and whose private path is gone, never
-//! `vowp-home`, the default socket, `vowp-night` or `vowp-orchestrator`. The board test
+//! `vowp-home`, the default socket, `vowp-ops` or `vowp-orchestrator`. The board test
 //! also proves that killing a private server takes its `vowp __window board` pane down
 //! with it.
 
@@ -1731,7 +1731,7 @@ fn parses_the_macos_ps_output_used_by_the_stale_server_sweep() {
 
     // Shape of `ps -p <pid> -E -o command=`: the environment shares the command
     // line. BSD `ps` prints it before the argv; accept it on either side.
-    let env = "PATH=/usr/bin:/bin TMUX_TMPDIR=/private/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/.tmp8SuL1L HOME=/Users/runner";
+    let env = "PATH=/usr/bin:/bin TMUX_TMPDIR=/private/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/.tmp8SuL1L HOME=/Users/me";
     let tmux = "/opt/homebrew/bin/tmux -L vowp-t-501-deadbeef -f /dev/null new-session -d -s vowp-test";
     assert_eq!(
         common::tmpdir_from_ps(&format!("{env} {tmux}")),

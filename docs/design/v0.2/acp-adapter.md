@@ -1,7 +1,8 @@
 # v0.2 — ACP adapter
 
-Status: **first slice implemented** (v0.2). v0.1 ships the `claude-code`, `opencode` and generic
-`cli` adapters. The ACP adapter, its registry entry, fake-server tests and pinned subset are in
+Status: current. The first slice is implemented (v0.2); v0.1 ships the
+`claude-code`, `opencode` and generic `cli` adapters. The ACP adapter, its registry entry, fake-server
+tests and pinned subset are in
 `docs/design/adapters.md` §10. Real ACP servers, native resume, a permission UI, live pause and
 streaming chunk events remain **planned**.
 

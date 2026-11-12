@@ -78,7 +78,7 @@ impl Fixture {
             store
                 .upsert_node(&Node {
                     name: NodeName::parse("remote-node").expect("remote node name"),
-                    ssh_target: Some("builder@example.test".to_owned()),
+                    ssh_target: Some("vowp@example.invalid".to_owned()),
                     is_local: false,
                     capabilities: json!({
                         "vowp": "0.2.9",
@@ -198,7 +198,7 @@ fn nodes_page_serves_the_shell_and_the_fixture_nodes() {
 
     let remote = &page.items[1];
     assert!(!remote.is_local);
-    assert_eq!(remote.ssh_target.as_deref(), Some("builder@example.test"));
+    assert_eq!(remote.ssh_target.as_deref(), Some("vowp@example.invalid"));
     assert_eq!(remote.capabilities["vowp"], json!("0.2.9"));
     assert_eq!(remote.capabilities["probe_ok"], json!(false));
     assert_eq!(remote.last_seen_at, Some(fixture.remote_seen));

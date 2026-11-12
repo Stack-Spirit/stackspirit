@@ -41,7 +41,7 @@ max_concurrent = 2
 [harnesses]
 
 [harnesses.opencode]
-binary = "/home/dev/.opencode-v2/bin/opencode"
+binary = "opencode"  # name on PATH, or an absolute path on this machine
 
 [env]
 

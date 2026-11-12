@@ -383,7 +383,7 @@ def build_bundle(rows: list[dict]) -> str:
         + ".",
         "",
         "The full texts below cover every licence identifier used by this locked",
-        "tree, plus BSD-3-Clause and ISC from the audit's allowed set. A locked",
+        "tree and the other reviewed texts in the audit's allowed set. A locked",
         "identifier without a reviewed text in `scripts/release/license-texts/`",
         "makes the generator fail instead of shipping an incomplete bundle.",
         "",
