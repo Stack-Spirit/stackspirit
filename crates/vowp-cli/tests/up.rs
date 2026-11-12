@@ -1701,6 +1701,55 @@ fn private_tmux_socket_path_fits_the_platform_limit() {
 }
 
 #[test]
+fn parses_the_macos_ps_output_used_by_the_stale_server_sweep() {
+    // Shape of `ps -A -o pid=,command=` on macOS: right-aligned pid, then argv.
+    let listing = "\
+  501 /opt/homebrew/bin/tmux -L vowp-t-501-deadbeef -f /dev/null new-session -d -s vowp-test
+  777 /usr/bin/sleep 30
+  888
+";
+    assert_eq!(
+        common::parse_ps_pid_command(listing),
+        vec![
+            (
+                501,
+                vec![
+                    "/opt/homebrew/bin/tmux".to_owned(),
+                    "-L".to_owned(),
+                    "vowp-t-501-deadbeef".to_owned(),
+                    "-f".to_owned(),
+                    "/dev/null".to_owned(),
+                    "new-session".to_owned(),
+                    "-d".to_owned(),
+                    "-s".to_owned(),
+                    "vowp-test".to_owned(),
+                ],
+            ),
+            (777, vec!["/usr/bin/sleep".to_owned(), "30".to_owned()]),
+        ]
+    );
+
+    // Shape of `ps -p <pid> -E -o command=`: the environment shares the command
+    // line. BSD `ps` prints it before the argv; accept it on either side.
+    let env = "PATH=/usr/bin:/bin TMUX_TMPDIR=/private/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/.tmp8SuL1L HOME=/Users/runner";
+    let tmux = "/opt/homebrew/bin/tmux -L vowp-t-501-deadbeef -f /dev/null new-session -d -s vowp-test";
+    assert_eq!(
+        common::tmpdir_from_ps(&format!("{env} {tmux}")),
+        Some(PathBuf::from(
+            "/private/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/.tmp8SuL1L"
+        ))
+    );
+    assert_eq!(
+        common::tmpdir_from_ps(&format!("{tmux} {env}")),
+        Some(PathBuf::from(
+            "/private/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/.tmp8SuL1L"
+        ))
+    );
+    assert_eq!(common::tmpdir_from_ps("PATH=/usr/bin:/bin"), None);
+    assert_eq!(common::tmpdir_from_ps("TMUX_TMPDIR="), None);
+}
+
+#[test]
 fn tmux_layout_created_on_private_socket() {
     common::sweep_stale_test_servers_once();
     let Some(guard) = private_tmux_guard() else {
@@ -1728,13 +1777,6 @@ fn tmux_layout_created_on_private_socket() {
 
 #[test]
 fn stale_server_sweep_kills_a_server_whose_private_dir_is_gone() {
-    // The shared sweep discovers servers through `/proc`, which only Linux has.
-    // On macOS it sees no servers at all, so this test would assert a kill the
-    // helper cannot perform; skip it there and keep the Linux coverage.
-    if !cfg!(target_os = "linux") {
-        eprintln!("SKIP: the stale-server sweep reads /proc and is Linux-only");
-        return;
-    }
     common::sweep_stale_test_servers_once();
     let Some(guard) = private_tmux_guard() else {
         return;

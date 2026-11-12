@@ -16,6 +16,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(target_os = "linux"))]
+use std::process::Stdio;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
@@ -236,11 +238,12 @@ pub fn sweep_stale_test_servers_once() {
 
 /// Kills leftover private test tmux servers whose temporary home was deleted.
 ///
-/// The sweep reads `/proc/<pid>/cmdline` and only considers a process whose argv
-/// starts with `tmux -L vowp-…` and whose `-s` session is a `vowp-…` session. A
-/// test server uses `vowp-test…`, while `up --no-tmux` creates project sessions
-/// named `vowp-<project>` (for example `vowp-one`); both are candidates. It reads
-/// that server's `TMUX_TMPDIR` from `/proc/<pid>/environ`; a server whose directory
+/// The sweep reads `/proc/<pid>/cmdline` on Linux and `ps` on macOS and the other
+/// Unixes. It only considers a process whose argv starts with `tmux -L vowp-…` and
+/// whose `-s` session is a `vowp-…` session. A test server uses `vowp-test…`, while
+/// `up --no-tmux` creates project sessions named `vowp-<project>` (for example
+/// `vowp-one`); both are candidates. It reads that server's `TMUX_TMPDIR` from
+/// `/proc/<pid>/environ` on Linux or from `ps -E` elsewhere; a server whose directory
 /// or parent home still exists is left alone. The default socket and the
 /// `vowp-home`, `vowp-night` and `vowp-orchestrator` sessions are never candidates.
 /// Stale candidates get `SIGTERM`, then `SIGKILL` if they do not exit; the process
@@ -253,7 +256,8 @@ pub fn sweep_stale_test_servers() {
     }
 }
 
-/// Enumerates the running `tmux -L vowp-… -s vowp-…` servers.
+/// Enumerates the running `tmux -L vowp-… -s vowp-…` servers from `/proc`.
+#[cfg(target_os = "linux")]
 fn private_test_servers() -> Vec<PrivateTestServer> {
     let mut servers = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -288,7 +292,63 @@ fn private_test_servers() -> Vec<PrivateTestServer> {
     servers
 }
 
+/// Enumerates the running `tmux -L vowp-… -s vowp-…` servers through `ps`.
+///
+/// Only processes whose command line already looks like a private tmux server get a
+/// second `ps` call for their environment, so the sweep does not read every environment.
+#[cfg(not(target_os = "linux"))]
+fn private_test_servers() -> Vec<PrivateTestServer> {
+    let Some(output) = ps_output(&["-ww", "-A", "-o", "pid=,command="]) else {
+        return Vec::new();
+    };
+    let mut servers = Vec::new();
+    for (pid, argv) in parse_ps_pid_command(&output) {
+        let Some(socket) = private_socket(&argv) else {
+            continue;
+        };
+        let Some(session) = session_argument(&argv) else {
+            continue;
+        };
+        if !is_private_session(&session) || is_reserved_session(&session) {
+            continue;
+        }
+        let Some(tmpdir) = process_tmpdir(pid) else {
+            continue;
+        };
+        servers.push(PrivateTestServer {
+            pid,
+            socket: socket.to_owned(),
+            session,
+            tmpdir,
+        });
+    }
+    servers
+}
+
+/// Parses `ps -A -o pid=,command=` output into `(pid, argv)` pairs.
+///
+/// macOS `ps` prints one process per line as a right-aligned pid followed by the
+/// arguments joined with spaces. Lines without a command are ignored.
+pub fn parse_ps_pid_command(output: &str) -> Vec<(u32, Vec<String>)> {
+    let mut processes = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_start();
+        let Some((pid, command)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+        if !argv.is_empty() {
+            processes.push((pid, argv));
+        }
+    }
+    processes
+}
+
 /// Returns the NUL-separated argv of `pid`.
+#[cfg(target_os = "linux")]
 fn process_argv(pid: u32) -> Option<Vec<String>> {
     let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     let argv: Vec<String> = bytes
@@ -297,6 +357,51 @@ fn process_argv(pid: u32) -> Option<Vec<String>> {
         .map(|part| String::from_utf8_lossy(part).into_owned())
         .collect();
     (!argv.is_empty()).then_some(argv)
+}
+
+/// Returns the argv of `pid` from `ps`.
+#[cfg(not(target_os = "linux"))]
+fn process_argv(pid: u32) -> Option<Vec<String>> {
+    let command = ps_command(pid, &["-o", "command="])?;
+    let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+    (!argv.is_empty()).then_some(argv)
+}
+
+/// Runs `ps` with `format` for all processes and returns its trimmed stdout.
+#[cfg(not(target_os = "linux"))]
+fn ps_output(format: &[&str]) -> Option<String> {
+    let output = Command::new("ps")
+        .args(format)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Runs `ps` with `format` for one `pid` and returns its trimmed stdout.
+#[cfg(not(target_os = "linux"))]
+fn ps_command(pid: u32, format: &[&str]) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-p", &pid.to_string()])
+        .args(format)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Returns the private socket from a `tmux -L <socket> …` command line.
@@ -332,6 +437,7 @@ fn session_argument(argv: &[String]) -> Option<String> {
 }
 
 /// Returns the server's `TMUX_TMPDIR` from `/proc/<pid>/environ`.
+#[cfg(target_os = "linux")]
 fn process_tmpdir(pid: u32) -> Option<PathBuf> {
     let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     for entry in environ.split(|byte| *byte == 0) {
@@ -342,6 +448,31 @@ fn process_tmpdir(pid: u32) -> Option<PathBuf> {
             return None;
         }
         return Some(PathBuf::from(String::from_utf8_lossy(value).into_owned()));
+    }
+    None
+}
+
+/// Returns the server's `TMUX_TMPDIR` from the environment `ps -E` prints.
+#[cfg(not(target_os = "linux"))]
+fn process_tmpdir(pid: u32) -> Option<PathBuf> {
+    let command = ps_command(pid, &["-E", "-o", "command="])?;
+    tmpdir_from_ps(&command)
+}
+
+/// Extracts `TMUX_TMPDIR` from a `ps -E` command line.
+///
+/// macOS appends the environment to the command line as whitespace-separated
+/// `NAME=value` entries. Scanning the whole line keeps this independent of how many
+/// entries precede `TMUX_TMPDIR`.
+pub fn tmpdir_from_ps(command: &str) -> Option<PathBuf> {
+    for token in command.split_whitespace() {
+        let Some(value) = token.strip_prefix("TMUX_TMPDIR=") else {
+            continue;
+        };
+        if value.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(value));
     }
     None
 }
@@ -386,7 +517,7 @@ fn kill_private_test_server(server: &PrivateTestServer) {
         .status();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if !Path::new(&format!("/proc/{}", server.pid)).exists() {
+        if !process_exists(server.pid) {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -398,6 +529,25 @@ fn kill_private_test_server(server: &PrivateTestServer) {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
+    }
+}
+
+/// Whether `pid` still exists; Linux uses `/proc`, other platforms `kill -0`.
+fn process_exists(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }
 
