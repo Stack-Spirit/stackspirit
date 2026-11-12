@@ -46,6 +46,8 @@
   main > * { min-width: 0; }
   h1 { margin: 0; font-size: 1.65rem; }
   h2 { margin: 0 0 .6rem; font-size: 1rem; }
+  h3 { margin: 0 0 .35rem; font-size: .9rem; }
+  h4 { margin: .55rem 0 .2rem; color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
   a { color: var(--accent); }
   .page-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline; justify-content: space-between; }
   .page-nav { margin: .15rem 0 0; font-weight: 600; }
@@ -87,6 +89,11 @@
   .fact dt { color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
   .fact dd { margin: 0; overflow-wrap: anywhere; }
   .event-summary { margin: 0; overflow-wrap: anywhere; }
+  .capsule-section { margin-top: .9rem; }
+  .bullets { margin: 0; padding-left: 1.15rem; }
+  .bullets li { margin: .15rem 0; overflow-wrap: anywhere; }
+  .lineage { margin: 0; padding-left: 1.25rem; display: grid; gap: .3rem; }
+  .lineage li { overflow-wrap: anywhere; }
   .error {
     margin: 0;
     padding: .65rem .9rem;
@@ -165,6 +172,67 @@
       </dl>
     </div>
 
+    <div class="card" id="capsule-panel" aria-labelledby="capsule-heading">
+      <h2 id="capsule-heading">Capsule</h2>
+      <p id="capsule-empty" class="muted" hidden>No capsule yet.</p>
+      <div id="capsule-body" hidden>
+        <dl id="capsule-meta" class="facts">
+          <div class="fact"><dt>Capsule ID</dt><dd>–</dd></div>
+          <div class="fact"><dt>At seq</dt><dd>–</dd></div>
+          <div class="fact"><dt>Trigger</dt><dd>–</dd></div>
+          <div class="fact"><dt>From</dt><dd>–</dd></div>
+        </dl>
+
+        <section class="capsule-section" aria-labelledby="capsule-intent-label">
+          <h3 id="capsule-intent-label">Intent</h3>
+          <p id="capsule-intent" class="event-summary"></p>
+        </section>
+
+        <section class="capsule-section" aria-labelledby="capsule-constraints-label">
+          <h3 id="capsule-constraints-label">Constraints</h3>
+          <ul id="capsule-constraints" class="bullets"></ul>
+        </section>
+
+        <section class="capsule-section" aria-labelledby="capsule-decisions-label">
+          <h3 id="capsule-decisions-label">Decisions</h3>
+          <ul id="capsule-decisions" class="bullets"></ul>
+        </section>
+
+        <section class="capsule-section" aria-labelledby="capsule-state-label">
+          <h3 id="capsule-state-label">State</h3>
+          <h4>Done</h4>
+          <ul id="capsule-done" class="bullets"></ul>
+          <h4>In progress</h4>
+          <ul id="capsule-in-progress" class="bullets"></ul>
+          <h4>Blocked</h4>
+          <ul id="capsule-blocked" class="bullets"></ul>
+          <h4>Next steps</h4>
+          <ul id="capsule-next-steps" class="bullets"></ul>
+        </section>
+
+        <section class="capsule-section" aria-labelledby="capsule-files-label">
+          <h3 id="capsule-files-label">Files</h3>
+          <ul id="capsule-files" class="bullets"></ul>
+        </section>
+
+        <section class="capsule-section" aria-labelledby="capsule-gotchas-label">
+          <h3 id="capsule-gotchas-label">Gotchas</h3>
+          <ul id="capsule-gotchas" class="bullets"></ul>
+        </section>
+
+        <section class="capsule-section" aria-labelledby="capsule-questions-label">
+          <h3 id="capsule-questions-label">Open questions</h3>
+          <ul id="capsule-questions" class="bullets"></ul>
+        </section>
+      </div>
+    </div>
+
+    <div class="card" id="lineage-panel" aria-labelledby="lineage-heading">
+      <h2 id="lineage-heading">Parent lineage</h2>
+      <p id="lineage-empty" class="muted" hidden>No parent sessions.</p>
+      <ol id="lineage" class="lineage"></ol>
+    </div>
+
     <div class="card">
       <h2 id="events-heading">Event timeline</h2>
       <ul id="events" class="cards">
@@ -202,6 +270,21 @@
   const list = document.getElementById("list");
   const meta = document.getElementById("meta");
   const events = document.getElementById("events");
+  const capsuleEmpty = document.getElementById("capsule-empty");
+  const capsuleBody = document.getElementById("capsule-body");
+  const capsuleMeta = document.getElementById("capsule-meta");
+  const capsuleIntent = document.getElementById("capsule-intent");
+  const capsuleConstraints = document.getElementById("capsule-constraints");
+  const capsuleDecisions = document.getElementById("capsule-decisions");
+  const capsuleDone = document.getElementById("capsule-done");
+  const capsuleInProgress = document.getElementById("capsule-in-progress");
+  const capsuleBlocked = document.getElementById("capsule-blocked");
+  const capsuleNextSteps = document.getElementById("capsule-next-steps");
+  const capsuleFiles = document.getElementById("capsule-files");
+  const capsuleGotchas = document.getElementById("capsule-gotchas");
+  const capsuleQuestions = document.getElementById("capsule-questions");
+  const lineageList = document.getElementById("lineage");
+  const lineageEmpty = document.getElementById("lineage-empty");
 
   const sessionId = pathSessionId();
   const detailMode = sessionId !== null;
@@ -256,6 +339,22 @@
     item.className = "muted";
     item.textContent = message;
     return item;
+  }
+
+  function listItem(text, mono) {
+    const item = document.createElement("li");
+    item.textContent = text;
+    if (mono) item.className = "mono";
+    return item;
+  }
+
+  function fillList(target, items, render) {
+    target.replaceChildren();
+    if (!Array.isArray(items) || items.length === 0) {
+      target.appendChild(emptyItem("None."));
+      return;
+    }
+    for (const item of items) target.appendChild(render(item));
   }
 
   function markUpdated() {
@@ -412,6 +511,13 @@
       if (eventSource !== source) return;
       handleStreamFailure();
     };
+  }
+
+  async function fetchSessionDetail() {
+    const response = await fetch("/api/v1/sessions/" + encodeURIComponent(sessionId));
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return response.json();
   }
 
   async function fetchSessions() {
@@ -583,6 +689,77 @@
     );
   }
 
+  function renderCapsule(capsule) {
+    if (!capsule) {
+      capsuleBody.hidden = true;
+      capsuleEmpty.hidden = false;
+      return;
+    }
+    capsuleEmpty.hidden = true;
+    capsuleBody.hidden = false;
+    capsuleMeta.replaceChildren(
+      fact("Capsule ID", formatValue(capsule.capsule_id, "unknown"), true),
+      fact("At seq", formatValue(capsule.at_seq, "–"), false),
+      fact("Trigger", formatValue(capsule.trigger, "unknown"), false),
+      fact("From", executorText(capsule.from), true)
+    );
+    capsuleIntent.textContent = formatValue(capsule.intent, "–");
+    const state = capsule.state || {};
+    fillList(capsuleConstraints, capsule.constraints, (item) => listItem(item));
+    fillList(capsuleDecisions, capsule.decisions, (decision) => {
+      let text = formatValue(decision.what, "decision");
+      const why = formatValue(decision.why, "");
+      if (why) text += " — " + why;
+      if (decision.at_seq !== null && decision.at_seq !== undefined) {
+        text += " (at seq " + decision.at_seq + ")";
+      }
+      return listItem(text);
+    });
+    fillList(capsuleDone, state.done, (item) => listItem(item));
+    fillList(capsuleInProgress, state.in_progress, (item) => listItem(item));
+    fillList(capsuleBlocked, state.blocked, (item) => listItem(item));
+    fillList(capsuleNextSteps, state.next_steps, (item) => listItem(item));
+    fillList(capsuleFiles, capsule.files, (file) => {
+      const path = formatValue(file.path, "unknown");
+      const action = formatValue(file.role, "unknown");
+      const note = formatValue(file.note, "");
+      return listItem(path + " (" + action + ")" + (note ? ": " + note : ""), true);
+    });
+    fillList(capsuleGotchas, capsule.gotchas, (item) => listItem(item));
+    fillList(capsuleQuestions, capsule.open_questions, (item) => listItem(item));
+  }
+
+  function renderLineage(lineage, sessions) {
+    const titles = new Map();
+    for (const session of sessions) {
+      if (session && typeof session.id === "string") titles.set(session.id, session.title);
+    }
+    lineageList.replaceChildren();
+    if (!Array.isArray(lineage) || lineage.length === 0) {
+      lineageEmpty.hidden = false;
+      lineageList.hidden = true;
+      return;
+    }
+    lineageEmpty.hidden = true;
+    lineageList.hidden = false;
+    for (const id of lineage) {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.className = "session-link";
+      link.href = "/sessions/" + encodeURIComponent(id);
+      const title = titles.get(id);
+      link.textContent = formatValue(title, formatValue(id, "session"));
+      item.appendChild(link);
+      if (title) {
+        const ref = document.createElement("span");
+        ref.className = "mono muted";
+        ref.textContent = " " + id;
+        item.appendChild(ref);
+      }
+      lineageList.appendChild(item);
+    }
+  }
+
   async function fetchNewEvents() {
     let after = lastSeq;
     for (;;) {
@@ -631,15 +808,22 @@
     if (refreshing) return "busy";
     refreshing = true;
     try {
-      const sessions = await fetchSessions();
-      const session = sessions.find((item) => item.id === sessionId);
-      if (!session) {
+      const detail = await fetchSessionDetail();
+      if (detail === null) {
         showError("Session " + sessionId + " not found.");
         markSessionMissing();
         return "missing";
       }
       sessionMissing = false;
-      renderMeta(session);
+      renderMeta(detail.session);
+      renderCapsule(detail.latest_capsule);
+      let sessions = [];
+      try {
+        sessions = await fetchSessions();
+      } catch (_error) {
+        sessions = [];
+      }
+      renderLineage(detail.lineage, sessions);
       const loaded = await fetchNewEvents();
       if (!loaded) {
         markSessionMissing();

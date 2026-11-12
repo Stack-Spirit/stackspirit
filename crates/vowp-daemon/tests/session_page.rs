@@ -17,22 +17,27 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use vowp_daemon::{ApiState, select_project, serve_with_shutdown};
-use vowp_protocol::api::{EventPage, SessionPage};
+use vowp_protocol::api::{EventPage, SessionDetail, SessionPage};
+use vowp_protocol::capsule::CAPSULE_VERSION;
 use vowp_protocol::{
-    Actor, AssistantMessage, Clock, EventBody, EventEnvelope, EventSource, EventType, Executor, FakeClock, HarnessKind,
-    JobId, JobKind, NewJob, NodeName, Project, ProjectName, Role, Session, SessionId, SessionRole, SessionState,
-    Timestamp, ToolCall, UserMessage, VowpConfig,
+    Actor, AssistantMessage, Capsule, CapsuleDecision, CapsuleFile, CapsuleId, CapsuleState, CapsuleTelemetry,
+    CapsuleTrigger, Clock, EventBody, EventEnvelope, EventSource, EventType, Executor, ExecutorRef, FakeClock,
+    FileRole, HarnessKind, JobId, JobKind, NewJob, NodeName, Project, ProjectName, Role, Session, SessionId,
+    SessionRole, SessionState, Timestamp, ToolCall, UserMessage, VowpConfig,
 };
 use vowp_store::session_log::{NewEvent, SessionLog};
 use vowp_store::{NodePaths, Store};
 
-/// A temporary home with one project, one job, one session and three events.
+/// A temporary home with one project, one job, a parent/child session chain, a capsule and
+/// three events.
 struct Fixture {
     _tmp: TempDir,
     paths: NodePaths,
     project: ProjectName,
     node: NodeName,
     session_id: SessionId,
+    parent_id: SessionId,
+    capsule: Capsule,
     envelopes: Vec<EventEnvelope>,
 }
 
@@ -68,6 +73,28 @@ impl Fixture {
         let job = store
             .insert_job(&project, &new_job("job-a", JobKind::Build, Role::Worker), "test")
             .expect("job a");
+
+        // The parent session gives the detail page a one-entry lineage and has no capsule.
+        let parent_id = SessionId::new();
+        store
+            .upsert_session(&Session {
+                id: parent_id.clone(),
+                project: Some(project.clone()),
+                job_id: None,
+                role: Some(SessionRole::Worker),
+                title: "parent fixture session".to_owned(),
+                parent_session_id: None,
+                node: node.clone(),
+                cwd: "/tmp/proj".to_owned(),
+                state: SessionState::Idle,
+                executor: None,
+                last_seq: 0,
+                last_capsule_id: None,
+                log_bytes: 0,
+                created_at: clock.now(),
+                updated_at: clock.now(),
+            })
+            .expect("parent session row");
 
         let session_id = SessionId::new();
         let executor = Executor::parse("opencode:deepseek/deepseek-flash#max").expect("executor");
@@ -118,6 +145,7 @@ impl Fixture {
         let log_bytes = log.byte_len();
         drop(log);
 
+        let capsule = capsule(&session_id, clock.now());
         store
             .upsert_session(&Session {
                 id: session_id.clone(),
@@ -125,18 +153,21 @@ impl Fixture {
                 job_id: Some(job.id),
                 role: Some(SessionRole::Worker),
                 title: "fixture session".to_owned(),
-                parent_session_id: None,
+                parent_session_id: Some(parent_id.clone()),
                 node: node.clone(),
                 cwd: "/tmp/proj".to_owned(),
                 state: SessionState::Running,
                 executor: Some(executor),
                 last_seq: envelopes.len() as u64,
-                last_capsule_id: None,
+                last_capsule_id: Some(capsule.capsule_id.clone()),
                 log_bytes,
                 created_at: clock.now(),
                 updated_at: clock.now(),
             })
             .expect("session row");
+        store
+            .insert_capsule(&capsule, "sessions/fixture/capsules/3.json")
+            .expect("capsule row");
         drop(store);
 
         Self {
@@ -145,6 +176,8 @@ impl Fixture {
             project,
             node,
             session_id,
+            parent_id,
+            capsule,
             envelopes,
         }
     }
@@ -165,6 +198,43 @@ fn new_job(id: &str, kind: JobKind, role: Role) -> NewJob {
         priority: None,
         loop_: None,
         brief_text: None,
+    }
+}
+
+/// Builds a capsule with every panel section populated.
+fn capsule(session: &SessionId, at: Timestamp) -> Capsule {
+    Capsule {
+        version: CAPSULE_VERSION,
+        capsule_id: CapsuleId::new(),
+        session_id: session.clone(),
+        created_at: at,
+        at_seq: 3,
+        trigger: CapsuleTrigger::TurnEnd,
+        from: ExecutorRef {
+            executor: Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("capsule executor"),
+            node: Some(NodeName::parse("test-node").expect("capsule node")),
+        },
+        intent: "hand the fixture session off".to_owned(),
+        constraints: vec!["keep the page read-only".to_owned()],
+        decisions: vec![CapsuleDecision {
+            what: "render the capsule panel".to_owned(),
+            why: "the session-detail API returns it".to_owned(),
+            at_seq: Some(3),
+        }],
+        state: CapsuleState {
+            done: vec!["fixture session".to_owned()],
+            in_progress: vec!["capsule panel".to_owned()],
+            blocked: vec!["nothing".to_owned()],
+            next_steps: vec!["render the lineage".to_owned()],
+        },
+        files: vec![CapsuleFile {
+            path: "crates/vowp-daemon/web/sessions.html".to_owned(),
+            role: FileRole::Modified,
+            note: "capsule panel".to_owned(),
+        }],
+        gotchas: vec!["the page stays read-only".to_owned()],
+        open_questions: vec!["none".to_owned()],
+        telemetry: CapsuleTelemetry::default(),
     }
 }
 
@@ -361,10 +431,20 @@ fn sessions_page_lists_the_fixture_sessions() {
     let response = get(server.address, "/api/v1/sessions");
     assert_eq!(response.status, 200, "body: {}", response.body);
     let page: SessionPage = serde_json::from_str(&response.body).expect("SessionPage");
-    assert_eq!(page.total, 1);
+    assert_eq!(page.total, 2);
     assert_eq!(page.next, None);
-    let session = &page.items[0];
-    assert_eq!(session.id, fixture.session_id);
+    let session = page
+        .items
+        .iter()
+        .find(|session| session.id == fixture.session_id)
+        .expect("fixture session in the list");
+    let parent = page
+        .items
+        .iter()
+        .find(|session| session.id == fixture.parent_id)
+        .expect("parent session in the list");
+    assert_eq!(parent.title, "parent fixture session");
+    assert_eq!(parent.parent_session_id, None);
     assert_eq!(session.title, "fixture session");
     assert_eq!(session.project.as_ref(), Some(&fixture.project));
     assert_eq!(session.job_id.as_ref().map(JobId::as_str), Some("job-a"));
@@ -443,6 +523,95 @@ fn session_page_shows_the_fixture_events() {
     // Unknown non-page paths still use the API's JSON 404 fallback.
     let unknown = get(server.address, &format!("/sessions/{}/extra", fixture.session_id));
     assert_eq!(unknown.status, 404, "body: {}", unknown.body);
+}
+
+#[test]
+fn session_page_renders_the_capsule_and_lineage_from_the_detail_api() {
+    let fixture = Fixture::new();
+    let server = Server::start(&fixture);
+
+    let page = get(server.address, &format!("/sessions/{}", fixture.session_id));
+    assert_shell(&page, &fixture);
+    for needle in [
+        // The detail page fetches the session-detail document in addition to the timeline.
+        "fetch(\"/api/v1/sessions/\" + encodeURIComponent(sessionId))",
+        "detail.latest_capsule",
+        "detail.lineage",
+        "function renderCapsule(capsule)",
+        "function renderLineage(lineage, sessions)",
+        // The capsule panel's field labels.
+        "<dt>Capsule ID</dt>",
+        "<dt>At seq</dt>",
+        "<dt>Trigger</dt>",
+        "<dt>From</dt>",
+        ">Intent</h3>",
+        ">Constraints</h3>",
+        ">Decisions</h3>",
+        ">State</h3>",
+        ">Done</h4>",
+        ">In progress</h4>",
+        ">Blocked</h4>",
+        ">Next steps</h4>",
+        ">Files</h3>",
+        ">Gotchas</h3>",
+        ">Open questions</h3>",
+        // A decision carries its sequence and a file carries its action.
+        "decision.at_seq",
+        "file.role",
+        // The nullable-capsule branch and the lineage label.
+        "No capsule yet.",
+        "capsuleBody.hidden = true;",
+        "capsuleBody.hidden = false;",
+        "capsuleEmpty.hidden = true;",
+        "capsuleEmpty.hidden = false;",
+        ">Parent lineage</h2>",
+        "No parent sessions.",
+        "renderLineage(detail.lineage, sessions)",
+    ] {
+        assert!(page.body.contains(needle), "capsule page is missing {needle:?}");
+    }
+
+    // The panel's data source is the session-detail API: the same fixture must return the
+    // capsule and the parent lineage the page renders.
+    let response = get(server.address, &format!("/api/v1/sessions/{}", fixture.session_id));
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let home = fixture.paths.root().display().to_string();
+    assert!(!response.body.contains(&home), "session detail leaked the home path");
+    let detail: SessionDetail = serde_json::from_str(&response.body).expect("SessionDetail");
+    assert_eq!(detail.session.id, fixture.session_id);
+    assert_eq!(detail.session.title, "fixture session");
+    assert_eq!(detail.session.parent_session_id.as_ref(), Some(&fixture.parent_id));
+    assert_eq!(detail.latest_capsule.as_ref(), Some(&fixture.capsule));
+    assert_eq!(detail.lineage, vec![fixture.parent_id.clone()]);
+
+    let capsule = detail.latest_capsule.expect("fixture capsule");
+    assert_eq!(capsule.intent, "hand the fixture session off");
+    assert_eq!(capsule.trigger, CapsuleTrigger::TurnEnd);
+    assert_eq!(capsule.state.done, vec!["fixture session".to_owned()]);
+    assert_eq!(capsule.decisions[0].at_seq, Some(3));
+    assert_eq!(capsule.files[0].role, FileRole::Modified);
+
+    // The parent session has no capsule and no parent; that is the page's no-capsule and
+    // empty-lineage branch.
+    let response = get(server.address, &format!("/api/v1/sessions/{}", fixture.parent_id));
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let parent: SessionDetail = serde_json::from_str(&response.body).expect("parent SessionDetail");
+    assert_eq!(parent.session.title, "parent fixture session");
+    assert!(parent.latest_capsule.is_none());
+    assert!(parent.lineage.is_empty());
+
+    // The session list still supplies the titles the lineage links prefer over bare ids.
+    let response = get(server.address, "/api/v1/sessions");
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let sessions: SessionPage = serde_json::from_str(&response.body).expect("SessionPage");
+    assert_eq!(
+        sessions
+            .items
+            .iter()
+            .find(|session| session.id == fixture.parent_id)
+            .map(|session| session.title.as_str()),
+        Some("parent fixture session")
+    );
 }
 
 #[test]
