@@ -100,6 +100,14 @@ const LISTED_TYPES: &[&str] = &[
     "Tunnel",
     "MigrationReport",
     "MigrationCount",
+    // v0.3 loopback HTTP API documents.
+    "Health",
+    "Page",
+    "JobPage",
+    "SessionPage",
+    "EventPage",
+    "ApiError",
+    "ApiErrorBody",
 ];
 
 /// Decodes one JSON value into a concrete type.
