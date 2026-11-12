@@ -4,6 +4,9 @@
 //! `tick` advances `last_run_at`/`next_run_at` **before** returning a due run, so a crash can
 //! lose at most one firing and can never double-fire. `fire` writes the ledger row carrying
 //! the idempotency key `"<schedule id>@<due>"` before it executes the action.
+//!
+//! Interval schedules re-arm on the row's `created_at` phase, so a restart never snaps an
+//! occurrence to the epoch-aligned grid; cron schedules ignore the anchor.
 
 use std::path::PathBuf;
 use std::time::Duration;
