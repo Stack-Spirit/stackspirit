@@ -977,7 +977,7 @@ fn session_pull_same_id_imports_the_origin_id_without_a_parent() {
 }
 
 #[test]
-fn session_pull_same_id_refuses_an_existing_session_without_mutating_it() {
+fn session_pull_same_id_reports_divergence_without_mutating_it() {
     let env = common::TestEnv::new();
     configure(&env);
     let remote = remote_node(&env);
@@ -991,7 +991,20 @@ fn session_pull_same_id_refuses_an_existing_session_without_mutating_it() {
         "first same-id pull failed: {}",
         output_text(&output.stderr)
     );
-    let log_path = env.home_path().join("sessions").join(&source).join("log.jsonl");
+    append_user_message(env.home_path(), &source, "local advanced");
+    append_user_message(remote.home.path(), &source, "remote advanced");
+
+    let local_paths = vowp_store::NodePaths::new(env.home_path());
+    let remote_paths = vowp_store::NodePaths::new(remote.home.path());
+    let local_events = SessionLog::open_read(&local_paths, &source_id)
+        .expect("local log")
+        .read_all()
+        .expect("local events");
+    let remote_events = SessionLog::open_read(&remote_paths, &source_id)
+        .expect("remote log")
+        .read_all()
+        .expect("remote events");
+    let log_path = local_paths.log_path(&source_id);
     let before_log = std::fs::read(&log_path).expect("same-id log bytes");
     let store = env.store();
     let before_row = store.require_session(&source_id).expect("same-id row");
@@ -1001,13 +1014,40 @@ fn session_pull_same_id_refuses_an_existing_session_without_mutating_it() {
     assert_eq!(
         output.status.code(),
         Some(4),
-        "a duplicate same-id import must conflict: {}",
+        "a duplicate same-id pull must be a conflict: {}",
         output_text(&output.stderr)
     );
+    let stderr = output_text(&output.stderr);
     assert!(
-        output_text(&output.stderr).contains("already exists"),
-        "the conflict was not explained: {}",
-        output_text(&output.stderr)
+        stderr.contains(&format!("session {source} exists locally and on vps")),
+        "the divergence was not named: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "local:  {source} on {}: seq {}, last user.message at ",
+            env.config.node.name,
+            local_events.len()
+        )),
+        "the local head is missing: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "remote: {source} on vps: seq {}, last user.message at ",
+            remote_events.len()
+        )),
+        "the remote head is missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("choose which side advances; no merge performed"),
+        "the manual-choice note is missing: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&env.home_path().display().to_string()),
+        "the report leaked the local home path: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&remote.home.path().display().to_string()),
+        "the report leaked the remote home path: {stderr}"
     );
     assert_eq!(
         std::fs::read(&log_path).expect("same-id log bytes"),
@@ -1020,6 +1060,82 @@ fn session_pull_same_id_refuses_an_existing_session_without_mutating_it() {
     assert_eq!(after_row.updated_at, before_row.updated_at);
     assert_eq!(local_session_count(&env), 1);
     drop(store);
+    assert_temp_clean(&env);
+
+    // The JSON document carries both heads under one stable code. The first divergence
+    // run's export wrote a capsule on the source, so the next bundle tail ends there.
+    let remote_events = SessionLog::open_read(&remote_paths, &source_id)
+        .expect("remote log")
+        .read_all()
+        .expect("remote events");
+    let remote_last = remote_events.last().expect("remote head event");
+    let output = run_cli(
+        &env,
+        &remote,
+        &["--json", "session", "pull", "--same-id", "vps", &source],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "a JSON divergence must be a conflict: {}",
+        output_text(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(output_text(&output.stdout).trim()).expect("divergence JSON");
+    assert_eq!(value["error"]["kind"], "conflict");
+    assert_eq!(value["error"]["code"], "session_divergence");
+    assert_eq!(value["error"]["node"], "vps");
+    assert_eq!(value["error"]["source_session"], source);
+    assert_eq!(
+        value["error"]["local"]["last_seq"].as_u64(),
+        Some(local_events.len() as u64)
+    );
+    assert_eq!(value["error"]["local"]["last_event"], "user.message");
+    assert!(
+        value["error"]["local"]["last_event_at"].as_str().is_some(),
+        "the local timestamp is missing: {value}"
+    );
+    assert_eq!(
+        value["error"]["remote"]["last_seq"].as_u64(),
+        Some(remote_events.len() as u64)
+    );
+    assert_eq!(value["error"]["remote"]["last_event"], remote_last.event_type.as_str());
+    assert_eq!(value["error"]["remote"]["node"], "vps");
+    assert_eq!(value["error"]["note"], "choose which side advances; no merge performed");
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("delete or export one side")),
+        "the manual hint is missing: {value}"
+    );
+    assert_eq!(
+        std::fs::read(&log_path).expect("same-id log bytes"),
+        before_log,
+        "a JSON divergence rewrote the existing log"
+    );
+    assert_temp_clean(&env);
+
+    // The default child pull is unchanged: a present source id does not change its mode.
+    let output = run_cli(&env, &remote, &["session", "pull", "vps", &source]);
+    assert!(
+        output.status.success(),
+        "the default child pull failed: {}",
+        output_text(&output.stderr)
+    );
+    assert!(
+        output_text(&output.stdout).contains("as child"),
+        "the default pull did not create a child: {}",
+        output_text(&output.stdout)
+    );
+    assert_eq!(
+        local_session_count(&env),
+        2,
+        "the default pull did not add exactly one child"
+    );
+    assert_eq!(
+        std::fs::read(&log_path).expect("same-id log bytes"),
+        before_log,
+        "the default child pull rewrote the same-id log"
+    );
     assert_temp_clean(&env);
 }
 
@@ -1216,7 +1332,7 @@ fn session_pull_full_imports_the_origin_id_with_the_full_log() {
 }
 
 #[test]
-fn session_pull_full_refuses_an_existing_session_without_mutating_it() {
+fn session_pull_full_reports_divergence_without_mutating_it() {
     let env = common::TestEnv::new();
     configure(&env);
     let remote = remote_node(&env);
@@ -1230,7 +1346,19 @@ fn session_pull_full_refuses_an_existing_session_without_mutating_it() {
         "first full pull failed: {}",
         output_text(&output.stderr)
     );
+    append_user_message(env.home_path(), &source, "local advanced");
+    append_user_message(remote.home.path(), &source, "remote advanced");
+
     let local_paths = vowp_store::NodePaths::new(env.home_path());
+    let remote_paths = vowp_store::NodePaths::new(remote.home.path());
+    let local_events = SessionLog::open_read(&local_paths, &source_id)
+        .expect("local log")
+        .read_all()
+        .expect("local events");
+    let remote_events = SessionLog::open_read(&remote_paths, &source_id)
+        .expect("remote log")
+        .read_all()
+        .expect("remote events");
     let log_path = local_paths.log_path(&source_id);
     let manifest_path = local_paths.session_manifest_path(&source_id);
     let before_log = std::fs::read(&log_path).expect("full-pull log bytes");
@@ -1243,13 +1371,40 @@ fn session_pull_full_refuses_an_existing_session_without_mutating_it() {
     assert_eq!(
         output.status.code(),
         Some(4),
-        "a duplicate full pull must conflict: {}",
+        "a duplicate full pull must be a conflict: {}",
         output_text(&output.stderr)
     );
+    let stderr = output_text(&output.stderr);
     assert!(
-        output_text(&output.stderr).contains("already exists"),
-        "the conflict was not explained: {}",
-        output_text(&output.stderr)
+        stderr.contains(&format!("session {source} exists locally and on vps")),
+        "the divergence was not named: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "local:  {source} on {}: seq {}, last user.message at ",
+            env.config.node.name,
+            local_events.len()
+        )),
+        "the local head is missing: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "remote: {source} on vps: seq {}, last user.message at ",
+            remote_events.len()
+        )),
+        "the remote head is missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("choose which side advances; no merge performed"),
+        "the manual-choice note is missing: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&env.home_path().display().to_string()),
+        "the report leaked the local home path: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&remote.home.path().display().to_string()),
+        "the report leaked the remote home path: {stderr}"
     );
     assert_eq!(
         std::fs::read(&log_path).expect("full-pull log bytes"),
@@ -1267,6 +1422,38 @@ fn session_pull_full_refuses_an_existing_session_without_mutating_it() {
     assert_eq!(after_row.updated_at, before_row.updated_at);
     assert_eq!(local_session_count(&env), 1);
     drop(store);
+    assert_temp_clean(&env);
+
+    // The JSON document carries both heads under one stable code.
+    let output = run_cli(&env, &remote, &["--json", "session", "pull", "--full", "vps", &source]);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "a JSON full divergence must be a conflict: {}",
+        output_text(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(output_text(&output.stdout).trim()).expect("divergence JSON");
+    assert_eq!(value["error"]["kind"], "conflict");
+    assert_eq!(value["error"]["code"], "session_divergence");
+    assert_eq!(value["error"]["node"], "vps");
+    assert_eq!(value["error"]["source_session"], source);
+    assert_eq!(
+        value["error"]["local"]["last_seq"].as_u64(),
+        Some(local_events.len() as u64)
+    );
+    assert_eq!(value["error"]["local"]["last_event"], "user.message");
+    assert_eq!(
+        value["error"]["remote"]["last_seq"].as_u64(),
+        Some(remote_events.len() as u64)
+    );
+    assert_eq!(value["error"]["remote"]["last_event"], "user.message");
+    assert_eq!(value["error"]["remote"]["node"], "vps");
+    assert_eq!(value["error"]["note"], "choose which side advances; no merge performed");
+    assert_eq!(
+        std::fs::read(&log_path).expect("full-pull log bytes"),
+        before_log,
+        "a JSON full divergence rewrote the existing log"
+    );
     assert_temp_clean(&env);
 }
 
@@ -1300,11 +1487,19 @@ fn session_pull_full_prefix_of_an_existing_session_keeps_the_local_conflict() {
     stream.push(b'\n');
     let stream_path = env.project_path().join("existing-full.snapshot");
     std::fs::write(&stream_path, stream).expect("existing snapshot");
+    let remote_store = vowp_store::Store::open(&vowp_store::NodePaths::new(remote.home.path())).expect("remote store");
+    let remote_row = remote_store.require_session(&source_id).expect("remote source row");
+    let show_json = serde_json::to_string(&remote_row).expect("session JSON");
+    drop(remote_store);
     // A prefix is resolved by the manifest, so the local present-id check runs while the
-    // source stream is still open; the deliberate abort must not mask the conflict.
+    // source stream is still open; the deliberate abort must not mask the conflict. The
+    // report's read-only `session show` gets the source row instead of the snapshot.
     install_ssh(
         &remote,
-        &format!("#!/bin/sh\ncat '{}'\nexec sleep 30\n", stream_path.display()),
+        &format!(
+            "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  *show*) printf '%s\\n' '{show_json}'; exit 0;;\nesac\ncat '{}'\nexec sleep 30\n",
+            stream_path.display()
+        ),
     );
     let prefix = &source[..10];
     let output = run_cli(&env, &remote, &["session", "pull", "--full", "vps", prefix]);
@@ -1314,10 +1509,14 @@ fn session_pull_full_prefix_of_an_existing_session_keeps_the_local_conflict() {
         "a present-id full pull must conflict: {}",
         output_text(&output.stderr)
     );
+    let stderr = output_text(&output.stderr);
     assert!(
-        output_text(&output.stderr).contains("already exists"),
-        "the conflict was not explained: {}",
-        output_text(&output.stderr)
+        stderr.contains(&format!("session {source} exists locally and on vps")),
+        "the divergence was not named: {stderr}"
+    );
+    assert!(
+        stderr.contains("choose which side advances; no merge performed"),
+        "the manual-choice note is missing: {stderr}"
     );
     assert_eq!(
         std::fs::read(local_paths.log_path(&source_id)).expect("full-pull log bytes"),

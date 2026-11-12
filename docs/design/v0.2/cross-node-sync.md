@@ -36,8 +36,9 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
   it copies `sessions/<id>/` (log, blobs, capsules, `adapters.json`) with a manifest, checksums and
   a 1 GiB cap, then runs `vowp reindex`; the full log is preserved rather than the bundle's capsule
   + tail.
-- **Divergence reporting, never a silent merge.** If both sides advanced the same session, report
-  the two heads and require an explicit choice.
+- **Divergence reporting, never a silent merge.** Landed in the fourth slice below for
+  `--same-id` and `--full`: if both sides advanced the same session, report the two heads and
+  require an explicit choice. Automatic merge and a force flag remain out of scope.
 - **Daemon transport.** The optional second transport after the v0.3 HTTP API exists. SSH stays the
   only v0.2/v0.3 transport until then.
 
@@ -63,10 +64,11 @@ not move it; you move the executor. The bundle is the escape hatch, not the ever
 
 1. **Child vs same id.** The v0.1 child rule is still the default. The second slice adds an
    explicit `--same-id` mode: it preserves the origin id only when it is absent locally, refuses a
-   duplicate, and treats a `reindex` event-id collision as a conflict. An automatic choice between
-   the two modes is still open; divergence needs the two-head report below.
+   duplicate, and treats a `reindex` event-id collision as a conflict. The fourth slice reports the
+   two heads on a duplicate instead of a bare refusal. An automatic choice between the two modes
+   is still open.
 2. **Direction.** Explicit `pull`/`push` first; a bidirectional `session sync` only with a visible
-   divergence report. Never guess a merge.
+   divergence report (now implemented for explicit pulls, fourth slice). Never guess a merge.
 3. **Blobs.** The full pull refuses a session whose declared file sizes exceed the 1 GiB limit
    before copying anything; there is no partial copy and no "blob unavailable" placeholder. A
    progress display and a configurable limit remain open.
@@ -120,10 +122,10 @@ The tests are `same_id_import_keeps_the_origin_id_without_a_parent`,
 `session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import`.
 
 Still out of scope for this slice: directory copy (landed in the third slice below), divergence
-reporting (two heads), merge, bidirectional sync, `session push`, lease interaction and offline
-queueing. A same-id pull is still a one-way snapshot; the source is neither modified nor locked.
-The bundle carries only the replayable tail, so the local log is a partial copy even though it
-keeps the origin id.
+reporting (landed in the fourth slice below), merge, bidirectional sync, `session push`, lease
+interaction and offline queueing. A same-id pull is still a one-way snapshot; the source log is
+not locked. The bundle carries only the replayable tail, so the local log is a partial copy even
+though it keeps the origin id.
 
 ## Third v0.3 slice (implemented)
 
@@ -164,6 +166,34 @@ bundle tail, blob, capsule, `adapters.json`, manifest verification and `vowp rei
 `session_dir_manifest_rejects_traversal_and_reserved_paths`. The default child pull remains
 `session_pull_imports_a_child_and_prints_both_ids`.
 
-Still out of scope: divergence reporting (two heads), merge, bidirectional sync, `session push`,
+Still out of scope: divergence reporting (landed in the fourth slice below), merge, bidirectional
+sync, `session push`, live lease migration, a daemon transport, offline queueing, a progress
+display, blob deduplication and a configurable size limit.
+
+## Fourth v0.3 slice (implemented)
+
+`vowp session pull --same-id` and `vowp session pull --full` now report divergence instead of a
+bare "already exists" refusal when the origin id is present locally. The bundle and directory
+paths are both checked before any local session file, row or index entry is written.
+
+The human report names the local head (last log seq, last event type/timestamp, state and executor
+where available) and the remote head (bundle tail seq/event/timestamp, or the source's read-only
+`session show --json --events 1` for the full path because a directory manifest has no log
+position), then prints `choose which side advances; no merge performed` and exits 4. `--json`
+writes one stable document:
+`{"error":{"kind":"conflict","code":"session_divergence","message","hint","node",
+"source_session","local","remote","note"}}`; each head has `session`, `node`, `last_seq`,
+`last_event`, `last_event_at`, `state`, `executor` and `updated_at`. The local log, manifest and
+row are untouched, the full stream is aborted before staging, and no token, cwd or home path is
+printed. The choice is manual: delete or export one side, then pull again. There is no
+force/overwrite flag and no merge.
+
+Tests: `session_pull_same_id_reports_divergence_without_mutating_it`,
+`session_pull_full_reports_divergence_without_mutating_it` and
+`session_pull_full_prefix_of_an_existing_session_keeps_the_local_conflict`, plus the unchanged
+empty-local and default-child tests. Store tests cover `SessionLogReader::head`; the core test
+covers the bundle head and its compacted-bundle case.
+
+Still out of scope: automatic merge, a force/overwrite flag, bidirectional sync, `session push`,
 live lease migration, a daemon transport, offline queueing, a progress display, blob deduplication
 and a configurable size limit.

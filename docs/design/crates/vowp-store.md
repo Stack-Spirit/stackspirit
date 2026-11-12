@@ -337,9 +337,15 @@ impl SessionLog {
 impl Drop for SessionLog { /* best-effort sync(), then release the lock file */ }
 pub struct AppendedEvent { pub envelope: EventEnvelope, pub byte_offset: u64, pub byte_len: u64 }
 
+/// Last complete event of a log, used by the divergence report.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogHead { pub last_seq: u64, pub event_type: Option<EventType>, pub ts: Option<Timestamp> }
+
 pub struct SessionLogReader { /* path, BlobStore */ }
 impl SessionLogReader {
     pub fn last_seq(&self) -> Result<u64, StoreError>;
+    /// Last seq plus the last event's type/timestamp, in one read; empty log => `LogHead::default()`.
+    pub fn head(&self) -> Result<LogHead, StoreError>;
     pub fn read_all(&self) -> Result<Vec<EventEnvelope>, StoreError>;
     pub fn read_from(&self, after_seq: u64, limit: Option<usize>) -> Result<Vec<EventEnvelope>, StoreError>;   // seq > after_seq
     pub fn tail(&self, n: usize) -> Result<Vec<EventEnvelope>, StoreError>;                                  // last n, ascending

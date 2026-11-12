@@ -16,12 +16,12 @@ use time::{OffsetDateTime, macros::format_description};
 use vowp_core::session::bundle::{self, ImportMode};
 use vowp_core::session::importer::{ImportCursor, import_file, line_uuid};
 use vowp_core::session::remote::{BeginTurn, IngestGrant, IngestSession, begin_turn};
-use vowp_core::session::service::SessionService;
+use vowp_core::session::service::{SessionHead, SessionService, local_head};
 use vowp_core::surface::native::{TranscriptEntry, TranscriptKind};
 use vowp_protocol::{
     Actor, AssistantMessage, AssistantReasoning, AttachAction, CapsuleTrigger, Cost, CostEvent, CostSource, EventBody,
-    EventEnvelope, EventSource, Executor, ExecutorRef, HarnessKind, NewSession, NodeName, RunPurpose, Session,
-    SessionId, SessionRole, SessionState, Switch, SwitchEvent, SwitchId, SwitchReason, SwitchState, Timestamp,
+    EventEnvelope, EventSource, EventType, Executor, ExecutorRef, HarnessKind, NewSession, NodeName, RunPurpose,
+    Session, SessionId, SessionRole, SessionState, Switch, SwitchEvent, SwitchId, SwitchReason, SwitchState, Timestamp,
     ToolCall, ToolResult, UserMessage,
 };
 use vowp_store::reindex::reindex;
@@ -366,6 +366,13 @@ fn pull(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionPullArgs) -> Result<i32
     let staged = StagedBundle::write(&run.stdout)?;
     let bundle = bundle::from_json(&staged.read()?)?;
     let source = bundle.session.id.clone();
+    // A same-id pull never overwrites: when the id is already local, report both heads
+    // and let the operator choose a side before anything is imported.
+    if args.same_id && local_session_present(ctx, &source)? {
+        let local = local_head(ctx.deps(), &source)?;
+        let remote = bundle::head(&bundle);
+        return report_divergence(ctx, io, &node, &source, &local, &remote);
+    }
     let mode = if args.same_id {
         ImportMode::SameId
     } else {
@@ -436,14 +443,9 @@ fn pull_full(
     target: &str,
     args: &SessionPullArgs,
 ) -> Result<i32, CliError> {
-    // A full id can be refused before contacting the source; a prefix is resolved by the
-    // remote manifest and checked again below.
-    if let Ok(id) = SessionId::parse(&args.session)
-        && local_session_present(ctx, &id)?
-    {
-        return Err(full_exists(&id));
-    }
-
+    // The source manifest resolves a prefix and names the exact origin. A present local id
+    // is reported with both heads after the manifest arrives; the snapshot is not copied
+    // into the local session store.
     let mut remote = remote_prefix(ctx);
     remote.extend([
         "session".to_owned(),
@@ -485,7 +487,15 @@ fn pull_full(
 
     let origin = manifest.origin.clone();
     if local_session_present(ctx, &origin)? {
-        return finish_stream_error(io, stream, full_exists(&origin));
+        // Stop the snapshot stream before it is copied anywhere, then read the source's
+        // head with a cheap read-only command. Nothing local is written.
+        let exit = stream.abort()?;
+        if exit.code != 0 {
+            return relay_remote_exit(io, exit);
+        }
+        let local = local_head(ctx.deps(), &origin)?;
+        let remote = remote_full_head(ctx, target, &origin)?;
+        return report_divergence(ctx, io, node, &origin, &local, &remote);
     }
     let bytes = manifest.total_bytes();
     if bytes > SESSION_DIR_MAX_BYTES {
@@ -594,6 +604,174 @@ fn full_exists(id: &SessionId) -> CliError {
     CliError::Conflict(format!(
         "session {id} already exists locally; --full refuses to overwrite"
     ))
+}
+
+/// Reads the source head for a full-pull divergence report.
+///
+/// The directory manifest names the origin but carries no log position, so the source's
+/// existing read-only `session show --json --events 1` supplies its last seq, event,
+/// state and executor. This does not copy the directory and changes nothing.
+fn remote_full_head(ctx: &Ctx, target: &str, origin: &SessionId) -> Result<SessionHead, CliError> {
+    let mut remote = remote_prefix(ctx);
+    remote.extend([
+        "--json".to_owned(),
+        "session".to_owned(),
+        "show".to_owned(),
+        "--events".to_owned(),
+        "1".to_owned(),
+        origin.to_string(),
+    ]);
+    let run = run_remote_capture(target, &remote, None)?;
+    if run.code != 0 {
+        return Err(CliError::Remote(format!(
+            "remote session show for {origin} failed with exit {}: {}",
+            run.code,
+            run.stderr.trim()
+        )));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Show {
+        #[serde(flatten)]
+        session: Session,
+        #[serde(default)]
+        events: Vec<EventEnvelope>,
+    }
+    let show: Show = serde_json::from_str(&run.stdout)
+        .map_err(|error| CliError::Remote(format!("remote printed an invalid session document: {error}")))?;
+    if show.session.id != *origin {
+        return Err(CliError::Remote(format!(
+            "remote resolved session {} but the manifest named {origin}",
+            show.session.id
+        )));
+    }
+    Ok(SessionHead::from_session(&show.session, show.events.last()))
+}
+
+/// The stable JSON code for a pull whose id exists on both sides.
+const DIVERGENCE_CODE: &str = "session_divergence";
+
+/// The manual-choice note printed with a divergence report.
+const DIVERGENCE_NOTE: &str = "choose which side advances; no merge performed";
+
+/// The exit code for a divergence report: the conflict code from `cli.md` §1.1.
+const DIVERGENCE_EXIT: i32 = 4;
+
+/// JSON shape for a divergent pull.
+#[derive(Debug, serde::Serialize)]
+struct DivergenceOutput {
+    error: DivergenceError,
+}
+
+/// The `error` document a divergent pull prints under `--json`.
+#[derive(Debug, serde::Serialize)]
+struct DivergenceError {
+    kind: &'static str,
+    code: &'static str,
+    message: String,
+    hint: &'static str,
+    node: NodeName,
+    source_session: SessionId,
+    local: HeadOutput,
+    remote: HeadOutput,
+    note: &'static str,
+}
+
+/// One head in a divergence report.
+#[derive(Debug, serde::Serialize)]
+struct HeadOutput {
+    session: SessionId,
+    node: NodeName,
+    last_seq: u64,
+    last_event: Option<EventType>,
+    last_event_at: Option<Timestamp>,
+    state: Option<SessionState>,
+    executor: Option<String>,
+    updated_at: Option<Timestamp>,
+}
+
+impl HeadOutput {
+    /// Converts a collected head into its JSON form.
+    fn from_head(head: &SessionHead) -> Self {
+        Self {
+            session: head.session_id.clone(),
+            node: head.node.clone(),
+            last_seq: head.last_seq,
+            last_event: head.last_event,
+            last_event_at: head.last_event_at,
+            state: head.state,
+            executor: head.executor.as_ref().map(ToString::to_string),
+            updated_at: head.updated_at,
+        }
+    }
+}
+
+/// Prints a divergence report and returns its conflict exit code.
+///
+/// This is an error path, but it owns the whole document: the generic error renderer only
+/// carries `kind`, `message` and `hint`, and the report must expose both heads with one
+/// stable shape. Nothing is written to the local session store.
+fn report_divergence(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    node: &NodeName,
+    source: &SessionId,
+    local: &SessionHead,
+    remote: &SessionHead,
+) -> Result<i32, CliError> {
+    let message = format!("session {source} exists locally and on {node}; refusing to overwrite or merge");
+    let hint = "delete or export one side, then pull again";
+    // The source row names its own node; the operator knows it by the local registry name.
+    let remote = SessionHead {
+        node: node.clone(),
+        ..remote.clone()
+    };
+    if ctx.json() {
+        print_json(
+            io,
+            &DivergenceOutput {
+                error: DivergenceError {
+                    kind: "conflict",
+                    code: DIVERGENCE_CODE,
+                    message,
+                    hint,
+                    node: node.clone(),
+                    source_session: source.clone(),
+                    local: HeadOutput::from_head(local),
+                    remote: HeadOutput::from_head(&remote),
+                    note: DIVERGENCE_NOTE,
+                },
+            },
+        )?;
+    } else {
+        writeln!(io.err(), "vowp: {message}")?;
+        writeln!(io.err(), "local:  {}", head_line(local))?;
+        writeln!(io.err(), "remote: {}", head_line(&remote))?;
+        writeln!(io.err(), "{DIVERGENCE_NOTE}")?;
+        writeln!(io.err(), "hint: {hint}")?;
+    }
+    Ok(DIVERGENCE_EXIT)
+}
+
+/// Renders one head as a single human line, without the session cwd or any secret.
+fn head_line(head: &SessionHead) -> String {
+    let last = match (head.last_event, head.last_event_at) {
+        (Some(event), Some(ts)) => format!("{event} at {}", ts.as_rfc3339()),
+        (Some(event), None) => event.to_string(),
+        (None, _) => "no readable log event".to_owned(),
+    };
+    format!(
+        "{} on {}: seq {}, last {}, state {}, executor {}",
+        head.session_id,
+        head.node,
+        head.last_seq,
+        last,
+        head.state.map(state_name).unwrap_or("-"),
+        head.executor
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "-".to_owned())
+    )
 }
 
 /// Upper bound on one manifest line; larger streams are not trusted.

@@ -268,8 +268,8 @@ origin session id instead of creating a child. The default import and pull paths
    `{"node","source_session","same_id_session"}`.
 
 Out of scope for this slice: directory copy of `sessions/<id>/` (see §6.6), divergence reporting
-(two heads), merge, bidirectional sync, `session push`, lease interaction and an offline retry
-queue.
+(two heads, see §6.7), merge, bidirectional sync, `session push`, lease interaction and an offline
+retry queue.
 
 ### 6.6 Full directory pull (v0.3 third slice)
 
@@ -318,9 +318,50 @@ Named tests: `session_pull_full_imports_the_origin_id_with_the_full_log`,
 `session_dir_manifest_refuses_a_directory_over_the_size_cap` and
 `session_dir_manifest_rejects_traversal_and_reserved_paths`.
 
-Still out of scope: divergence reporting (two heads), merge, bidirectional sync, `session push`,
-live lease migration, a daemon transport, offline queueing, a progress display, blob deduplication
-and a CLI size-limit flag.
+Still out of scope: divergence reporting (two heads, see §6.7), merge, bidirectional sync,
+`session push`, live lease migration, a daemon transport, offline queueing, a progress display,
+blob deduplication and a CLI size-limit flag.
+
+### 6.7 Divergence report (v0.3 fourth slice)
+
+`vowp session pull --same-id` and `vowp session pull --full` report a divergence when the origin
+id is present locally instead of overwriting, silently refusing or merging. The default child pull
+and the empty-local same-id/full success paths are unchanged.
+
+1. The check runs after the bundle or directory manifest has been verified but before any local
+   session file, row or index entry is written. The full path aborts the snapshot stream at that
+   point; it does not stage, copy, rename or reindex anything.
+2. The report names both heads. The local head is read from the local index row and `log.jsonl`:
+   last seq, last event type and timestamp, state and executor when the row exists. A compacted
+   local session reports the row's `last_seq` with no last event. The remote head comes from the
+   bundle tail (seq, event type, timestamp) or, for a full pull, from the source's read-only
+   `session show --json --events 1` because a `vowp-session-dir-v1` manifest carries no log
+   position. `vowp-store::session_log::SessionLogReader::head` supplies the local log position.
+3. Human output writes a `local:` and a `remote:` line plus the note
+   `choose which side advances; no merge performed`, and exits 4 (conflict). `--json` writes one
+   stable document: `{"error":{"kind":"conflict","code":"session_divergence","message","hint",
+   "node","source_session","local","remote","note"}}`, where each head carries `session`, `node`,
+   `last_seq`, `last_event`, `last_event_at`, `state`, `executor` and `updated_at` (nullable).
+   Neither form prints a token, cwd or home path.
+4. The explicit choice is manual and outside this slice: delete or export one side, then pull
+   again. There is no force/overwrite flag and no merge. A bundle export still writes its usual
+   export capsule on the source; the directory export and the head read take no lock and write
+   nothing.
+
+Tests: `session_pull_same_id_reports_divergence_without_mutating_it` and
+`session_pull_full_reports_divergence_without_mutating_it` (both sides advanced, both heads,
+human and JSON shape, unchanged local log/manifest/row, clean temp directory),
+`session_pull_full_prefix_of_an_existing_session_keeps_the_local_conflict`, plus the existing
+empty-local success tests `session_pull_same_id_imports_the_origin_id_without_a_parent`,
+`session_pull_full_imports_the_origin_id_with_the_full_log` and the default child test
+`session_pull_imports_a_child_and_prints_both_ids`. Store tests are
+`session_log_head_reports_the_last_complete_event` and
+`session_log_head_is_empty_for_an_empty_log`; the core test is
+`bundle_head_names_the_source_row_and_last_tail_event` (and its compacted-bundle case).
+
+Still out of scope: automatic merge, a force/overwrite flag, bidirectional sync, `session push`,
+live lease migration, a daemon transport, offline queueing, a progress display and a configurable
+size limit.
 
 ## 7. `vowp session watch` importer
 

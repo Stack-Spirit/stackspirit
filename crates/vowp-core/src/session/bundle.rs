@@ -29,7 +29,7 @@ use crate::deps::Deps;
 use crate::error::CoreError;
 use crate::session::capsule::CapsuleWriter;
 use crate::session::seed::seed_prompt;
-use crate::session::service::SessionService;
+use crate::session::service::{SessionHead, SessionService};
 
 /// The only bundle format this build reads and writes.
 pub const BUNDLE_FORMAT: &str = "vowp-bundle-v1";
@@ -220,6 +220,20 @@ pub fn from_json(text: &str) -> Result<Bundle, CoreError> {
     let bundle: Bundle = serde_json::from_str(text).map_err(json_error)?;
     bundle.validate()?;
     Ok(bundle)
+}
+
+/// Returns the source head a bundle reports for a divergence decision.
+///
+/// The head's sequence number, event type and timestamp come from the last replayable tail
+/// event; state and executor come from the exported row. A compacted bundle has an empty
+/// tail, so its row still supplies `last_seq` and `updated_at` and there is no last event.
+pub fn head(bundle: &Bundle) -> SessionHead {
+    let mut head = SessionHead::from_session(&bundle.session, bundle.tail.last());
+    head.node = bundle.source_node.clone();
+    if let Some(last) = bundle.tail.last() {
+        head.last_seq = last.seq;
+    }
+    head
 }
 
 /// How an import chooses the target id and parent.
@@ -1159,6 +1173,37 @@ mod tests {
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
         assert!(base64_decode("a").is_err());
         assert!(base64_decode("****").is_err());
+    }
+
+    #[test]
+    fn bundle_head_names_the_source_row_and_last_tail_event() {
+        let source = SessionId::new();
+        let (bundle, _user) = test_bundle(&source);
+
+        let head = head(&bundle);
+        assert_eq!(head.session_id, source);
+        assert_eq!(head.node, bundle.source_node);
+        assert_eq!(head.last_seq, 3);
+        assert_eq!(head.last_event, Some(EventType::AssistantMessage));
+        assert_eq!(head.last_event_at, Some(ts()));
+        assert_eq!(head.state, Some(SessionState::Idle));
+        assert_eq!(head.executor, Some(executor()));
+        assert_eq!(head.updated_at, Some(ts()));
+    }
+
+    #[test]
+    fn bundle_head_of_a_compacted_bundle_has_no_tail_event() {
+        let source = SessionId::new();
+        let (mut bundle, _user) = test_bundle(&source);
+        bundle.tail.clear();
+        bundle.compacted_at = Some(ts());
+        bundle.checksum = checksum(&bundle).expect("checksum");
+
+        let head = head(&bundle);
+        assert_eq!(head.last_seq, 3, "the exported row still names the last seq");
+        assert_eq!(head.last_event, None);
+        assert_eq!(head.last_event_at, None);
+        assert_eq!(head.updated_at, Some(ts()));
     }
 
     #[test]

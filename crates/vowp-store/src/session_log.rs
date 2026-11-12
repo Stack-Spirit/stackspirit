@@ -21,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{
-    Actor, BLOB_SPILL_BYTES, Clock, EventBody, EventEnvelope, EventIndexRow, EventSource, SessionId, Timestamp,
+    Actor, BLOB_SPILL_BYTES, Clock, EventBody, EventEnvelope, EventIndexRow, EventSource, EventType, SessionId,
+    Timestamp,
 };
 
 use crate::blobs::BlobStore;
@@ -66,6 +67,20 @@ impl VerifyReport {
     pub fn is_ok(&self) -> bool {
         self.problems.is_empty() && self.torn_tail_bytes == 0
     }
+}
+
+/// The last complete event in a session log.
+///
+/// A divergence report needs the log position and the last event's type and time without
+/// reading or indexing the whole session twice.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogHead {
+    /// Sequence number of the last event; 0 for an empty log.
+    pub last_seq: u64,
+    /// Type of the last event, when the log has one.
+    pub event_type: Option<EventType>,
+    /// Timestamp of the last event, when the log has one.
+    pub ts: Option<Timestamp>,
 }
 
 /// What [`SessionLog::open`] found and repaired; all zero after [`SessionLog::create`].
@@ -398,6 +413,21 @@ impl SessionLogReader {
             last = event?.envelope.seq;
         }
         Ok(last)
+    }
+
+    /// Returns the last sequence number and the last event's type and timestamp.
+    ///
+    /// Reads the log once, like [`Self::last_seq`], but keeps the last complete event so a
+    /// caller can report a session head. An empty log yields [`LogHead::default`].
+    pub fn head(&self) -> Result<LogHead, StoreError> {
+        let mut head = LogHead::default();
+        for event in self.iter()? {
+            let envelope = event?.envelope;
+            head.last_seq = envelope.seq;
+            head.event_type = Some(envelope.event_type);
+            head.ts = Some(envelope.ts);
+        }
+        Ok(head)
     }
 
     /// Reads every complete event in file order.
@@ -1397,6 +1427,55 @@ mod tests {
         log.sync().expect("sync");
         drop(log);
         (dir, paths, id)
+    }
+
+    #[test]
+    fn session_log_head_reports_the_last_complete_event() {
+        let (_dir, paths, id) = snapshot_setup();
+        let log = SessionLog::open(&paths, &id, Arc::new(FakeClock::at(Timestamp::now()))).expect("log");
+        let appended = log
+            .append(NewEvent {
+                actor: Actor::User,
+                source: EventSource {
+                    harness: HarnessKind::Opencode,
+                    model: None,
+                    node: None,
+                    native_session_id: None,
+                },
+                body: EventBody::UserMessage(vowp_protocol::UserMessage {
+                    text: "advance the local side".to_owned(),
+                    attachments: Vec::new(),
+                    note: None,
+                }),
+                raw: None,
+                ts: None,
+            })
+            .expect("user message");
+        log.sync().expect("sync");
+        drop(log);
+
+        let reader = SessionLog::open_read(&paths, &id).expect("reader");
+        let head = reader.head().expect("head");
+        assert_eq!(head.last_seq, appended.envelope.seq);
+        assert_eq!(head.event_type, Some(EventType::UserMessage));
+        assert_eq!(head.ts, Some(appended.envelope.ts));
+        assert_eq!(reader.last_seq().expect("last seq"), head.last_seq);
+    }
+
+    #[test]
+    fn session_log_head_is_empty_for_an_empty_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = NodePaths::new(dir.path().join("node"));
+        paths.ensure().expect("paths");
+        let id = SessionId::new();
+        let log = SessionLog::create(&paths, &id, Arc::new(FakeClock::at(Timestamp::now()))).expect("log");
+        drop(log);
+
+        let head = SessionLog::open_read(&paths, &id)
+            .expect("reader")
+            .head()
+            .expect("head");
+        assert_eq!(head, LogHead::default());
     }
 
     #[test]

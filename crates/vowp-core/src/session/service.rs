@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use vowp_protocol::{
     Actor, AttachAction, CancelToken, Capsule, CapsuleEvent, CapsuleTrigger, CostEvent, ErrorEvent, ErrorKind,
-    EventBody, EventEnvelope, EventSource, Executor, HarnessKind, Limit, LimitEvent, LimitRowKind, NewSession,
-    NodeName, Run, RunOutcome, ServiceError, Session, SessionExecutor, SessionId, SessionOps, SessionState, Switch,
-    SwitchRequest, Timestamp, TurnEnded, TurnRequest, TurnResult, TurnStarted, UserMessage,
+    EventBody, EventEnvelope, EventSource, EventType, Executor, HarnessKind, Limit, LimitEvent, LimitRowKind,
+    NewSession, NodeName, Run, RunOutcome, ServiceError, Session, SessionExecutor, SessionId, SessionOps, SessionState,
+    Switch, SwitchRequest, Timestamp, TurnEnded, TurnRequest, TurnResult, TurnStarted, UserMessage,
 };
 use vowp_store::session_files::{AdapterMapping, add_adapter_mapping, write_capsule_file};
 use vowp_store::session_log::{AppendedEvent, NewEvent, SessionLog, index_row};
@@ -43,6 +43,77 @@ pub struct RecoveryReport {
     pub runs_closed: u32,
     /// Session locks found and cleared (always zero: locks are files released with the process).
     pub sessions_unlocked: u32,
+}
+
+/// The last log position and index metadata for one side of a divergence report.
+///
+/// A pull that finds the same session id on both nodes reports these two heads instead of
+/// overwriting, silently refusing or merging. Log fields come from `log.jsonl`; state,
+/// executor and `updated_at` come from the index row when it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHead {
+    /// Session id whose log this head describes.
+    pub session_id: SessionId,
+    /// Node that owns the log.
+    pub node: NodeName,
+    /// Last log sequence number, or the row's `last_seq` when no log remains.
+    pub last_seq: u64,
+    /// Type of the last log event, when the log has one.
+    pub last_event: Option<EventType>,
+    /// Timestamp of the last log event, when the log has one.
+    pub last_event_at: Option<Timestamp>,
+    /// Session state from the index row, when the row exists.
+    pub state: Option<SessionState>,
+    /// Current executor from the index row, when the row exists.
+    pub executor: Option<Executor>,
+    /// Row `updated_at`, when the row exists.
+    pub updated_at: Option<Timestamp>,
+}
+
+impl SessionHead {
+    /// Builds a head from an index row and the last event of its log.
+    pub fn from_session(session: &Session, last_event: Option<&EventEnvelope>) -> Self {
+        Self {
+            session_id: session.id.clone(),
+            node: session.node.clone(),
+            last_seq: session.last_seq,
+            last_event: last_event.map(|event| event.event_type),
+            last_event_at: last_event.map(|event| event.ts),
+            state: Some(session.state),
+            executor: session.executor.clone(),
+            updated_at: Some(session.updated_at),
+        }
+    }
+}
+
+/// Reads one local session's head without changing the row, log or index.
+///
+/// A missing row is allowed: a copied `sessions/<id>/` can be inspected before
+/// `vowp reindex` registers it. A missing log (a compacted session) keeps the row's
+/// `last_seq` and reports no last event.
+pub fn local_head(deps: &Deps, id: &SessionId) -> Result<SessionHead, CoreError> {
+    let store = deps.open_store()?;
+    let row = store.session(id)?;
+    let mut head = match &row {
+        Some(session) => SessionHead::from_session(session, None),
+        None => SessionHead {
+            session_id: id.clone(),
+            node: deps.node.clone(),
+            last_seq: 0,
+            last_event: None,
+            last_event_at: None,
+            state: None,
+            executor: None,
+            updated_at: None,
+        },
+    };
+    if deps.paths.log_path(id).is_file() {
+        let log = SessionLog::open_read(&deps.paths, id)?.head()?;
+        head.last_seq = log.last_seq;
+        head.last_event = log.event_type;
+        head.last_event_at = log.ts;
+    }
+    Ok(head)
 }
 
 /// The session service. Cloning shares the injected [`Deps`].

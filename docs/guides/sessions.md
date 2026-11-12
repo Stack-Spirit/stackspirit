@@ -256,30 +256,49 @@ seeded from the bundle capsule and tail.
 
 `pull --same-id` keeps the source id when it is absent locally, with no parent and the same log and
 capsule rules as `session import --same-id`. It prints `pulled session <source> from <node> with
-same id <id>`; `--json` prints `{"node","source_session","same_id_session"}`. If the id is already
-present locally the pull exits 4 and changes nothing.
+same id <id>`; `--json` prints `{"node","source_session","same_id_session"}`.
 
 `pull --full` copies the whole `sessions/<id>/` directory instead of the bundle: the full event
 log, every blob, the capsule files and `adapters.json`. It always keeps the source id (there is no
-child and `--full` cannot be combined with `--same-id`) and refuses with exit 4 when that id
-already exists locally as a session row or a session directory; the local copy is left untouched.
-The files arrive as a `vowp-session-dir-v1` manifest plus raw bytes, are written into a private
-staging directory and checked against the manifest's byte sizes and sha256 digests before the
-directory is renamed into `sessions/<id>/`. The resulting directory contains `manifest.json` for
-inspection. A failed copy, digest mismatch, corrupt log or over-cap directory leaves no final
-`sessions/<id>/` and no staging directory. `vowp reindex` then registers the session.
+child and `--full` cannot be combined with `--same-id`). The files arrive as a
+`vowp-session-dir-v1` manifest plus raw bytes, are written into a private staging directory and
+checked against the manifest's byte sizes and sha256 digests before the directory is renamed into
+`sessions/<id>/`. The resulting directory contains `manifest.json` for inspection. A failed copy,
+digest mismatch, corrupt log or over-cap directory leaves no final `sessions/<id>/` and no staging
+directory. `vowp reindex` then registers the session.
 
 The full-pull limit is 1 GiB (1 073 741 824 bytes), checked from the remote file sizes before
 anything is copied. There is no partial copy and no placeholder for missing blobs: an over-cap or
 unreadable session is refused. A compacted source has no log to copy and is refused; use the bundle
 pull for it.
 
-Both pull modes are one-way, read-only snapshots: the source is not modified or locked and no live
-lease is migrated. For `--full`, leave the source lease released or quiescent while it runs and run
-the same build on both nodes. A failed ssh/remote read, truncated stream or checksum mismatch
-leaves the local home unchanged. Push, bidirectional sync/merge, divergence reporting, live lease
-migration and an offline retry queue remain out of scope. For a local file copy use `session
-export` and `session import`.
+If `--same-id` or `--full` finds the source id already present locally, the pull does not overwrite,
+silently refuse or merge. It prints both heads and exits 4 (conflict):
+
+```text
+vowp: session 01KA… exists locally and on vps; refusing to overwrite or merge
+local:  01KA… on laptop: seq 12, last user.message at 2026-11-12T09:14:02.118Z, state idle, executor opencode:…
+remote: 01KA… on vps: seq 15, last assistant.message at 2026-11-12T09:20:41.006Z, state idle, executor claude-code:…
+choose which side advances; no merge performed
+hint: delete or export one side, then pull again
+```
+
+`--json` writes one document:
+`{"error":{"kind":"conflict","code":"session_divergence","message","hint","node",
+"source_session","local","remote","note"}}`. Each head carries `session`, `node`, `last_seq`,
+`last_event`, `last_event_at`, `state`, `executor` and `updated_at`; unavailable fields are `null`.
+The local head comes from the index row and `log.jsonl`. The remote head comes from the bundle tail;
+for `--full` it comes from the source's read-only `session show --json --events 1` because the
+directory manifest carries no log position. Neither form prints a token, cwd or home path.
+
+The choice is manual and the pull itself writes nothing locally: delete or export one side, then
+pull again. There is no force flag and no merge. Both pull modes are one-way snapshots and no live
+lease is migrated. A bundle export writes its usual export capsule on the source; the directory
+export and head read are read-only and take no lock. For `--full`, leave the source lease released
+or quiescent while it runs and run the same build on both nodes. A failed ssh/remote read,
+truncated stream or checksum mismatch leaves the local home unchanged. Push, bidirectional
+sync/merge, live lease migration and an offline retry queue remain out of scope. For a local file
+copy use `session export` and `session import`.
 
 ## Watch an interactive Claude Code session
 
