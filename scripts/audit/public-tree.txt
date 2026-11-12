@@ -41,6 +41,7 @@ allow scripts
 # --- internal build and operations material --------------------------------
 
 prune AGENTS.md
+prune vowp.toml
 prune docs/dogfood/
 prune docs/fresh-user/
 prune docs/maintainers/
