@@ -167,6 +167,9 @@ pub fn parse_verdict(report: &Report) -> Result<(Verdict, Vec<String>), CoreErro
 }
 
 /// The verifier prompt (loops.md §5.1).
+///
+/// Names the exact report file (`job.worktree` joined with `job.report`) and tells the verifier
+/// to write it with a tool instead of only printing it in chat.
 pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summary: &str) -> String {
     let mut lines = String::new();
     for result in evidence {
@@ -180,17 +183,21 @@ pub fn verify_prompt(job: &Job, brief: &str, evidence: &[GateResult], diff_summa
     if lines.is_empty() {
         lines.push_str("- (no gate evidence yet)\n");
     }
+    let worktree = job.worktree.as_deref().unwrap_or(".");
+    let report_path = PathBuf::from(worktree).join(&job.report);
     format!(
         "You are the verifier for job {job_id} of project {project}. The original brief is at {brief_path}.\n\
          The job worktree is {worktree}. The change under review: {diff}\n\
          Gate evidence for this attempt:\n{evidence}\
          Judge only against evidence and the brief; run the commands yourself; do not edit files.\n\
-         Write your report with front-matter `verdict: pass|fail` and, on fail, `findings:` as a list of concrete, checkable problems (file, command, expected, actual). Report `status: done` when you finished judging.\n\
+         Use the write tool to write the report file at {report_path}; do not only print it in chat.\n\
+         The report needs front-matter `job`, `status: done`, `branch`, `commits`, `tests`, `verdict: pass|fail` and `findings` (on fail, a list of concrete, checkable problems: file, command, expected, actual). Report `status: done` when you finished judging.\n\
          Job: {job_id}",
         job_id = job.id,
         project = job.project,
         brief_path = brief,
-        worktree = job.worktree.as_deref().unwrap_or("."),
+        worktree = worktree,
+        report_path = report_path.display(),
         evidence = lines,
         diff = diff_summary,
     )
@@ -284,5 +291,75 @@ fn summarise_evidence(evidence: &Evidence) -> String {
             ..
         } => format!("`{command}` exited {exit_code:?}; probe: {}", summarise_evidence(probe)),
         Evidence::SecretScan { hits, .. } => format!("{} secret hit(s)", hits.len()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_prompt;
+    use vowp_protocol::{Job, JobId, JobKind, JobLoop, JobState, ProjectName, Role, Timestamp};
+
+    #[test]
+    fn verify_prompt_names_the_report_file() {
+        let ts = Timestamp::parse("2026-11-12T00:00:00Z").expect("timestamp");
+        let job = Job {
+            id: JobId::parse("demo-verify-0").expect("id"),
+            project: ProjectName::parse("demo").expect("project"),
+            title: "verify demo".to_owned(),
+            kind: JobKind::Verify,
+            role: Role::Verifier,
+            profile: "verifier".to_owned(),
+            state: JobState::Running,
+            priority: 50,
+            needs: Vec::new(),
+            owns: Vec::new(),
+            reads: Vec::new(),
+            brief: ".vowp/jobs/demo-verify-0/brief.md".to_owned(),
+            report: ".vowp/jobs/demo-verify-0/report.md".to_owned(),
+            gates: Vec::new(),
+            loop_: JobLoop::default(),
+            branch: Some("job/demo".to_owned()),
+            worktree: Some("/worktrees/demo".to_owned()),
+            attempts: 0,
+            continues: 0,
+            hang_restarts: 0,
+            parked_reason: None,
+            note: String::new(),
+            created_by: "l3".to_owned(),
+            last_progress_at: None,
+            state_changed_at: ts,
+            created_at: ts,
+            updated_at: ts,
+        };
+
+        let prompt = verify_prompt(
+            &job,
+            ".vowp/jobs/demo-verify-0/brief.md",
+            &[],
+            "git diff main...job/demo",
+        );
+
+        assert!(
+            prompt.contains("/worktrees/demo/.vowp/jobs/demo-verify-0/report.md"),
+            "prompt must name the exact report path: {prompt}"
+        );
+        assert!(
+            prompt.contains("write the report file"),
+            "prompt must say to write the report file: {prompt}"
+        );
+        for field in [
+            "`job`",
+            "`status: done`",
+            "`branch`",
+            "`commits`",
+            "`tests`",
+            "`verdict: pass|fail`",
+            "`findings`",
+        ] {
+            assert!(
+                prompt.contains(field),
+                "prompt must name the front-matter field {field}: {prompt}"
+            );
+        }
     }
 }
