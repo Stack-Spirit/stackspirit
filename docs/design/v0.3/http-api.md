@@ -1,8 +1,8 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: the first read-only slice is implemented in `crates/vowp-daemon`; the rest of this
-note is design. The daemon is **not** part of v0.2 and is not wired into `vowp up` yet.
-Nothing here is implemented in v0.1.
+Status: the first read-only slice and the per-session SSE stream are implemented in
+`crates/vowp-daemon`; the rest of this note is design. The daemon is **not** part of v0.2 and
+is not wired into `vowp up` yet. Nothing here is implemented in v0.1.
 
 ## First slice (implemented)
 
@@ -17,7 +17,7 @@ zero or several are registered); reads the node name from that project's registe
 migrates or writes a home. The listener binds `127.0.0.1` only, defaults to port `0` and
 prints the bound address.
 
-Served endpoints, all `GET` and JSON:
+Served endpoints, all `GET`; every response is JSON except the SSE stream:
 
 - `/api/v1/health` — binary version, node, project, project schema version and the
   supervisor heartbeat from `<home>/heartbeat` (`null` when absent, unreadable or stopped).
@@ -30,6 +30,17 @@ Served endpoints, all `GET` and JSON:
 - `/api/v1/sessions/{id}/events?after_seq=<n>&limit=<n>` — an `EventPage` of exact stored
   `EventEnvelope` objects, in sequence order; the default limit is 200 and the cap is 1000.
   A full page's `next` is the cursor for the next `after_seq`.
+- `/api/v1/sessions/{id}/events/stream?after_seq=<n>` — a `text/event-stream` response with
+  one `event: session` frame per stored `EventEnvelope`, in sequence order and with the exact
+  stored JSON as the `data:` line. `after_seq` defaults to 0 and an invalid value is `400`;
+  an unknown session is `404` before the stream starts. An `event: heartbeat` frame with
+  `{"at":"<RFC 3339>"}` is sent every 15 seconds, including while no events are flowing.
+  The log is polled every 200 ms in bounded batches (at most 256 events per poll), so a slow
+  client applies HTTP backpressure instead of growing an unbounded queue. When the cursor can
+  no longer be served (the log was compacted away, removed or truncated behind it), the stream
+  sends one `event: resync` frame with `{"after_seq":<n>}` naming the newest readable cursor,
+  or the client's own cursor when nothing is readable, and closes; the client may reconnect
+  with that cursor. The stream is read-only and has no token, lease or poll fallback.
 - `/api/v1/inbox?state=open|answered|dismissed` — an `InboxPage` over the served project;
   `state` defaults to `open`.
 - `/api/v1/cost?by=day|job|role|provider|model&since=&until=` — the exact `vowp cost --json`
@@ -48,8 +59,10 @@ no privileged action to protect; do not add a placeholder auth layer. A token mu
 with the first write endpoint or a non-loopback listener.
 
 Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
-SSE, the cost dashboard page, nodes, capsules, the auth token, `vowp up` integration and the
-remaining browser pages. There are no placeholder routes for any of them.
+the board/global SSE stream, the browser reconnect UI, the cost dashboard page, nodes,
+capsules, the auth token, `vowp up` integration and the remaining browser pages. There are
+no placeholder routes for any of them. The per-session SSE stream is implemented; it is not
+used by the session pages yet.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -124,10 +137,11 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `unknown` or `mixed`.
 - `CostTotal { runs, usd, tokens, source, unknown_entries }` — the totals row.
 - `ApiError { error: { kind, message, hint? } }` — the same shape as `vowp --json` errors.
-- An SSE frame with `event: session` / `event: board` / `event: heartbeat` and the JSON data line.
+- An SSE frame with `event: session` / `event: heartbeat` / `event: resync` and the JSON data line.
   This is a `text/event-stream` frame, not a JSON document, so it has no schema of its own: the
-  `data:` line is an `EventEnvelope` for `session`, a `Board` for `board`, and `{ at }` for
-  `heartbeat`.
+  `data:` line is an exact `EventEnvelope` for `session`, `{ at }` for `heartbeat`, and
+  `{ after_seq }` for the one recovery `resync` frame. The later board stream reuses this frame
+  shape with `event: board` and a `Board` data line.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`
 and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the concrete page
@@ -161,20 +175,25 @@ exception above.
    id. A board stream needs a merge policy. Start with per-session SSE and board polling.
 4. **Token storage.** A random token in `<home>/api-token` (0600) or an environment variable? How is it
    rotated? Never log the value; never put it in a URL.
-5. **Backpressure.** A slow SSE client must not block the supervisor. Bound the per-client queue and
-   send a `resync` hint when the cursor falls behind.
+5. **Backpressure.** Answered for the per-session stream: each poll reads at most 256 events,
+   the response stream yields one frame at a time and lets HTTP backpressure slow the client, and
+   a cursor that falls behind a truncated log gets one `resync` frame and a clean close. The
+   board stream will need the same policy when it lands.
 
 ## First-issue-sized slice
 
 Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
 `GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions`,
-`GET /api/v1/sessions/{id}/events?after_seq=`, `GET /api/v1/inbox?state=` and
+`GET /api/v1/sessions/{id}/events?after_seq=`,
+`GET /api/v1/sessions/{id}/events/stream?after_seq=`, `GET /api/v1/inbox?state=` and
 `GET /api/v1/cost?by=&since=&until=`. It binds `127.0.0.1:0` in tests, uses a temporary store
 with jobs in several states, one running job and session, a limit, open/answered inbox items,
 cost ledger rows from every source and a checkpoint, and asserts that every JSON document
 validates against its exported schema — including `Board`, `BoardRun` and `BoardLimit` for the
-board, `InboxPage` for the inbox and `CostReport` for cost. No write endpoints and no SSE yet.
-The first-slice section above lists what is still later.
+board, `InboxPage` for the inbox and `CostReport` for cost. The SSE test uses a real loopback
+listener, a short injected heartbeat interval, exact `EventEnvelope` frame comparisons and a
+live append through `SessionLog::open`. No write endpoints and no board stream yet. The
+first-slice section above lists what is still later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

@@ -5,13 +5,17 @@
 //! or require a lock; opening per request also gives each request a fresh WAL view. The
 //! blocking SQLite and JSONL work runs on `tokio::task::spawn_blocking`.
 
+use std::convert::Infallible;
 use std::future::Future;
+use std::time::Duration;
 
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::Stream;
 use tokio::net::TcpListener;
 use vowp_core::ledger::BoardSnapshot;
 use vowp_protocol::api::{
@@ -24,6 +28,7 @@ use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, Sessi
 
 use crate::config::ProjectSelection;
 use crate::filters::{self, CostQuerySpec, EventQuery};
+use crate::stream;
 
 /// State shared by every request handler.
 #[derive(Debug, Clone)]
@@ -32,6 +37,8 @@ pub struct ApiState {
     project: ProjectName,
     node: NodeName,
     schema_version: i64,
+    stream_poll: Duration,
+    stream_heartbeat: Duration,
 }
 
 impl ApiState {
@@ -42,7 +49,34 @@ impl ApiState {
             project: selection.project.clone(),
             node: selection.node.clone(),
             schema_version: selection.schema_version,
+            stream_poll: stream::POLL_INTERVAL,
+            stream_heartbeat: stream::HEARTBEAT_INTERVAL,
         }
+    }
+
+    /// Returns this state with the SSE poll and heartbeat intervals replaced.
+    ///
+    /// The daemon uses the module defaults; integration tests shorten both so a heartbeat
+    /// assertion stays fast without changing production timing.
+    pub fn with_stream_intervals(mut self, poll: Duration, heartbeat: Duration) -> Self {
+        self.stream_poll = poll;
+        self.stream_heartbeat = heartbeat;
+        self
+    }
+
+    /// Returns the served home.
+    pub(crate) fn paths(&self) -> &NodePaths {
+        &self.paths
+    }
+
+    /// Returns the interval between SSE log polls.
+    pub(crate) fn stream_poll_interval(&self) -> Duration {
+        self.stream_poll
+    }
+
+    /// Returns the interval between SSE heartbeat frames.
+    pub(crate) fn stream_heartbeat_interval(&self) -> Duration {
+        self.stream_heartbeat
     }
 
     /// Opens the served project read-only, mapping failures onto a path-free 500.
@@ -109,22 +143,10 @@ impl ApiState {
                 return Err(ApiFailure::not_found(format!("session {id} not found")));
             }
         }
-        let reader = SessionLog::open_read(&self.paths, id).map_err(|_| {
-            ApiFailure::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorKind::Io,
-                "the session log could not be read",
-            )
-        })?;
+        let reader = SessionLog::open_read(&self.paths, id).map_err(|_| log_failure())?;
         let events = reader
             .read_from(query.after_seq, Some(query.limit as usize))
-            .map_err(|_| {
-                ApiFailure::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ErrorKind::Io,
-                    "the session log could not be read",
-                )
-            })?;
+            .map_err(|_| log_failure())?;
         let next = if query.limit > 0 && events.len() == query.limit as usize {
             events.last().map(|event| event.seq)
         } else {
@@ -135,6 +157,19 @@ impl ApiState {
             items: events,
             next,
         })
+    }
+
+    /// Verifies that `id` names a known session before the SSE response starts.
+    ///
+    /// A missing or compacted log is not an error here: the stream opens normally and its
+    /// first poll sends one `resync` frame, which is the documented recovery. Only an
+    /// unknown session is a plain `404` [`ApiError`] before streaming.
+    fn check_stream_session(&self, id: &SessionId) -> Result<(), ApiFailure> {
+        let store = self.open()?;
+        if store.session(id).map_err(|_| store_failure())?.is_none() {
+            return Err(ApiFailure::not_found(format!("session {id} not found")));
+        }
+        Ok(())
     }
 
     /// Returns the served project's registered [`VowpConfig`], filled from its registry row.
@@ -210,6 +245,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/sessions", get(sessions))
         .route("/api/v1/sessions/{id}/events", get(session_events))
+        .route("/api/v1/sessions/{id}/events/stream", get(session_events_stream))
         .route("/api/v1/inbox", get(inbox))
         .route("/api/v1/cost", get(cost))
         .fallback(unknown_endpoint)
@@ -314,6 +350,25 @@ async fn session_events(
     Ok(Json(page))
 }
 
+/// Streams one session's stored events as server-sent `session` frames.
+///
+/// The cursor is validated and the session is checked before the SSE response starts, so
+/// a bad request or an unknown session is a normal JSON [`ApiError`]. The response then
+/// carries one `session` frame per sequence number, periodic `heartbeat` frames and, when
+/// the log can no longer serve the cursor, one `resync` frame followed by a clean close.
+async fn session_events_stream(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiFailure> {
+    let id = SessionId::parse(&id).map_err(|_| ApiFailure::invalid("invalid session id"))?;
+    let after_seq = filters::event_stream_query(query.as_deref()).map_err(ApiFailure::invalid)?;
+    let checked = state.clone();
+    let check_id = id.clone();
+    blocking(move || checked.check_stream_session(&check_id)).await?;
+    Ok(stream::response(state, id, after_seq))
+}
+
 /// Returns an `ApiError` for an unknown path.
 async fn unknown_endpoint() -> ApiFailure {
     ApiFailure::not_found("unknown endpoint")
@@ -372,6 +427,15 @@ fn store_failure() -> ApiFailure {
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorKind::Db,
         "could not read the project database",
+    )
+}
+
+/// A path-free `500` for an unreadable session log.
+fn log_failure() -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Io,
+        "the session log could not be read",
     )
 }
 

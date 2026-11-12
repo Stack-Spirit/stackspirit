@@ -152,6 +152,15 @@ pub(crate) fn event_query(raw: Option<&str>) -> Result<EventQuery, String> {
     Ok(EventQuery { after_seq, limit })
 }
 
+/// Parses the per-session SSE cursor, defaulting to 0.
+pub(crate) fn event_stream_query(raw: Option<&str>) -> Result<u64, String> {
+    let pairs = pairs(raw);
+    single_value(&pairs, "after_seq")
+        .map(|value| value.parse::<u64>().map_err(|_| format!("invalid after_seq {value:?}")))
+        .transpose()
+        .map(|after_seq| after_seq.unwrap_or(0))
+}
+
 /// Parses one JSON-schema enum from its snake_case wire string.
 fn parse_enum<T: DeserializeOwned>(value: &str, what: &str) -> Result<T, String> {
     serde_json::from_value(Value::String(value.to_owned())).map_err(|_| format!("unknown {what} {value:?}"))
@@ -297,6 +306,16 @@ mod tests {
         assert!(event_query(Some("after_seq=nope")).is_err());
         assert!(event_query(Some("limit=-1")).is_err());
         assert!(event_query(Some("after_seq=18446744073709551616")).is_err());
+    }
+
+    #[test]
+    fn event_stream_query_defaults_and_rejects_bad_cursors() {
+        assert_eq!(event_stream_query(None).expect("default"), 0);
+        assert_eq!(event_stream_query(Some("after_seq=7")).expect("cursor"), 7);
+        assert_eq!(event_stream_query(Some("after_seq=0")).expect("zero"), 0);
+        assert!(event_stream_query(Some("after_seq=nope")).is_err());
+        assert!(event_stream_query(Some("after_seq=-1")).is_err());
+        assert!(event_stream_query(Some("after_seq=18446744073709551616")).is_err());
     }
 
     #[test]
