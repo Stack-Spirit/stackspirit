@@ -18,7 +18,18 @@ fn graph_ascii_and_mermaid_golden() {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
         stdout,
-        "graph TD\n    a_job[\"a-job (pending)\"]\n    b_job[\"b-job (pending)\"]\n    a_job --> b_job\n"
+        concat!(
+            "graph TD\n",
+            "    a_job[\"a-job (pending)\"]\n",
+            "    b_job[\"b-job (pending)\"]\n",
+            "    a_job --> b_job\n",
+            "    classDef running fill:#fff4d6,stroke:#b7791f,color:#744210\n",
+            "    classDef waiting fill:#e8f0fe,stroke:#3b6fb6,color:#1a3d6d\n",
+            "    classDef failed fill:#fde8e8,stroke:#b42318,color:#7a1a12\n",
+            "    classDef done fill:#e6f4ea,stroke:#2f7d4f,color:#1d4d31\n",
+            "    class a_job waiting\n",
+            "    class b_job waiting\n",
+        )
     );
 }
 
@@ -144,7 +155,18 @@ fn graph_json_mermaid_prints_only_mermaid() {
 
     let (code, stdout, stderr) = env.run(&["graph", "--json", "--mermaid"]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout, "graph TD\n    a_job[\"a-job (pending)\"]\n");
+    assert_eq!(
+        stdout,
+        concat!(
+            "graph TD\n",
+            "    a_job[\"a-job (pending)\"]\n",
+            "    classDef running fill:#fff4d6,stroke:#b7791f,color:#744210\n",
+            "    classDef waiting fill:#e8f0fe,stroke:#3b6fb6,color:#1a3d6d\n",
+            "    classDef failed fill:#fde8e8,stroke:#b42318,color:#7a1a12\n",
+            "    classDef done fill:#e6f4ea,stroke:#2f7d4f,color:#1d4d31\n",
+            "    class a_job waiting\n",
+        )
+    );
     assert!(
         serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
         "mermaid output must not be JSON: {stdout:?}"
