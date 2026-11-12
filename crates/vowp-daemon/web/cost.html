@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VOWP cost</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#16855b">
 <style>
   :root {
     color-scheme: light dark;
@@ -271,6 +273,11 @@
   refresh();
   setInterval(refresh, REFRESH_MS);
 })();
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 </script>
 </body>
 </html>

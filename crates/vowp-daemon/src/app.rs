@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -372,8 +372,8 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
 /// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox and nodes pages at `/cost`,
-/// `/inbox` and `/nodes`, plus the API under `/api/v1`. The only non-GET API route is the
-/// token-gated inbox answer write.
+/// `/inbox` and `/nodes`, the PWA manifest, icon and service worker, plus the API under
+/// `/api/v1`. The only non-GET API route is the token-gated inbox answer write.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -384,6 +384,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/cost", get(cost_page))
         .route("/inbox", get(inbox_page))
         .route("/nodes", get(nodes_page))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/sw.js", get(service_worker))
+        .route("/icon.svg", get(icon))
         .route("/api/v1/health", get(health))
         .route("/api/v1/board", get(board))
         .route("/api/v1/board/stream", get(board_stream))
@@ -490,6 +493,41 @@ const NODES_PAGE: &str = include_str!("../web/nodes.html");
 /// add, remove or probe control and no SSH or write path is offered.
 async fn nodes_page() -> Html<&'static str> {
     Html(NODES_PAGE)
+}
+
+/// The embedded PWA manifest.
+const MANIFEST: &str = include_str!("../web/manifest.webmanifest");
+
+/// Serves the PWA manifest as `application/manifest+json`.
+async fn manifest() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/manifest+json")], MANIFEST)
+}
+
+/// The embedded PWA icon.
+const ICON: &str = include_str!("../web/icon.svg");
+
+/// Serves the SVG icon used by the manifest and the page chrome.
+async fn icon() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], ICON)
+}
+
+/// The embedded hand-written service worker.
+const SERVICE_WORKER: &str = include_str!("../web/sw.js");
+
+/// Serves the service worker at the root scope and tells the browser not to cache it.
+///
+/// `Service-Worker-Allowed: /` lets a worker script served from any path control the whole
+/// origin; `Cache-Control: no-cache` makes the browser revalidate the script so a changed
+/// shell cache version is picked up on the next page load.
+async fn service_worker() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (HeaderName::from_static("service-worker-allowed"), "/"),
+        ],
+        SERVICE_WORKER,
+    )
 }
 
 /// Returns the health document for the served project.

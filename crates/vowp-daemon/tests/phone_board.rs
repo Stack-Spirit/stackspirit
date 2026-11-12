@@ -1,10 +1,10 @@
 //! Hermetic phone-board tests: a temporary home, a real loopback listener and real GETs.
 //!
 //! The phone board is static HTML that fetches `/api/v1/board`, so these tests pin the
-//! narrow-viewport card markup, the labels an operator reads, the `<noscript>` fallback and
-//! the absence of paths or secrets. The same fixture proves the API fields the page
-//! renders: one running job, one limit with a reset time and an unknown cost total. No
-//! browser, Node runtime or real home is involved.
+//! narrow-viewport card markup, the labels an operator reads, the PWA manifest and
+//! service-worker hooks, the `<noscript>` fallback and the absence of paths or secrets. The
+//! same fixture proves the API fields the page renders: one running job, one limit with a
+//! reset time and an unknown cost total. No browser, Node runtime or real home is involved.
 
 mod support;
 
@@ -51,6 +51,10 @@ fn phone_board_serves_the_card_page_and_the_fixture_board() {
         "Last updated",
         "<noscript>The board requires JavaScript.</noscript>",
         "@media (max-width: 360px)",
+        "<link rel=\"manifest\" href=\"/manifest.webmanifest\">",
+        "<meta name=\"theme-color\" content=\"#16855b\">",
+        "if ('serviceWorker' in navigator)",
+        "navigator.serviceWorker.register('/sw.js')",
     ] {
         assert!(page.body.contains(needle), "page is missing {needle:?}");
     }
@@ -68,15 +72,7 @@ fn phone_board_serves_the_card_page_and_the_fixture_board() {
     let home = fixture.paths.root().display().to_string();
     assert!(!page.body.contains(&home), "page leaked the home path");
     let lowered = page.body.to_ascii_lowercase();
-    for forbidden in [
-        "token",
-        "secret",
-        "api_key",
-        "apikey",
-        "service worker",
-        "serviceworker",
-        "manifest",
-    ] {
+    for forbidden in ["token", "secret", "api_key", "apikey"] {
         assert!(
             !lowered.contains(forbidden),
             "phone board must not mention {forbidden:?}"

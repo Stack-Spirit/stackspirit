@@ -1,8 +1,9 @@
 # v0.3 — web / PWA window
 
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
-board, session, capsule, cost, inbox and nodes pages and the token-gated inbox answer are
-implemented; the rest of this note is design. v0.1 has no browser UI and no listening socket.
+board, session, capsule, cost, inbox and nodes pages, the token-gated inbox answer and the PWA
+manifest/service-worker shell are implemented; the rest of this note is design. v0.1 has no
+browser UI and no listening socket.
 
 ## Goal
 
@@ -42,12 +43,13 @@ CLI (the queue has no switch variant).
 ## Shape
 
 - TypeScript, built to static assets and served by the daemon; no runtime Node dependency. The
-  implemented first slice deliberately skips the build step: it is one hand-written
-  `index.html` with inline CSS and vanilla JavaScript.
-- Routes: `/` (board), `/sessions`, `/sessions/:id`, `/sessions/:id/capsules/:capsuleId`,
-  `/nodes`, `/cost`, `/inbox`. The first slice implements all of them, with `/nodes` a
-  read-only node list and no node mutation or SSH path.
-- PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
+  implemented slices deliberately skip the build step: every page is a hand-written HTML shell
+  with inline CSS and vanilla JavaScript.
+- Routes: `/` (board; `/board` is its phone alias), `/sessions`, `/sessions/:id`,
+  `/sessions/:id/capsules/:capsuleId`, `/nodes`, `/cost`, `/inbox`. All are implemented, with
+  `/nodes` a read-only node list and no node mutation or SSH path.
+- PWA manifest and a small hand-written service worker; cache only the static shell, never cache
+  event data as authoritative.
 - The write token is kept in `sessionStorage`, never in a URL. The inbox page shows a one-field
   unlock panel when no token is stored; a `401` clears it and shows the panel again. Rotating the
   token means restarting the daemon with a new `VOWP_API_TOKEN`, then unlocking again.
@@ -161,11 +163,38 @@ no add, remove or probe control and no SSH, exec or write path. It links to the 
 cost and inbox, carries `<noscript>The nodes page requires JavaScript.</noscript>`, and never
 prints a home path, token or provider secret.
 
-There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
+## PWA shell (implemented)
+
+`vowp-daemon` serves the installable shell assets, embedded with `include_str!` like the pages:
+
+- `GET /manifest.webmanifest` (`application/manifest+json`) names the app, sets
+  `start_url` and `scope` to `/`, uses `display: standalone`, theme colour `#16855b`, background
+  colour `#f6f5f1` and one `image/svg+xml` icon at `/icon.svg`.
+- `GET /icon.svg` (`image/svg+xml`) is a static SVG mark.
+- `GET /sw.js` (`text/javascript`) is sent with `Cache-Control: no-cache` and
+  `Service-Worker-Allowed: /`, so it can control the root scope and updates are revalidated.
+
+The service worker is hand-written with no build step. On install it opens cache
+`vowp-shell-v1` and caches a bounded `SHELL` list: `/`, `/board`, `/sessions`, `/cost`,
+`/inbox`, `/nodes`, `/manifest.webmanifest` and `/icon.svg`. On activate it deletes every other
+cache version. The fetch handler bypasses `/api/` and any `/stream` URL (and any request whose
+`Accept` names `text/event-stream`) entirely: those requests go to the network only and are never
+cached. Navigations are network-first with a cached shell fallback, and other same-origin GET
+shell/assets are cache-first with a background network update. Dynamic session and capsule
+navigations are therefore read live and only fall back to the cached session or board shell when
+the daemon is unreachable. API responses, SSE frames and event data are never cached as
+authoritative data; the pages keep their existing error states offline. Offline data entry is out
+of scope.
+
+Every page shell links `/manifest.webmanifest`, carries
+`<meta name="theme-color" content="#16855b">` and registers `/sw.js` at load time inside
+`if ('serviceWorker' in navigator)`. There is no push-notification code.
+
+There is no Node or TypeScript build step and no browser test:
 `crates/vowp-daemon/tests/board_page.rs`, `session_page.rs`, `capsule_page.rs`,
-`cost_inbox_pages.rs` and `nodes_page.rs` are HTTP-only tests over a temporary home and a real
-`127.0.0.1:0` listener, and `tests/sse.rs` reads real chunked stream bodies. The board-page test
-pins the stream path, the `board` and `heartbeat` handlers, the "Reconnecting..." text and the
+`cost_inbox_pages.rs`, `nodes_page.rs` and `pwa.rs` are HTTP-only tests over a temporary home and
+a real `127.0.0.1:0` listener, and `tests/sse.rs` reads real chunked stream bodies. The board-page
+test pins the stream path, the `board` and `heartbeat` handlers, the "Reconnecting..." text and the
 polling fallback without running a browser. The session-page test pins the stream path, the `after_seq` resume, the
 `session` and `heartbeat` handlers, the reconnect text and the polling fallback. It also pins the
 session-detail path, the capsule field labels, the lineage links, the "View capsule" link and the
@@ -179,13 +208,15 @@ unlock, the queued message, the `401` and `503` lines, and the absence of a toke
 answer API test proves the write itself. The nodes-page test pins the `/api/v1/nodes` fetch, the
 node column labels, the empty and failed-fetch messages and the `<noscript>` fallback, and reads
 the same endpoint to prove the page's data source is a schema-valid `NodePage` of the stored
-local and remote nodes.
+local and remote nodes. The PWA test parses the manifest, pins the three asset content types and
+the service-worker headers, checks the bounded `SHELL` list and the API/SSE bypass, and asserts
+every page shell links and registers the service worker without printing a home path or token.
 
 Still later: the cost dashboard and charts, the reconnect UI on the pages that still
-poll, executor switching, dismiss and the other write actions, PWA installability and a token
-rotation service. Markdown rendering, capsule editing and capsule writes remain out of scope.
-The API routes and their fallback are otherwise unchanged; unknown non-API paths still return the
-API's JSON 404.
+poll, executor switching, dismiss and the other write actions, and a token rotation service.
+Offline data entry, offline event data and push notifications remain out of scope. Markdown
+rendering, capsule editing and capsule writes remain out of scope. The API routes and their
+fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.
 
 The app must never print a token value, a home path or a provider secret; the board only contains the
 fields already shown by `vowp board`, and the session pages only the fields already shown by
