@@ -31,7 +31,15 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &MaintCommand) -> Result<
     match command {
         MaintCommand::Reindex(args) => reindex(ctx, io, args),
         MaintCommand::Backup(args) => backup(ctx, io, args),
-        MaintCommand::Schema(args) => super::schema::run(ctx.json(), io, args),
+        MaintCommand::Schema(args) => {
+            // `MaintCommand::Schema` is public and keeps its v0.1 lookup. `snapshot` is an
+            // alias owned by the `vowp schema` command, not a name in `vowp_protocol::schema`,
+            // so this path still reports it as not found.
+            if args.type_name.as_deref() == Some("snapshot") {
+                return Err(CliError::NotFound("schema snapshot".to_owned()));
+            }
+            super::schema::run(ctx.json(), io, args)
+        }
         MaintCommand::Version => version(ctx, io),
     }
 }

@@ -75,6 +75,36 @@ fn schema_lists_names_and_prints_one_document() {
 }
 
 #[test]
+fn maint_schema_keeps_the_v0_1_snapshot_lookup() {
+    let env = common::TestEnv::new();
+    let build_io = BufferIo::new("");
+    let ctx = vowp_cli::Ctx::build(&env.global(false), &build_io).expect("context");
+
+    // The public maintenance entry point predates the `snapshot` alias: the base lookup
+    // asked `vowp_protocol::schema` for the literal name and reported it as not found.
+    let mut io = BufferIo::new("");
+    let args = vowp_cli::cli::SchemaArgs {
+        type_name: Some("snapshot".to_owned()),
+    };
+    let error = vowp_cli::cmd::maint::run(&ctx, &mut io, &vowp_cli::cli::MaintCommand::Schema(args))
+        .expect_err("the maintenance entry point has no snapshot alias");
+    assert!(
+        matches!(&error, vowp_cli::CliError::NotFound(message) if message == "schema snapshot"),
+        "{error:?}"
+    );
+
+    // Real schema names keep using the shared handler.
+    let mut io = BufferIo::new("");
+    let args = vowp_cli::cli::SchemaArgs {
+        type_name: Some("Job".to_owned()),
+    };
+    let code = vowp_cli::cmd::maint::run(&ctx, &mut io, &vowp_cli::cli::MaintCommand::Schema(args))
+        .expect("Job schema");
+    assert_eq!(code, 0);
+    assert!(io.stdout().contains("\"properties\""), "{}", io.stdout());
+}
+
+#[test]
 fn schema_works_without_an_initialised_home() {
     let home = tempfile::tempdir().expect("fresh home");
     let home_text = home.path().display().to_string();
