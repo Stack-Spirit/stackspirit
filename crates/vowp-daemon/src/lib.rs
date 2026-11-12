@@ -1,11 +1,11 @@
-//! The VOWP daemon: a read-only loopback HTTP API over one existing VOWP home.
+//! The VOWP daemon: a loopback HTTP API over one existing VOWP home.
 //!
-//! The first v0.3 slice serves the static read-only board page at `GET /` and `GET /board`,
-//! the static session list and detail pages at `GET /sessions` and `GET /sessions/{id}`,
-//! the static capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the static cost and
-//! inbox pages at `GET /cost` and `GET /inbox`, and the API endpoints
-//! `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`,
-//! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
+//! The v0.3 slice serves the static board page at `GET /` and `GET /board`, the static
+//! session list and detail pages at `GET /sessions` and `GET /sessions/{id}`, the static
+//! capsule page at `GET /sessions/{id}/capsules/{capsule_id}`, the static cost and inbox pages
+//! at `GET /cost` and `GET /inbox`, and the API endpoints `GET /api/v1/health`,
+//! `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`, `/api/v1/sessions`,
+//! `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 //! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`, `/api/v1/inbox` and
 //! `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints. The session detail
 //! contains the exact `Session`, its latest capsule and at most 32 parent links, nearest
@@ -22,16 +22,18 @@
 //! reconnect state, bounded-backoff retry and a five-second polling fallback. The capsule page
 //! fetches one capsule from `/api/v1/sessions/{id}/capsules/{capsuleId}` and renders its
 //! metadata and structured fields read-only.
-//! The pages never write. The cost page renders grouped ledger rows and totals
-//! with a `by` selector, and the inbox page renders open, answered and dismissed items with a
-//! state selector; both only fetch the read-only cost and inbox endpoints.
-//! It opens the home with [`vowp_store::Store::open_read_only`], never creates, migrates or
-//! writes a home, and binds `127.0.0.1` only.
+//! The cost page renders grouped ledger rows and totals with a `by` selector. The inbox page
+//! renders open, answered and dismissed items with a state selector, and its answer form is
+//! the only browser write.
 //!
-//! **There is no auth token in this slice.** Nothing writes, and the listener is
-//! loopback-only, so there is no privileged action to protect. A token must be added
-//! before any write endpoint or a non-loopback listener; do not add a placeholder layer.
-//! The daemon also never prints a home path, token or secret.
+//! Reads are token-free. `POST /api/v1/inbox/{id}/answer` requires
+//! `Authorization: Bearer <VOWP_API_TOKEN>` and answers `503` when the daemon was started
+//! without a token. The handler opens the home writable with
+//! [`vowp_store::Store::open_writable`], writes the same item update and `answer_inbox`
+//! request row as `vowp inbox answer`, and leaves job state to the supervisor. It never calls
+//! `Store::open`, so it never creates or migrates a home. Every other request uses
+//! [`vowp_store::Store::open_read_only`]. The listener binds `127.0.0.1` only, and the daemon
+//! never prints a home path, token or secret.
 //!
 //! Spec: `docs/design/v0.3/http-api.md`.
 
@@ -39,11 +41,13 @@
 #![warn(missing_docs)]
 
 mod app;
+mod auth;
 mod config;
 mod error;
 mod filters;
 mod stream;
 
 pub use app::{ApiState, router, serve, serve_with_shutdown};
+pub use auth::ApiToken;
 pub use config::{Invocation, Options, ProjectSelection, USAGE, parse_invocation, select_project};
 pub use error::DaemonError;

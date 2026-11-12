@@ -1,7 +1,8 @@
 # v0.3 — web / PWA window
 
-Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. This note is
-design only. v0.1 has no browser UI and no listening socket.
+Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
+board, session, capsule, cost and inbox pages and the token-gated inbox answer are implemented;
+the rest of this note is design. v0.1 has no browser UI and no listening socket.
 
 ## Goal
 
@@ -17,9 +18,10 @@ tunnel. It should answer the questions an operator asks from a browser without o
 - **Board** — job counts, running jobs, slot occupancy, limits, today's cost and open inbox count.
 
 The board uses the same JSON shape as `vowp board --json`; the session list and event timeline use
-the API from [`http-api.md`](http-api.md). The app is read-only in the first slice. When writes are
-added, answering an inbox item is the only one that uses the existing request queue, and switching an
-executor runs the same `SessionOps::switch` path as the CLI (the queue has no switch variant).
+the API from [`http-api.md`](http-api.md). Reads are token-free. Answering an inbox item is the one
+browser write in this slice: it uses the existing request queue behind the daemon bearer token.
+Switching an executor remains later and, when added, runs the same `SessionOps::switch` path as the
+CLI (the queue has no switch variant).
 
 ## Non-goals
 
@@ -46,7 +48,9 @@ executor runs the same `SessionOps::switch` path as the CLI (the queue has no sw
   `/nodes`, `/cost`, `/inbox`. The first slice implements `/`, `/sessions`, `/sessions/:id`,
   `/sessions/:id/capsules/:capsuleId`, `/cost` and `/inbox`; `/nodes` is later.
 - PWA manifest and a small service worker; cache the shell, never cache event data as authoritative.
-- The token is kept in memory or `sessionStorage`, not in a URL. A 401 shows a one-field unlock page.
+- The write token is kept in `sessionStorage`, never in a URL. The inbox page shows a one-field
+  unlock panel when no token is stored; a `401` clears it and shows the panel again. Rotating the
+  token means restarting the daemon with a new `VOWP_API_TOKEN`, then unlocking again.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
   The session timeline uses the per-session stream with `after_seq` resume. The board uses the
   snapshot `/api/v1/board/stream` with reconnect and polling fallback. The cost and inbox pages
@@ -135,11 +139,18 @@ never prints a home path, token or provider secret.
 The inbox page is `crates/vowp-daemon/web/inbox.html`, served at `GET /inbox`. It fetches
 `GET /api/v1/inbox?state=open` on load and every five seconds. The state selector adds all,
 answered and dismissed; "all" fetches the three API states and merges their lists. The page
-renders id, kind, job, title, age, state, options and a short body preview. A failed fetch shows an
-error line and keeps the last list and timestamp visible; an empty list shows "No inbox items."
-There is no answer, dismiss or other write action. The page links to the other pages, carries
-`<noscript>The inbox page requires JavaScript.</noscript>`, and never prints a home path, token or
-provider secret.
+renders id, kind, job, title, age, state, options, a short body preview and, for an open item, an
+answer form. The form offers a select of the item's options plus a free-text input, or only a
+text input when the item has no options; the Answer button posts the chosen or typed text to
+`POST /api/v1/inbox/{id}/answer` as JSON. A token unlock panel stores the `VOWP_API_TOKEN` value
+in `sessionStorage` (never the URL) and hides once stored. A `401` clears the stored value,
+shows the unlock panel and leaves the list visible; `503` shows the writes-disabled message;
+`202` shows "Answer queued; the supervisor applies it on the next tick" and refreshes the list;
+any other error shows a line and keeps the list. Reads continue without a token. A failed fetch
+shows an error line and keeps the last list and timestamp visible; an empty list shows "No inbox
+items." There is no dismiss or other write action. The page links to the other pages, carries
+`<noscript>The inbox page requires JavaScript.</noscript>`, and never prints a home path, token
+value or provider secret.
 
 There is no Node or TypeScript build step, no PWA manifest, no service worker and no browser test:
 `crates/vowp-daemon/tests/board_page.rs`, `session_page.rs`, `capsule_page.rs` and
@@ -153,11 +164,14 @@ no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove
 source. The capsule-page test pins the capsule API path, the metadata and section labels, the
 session back link, the `<noscript>` fallback and the absence of paths or secrets, fetches
 `/api/v1/sessions/{id}/capsules/{capsuleId}` in the same test to prove the page's data source, and
-checks that an unknown session or capsule is the API's `404` behind the page's not-found text.
+checks that an unknown session or capsule is the API's `404` behind the page's not-found text. The
+inbox-page test pins the answer form, the `Authorization: Bearer` header, the `sessionStorage`
+unlock, the queued message, the `401` and `503` lines, and the absence of a token in the URL; the
+answer API test proves the write itself.
 
-Still later: `/nodes`, inbox answering, the cost dashboard and charts, the reconnect UI on the
-pages that still poll, executor switching, write actions, PWA installability and the auth token.
-Markdown rendering, capsule editing and capsule writes remain out of scope.
+Still later: `/nodes`, the cost dashboard and charts, the reconnect UI on the pages that still
+poll, executor switching, dismiss and the other write actions, PWA installability and a token
+rotation service. Markdown rendering, capsule editing and capsule writes remain out of scope.
 The API routes and their fallback are otherwise unchanged; unknown non-API paths still return the
 API's JSON 404.
 

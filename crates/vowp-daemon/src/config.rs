@@ -1,7 +1,8 @@
 //! Command-line options and project selection for the daemon.
 //!
-//! The daemon never creates, migrates or writes a home: every store handle is opened with
-//! [`vowp_store::Store::open_read_only`].
+//! Reads open the home with [`vowp_store::Store::open_read_only`]. The one write (inbox
+//! answer) uses [`vowp_store::Store::open_writable`]; neither path creates or migrates a
+//! home.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -15,8 +16,9 @@ use crate::error::DaemonError;
 pub const USAGE: &str = "\
 Usage: vowp-daemon [--home <dir>] [--project <name>] [--port <n>]
 
-Serves the read-only VOWP loopback HTTP API for one project. The listener binds
-127.0.0.1 only and carries no token: this slice has no write endpoint.
+Serves the VOWP loopback HTTP API for one project. Reads are token-free. The only
+write is POST /api/v1/inbox/{id}/answer, enabled by VOWP_API_TOKEN (missing or
+empty disables it). The listener binds 127.0.0.1 only.
 
 Options:
   --home <dir>      VOWP home (default: $VOWP_HOME, else $HOME/.vowp)

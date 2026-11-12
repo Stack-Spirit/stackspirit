@@ -1,36 +1,45 @@
 //! The axum application: state, routes and request handlers.
 //!
-//! Every request opens its own read-only [`vowp_store::Store`] against the served home.
-//! The store handle is `Send` but not `Sync`, so a shared handle would serialize requests
-//! or require a lock; opening per request also gives each request a fresh WAL view. The
-//! blocking SQLite and JSONL work runs on `tokio::task::spawn_blocking`.
+//! Read requests open their own read-only [`vowp_store::Store`] against the served home. The
+//! one write, `POST /api/v1/inbox/{id}/answer`, opens the same home with
+//! [`vowp_store::Store::open_writable`], which never creates or migrates it. The store handle
+//! is `Send` but not `Sync`, so a shared handle would serialize requests or require a lock;
+//! opening per request also gives each request a fresh WAL view. The blocking SQLite and
+//! JSONL work runs on `tokio::task::spawn_blocking`.
 
 use std::convert::Infallible;
 use std::future::Future;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
 use tokio::net::TcpListener;
 use vowp_core::ledger::BoardSnapshot;
+use vowp_core::requests::{self, Request};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
-    Health, InboxPage, JobPage, MAX_LINEAGE, SessionDetail, SessionPage,
+    Health, InboxAnswerRequest, InboxPage, JobPage, MAX_LINEAGE, SessionDetail, SessionPage,
 };
 use vowp_protocol::{
-    Capsule, CapsuleId, ErrorKind, InboxState, NodeName, ProjectName, Session, SessionId, Timestamp, VowpConfig,
+    Capsule, CapsuleId, ErrorKind, InboxId, InboxItem, InboxState, NodeName, ProjectName, Session, SessionId,
+    Timestamp, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
-use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, SessionFilter, Store};
+use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, SessionFilter, Store, StoreError};
 
+use crate::auth::{self, ApiToken};
 use crate::config::ProjectSelection;
 use crate::filters::{self, CostQuerySpec, EventQuery};
 use crate::stream;
+
+/// Largest accepted answer text, in UTF-8 bytes after trimming.
+const MAX_ANSWER_BYTES: usize = 10_000;
 
 /// State shared by every request handler.
 #[derive(Debug, Clone)]
@@ -42,6 +51,7 @@ pub struct ApiState {
     stream_poll: Duration,
     stream_heartbeat: Duration,
     board_poll: Duration,
+    write_token: Option<ApiToken>,
 }
 
 impl ApiState {
@@ -55,7 +65,17 @@ impl ApiState {
             stream_poll: stream::POLL_INTERVAL,
             stream_heartbeat: stream::HEARTBEAT_INTERVAL,
             board_poll: stream::BOARD_POLL_INTERVAL,
+            write_token: None,
         }
+    }
+
+    /// Returns this state with the write token replaced.
+    ///
+    /// The binary passes [`ApiToken::from_env`]; `None` keeps writes disabled. Tests pass a
+    /// fixed token so they never touch the process environment.
+    pub fn with_api_token(mut self, token: Option<ApiToken>) -> Self {
+        self.write_token = token;
+        self
     }
 
     /// Returns this state with the SSE poll and heartbeat intervals replaced.
@@ -100,6 +120,32 @@ impl ApiState {
     /// Opens the served project read-only, mapping failures onto a path-free 500.
     fn open(&self) -> Result<Store, ApiFailure> {
         Store::open_read_only(&self.paths, Some(&self.project)).map_err(|_| store_failure())
+    }
+
+    /// Opens the served project writable without creating or migrating the home.
+    fn open_writable(&self) -> Result<Store, ApiFailure> {
+        Store::open_writable(&self.paths, Some(&self.project)).map_err(|_| store_write_failure())
+    }
+
+    /// Answers one open inbox item and queues the same request as the CLI.
+    ///
+    /// The item update and the `answer_inbox` request row go through the same store methods
+    /// the CLI uses; the supervisor applies the request on its next tick. Job state is not
+    /// touched here.
+    fn answer_inbox(&self, id: &InboxId, answer: &str) -> Result<InboxItem, ApiFailure> {
+        let store = self.open_writable()?;
+        let item = store
+            .inbox_item(id)
+            .map_err(|_| store_failure())?
+            .ok_or_else(|| ApiFailure::not_found(format!("inbox item {id} not found")))?;
+        if item.state != InboxState::Open {
+            return Err(ApiFailure::conflict(format!("inbox item {id} is not open")));
+        }
+        let answered = store.answer_inbox(id, answer, "web").map_err(answer_store_failure)?;
+        if answered.job_id.is_some() {
+            requests::push(&store, &Request::AnswerInbox { id: id.clone() }).map_err(|_| request_write_failure())?;
+        }
+        Ok(answered)
     }
 
     /// Returns the jobs matching `filter`.
@@ -315,7 +361,8 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
 /// `/sessions/{id}/capsules/{capsule_id}`, the static cost and inbox pages at `/cost` and
-/// `/inbox`, plus the API under `/api/v1`.
+/// `/inbox`, plus the API under `/api/v1`. The only non-GET API route is the token-gated
+/// inbox answer write.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -335,6 +382,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/sessions/{id}/events", get(session_events))
         .route("/api/v1/sessions/{id}/events/stream", get(session_events_stream))
         .route("/api/v1/inbox", get(inbox))
+        .route("/api/v1/inbox/{id}/answer", post(answer_inbox))
         .route("/api/v1/cost", get(cost))
         .fallback(unknown_endpoint)
         .with_state(state)
@@ -405,13 +453,16 @@ async fn cost_page() -> Html<&'static str> {
     Html(COST_PAGE)
 }
 
-/// The embedded static inbox shell, served read-only at `/inbox`.
+/// The embedded static inbox shell, served at `/inbox`.
 const INBOX_PAGE: &str = include_str!("../web/inbox.html");
 
 /// Serves the static inbox shell; it fetches `/api/v1/inbox?state=` on load and every five seconds.
 ///
 /// The state selector offers open, all, answered and dismissed; `all` fetches the three API
-/// states and merges their items. The page only reads: there is no answer or dismiss action.
+/// states and merges their items. Open items carry the answer form: it stores the daemon write
+/// token in `sessionStorage`, posts `{"answer":"<text>"}` to `/api/v1/inbox/{id}/answer` with
+/// an `Authorization: Bearer` header, and refreshes the list on `202`. Reads stay token-free.
+/// There is no dismiss or other write action.
 async fn inbox_page() -> Html<&'static str> {
     Html(INBOX_PAGE)
 }
@@ -486,6 +537,49 @@ async fn inbox(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Resu
     let filter = filters::inbox_state(query.as_deref()).map_err(ApiFailure::invalid)?;
     let page = blocking(move || state.inbox(filter)).await?;
     Ok(Json(page))
+}
+
+/// Answers one open inbox item and queues the supervisor request.
+///
+/// The bearer token is checked before the id, body or item is read. A daemon without
+/// `VOWP_API_TOKEN` answers `503`; a missing or wrong token is `401` with a `Bearer`
+/// challenge. The response is the answered `InboxItem` with `202 Accepted`.
+async fn answer_inbox(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<InboxItem>), ApiFailure> {
+    authorize(&state, &headers)?;
+    let id = InboxId::parse(&id).map_err(|_| ApiFailure::invalid("invalid inbox id"))?;
+    let request: InboxAnswerRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiFailure::invalid("the request body must be {\"answer\":\"<text>\"}"))?;
+    let answer = request.answer.trim().to_owned();
+    if answer.is_empty() {
+        return Err(ApiFailure::invalid("answer must not be empty"));
+    }
+    if answer.len() > MAX_ANSWER_BYTES {
+        return Err(ApiFailure::invalid("answer must be at most 10000 bytes"));
+    }
+    let answered = blocking(move || state.answer_inbox(&id, &answer)).await?;
+    Ok((StatusCode::ACCEPTED, Json(answered)))
+}
+
+/// Checks the daemon write token before a handler reads the request body or store.
+///
+/// The comparison is constant-time over the candidate and the configured token is never
+/// echoed. A daemon with no token answers `503`; a missing or wrong token is `401`.
+fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiFailure> {
+    let Some(token) = &state.write_token else {
+        return Err(ApiFailure::writes_disabled());
+    };
+    let Some(candidate) = auth::bearer_token(headers) else {
+        return Err(ApiFailure::unauthorized("a bearer token is required"));
+    };
+    if !token.matches(candidate) {
+        return Err(ApiFailure::unauthorized("invalid bearer token"));
+    }
+    Ok(())
 }
 
 /// Returns the served project's cost report as the `vowp cost --json` document.
@@ -566,15 +660,40 @@ impl ApiFailure {
         Self::new(StatusCode::BAD_REQUEST, ErrorKind::InvalidInput, message)
     }
 
-    /// A `404` for an unknown session.
+    /// A `404` for an unknown session or inbox item.
     fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, ErrorKind::NotFound, message)
+    }
+
+    /// A `409` for an item that is no longer open.
+    fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, ErrorKind::Conflict, message)
+    }
+
+    /// A `401` for a missing or wrong bearer token.
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, ErrorKind::Auth, message)
+    }
+
+    /// A `503` when the daemon was started without a write token.
+    fn writes_disabled() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorKind::Config,
+            "writes are disabled: the daemon was started without VOWP_API_TOKEN",
+        )
     }
 }
 
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
-        (self.status, Json(self.body)).into_response()
+        let mut response = (self.status, Json(self.body)).into_response();
+        if self.status == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        response
     }
 }
 
@@ -584,6 +703,37 @@ fn store_failure() -> ApiFailure {
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorKind::Db,
         "could not read the project database",
+    )
+}
+
+/// A path-free `500` for a writable store that cannot be opened.
+fn store_write_failure() -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Db,
+        "could not open the project database for writing",
+    )
+}
+
+/// Maps a failed inbox update onto its documented status without leaking a path.
+fn answer_store_failure(error: StoreError) -> ApiFailure {
+    match error.kind() {
+        ErrorKind::NotFound => ApiFailure::not_found("inbox item not found"),
+        ErrorKind::Conflict => ApiFailure::conflict("the inbox item is not open"),
+        _ => ApiFailure::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorKind::Db,
+            "could not answer the inbox item",
+        ),
+    }
+}
+
+/// A path-free `500` for a request row that could not be queued.
+fn request_write_failure() -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Db,
+        "the answer was stored but the supervisor request could not be queued",
     )
 }
 

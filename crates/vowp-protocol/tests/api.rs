@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 use vowp_protocol::api::{
-    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health, InboxPage,
-    JobPage, Page, SessionDetail, SessionPage,
+    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
+    InboxAnswerRequest, InboxPage, JobPage, Page, SessionDetail, SessionPage,
 };
 use vowp_protocol::schema::schema_for_name;
 use vowp_protocol::{
@@ -392,6 +392,31 @@ fn inbox_page_carries_items_and_the_page_envelope() {
 }
 
 #[test]
+fn inbox_answer_request_has_one_required_answer_field() {
+    let request = InboxAnswerRequest {
+        answer: "left".to_owned(),
+    };
+    let value = serde_json::to_value(&request).expect("answer request JSON");
+    assert_eq!(value, json!({ "answer": "left" }));
+    assert_eq!(
+        serde_json::from_value::<InboxAnswerRequest>(value).expect("answer request roundtrip"),
+        request
+    );
+
+    let schema = schema_for_name("InboxAnswerRequest").expect("InboxAnswerRequest is exported");
+    assert!(
+        schema["properties"].get("answer").is_some(),
+        "InboxAnswerRequest schema has no answer property: {schema}"
+    );
+    assert!(
+        schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("answer"))),
+        "InboxAnswerRequest schema does not require answer: {schema}"
+    );
+}
+
+#[test]
 fn cost_report_matches_the_cli_json_shape() {
     let report = CostReport {
         by: "job".to_owned(),
@@ -558,6 +583,7 @@ fn api_documents_are_exported_schemas() {
         "SessionPage",
         "SessionDetail",
         "EventPage",
+        "InboxAnswerRequest",
         "InboxPage",
         "CostReport",
         "CostRow",

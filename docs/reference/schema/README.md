@@ -52,6 +52,7 @@ python3 docs/reference/check-reference.py
 | `GcReport` | [gc-report.md](gc-report.md) |
 | `Health` | [health.md](health.md) |
 | `HostSample` | [host-sample.md](host-sample.md) |
+| `InboxAnswerRequest` | [inbox-answer-request.md](inbox-answer-request.md) |
 | `InboxItem` | [inbox-item.md](inbox-item.md) |
 | `InboxPage` | [inbox-page.md](inbox-page.md) |
 | `InboxSummary` | [inbox-summary.md](inbox-summary.md) |

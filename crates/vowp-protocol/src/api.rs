@@ -3,10 +3,10 @@
 //! Spec: `docs/design/v0.3/http-api.md`. The API serves the same `vowp-protocol`
 //! objects the CLI prints; these are only the transport documents layered on top.
 //!
-//! The API is read-only: it has no token and no write endpoint. The per-session SSE stream
-//! is a transport in `vowp-daemon`, not a document type here. The listener is
-//! loopback-only, so there is no privileged action to authenticate. A token must be added
-//! before this API grows a write endpoint or a non-loopback listener.
+//! Reads are token-free. The only write is `POST /api/v1/inbox/{id}/answer`, gated by the
+//! daemon's bearer token (`VOWP_API_TOKEN`); its request body is [`InboxAnswerRequest`] and
+//! its response reuses [`InboxItem`]. The per-session and board SSE streams are transports
+//! in `vowp-daemon`, not document types here. The listener stays loopback-only.
 
 use std::collections::BTreeMap;
 
@@ -146,6 +146,17 @@ pub type EventPage = Page<EventEnvelope>;
 
 /// One page of [`InboxItem`] objects.
 pub type InboxPage = Page<InboxItem>;
+
+/// Request body for `POST /api/v1/inbox/{id}/answer`.
+///
+/// The daemon trims `answer`, rejects an empty value or one over 10,000 bytes with `400`,
+/// and answers the item as `web` when the bearer token is valid. The response is the
+/// answered [`InboxItem`]; no separate response type is introduced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct InboxAnswerRequest {
+    /// Answer text to store on the inbox item.
+    pub answer: String,
+}
 
 /// The `/api/v1/cost` document.
 ///

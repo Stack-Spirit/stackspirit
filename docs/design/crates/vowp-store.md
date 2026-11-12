@@ -80,6 +80,8 @@ pub const SCHEMA_VERSION: i64 = 1;
 impl Store {
     /// `paths.ensure()`, open `paths.db_path()`, apply pragmas, migrate. Uses `SystemClock`.
     pub fn open(paths: &NodePaths) -> Result<Store, StoreError>;
+    /// Existing DB only: no `ensure`, no migration, no `query_only`; missing DB → NotFound.
+    pub fn open_writable(paths: &NodePaths, project: Option<&ProjectName>) -> Result<Store, StoreError>;
     pub fn open_path(path: &std::path::Path) -> Result<Store, StoreError>;     // file DB at path, parent dir must exist
     pub fn open_memory() -> Result<Store, StoreError>;                          // :memory:, for tests
     pub fn with_clock(self, clock: std::sync::Arc<dyn Clock>) -> Store;          // tests inject FakeClock (used for created_at/updated_at stamping)
@@ -103,6 +105,13 @@ Migration/pragma rules (all in `Store::open*`):
 4. Migrations are `const MIGRATIONS: &[&str] = &[include_str!("schema/001_init.sql")]`. `001_init.sql` is **byte-identical** to
    `docs/design/schema.sql`; it is copied byte for byte. Future schema changes are new files `002_*.sql` and a new design amendment — never edits to 001.
 5. Insert `kv('schema_created_at')` and `kv('node_id')` (a fresh ULID) on first creation.
+6. `open_writable(paths, project)` is the daemon's narrow write constructor. It requires the
+   existing `vowp.db` (missing → `NotFound`), uses read-write flags without create, sets the busy
+   timeout and foreign keys, checks `user_version = 2` (newer → `SchemaTooNew`, older →
+   `MigrationRequired`), and attaches an existing registered project with the same schema check.
+   It never calls `paths.ensure`, `resume_migration` or a schema file, so opening it cannot create
+   or migrate a home. It is not a general write-open: `Store::open` remains the CLI/supervisor
+   constructor.
 
 ### 3.3 Filters and small structs
 
@@ -451,6 +460,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `open_creates_schema_version_1` | fresh temp DB: `schema_version()==1`, tables listed in schema.sql all exist, WAL mode (`PRAGMA journal_mode` = `wal`), `foreign_keys` = 1 |
 | `open_refuses_newer_schema` | set `PRAGMA user_version = 99` on a temp DB file, `Store::open_path` → `SchemaTooNew{found:99,supported:1}`, file bytes unchanged |
 | `open_is_idempotent` | open twice on the same file: no error, `node_id` kv unchanged |
+| `open_writable_answers_and_never_creates_or_migrates` | `open_writable` opens an existing home, answers an inbox item and reads it back; a missing `vowp.db` is `NotFound` and its directory is not created; an empty zero-byte file is `MigrationRequired` and stays untouched |
 | `schema_matches_enums` | parse every `CHECK (col IN ('a','b',...))` list from `schema.sql` and compare to the serde names of the matching Rust enum for: `jobs.kind/role/state`, `edges.kind`, `runs.role/purpose/outcome/limit_kind/cost_source`, `gate_results.gate_kind`, `session_events.type/actor`, `sessions.state/role`, `capsules.trigger`, `switches.reason/state`, `loops.kind/state`, `schedules.spec_kind/action_kind/missed_policy/state`, `ledger.kind`, `inbox.kind/state`, `limits.kind`, `releases.state`, `workers.kind/state` — sets must be equal |
 | `job_insert_defaults_and_needs_edges` | `insert_job` with minimal `NewJob` yields state Pending, priority 50, brief path `.vowp/jobs/<id>/brief.md`, default gates for kind, and `job.needs` equals the `needs` edges |
 | `job_insert_duplicate_and_unknown_need` | duplicate id → `Conflict`; unknown need → `NotFound`; no partial rows left (transaction) |

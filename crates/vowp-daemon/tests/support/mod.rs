@@ -17,7 +17,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use vowp_daemon::{ApiState, ProjectSelection, select_project, serve_with_shutdown};
+use vowp_daemon::{ApiState, ApiToken, ProjectSelection, select_project, serve_with_shutdown};
 use vowp_protocol::{
     Cost, Executor, FakeClock, HarnessKind, InboxId, InboxItem, InboxKind, InboxState, JobId, JobKind, Limit,
     LimitRowKind, NewJob, NodeName, Project, ProjectName, Role, Run, RunId, RunPurpose, RunRole, Session, SessionId,
@@ -268,17 +268,22 @@ impl Server {
         let selection = select_project(&fixture.paths, None).expect("project selection");
         assert_eq!(selection.project, fixture.project);
         assert_eq!(selection.node, fixture.node);
-        Self::start_with(&fixture.paths, selection)
+        Self::start_with(&fixture.paths, selection, None)
     }
 
     /// Starts the daemon for any temporary home with exactly one registered project.
     pub fn start_for(paths: &NodePaths) -> Self {
-        let selection = select_project(paths, None).expect("project selection");
-        Self::start_with(paths, selection)
+        Self::start_for_with_token(paths, None)
     }
 
-    fn start_with(paths: &NodePaths, selection: ProjectSelection) -> Self {
-        let state = ApiState::new(paths, &selection);
+    /// Starts the daemon with a fixed write token, or no token at all.
+    pub fn start_for_with_token(paths: &NodePaths, token: Option<&str>) -> Self {
+        let selection = select_project(paths, None).expect("project selection");
+        Self::start_with(paths, selection, token)
+    }
+
+    fn start_with(paths: &NodePaths, selection: ProjectSelection, token: Option<&str>) -> Self {
+        let state = ApiState::new(paths, &selection).with_api_token(token.map(ApiToken::new));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let thread = std::thread::spawn(move || {
@@ -324,21 +329,64 @@ pub struct HttpResponse {
     pub status: u16,
     /// `Content-Type` header value, when the server sent one.
     pub content_type: Option<String>,
+    /// Response headers, lower-cased names and trimmed values.
+    pub headers: Vec<(String, String)>,
     /// Response body decoded from chunked transfer encoding.
     pub body: String,
 }
 
+impl HttpResponse {
+    /// Returns one response header value, matched case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 /// Issues one real `GET` over loopback.
 pub fn get(address: SocketAddr, path: &str) -> HttpResponse {
+    request(address, "GET", path, None, None)
+}
+
+/// Issues one real JSON `POST` over loopback, optionally with a bearer token.
+pub fn post(address: SocketAddr, path: &str, body: &str, authorization: Option<&str>) -> HttpResponse {
+    request(address, "POST", path, Some(body), authorization)
+}
+
+/// Issues one raw HTTP request over loopback and parses the response.
+fn request(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    authorization: Option<&str>,
+) -> HttpResponse {
     let mut stream = TcpStream::connect(address).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
     )
-    .expect("write request");
+    .expect("write request line");
+    if let Some(body) = body {
+        write!(
+            stream,
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+        .expect("write content headers");
+    }
+    if let Some(value) = authorization {
+        write!(stream, "Authorization: {value}\r\n").expect("write authorization");
+    }
+    write!(stream, "\r\n").expect("write header terminator");
+    if let Some(body) = body {
+        stream.write_all(body.as_bytes()).expect("write body");
+    }
     let mut response = Vec::new();
     stream.read_to_end(&mut response).expect("read response");
     let split = response
@@ -353,14 +401,22 @@ pub fn get(address: SocketAddr, path: &str) -> HttpResponse {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|status| status.parse().ok())
         .expect("status line");
-    let content_type = head.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("content-type")
-            .then(|| value.trim().to_owned())
-    });
+    let headers: Vec<(String, String)> = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect();
+    let content_type = headers
+        .iter()
+        .find(|(name, _)| name == "content-type")
+        .map(|(_, value)| value.clone());
     HttpResponse {
         status,
         content_type,
+        headers,
         body: String::from_utf8_lossy(&body).into_owned(),
     }
 }

@@ -34,7 +34,7 @@ crates/vowp-protocol/
   src/loops.rs        // Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
   src/release.rs      // Release, ReleaseState, GuardResult
   src/config.rs       // VowpConfig and sub-structs
-  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, SessionPage, SessionDetail, EventPage, InboxPage, CostReport, CostRow, CostTotal, ApiError
+  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, SessionPage, SessionDetail, EventPage, InboxPage, InboxAnswerRequest, CostReport, CostRow, CostTotal, ApiError
   src/adapter.rs      // Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
   src/services.rs     // SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
   src/schema.rs       // all_schemas, schema_for_name
@@ -120,8 +120,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"Capsule"`, `"CapsuleDraft"`, `"CatalogEntry"`, `"Cost"`, `"CostReport"`, `"CostRow"`,
     `"CostTotal"`, `"Edge"`, `"EventEnvelope"`, `"EventPage"`,
     `"Evidence"`, `"FleetQueueRow"`, `"FleetStatus"`, `"Gate"`, `"GateFailureCard"`, `"GateResult"`,
-    `"GcClassReport"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxItem"`, `"InboxPage"`,
-    `"InboxSummary"`,
+    `"GcClassReport"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxAnswerRequest"`,
+    `"InboxItem"`, `"InboxPage"`, `"InboxSummary"`,
     `"IngestAck"`, `"Job"`, `"JobPage"`, `"JobPatch"`, `"JoinInstructions"`, `"Lease"`, `"LeaseStatus"`,
     `"LedgerEntry"`, `"Limit"`, `"Loop"`, `"MergeCard"`, `"MigrationCount"`, `"MigrationReport"`, `"NewJob"`,
     `"Node"`, `"OrchestratorCard"`, `"Page"`, `"Profile"`, `"Project"`, `"ProjectEntry"`,
@@ -182,6 +182,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `config_rejects_unknown_fields_and_bad_values` | unknown key in `[node]`, both `cron` and `every` on a schedule, empty ladder, `max_workers=0` → errors |
 | `config_defaults_are_documented_values` | `NodeConfig::default()`: name `local`, 4, 2, 60, tz 0; `MergeConfig::default()`: rebase true, 2700, secret_scan true |
 | `schema_export_covers_listed_types` | `all_schemas()` has every key of rule 12; each value is an object with `"$schema"` or `"type"`/`"definitions"`; deterministic across two calls |
+| `inbox_answer_request_has_one_required_answer_field` | `InboxAnswerRequest { answer }` serialises to `{"answer":"…"}`, round-trips, and its exported schema requires `answer` |
 | `types_md_examples_validate` | each JSON example fixture (`job.json`, `capsule.json`, `cost.json`, `limit.json`, `events.jsonl`, `profile.json`, `edge.json`, `run.json`, `session.json`, `inbox_item.json`, `loop.json`, `release.json`, `schedule.json`, `gate_result.json`, `worker.json`, `switch.json`) deserialises into its Rust type and validates against its exported schema (use a tiny structural checker: required properties present, no unknown top-level keys for `deny_unknown_fields` types) |
 | `log_format_line` | `format_log_line` golden string; `MemoryLog` records in order |
 | `service_cancel_token` | clones share cancellation; `ServiceError` Display strings |

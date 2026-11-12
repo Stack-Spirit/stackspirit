@@ -1,11 +1,12 @@
 //! Hermetic cost and inbox page tests: a temporary home, a real loopback listener and real GETs.
 //!
 //! Both pages are static HTML shells served by the daemon. These tests pin the `text/html`
-//! response, the read-only API fetch paths and selectors, the rendered column labels, the
-//! unknown-cost wording, the `<noscript>` fallback, the navigation links and the absence of a
-//! home path or auth token. The same test then reads the cost and inbox APIs from the same
-//! fixture, which is the only data source the pages use. No browser, Node runtime, harness or
-//! real home is involved.
+//! response, the API fetch paths and selectors, the rendered column labels, the unknown-cost
+//! wording, the `<noscript>` fallback, the navigation links and the absence of a home path.
+//! The inbox shell also carries the token unlock and answer form; the test pins those code
+//! paths and the no-token-in-URL behavior, but no token value is present. The same test then
+//! reads the cost and inbox APIs from the same fixture, which is the only data source the
+//! pages use. No browser, Node runtime, harness or real home is involved.
 
 mod support;
 
@@ -225,13 +226,19 @@ fn assert_html(page: &support::HttpResponse) {
     );
 }
 
-/// Asserts a page never prints the served home or auth-token material.
-///
-/// The cost table deliberately prints ledger token counts under a "Tokens" column, so the
-/// forbidden checks name auth-token forms rather than the bare word "token".
-fn assert_no_home_or_auth_token(page: &support::HttpResponse, fixture: &Fixture) {
+/// Asserts a page never prints the served home path.
+fn assert_no_home(page: &support::HttpResponse, fixture: &Fixture) {
     let home = fixture.paths.root().display().to_string();
     assert!(!page.body.contains(&home), "page leaked the home path");
+}
+
+/// Asserts a read-only page never prints the served home or auth-token material.
+///
+/// The cost table deliberately prints ledger token counts under a "Tokens" column, so the
+/// forbidden checks name auth-token forms rather than the bare word "token". The inbox page
+/// is different: it must carry the unlock and `Authorization` code, but no token value.
+fn assert_no_home_or_auth_token(page: &support::HttpResponse, fixture: &Fixture) {
+    assert_no_home(page, fixture);
     let lowered = page.body.to_ascii_lowercase();
     for forbidden in ["secret", "api_key", "apikey", "bearer", "authorization", "api-token"] {
         assert!(!lowered.contains(forbidden), "page must not expose {forbidden:?}");
@@ -337,16 +344,58 @@ fn inbox_page_serves_the_shell_and_the_fixture_items() {
         "<th>State</th>",
         "<th>Options</th>",
         "<th>Body preview</th>",
+        "<th>Answer</th>",
         "No inbox items.",
         "Last updated",
         "href=\"/\"",
         "href=\"/sessions\"",
         "href=\"/cost\"",
         "<noscript>The inbox page requires JavaScript.</noscript>",
+        // The token unlock panel stores the token in sessionStorage, never the URL.
+        "id=\"unlock\"",
+        "id=\"unlock-form\"",
+        "id=\"token\"",
+        "type=\"password\"",
+        "Save token",
+        "TOKEN_KEY = \"vowp-api-token\"",
+        "window.sessionStorage.setItem(TOKEN_KEY, value)",
+        "window.sessionStorage.removeItem(TOKEN_KEY)",
+        "sessionStorage",
+        // The answer form posts JSON to the one write route with a bearer header.
+        "input.type = \"text\"",
+        "input.maxLength = MAX_ANSWER_BYTES",
+        "form.appendChild(select)",
+        "method: \"POST\"",
+        "Authorization: \"Bearer \" + token",
+        "\"/api/v1/inbox/\" + encodeURIComponent(itemId) + \"/answer\"",
+        "body: JSON.stringify({ answer })",
+        "if (response.status === 202)",
+        "QUEUED_MESSAGE = \"Answer queued; the supervisor applies it on the next tick\"",
+        "if (response.status === 401)",
+        "if (response.status === 503)",
+        "Writes are disabled: the daemon was started without VOWP_API_TOKEN.",
+        "The token was rejected. Unlock with the current daemon write token.",
+        "id=\"notice\"",
+        "role=\"status\"",
+        // Reads stay token-free and the token never enters the URL.
+        "fetch(\"/api/v1/inbox?state=\" + encodeURIComponent(value))",
+        "role=\"alert\"",
     ] {
         assert!(page.body.contains(needle), "inbox page is missing {needle:?}");
     }
-    assert_no_home_or_auth_token(&page, &fixture);
+    assert!(
+        !page.body.contains("token="),
+        "inbox page must not put the token in a query string"
+    );
+    assert!(
+        !page.body.contains("searchParams.set(\"token\""),
+        "inbox page must not put the token in the URL"
+    );
+    assert_no_home(&page, &fixture);
+    assert!(
+        !page.body.contains("test-write-token"),
+        "the page must not embed a token value"
+    );
 
     // The page's data source is the inbox API. The same fixture must return one item per
     // state with the fields the page renders.

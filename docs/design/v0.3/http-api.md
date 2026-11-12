@@ -1,9 +1,10 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: the read-only API (including session detail and single-capsule reads), the
-per-session SSE stream and the board snapshot SSE stream are implemented in
-`crates/vowp-daemon`; the rest of this note is design. The daemon is **not** part of v0.2
-and is not wired into `vowp up` yet. Nothing here is implemented in v0.1.
+Status: the read API (including session detail and single-capsule reads), the
+per-session SSE stream, the board snapshot SSE stream and the one token-gated inbox answer
+write are implemented in `crates/vowp-daemon`; the rest of this note is design. The daemon
+is **not** part of v0.2 and is not wired into `vowp up` yet. Nothing here is implemented in
+v0.1.
 
 ## First slice (implemented)
 
@@ -14,11 +15,11 @@ and is not wired into `vowp up` yet. Nothing here is implemented in v0.1.
 It resolves the home from `--home`, `VOWP_HOME`, then `$HOME/.vowp`; selects the only
 non-reserved registered project (or the one named by `--project`, with a clear error when
 zero or several are registered); reads the node name from that project's registered
-`vowp.toml` config; and opens the home with `Store::open_read_only`. It never creates,
-migrates or writes a home. The listener binds `127.0.0.1` only, defaults to port `0` and
-prints the bound address.
+`vowp.toml` config; and opens the home with `Store::open_read_only`. The answer handler opens
+the same existing home with `Store::open_writable`, which also never creates or migrates it.
+The listener binds `127.0.0.1` only, defaults to port `0` and prints the bound address.
 
-Served endpoints, all `GET`; every response is JSON except the two SSE streams:
+Served endpoints; every response is JSON except the two SSE streams and the static pages.
 
 - `/api/v1/health` — binary version, node, project, project schema version and the
   supervisor heartbeat from `<home>/heartbeat` (`null` when absent, unreadable or stopped).
@@ -58,28 +59,43 @@ Served endpoints, all `GET`; every response is JSON except the two SSE streams:
   or the client's own cursor when nothing is readable, and closes; the client may reconnect
   with that cursor. The stream is read-only and has no token, lease or poll fallback.
 - `/api/v1/inbox?state=open|answered|dismissed` — an `InboxPage` over the served project;
-  `state` defaults to `open`.
+  `state` defaults to `open`. Token-free.
+- `POST /api/v1/inbox/{id}/answer` — the only write. The JSON body is
+  `InboxAnswerRequest {"answer":"<text>"}`. It requires
+  `Authorization: Bearer <VOWP_API_TOKEN>`; a daemon started without a token answers `503`,
+  a missing or wrong token is `401` with `WWW-Authenticate: Bearer`, an invalid id or body
+  is `400`, an unknown item is `404`, and an item that is not open is `409`. The answer is
+  trimmed, rejected when empty or over 10,000 UTF-8 bytes, and stored with `answered_by =
+  "web"`. When the item has a job, the handler queues the same `answer_inbox` request as the
+  CLI; the supervisor applies it on its next tick and the endpoint does not touch job state.
+  Success is `202 Accepted` with the answered `InboxItem`.
 - `/api/v1/cost?by=day|job|role|provider|model&since=&until=` — the exact `vowp cost --json`
   document over the served project. `by` defaults to `job`; `since` and `until` accept RFC 3339
   or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
 `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`,
-`SessionDetail`, `EventPage`, `InboxPage`, `CostReport`, `CostRow`, `CostTotal`, `ApiError`
-and `ApiErrorBody`. Failures use the same `ApiError` shape as `vowp --json` errors and map to
-`400` for an invalid filter or id, `404` for an unknown session or capsule and `500` for a
-store, config or I/O failure.
+`SessionDetail`, `EventPage`, `InboxPage`, `InboxAnswerRequest`, `CostReport`, `CostRow`,
+`CostTotal`, `ApiError` and `ApiErrorBody`. Failures use the same `ApiError` shape as
+`vowp --json` errors and map to `400` for an invalid filter, id or body, `401` for a
+missing or wrong write token, `404` for an unknown session, capsule or inbox item, `409`
+for an inbox item that is not open, `503` when writes are disabled and `500` for a store,
+config or I/O failure.
 
-**No token in this slice.** Nothing writes and the listener is loopback-only, so there is
-no privileged action to protect; do not add a placeholder auth layer. A token must land
-with the first write endpoint or a non-loopback listener.
+**One write, one token.** Every `GET` stays token-free and read-only. The only privileged
+action is `POST /api/v1/inbox/{id}/answer`, and the listener stays loopback-only. The
+daemon reads the token from the `VOWP_API_TOKEN` environment variable at startup; a
+missing or empty value leaves reads working and disables writes with `503`. The value is
+compared in constant time, is never logged, echoed, put in a URL or returned in a
+response, and rotation is a daemon restart with a new value. The page keeps it in
+`sessionStorage` and clears it on `401`.
 
-Still later: every write endpoint (job retry/park/cancel, session switch, inbox answer),
-the reconnect UI on the pages that still poll, the cost dashboard page, nodes, the
-capsule web view, the auth token, `vowp up` integration and the remaining browser pages.
-There are no placeholder routes for any of them. The per-session SSE stream is implemented
-and used by the session detail page; the board stream is implemented and used by the board
-page.
+Still later: every other write endpoint (job retry/park/cancel, session switch, capsule
+edits), the reconnect UI on the pages that still poll, the cost dashboard page, nodes,
+`vowp up` integration and the remaining browser pages. There are no placeholder routes for
+any of them. The per-session SSE stream is implemented and used by the session detail page;
+the board stream is implemented and used by the board page; the inbox answer form is
+implemented and uses the one write route.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -102,8 +118,8 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   `cost_today_usd`, `inbox_open`, `last_checkpoint`).
 - `GET /api/v1/board/stream` — SSE `board` frames carrying the exact `Board` document when it
   changes, plus `heartbeat` frames; no cursor or resume.
-- `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer; the read route
-  is implemented in this slice and the answer write is later.
+- `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer; both are
+  implemented. The answer is the one write and is gated by the daemon token.
 - `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape;
   implemented in this slice.
 - `GET /api/v1/nodes` — **later slice**: node name, SSH target, last seen, version and probe state.
@@ -122,7 +138,9 @@ placeholder route for it. The single-capsule route is implemented read-only in t
 capsule web view is later.
 
 A write response returns the affected row or the request id; consumers poll or wait for the next
-event. A browser action must never apply a state transition directly.
+event. The inbox answer write returns the answered `InboxItem` with `202 Accepted`; the
+supervisor applies the queued request on its next tick. A browser action must never apply a
+state transition directly.
 
 ## Wire contract
 
@@ -155,6 +173,8 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   parent first, at most 32 entries, stopped when a parent row is missing or a parent session
   repeats, or when the bound is hit.
 - `InboxPage` = `Page<InboxItem>` — one inbox list page.
+- `InboxAnswerRequest { answer }` — the body of `POST /api/v1/inbox/{id}/answer`. The
+  response reuses `InboxItem`; there is no separate answer response type.
 - `CostReport { by, rows, total }` — the exact `vowp cost --json` document. `by` echoes the
   grouping; `rows` and `total` split known USD, token usage, source and unknown-entry counts.
 - `CostRow { key, runs, usd, tokens, source, unknown_entries }` — one grouped cost row.
@@ -170,10 +190,10 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
-`SessionDetail` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples. Export the
-concrete page instantiations the API serves (`JobPage`, `SessionPage`, `EventPage` and `InboxPage`)
-and `CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
-exception above.
+`SessionDetail`, `InboxAnswerRequest` and `ApiError` to `all_schemas()` rather than hand-writing
+JSON examples. Export the concrete page instantiations the API serves (`JobPage`, `SessionPage`,
+`EventPage` and `InboxPage`) and `CostReport` alongside their item types, and keep the SSE frame as
+the one explicit schema exception above.
 
 ## Existing crates it builds on
 
@@ -202,8 +222,11 @@ exception above.
    frame whenever its content changes apart from `at`, with no cursor, `after_seq`, event
    merge or `resync`. `session_events.seq` remains per session for the timeline stream and
    the ledger has a global autoincrement id; no global event log is introduced.
-4. **Token storage.** A random token in `<home>/api-token` (0600) or an environment variable? How is it
-   rotated? Never log the value; never put it in a URL.
+4. **Token storage.** Resolved for this slice: the daemon reads `VOWP_API_TOKEN` from its
+   environment at startup. Missing or empty disables writes; rotating the token means restarting
+   the daemon with a new value. There is no token file, rotation service or multi-user account.
+   The value is never logged or put in a URL; the page keeps it in `sessionStorage` and clears it
+   on `401`.
 5. **Backpressure.** Answered for both streams. Each session poll reads at most 256 events,
    the response stream yields one frame at a time and lets HTTP backpressure slow the client,
    and a cursor that falls behind a truncated log gets one `resync` frame and a clean close.
@@ -213,24 +236,31 @@ exception above.
 
 ## First-issue-sized slice
 
-Implemented: `crates/vowp-daemon` opens an existing node home read-only and serves
+Implemented: `crates/vowp-daemon` opens an existing node home read-only for reads
+(and writable-but-non-creating for the one answer write) and serves
 `GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/board/stream`, `GET /api/v1/jobs`,
 `GET /api/v1/sessions`,
 `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/capsules/{capsuleId}`,
 `GET /api/v1/sessions/{id}/events?after_seq=`,
-`GET /api/v1/sessions/{id}/events/stream?after_seq=`, `GET /api/v1/inbox?state=` and
-`GET /api/v1/cost?by=&since=&until=`. It binds `127.0.0.1:0` in tests, uses a temporary store
-with jobs in several states, one running job and a parent/child session chain with a capsule
-and a bounded long chain, a limit, open/answered inbox items, cost ledger rows from every
-source and a checkpoint, and asserts that every JSON document validates against its exported
-schema — including `SessionDetail` for the session detail, `Capsule` for the capsule read,
-`Board`, `BoardRun` and `BoardLimit` for the board, `InboxPage` for the inbox and `CostReport`
-for cost. The SSE tests use a real loopback listener and short injected intervals: the
-session stream compares exact `EventEnvelope` frames and appends live through
-`SessionLog::open`; the board stream validates its `board` frames against the `Board` schema,
-compares them with `GET /api/v1/board` apart from `at`, changes a job row through a writable
-store to receive the next snapshot, and observes heartbeats while the snapshot is stable. No
-write endpoints yet. The first-slice section above lists what is still later.
+`GET /api/v1/sessions/{id}/events/stream?after_seq=`, `GET /api/v1/inbox?state=`,
+`POST /api/v1/inbox/{id}/answer` and `GET /api/v1/cost?by=&since=&until=`. It binds
+`127.0.0.1:0` in tests, uses a temporary store with jobs in several states, one running job
+and a parent/child session chain with a capsule and a bounded long chain, a limit,
+open/answered inbox items, cost ledger rows from every source and a checkpoint, and asserts
+that every JSON document validates against its exported schema — including `SessionDetail`
+for the session detail, `Capsule` for the capsule read, `Board`, `BoardRun` and `BoardLimit`
+for the board, `InboxPage` for the inbox and `CostReport` for cost. The SSE tests use a real
+loopback listener and short injected intervals: the session stream compares exact
+`EventEnvelope` frames and appends live through `SessionLog::open`; the board stream validates
+its `board` frames against the `Board` schema, compares them with `GET /api/v1/board` apart
+from `at`, changes a job row through a writable store to receive the next snapshot, and
+observes heartbeats while the snapshot is stable. The answer tests pin `503` without a token,
+`401` for a missing or wrong Bearer value (before the body is parsed), `202` with the answered
+`InboxItem` and exactly one `answer_inbox` request row for a job item, `404`, `409`, `400` for
+empty/oversized/malformed answers, unchanged token-free `GET`s, and the store never creating a
+home. The inbox page test pins the answer form, `Authorization: Bearer` use,
+`sessionStorage`, the queued message, the `401` and `503` lines and the absence of a token in
+the URL. Every other write endpoint remains later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.
