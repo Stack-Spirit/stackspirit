@@ -104,6 +104,14 @@ for every non-archived project (including paused ones), then detaches the superv
 home, or from a checkout to register that checkout on the way. `vowp up --foreground` is what the systemd unit runs; `--once` runs one tick
 for a smoke test.
 
+`vowp up` also starts the loopback web window as a separate `vowp-daemon` child and prints
+`web window: http://127.0.0.1:<port>/`. Open that URL on the home, or through your SSH tunnel;
+`vowp down` stops the window together with the supervisor. The window serves one project: run
+`up` from that checkout, or pass `--project <name>`, when the home has several. If the daemon
+binary is not installed next to `vowp` or on `PATH`, `vowp up` warns and continues without the
+window; the supervisor is not optional. The writes on the pages use the same `VOWP_API_TOKEN`
+the supervisor inherited.
+
 `vowp status` is the short screen; `vowp fleet status` is the fleet view, and
 `vowp fleet queue` explains why a ready job is not running. `vowp board --once` prints the board once.
 With tmux:

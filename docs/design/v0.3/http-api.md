@@ -2,9 +2,9 @@
 
 Status: the read API (including session detail, single-capsule reads and the node list), the
 per-session SSE stream, the board snapshot SSE stream and the two token-gated writes (inbox
-answer and local session switch) are implemented in `crates/vowp-daemon`; the rest of this
-note is design. The daemon is **not** part of v0.2 and is not wired into `vowp up` yet.
-Nothing here is implemented in v0.1.
+answer and local session switch) are implemented in `crates/vowp-daemon`, and `vowp up`
+starts the daemon as a separate child process; the rest of this note is design. The daemon
+is not part of v0.2. Nothing here is implemented in v0.1.
 
 ## First slice (implemented)
 
@@ -111,15 +111,51 @@ in `sessionStorage` and clear it on `401`. Both writes open the existing home wi
 running session needs an explicit `force` before the switch drains and stops it.
 
 Still later: every other write endpoint (job retry/park/cancel, capsule edits), the reconnect
-UI on the pages that still poll, the cost dashboard page, node add/remove/probe, `vowp up`
-integration and the remaining browser pages. There are no placeholder routes for any of
-them. The per-session SSE stream is implemented and used by the session detail page; the board
-stream is implemented and used by the board page; the inbox answer form and the session
-switch form are implemented and use the two write routes.
+UI on the pages that still poll, the cost dashboard page, node add/remove/probe and the
+remaining browser pages. There are no placeholder routes for any of them. The per-session SSE
+stream is implemented and used by the session detail page; the board stream is implemented and
+used by the board page; the inbox answer form and the session switch form are implemented and
+use the two write routes.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
 validated against its exported JSON Schema, not just round-tripped through serde.
+
+## Starting the window from `vowp up` (implemented)
+
+The process-shape question is resolved in favour of the **separate `vowp-daemon` child
+process**. An in-supervisor thread would have to share the supervisor's store handles, error
+path and shutdown, while the daemon already owns its read-only/read-write split. The separate
+process keeps that split intact: the supervisor keeps its `<home>/supervisor.lock`, the daemon
+opens the existing home itself, and there is no second home lock and no placeholder token.
+
+`vowp up` locates the binary from `VOWP_DAEMON_BIN` when set (tests and unusual installs),
+then the `vowp-daemon` sibling next to the running `vowp` executable, then `PATH`. It starts
+`vowp-daemon --home <home> --project <project> --port 0` as a direct child, inheriting the
+environment (including `VOWP_API_TOKEN`) and forwarding the child's stderr with the token
+value and home path redacted. The child shares the supervisor's process group, so a terminal
+Ctrl-C or a control-group stop reaches it too. No token file, second home lock or
+new token storage is added; a missing or empty `VOWP_API_TOKEN` still leaves reads working and
+writes disabled.
+
+The window serves one project while the supervisor serves every active project. The checkout
+named by `--project` (or the current directory) is used when `up` runs from one; otherwise the
+home must have exactly one non-archived project. An ambiguous or empty home prints a warning
+and leaves the window off rather than guessing.
+
+The daemon binds `127.0.0.1:0` and prints one `vowp-daemon: listening on http://…` line. The
+supervisor reads that line and prints `web window: http://127.0.0.1:<port>/`; it also writes
+the URL to `<home>/web-window` so a detached `vowp up` (whose foreground child owns the log)
+can print the same line, and removes the file on shutdown. A missing or unstartable binary
+prints `warning: web window not started: …` and the supervisor keeps running: the window is
+optional, the supervisor is not. `up --once` runs one tick and starts no daemon.
+
+On its shutdown path (normal stop file, first SIGINT/SIGTERM, supervisor error or early
+startup failure) the foreground supervisor sends SIGTERM to the daemon, waits up to five
+seconds, escalates to SIGKILL, reaps the child and removes the address file. No daemon child
+is left behind. Tests use `VOWP_DAEMON_BIN` with a fake daemon that records its argv and
+token, prints a fake address and traps SIGTERM; the real home, tmux server and harnesses are
+never touched.
 
 ## Goal
 
@@ -243,11 +279,13 @@ exception above.
 
 ## Open questions
 
-1. **Process shape.** Is the daemon a separate planned `serve` process, or an optional thread inside
-   `vowp up`? A separate process keeps the supervisor unchanged but needs a second lock/ownership
-   story; an in-supervisor thread reuses the heartbeat and `BoardSnapshot`.
-2. **Scope.** One project per daemon (matching one supervisor per project home), or every project in
-   the node database? Default to one project and make it explicit in the URL or a `--project` flag.
+1. **Process shape.** Resolved: the daemon is the separate `vowp-daemon` child process described
+   above. The supervisor keeps its lock, the daemon opens the home itself and there is no second
+   lock or ownership story. An in-supervisor thread was rejected because it would share the
+   supervisor's store handles and shutdown path.
+2. **Scope.** One project per daemon, matching one supervisor per project home. `vowp up` passes
+   the checkout's project, or the only non-archived project; an ambiguous home leaves the window
+   off with a warning. Starting `vowp-daemon` directly still takes `--project`.
 3. **Cursor semantics.** Resolved for the board stream: the board is a self-contained
    snapshot, so `GET /api/v1/board/stream` sends the exact `Board` document as a `board`
    frame whenever its content changes apart from `at`, with no cursor, `after_seq`, event
@@ -295,7 +333,10 @@ home. The switch tests pin `503` without a token, `401` for a missing or wrong B
 `404`, the running/switching/closed/limit `409` guards and `400` for malformed bodies and
 executors. The page tests pin the switch form, `Authorization: Bearer` use, `sessionStorage`,
 the force warning, the state/error line and the absence of a token in the URL. The inbox page
-test pins the answer form and its queued message. Every other write endpoint remains later.
+test pins the answer form and its queued message. The `vowp up` tests pin the daemon child's
+`--home`/`--project`/`--port` arguments, inherited `VOWP_API_TOKEN`, the printed address, the
+detached address file, SIGTERM/`down` shutdown without an orphan, and the warning-and-continue
+path when the binary is missing. Every other write endpoint remains later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

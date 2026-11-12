@@ -2,8 +2,9 @@
 
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
 board, session, capsule, cost, inbox and nodes pages, the cost chart, the token-gated inbox answer
-and local session switch, and the PWA manifest/service-worker shell are implemented; the rest of
-this note is design. v0.1 has no browser UI and no listening socket.
+and local session switch, and the PWA manifest/service-worker shell are implemented. `vowp up`
+starts the serving `vowp-daemon` as a separate child process and prints the window address; the
+rest of this note is design. v0.1 has no browser UI and no listening socket.
 
 ## Goal
 
@@ -88,6 +89,14 @@ backoff and keeps the five-second polling fallback until a stream open succeeds.
 `EventSource` is unavailable the page polls only. A failed fetch or stream keeps the last board
 and its timestamp visible. The page uses text labels as well as colour and carries a
 `<noscript>` message. It links to `/sessions`, `/cost` and `/inbox`.
+
+`vowp up` starts this daemon for the window as a separate `vowp-daemon` child process, prints
+`web window: http://127.0.0.1:<port>/`, and stops the child on `vowp down` or SIGINT/SIGTERM.
+The child inherits `VOWP_API_TOKEN`, so the page's token unlock and the two writes work without
+a second token store. The window is optional: a missing daemon binary warns and the supervisor
+keeps running. The window serves one project (the checkout `up` runs from, or the only active
+project); an ambiguous home leaves it off with a warning. The process shape, address file and
+shutdown details are in [`http-api.md`](http-api.md#starting-the-window-from-vowp-up-implemented).
 
 The session pages are the same kind of embedded static shell,
 `crates/vowp-daemon/web/sessions.html`, served at `GET /sessions` and `GET /sessions/{id}`. The

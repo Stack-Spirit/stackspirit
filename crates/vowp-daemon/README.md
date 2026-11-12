@@ -2,6 +2,10 @@
 
 The loopback HTTP API for one VOWP project.
 
+`vowp up` starts this binary as a separate child process for the web window, prints its
+loopback address as `web window: http://127.0.0.1:<port>/`, inherits `VOWP_API_TOKEN`, and
+stops it on `vowp down` or SIGINT/SIGTERM. Running the binary directly remains supported.
+
 `vowp-daemon [--home <dir>] [--project <name>] [--port <n>]` opens an existing VOWP home
 read-only for its GET endpoints (and writable-but-non-creating for the two writes),
 serves the static board page at `GET /` and its phone alias `GET /board`, the
