@@ -19,16 +19,20 @@ the public README**; it is shown as a diff for the owner to approve.
 
 ## What was ported
 
-To `main`, preserving unrelated work:
+On `main`, preserving unrelated work:
 
-- `README` positioning is staged separately because `v4-s2-remaining-redaction-gaps` currently owns
-  `README.md`, `docs/guides/operating.md` and `docs/guides/vps.md`. See `docs/public-positioning`.
 - `docs/concepts/what-is-vowp.md` (new), `docs/concepts/README.md`,
   `docs/concepts/capacity.md`, `docs/concepts/home-and-surfaces.md`,
   `docs/concepts/overview.md`, `docs/concepts/sessions-and-switching.md`.
 - `docs/guides/README.md`, `docs/guides/multi-node.md`, `docs/guides/sessions.md`.
 - `docs/release/0.3.0.md`.
 - `docs/design/README.md` (v0.3 status) and `docs/design/plan.md` (VPS-first paragraph).
+
+On `docs/public-positioning`, because `v4-s2-remaining-redaction-gaps` currently owns these paths:
+
+- `README.md` positioning (the private redaction paragraph is preserved).
+- `docs/guides/operating.md` and `docs/guides/vps.md` v0.3/VPS-first wording (the private redaction
+  paragraph is preserved).
 
 Deliberately not ported:
 
