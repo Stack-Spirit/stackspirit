@@ -3319,6 +3319,95 @@ fn session_watch_once_appends_to_one_session_without_duplicates() {
 }
 
 #[test]
+fn session_watch_redacts_secret_from_transcript_body_and_raw() {
+    let env = common::TestEnv::new();
+    let ctx = vowp_cli::Ctx::build(&env.global(false), &vowp_cli::BufferIo::new("")).expect("context");
+    let secret = "watch-transcript-value-9713";
+    let name = vowp_protocol::SecretName::parse("WATCH_KEY").expect("secret name");
+    vowp_core::vault::write_secret(ctx.deps(), &name, secret).expect("write secret");
+
+    let dir = claude_transcripts(&env);
+    let path = dir.join("mangled-cwd").join("claude-secret.jsonl");
+    append_claude_line(
+        &path,
+        &claude_line(
+            "user",
+            "u1",
+            "native-secret",
+            serde_json::json!(format!("question {secret}")),
+            "2026-11-12T12:00:00Z",
+        ),
+    );
+    append_claude_line(
+        &path,
+        &claude_line(
+            "assistant",
+            "a1",
+            "native-secret",
+            serde_json::json!([{"type": "text", "text": format!("answer {secret}")}]),
+            "2026-11-12T12:00:01Z",
+        ),
+    );
+    let transcript_before = std::fs::read(&path).expect("read transcript");
+
+    let (code, stdout, stderr) = watch_once(&env, &dir);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("2 events imported"), "{stdout}");
+
+    let sessions = project_sessions(&env);
+    assert_eq!(sessions.len(), 1);
+    let events = watched_events(&env, &sessions[0].id);
+    let marker = "[REDACTED:WATCH_KEY]";
+    let mut messages = Vec::new();
+    for event in &events {
+        match event.body() {
+            Ok(EventBody::UserMessage(payload)) => messages.push(("user", event, payload.text)),
+            Ok(EventBody::AssistantMessage(payload)) => messages.push(("assistant", event, payload.text)),
+            _ => {}
+        }
+    }
+    assert_eq!(messages.len(), 2, "both transcript messages were imported");
+    for (kind, event, text) in messages {
+        assert!(!text.contains(secret), "{kind} body holds the raw secret: {text}");
+        assert!(text.contains(marker), "{kind} body records the redaction: {text}");
+        let raw = event
+            .raw
+            .as_ref()
+            .expect("the imported event keeps its raw transcript line");
+        let raw_text = raw.to_string();
+        assert!(
+            !raw_text.contains(secret),
+            "{kind} raw holds the raw secret: {raw_text}"
+        );
+        assert!(
+            raw_text.contains(marker),
+            "{kind} raw records the redaction: {raw_text}"
+        );
+    }
+    for event in &events {
+        assert!(
+            !event.payload.to_string().contains(secret),
+            "event {} ({}) holds the raw secret",
+            event.seq,
+            event.event_type
+        );
+        if let Some(raw) = &event.raw {
+            assert!(
+                !raw.to_string().contains(secret),
+                "event {} ({}) raw holds the raw secret",
+                event.seq,
+                event.event_type
+            );
+        }
+    }
+    let transcript_after = std::fs::read(&path).expect("read transcript again");
+    assert_eq!(
+        transcript_after, transcript_before,
+        "the importer must not modify the source transcript"
+    );
+}
+
+#[test]
 fn session_watch_once_waits_for_a_complete_final_line() {
     let env = common::TestEnv::new();
     let dir = claude_transcripts(&env);

@@ -392,13 +392,13 @@ local tunnel so the browser sees a control-machine loopback URL. A harness recei
 listed in `env_pass`; VOWP injects those names into that child's environment, from the secret store
 when set and otherwise from the process environment.
 
-Redaction is partial and timed. Event payloads and `raw` appended by the session service or the
-remote ingest path are redacted before writing, as is the snapshot; a capsule is redacted after the
-writer returns; the job report and latest run mirror are redacted after each turn finishes.
-Supervisor logs, gate command evidence, ledger detail rows, the switch turn path and the
-`session watch` importer are written unredacted today, and a report or run mirror is still raw while
-the turn is running. Treat the home and its databases as sensitive; avoid commands that print secret
-values.
+Redaction is partial and timed. Event payloads and `raw` appended by the session service, the remote
+ingest path, a switch turn or the `session watch` importer are redacted before writing, as is the
+snapshot; a capsule is redacted after the writer returns; the supervisor log, gate command evidence
+and ledger detail rows are redacted before writing; the job report and latest run mirror are redacted
+after each turn finishes. A report or run mirror is still raw while the turn is running, and
+exact-value matching cannot catch a transformed or encoded copy. Treat the home and its databases as
+sensitive; avoid commands that print secret values.
 
 The honest limit: any agent that can run arbitrary code in a process that holds a secret can print
 it. **Basic mode does not separate the value from the agent's user**: `~/.vowp/secrets/<NAME>` is mode

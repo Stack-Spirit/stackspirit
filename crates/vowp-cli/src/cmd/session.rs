@@ -2106,19 +2106,22 @@ fn import_transcript(ctx: &Ctx, store: &Store, path: &Path) -> Result<usize, Cli
             let Some((body, actor)) = transcript_event(entry) else {
                 continue;
             };
+            let event = vowp_store::session_log::NewEvent {
+                actor,
+                source: EventSource {
+                    harness,
+                    model: Some(CLAUDE_MODEL.to_owned()),
+                    node: Some(ctx.config().node.name.clone()),
+                    native_session_id: Some(native.clone()),
+                },
+                body,
+                raw: Some(line.value.clone()),
+                ts: None,
+            };
+            // Redact exact values from the mapped body and the raw transcript line
+            // before the log line is written. A failure fails the import.
             let appended = log
-                .append(vowp_store::session_log::NewEvent {
-                    actor,
-                    source: EventSource {
-                        harness,
-                        model: Some(CLAUDE_MODEL.to_owned()),
-                        node: Some(ctx.config().node.name.clone()),
-                        native_session_id: Some(native.clone()),
-                    },
-                    body,
-                    raw: Some(line.value.clone()),
-                    ts: None,
-                })
+                .append(vowp_core::vault::redact_event(ctx.deps(), event)?)
                 .map_err(vowp_core::CoreError::from)?;
             store.index_event(&vowp_store::session_log::index_row(&appended))?;
             store.insert_native_event(

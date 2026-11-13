@@ -159,14 +159,14 @@ built-in rotation for the supervisor log, so use your normal log rotation.
 | `<project>/.vowp/checkpoints/` | Planner checkpoint summaries. |
 
 Never log or paste prompts, environment values or secret-looking strings. Exact injected values are
-replaced with `[REDACTED:<NAME>]` on the session-service and remote-ingest event paths, in the
-snapshot, in capsules, in the supervisor log, in command-gate evidence and ledger rows, and in a
-finished job report and run mirror. The `session switch` harness events and the `session watch`
-importer are written without that redaction, and a report or run mirror is still raw while its turn
-runs. The supervisor loads the secret values at startup, so a secret added later is covered after
-the next supervisor restart. Treat session logs, the databases and every file under `~/.vowp` as
-sensitive: they can contain prompts, tool output and file contents. The coverage is stated exactly
-in the [security model](../security.md#redaction).
+replaced with `[REDACTED:<NAME>]` on every session event path (the service, remote ingest, a switch
+turn and the `session watch` importer), in the snapshot, in capsules, in the supervisor log, in
+command-gate evidence and ledger rows, and in a finished job report and run mirror. A report or run
+mirror is still raw while its turn runs, and exact-value matching does not catch a transformed or
+encoded copy. The supervisor loads the secret values at startup, so a secret added later is covered
+after the next supervisor restart. Treat session logs, the databases and every file under `~/.vowp` as
+sensitive: they can contain prompts, tool output and file contents. The coverage is stated exactly in
+the [security model](../security.md#redaction).
 
 ## Loops
 
