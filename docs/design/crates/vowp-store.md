@@ -23,6 +23,7 @@ crates/vowp-store/
   src/schema/001_init.sql   // BYTE-IDENTICAL copy of docs/design/schema.sql
   src/db.rs             // Store, open/migrate/pragmas/transaction/backup/integrity_check
   src/convert.rs        // private: row <-> protocol type helpers, ts/enum <-> TEXT
+  src/agent.rs          // node credentials, enrollment codes, node path maps, NodeCard
   src/repo_nodes.rs     // nodes, projects
   src/repo_jobs.rs      // jobs, edges
   src/repo_runs.rs      // runs, gate_results, workers
@@ -37,7 +38,7 @@ crates/vowp-store/
   tests/*.rs
 ```
 
-The module split follows the four concerns: connection/schema and the node/job/run repositories; the session, loop, ledger and misc repositories; and the blob store, session log, session files and reindex.
+The module split follows the four concerns: connection/schema and the node/job/run repositories; the session, loop, ledger and misc repositories; the v0.4 local-node enrollment records; and the blob store, session log, session files and reindex.
 
 ## 3. Public API
 
@@ -108,11 +109,20 @@ Migration/pragma rules (all in `Store::open*`):
 5. Insert `kv('schema_created_at')` and `kv('node_id')` (a fresh ULID) on first creation.
 6. `open_writable(paths, project)` is the daemon's narrow write constructor. It requires the
    existing `vowp.db` (missing → `NotFound`), uses read-write flags without create, sets the busy
-   timeout and foreign keys, checks `user_version = 2` (newer → `SchemaTooNew`, older →
+   timeout and foreign keys, checks `user_version = 3` (newer → `SchemaTooNew`, older →
    `MigrationRequired`), and attaches an existing registered project with the same schema check.
    It never calls `paths.ensure`, `resume_migration` or a schema file, so opening it cannot create
    or migrate a home. It is not a general write-open: `Store::open` remains the CLI/supervisor
    constructor.
+7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3 before opening
+   it. `migrate_v02` follows the v0.1 migration's staged-swap recipe: it copies the original file
+   to `backups/pre-0.3-<ms>.db`, writes a fresh v3 file in `tmp/`, copies every global table with
+   explicit columns, verifies per-table counts, integrity and foreign keys, and then renames the
+   staged file into place. A `migration.json` manifest makes the swap restartable. Projects,
+   session logs and the project schema are untouched. The local row (`is_local = 1`) becomes
+   `kind = 'home'`; every other v2 node becomes `kind = 'ssh'` with `status = 'active'`. The
+   existing v0.1 → v2 `migrate_v01` path is not renumbered: it writes the current embedded schema
+   and therefore leaves the home at v3.
 
 ### 3.3 Filters and small structs
 
@@ -141,7 +151,29 @@ pub struct Request { pub id: RequestId, pub kind: String /* "retry_job" | "park_
 pub struct LedgerFilter { pub kind: Option<LedgerKind>, pub job_id: Option<JobId>, pub since: Option<Timestamp>, pub limit: Option<u32> }
 #[derive(Debug, Clone, Default)]
 pub struct SessionFilter { pub project: Option<ProjectName>, pub job_id: Option<JobId>, pub state: Option<SessionState>, pub limit: Option<u32> }
+
+// v0.4 local-node records (agent.rs)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub enum EnrollmentKind { Node, Surface }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeCredential { pub node: NodeName, pub key_id: String, pub public_key: String,
+                            pub created_at: Timestamp, pub last_used_at: Option<Timestamp>,
+                            pub revoked_at: Option<Timestamp> }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentCode { pub code_hash: String, pub node: NodeName, pub kind: EnrollmentKind,
+                            pub surface_id: Option<String>, pub expires_at: Timestamp,
+                            pub used_at: Option<Timestamp>, pub created_by: String,
+                            pub created_at: Timestamp }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePath { pub node: NodeName, pub project: ProjectName, pub local_root: String,
+                      pub worktree_root: String, pub allow: Vec<String>, pub updated_at: Timestamp }
 ```
+
+`consume_enrollment_code` is one `BEGIN IMMEDIATE` transaction: it updates `used_at` only for an
+unused row whose `expires_at > now`, then reads back the winner. Two racing callers therefore get
+exactly one `Some`. `node_card` computes presence as online under 30 seconds since
+`last_seen_at`, degraded from 30 through 90 seconds, offline after 90; a revoked node is always
+`NodePresence::Revoked`. The card never carries `node_paths` or secret names, and `runs` is `0`
+until the agent-assignment phase adds a durable run index.
 
 ### 3.4 Repositories — all are `impl Store` methods
 
@@ -157,6 +189,24 @@ pub fn local_node(&self) -> Result<Option<Node>, StoreError>;
 pub fn list_nodes(&self) -> Result<Vec<Node>, StoreError>;
 pub fn touch_node_seen(&self, name: &NodeName, at: Timestamp) -> Result<(), StoreError>;
 pub fn remove_node(&self, name: &NodeName) -> Result<(), StoreError>;          // refuses the local node
+pub fn insert_pending_node(&self, node: &NodeName, labels: &[String], at: Timestamp) -> Result<(), StoreError>;
+pub fn touch_node(&self, node: &NodeName, at: Timestamp, agent_version: Option<&str>,
+                  protocol: Option<&str>, capabilities: &serde_json::Value) -> Result<(), StoreError>;
+pub fn set_node_status(&self, node: &NodeName, status: NodeStatus, last_error: &str,
+                       at: Timestamp) -> Result<(), StoreError>;
+pub fn node_card(&self, node: &NodeName, now: Timestamp) -> Result<Option<NodeCard>, StoreError>;
+pub fn list_node_cards(&self, now: Timestamp) -> Result<Vec<NodeCard>, StoreError>;
+
+// ---- node credentials, enrollment codes, path maps (agent.rs)
+pub fn node_credential(&self, node: &NodeName, key_id: &str) -> Result<Option<NodeCredential>, StoreError>;
+pub fn upsert_node_credential(&self, credential: &NodeCredential) -> Result<(), StoreError>;
+pub fn revoke_node_credentials(&self, node: &NodeName, at: Timestamp) -> Result<u64, StoreError>;
+pub fn insert_enrollment_code(&self, code: &EnrollmentCode) -> Result<(), StoreError>;
+pub fn consume_enrollment_code(&self, code_hash: &str, now: Timestamp) -> Result<Option<EnrollmentCode>, StoreError>;
+pub fn purge_expired_enrollment_codes(&self, before: Timestamp) -> Result<u64, StoreError>;
+pub fn upsert_node_path(&self, path: &NodePath) -> Result<(), StoreError>;
+pub fn list_node_paths(&self, node: &NodeName) -> Result<Vec<NodePath>, StoreError>;
+
 pub fn upsert_project(&self, p: &Project) -> Result<(), StoreError>;
 pub fn project(&self, name: &ProjectName) -> Result<Option<Project>, StoreError>;
 pub fn require_project(&self, name: &ProjectName) -> Result<Project, StoreError>;
@@ -501,6 +551,14 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `open_refuses_newer_schema` | set `PRAGMA user_version = 99` on a temp DB file, `Store::open_path` → `SchemaTooNew{found:99,supported:1}`, file bytes unchanged |
 | `open_is_idempotent` | open twice on the same file: no error, `node_id` kv unchanged |
 | `open_writable_answers_and_never_creates_or_migrates` | `open_writable` opens an existing home, answers an inbox item and reads it back; a missing `vowp.db` is `NotFound` and its directory is not created; an empty zero-byte file is `MigrationRequired` and stays untouched |
+| `migration_v2_to_v3_preserves_nodes_projects_and_sessions` | a v2 fixture with nodes, a project and a session migrates to v3; counts, `kv('node_id')`, project and session rows survive; the backup still reports v2 |
+| `local_node_is_home_after_migration` | `is_local = 1` becomes `kind = 'home'`; other nodes become `kind = 'ssh'` with `status = 'active'` |
+| `enrollment_code_is_single_use` | one sequential redemption, then `None`; two racing connections produce exactly one winner |
+| `enrollment_code_expires` | a code is invalid at its expiry instant; `purge_expired_enrollment_codes` removes it |
+| `node_credential_round_trips_and_revokes` | insert/update round-trip preserves `created_at`, revocation is idempotent and returns the changed count; an unknown node fails its foreign key |
+| `node_path_upsert_is_idempotent` | two upserts leave one row per `(node, project)` with the newest map |
+| `node_status_and_presence_persist` | pending/active status, labels, version, protocol and capacity round-trip; presence is online/degraded/offline at 10/60/120 seconds; `last_error` persists |
+| `revoked_node_is_not_active` | a revoked node stays `Revoked` and never becomes `Active` after a late heartbeat |
 | `schema_matches_enums` | parse every `CHECK (col IN ('a','b',...))` list from `schema.sql` and compare to the serde names of the matching Rust enum for: `jobs.kind/role/state`, `edges.kind`, `runs.role/purpose/outcome/limit_kind/cost_source`, `gate_results.gate_kind`, `session_events.type/actor`, `sessions.state/role`, `capsules.trigger`, `switches.reason/state`, `loops.kind/state`, `schedules.spec_kind/action_kind/missed_policy/state`, `ledger.kind`, `inbox.kind/state`, `limits.kind`, `releases.state`, `workers.kind/state` — sets must be equal |
 | `job_insert_defaults_and_needs_edges` | `insert_job` with minimal `NewJob` yields state Pending, priority 50, brief path `.vowp/jobs/<id>/brief.md`, default gates for kind, and `job.needs` equals the `needs` edges |
 | `job_insert_duplicate_and_unknown_need` | duplicate id → `Conflict`; unknown need → `NotFound`; no partial rows left (transaction) |
@@ -556,3 +614,6 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 ## 7. Out of scope / v0.2
 
 HTTP/daemon access, replication/libSQL, FTS search over events, sidecar tail index for huge logs, log signing/hash chain, automatic backup scheduling (that is a `vowp schedule` command item in core), blob garbage collection.
+
+The v0.4 Phase 0 store stops at enrollment: `surface_tokens`, `agent_assignments`, `node_limits`,
+lease token hashing, the project `runs` columns and the agent gateway are later phases.

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agent;
 pub mod blobs;
 mod convert;
 pub mod db;
@@ -34,13 +35,14 @@ pub mod repo_surfaces;
 pub mod session_files;
 pub mod session_log;
 
+pub use agent::{EnrollmentCode, EnrollmentKind, NodeCredential, NodePath};
 pub use db::{
     CostGroup, CostQuery, CostRow, GLOBAL_SCHEMA_VERSION, JobFilter, LedgerFilter, PROJECT_SCHEMA_VERSION, Request,
     RequestId, RunFinish, SCHEMA_VERSION, SessionFilter, StateChange, Store,
 };
 pub use error::StoreError;
 pub use migrate::{
-    MigrationCount, MigrationReport, migrate_rollback, migrate_v01, migrate_v01_dry_run, resume_migration,
+    MigrationCount, MigrationReport, migrate_rollback, migrate_v01, migrate_v01_dry_run, migrate_v02, resume_migration,
 };
 pub use paths::NodePaths;
 pub use reconcile::{CrossDbReconcile, ReconcileCounts};
