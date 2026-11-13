@@ -595,10 +595,10 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
-/// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox and nodes pages at `/cost`,
-/// `/inbox` and `/nodes`, the PWA manifest, icon and service worker, plus the API under
-/// `/api/v1`. The only non-GET API routes are the token-gated inbox answer, session switch
-/// and job retry/park/cancel writes.
+/// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox, nodes and jobs pages at
+/// `/cost`, `/inbox`, `/nodes` and `/jobs`, the PWA manifest, icon and service worker, plus
+/// the API under `/api/v1`. The only non-GET API routes are the token-gated inbox answer,
+/// session switch and job retry/park/cancel writes.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -609,6 +609,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/cost", get(cost_page))
         .route("/inbox", get(inbox_page))
         .route("/nodes", get(nodes_page))
+        .route("/jobs", get(jobs_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(service_worker))
         .route("/icon.svg", get(icon))
@@ -722,6 +723,19 @@ const NODES_PAGE: &str = include_str!("../web/nodes.html");
 /// add, remove or probe control and no SSH or write path is offered.
 async fn nodes_page() -> Html<&'static str> {
     Html(NODES_PAGE)
+}
+
+/// The embedded static jobs shell, served at `/jobs`.
+const JOBS_PAGE: &str = include_str!("../web/jobs.html");
+
+/// Serves the static jobs shell; it fetches `/api/v1/jobs` on load and every five seconds.
+///
+/// The page renders each job's id, state, kind, role, priority, needs, attempts, updated
+/// time and note. Reads stay token-free. Retry, park and cancel appear only after the daemon
+/// write token is stored in `sessionStorage`; they post to the existing token-gated
+/// `/api/v1/jobs/{id}/retry|park|cancel` routes and refresh the list on `202`.
+async fn jobs_page() -> Html<&'static str> {
+    Html(JOBS_PAGE)
 }
 
 /// The embedded PWA manifest.

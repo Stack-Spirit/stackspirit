@@ -11,9 +11,10 @@ use serde_json::Value;
 use support::{BoardFixture, Server, get};
 
 /// Every static page shell route, including one dynamic session and capsule path.
-const PAGES: [&str; 8] = [
+const PAGES: [&str; 9] = [
     "/",
     "/board",
+    "/jobs",
     "/sessions",
     "/sessions/ses-test",
     "/sessions/ses-test/capsules/cap-test",
@@ -130,7 +131,7 @@ fn service_worker_caches_only_the_shell_and_bypasses_api_and_streams() {
     let body = &response.body;
 
     for needle in [
-        "const CACHE_NAME = \"vowp-shell-v2\";",
+        "const CACHE_NAME = \"vowp-shell-v3\";",
         "const SHELL = [",
         "caches.open(CACHE_NAME)",
         "cache.addAll(SHELL)",
@@ -157,6 +158,7 @@ fn service_worker_caches_only_the_shell_and_bypasses_api_and_streams() {
     for route in [
         "/",
         "/board",
+        "/jobs",
         "/sessions",
         "/cost",
         "/inbox",
