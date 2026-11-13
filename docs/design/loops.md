@@ -206,14 +206,18 @@ A hit stores `{path, line, rule}` only. `vowp_core::gates::secret_scan::rules()`
 
 One merge at a time per project (`workers`-independent; runs on a runner thread). Input: job in `merging` (never a fix/merge/verify job: those go `done` at T14).
 
-1. `git fetch <remote>`; record `main_before = rev-parse <remote>/<default_branch>`.
-2. In the job worktree: `git rebase <remote>/<default_branch>` (if `merge.rebase=false`: skip, require ff-ability).
+1. `git fetch <remote>`; resolve the **local** `<default_branch>` head and the fetched `<remote>/<default_branch>` head. The merge base is the local branch the queue is about to fast-forward and push:
+   - The remote base is an ancestor of the local base (including equal): keep the local base. A local branch **ahead of the remote is the normal case** while the GitHub push is parked, not an error.
+   - The local base is an ancestor of the remote base: fast-forward the local base to `<remote>/<default_branch>` (`git merge --ff-only <remote>/<default_branch>`), then use it as the base.
+   - The two bases **diverged**: record a ledger `merge` failure naming both heads, open an inbox notice and park the job `Manual`. Never reset or force: a human reconciles the branches.
+   `main_before` is the local base head used for the merge; it is also the reset target when a push race is retried.
+2. In the job worktree: `git rebase <default_branch>` (if `merge.rebase=false`: skip, require ff-ability).
    - **Conflict** (rebase exits ≠ 0): `git rebase --abort`; list conflicted files; emit `MergeConflict` (T26). The merge job's brief lists the files and tells the agent to `git rebase origin/main`, resolve, `git add`, `git rebase --continue`, rerun gates. It runs **in the same worktree** with the original's `owns` plus the conflicted files.
-   - **Lockfile only** (every conflicted path is in `project.lock_files`, e.g. `Cargo.lock`): no merge job. Take the main version (`git checkout <remote>/<default_branch> -- <file>`), `git add`, `git rebase --continue`; after the rebase regenerate with `cargo update -w` (never `generate-lockfile`, which bumps versions) and, if the file changed, commit `chore: refresh lockfile (merge queue)` with the job's trailer. These are the only commits the supervisor authors; the ledger `merge` row records `lockfile_refreshed=true`.
+   - **Lockfile only** (every conflicted path is in `project.lock_files`, e.g. `Cargo.lock`): no merge job. Take the local base version (`git checkout <default_branch> -- <file>`), `git add`, `git rebase --continue`; after the rebase regenerate with `cargo update -w` (never `generate-lockfile`, which bumps versions) and, if the file changed, commit `chore: refresh lockfile (merge queue)` with the job's trailer. These are the only commits the supervisor authors; the ledger `merge` row records `lockfile_refreshed=true`.
 3. Re-run the **repo-wide checks**: `merge.check_cmds` (falls back to `project.check_cmds`, e.g. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`), each with `merge.timeout_secs` (2700) total budget. A failure → `MergeChecksFailed` (T27); evidence `Cmd` rows with `gate_index=-1`.
 4. If `merge.secret_scan`: run the `secret_scan` gate over `<remote>/<default_branch>...job/<id>`; hits → `MergeChecksFailed`, and the job is **never pushed**.
 5. Fast-forward: in the main checkout `git merge --ff-only job/<id>` (the main checkout is clean by invariant; if not, abort, write a ledger `merge` failure and park the job `Manual` with an inbox notice).
-6. `git push <remote> <default_branch>` (if `project.push`); a rejected push (remote moved) → `git reset --hard <main_before>` in the main checkout and restart from step 1 (≤ 3 times, then `MergeChecksFailed`).
+6. `git push <remote> <default_branch>` (if `project.push`); a rejected push (remote moved) → `git reset --hard <main_before>` in the main checkout, fetch again, recompute the local and remote bases and restart from step 1 (≤ 3 times, then `MergeChecksFailed`).
 7. Delete branch `job/<id>` remote+local only if it was pushed by us; `git worktree remove <worktree>`; window `job-<id>` killed (tagged windows only).
 8. Ledger `merge` row: job, `main_before`, `main_after`, files changed count, durations of each step. Emit `MergeSucceeded` (T25) → `UnblockDependents` → dependents may become `ready` on the next tick.
 
