@@ -1,8 +1,8 @@
 # v0.4 — the local orchestrator: a local surface and a local node on the home's terms
 
-Status: **draft for owner review (2026-11-13).** No code is implemented. The names, schemas,
-commands and defaults here are proposals for v0.4; §16 lists the decisions the owner must make
-before implementation. Where this note conflicts with the v0.2 specification, the v0.2
+Status: **draft; decisions accepted (2026-11-13).** No code is implemented. The owner accepted
+the transport, result-return, phase-order and offload/secret proposals; §16.1 records them and
+the remaining MVP defaults. Where this note conflicts with the v0.2 specification, the v0.2
 specification still governs the shipped tree and this note is a proposal.
 
 The **home** is the VPS. It stays the only home: the global DB, every project DB, every session
@@ -34,6 +34,10 @@ through a reverse proxy without changing the semantics.
 
 What this is not: a second home, a DB replica, a distributed scheduler, a sandbox, a way to copy
 provider logins, or a public API.
+
+On 2026-11-13 the owner accepted the transport, result-return, phase-order and offload/secret
+proposals. §16.1 is the decision record; the remaining open questions are recorded as MVP
+defaults and can be changed before their phase.
 
 ## 1. Goals, non-goals and invariants
 
@@ -1438,6 +1442,9 @@ or refused.
   enable fixes/verifiers and the opencode bridge.
 - Rollback: revoke the nodes, stop the agent, disable offload. The home-only path remains; leases
   expire; the local spool is inspectable; no data is deleted.
+- Until the owner publishes, the project's `origin` push URL points at a local bare repository.
+  The merge queue still merges and pushes locally; nothing goes to GitHub. Restore the GitHub push
+  URL when the owner is ready to publish.
 - The home DB migration is one-way. Back up first and keep the backup until the dogfood period
   ends.
 
@@ -1611,9 +1618,34 @@ opencode bridge.
 | Local events | normalized on the Mac | raw app transcript to the home | less bandwidth; home validates | a shared mapping module to version |
 | Home checkout | keep a home checkout/mirror | Mac-only project | the merge queue and gates need git | disk on the home |
 
-## 16. Open questions for the owner
+## 16. Decisions and open questions
 
-Each has a recommendation; none blocks the draft, but all block implementation choices.
+### 16.1 Decision record (2026-11-13)
+
+The owner accepted the first four items and adopted the remaining recommendations as MVP defaults.
+A default can be changed before its phase; an accepted decision needs a new owner decision to change.
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Transport | **Accepted:** SSH stdio for the MVP; WSS is a Phase 4 opt-in, not a second protocol. |
+| 2 | Result return | **Accepted:** the node pushes `job/<id>` with its own git credentials; bundle upload is Phase 4. |
+| 3 | Phase order | **Accepted:** prove local `vowp chat` first (phases 0–2); the opencode surface is Phase 3. |
+| 4 | Secrets and offload | **Accepted:** offload is opt-in per project/job; the node uses only names it resolves locally; home-only secrets stay home. |
+| 5 | Offline local app | **Default:** pending spool with a 2 GiB cap and a visible "recording locally" state; discard on takeover. |
+| 6 | Takeover | **Default:** fence immediately; VOWP stops recording; the app may keep editing locally. |
+| 7 | Offload default | **Default:** opt-in (same as 4); no automatic offload of idle nodes. |
+| 8 | Capacity | **Default:** the home brake stops home runs only; `pause_on_home_brake = true` is an option. |
+| 9 | Lease token hashing | **Default:** store hashes; clear the short-lived leases during the upgrade. |
+| 10 | macOS isolation | **Default:** normal user for trusted repos; a separate user/VM for untrusted work; no sandbox claim. |
+| 11 | Local app scope | **Default:** opencode first; Claude Code later. |
+| 12 | Orchestrator start | **Default:** support both; start the local opencode service by default for a managed orchestrator. |
+| 13 | Git remote | **Default:** the Mac's `origin` must match the project remote in the MVP; a `push_remote` override is later. |
+| 14 | Phase order detail | **Default:** chat-first, as in 3; swap only by a new owner decision. |
+
+### 16.2 Open questions and rationale
+
+The discussion below preserves the reasoning for the record and the remaining defaults. It no
+longer blocks the first implementation slice.
 
 1. **Transport.** Is SSH stdio acceptable for the MVP, with WSS only if the network blocks SSH?
    Recommended: yes. It keeps the "no public listener" invariant and reuses the existing key-only
