@@ -312,6 +312,7 @@ pub(crate) fn surface_kind_name(kind: SurfaceKind) -> &'static str {
         SurfaceKind::Mcp => "mcp",
         SurfaceKind::Mirror => "mirror",
         SurfaceKind::Api => "api",
+        SurfaceKind::Agent => "agent",
     }
 }
 

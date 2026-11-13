@@ -123,6 +123,17 @@ const LISTED_TYPES: &[&str] = &[
     "CostTotal",
     "ApiError",
     "ApiErrorBody",
+    // v0.4 local-node agent protocol documents.
+    "PathRef",
+    "AgentRole",
+    "AgentCapabilities",
+    "AgentCapacity",
+    "AgentPathMap",
+    "NodeCard",
+    "NodeKind",
+    "NodeStatus",
+    "NodePresence",
+    "AgentFrame",
 ];
 
 /// Decodes one JSON value into a concrete type.

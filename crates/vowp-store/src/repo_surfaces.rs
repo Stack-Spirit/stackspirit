@@ -115,6 +115,7 @@ fn surface_kind_to_text(kind: SurfaceKind) -> &'static str {
         SurfaceKind::Mcp => "mcp",
         SurfaceKind::Mirror => "mirror",
         SurfaceKind::Api => "api",
+        SurfaceKind::Agent => "agent",
     }
 }
 
@@ -127,6 +128,7 @@ fn surface_kind_from_text(text: &str, what: &str) -> Result<SurfaceKind, StoreEr
         "mcp" => Ok(SurfaceKind::Mcp),
         "mirror" => Ok(SurfaceKind::Mirror),
         "api" => Ok(SurfaceKind::Api),
+        "agent" => Ok(SurfaceKind::Agent),
         other => Err(corrupt(what, format!("unknown surface kind {other:?}"))),
     }
 }
