@@ -164,6 +164,17 @@ Proposed public replacement:
 
 The new page's "It opens no public port" and "the home opens no public port" need the same wording.
 
+### 7. Small roadmap fixes for `v4-d1`
+
+`docs/roadmap.md` is owned by the pending `v4-d1-roadmap-0-4` job, so it was not ported. Two public
+lines there are stale even after the v0.3 heading sweep:
+
+- The "No VPS metrics history..." bullet still says "infrastructure that v0.2 does not provide"; it
+  should say v0.3.
+- "The only listeners are loopback-only: the opencode app server joined through an SSH tunnel and
+  the one-time secret paste page" predates the v0.3 `vowp-daemon`/window; add the loopback daemon
+  and window to the list.
+
 ## What is not a problem
 
 - The public 0.3 status alignment (v0.2 → v0.3) matches the private version `0.3.0` and the merged
