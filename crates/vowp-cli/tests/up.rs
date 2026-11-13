@@ -2689,7 +2689,7 @@ fn migrate_requires_yes_and_reports_the_v01_backup() {
     );
 
     let store = Store::open(&env.paths()).expect("migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 2);
+    assert_eq!(store.global_schema_version().expect("version"), 3);
     let node = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT).expect("reserved project");
     assert!(
         store.project(&node).expect("lookup").is_some(),
@@ -2733,7 +2733,7 @@ fn up_migrates_with_backup_first() {
     );
 
     let store = Store::open(&env.paths()).expect("migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 2);
+    assert_eq!(store.global_schema_version().expect("version"), 3);
     let node = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT).expect("reserved project");
     assert!(
         env.paths().project_db_path(&node).is_file(),
