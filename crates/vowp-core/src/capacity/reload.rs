@@ -381,7 +381,9 @@ pub fn preview(deps: &Deps, store: &Store, now: Timestamp) -> Result<ConfigPrevi
 /// Checks and, when changed, atomically applies the on-disk config.
 ///
 /// `force` makes the caller's explicit request attempt a parse even when the fingerprint is
-/// unchanged; it still installs nothing on error. A periodic tick passes `false`.
+/// unchanged; it still installs nothing on error. A periodic tick passes `false`. When the
+/// parsed document matches the effective config, neither value swaps the cell or writes an
+/// applied-reload ledger row.
 pub fn reload_project(deps: &Deps, store: &Store, now: Timestamp, force: bool) -> Result<ReloadOutcome, CoreError> {
     let project = deps.config.project.name.clone();
     let Some(path) = config_path(deps, store)? else {
@@ -450,30 +452,14 @@ pub fn reload_project(deps: &Deps, store: &Store, now: Timestamp, force: bool) -
 
     let old_config = effective_config(deps);
     let old_target = targets::current_with_config(&old_config, store, now)?;
-    let baseline = cell.applied().is_none() && *old_config == new_config;
     let changed = changed_keys(&old_config, &new_config);
 
-    if baseline {
+    if *old_config == new_config {
+        // The file parses, but nothing effective changed: a forced request for an
+        // already-current config lands here. Record the fingerprint as applied and publish
+        // the state, without swapping the cell or writing a misleading ledger row.
         cell.set_applied(disk.clone());
-        let target = targets::current_with_config(&new_config, store, now)?;
-        let published = ReloadState {
-            config_path: Some(path_text),
-            fingerprint: Some(disk),
-            provider_caps: new_config.provider_caps(),
-            target_workers: target.target_workers,
-            applied_at: Some(now),
-            last_error: None,
-        };
-        write_state(store, &project, &published)?;
-        return Ok(ReloadOutcome {
-            applied: false,
-            config_path: published.config_path,
-            provider_caps: published.provider_caps,
-            target: Some(target),
-            changed,
-            pending: false,
-            error: None,
-        });
+        return finish_unchanged(deps, store, now, &path, &disk, state);
     }
 
     cell.swap(Arc::new(new_config.clone()));
@@ -539,6 +525,7 @@ fn finish_unchanged(
     let target = targets::current_for(deps, store, now)?;
     let needs_publish = state.as_ref().is_none_or(|state| {
         state.last_error.is_some()
+            || state.fingerprint.as_ref() != Some(disk)
             || state.provider_caps != config.provider_caps()
             || state.target_workers != target.target_workers
     });

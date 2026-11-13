@@ -478,6 +478,7 @@ fn capacity_reload_request_is_served_by_a_running_supervisor() {
     let mut node = NodeSupervisor::new(env.deps.clone()).expect("supervisor");
     node.startup().expect("startup");
     node.tick().expect("baseline tick");
+    let before = reload_notes(&env.store);
 
     env.set_cap(2);
     let token = "reload-request-token";
@@ -495,8 +496,64 @@ fn capacity_reload_request_is_served_by_a_running_supervisor() {
     assert_eq!(outcome.provider_caps.get("deepseek"), Some(&2));
     assert!(!outcome.pending);
     assert!(
+        !outcome.applied,
+        "the periodic step already applied the change; the request found it current: {outcome:?}"
+    );
+    assert_eq!(
+        reload_notes(&env.store),
+        before + 1,
+        "one ledger row for the change, none for the already-current request"
+    );
+    assert!(
         env.store.kv_get(&request).expect("request row").is_none(),
         "a served request is removed"
+    );
+
+    let again = "reload-request-again";
+    let request = format!("{}{}", reload::request_prefix(&env.project), again);
+    env.store.kv_set(&request, "1").expect("second request row");
+    node.tick().expect("second request tick");
+    let text = env
+        .store
+        .kv_get(&reload::result_key(again))
+        .expect("result row")
+        .expect("served result");
+    let outcome: reload::ReloadOutcome = serde_json::from_str(&text).expect("outcome json");
+    assert!(!outcome.applied, "{outcome:?}");
+    assert!(outcome.changed.is_empty(), "{outcome:?}");
+    assert_eq!(
+        reload_notes(&env.store),
+        before + 1,
+        "an already-current forced reload writes no ledger row"
+    );
+    assert!(
+        env.store.kv_get(&request).expect("request row").is_none(),
+        "a served request is removed"
+    );
+}
+
+#[test]
+fn forced_reload_of_a_semantically_identical_file_records_no_ledger() {
+    let env = Env::new(Some(2));
+    reload::reload_project(&env.deps, &env.store, now(), true).expect("baseline");
+    let before = reload_notes(&env.store);
+
+    let path = env.project_dir.join("vowp.toml");
+    let text = std::fs::read_to_string(&path).expect("config text");
+    std::fs::write(&path, format!("# a formatting-only change\n{text}")).expect("rewrite config");
+
+    let forced = reload::reload_project(&env.deps, &env.store, now(), true).expect("forced reload");
+    assert!(!forced.applied, "{forced:?}");
+    assert!(forced.changed.is_empty(), "{forced:?}");
+    assert!(!forced.pending, "{forced:?}");
+    assert_eq!(
+        reload_notes(&env.store),
+        before,
+        "a semantically identical forced reload writes no ledger row"
+    );
+    assert!(
+        !reload::pending(&env.deps, &env.store).expect("pending"),
+        "the new fingerprint is recorded as applied"
     );
 }
 
