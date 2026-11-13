@@ -1709,6 +1709,21 @@ The main checkout stays clean because the design note is committed. GitHub pushe
 `origin` push URL points at the local bare repository `/home/dev/vowp-local-push.git`; fetches still
 use the real origin. Restore the GitHub push URL when the owner is ready to publish.
 
+### 16.4 Known framework gap: live provider caps (2026-11-13)
+
+The capacity **target** is live: on 2026-11-13 the owner set it to 4 (fixed override) while two fix
+runs were active, and neither run was stopped. The **provider concurrency cap** is not live:
+`[providers.<name>].max_concurrent` is read at supervisor startup, so changing it requires a restart
+and a restart would disturb active runs. That is a framework gap, not a provider limit.
+
+`v4-c1-live-limits` tracks the fix for the next version: reload provider caps and the target without
+a restart, keep active runs' slots, admit more on the next tick after a raise, never kill a run when
+the cap is lowered, and keep the old config when the new one is invalid. Until it lands, raise the
+provider cap only in a quiet window with no active workers.
+
+The Phase 0 protocol job remains ready while the two fix runs hold the two provider slots; the target
+change alone does not create a third provider slot.
+
 ## 17. Alternatives considered
 
 - **v0.2 app host plus a tunnel.** Gives the app the home's checkout, not the Mac's. It does not
