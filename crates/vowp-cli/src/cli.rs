@@ -490,6 +490,8 @@ pub enum SessionCommand {
     Import(SessionImportArgs),
     /// Pull a session from another node.
     Pull(SessionPullArgs),
+    /// Push a session to another node.
+    Push(SessionPushArgs),
     /// Hidden: stream a full session directory snapshot.
     #[command(name = "dir-export", hide = true)]
     DirExport(SessionDirExportArgs),
@@ -654,6 +656,18 @@ pub struct SessionPullArgs {
     /// Copy the full session directory (log, blobs, capsules, adapters.json).
     #[arg(long, conflicts_with = "same_id")]
     pub full: bool,
+}
+
+/// Arguments for `vowp session push`.
+#[derive(Debug, Clone, Args)]
+pub struct SessionPushArgs {
+    /// Node that receives the session.
+    pub node: String,
+    /// Local session id or unique prefix.
+    pub session: String,
+    /// Keep the source session id; refuse when it already exists on the node.
+    #[arg(long)]
+    pub same_id: bool,
 }
 
 /// Arguments for the hidden `vowp session dir-export` stream.
