@@ -18,6 +18,11 @@ python3 docs/reference/check-reference.py
 
 | Type | Page |
 |---|---|
+| `AgentCapabilities` | [agent-capabilities.md](agent-capabilities.md) |
+| `AgentCapacity` | [agent-capacity.md](agent-capacity.md) |
+| `AgentFrame` | [agent-frame.md](agent-frame.md) |
+| `AgentPathMap` | [agent-path-map.md](agent-path-map.md) |
+| `AgentRole` | [agent-role.md](agent-role.md) |
 | `ApiError` | [api-error.md](api-error.md) |
 | `ApiErrorBody` | [api-error-body.md](api-error-body.md) |
 | `BackupFile` | [backup-file.md](backup-file.md) |
@@ -73,9 +78,14 @@ python3 docs/reference/check-reference.py
 | `MigrationReport` | [migration-report.md](migration-report.md) |
 | `NewJob` | [new-job.md](new-job.md) |
 | `Node` | [node.md](node.md) |
+| `NodeCard` | [node-card.md](node-card.md) |
+| `NodeKind` | [node-kind.md](node-kind.md) |
 | `NodePage` | [node-page.md](node-page.md) |
+| `NodePresence` | [node-presence.md](node-presence.md) |
+| `NodeStatus` | [node-status.md](node-status.md) |
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
 | `Page` | [page.md](page.md) |
+| `PathRef` | [path-ref.md](path-ref.md) |
 | `Profile` | [profile.md](profile.md) |
 | `Project` | [project.md](project.md) |
 | `ProjectEntry` | [project-entry.md](project-entry.md) |

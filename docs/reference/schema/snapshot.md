@@ -1429,6 +1429,11 @@ Exported by `vowp schema Snapshot` and generated from the protocol types in
           "const": "api",
           "description": "A direct API client.",
           "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "A v0.4 local surface attached through a `vowp agent`.",
+          "type": "string"
         }
       ]
     },
