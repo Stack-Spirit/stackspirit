@@ -226,7 +226,8 @@ Nothing is pushed. The complete proposed patch is
 public repository root:
 
 ```sh
-git apply -p1 docs/design/v0.4/public-positioning-b49f90e.patch
+# copy this patch to the Mac first; run from the public repository root
+git apply -p1 /path/to/public-positioning-b49f90e.patch
 ```
 
 It touches `README.md`, `docs/concepts/what-is-vowp.md`, `docs/concepts/overview.md`,
