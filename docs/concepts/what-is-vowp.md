@@ -52,8 +52,8 @@ session logs and blobs. Kill every process, restart, and the supervisor reconcil
 ### 3. A fleet of workers on nodes
 
 One supervisor ticks every active project in fairness order. Nodes are registered and tracked; the
-fleet read model and the project board show projects, jobs, runs, worker slots, capacity, provider
-limits, inbox and orchestrators; `vowp node ls` shows the node registry. A broken project parks
+fleet read model shows projects, jobs, runs, capacity, provider limits, inbox and orchestrators, the
+project board shows worker slots, and `vowp node ls` shows the node registry. A broken project parks
 alone. Capacity is measured, not guessed; brakes stop new runs and never kill running work.
 
 ### 4. Systematic graphs, loops and schedules

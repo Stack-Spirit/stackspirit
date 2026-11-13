@@ -69,7 +69,7 @@ diff -ruN a/docs/concepts/overview.md b/docs/concepts/overview.md
  - Windows support and a native VOWP desktop app.
 diff -ruN a/docs/concepts/what-is-vowp.md b/docs/concepts/what-is-vowp.md
 --- a/docs/concepts/what-is-vowp.md	2026-11-13 12:45:47.731721541 +0100
-+++ b/docs/concepts/what-is-vowp.md	2026-11-13 12:45:47.734721549 +0100
++++ b/docs/concepts/what-is-vowp.md	2026-11-13 12:58:37.129824531 +0100
 @@ -25,7 +25,8 @@
  ## The shape
  
@@ -100,8 +100,8 @@ diff -ruN a/docs/concepts/what-is-vowp.md b/docs/concepts/what-is-vowp.md
 -snapshot shows projects, jobs, workers, capacity, provider limits, inbox and orchestrators. A broken
 -project parks alone. Capacity is measured, not guessed; brakes stop new runs and never kill running
 -work.
-+fleet read model and the project board show projects, jobs, runs, worker slots, capacity, provider
-+limits, inbox and orchestrators; `vowp node ls` shows the node registry. A broken project parks
++fleet read model shows projects, jobs, runs, capacity, provider limits, inbox and orchestrators, the
++project board shows worker slots, and `vowp node ls` shows the node registry. A broken project parks
 +alone. Capacity is measured, not guessed; brakes stop new runs and never kill running work.
  
  ### 4. Systematic graphs, loops and schedules
