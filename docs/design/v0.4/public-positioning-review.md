@@ -39,7 +39,8 @@ Deliberately not ported:
 
 - `docs/roadmap.md` and `docs/design/v0.2/README.md` / `docs/design/v0.3/README.md` are owned by the
   pending `v4-d1-roadmap-0-4` job. That job should carry the v0.4 roadmap section and the 0.3.0
-  status alignment.
+  status alignment. Its current brief does not mention the public v0.4 section, so either extend
+  that brief or treat [`local-orchestrator.md`](local-orchestrator.md) as the v0.4 record.
 - The public `README.md` and `docs/guides/operating.md` redaction paragraphs are **older than the
   private tree** and, at `b49f90e`, older than the public code for gate evidence and ledger details.
   The private supervisor-log, gate-evidence and ledger redaction is already in place, and `v4-s2` is
