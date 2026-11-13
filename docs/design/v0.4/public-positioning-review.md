@@ -221,6 +221,16 @@ lines there are stale even after the v0.3 heading sweep:
 
 ## Next public update
 
-Nothing is pushed. When the owner approves the six replacements, update the public README and the new
-page from the Mac; do not regenerate private history. The private README and the two running-job
-guides can then be updated from the canonical public text after `v4-s2` merges.
+Nothing is pushed. The complete proposed patch is
+[`public-positioning-b49f90e.patch`](public-positioning-b49f90e.patch). Apply it on the Mac from the
+public repository root:
+
+```sh
+git apply -p1 docs/design/v0.4/public-positioning-b49f90e.patch
+```
+
+It touches `README.md`, `docs/concepts/what-is-vowp.md`, `docs/concepts/overview.md`,
+`docs/design/plan.md`, `docs/guides/operating.md`, `docs/roadmap.md` and `docs/security.md`. It was
+dry-run checked against the raw `b49f90e` files. Do not regenerate private history from the public
+repo. The private README and the two running-job guides can then be updated from the corrected
+public text after `v4-s2` merges.
