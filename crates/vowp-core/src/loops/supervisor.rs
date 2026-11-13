@@ -256,6 +256,7 @@ impl Supervisor {
         let mut steps = Vec::new();
 
         steps.push(self.step("requests", Self::step_requests));
+        steps.push(self.step("config", |this| this.step_config(now)));
         steps.push(self.step("reconcile", |this| this.step_reconcile(now)));
         if !node_paused {
             steps.push(self.step("harvest", |this| this.step_harvest(now)));
@@ -401,6 +402,36 @@ impl Supervisor {
             }
         }
         Ok(format!("{applied} request(s) applied"))
+    }
+
+    /// Step 0b: reload `vowp.toml` when it changed, then serve explicit CLI reload requests.
+    ///
+    /// The periodic check reads the project file and the node defaults once per tick. A
+    /// changed valid file is parsed and validated into a new config and swapped atomically;
+    /// an invalid one keeps the previous config and opens one notice. Active runs are never
+    /// touched: dispatch counts them against the new provider cap, so a raise frees slots
+    /// and a lower only stops new admissions.
+    fn step_config(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        let periodic = crate::capacity::reload::reload_project(&self.deps, &self.store, now, false)?;
+        let requests = crate::capacity::reload::serve_reload_requests(&self.deps, &self.store, now)?;
+        let mut parts = Vec::new();
+        if let Some(error) = &periodic.error {
+            parts.push(format!("reload failed: {error}"));
+        } else if periodic.applied {
+            parts.push(format!(
+                "reloaded {} ({})",
+                periodic.config_path.as_deref().unwrap_or("vowp.toml"),
+                periodic.changed.join(", ")
+            ));
+        }
+        if requests > 0 {
+            parts.push(format!("{requests} reload request(s) applied"));
+        }
+        if parts.is_empty() {
+            Ok("config current".to_owned())
+        } else {
+            Ok(parts.join("; "))
+        }
     }
 
     /// Applies one drained request and logs the loop-request ledger rows.
@@ -1277,24 +1308,9 @@ impl Supervisor {
             .try_into()
             .unwrap_or(u32::MAX);
         let open_runs = self.store.open_runs()?;
-        let mut provider_free = BTreeMap::new();
-        for profile in self.deps.config.profiles.values() {
-            for executor in &profile.ladder {
-                let provider = executor.provider();
-                if provider_free.contains_key(&provider) {
-                    continue;
-                }
-                if let Some(config) = self.deps.config.providers.get(&provider) {
-                    let running = open_runs
-                        .iter()
-                        .filter(|run| run.provider.as_deref() == Some(provider.as_str()))
-                        .count()
-                        .try_into()
-                        .unwrap_or(u32::MAX);
-                    provider_free.insert(provider, config.max_concurrent.saturating_sub(running));
-                }
-            }
-        }
+        // Read the live cell, not the startup snapshot: a reload swaps it atomically.
+        let config = crate::capacity::reload::effective_config(&self.deps);
+        let mut provider_free = crate::capacity::reload::provider_free(&config, &open_runs);
         let limited = self
             .store
             .active_limits(now)?
@@ -1315,9 +1331,7 @@ impl Supervisor {
             free_verifiers,
             provider_free: provider_free.into_iter().collect(),
             limited,
-            profiles: self
-                .deps
-                .config
+            profiles: config
                 .profiles
                 .clone()
                 .into_iter()

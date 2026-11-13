@@ -98,6 +98,27 @@ impl CliEnv {
     fn store(&self) -> Store {
         Store::open(&NodePaths::new(self.home.path())).expect("store opens")
     }
+
+    /// Reads the project's current `vowp.toml`.
+    fn config(&self) -> VowpConfig {
+        let text = std::fs::read_to_string(self.project.path().join("vowp.toml")).expect("read config");
+        VowpConfig::from_toml(&text).expect("parse config")
+    }
+
+    /// Sets one provider's `max_concurrent` in the project config.
+    fn set_provider_cap(&self, cap: u32) {
+        let mut config = self.config();
+        config
+            .providers
+            .entry("deepseek".to_owned())
+            .or_default()
+            .max_concurrent = cap;
+        std::fs::write(
+            self.project.path().join("vowp.toml"),
+            toml::to_string_pretty(&config).expect("config toml"),
+        )
+        .expect("write vowp.toml");
+    }
 }
 
 /// Returns the `vowp` binary, building it once when the core test target runs alone.
@@ -162,6 +183,84 @@ fn capacity_set_json_writes_the_target() {
         .expect("a target row");
     assert_eq!(latest.target_workers, 2);
     assert_eq!(latest.reason, "two workers");
+}
+
+#[test]
+fn capacity_reload_check_reports_without_writing() {
+    let env = CliEnv::new();
+    env.set_provider_cap(3);
+
+    let (code, value, stderr) = env.run_json(&["capacity", "reload", "--check"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["checked"], true);
+    assert_eq!(value["applied"], false);
+    assert_eq!(value["pending"], false);
+    assert_eq!(value["provider_caps"]["deepseek"], 3);
+    assert_eq!(
+        value["target"]["target_workers"], 3,
+        "with no sample, the bootstrap target is capped by the configured provider"
+    );
+    assert_eq!(value["target"]["mode"], "auto");
+
+    let project = env.config().project.name;
+    let key = format!("capacity:config:{project}");
+    assert!(
+        env.store().kv_get(&key).expect("kv").is_none(),
+        "--check must not publish reload state"
+    );
+    assert!(
+        env.store().latest_capacity_target().expect("target query").is_none(),
+        "--check must not write a target row"
+    );
+}
+
+#[test]
+fn capacity_report_shows_provider_caps_and_reload_state() {
+    let env = CliEnv::new();
+    env.set_provider_cap(2);
+
+    let (code, value, stderr) = env.run_json(&["capacity", "report"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["provider_caps"]["deepseek"], 2);
+    assert_eq!(value["reload_pending"], false);
+
+    let (code, stdout, stderr) = env.run(&["capacity", "report"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("providers: deepseek=2"), "{stdout}");
+    assert!(stdout.contains("reload: current"), "{stdout}");
+}
+
+#[test]
+fn capacity_reload_refuses_when_no_supervisor_runs() {
+    let env = CliEnv::new();
+    env.set_provider_cap(2);
+    let project = env.config().project.name;
+
+    let (code, value, stderr) = env.run_json(&["capacity", "reload"]);
+    assert_eq!(code, 5, "{stderr}");
+    assert_eq!(value["error"]["kind"], "guard");
+    let message = value["error"]["message"].as_str().expect("message");
+    assert!(message.contains("supervisor is not running"), "{message}");
+    assert!(
+        message.contains("vowp up"),
+        "the refusal includes a start hint: {message}"
+    );
+
+    let store = env.store();
+    assert!(
+        store
+            .kv_prefix("capacity:reload_request:")
+            .expect("requests")
+            .is_empty(),
+        "no request is left when the supervisor is absent"
+    );
+    assert!(
+        store
+            .kv_get(&format!("capacity:config:{project}"))
+            .expect("kv")
+            .is_none(),
+        "the CLI does not write reload state itself"
+    );
 }
 
 #[test]

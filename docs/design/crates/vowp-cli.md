@@ -25,6 +25,8 @@ crates/vowp-cli/
   src/cmd/up.rs  status.rs  board.rs  attach.rs  plan.rs  window.rs   (`up`,`down`, `status`, `board`, `attach`, `plan`, hidden `__window`)
   src/cmd/session.rs  inbox.rs  cost.rs  node.rs  loops.rs  schedule.rs  maint.rs   (`maint` = reindex, backup, schema, version)
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
+  src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
+                       caps and reload pending, and `reload` asks the supervisor or checks locally)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
 ```
@@ -75,7 +77,8 @@ pub mod remote {
 ## 4. Named tests
 
 Listed in `cli.md` §8, grouped by the file table above. Additional: `help_lists_every_v0_1_command` (compares clap's subcommand set with a constant list copied from `cli.md`),
-`no_command_returns_not_implemented`, `json_flag_outputs_valid_json_for_every_listing_command`, `exit_codes_follow_error_kind`, `ctx_build_requires_init`, `io_streams_buffer_impl_captures_output`.
+`no_command_returns_not_implemented`, `json_flag_outputs_valid_json_for_every_listing_command`, `exit_codes_follow_error_kind`, `ctx_build_requires_init`, `io_streams_buffer_impl_captures_output`,
+`capacity_reload_check_reports_without_writing`, `capacity_reload_refuses_when_no_supervisor_runs`.
 
 ## 5. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

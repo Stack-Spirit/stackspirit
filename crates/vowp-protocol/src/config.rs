@@ -233,6 +233,17 @@ pub struct ProviderConfig {
     pub prices: BTreeMap<String, PriceEntry>,
 }
 
+impl Default for ProviderConfig {
+    /// Matches the serde defaults used when a `[providers.<name>]` table omits a key.
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_max_concurrent(),
+            on_credits_exhausted: OnCreditsExhausted::default(),
+            prices: BTreeMap::new(),
+        }
+    }
+}
+
 /// Per-harness overrides and generic `cli` entries from `[harnesses.<name>]`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -448,6 +459,17 @@ impl VowpConfig {
         let config: Self = toml::from_str(s).map_err(|err| ProtocolError::Config(err.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Returns each configured provider's concurrency cap, keyed by provider name.
+    ///
+    /// This is the value dispatch reads; a live reload swaps the whole config, so callers
+    /// must read it from the effective config rather than caching it.
+    pub fn provider_caps(&self) -> BTreeMap<String, u32> {
+        self.providers
+            .iter()
+            .map(|(name, provider)| (name.clone(), provider.max_concurrent))
+            .collect()
     }
 
     /// Validates the configuration against `architecture.md` §5.3.

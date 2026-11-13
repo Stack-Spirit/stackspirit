@@ -225,14 +225,25 @@ inbox cards omit it); `capacity` is an alias of `capacity show`.
 vowp capacity show
 vowp capacity report [--since <dur|date>] [--limit <n>]
 vowp capacity set [--target <n>] [--mode auto|fixed] [--override] [--reason <text>] [--by <actor>]
+vowp capacity reload [--check]
 ```
 
 `show`/`report` return `CapacityReport`: the latest host sample (or none), the owner target and
-advice, running run count and p90 estimates, brakes, reserves, estimates and waiting jobs. `set`
+advice, running run count and p90 estimates, brakes, reserves, estimates and waiting jobs. `show`
+and `report` also print the effective provider caps and whether a config reload is pending; their
+`--json` document carries the extra `provider_caps` object and `reload_pending` boolean. `set`
 writes one `capacity_targets` history row. A target above the advised value needs `--override`
 (exit 5 otherwise); the brakes still apply and `capacity show` prints
 `owner override: 8 (advised 5)`. The board does not carry capacity data. The AI advisor only
 proposes: it opens a `capacity` inbox item and never changes the target itself.
+
+`reload --check` parses and validates the project `vowp.toml` plus node defaults, then prints the
+target and provider caps it would apply. It writes no target row, ledger row or reload state and
+does not need a running supervisor. `reload` without `--check` asks the running supervisor to
+apply the on-disk config and prints the effective values; with no live supervisor it exits 5 and
+prints a `vowp up` hint. Both forms are read-only for `vowp.toml` and never restart the supervisor
+or stop a run. An invalid file is refused with exit 1; the supervisor keeps the previous config,
+logs the path and error and opens a node-inbox notice.
 
 ### 6.4 `vowp control` and `vowp tunnel`
 

@@ -35,7 +35,11 @@ pub fn sample(deps: &Deps, store: &Store, now: Timestamp) -> Result<Option<HostS
 
 /// Reads one host sample without storing it.
 pub fn sample_host(deps: &Deps) -> Result<HostSample, CoreError> {
-    let worktrees = deps.config.project.worktree_root.as_deref().map(PathBuf::from);
+    let worktrees = super::reload::effective_config(deps)
+        .project
+        .worktree_root
+        .as_deref()
+        .map(PathBuf::from);
     sample_with(
         &SystemProcFs,
         &deps.paths,

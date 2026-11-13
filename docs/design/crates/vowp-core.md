@@ -62,9 +62,27 @@ pub struct Deps {
     pub cmd: std::sync::Arc<dyn CommandRunner>,
     pub rng: std::sync::Arc<dyn Rng>,
 }
-impl Deps { pub fn open_store(&self) -> Result<vowp_store::Store, CoreError>; }   // each thread opens its own connection
+impl Deps {
+    pub fn open_store(&self) -> Result<vowp_store::Store, CoreError>;   // each thread opens its own connection
+    pub fn config_now(&self) -> std::sync::Arc<vowp_protocol::VowpConfig>; // live cell; `config` stays the startup snapshot
+}
 
 pub trait Rng: Send + Sync { fn jitter_secs(&self, max: u64) -> u64; }          // SystemRng (time-seeded xorshift) / FixedRng(n) in tests
+
+// `capacity::reload` keeps the effective config in a plain RwLock<Arc<VowpConfig>> per
+// (node root, project). The L1 `config` step hashes `vowp.toml` plus `<node>/config.toml`,
+// parses and validates a changed file into one complete VowpConfig, and swaps the cell. An
+// invalid file keeps the previous config, logs the path and error, and opens one node-inbox
+// notice. `provider_free` counts open runs against the new cap: a raise admits on the next
+// tick, a lower only stops new admissions, and no run is finished or interrupted.
+pub mod capacity::reload {
+    pub struct ConfigCell { /* current: RwLock<Arc<VowpConfig>>, applied fingerprint */ }
+    pub fn effective_config(deps: &Deps) -> std::sync::Arc<VowpConfig>;
+    pub fn provider_free(config: &VowpConfig, open_runs: &[Run]) -> BTreeMap<String, u32>;
+    pub fn preview(deps: &Deps, store: &Store, now: Timestamp) -> Result<ConfigPreview, CoreError>; // reads, never writes
+    pub fn reload_project(deps: &Deps, store: &Store, now: Timestamp, force: bool) -> Result<ReloadOutcome, CoreError>;
+    pub fn serve_reload_requests(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, CoreError>;
+}
 
 /// Maps HarnessKind (+ `[harnesses.*]` config) to a ready adapter. Fakes: `AdapterRegistry::with(kind, Arc<dyn Adapter>)`.
 pub struct AdapterRegistry { /* BTreeMap<String, Arc<dyn Adapter>> keyed by "claude-code" | "opencode" | "acp" | "cli:<name>" */ }

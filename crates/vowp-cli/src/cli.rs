@@ -162,7 +162,7 @@ pub enum Command {
     Project(ProjectArgs),
     /// Read the node snapshot, queue and inbox.
     Fleet(FleetArgs),
-    /// Show or change measured capacity.
+    /// Show, change or reload measured capacity.
     Capacity(CapacityArgs),
     /// Set, list, remove or request secrets.
     Secret(SecretArgs),
