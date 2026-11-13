@@ -3,12 +3,14 @@
 //! Spec: `docs/design/v0.3/http-api.md`. The API serves the same `vowp-protocol`
 //! objects the CLI prints; these are only the transport documents layered on top.
 //!
-//! Reads are token-free. The two writes are `POST /api/v1/inbox/{id}/answer` and
-//! `POST /api/v1/sessions/{id}/switch`, both gated by the daemon's bearer token
+//! Reads are token-free. The writes are `POST /api/v1/inbox/{id}/answer`,
+//! `POST /api/v1/sessions/{id}/switch` and the three job actions
+//! `POST /api/v1/jobs/{id}/retry|park|cancel`, all gated by the daemon's bearer token
 //! (`VOWP_API_TOKEN`). Their request bodies are [`InboxAnswerRequest`] and
-//! [`SessionSwitchRequest`]; the answer response reuses [`InboxItem`] and the switch
-//! response reuses [`Switch`]. The per-session and board SSE streams are transports in
-//! `vowp-daemon`, not document types here. The listener stays loopback-only.
+//! [`SessionSwitchRequest`]; the answer response reuses [`InboxItem`], the switch response
+//! reuses [`Switch`] and a job action returns [`JobActionResponse`]. The per-session and
+//! board SSE streams are transports in `vowp-daemon`, not document types here. The listener
+//! stays loopback-only.
 
 use std::collections::BTreeMap;
 
@@ -121,6 +123,38 @@ pub struct Page<T> {
 
 /// One page of [`Job`] objects.
 pub type JobPage = Page<Job>;
+
+/// One job action the loopback API may queue for the supervisor.
+///
+/// The three actions mirror `vowp job retry|park|cancel`; the daemon validates the
+/// current job state with `vowp_graph::transition` and queues the same
+/// `vowp_core::requests::Request` the CLI would queue. The handler never changes the job
+/// row itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobAction {
+    /// Retry a failed or stalled job, or resolve a parked one.
+    Retry,
+    /// Park a non-terminal job until a human resolves it.
+    Park,
+    /// Cancel a non-terminal job.
+    Cancel,
+}
+
+/// The `POST /api/v1/jobs/{id}/retry|park|cancel` document returned with `202 Accepted`.
+///
+/// `request` is the id of the queued request row (`req:<project>:<ULID>`); the supervisor
+/// applies it on its next tick. The response carries no home path, SQL text, token or
+/// secret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct JobActionResponse {
+    /// Job the action was queued for.
+    pub job: JobId,
+    /// Action that was queued.
+    pub action: JobAction,
+    /// Id of the request row the supervisor will apply.
+    pub request: String,
+}
 
 /// One page of [`Session`] objects.
 pub type SessionPage = Page<Session>;

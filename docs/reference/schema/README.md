@@ -58,6 +58,8 @@ python3 docs/reference/check-reference.py
 | `InboxSummary` | [inbox-summary.md](inbox-summary.md) |
 | `IngestAck` | [ingest-ack.md](ingest-ack.md) |
 | `Job` | [job.md](job.md) |
+| `JobAction` | [job-action.md](job-action.md) |
+| `JobActionResponse` | [job-action-response.md](job-action-response.md) |
 | `JobPage` | [job-page.md](job-page.md) |
 | `JobPatch` | [job-patch.md](job-patch.md) |
 | `JoinInstructions` | [join-instructions.md](join-instructions.md) |

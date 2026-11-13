@@ -12,11 +12,13 @@ use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use vowp_protocol::api::{JobAction, JobActionResponse};
 use vowp_protocol::capsule::Capsule;
 use vowp_protocol::cost::Cost;
 use vowp_protocol::event::EventEnvelope;
 use vowp_protocol::executor::Profile;
 use vowp_protocol::gate::GateResult;
+use vowp_protocol::ids::JobId;
 use vowp_protocol::inbox::InboxItem;
 use vowp_protocol::job::{Edge, Job};
 use vowp_protocol::limit::Limit;
@@ -107,6 +109,8 @@ const LISTED_TYPES: &[&str] = &[
     "BoardLimit",
     "Page",
     "JobPage",
+    "JobAction",
+    "JobActionResponse",
     "SessionPage",
     "NodePage",
     "SessionDetail",
@@ -209,6 +213,43 @@ fn schema_export_covers_listed_types() {
     let cost = schema_for_name("Cost").expect("Cost is exported");
     assert_eq!(cost["title"], "Cost");
     assert!(schema_for_name("NotAType").is_none());
+}
+
+#[test]
+fn job_action_response_has_a_schema_and_stable_action_names() {
+    for (action, name) in [
+        (JobAction::Retry, "retry"),
+        (JobAction::Park, "park"),
+        (JobAction::Cancel, "cancel"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(action).expect("action JSON"),
+            Value::String(name.to_owned()),
+            "the wire name of {action:?}"
+        );
+    }
+
+    let schema = schema_for_name("JobActionResponse").expect("JobActionResponse is exported");
+    assert_eq!(schema["title"], "JobActionResponse");
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required is an array")
+        .iter()
+        .map(|name| name.as_str().expect("required names are strings"))
+        .collect();
+    for field in ["job", "action", "request"] {
+        assert!(required.contains(&field), "the schema must require {field}: {schema}");
+    }
+
+    let response = JobActionResponse {
+        job: JobId::parse("job-a").expect("job id"),
+        action: JobAction::Park,
+        request: "01J00000000000000000000000".to_owned(),
+    };
+    let value = serde_json::to_value(&response).expect("response JSON");
+    check_structure("JobActionResponse", &schema, &value);
+    let decoded: JobActionResponse = serde_json::from_value(value.clone()).expect("round-trip");
+    assert_eq!(decoded, response);
 }
 
 #[test]

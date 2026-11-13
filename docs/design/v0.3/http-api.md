@@ -1,10 +1,10 @@
 # v0.3 — daemon HTTP + SSE API
 
 Status: the read API (including session detail, single-capsule reads and the node list), the
-per-session SSE stream, the board snapshot SSE stream and the two token-gated writes (inbox
-answer and local session switch) are implemented in `crates/vowp-daemon`, and `vowp up`
-starts the daemon as a separate child process; the rest of this note is design. The daemon
-is not part of v0.2. Nothing here is implemented in v0.1.
+per-session SSE stream, the board snapshot SSE stream and the token-gated writes (inbox
+answer, local session switch and the three job actions) are implemented in
+`crates/vowp-daemon`, and `vowp up` starts the daemon as a separate child process; the rest of
+this note is design. The daemon is not part of v0.2. Nothing here is implemented in v0.1.
 
 ## First slice (implemented)
 
@@ -15,10 +15,9 @@ is not part of v0.2. Nothing here is implemented in v0.1.
 It resolves the home from `--home`, `VOWP_HOME`, then `$HOME/.vowp`; selects the only
 non-reserved registered project (or the one named by `--project`, with a clear error when
 zero or several are registered); reads the node name from that project's registered
-`vowp.toml` config; and opens the home with `Store::open_read_only`. The answer and switch
-handlers open the same existing home with `Store::open_writable`, which also never creates or
-migrates it. The listener binds `127.0.0.1` only, defaults to port `0` and prints the bound
-address.
+`vowp.toml` config; and opens the home with `Store::open_read_only`. The write handlers open
+the same existing home with `Store::open_writable`, which also never creates or migrates it.
+The listener binds `127.0.0.1` only, defaults to port `0` and prints the bound address.
 
 Served endpoints; every response is JSON except the two SSE streams and the static pages.
 
@@ -86,36 +85,57 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   `409`. Success is `200` with the completed `Switch`; a failed switch is an `ApiError` and
   never claims the executor moved. This is local-node only: there is no `node` field and no
   remote or SSH switch.
+- `POST /api/v1/jobs/{id}/retry`, `POST /api/v1/jobs/{id}/park` and
+  `POST /api/v1/jobs/{id}/cancel` — the three token-gated job actions. Each validates the
+  current state with `vowp_graph::transition` and queues exactly one
+  `vowp_core::requests::Request` on the writable, non-creating store; the supervisor applies
+  it on its next tick and the handler never changes the job row. Retry follows the CLI:
+  `failed` queues `retry_job`, `stalled` queues `retry_job` (the same `KeeperRestart` event
+  the CLI applies) and `parked` queues `resolve_job`; every other state is `409`. Park accepts
+  any non-terminal state and queues `park_job` with a reason; an empty body or an absent or
+  blank `reason` uses `"parked from the web"`, a non-empty reason is trimmed, and a reason
+  over 10,000 UTF-8 bytes or a malformed non-empty body is `400`. Cancel accepts any
+  non-terminal state and queues `cancel_job`; a terminal (`done`, `replanned`, `cancelled`)
+  job is `409` for park and cancel. Every action requires
+  `Authorization: Bearer <VOWP_API_TOKEN>`: a daemon without a token is `503`, and a missing
+  or wrong token is `401` with `WWW-Authenticate: Bearer` before the id or body is read. An
+  invalid id is `400`, an unknown job is `404`, and a store or request failure is a path-free
+  `500`. Success is `202 Accepted` with
+  `JobActionResponse { job, action, request }`, where `request` is the queued request id.
+  There is no direct state write and no other job action route.
 - `/api/v1/cost?by=day|job|role|provider|model&since=&until=` — the exact `vowp cost --json`
   document over the served project. `by` defaults to `job`; `since` and `until` accept RFC 3339
   or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
-`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `SessionPage`, `NodePage`,
-`SessionDetail`, `EventPage`, `InboxPage`, `InboxAnswerRequest`, `SessionSwitchRequest`,
-`CostReport`, `CostRow`, `CostTotal`, `ApiError` and `ApiErrorBody`. Failures use the same
-`ApiError` shape as `vowp --json` errors and map to `400` for an invalid filter, id, body or
-executor, `401` for a missing or wrong write token, `404` for an unknown session, capsule or
-inbox item, `409` for an inbox item that is not open, a switch guard or an aborted switch,
-`503` when writes are disabled and `500` for a store, config or I/O failure. Switch error
-messages stay path-free.
+`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `JobAction`,
+`JobActionResponse`, `SessionPage`, `NodePage`, `SessionDetail`, `EventPage`, `InboxPage`,
+`InboxAnswerRequest`, `SessionSwitchRequest`, `CostReport`, `CostRow`, `CostTotal`, `ApiError`
+and `ApiErrorBody`. Failures use the same `ApiError` shape as `vowp --json` errors and map to
+`400` for an invalid filter, id, body or executor, `401` for a missing or wrong write token,
+`404` for an unknown session, capsule, inbox item or job, `409` for an inbox item that is not
+open, a switch guard, a job action guard or an aborted switch, `503` when writes are disabled
+and `500` for a store, config or I/O failure. Write error messages stay path-free.
 
-**Two writes, one token.** Every `GET` stays token-free and read-only. The privileged actions
-are `POST /api/v1/inbox/{id}/answer` and `POST /api/v1/sessions/{id}/switch`, and the listener
-stays loopback-only. The daemon reads the token from the `VOWP_API_TOKEN` environment
-variable at startup; a missing or empty value leaves reads working and disables both writes
-with `503`. The value is compared in constant time, is never logged, echoed, put in a URL or
-returned in a response, and rotation is a daemon restart with a new value. The pages keep it
-in `sessionStorage` and clear it on `401`. Both writes open the existing home with
-`Store::open_writable` and never create or migrate it. The switch is local-node only; a
-running session needs an explicit `force` before the switch drains and stops it.
+**Five writes, one token.** Every `GET` stays token-free and read-only. The privileged actions
+are `POST /api/v1/inbox/{id}/answer`, `POST /api/v1/sessions/{id}/switch` and the three
+`POST /api/v1/jobs/{id}/retry|park|cancel` writes, and the listener stays loopback-only. The
+daemon reads the token from the `VOWP_API_TOKEN` environment variable at startup; a missing or
+empty value leaves reads working and disables all writes with `503`. The value is compared in
+constant time, is never logged, echoed, put in a URL or returned in a response, and rotation is
+a daemon restart with a new value. The pages keep it in `sessionStorage` and clear it on
+`401`. Every write opens the existing home with `Store::open_writable` and never creates or
+migrates it. The switch is local-node only; a running session needs an explicit `force` before
+the switch drains and stops it. The job actions only queue the CLI's request; none of them
+writes a job row.
 
-Still later: every other write endpoint (job retry/park/cancel, capsule edits), the reconnect
-UI on the pages that still poll, the cost dashboard page, node add/remove/probe and the
-remaining browser pages. There are no placeholder routes for any of them. The per-session SSE
-stream is implemented and used by the session detail page; the board stream is implemented and
-used by the board page; the inbox answer form and the session switch form are implemented and
-use the two write routes.
+Still later: the keeper job actions (`nudge`, `restart`, `replan`, `fail`), capsule edits, the
+reconnect UI on the pages that still poll, the cost dashboard page, node add/remove/probe,
+browser chat and the remaining browser pages. There are no placeholder routes for any of them.
+The per-session SSE stream is implemented and used by the session detail page; the board
+stream is implemented and used by the board page; the inbox answer form and the session
+switch form are implemented and use their write routes; the three job action routes are
+implemented for the `/jobs` controls a later page job adds.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -169,8 +189,8 @@ the daemon reported an address: a missing daemon warns and prints no port or tun
 The browser opens the tunnel's local loopback URL, not a home URL, so the write token is never
 part of a URL. `VOWP_API_TOKEN` is inherited by the daemon from the environment `vowp up` runs
 in; the page stores the value it is given in `sessionStorage` and uses it only for the inbox
-answer and session switch writes. Reads stay token-free. Rotation is a daemon restart with a new
-value followed by an unlock; there is no token file or second store.
+answer, session switch and job action writes. Reads stay token-free. Rotation is a daemon
+restart with a new value followed by an unlock; there is no token file or second store.
 
 On its shutdown path (normal stop file, first SIGINT/SIGTERM, supervisor error or early
 startup failure) the foreground supervisor sends SIGTERM to the daemon, waits up to five
@@ -197,7 +217,7 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
 - `GET /api/v1/board/stream` — SSE `board` frames carrying the exact `Board` document when it
   changes, plus `heartbeat` frames; no cursor or resume.
 - `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer; both are
-  implemented. The answer is one of the two token-gated writes.
+  implemented. The answer is one of the token-gated writes.
 - `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape;
   implemented in this slice.
 - `GET /api/v1/nodes` — a `NodePage` of the exact stored nodes, ordered by name; implemented
@@ -205,7 +225,9 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
 - `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — one capsule belonging to the session;
   implemented in this slice. The window's capsule view remains later.
 - `POST /api/v1/jobs/{id}/retry|park|cancel` — enqueue the existing
-  `vowp_core::requests::Request`; do not duplicate the state machine.
+  `vowp_core::requests::Request`; implemented in this slice. The daemon validates the state
+  with `vowp_graph::transition`, queues exactly one request and never duplicates the state
+  machine or writes the job row.
 - `POST /api/v1/sessions/{id}/switch` — run the same `SessionService` switch path as
   `vowp session switch`; implemented in this slice for the local node. The v0.1 request queue
   has no switch variant, so it calls the service directly through the token-gated daemon
@@ -249,6 +271,12 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
 - `NodePage` = `Page<Node>` — the `/api/v1/nodes` document. Each item is the exact stored
   `Node` (`name`, `ssh_target`, `is_local`, `capabilities`, `last_seen_at`, `created_at`),
   ordered by name; `next` is null and `Node` keeps its existing shape and schema.
+- `JobAction { retry | park | cancel }` — the action selected by one of the three job write
+  routes. The names are the CLI's verbs and never describe a raw state transition.
+- `JobActionResponse { job, action, request }` — the `202 Accepted` document of a job action.
+  `job` is the `JobId`, `action` is the queued `JobAction`, and `request` is the
+  `req:<project>:<ULID>` id the supervisor will apply. The document never carries a home path,
+  SQL text, token or secret.
 - `SessionDetail { session, latest_capsule, lineage }` — the `/api/v1/sessions/{id}` document.
   `session` is the exact `Session`, `latest_capsule` is the capsule with the highest `at_seq`
   (or null when the session has none), and `lineage` is the parent-session chain, nearest
@@ -276,8 +304,9 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
-`SessionDetail`, `NodePage`, `InboxAnswerRequest`, `SessionSwitchRequest` and `ApiError` to
-`all_schemas()` rather than hand-writing JSON examples. Export the concrete page instantiations
+`JobAction`, `JobActionResponse`, `SessionDetail`, `NodePage`, `InboxAnswerRequest`,
+`SessionSwitchRequest` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples.
+Export the concrete page instantiations
 the API serves (`JobPage`, `SessionPage`, `NodePage`, `EventPage` and `InboxPage`) and
 `CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
 exception above.
@@ -328,14 +357,15 @@ exception above.
 ## First-issue-sized slice
 
 Implemented: `crates/vowp-daemon` opens an existing node home read-only for reads
-(and writable-but-non-creating for the two writes) and serves
+(and writable-but-non-creating for the writes) and serves
 `GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/board/stream`, `GET /api/v1/jobs`,
 `GET /api/v1/sessions`,
 `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/capsules/{capsuleId}`,
 `GET /api/v1/sessions/{id}/events?after_seq=`,
 `GET /api/v1/sessions/{id}/events/stream?after_seq=`,
 `POST /api/v1/sessions/{id}/switch`, `GET /api/v1/inbox?state=`,
-`POST /api/v1/inbox/{id}/answer` and `GET /api/v1/cost?by=&since=&until=`. It binds
+`POST /api/v1/inbox/{id}/answer`, `POST /api/v1/jobs/{id}/retry|park|cancel` and
+`GET /api/v1/cost?by=&since=&until=`. It binds
 `127.0.0.1:0` in tests, uses a temporary store with jobs in several states, one running job
 and a parent/child session chain with a capsule and a bounded long chain, a limit,
 open/answered inbox items, cost ledger rows from every source and a checkpoint, and asserts
@@ -353,14 +383,21 @@ empty/oversized/malformed answers, unchanged token-free `GET`s, and the store ne
 home. The switch tests pin `503` without a token, `401` for a missing or wrong Bearer value
 (before the body is parsed), `200` with a schema-valid completed `Switch` and the moved session,
 `404`, the running/switching/closed/limit `409` guards and `400` for malformed bodies and
-executors. The page tests pin the switch form, `Authorization: Bearer` use, `sessionStorage`,
+executors. The job action tests pin `503` without a token, `401` for a missing or wrong Bearer
+value before the id or body is parsed, `202` with a schema-valid `JobActionResponse` and
+exactly one decoded request row for retry on failed/stalled/parked, park on ready/running and
+cancel on pending, the trimmed and default park reasons, a job row unchanged immediately after
+each success, `400` for invalid ids, malformed bodies and oversized reasons, `404` for an
+unknown job, the `409` retry/park/cancel guards with no request row, and apply each drained
+request through `requests::apply_direct` to the new state. The page tests pin the switch form,
+`Authorization: Bearer` use, `sessionStorage`,
 the force warning, the state/error line and the absence of a token in the URL. The inbox page
 test pins the answer form and its queued message. The `vowp up` tests pin the daemon child's
 `--home`/`--project`/`--port` arguments, inherited `VOWP_API_TOKEN`, the printed address, the
 exact `vowp tunnel open window --remote-port <port>` hint with the daemon's actual port, the
 detached address file and hint, SIGTERM/`down` shutdown without an orphan, and the
-warning-and-continue path when the binary is missing (including no tunnel hint). Every other
-write endpoint remains later.
+warning-and-continue path when the binary is missing (including no tunnel hint). The keeper
+job actions, capsule edits, node writes and browser chat remain later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

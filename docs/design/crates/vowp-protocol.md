@@ -34,7 +34,7 @@ crates/vowp-protocol/
   src/loops.rs        // Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
   src/release.rs      // Release, ReleaseState, GuardResult
   src/config.rs       // VowpConfig and sub-structs
-  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, SessionPage, NodePage, SessionDetail, EventPage, InboxPage, InboxAnswerRequest, SessionSwitchRequest, CostReport, CostRow, CostTotal, ApiError
+  src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, JobAction, JobActionResponse, SessionPage, NodePage, SessionDetail, EventPage, InboxPage, InboxAnswerRequest, SessionSwitchRequest, CostReport, CostRow, CostTotal, ApiError
   src/adapter.rs      // Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
   src/services.rs     // SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
   src/schema.rs       // all_schemas, schema_for_name
@@ -122,7 +122,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"Evidence"`, `"FleetQueueRow"`, `"FleetStatus"`, `"Gate"`, `"GateFailureCard"`, `"GateResult"`,
     `"GcClassReport"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxAnswerRequest"`,
     `"InboxItem"`, `"InboxPage"`, `"InboxSummary"`,
-    `"IngestAck"`, `"Job"`, `"JobPage"`, `"JobPatch"`, `"JoinInstructions"`, `"Lease"`, `"LeaseStatus"`,
+    `"IngestAck"`, `"Job"`, `"JobAction"`, `"JobActionResponse"`, `"JobPage"`, `"JobPatch"`,
+    `"JoinInstructions"`, `"Lease"`, `"LeaseStatus"`,
     `"LedgerEntry"`, `"Limit"`, `"Loop"`, `"MergeCard"`, `"MigrationCount"`, `"MigrationReport"`, `"NewJob"`,
     `"Node"`, `"NodePage"`, `"OrchestratorCard"`, `"Page"`, `"Profile"`, `"Project"`, `"ProjectEntry"`,
     `"ProjectSnapshot"`, `"QueueJobCard"`, `"Release"`, `"RemoteEvent"`, `"RemoteLine"`,
@@ -184,6 +185,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `schema_export_covers_listed_types` | `all_schemas()` has every key of rule 12; each value is an object with `"$schema"` or `"type"`/`"definitions"`; deterministic across two calls |
 | `inbox_answer_request_has_one_required_answer_field` | `InboxAnswerRequest { answer }` serialises to `{"answer":"…"}`, round-trips, and its exported schema requires `answer` |
 | `session_switch_request_defaults_reason_and_force_and_has_a_schema` | `SessionSwitchRequest { to }` defaults `reason` to `user` and `force` to false, serialises all three fields, round-trips, and its exported schema requires only `to` |
+| `job_action_response_has_a_schema_and_stable_action_names` | `JobAction` serialises to `retry`, `park` and `cancel`; the exported `JobActionResponse` schema requires `job`, `action` and `request`, and a response round-trips |
 | `types_md_examples_validate` | each JSON example fixture (`job.json`, `capsule.json`, `cost.json`, `limit.json`, `events.jsonl`, `profile.json`, `edge.json`, `run.json`, `session.json`, `inbox_item.json`, `loop.json`, `release.json`, `schedule.json`, `gate_result.json`, `worker.json`, `switch.json`) deserialises into its Rust type and validates against its exported schema (use a tiny structural checker: required properties present, no unknown top-level keys for `deny_unknown_fields` types) |
 | `log_format_line` | `format_log_line` golden string; `MemoryLog` records in order |
 | `service_cancel_token` | clones share cancellation; `ServiceError` Display strings |
