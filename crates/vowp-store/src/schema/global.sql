@@ -15,9 +15,46 @@ CREATE TABLE nodes (                    -- home and known executor nodes
   capabilities TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(capabilities)),
   last_seen_at TEXT,
   created_at   TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'ssh' CHECK (kind IN ('home','ssh','agent')),
+  status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending','active','revoked')),
+  labels_json  TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(labels_json)),
+  agent_version TEXT,
+  protocol      TEXT,
+  last_error    TEXT NOT NULL DEFAULT '',
   CHECK ((is_local = 1 AND ssh_target IS NULL) OR is_local = 0)
 ) STRICT;
 CREATE UNIQUE INDEX nodes_one_local ON nodes(is_local) WHERE is_local = 1;
+
+CREATE TABLE node_credentials (         -- public keys an enrolled node may authenticate with
+  node         TEXT NOT NULL REFERENCES nodes(name) ON DELETE CASCADE,
+  key_id       TEXT NOT NULL,
+  public_key   TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at   TEXT,
+  PRIMARY KEY (node, key_id)
+) STRICT;
+
+CREATE TABLE enrollment_codes (         -- one-time node and surface codes; only the hash is stored
+  code_hash  TEXT PRIMARY KEY,
+  node       TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('node','surface')),
+  surface_id TEXT,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE node_paths (               -- the last path map an agent reported; home-only, redacted
+  node          TEXT NOT NULL REFERENCES nodes(name) ON DELETE CASCADE,
+  project       TEXT NOT NULL,
+  local_root    TEXT NOT NULL,
+  worktree_root TEXT NOT NULL,
+  allow_json    TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(allow_json)),
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (node, project)
+) STRICT;
 
 CREATE TABLE projects (                 -- the registry (plan §3 rule 5)
   name           TEXT PRIMARY KEY,
@@ -348,4 +385,4 @@ CREATE TABLE secret_index (
   updated_at TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
