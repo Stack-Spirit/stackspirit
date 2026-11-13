@@ -160,12 +160,13 @@ built-in rotation for the supervisor log, so use your normal log rotation.
 
 Never log or paste prompts, environment values or secret-looking strings. Exact injected values are
 replaced with `[REDACTED:<NAME>]` on the session-service and remote-ingest event paths, in the
-snapshot, in capsules, and in a finished job report and run mirror. The supervisor log, gate command
-evidence, ledger rows, the `session switch` harness events and the `session watch` importer are
-written without that redaction, and a report or run mirror is still raw while its turn runs. Treat
-session logs, the databases and every file under `~/.vowp` as sensitive: they can contain prompts,
-tool output and file contents. The coverage is stated exactly in the
-[security model](../security.md#redaction).
+snapshot, in capsules, in the supervisor log, in command-gate evidence and ledger rows, and in a
+finished job report and run mirror. The `session switch` harness events and the `session watch`
+importer are written without that redaction, and a report or run mirror is still raw while its turn
+runs. The supervisor loads the secret values at startup, so a secret added later is covered after
+the next supervisor restart. Treat session logs, the databases and every file under `~/.vowp` as
+sensitive: they can contain prompts, tool output and file contents. The coverage is stated exactly
+in the [security model](../security.md#redaction).
 
 ## Loops
 

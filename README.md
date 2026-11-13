@@ -150,9 +150,9 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
   mode does not separate the value from the agent's user; the harness runs as that same user.
 - Injection is by name through a harness's `env_pass` list. The promoter does not add a secret
   environment to deploy commands in this build.
-- Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules and
-  the finished report and run mirror. It does **not** cover the supervisor log, gate command evidence,
-  ledger rows, the switch turn path or the `session watch` importer in this build, so a command that
+- Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules, the
+  supervisor log, command-gate evidence, ledger rows and the finished report and run mirror. It does
+  **not** cover the switch turn path or the `session watch` importer in this build, so a command that
   prints a secret can still persist it there.
 - **The honest limit:** any agent that can run arbitrary code inside a process that holds a secret can
   print it. Vault mode keeps the files out of the runtime user's direct readable tree, but the helper

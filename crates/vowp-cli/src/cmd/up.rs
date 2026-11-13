@@ -22,6 +22,7 @@ use serde::Serialize;
 use vowp_adapters::proc::{process_alive, valid_pid};
 use vowp_core::Deps;
 use vowp_core::loops::{NodeReconcileReport, NodeSupervisor, NodeTickReport};
+use vowp_core::vault::Redactor;
 use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
 use vowp_store::{MigrationReport, NodePaths, Store, StoreError};
 use vowp_tmux::{LayoutSpec, TmuxError, WindowManager, WindowSpec, session_name_for_project};
@@ -1300,26 +1301,40 @@ fn remove_lock(paths: &NodePaths) {
 }
 
 /// Clones the context dependencies and replaces the log with the node's supervisor log.
+///
+/// The exact-value [`Redactor`] is loaded once here, at supervisor start. Secret values are
+/// files, so a secret added after startup is picked up at the next supervisor restart; this
+/// slice has no watcher. A failed load is passed to the sink as `None` so it fails closed,
+/// and the error is not logged through the same sink (its text can name a path).
 fn supervisor_deps(mut deps: Deps, paths: &NodePaths) -> Deps {
+    let redactor = Redactor::load(&deps).ok();
     deps.log = Arc::new(FileLog::new(
         paths.logs_dir().join("supervisor.log"),
         Arc::clone(&deps.clock),
+        redactor,
     ));
     deps
 }
 
 /// Appends supervisor lines to `<home>/logs/supervisor.log`.
 ///
-/// Lines are `<rfc3339> <LEVEL> <target> <message>`, matching `conventions.md` §4.
+/// Lines are `<rfc3339> <LEVEL> <target> <message>`, matching `conventions.md` §4. The message
+/// is redacted with the [`Redactor`] loaded once when the supervisor starts. The timestamp,
+/// level and target are structural fields written by this sink, not message text, so they are
+/// not redacted. When no redactor could be loaded the message is replaced by a fixed marker
+/// instead of falling back to the raw text.
 struct FileLog {
     path: PathBuf,
     clock: Arc<dyn Clock>,
+    redactor: Option<Redactor>,
 }
 
 impl FileLog {
-    /// Creates a sink for `path`; the directory is created by [`vowp_store::NodePaths`].
-    fn new(path: PathBuf, clock: Arc<dyn Clock>) -> Self {
-        Self { path, clock }
+    /// Creates a sink for `path`; `redactor` is `None` when the secret values could not be
+    /// loaded and the sink must fail closed. The directory is created by
+    /// [`vowp_store::NodePaths`].
+    fn new(path: PathBuf, clock: Arc<dyn Clock>, redactor: Option<Redactor>) -> Self {
+        Self { path, clock, redactor }
     }
 }
 
@@ -1331,10 +1346,14 @@ impl Log for FileLog {
             Level::Warn => "WARN",
             Level::Error => "ERROR",
         };
+        let message = match &self.redactor {
+            Some(redactor) => redactor.redact(msg),
+            None => "[REDACTED: secret values unavailable]".to_owned(),
+        };
         let line = format!(
             "{} {level} {target} {}\n",
             self.clock.now().as_rfc3339(),
-            msg.replace('\n', " ")
+            message.replace('\n', " ")
         );
         let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) else {
             return;
@@ -1459,5 +1478,72 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         panic!("direct child {} was not listed", child.id());
+    }
+
+    #[test]
+    fn supervisor_log_redacts_a_stored_secret() {
+        let home = tempfile::tempdir().expect("temp home");
+        let paths = NodePaths::new(home.path());
+        paths.ensure().expect("node paths");
+        Store::open(&paths).expect("store");
+        let deps = crate::node_ctx::home_deps(&paths).expect("home deps");
+        let name = vowp_protocol::SecretName::parse("SUPERVISOR_KEY").expect("secret name");
+        let value = "supervisor-secret-value-2468";
+        vowp_core::vault::write_secret(&deps, &name, value).expect("write secret");
+
+        let deps = supervisor_deps(deps, &paths);
+        deps.log
+            .log(Level::Info, "loop", &format!("injecting {value} into the harness"));
+
+        let text = std::fs::read_to_string(paths.logs_dir().join("supervisor.log")).expect("log file");
+        assert!(text.contains("[REDACTED:SUPERVISOR_KEY]"), "{text}");
+        assert!(!text.contains(value), "the stored value must not reach the log: {text}");
+        assert!(text.contains("injecting "), "{text}");
+        assert!(text.contains(" into the harness"), "{text}");
+        let line = text.lines().next().expect("one log line");
+        let (timestamp, rest) = line.split_once(' ').expect("timestamp field");
+        Timestamp::parse(timestamp).expect("RFC 3339 timestamp");
+        assert!(rest.starts_with("INFO loop "), "{line}");
+        assert_eq!(text.lines().count(), 1, "{text}");
+    }
+
+    #[test]
+    fn supervisor_log_keeps_an_ordinary_message_unchanged() {
+        let home = tempfile::tempdir().expect("temp home");
+        let paths = NodePaths::new(home.path());
+        paths.ensure().expect("node paths");
+        Store::open(&paths).expect("store");
+        let deps = crate::node_ctx::home_deps(&paths).expect("home deps");
+
+        let deps = supervisor_deps(deps, &paths);
+        deps.log.log(Level::Warn, "node", "ordinary supervisor message");
+
+        let text = std::fs::read_to_string(paths.logs_dir().join("supervisor.log")).expect("log file");
+        let line = text.lines().next().expect("one log line");
+        let (timestamp, rest) = line.split_once(' ').expect("timestamp field");
+        Timestamp::parse(timestamp).expect("RFC 3339 timestamp");
+        assert_eq!(rest, "WARN node ordinary supervisor message", "{line}");
+        assert_eq!(text, format!("{line}\n"), "{text}");
+    }
+
+    #[test]
+    fn supervisor_log_fails_closed_without_a_redactor() {
+        let home = tempfile::tempdir().expect("temp home");
+        let paths = NodePaths::new(home.path());
+        paths.ensure().expect("node paths");
+        let at = Timestamp::parse("2026-11-10T10:00:00Z").expect("timestamp");
+        let log = FileLog::new(
+            paths.logs_dir().join("supervisor.log"),
+            Arc::new(vowp_protocol::FakeClock::at(at)),
+            None,
+        );
+
+        log.log(Level::Error, "loop", "raw text with a value that must not leak");
+
+        let text = std::fs::read_to_string(paths.logs_dir().join("supervisor.log")).expect("log file");
+        assert_eq!(
+            text,
+            format!("{} ERROR loop [REDACTED: secret values unavailable]\n", at.as_rfc3339())
+        );
     }
 }
