@@ -1684,6 +1684,31 @@ longer blocks the first implementation slice.
     opencode app come before offloaded jobs? Recommended: chat first; it de-risks leases, spool and
     takeover without the app's SSE/MCP unknowns.
 
+### 16.3 Implementation tracking
+
+Phase 0 is tracked as four build jobs on the `vowp` project. Each build has a `review` gate, so the
+supervisor creates its own verifier (`<id>-verify-<attempt>`) and the merge queue; no verify job is
+added by hand.
+
+| Phase | Job | Depends on | Current state |
+|---|---|---|---|
+| 0a | `v4-local-0-protocol` | — | ready |
+| 0b | `v4-local-0-store` | 0a | pending |
+| 0c | `v4-local-0-agent-client` | 0a | pending |
+| 0d | `v4-local-0-gateway` | 0b, 0c | pending |
+
+The supervisor owns dispatch, gates, verify, fix and merge. Track with:
+
+```sh
+vowp job show v4-local-0-protocol --runs --gates
+vowp graph --mermaid
+vowp fleet queue
+```
+
+The main checkout stays clean because the design note is committed. GitHub pushes are parked: the
+`origin` push URL points at the local bare repository `/home/dev/vowp-local-push.git`; fetches still
+use the real origin. Restore the GitHub push URL when the owner is ready to publish.
+
 ## 17. Alternatives considered
 
 - **v0.2 app host plus a tunnel.** Gives the app the home's checkout, not the Mac's. It does not
