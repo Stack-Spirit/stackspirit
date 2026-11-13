@@ -9,6 +9,10 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 
+use crate::agent::{
+    AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, NodeCard, NodeKind, NodePresence,
+    NodeStatus, PathRef,
+};
 use crate::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
     InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, NodePage, Page, SessionDetail, SessionPage,
@@ -147,6 +151,17 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("CostTotal", schema_value::<CostTotal>());
     schemas.insert("ApiError", schema_value::<ApiError>());
     schemas.insert("ApiErrorBody", schema_value::<ApiErrorBody>());
+    // v0.4 local-node agent protocol documents.
+    schemas.insert("PathRef", schema_value::<PathRef>());
+    schemas.insert("AgentRole", schema_value::<AgentRole>());
+    schemas.insert("AgentCapabilities", schema_value::<AgentCapabilities>());
+    schemas.insert("AgentCapacity", schema_value::<AgentCapacity>());
+    schemas.insert("AgentPathMap", schema_value::<AgentPathMap>());
+    schemas.insert("NodeCard", schema_value::<NodeCard>());
+    schemas.insert("NodeKind", schema_value::<NodeKind>());
+    schemas.insert("NodeStatus", schema_value::<NodeStatus>());
+    schemas.insert("NodePresence", schema_value::<NodePresence>());
+    schemas.insert("AgentFrame", schema_value::<AgentFrame>());
     schemas
 }
 

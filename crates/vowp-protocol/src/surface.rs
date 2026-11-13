@@ -64,6 +64,8 @@ pub enum SurfaceKind {
     Mirror,
     /// A direct API client.
     Api,
+    /// A v0.4 local surface attached through a `vowp agent`.
+    Agent,
 }
 
 /// A registered surface.

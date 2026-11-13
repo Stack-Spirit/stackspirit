@@ -20,6 +20,7 @@ Module → file map:
 | `snapshot` | v0.2 `snapshot.json` and the project registry view (§16.3) |
 | `catalog` | v0.2 lifecycle classes, catalog rows, GC and backup reports (§16.4) |
 | `vault` | v0.2 secret names, metadata, modes and the one-time request (§16.5) |
+| `agent` | v0.4 local-node path refs, capabilities, capacity, frames and redacted cards (§16.7) |
 | `config`, `adapter`, `services`, `schema` | `vowp.toml`, adapter trait, service traits, JSON Schema export |
 
 `lib.rs` re-exports everything at the crate root (`vowp_protocol::Job`), plus `vowp_protocol::prelude::*`.
@@ -1521,3 +1522,86 @@ storage types: `FleetStatus {snapshot, source, fetched_at, stale}`, `FleetQueueR
 `vowp schema` and have pages under [`docs/reference/schema/`](../reference/schema/README.md).
 `ControlConfig` and the setup plan/report types are CLI-local `Serialize` shapes (not protocol
 storage types); their fields are described in `v0.2/home-and-surfaces.md` §8 and §11.
+
+### 16.7 v0.4 local-node agent protocol (`agent`)
+
+```rust
+pub const AGENT_PROTOCOL: &str = "vowp-agent/1";
+pub const MAX_PATH_REF_LEN: usize = 1024;
+
+#[serde(try_from = "String", into = "String")]
+pub enum PathRef {
+    Project { project: ProjectName },
+    Worktree { project: ProjectName, job: JobId },
+    Subdir { project: ProjectName, rel: String },
+}
+// Wire strings: `project:vowp`, `worktree:vowp/<job>`, `subdir:vowp/src`.
+// Parse rejects `..`, leading `/`, `\`, NUL, an empty project or subdirectory, and a
+// string over MAX_PATH_REF_LEN; repeated `/` and `.` components are normalised.
+
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole { Surface, Executor, Both }
+
+pub struct AgentCapabilities {
+    pub os: String, pub arch: String, pub agent_version: String,
+    pub harnesses: BTreeMap<String, String>, pub git_version: Option<String>,
+    pub labels: Vec<String>, pub secret_names: Vec<SecretName>,
+    pub projects: Vec<ProjectName>,
+}
+
+pub struct AgentCapacity {
+    pub cpu_cores: u32, pub load1: f64,
+    pub mem_total_bytes: u64, pub mem_free_bytes: u64, pub disk_free_bytes: u64,
+    pub busy_slots: u32, pub max_slots: u32,
+    pub on_battery: Option<bool>, pub thermal_state: Option<String>,
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind { Home, Ssh, Agent }
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus { Pending, Active, Revoked }
+#[serde(rename_all = "snake_case")]
+pub enum NodePresence { Online, Degraded, Offline, Revoked }
+
+pub struct AgentPathMap {
+    pub project: ProjectName, pub local_root: String,
+    pub worktree_root: Option<String>, pub allow: Vec<String>,
+}
+
+pub struct NodeCard {
+    pub name: NodeName, pub kind: NodeKind, pub status: NodeStatus,
+    pub presence: NodePresence, pub labels: Vec<String>,
+    pub capacity: Option<AgentCapacity>, pub runs: u32,
+    pub mapped: Vec<ProjectName>, pub agent_version: Option<String>,
+    pub protocol: Option<String>, pub last_error: Option<String>,
+}
+
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentFrame {
+    AgentHello { node: NodeName, key_id: String, agent_version: String,
+                 os: String, arch: String, labels: Vec<String>,
+                 capabilities: AgentCapabilities },
+    HomeChallenge { nonce: String, home_id: String, connection_id: String,
+                    server_time: Timestamp, heartbeat_secs: u64, max_frame_bytes: u64 },
+    AgentAuth { signature: String },
+    HomeWelcome { protocol: String, home_id: String, node: NodeName,
+                  connection_id: String },
+    Enroll { code: String, public_key: String, agent_version: String, os: String,
+             arch: String, labels: Vec<String>, capabilities: AgentCapabilities,
+             paths: Vec<AgentPathMap> },
+    Enrolled { home_id: String, node: NodeName, protocol: String,
+               server_time: Timestamp, heartbeat_secs: u64 },
+    Heartbeat { at: Timestamp, capacity: AgentCapacity, pending_spool_bytes: u64 },
+    Ping,
+    Pong,
+    Revoked { reason: String },
+    Superseded { connection_id: String },
+    Error { kind: ErrorKind, message: String, retryable: bool },
+}
+```
+
+`NodeCard` is the redacted read model: it has no path-map field and no secret names. The
+owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
+snapshot or log. `AgentFrame` covers Phase 0 only; assignment, surface-token, lease and
+`AssignRun`/`RemoteLine` frames are later phases. `SurfaceKind` gains the `agent` wire
+variant in the same phase, but the store `CHECK` is updated by a later migration.

@@ -1,0 +1,399 @@
+//! v0.4 local-node wire types: path refs, capabilities, capacity and Phase 0 frames.
+//!
+//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.1, §6.1, §8.3, §8.5 and §11.3.
+//! This module is pure data: no I/O, crypto, store or network. Absolute local paths stay on
+//! the node; [`PathRef`] is the only path shape that crosses the machine boundary.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::error::{ErrorKind, ProtocolError};
+use crate::ids::{JobId, NodeName, ProjectName};
+use crate::time::Timestamp;
+use crate::vault::SecretName;
+
+/// Protocol name exchanged in the agent handshake.
+pub const AGENT_PROTOCOL: &str = "vowp-agent/1";
+
+/// Longest accepted `PathRef` wire string, in bytes.
+pub const MAX_PATH_REF_LEN: usize = 1024;
+
+/// A project-relative path the agent resolves locally.
+///
+/// The wire form is one short string: `project:vowp`, `worktree:vowp/<job>` or
+/// `subdir:vowp/src`. Parsing rejects `..`, absolute paths, backslashes, NUL, an empty
+/// project and an empty subdirectory, and normalises repeated `/` and `.` components.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(with = "String")]
+pub enum PathRef {
+    /// The project root.
+    Project {
+        /// Project name.
+        project: ProjectName,
+    },
+    /// The job worktree under the project.
+    Worktree {
+        /// Project name.
+        project: ProjectName,
+        /// Job whose worktree is referenced.
+        job: JobId,
+    },
+    /// A directory below the project root.
+    Subdir {
+        /// Project name.
+        project: ProjectName,
+        /// Normalised project-relative path.
+        rel: String,
+    },
+}
+
+impl PathRef {
+    /// Parses and validates a path ref wire string.
+    pub fn parse(s: &str) -> Result<Self, ProtocolError> {
+        let invalid = || ProtocolError::InvalidId {
+            kind: "path_ref",
+            value: s.to_owned(),
+        };
+        if s.len() > MAX_PATH_REF_LEN || s.contains('\0') || s.contains('\\') {
+            return Err(invalid());
+        }
+        let (kind, rest) = s.split_once(':').ok_or_else(invalid)?;
+        match kind {
+            "project" => {
+                if rest.is_empty() || rest.contains('/') {
+                    return Err(invalid());
+                }
+                Ok(Self::Project {
+                    project: ProjectName::parse(rest)?,
+                })
+            }
+            "worktree" => {
+                let (project, job) = rest.split_once('/').ok_or_else(invalid)?;
+                if project.is_empty() || job.is_empty() || job.contains('/') {
+                    return Err(invalid());
+                }
+                Ok(Self::Worktree {
+                    project: ProjectName::parse(project)?,
+                    job: JobId::parse(job)?,
+                })
+            }
+            "subdir" => {
+                let (project, rel) = rest.split_once('/').ok_or_else(invalid)?;
+                if project.is_empty() {
+                    return Err(invalid());
+                }
+                let rel = normalise_rel(rel).ok_or_else(invalid)?;
+                Ok(Self::Subdir {
+                    project: ProjectName::parse(project)?,
+                    rel,
+                })
+            }
+            _ => Err(invalid()),
+        }
+    }
+}
+
+/// Normalises a relative path, rejecting traversal, absolute input and empty results.
+fn normalise_rel(rel: &str) -> Option<String> {
+    if rel.is_empty() || rel.starts_with('/') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in rel.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => return None,
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() { None } else { Some(parts.join("/")) }
+}
+
+impl fmt::Display for PathRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Project { project } => write!(f, "project:{project}"),
+            Self::Worktree { project, job } => write!(f, "worktree:{project}/{job}"),
+            Self::Subdir { project, rel } => write!(f, "subdir:{project}/{rel}"),
+        }
+    }
+}
+
+impl From<PathRef> for String {
+    fn from(value: PathRef) -> Self {
+        value.to_string()
+    }
+}
+
+impl TryFrom<String> for PathRef {
+    type Error = ProtocolError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl FromStr for PathRef {
+    type Err = ProtocolError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+/// What a local agent is allowed to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    /// Hosts local surfaces only.
+    Surface,
+    /// Runs offloaded jobs only.
+    Executor,
+    /// Hosts surfaces and runs offloaded jobs.
+    Both,
+}
+
+/// Names-only capabilities advertised by an agent; values never cross the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentCapabilities {
+    /// Operating system name (`darwin`, `linux`).
+    pub os: String,
+    /// CPU architecture (`arm64`, `x86_64`).
+    pub arch: String,
+    /// Agent binary version.
+    pub agent_version: String,
+    /// Harness name to version, for example `opencode` -> `1.2.3`.
+    pub harnesses: BTreeMap<String, String>,
+    /// `git --version` output, when known.
+    pub git_version: Option<String>,
+    /// Owner-assigned labels.
+    pub labels: Vec<String>,
+    /// Names of secrets the node can resolve; never values.
+    pub secret_names: Vec<SecretName>,
+    /// Projects mapped on the node.
+    pub projects: Vec<ProjectName>,
+}
+
+/// Capacity reported in a heartbeat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentCapacity {
+    /// Logical CPU cores.
+    pub cpu_cores: u32,
+    /// One-minute load average.
+    pub load1: f64,
+    /// Total physical memory in bytes.
+    pub mem_total_bytes: u64,
+    /// Memory available to new work in bytes.
+    pub mem_free_bytes: u64,
+    /// Free bytes on the worktree filesystem.
+    pub disk_free_bytes: u64,
+    /// Worker and verifier slots in use.
+    pub busy_slots: u32,
+    /// Maximum worker and verifier slots.
+    pub max_slots: u32,
+    /// Whether the node is on battery, when known.
+    pub on_battery: Option<bool>,
+    /// Thermal state name (`nominal`, `fair`, `serious`, `critical`), when known.
+    pub thermal_state: Option<String>,
+}
+
+/// Enrollment state of a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    /// Waiting for approval.
+    Pending,
+    /// Enrolled and usable.
+    Active,
+    /// Credentials revoked.
+    Revoked,
+}
+
+/// How a node is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    /// The home itself.
+    Home,
+    /// A pre-v0.4 SSH node.
+    Ssh,
+    /// An enrolled `vowp agent` node.
+    Agent,
+}
+
+/// Computed presence of a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodePresence {
+    /// A heartbeat arrived under 30 seconds ago.
+    Online,
+    /// The last heartbeat is 30 to 90 seconds old.
+    Degraded,
+    /// The last heartbeat is over 90 seconds old.
+    Offline,
+    /// The node is revoked regardless of its last heartbeat.
+    Revoked,
+}
+
+/// One project path map entry supplied by an agent at enrollment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentPathMap {
+    /// Project the map belongs to.
+    pub project: ProjectName,
+    /// Absolute project root on the node; stays local to the home's `node_paths` row.
+    pub local_root: String,
+    /// Absolute worktree root on the node, when separate.
+    pub worktree_root: Option<String>,
+    /// Allowed relative paths below the root.
+    pub allow: Vec<String>,
+}
+
+/// Redacted node summary shown by `vowp node show` and never carrying a path or secret name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeCard {
+    /// Node name.
+    pub name: NodeName,
+    /// How the node is reached.
+    pub kind: NodeKind,
+    /// Enrollment state.
+    pub status: NodeStatus,
+    /// Computed presence.
+    pub presence: NodePresence,
+    /// Owner-assigned labels.
+    pub labels: Vec<String>,
+    /// Latest capacity snapshot, when one arrived.
+    pub capacity: Option<AgentCapacity>,
+    /// Number of active runs on the node.
+    pub runs: u32,
+    /// Projects mapped on the node.
+    pub mapped: Vec<ProjectName>,
+    /// Agent binary version, when known.
+    pub agent_version: Option<String>,
+    /// Agent protocol, when known.
+    pub protocol: Option<String>,
+    /// Last connection or policy error, redacted by the caller.
+    pub last_error: Option<String>,
+}
+
+/// One Phase 0 agent protocol frame, tagged by `type`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentFrame {
+    /// Agent -> home: identity and capabilities.
+    AgentHello {
+        /// Node name.
+        node: NodeName,
+        /// Public-key id.
+        key_id: String,
+        /// Agent binary version.
+        agent_version: String,
+        /// Operating system name.
+        os: String,
+        /// CPU architecture.
+        arch: String,
+        /// Owner-assigned labels.
+        labels: Vec<String>,
+        /// Names-only capabilities.
+        capabilities: AgentCapabilities,
+    },
+    /// Home -> agent: the nonce and limits for authentication.
+    HomeChallenge {
+        /// One-time nonce.
+        nonce: String,
+        /// Home identity.
+        home_id: String,
+        /// Connection identity.
+        connection_id: String,
+        /// Home server time.
+        server_time: Timestamp,
+        /// Heartbeat interval in seconds.
+        heartbeat_secs: u64,
+        /// Maximum accepted frame size in bytes.
+        max_frame_bytes: u64,
+    },
+    /// Agent -> home: signature over the challenge.
+    AgentAuth {
+        /// Lowercase hex signature.
+        signature: String,
+    },
+    /// Home -> agent: the handshake succeeded.
+    HomeWelcome {
+        /// Negotiated protocol.
+        protocol: String,
+        /// Home identity.
+        home_id: String,
+        /// Node name.
+        node: NodeName,
+        /// Connection identity.
+        connection_id: String,
+    },
+    /// Agent -> home: redeem a one-time enrollment code.
+    Enroll {
+        /// One-time enrollment code; never logged.
+        code: String,
+        /// Lowercase hex ed25519 public key.
+        public_key: String,
+        /// Agent binary version.
+        agent_version: String,
+        /// Operating system name.
+        os: String,
+        /// CPU architecture.
+        arch: String,
+        /// Owner-assigned labels.
+        labels: Vec<String>,
+        /// Names-only capabilities.
+        capabilities: AgentCapabilities,
+        /// Initial project path map.
+        paths: Vec<AgentPathMap>,
+    },
+    /// Home -> agent: enrollment succeeded.
+    Enrolled {
+        /// Home identity.
+        home_id: String,
+        /// Node name.
+        node: NodeName,
+        /// Negotiated protocol.
+        protocol: String,
+        /// Home server time.
+        server_time: Timestamp,
+        /// Heartbeat interval in seconds.
+        heartbeat_secs: u64,
+    },
+    /// Agent -> home: capacity and spool state.
+    Heartbeat {
+        /// When the heartbeat was sent.
+        at: Timestamp,
+        /// Latest capacity snapshot.
+        capacity: AgentCapacity,
+        /// Bytes waiting in the pending spool.
+        pending_spool_bytes: u64,
+    },
+    /// Home -> agent: liveness probe.
+    Ping,
+    /// Agent -> home: liveness reply.
+    Pong,
+    /// Home -> agent: the node credential was revoked.
+    Revoked {
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// Home -> agent: another connection took over.
+    Superseded {
+        /// Connection that superseded this one.
+        connection_id: String,
+    },
+    /// Home -> agent: protocol or policy error.
+    Error {
+        /// Error class.
+        kind: ErrorKind,
+        /// Human-readable message.
+        message: String,
+        /// Whether a retry may succeed.
+        retryable: bool,
+    },
+}

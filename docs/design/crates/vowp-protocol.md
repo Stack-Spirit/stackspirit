@@ -42,6 +42,10 @@ crates/vowp-protocol/
   tests/*.rs
 ```
 
+`src/agent.rs` holds the v0.4 local-node documents (`PathRef`, `AgentRole`,
+`AgentCapabilities`, `AgentCapacity`, `AgentPathMap`, `NodeCard`, `NodeKind`, `NodeStatus`,
+`NodePresence` and `AgentFrame`); see rule 14.
+
 `lib.rs` declares **all** modules and re-exports with `pub use <module>::*;` for every module.
 
 ## 3. Extra public items (not in types.md)
@@ -131,8 +135,18 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"SecretInfo"`, `"SecretRequest"`, `"Session"`, `"SessionDetail"`, `"SessionPage"`, `"SessionSwitchRequest"`,
     `"SessionSurfaceCard"`, `"Snapshot"`, `"SupervisorSnapshot"`, `"Surface"`, `"SurfaceRef"`, `"Switch"`, `"TakeoverReport"`,
     `"Tunnel"`, `"TurnGrant"`, `"UsageEstimate"`, `"VowpConfig"`, `"WaitReason"`, `"WaitingJob"`, `"Worker"`.
+    The v0.4 local-node set adds `"AgentCapabilities"`, `"AgentCapacity"`, `"AgentFrame"`,
+    `"AgentPathMap"`, `"AgentRole"`, `"NodeCard"`, `"NodeKind"`, `"NodePresence"`, `"NodeStatus"`,
+    `"PathRef"`.
     Output is deterministic (BTreeMap, stable ordering).
 13. **No panics**: all constructors/parsers return `Result`; regex literals inside use `// invariant:` comments.
+14. **v0.4 agent protocol.** `PathRef` serialises as one string (`project:vowp`,
+    `worktree:vowp/<job>`, `subdir:vowp/src`) and parses strictly: no `..`, leading `/`, `\`, NUL
+    or empty project/subdirectory, at most `MAX_PATH_REF_LEN` bytes, with repeated `/` and `.`
+    components normalised. `AgentFrame` is the Phase 0 tagged union (`type` is `snake_case`):
+    `AgentHello`, `HomeChallenge`, `AgentAuth`, `HomeWelcome`, `Enroll`, `Enrolled`, `Heartbeat`,
+    `Ping`, `Pong`, `Revoked`, `Superseded` and `Error`. `NodeCard` carries no path map and no
+    secret name; `NodeStatus`/`NodePresence` are separate so a revoked node is always `revoked`.
 
 ## 5. Error enum
 
@@ -189,8 +203,19 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `types_md_examples_validate` | each JSON example fixture (`job.json`, `capsule.json`, `cost.json`, `limit.json`, `events.jsonl`, `profile.json`, `edge.json`, `run.json`, `session.json`, `inbox_item.json`, `loop.json`, `release.json`, `schedule.json`, `gate_result.json`, `worker.json`, `switch.json`) deserialises into its Rust type and validates against its exported schema (use a tiny structural checker: required properties present, no unknown top-level keys for `deny_unknown_fields` types) |
 | `log_format_line` | `format_log_line` golden string; `MemoryLog` records in order |
 | `service_cancel_token` | clones share cancellation; `ServiceError` Display strings |
+| `path_ref_parses_project_worktree_and_subdir` | the three wire forms parse, display and `FromStr` identically; repeated `/` and `.` normalise |
+| `path_ref_rejects_traversal_absolute_backslash_and_nul` | `..`, leading `/`, `\`, NUL, empty project/subdirectory, unknown kind and over-length input all return `InvalidInput` |
+| `path_ref_round_trips_through_json` | each form serialises as its Display string and deserialises back; a traversal string fails |
+| `agent_frame_round_trips_every_phase_zero_variant` | all 12 Phase 0 variants have their `snake_case` `type` and round-trip through JSON |
+| `agent_frame_rejects_unknown_type` | an unknown `type` and a missing required field both fail |
+| `node_card_serializes_without_absolute_paths_or_secret_names` | no absolute string, path-map field or secret name appears in the card JSON |
+| `all_schemas_includes_agent_types` | every v0.4 agent type is in `all_schemas()` and `schema_for_name` |
+| `surface_kind_agent_wire_name_is_agent` | `SurfaceKind::Agent` serialises as `"agent"` and back |
 
 ## 7. Out of scope / v0.2
 
 ACP event mapping, permission.request/resolve events, IANA timezone support, signed/hash-chained logs (field reserved: none in v0.1).
 The v0.3 loopback API documents live in `src/api.rs`; see `docs/design/v0.3/http-api.md`.
+The v0.4 local-node protocol lives in `src/agent.rs`; see `docs/design/v0.4/local-orchestrator.md`
+§8.3 and §11.3. Assignment, surface-token, lease and `RemoteLine` wrapper frames are later
+phases and are not defined here.
