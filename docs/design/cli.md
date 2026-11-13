@@ -127,6 +127,9 @@ A takeover by another surface prints
 `Taken over by phone at 14:05. This surface is now read-only (follow mode).` and keeps showing new
 events. See `sessions.md` §8–§11.
 
+The Mac-side v0.4 agent commands (`vowp agent enroll`, `vowp agent run`, `vowp agent status`) live
+in §12. They use `~/.vowp-agent` rather than the home/project store.
+
 ### Hidden session interfaces
 
 These are implementation interfaces, not help-listed user commands. `vowp session turn-begin`,
@@ -431,3 +434,63 @@ adds `session_pull_full_imports_the_origin_id_with_the_full_log`,
 `session_pull_full_refuses_an_over_cap_snapshot_before_copying` and
 `session_pull_full_reports_a_failed_remote_export_and_imports_nothing`; the default child path
 remains `session_pull_imports_a_child_and_prints_both_ids`.
+
+The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
+`agent_status_prints_json`, `agent_enroll_help_names_code_file` and
+`agent_enroll_accepts_code_file_stdin`.
+
+## 12. Mac agent commands (v0.4 Phase 0)
+
+These commands are the Mac side of the local orchestrator. They use `~/.vowp-agent` (override
+with `VOWP_AGENT_HOME`), never open a project store or `vowp-core`, and never put the node private
+key or the one-time code in argv, `ps`, a log line or a JSON document. Crate API:
+[`crates/vowp-agent.md`](crates/vowp-agent.md).
+
+### `vowp agent enroll --target <ssh-target> --code-file <path|->`
+Generates `~/.vowp-agent/node.key` (0600) and `node.pub` when absent, opens
+`ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <ssh-target> vowp agent gateway --stdio`,
+sends `Enroll { code, public_key, … }` and waits for `Enrolled`. It then reconnects and performs
+the `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome` handshake. The code is a
+52-character one-time value; `--code-file -` reads it from stdin. Success writes `agent.json`
+(0600) and prints the node, home and protocol:
+
+```sh
+vowp agent enroll --target home.example --code-file -
+```
+
+Human output is `enrolled node mac-studio in home home-1 (vowp-agent/1)`; `--json` prints
+`{"node":"mac-studio","home":"home-1","protocol":"vowp-agent/1","heartbeat_secs":10}`. The
+private key, public key and code are never printed.
+
+### `vowp agent run [--foreground] [--role <role>]`
+Loads `agent.json` and `node.key`, connects, and sends a heartbeat every 10 seconds (the interval
+`HomeChallenge` names); each heartbeat rewrites `status.json` (0600). `Ping` is answered with
+`Pong`. `Revoked` stops with exit 5 and `Superseded` stops with exit 4. A dropped connection,
+EOF or retryable home error reconnects with exponential backoff (1, 2, 4 … 60 seconds, with
+jitter; a 60-second stable connection resets it). `--role` is `surface`, `executor` or `both`
+(default `both`). Phase 0 always runs in the foreground; `--foreground` is accepted, and a
+launchd service is Phase 4.
+
+### `vowp agent status [--json]`
+Reads `status.json` and prints the last connection state, node, home, protocol, last heartbeat,
+last error, pending spool bytes, key fingerprint and surface-token expiry when one is paired.
+Without an enrollment it exits 3 with the `vowp agent enroll` hint. It also exits 0 when the
+last state is offline or stopped. `--json` prints:
+
+```json
+{
+  "connection": "connected",
+  "node": "mac-studio",
+  "home": "home-1",
+  "protocol": "vowp-agent/1",
+  "last_heartbeat": "2026-11-14T10:00:00.000Z",
+  "last_error": null,
+  "pending_spool_bytes": 42,
+  "key_fingerprint": "sha256:0123456789abcdef",
+  "surface_token_expires_at": null
+}
+```
+
+`connection` is one of `unknown`, `connecting`, `connected`, `reconnecting`, `revoked`,
+`superseded` or `stopped`. `AgentStatus` is a CLI-local document, not an exported protocol
+schema.

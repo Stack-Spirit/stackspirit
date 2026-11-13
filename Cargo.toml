@@ -6,6 +6,7 @@ members = [
   "crates/vowp-graph",
   "crates/vowp-tmux",
   "crates/vowp-adapters",
+  "crates/vowp-agent",
   "crates/vowp-core",
   "crates/vowp-daemon",
 ]
@@ -57,6 +58,10 @@ path = "crates/vowp-cli/src/lib.rs"
 [[bin]]
 name = "vowp"
 path = "crates/vowp-cli/src/main.rs"
+
+[[test]]
+name = "agent"
+path = "crates/vowp-cli/tests/agent.rs"
 
 [[test]]
 name = "board"
@@ -162,6 +167,7 @@ thiserror = "2.0.21"
 time = "0.3.45"
 toml = "1.2.1"
 vowp-adapters = { version = "0.3.0", path = "crates/vowp-adapters" }
+vowp-agent = { version = "0.3.0", path = "crates/vowp-agent" }
 vowp-core = { version = "0.3.0", path = "crates/vowp-core" }
 vowp-graph = { version = "0.3.0", path = "crates/vowp-graph" }
 vowp-protocol = { version = "0.3.0", path = "crates/vowp-protocol" }

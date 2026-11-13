@@ -45,6 +45,7 @@ pub const V0_2_COMMANDS: &[&str] = &[
     "orchestrator",
     "migrate",
     "mcp",
+    "agent",
     "__exec",
     "__vault-exec",
     "__vault-admin",
@@ -180,6 +181,12 @@ pub enum Command {
     Migrate(MigrateArgs),
     /// Run the stdio MCP server.
     Mcp(McpArgs),
+    /// Enroll, run or inspect the Mac-side agent.
+    Agent {
+        /// The agent subcommand.
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Print the binary version.
     Version,
     /// Hidden: what the tmux windows run.
@@ -859,6 +866,43 @@ pub struct NodeRmArgs {
     /// Node name.
     pub name: String,
 }
+
+/// `vowp agent` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum AgentCommand {
+    /// Enroll this Mac with a one-time code.
+    Enroll(AgentEnrollArgs),
+    /// Run the agent client until revoked or superseded.
+    Run(AgentRunArgs),
+    /// Show the last local agent status.
+    Status(AgentStatusArgs),
+}
+
+/// Arguments for `vowp agent enroll`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentEnrollArgs {
+    /// ssh destination of the home.
+    #[arg(long, value_name = "SSH-TARGET")]
+    pub target: String,
+    /// File holding the one-time code, or `-` for stdin.
+    #[arg(long, value_name = "PATH|-")]
+    pub code_file: String,
+}
+
+/// Arguments for `vowp agent run`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentRunArgs {
+    /// Keep the process in the terminal (the Phase 0 default).
+    #[arg(long)]
+    pub foreground: bool,
+    /// Agent role: `surface`, `executor` or `both`.
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+}
+
+/// Arguments for `vowp agent status`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentStatusArgs {}
 
 /// Arguments for `vowp loops`.
 #[derive(Debug, Clone, Args)]

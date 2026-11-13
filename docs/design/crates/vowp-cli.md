@@ -27,6 +27,7 @@ crates/vowp-cli/
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
+  src/cmd/agent.rs    (`agent enroll|run|status`; no store, project or `vowp-core`)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
 ```
@@ -64,7 +65,45 @@ pub mod remote {
 }
 ```
 
-## 3. Rules
+## 3. Agent commands (`cmd/agent.rs`)
+
+`vowp agent` is the Phase 0 Mac-side client from
+[`vowp-agent.md`](vowp-agent.md) and `cli.md` §12. It is handled before `Ctx::build` and before the
+generic `--node` redirect: it uses `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never opens a
+project store or `vowp-core`.
+
+- `agent enroll --target <ssh-target> --code-file <path|->` reads `-` from the `IoStreams` stdin,
+  trims the line, validates the 52-character code shape and passes it only to
+  `AgentClient::enroll`. The code never appears in argv, `ps`, output or a log. Success writes
+  `agent.json` 0600 and prints the node, home and protocol; `--json` prints
+  `{"node","home","protocol","heartbeat_secs"}`.
+- `agent run [--foreground] [--role surface|executor|both]` loads `agent.json` and `node.key`,
+  builds the SSH transport, and calls `AgentClient::run`. `status.json` is rewritten on every
+  heartbeat. Phase 0 always runs in the foreground; `--foreground` is accepted for the documented
+  surface. A revoked credential exits 5 and a superseded connection exits 4.
+- `agent status [--json]` loads `status.json`; without `agent.json` it exits 3 with the enrollment
+  command in the message. It fills missing fields from `agent.json` and `node.pub`, recounts
+  `spool/`, and prints the human lines `connection`, `node`, `home`, `protocol`, `last heartbeat`,
+  `pending spool`, `key`, optional `surface token expires` and optional `last error`.
+
+`AgentStatus` is CLI-local (it is not an exported protocol schema), has no token or secret field,
+and serialises as:
+
+```json
+{
+  "connection": "connected",
+  "node": "mac-studio",
+  "home": "home-1",
+  "protocol": "vowp-agent/1",
+  "last_heartbeat": "2026-11-14T10:00:00.000Z",
+  "last_error": null,
+  "pending_spool_bytes": 42,
+  "key_fingerprint": "sha256:0123456789abcdef",
+  "surface_token_expires_at": null
+}
+```
+
+## 4. Rules
 
 1. Every command handler is `fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &XArgs) -> Result<i32, CliError>`; no handler prints directly to `std::io`.
 2. `--json` output types are the protocol types (types.md) wherever one exists (`Job`, `Session`, `InboxItem`, …); only summaries (`status`, `doctor`, `cost`) have CLI-local `Serialize` structs, defined next to the command.
@@ -74,11 +113,14 @@ pub mod remote {
 6. Secrets: `doctor` reports env var **names** present/absent only.
 7. `vowp --help` text for each command is the first line of its section in `cli.md`.
 
-## 4. Named tests
+## 5. Named tests
 
 Listed in `cli.md` §8, grouped by the file table above. Additional: `help_lists_every_v0_1_command` (compares clap's subcommand set with a constant list copied from `cli.md`),
 `no_command_returns_not_implemented`, `json_flag_outputs_valid_json_for_every_listing_command`, `exit_codes_follow_error_kind`, `ctx_build_requires_init`, `io_streams_buffer_impl_captures_output`,
-`capacity_reload_check_reports_without_writing`, `capacity_reload_refuses_when_no_supervisor_runs`.
+`capacity_reload_check_reports_without_writing`, `capacity_reload_refuses_when_no_supervisor_runs`;
+the agent slice adds `agent_status_without_enrollment_exits_three`, `agent_status_prints_json`,
+`agent_enroll_help_names_code_file` and `agent_enroll_accepts_code_file_stdin` in
+`tests/agent.rs`.
 
-## 5. Out of scope
+## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

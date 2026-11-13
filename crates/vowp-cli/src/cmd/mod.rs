@@ -6,6 +6,7 @@
 use crate::cli::{Command, MaintCommand, PromoteCommand, SessionCommand, UpCommand};
 use crate::{CliError, Ctx, IoStreams};
 
+pub mod agent;
 pub mod attach;
 pub mod board;
 pub mod capacity;
@@ -92,6 +93,9 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Orchestrator(args) => orchestrator::run(ctx, io, &args),
         Command::Migrate(args) => migrate::run(ctx, io, &args),
         Command::Mcp(args) => mcp::run(ctx, io, &args),
+        Command::Agent { .. } => Err(CliError::Invalid(
+            "agent commands run without a project context".to_owned(),
+        )),
         Command::Version => maint::run(ctx, io, &MaintCommand::Version),
         Command::Window(args) => window::run(ctx, io, &args),
         Command::Exec(args) => exec::run(ctx, io, &args),

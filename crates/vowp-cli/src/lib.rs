@@ -193,6 +193,11 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
             vowp_store::Store::open(&paths)?;
         }
     }
+    // The Mac agent has no store, project or `--node` meaning: it always runs locally against
+    // `~/.vowp-agent`. Handle it before the generic remote redirect.
+    if let Command::Agent { command } = &command {
+        return cmd::agent::run(&global, io, command);
+    }
     // Refuse a command that still needs a v0.2 handler before the generic `--node` redirect,
     // which would otherwise silently run the v0.1 chat loop.
     if cmd::command_needs_v0_2_handler(&command) {
