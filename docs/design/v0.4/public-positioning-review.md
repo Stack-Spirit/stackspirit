@@ -63,15 +63,18 @@ those paths as gaps again:
 +-  ledger rows, the switch turn path or the `session watch` importer in this build ...
 ```
 
-The private code has the supervisor-log, gate-evidence and ledger redaction in place
-(`crates/vowp-core/src/gates/cmd.rs`, `crates/vowp-core/src/ledger/record.rs`), and `v4-s2` is
-closing the switch/watch gaps. The public commit's text contradicts the public base and the private
-implementation. Do not publish this hunk; restore the pre-`b49f90e` redaction text, or re-derive it
-from the code at the release tag. The public `docs/security.md` was not changed, so the README and
-operating guide now disagree with it.
+The public code at `b49f90e` **does** redact gate evidence and ledger details:
+`crates/vowp-core/src/gates/cmd.rs` calls `vault::redact_text`/`redact_bytes`, and
+`crates/vowp-core/src/ledger/record.rs` redacts the summary and string details before insert. The
+public `docs/security.md` still lists gate evidence and ledger rows as unredacted, so the commit is
+following a stale security page instead of the code. The public base README was closer to the code
+for gate/ledger. The supervisor-log claim is a separate question at the public tag; the private
+`v4-s1` job already covers it.
 
-I did not port this hunk into the private README or operating guide. The private text is newer and
-more accurate.
+Do not publish the README/operating hunk as written. Keep the gate and ledger coverage in the public
+README, and update `docs/security.md` to match the code. The private tree has the gate, ledger and
+supervisor-log redaction and is closing switch/watch in `v4-s2`; I did not port the public hunk into
+the private README or operating guide.
 
 ### 1. "Fleet and worker tracking ... see the whole fleet in one snapshot"
 
