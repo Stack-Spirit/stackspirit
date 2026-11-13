@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
-use vowp_protocol::{NodeName, NodePresence, NodeStatus, ProjectName, SessionId, Timestamp};
+use vowp_protocol::{EventId, HarnessKind, NodeName, NodePresence, NodeStatus, ProjectName, SessionId, Timestamp};
 use vowp_store::{EnrollmentCode, EnrollmentKind, NodeCredential, NodePath, NodePaths, Store, StoreError, migrate_v02};
 
 const T0: &str = "2026-01-01T00:00:00.000Z";
 const T1: &str = "2026-01-01T00:10:00.000Z";
+const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const EVENT_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
 
 fn ts(text: &str) -> Timestamp {
     Timestamp::parse(text).expect("timestamp")
@@ -76,9 +78,15 @@ fn v2_home() -> (TempDir, NodePaths) {
         "INSERT INTO sessions (id, project, job_id, role, title, parent_session_id, node, cwd, state,
                                executor, last_seq, last_capsule_id, log_bytes, compacted_at, created_at, updated_at)
          VALUES (?1, 'alpha', NULL, 'user', 'kept', NULL, 'local', '/tmp', 'idle', NULL, 0, NULL, 0, NULL, ?2, ?2)",
-        params![SessionId::new().as_str(), T0],
+        params![SESSION_ID, T0],
     )
     .expect("session");
+    conn.execute(
+        "INSERT INTO native_events (session_id, harness, native_id, event_id, at)
+         VALUES (?1, 'claude-code', 'native-1', ?2, ?3)",
+        params![SESSION_ID, EVENT_ID, T0],
+    )
+    .expect("native event");
     drop(conn);
     (tmp, paths)
 }
@@ -86,21 +94,47 @@ fn v2_home() -> (TempDir, NodePaths) {
 #[test]
 fn migration_v2_to_v3_preserves_nodes_projects_and_sessions() {
     let (_tmp, paths) = v2_home();
+    let source_tables: Vec<String> = {
+        let source = Connection::open(paths.db_path()).expect("source db");
+        let mut statement = source
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .expect("source tables");
+        statement
+            .query_map([], |row| row.get(0))
+            .expect("source table rows")
+            .map(|row| row.expect("source table name"))
+            .collect()
+    };
     let report = migrate_v02(&paths).expect("migrate");
     assert_eq!(report.from_version, 2);
     assert_eq!(report.to_version, 3);
     assert!(report.verified);
     assert!(std::path::Path::new(&report.backup).is_file(), "backup exists");
+    for table in &source_tables {
+        assert!(
+            report.tables.contains_key(&format!("global:{table}")),
+            "the migration did not copy v2 table {table}"
+        );
+    }
     assert_eq!(report.tables["global:nodes"].before, 2);
     assert_eq!(report.tables["global:nodes"].after, 2);
     assert_eq!(report.tables["global:projects"].before, 1);
     assert_eq!(report.tables["global:sessions"].before, 1);
+    assert_eq!(report.tables["global:native_events"].before, 1);
+    assert_eq!(report.tables["global:native_events"].after, 1);
 
     let backup = Connection::open(&report.backup).expect("backup db");
     let backup_version: i64 = backup
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("backup version");
     assert_eq!(backup_version, 2, "the backup is the untouched v2 file");
+    let backup_events: i64 = backup
+        .query_row("SELECT COUNT(*) FROM native_events", [], |row| row.get(0))
+        .expect("backup native events");
+    assert_eq!(backup_events, 1, "the backup keeps the v2 row");
     drop(backup);
 
     let store = Store::open(&paths).expect("open migrated home");
@@ -111,6 +145,16 @@ fn migration_v2_to_v3_preserves_nodes_projects_and_sessions() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].name, project("alpha"));
     assert_eq!(store.list_sessions(&Default::default()).expect("sessions").len(), 1);
+    assert_eq!(
+        store
+            .native_event(
+                &SessionId::parse(SESSION_ID).expect("session id"),
+                HarnessKind::ClaudeCode,
+                "native-1",
+            )
+            .expect("native event"),
+        Some(EventId::parse(EVENT_ID).expect("event id"))
+    );
     assert_eq!(store.local_node().expect("local").expect("present").name, node("local"));
     assert_eq!(
         store

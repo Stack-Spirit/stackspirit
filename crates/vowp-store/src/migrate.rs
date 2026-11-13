@@ -20,13 +20,14 @@ use crate::paths::NodePaths;
 use crate::session_log::{pid_alive, valid_pid};
 
 /// Every table in the v2 global schema, in copy and count order.
-const V02_GLOBAL_TABLES: [&str; 20] = [
+const V02_GLOBAL_TABLES: [&str; 21] = [
     "kv",
     "nodes",
     "projects",
     "sessions",
     "session_events",
     "session_natives",
+    "native_events",
     "capsules",
     "switches",
     "limits",

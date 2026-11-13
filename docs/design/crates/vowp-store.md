@@ -116,13 +116,15 @@ Migration/pragma rules (all in `Store::open*`):
    constructor.
 7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3 before opening
    it. `migrate_v02` follows the v0.1 migration's staged-swap recipe: it copies the original file
-   to `backups/pre-0.3-<ms>.db`, writes a fresh v3 file in `tmp/`, copies every global table with
-   explicit columns, verifies per-table counts, integrity and foreign keys, and then renames the
-   staged file into place. A `migration.json` manifest makes the swap restartable. Projects,
-   session logs and the project schema are untouched. The local row (`is_local = 1`) becomes
-   `kind = 'home'`; every other v2 node becomes `kind = 'ssh'` with `status = 'active'`. The
-   existing v0.1 → v2 `migrate_v01` path is not renumbered: it writes the current embedded schema
-   and therefore leaves the home at v3.
+   to `backups/pre-0.3-<ms>.db`, writes a fresh v3 file in `tmp/`, copies all 21 v2 global tables
+   (including `native_events`), verifies per-table counts, integrity and foreign keys, and then
+   renames the staged file into place. `nodes` is copied with an explicit column list and a
+   `CASE` that maps `is_local` to `kind`; the other tables keep their v2 definitions and are
+   copied column-for-column with `INSERT ... SELECT *`. A `migration.json` manifest makes the
+   swap restartable. Projects, session logs and the project schema are untouched. The local row
+   (`is_local = 1`) becomes `kind = 'home'`; every other v2 node becomes `kind = 'ssh'` with
+   `status = 'active'`. The existing v0.1 → v2 `migrate_v01` path is not renumbered: it writes
+   the current embedded schema and therefore leaves the home at v3.
 
 ### 3.3 Filters and small structs
 
