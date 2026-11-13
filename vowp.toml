@@ -10,12 +10,12 @@ tz_offset_minutes = 60
 
 [project]
 name = "vowp"
-remote = "origin"
+remote = "local"
 default_branch = "main"
 check_cmds = []
 lock_files = ["Cargo.lock"]
 always_allowed = ["Cargo.lock"]
-push = true
+push = false
 
 [profiles.keeper]
 ladder = ["opencode:deepseek/deepseek-flash#max"]
