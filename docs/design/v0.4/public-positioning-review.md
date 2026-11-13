@@ -14,8 +14,9 @@ The new "0.4 direction" matches our design in
 surface, and an outbound-only node runs offloaded jobs with per-node path mapping. No design change
 is needed.
 
-The public message is not yet exact in six places. The proposed wording below is **not applied to
-the public README**; it is shown as a diff for the owner to approve.
+The public message has six claims that need qualification, one redaction regression and two roadmap
+fixes. The proposed wording below is **not applied to the public README**; it is shown as a diff for
+the owner to approve.
 
 ## What was ported
 
@@ -40,10 +41,9 @@ Deliberately not ported:
   pending `v4-d1-roadmap-0-4` job. That job should carry the v0.4 roadmap section and the 0.3.0
   status alignment.
 - The public `README.md` and `docs/guides/operating.md` redaction paragraphs are **older than the
-  private tree**. The private supervisor-log, gate-evidence and ledger redaction is already in place,
-  and `v4-s2` is closing the switch/watch gaps. Porting the public paragraph would regress the
-  private docs. The public text may be correct for the public `v0.3.0` tag; it is not correct for
-  this tree.
+  private tree** and, at `b49f90e`, older than the public code for gate evidence and ledger details.
+  The private supervisor-log, gate-evidence and ledger redaction is already in place, and `v4-s2` is
+  closing the switch/watch gaps. Porting the public paragraph would regress the private docs.
 
 ## Claims to qualify
 
