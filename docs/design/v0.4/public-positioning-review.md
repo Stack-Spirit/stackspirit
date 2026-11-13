@@ -47,6 +47,32 @@ Deliberately not ported:
 
 ## Claims to qualify
 
+### Redaction regression (read first)
+
+The commit changes the `README.md` and `docs/guides/operating.md` redaction text in the **wrong
+direction**. The public base before `b49f90e` already said exact-value redaction covered the
+supervisor log, command-gate evidence and ledger rows; the commit removes that coverage and lists
+those paths as gaps again:
+
+```diff
+-- Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules, the
+--  supervisor log, command-gate evidence, ledger rows and the finished report and run mirror. It does
+--  **not** cover the switch turn path or the `session watch` importer in this build ...
++- Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules and
++-  the finished report and run mirror. It does **not** cover the supervisor log, gate command evidence,
++-  ledger rows, the switch turn path or the `session watch` importer in this build ...
+```
+
+The private code has the supervisor-log, gate-evidence and ledger redaction in place
+(`crates/vowp-core/src/gates/cmd.rs`, `crates/vowp-core/src/ledger/record.rs`), and `v4-s2` is
+closing the switch/watch gaps. The public commit's text contradicts the public base and the private
+implementation. Do not publish this hunk; restore the pre-`b49f90e` redaction text, or re-derive it
+from the code at the release tag. The public `docs/security.md` was not changed, so the README and
+operating guide now disagree with it.
+
+I did not port this hunk into the private README or operating guide. The private text is newer and
+more accurate.
+
 ### 1. "Fleet and worker tracking ... see the whole fleet in one snapshot"
 
 Public README, "What you get":
