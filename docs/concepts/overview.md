@@ -215,7 +215,7 @@ see [data lifecycle](data-lifecycle.md).
 
 ## What is deliberately deferred
 
-- The browser cost dashboard.
+- The full browser cost dashboard; a basic loopback cost page and `/api/v1/cost` ship.
 - More than one home, replication, leader election and multi-VPS scheduling.
 - Multi-user accounts, quotas, roles or audit.
 - Windows support and a native VOWP desktop app.

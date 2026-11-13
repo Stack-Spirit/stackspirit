@@ -25,7 +25,8 @@ evidence.
 ## The shape
 
 - **Home (the VPS).** The only writer. It owns the global DB, the project DBs, the session logs, the
-  supervisor, the snapshot, the capacity sampler and the schedules. It opens no public port.
+  supervisor, the snapshot, the capacity sampler and the schedules. VOWP opens no public port; the
+  home is reached over SSH.
 - **Control machine.** A laptop, desktop or phone. It talks to the home over SSH, caches a snapshot
   and opens tunnels. It holds no truth.
 - **Surface.** Where a person talks to a session now: the opencode desktop app, a Claude app,
@@ -38,9 +39,9 @@ evidence.
 ### 1. Interchangeable sessions
 
 Every conversation is a universal, harness-neutral session with a stable id and an append-only
-`log.jsonl` on the home. A session can move between models, harnesses, nodes and surfaces; a capsule
-carries the context and the lease rules prevent two writers. The history does not belong to the
-harness.
+`log.jsonl` on the home. A session can move between models, harnesses and surfaces; a capsule
+carries the context and the lease rules prevent two writers. Moving to another node is an explicit
+export/import or `session pull`; the history does not belong to the harness.
 
 ### 2. A built-in database for the work
 
@@ -51,9 +52,9 @@ session logs and blobs. Kill every process, restart, and the supervisor reconcil
 ### 3. A fleet of workers on nodes
 
 One supervisor ticks every active project in fairness order. Nodes are registered and tracked; the
-snapshot shows projects, jobs, workers, capacity, provider limits, inbox and orchestrators. A broken
-project parks alone. Capacity is measured, not guessed; brakes stop new runs and never kill running
-work.
+fleet read model and the project board show projects, jobs, runs, worker slots, capacity, provider
+limits, inbox and orchestrators; `vowp node ls` shows the node registry. A broken project parks
+alone. Capacity is measured, not guessed; brakes stop new runs and never kill running work.
 
 ### 4. Systematic graphs, loops and schedules
 
@@ -64,9 +65,10 @@ with missed-run handling and at-most-once keys.
 
 ### 5. Harness and provider freedom
 
-Claude Code, opencode, Codex and other CLI agents are driven through their documented headless
-interfaces. A model is a rung in a profile ladder, with fallbacks and shared provider limits. VOWP
-does not fork a harness, scrape a TUI, or read a login token.
+Claude Code and opencode are driven through their documented headless interfaces, ACP servers through
+the protocol, and Codex or another CLI agent through the generic mapping adapter. The mapping is
+configuration you pin and test. A model is a rung in a profile ladder, with fallbacks and shared
+provider limits. VOWP does not fork a harness, scrape a TUI, or read a login token.
 
 ## What runs where
 
@@ -81,7 +83,7 @@ does not fork a harness, scrape a TUI, or read a login token.
 
 - Not a VPS provider: you own the server, the domain and the bill.
 - Not a harness: it does not embed a model or replace Claude Code, opencode or Codex.
-- Not a public service: the home opens no public port; access is SSH with your key.
+- Not a public service: VOWP opens no public port; the home is reached over SSH with your key.
 - Not multi-home in 0.3: one home per installation. Teams and replication are out of scope.
 - Not a substitute for review: gates and evidence make the work checkable; a human still owns the
   promotion decision.
