@@ -524,6 +524,10 @@ Behaviour:
   token, while `LeaseHeartbeat` and `LeaseRelease` carry only the lease token and are bound by
   hashing that token and checking the surface row, its paired session and the connection node.
   The agent holds the lease token; local clients never read it.
+- The v0.2 orchestrator keeper, startup reuse and stop paths now hash the plaintext value in
+  `lease.token` before comparing it with the stored hash, and use `Store::release_lease_hash`
+  only for the owner-name fallback when the token file is already gone. This keeps the existing
+  orchestrator behavior without storing or accepting the hash itself as a credential.
 - The gateway does not restart the supervisor, stop a live run or drain a harness on a takeover
   or an expired lease. Surface event appends, the takeover note/switch and run fencing are later
   slices; this slice only owns the lease row and the control frames.

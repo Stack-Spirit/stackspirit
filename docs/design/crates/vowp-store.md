@@ -251,6 +251,7 @@ pub fn list_leases(&self) -> Result<Vec<Lease>, StoreError>;
 pub fn take_lease(&self, lease: &Lease) -> Result<Option<Lease>, StoreError>;  // hashes Lease::token on write
 pub fn heartbeat_lease(&self, session: &SessionId, token: &str, at: Timestamp) -> Result<bool, StoreError>;  // hashes the presented token
 pub fn release_lease(&self, session: &SessionId, token: &str) -> Result<bool, StoreError>;  // hashes the presented token
+pub fn release_lease_hash(&self, session: &SessionId, token_hash: &str) -> Result<bool, StoreError>;  // stored-hash form for a gone token file
 pub fn release_stale_lease(&self, session: &SessionId, token_hash: &str, before: Timestamp) -> Result<bool, StoreError>;
 pub fn hash_lease_token(token: &str) -> String;  // lowercase hex SHA-256
 
