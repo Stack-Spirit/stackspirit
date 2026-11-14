@@ -106,6 +106,7 @@ export class MockBridge implements SpiritBridge {
   private listeners = new Set<(event: StateEvent) => void>();
   private latencySamples: number[] = [];
   private failures = 0;
+  private backendDown: boolean;
   private actions: ActionResult[] = [];
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
@@ -113,6 +114,7 @@ export class MockBridge implements SpiritBridge {
   constructor(options: MockOptions | MockScenario = "fresh") {
     const resolved: MockOptions = typeof options === "string" ? { scenario: options } : options;
     this.scenario = resolved.scenario ?? "fresh";
+    this.backendDown = this.scenario === "stale-after-3";
     this.nowMs = resolved.now ? Date.parse(resolved.now) : EPOCH;
     const now = iso(this.nowMs);
     this.hostList =
@@ -167,6 +169,14 @@ export class MockBridge implements SpiritBridge {
   /** Test hook: advances the deterministic clock used by every mock timestamp. */
   advanceClock(ms: number): void {
     this.nowMs += ms;
+  }
+
+  /**
+   * Test hook: brings the simulated SSH backend back after `stale-after-3`.
+   * The next refresh is then a successful command that restores `Connected`.
+   */
+  restoreBackend(): void {
+    this.backendDown = false;
   }
 
   now(): string {
@@ -370,15 +380,18 @@ export class MockBridge implements SpiritBridge {
       if (!this.fleetView || !this.connectionState.host_id) {
         throw errorDto("conflict", "Connect to a host before refreshing.", "Connect first.");
       }
-      if (this.scenario === "stale-after-3") {
+      if (this.scenario === "stale-after-3" && this.backendDown) {
         this.failures += 1;
+        const stale = this.failures >= 3;
         const error = errorDto(
           "remote_timeout",
           "the remote command did not finish within 20s",
-          "Check the SSH connection and retry.",
+          stale
+            ? "Three polls failed. Backing off for 30s; Refresh retries immediately."
+            : "Check the SSH connection and retry.",
           true,
         );
-        if (this.failures >= 3) {
+        if (stale) {
           this.connectionState = {
             ...this.connectionState,
             state: "stale",
@@ -390,7 +403,8 @@ export class MockBridge implements SpiritBridge {
         this.emitError(error);
         throw error;
       }
-      this.recordLatency(38 + this.failures);
+      this.failures = 0;
+      this.recordLatency(38);
       const revision = this.nextRevision();
       if (this.scenario !== "stale-cache" && this.scenario !== "supervisor-down") {
         this.fleetView = {
@@ -398,12 +412,20 @@ export class MockBridge implements SpiritBridge {
           revision,
           fetched_at: this.now(),
           generated_at: this.now(),
+          stale: false,
           latency: this.latency(),
         };
       } else {
         this.fleetView = { ...this.fleetView, revision, latency: this.latency() };
       }
-      this.connectionState = { ...this.connectionState, latency: this.latency() };
+      // A successful command restores Connected and resets the backoff (PLAN §6.2).
+      this.connectionState = {
+        ...this.connectionState,
+        state: "connected",
+        latency: this.latency(),
+        last_ok_at: this.now(),
+        error: null,
+      };
       this.emit({ kind: "fleet", revision, fleet: clone(this.fleetView) });
       this.emit({ kind: "connection", revision, connection: clone(this.connectionState) });
       return clone(this.fleetView);

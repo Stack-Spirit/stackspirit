@@ -67,7 +67,15 @@ export function FleetPlaceholder({ onOpenHosts }: { onOpenHosts: () => void }) {
             variant="secondary"
             size="sm"
             onClick={() => void refresh()}
-            disabled={connection.state !== "connected"}
+            disabled={
+              connection.state !== "connected" && connection.state !== "stale"
+            }
+            data-testid="fleet-refresh"
+            title={
+              connection.state === "stale"
+                ? "Retry the poll and clear the stale state"
+                : undefined
+            }
           >
             Refresh
           </Button>

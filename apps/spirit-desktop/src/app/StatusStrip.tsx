@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "../components";
 import { errorTitle } from "../bridge/errors";
@@ -8,12 +8,35 @@ import {
   useFleet,
   useFleetStore,
   useLastError,
+  useNextRetryAt,
 } from "../state/fleetStore";
+
+/** Ticks the stale-backoff countdown once per second without touching the store. */
+export function BackoffCountdown({ retryAt }: { retryAt: number }) {
+  const [remaining, setRemaining] = useState<number | null>(null);
+  useEffect(() => {
+    const update = () =>
+      setRemaining(Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)));
+    const first = window.setTimeout(update, 0);
+    const timer = window.setInterval(update, 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, [retryAt]);
+  if (remaining === null) return null;
+  return (
+    <span className="status-strip__item status-strip__item--warn" data-testid="backoff-countdown">
+      {remaining > 0 ? `retrying in ${remaining}s` : "retrying now"}
+    </span>
+  );
+}
 
 export function StatusStrip({ onOpenRaw }: { onOpenRaw: () => void }) {
   const connection = useConnection();
   const fleet = useFleet();
   const lastError = useLastError();
+  const nextRetryAt = useNextRetryAt();
   const clearError = useFleetStore((state) => state.clearError);
   const [expanded, setExpanded] = useState(false);
 
@@ -49,6 +72,10 @@ export function StatusStrip({ onOpenRaw }: { onOpenRaw: () => void }) {
       ) : (
         <span className="status-strip__item">no snapshot yet</span>
       )}
+
+      {connection.state === "stale" && nextRetryAt !== null ? (
+        <BackoffCountdown retryAt={nextRetryAt} />
+      ) : null}
 
       <span className="status-strip__spacer" />
 

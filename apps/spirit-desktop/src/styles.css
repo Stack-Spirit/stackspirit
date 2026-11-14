@@ -7,7 +7,7 @@
   --border-strong: #34445a;
   --text: #e8eef7;
   --text-muted: #94a3b8;
-  --text-faint: #64748b;
+  --text-faint: #8090a5;
 
   --accent: #5be3c2;
   --accent-strong: #2dd4bf;
@@ -401,8 +401,9 @@ pre {
 }
 
 .data-dimmed {
-  opacity: 0.55;
-  filter: saturate(0.7);
+  /* Dim by desaturating, not by dropping text below the AA contrast floor. */
+  opacity: 0.95;
+  filter: saturate(0.6);
 }
 
 /* ---------- top bar ---------- */

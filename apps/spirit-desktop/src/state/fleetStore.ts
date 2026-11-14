@@ -20,6 +20,9 @@ import type {
 
 export type StoreStatus = "idle" | "loading" | "ready" | "error";
 
+/** PLAN §6.2: three consecutive poll failures mark the data stale, then back off 30 s. */
+export const STALE_BACKOFF_MS = 30_000;
+
 const DISCONNECTED: ConnectionSnapshot = {
   state: "disconnected",
   host_id: null,
@@ -46,6 +49,8 @@ interface FleetState {
   projectFilter: string | null;
   latencyHistory: number[];
   lastError: SpiritError | null;
+  /** Epoch milliseconds of the next automatic poll after a stale backoff. */
+  nextRetryAt: number | null;
 
   initialize(bridge: SpiritBridge): Promise<() => void>;
   dispose(): void;
@@ -108,6 +113,7 @@ export function createInitialFleetState(): Pick<
   | "projectFilter"
   | "latencyHistory"
   | "lastError"
+  | "nextRetryAt"
 > {
   return {
     bridge: null,
@@ -126,7 +132,13 @@ export function createInitialFleetState(): Pick<
     projectFilter: null,
     latencyHistory: [],
     lastError: null,
+    nextRetryAt: null,
   };
+}
+
+/** Re-arms the stale backoff when a countdown expires or no timer is set yet. */
+function backoffDeadline(current: number | null, now: number): number {
+  return current !== null && current > now ? current : now + STALE_BACKOFF_MS;
 }
 
 export const useFleetStore = create<FleetState>((set, get) => ({
@@ -240,12 +252,17 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       connection.state === "stale" && state.fleet
         ? { ...state.fleet, stale: true }
         : state.fleet;
+    const now = Date.now();
     set({
       connection,
       fleet,
       capacity: fleet?.capacity ?? state.capacity,
       latencyHistory: history,
       lastError: connection.error ? toSpiritError(connection.error) : state.lastError,
+      nextRetryAt:
+        connection.state === "stale"
+          ? backoffDeadline(state.nextRetryAt, now)
+          : null,
     });
   },
 
@@ -334,7 +351,7 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       const fleet = await bridge.fleet.refresh();
       get().acceptFleet(fleet);
       await get().loadRawDocument();
-      set({ lastError: null });
+      set({ lastError: null, nextRetryAt: null });
     } catch (error) {
       set({ lastError: toSpiritError(error) });
       try {
@@ -434,6 +451,7 @@ export const selectHosts = (state: FleetState): HostProfile[] => state.hosts;
 export const selectRevision = (state: FleetState): number => state.revision;
 export const selectPreview = (state: FleetState): boolean => state.preview;
 export const selectLastError = (state: FleetState): SpiritError | null => state.lastError;
+export const selectNextRetryAt = (state: FleetState): number | null => state.nextRetryAt;
 export const selectRawDocument = (state: FleetState): RawDocument | null => state.rawDocument;
 export const selectSelectedHostId = (state: FleetState): string | null => state.selectedHostId;
 export const selectProjectFilter = (state: FleetState): string | null => state.projectFilter;
@@ -485,6 +503,9 @@ export function useDataDimmed(): boolean {
 }
 export function useLastError(): SpiritError | null {
   return useFleetStore(selectLastError);
+}
+export function useNextRetryAt(): number | null {
+  return useFleetStore(selectNextRetryAt);
 }
 export function useRawDocument(): RawDocument | null {
   return useFleetStore(selectRawDocument);

@@ -94,7 +94,11 @@ export function AppShell({ bridge }: { bridge: SpiritBridge }) {
           {view === "hosts" ? <HostManager /> : null}
         </main>
 
-        <aside className="rail rail--right" aria-label="Capacity and storage">
+        <aside
+          className="rail rail--right"
+          aria-label="Capacity and storage"
+          tabIndex={0}
+        >
           <CapacityPlaceholder onOpenHosts={() => setView("hosts")} />
         </aside>
       </div>

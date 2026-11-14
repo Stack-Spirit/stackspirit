@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { describe, expect, it } from "vitest";
@@ -6,11 +6,13 @@ import { describe, expect, it } from "vitest";
 import { selectMutationsAllowed, useFleetStore } from "../state/fleetStore";
 import { renderApp, renderHostManager } from "../test/render";
 
-async function criticalViolations(container: HTMLElement) {
+const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
+
+async function wcagViolations(container: HTMLElement) {
   const results = await axe.run(container, {
-    rules: { "color-contrast": { enabled: false } },
+    runOnly: { type: "tag", values: WCAG_TAGS },
   });
-  return results.violations.filter((violation) => violation.impact === "critical");
+  return results.violations;
 }
 
 describe("AppShell", () => {
@@ -52,30 +54,56 @@ describe("AppShell", () => {
     );
   });
 
-  it("dims data and disables writes after the connection goes stale", async () => {
+  it("dims data, disables writes and starts a backoff after three failed polls", async () => {
     const user = userEvent.setup();
     const { container } = await renderApp("stale-after-3");
     await user.click(screen.getByTestId("topbar-connect"));
     await waitFor(() => expect(useFleetStore.getState().fleet).not.toBeNull());
-    await act(async () => {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        await useFleetStore.getState().refresh();
-      }
-    });
+    const refresh = screen.getByTestId("fleet-refresh");
+    expect(refresh).toBeEnabled();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const revision = useFleetStore.getState().revision;
+      await user.click(refresh);
+      await waitFor(() =>
+        expect(useFleetStore.getState().revision).toBeGreaterThan(revision),
+      );
+    }
+
     await waitFor(() => {
       expect(useFleetStore.getState().connection.state).toBe("stale");
       expect(container.querySelector(".data-dimmed")).not.toBeNull();
     });
     expect(selectMutationsAllowed(useFleetStore.getState())).toBe(false);
+    expect(refresh).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByTestId("backoff-countdown")).toHaveTextContent(
+        /retrying in \d+s/,
+      ),
+    );
   });
 
-  it("has no critical axe violations on the shell", async () => {
+  it("keeps the raw document scroll regions keyboard-focusable", async () => {
+    const user = userEvent.setup();
+    await renderApp("fresh");
+    await user.click(screen.getByTestId("topbar-connect"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Raw document" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "Raw document" }));
+    const drawer = await screen.findByRole("dialog", { name: "Raw VOWP document" });
+    const regions = drawer.querySelectorAll("pre.raw-json");
+    expect(regions).toHaveLength(2);
+    for (const region of regions) expect(region).toHaveAttribute("tabindex", "0");
+  });
+
+  it("has no WCAG 2.2 AA axe violations on the shell", async () => {
     const { container } = await renderApp("fresh");
-    expect(await criticalViolations(container)).toEqual([]);
+    expect(await wcagViolations(container)).toEqual([]);
   });
 
-  it("has no critical axe violations on the Host Manager", async () => {
+  it("has no WCAG 2.2 AA axe violations on the Host Manager", async () => {
     const { container } = await renderHostManager("fresh");
-    expect(await criticalViolations(container)).toEqual([]);
+    expect(await wcagViolations(container)).toEqual([]);
   });
 });

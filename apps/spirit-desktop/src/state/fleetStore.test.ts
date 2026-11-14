@@ -4,6 +4,7 @@ import { MockBridge } from "../bridge/MockBridge";
 import {
   resetFleetStore,
   selectMutationsAllowed,
+  STALE_BACKOFF_MS,
   useFleetStore,
 } from "../state/fleetStore";
 
@@ -41,10 +42,11 @@ describe("fleetStore", () => {
     expect(after.connection.host_id).toBe(host.id);
   });
 
-  it("dims the view and disables writes after three failed polls", async () => {
+  it("dims the view, disables writes and starts a backoff after three failed polls", async () => {
     const { bridge } = await connected("stale-after-3");
     const fleetBefore = useFleetStore.getState().fleet;
     expect(fleetBefore).not.toBeNull();
+    const before = Date.now();
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await useFleetStore.getState().refresh();
     }
@@ -53,7 +55,28 @@ describe("fleetStore", () => {
     expect(state.fleet?.stale).toBe(true);
     expect(state.lastError?.code).toBe("remote_timeout");
     expect(selectMutationsAllowed(state)).toBe(false);
+    expect(state.nextRetryAt).not.toBeNull();
+    expect(state.nextRetryAt ?? 0).toBeGreaterThanOrEqual(before + STALE_BACKOFF_MS);
     expect(await bridge.fleet.rawDocument()).not.toBeNull();
+  });
+
+  it("clears the stale backoff when a refresh succeeds", async () => {
+    const { bridge } = await connected("stale-after-3");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await useFleetStore.getState().refresh();
+    }
+    expect(useFleetStore.getState().connection.state).toBe("stale");
+    expect(useFleetStore.getState().nextRetryAt).not.toBeNull();
+
+    bridge.restoreBackend();
+    await useFleetStore.getState().refresh();
+
+    const state = useFleetStore.getState();
+    expect(state.connection.state).toBe("connected");
+    expect(state.fleet?.stale).toBe(false);
+    expect(state.lastError).toBeNull();
+    expect(state.nextRetryAt).toBeNull();
+    expect(selectMutationsAllowed(state)).toBe(true);
   });
 
   it("keeps the last fleet view dimmed after disconnect", async () => {

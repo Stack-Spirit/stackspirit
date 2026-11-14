@@ -100,12 +100,14 @@ export function RawDocumentDrawer({ open, onClose }: { open: boolean; onClose: (
 
       <section aria-label="Parsed fleet status">
         <h3 className="section-title">Parsed fleet status</h3>
-        <pre className="raw-json">{raw?.status ? JSON.stringify(raw.status, null, 2) : "No parsed document."}</pre>
+        <pre className="raw-json" tabIndex={0}>
+          {raw?.status ? JSON.stringify(raw.status, null, 2) : "No parsed document."}
+        </pre>
       </section>
 
       <section aria-label="Parsed capacity report">
         <h3 className="section-title">Parsed capacity report</h3>
-        <pre className="raw-json">
+        <pre className="raw-json" tabIndex={0}>
           {raw?.capacity ? JSON.stringify(raw.capacity, null, 2) : "No parsed document."}
         </pre>
       </section>

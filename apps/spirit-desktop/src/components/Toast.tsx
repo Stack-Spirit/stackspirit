@@ -32,7 +32,7 @@ export function Toast({ tone = "info", title, children, onDismiss }: ToastProps)
 
 export function ToastViewport({ children }: { children: ReactNode }) {
   return (
-    <div className="toast-viewport" aria-label="Notifications">
+    <div className="toast-viewport" role="region" aria-label="Notifications">
       {children}
     </div>
   );

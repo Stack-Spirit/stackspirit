@@ -138,7 +138,7 @@ export function AddHostWizard({ onClose, onSaved }: AddHostWizardProps) {
             <Button
               variant="primary"
               onClick={() => void save()}
-              disabled={!saveAllowed}
+              disabled={!saveAllowed || saving}
               loading={saving}
               title={
                 saveAllowed
