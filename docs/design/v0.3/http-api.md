@@ -1,8 +1,9 @@
 # v0.3 — daemon HTTP + SSE API
 
 Status: the read API (including session detail, single-capsule reads and the node list), the
-per-session SSE stream, the board snapshot SSE stream and the token-gated writes (inbox
-answer, local session switch and the three job actions) are implemented in
+per-session SSE stream, the board snapshot SSE stream, the token-gated writes (inbox
+answer, local session switch, ASIF import and the three job actions) and the ASIF download
+are implemented in
 `crates/vowp-daemon`, and `vowp up` starts the daemon as a separate child process; the rest of
 this note is design. The daemon is not part of v0.2. Nothing here is implemented in v0.1.
 
@@ -103,6 +104,42 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   `500`. Success is `202 Accepted` with
   `JobActionResponse { job, action, request }`, where `request` is the queued request id.
   There is no direct state write and no other job action route.
+- `/api/v1/sessions/{id}/export/asif` — the token-free ASIF 0.4 (review draft) download.
+  `200` streams a deterministic `.asif.zip` with `Content-Type: application/zip`,
+  `Content-Disposition: attachment; filename="<id>.asif.zip"`, `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff`, `Content-Length` when known, `X-Vowp-Asif-Losses: <n>`
+  and `X-Vowp-Asif-Unsupported: <n>`. The package is written by the core ASIF facade into a
+  private `0700` directory under `<home>/tmp/asif-export-*` and streamed in 64 KiB chunks; the
+  directory is removed when the response ends, the client disconnects, a five-minute timeout
+  elapses or the export fails. `?report=1` or `?report=true` runs the same export, discards the
+  package and returns the `AsifReport` summary (counts, losses, unsupported operations and
+  adapter/ASIF versions); any other `report` value is `400`. An unknown session or session
+  directory is `404`; a stored session that cannot be exported (torn log, corrupt capsule) is
+  `409` with a path-free adapter code; an export over the adapter's archive/resource limits is
+  `413`; an internal failure is `500`. The route addresses any session in the served home,
+  not only the served project's list. There is no redaction list or host-path override in the
+  web: it uses the safe defaults, so host paths are scrubbed and exact secrets are not
+  detected.
+- `POST /api/v1/sessions/import/asif?branch=<id>` — the token-gated ASIF import. The Bearer
+  token is checked before the body is read: a daemon without a token is `503`, a missing or
+  wrong token is `401` with `WWW-Authenticate: Bearer`. The body is the raw archive with
+  `Content-Type: application/zip`, `application/x-zip-compressed` or
+  `application/octet-stream`; another or missing content type is `415`. No multipart parser is
+  used. The body is streamed to a private `0600` file under `<home>/tmp/asif-upload-*` with a
+  hard 272 MiB (`MAX_ASIF_ARCHIVE_BYTES`) cap and a five-minute timeout; exceeding it removes
+  the file and returns `413`. The file is handed to the same core import as
+  `vowp session import --format asif`: the package, schema and resources are validated before
+  a staging session is written, the staged log is checked, and one new ULID session is renamed
+  into place and indexed. The new session is idle, with `cwd` set to the served project's
+  registered path; the ASIF source project is kept when it exists locally and is otherwise
+  null. Nothing is overwritten, merged or auto-run: no turn, capsule, lease or job is created.
+  `branch` selects one branch when the package has more than one. Success is `201 Created`
+  with `Location: /api/v1/sessions/{id}`, an `X-Vowp-Asif-Losses` header and a schema-valid
+  `AsifImportResponse { session, report, warnings }`. Invalid package/schema/version/branch is
+  `400`; an existing target, duplicate event id or missing registered project path is `409`;
+  an internal failure is `500`. The response never echoes uploaded bytes, the uploaded
+  filename, a temporary upload/staging path or source text; the only path is the ordinary
+  `Session.cwd` field.
 - `/api/v1/cost?by=day|job|role|provider|model&since=&until=` — the exact `vowp cost --json`
   document over the served project. `by` defaults to `job`; `since` and `until` accept RFC 3339
   or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
@@ -110,15 +147,19 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
 `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `JobAction`,
 `JobActionResponse`, `SessionPage`, `NodePage`, `SessionDetail`, `EventPage`, `InboxPage`,
-`InboxAnswerRequest`, `SessionSwitchRequest`, `CostReport`, `CostRow`, `CostTotal`, `ApiError`
+`InboxAnswerRequest`, `SessionSwitchRequest`, `CostReport`, `CostRow`, `CostTotal`, `AsifReport`,
+`AsifImportResponse`, `ApiError`
 and `ApiErrorBody`. Failures use the same `ApiError` shape as `vowp --json` errors and map to
-`400` for an invalid filter, id, body or executor, `401` for a missing or wrong write token,
-`404` for an unknown session, capsule, inbox item or job, `409` for an inbox item that is not
-open, a switch guard, a job action guard or an aborted switch, `503` when writes are disabled
+`400` for an invalid filter, id, body, ASIF package or executor, `401` for a missing or wrong
+write token, `404` for an unknown session, capsule, inbox item or job, `409` for an inbox item
+that is not open, a switch guard, a job action guard, an aborted switch, a corrupt ASIF export
+or an ASIF import conflict, `415` for an unsupported ASIF upload content type, `413` for an
+ASIF archive/resource over a limit, `503` when writes are disabled
 and `500` for a store, config or I/O failure. Write error messages stay path-free.
 
-**Five writes, one token.** Every `GET` stays token-free and read-only. The privileged actions
-are `POST /api/v1/inbox/{id}/answer`, `POST /api/v1/sessions/{id}/switch` and the three
+**Six writes, one token.** Every `GET` stays token-free and read-only. The privileged actions
+are `POST /api/v1/inbox/{id}/answer`, `POST /api/v1/sessions/{id}/switch`,
+`POST /api/v1/sessions/import/asif` and the three
 `POST /api/v1/jobs/{id}/retry|park|cancel` writes, and the listener stays loopback-only. The
 daemon reads the token from the `VOWP_API_TOKEN` environment variable at startup; a missing or
 empty value leaves reads working and disables all writes with `503`. The value is compared in
@@ -135,7 +176,9 @@ browser chat and the remaining browser pages. There are no placeholder routes fo
 The per-session SSE stream is implemented and used by the session detail page; the board
 stream is implemented and used by the board page; the inbox answer form and the session
 switch form are implemented and use their write routes; the three job action routes are
-implemented for the `/jobs` controls a later page job adds.
+implemented for the `/jobs` controls a later page job adds. The session detail page carries
+the ASIF download link and loss preview, and the separate `/import` page posts one raw
+archive to the token-gated import route.
 
 Tests are hermetic: a temporary `NodePaths`, a real `127.0.0.1:0` listener, fake clocks,
 no real home, harness, tmux server or network beyond loopback. Every returned document is
@@ -273,6 +316,13 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   ordered by name; `next` is null and `Node` keeps its existing shape and schema.
 - `JobAction { retry | park | cancel }` — the action selected by one of the three job write
   routes. The names are the CLI's verbs and never describe a raw state transition.
+- `AsifReport { adapter_version, asif_version, asif_pin, source_session, target_session,
+  counts, loss_count, losses, unsupported }` — the `?report=1` preview document and the report
+  inside the import response. `counts` carries `events_in`, `events_out`, `resources` and
+  `capsules`; each loss has a `kind`, `stage`, optional `scope` and a path-free `message`.
+- `AsifImportResponse { session, report, warnings }` — the `201 Created` document of the ASIF
+  import. `session` is the normal registered `Session` row, `report` is the summary above and
+  `warnings` are non-fatal reindex warnings.
 - `JobActionResponse { job, action, request }` — the `202 Accepted` document of a job action.
   `job` is the `JobId`, `action` is the queued `JobAction`, and `request` is the
   `req:<project>:<ULID>` id the supervisor will apply. The document never carries a home path,
@@ -305,7 +355,7 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
 `JobAction`, `JobActionResponse`, `SessionDetail`, `NodePage`, `InboxAnswerRequest`,
-`SessionSwitchRequest` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples.
+`SessionSwitchRequest`, `AsifReport`, `AsifImportResponse` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples.
 Export the concrete page instantiations
 the API serves (`JobPage`, `SessionPage`, `NodePage`, `EventPage` and `InboxPage`) and
 `CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
@@ -315,7 +365,7 @@ exception above.
 
 - `vowp-store` — `Store`, `JobFilter`, `SessionFilter`, `event_rows`, `cost_totals`, `list_inbox`.
 - `vowp-core` — `Deps`, `BoardSnapshot::collect`, `SessionService` (the store-injected switch),
-  `requests::Request` and the ledger query.
+  the ASIF export/import facade, `requests::Request` and the ledger query.
 - `vowp-protocol` — every served type and `schema::all_schemas`.
 - `vowp-cli` — keep as the first client; its `--json` shapes are the reference for the API.
 - New `vowp-daemon` crate proposed: `axum` + `tokio` live here, not in `vowp-core`.
@@ -363,6 +413,8 @@ Implemented: `crates/vowp-daemon` opens an existing node home read-only for read
 `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/capsules/{capsuleId}`,
 `GET /api/v1/sessions/{id}/events?after_seq=`,
 `GET /api/v1/sessions/{id}/events/stream?after_seq=`,
+`GET /api/v1/sessions/{id}/export/asif?report=`,
+`POST /api/v1/sessions/import/asif?branch=`,
 `POST /api/v1/sessions/{id}/switch`, `GET /api/v1/inbox?state=`,
 `POST /api/v1/inbox/{id}/answer`, `POST /api/v1/jobs/{id}/retry|park|cancel` and
 `GET /api/v1/cost?by=&since=&until=`. It binds
@@ -389,7 +441,15 @@ exactly one decoded request row for retry on failed/stalled/parked, park on read
 cancel on pending, the trimmed and default park reasons, a job row unchanged immediately after
 each success, `400` for invalid ids, malformed bodies and oversized reasons, `404` for an
 unknown job, the `409` retry/park/cancel guards with no request row, and apply each drained
-request through `requests::apply_direct` to the new state. The page tests pin the switch form,
+request through `requests::apply_direct` to the new state. The ASIF download tests compare the
+streamed package with a direct core export, pin every attachment header, validate the report
+preview against `AsifReport`, allow a session from another project in the same home, and pin
+the `404`, path-free `409` and `413` paths with no leftover temp directory. The ASIF import
+tests build synthetic packages with `vowp_asif::pack`, pin `503`/`401` before the body, `415`
+for another content type, `413` with the upload removed, `400` for an invalid package, `409`
+for duplicate event ids with the first session kept, `201` with a schema-valid
+`AsifImportResponse`, the idle session and `Location` header, branch selection, and the
+absence of uploaded bytes, filenames or temp paths from every response. The page tests pin the switch form,
 `Authorization: Bearer` use, `sessionStorage`,
 the force warning, the state/error line and the absence of a token in the URL. The inbox page
 test pins the answer form and its queued message. The `vowp up` tests pin the daemon child's

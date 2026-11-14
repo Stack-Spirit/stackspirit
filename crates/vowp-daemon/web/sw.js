@@ -4,13 +4,14 @@
 // SSE streams and event data always go to the network and are never cached here.
 "use strict";
 
-// Bumped from v2 when the jobs page joined the shell; activate deletes old caches.
-const CACHE_NAME = "vowp-shell-v3";
+// Bumped from v3 when the ASIF import page joined the shell; activate deletes old caches.
+const CACHE_NAME = "vowp-shell-v4";
 const SHELL = [
   "/",
   "/board",
   "/jobs",
   "/sessions",
+  "/import",
   "/cost",
   "/inbox",
   "/nodes",

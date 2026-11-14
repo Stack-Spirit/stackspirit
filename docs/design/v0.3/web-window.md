@@ -132,7 +132,7 @@ The same page is the PWA at any width. On a phone, use `/board` for the narrow c
 same shell is also at `/`) and add the tunnel's local URL to the home screen. Reads need no
 token. `VOWP_API_TOKEN` is set in the environment that runs `vowp up` (for example the systemd
 unit), inherited by the daemon, and typed into a page's unlock panel; the page keeps it in
-`sessionStorage` and only the inbox answer, session switch and jobs action writes use it. The
+`sessionStorage` and only the inbox answer, session switch, ASIF import and jobs action writes use it. The
 value is never put in a URL, logged or returned by the API. Rotating the token means restarting
 the daemon with a new value and unlocking again.
 
@@ -168,9 +168,26 @@ result line. Submitting posts `{to, reason, force}` to
 the current turn may drain for up to five seconds. A `200` shows the returned `Switch` state
 and `error` and refreshes the session; a failed request shows the `ApiError` message and never
 claims the executor moved. The token stays in `sessionStorage`, a `401` clears it and a `503`
-shows the disabled line; it is never put in the URL. The page carries
+shows the disabled line; it is never put in the URL. The sessions nav also links the separate
+`/import` page. The detail page carries an "Export ASIF" card with a plain
+`<a download>` link to `/api/v1/sessions/{id}/export/asif` and a "Preview declared losses"
+button that fetches `?report=1` and shows either `N losses: kind, kind…` or
+"No declared losses.". The card says host paths are scrubbed but exact secrets are not
+detected, points to the CLI `vowp session export --format asif --redact-file <file>` for a
+specific redaction list, and says the export is semantic interchange with declared losses, not
+lossless. A failed preview leaves the download link usable. The page carries
 `<noscript>The session view requires JavaScript.</noscript>`, links back to the board and to
 cost and inbox, and never prints the token value, the home path or a provider secret.
+
+The ASIF import page is `crates/vowp-daemon/web/import.html`, served at `GET /import`. It uses
+the same token unlock and `sessionStorage` key as the session page, a file input accepting
+`.asif.zip,application/zip`, an optional branch text field and a submit button. The page
+checks the 272 MiB archive size in the browser, posts the raw file with an explicit
+`Content-Type: application/zip`, `Authorization: Bearer` and no multipart form or filename,
+and shows the new session link, the event and loss counts, the optional warnings and the
+"not continued automatically" note. A `401` clears the token, a `413` names the limit, a
+`400` shows the API hint and a `503` shows the writes-disabled line. It loads no external
+script, font or image, and it links back to the sessions page.
 
 The capsule page is `crates/vowp-daemon/web/capsule.html`, served at
 `GET /sessions/{id}/capsules/{capsule_id}`. The shell reads its own path and fetches
@@ -259,9 +276,10 @@ work.
   `Service-Worker-Allowed: /`, so it can control the root scope and updates are revalidated.
 
 The service worker is hand-written with no build step. On install it opens cache
-`vowp-shell-v3` and caches a bounded `SHELL` list: `/`, `/board`, `/jobs`, `/sessions`, `/cost`,
-`/inbox`, `/nodes`, `/manifest.webmanifest` and `/icon.svg`. The version was bumped from v2 when
-the jobs page joined the shell, so existing clients replace the older shell; on activate the worker
+`vowp-shell-v4` and caches a bounded `SHELL` list: `/`, `/board`, `/jobs`, `/sessions`,
+`/import`, `/cost`, `/inbox`, `/nodes`, `/manifest.webmanifest` and `/icon.svg`. The version
+was bumped from v3 when the ASIF import page joined the shell, so existing clients replace
+the older shell; on activate the worker
 deletes every other cache version. The fetch handler bypasses `/api/` and any `/stream` URL (and
 any request whose `Accept` names `text/event-stream`) entirely: those requests go to the network
 only and are never cached. Navigations are network-first with a cached shell fallback, and other same-origin GET
@@ -290,7 +308,14 @@ session-detail path, the capsule field labels, the lineage links, the "View caps
 no-capsule branch, and fetches `/api/v1/sessions/{id}` in the same test to prove the panel's data
 source. It also pins the switch route, the `Authorization: Bearer` header, the shared
 `vowp-api-token` storage key, the force warning and the visible state/error line, and proves the
-page and its API response never contain the token value or home path. The capsule-page test pins
+page and its API response never contain the token value or home path. The ASIF download test
+compares the streamed package with a direct core export, pins the attachment and loss headers,
+validates the report preview, allows a session outside the served project and pins the
+`404`/`409`/`413` paths with no leftover temp directory. The ASIF import test builds synthetic
+packages, pins the token-before-body checks, content types, the capped upload removal, the
+idle session and `Location`, branch selection, duplicate-id conflict and the absence of
+uploaded bytes, filenames or temp paths from every response; the import-page test pins the raw
+zip body, Bearer header, browser size check, `401` clearing and the no-filename rule. The capsule-page test pins
 the capsule API path, the metadata and section labels, the
 session back link, the `<noscript>` fallback and the absence of paths or secrets, fetches
 `/api/v1/sessions/{id}/capsules/{capsuleId}` in the same test to prove the page's data source, and

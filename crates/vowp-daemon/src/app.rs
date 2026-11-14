@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -32,6 +32,7 @@ use tokio::net::TcpListener;
 use vowp_core::deps::SystemRng;
 use vowp_core::ledger::BoardSnapshot;
 use vowp_core::requests::{self, Request};
+use vowp_core::session::asif::MAX_ASIF_ARCHIVE_BYTES;
 use vowp_core::session::service::SessionService;
 use vowp_core::{AdapterRegistry, CoreError, Deps, SystemGit, SystemRunner};
 use vowp_graph::{JobEvent, transition};
@@ -76,6 +77,7 @@ pub struct ApiState {
     board_poll: Duration,
     write_token: Option<ApiToken>,
     session_deps: Option<Arc<Deps>>,
+    upload_limit: u64,
 }
 
 impl fmt::Debug for ApiState {
@@ -104,6 +106,7 @@ impl ApiState {
             board_poll: stream::BOARD_POLL_INTERVAL,
             write_token: None,
             session_deps: None,
+            upload_limit: MAX_ASIF_ARCHIVE_BYTES,
         }
     }
 
@@ -145,9 +148,29 @@ impl ApiState {
         self
     }
 
+    /// Returns this state with the raw ASIF upload limit replaced.
+    ///
+    /// The binary keeps the adapter's 272 MiB archive cap. Integration tests use a small
+    /// cap so an over-limit upload is visible without moving hundreds of megabytes
+    /// through loopback.
+    pub fn with_upload_limit(mut self, limit: u64) -> Self {
+        self.upload_limit = limit;
+        self
+    }
+
     /// Returns the served home.
     pub(crate) fn paths(&self) -> &NodePaths {
         &self.paths
+    }
+
+    /// Returns the served project's name.
+    pub(crate) fn project_name(&self) -> ProjectName {
+        self.project.clone()
+    }
+
+    /// Returns the raw upload byte cap.
+    pub(crate) fn upload_limit(&self) -> u64 {
+        self.upload_limit
     }
 
     /// Returns the interval between SSE log polls.
@@ -166,12 +189,12 @@ impl ApiState {
     }
 
     /// Opens the served project read-only, mapping failures onto a path-free 500.
-    fn open(&self) -> Result<Store, ApiFailure> {
+    pub(crate) fn open(&self) -> Result<Store, ApiFailure> {
         Store::open_read_only(&self.paths, Some(&self.project)).map_err(|_| store_failure())
     }
 
     /// Opens the served project writable without creating or migrating the home.
-    fn open_writable(&self) -> Result<Store, ApiFailure> {
+    pub(crate) fn open_writable(&self) -> Result<Store, ApiFailure> {
         Store::open_writable(&self.paths, Some(&self.project)).map_err(|_| store_write_failure())
     }
 
@@ -596,9 +619,10 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
 /// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox, nodes and jobs pages at
-/// `/cost`, `/inbox`, `/nodes` and `/jobs`, the PWA manifest, icon and service worker, plus
-/// the API under `/api/v1`. The only non-GET API routes are the token-gated inbox answer,
-/// session switch and job retry/park/cancel writes.
+/// `/cost`, `/inbox`, `/nodes` and `/jobs`, the static ASIF import page at `/import`, the
+/// PWA manifest, icon and service worker, plus the API under `/api/v1`. The only non-GET
+/// API routes are the token-gated inbox answer, session switch, ASIF import and job
+/// retry/park/cancel writes.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -610,6 +634,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/inbox", get(inbox_page))
         .route("/nodes", get(nodes_page))
         .route("/jobs", get(jobs_page))
+        .route("/import", get(import_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(service_worker))
         .route("/icon.svg", get(icon))
@@ -621,10 +646,17 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/jobs/{id}/park", post(park_job))
         .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
         .route("/api/v1/sessions", get(sessions))
+        .route(
+            "/api/v1/sessions/import/asif",
+            post(crate::asif::import_session).layer(DefaultBodyLimit::max(
+                usize::try_from(MAX_ASIF_ARCHIVE_BYTES + 1).unwrap_or(usize::MAX),
+            )),
+        )
         .route("/api/v1/sessions/{id}", get(session_detail))
         .route("/api/v1/sessions/{id}/capsules/{capsule_id}", get(session_capsule))
         .route("/api/v1/sessions/{id}/events", get(session_events))
         .route("/api/v1/sessions/{id}/events/stream", get(session_events_stream))
+        .route("/api/v1/sessions/{id}/export/asif", get(crate::asif::export_session))
         .route("/api/v1/sessions/{id}/switch", post(switch_session))
         .route("/api/v1/inbox", get(inbox))
         .route("/api/v1/inbox/{id}/answer", post(answer_inbox))
@@ -736,6 +768,20 @@ const JOBS_PAGE: &str = include_str!("../web/jobs.html");
 /// `/api/v1/jobs/{id}/retry|park|cancel` routes and refresh the list on `202`.
 async fn jobs_page() -> Html<&'static str> {
     Html(JOBS_PAGE)
+}
+
+/// The embedded static ASIF import shell, served at `/import`.
+const IMPORT_PAGE: &str = include_str!("../web/import.html");
+
+/// Serves the static ASIF import page.
+///
+/// The page keeps the daemon write token in `sessionStorage`, never in the URL. It posts
+/// one raw `.asif.zip` file with an explicit zip `Content-Type` and a Bearer header to
+/// `/api/v1/sessions/import/asif?branch=`, then shows the new session link, the event and
+/// loss counts and the "not continued automatically" note. It performs the file-size
+/// check in the browser so an oversized archive is refused before it is sent.
+async fn import_page() -> Html<&'static str> {
+    Html(IMPORT_PAGE)
 }
 
 /// The embedded PWA manifest.
@@ -1003,7 +1049,7 @@ async fn switch_session(
 ///
 /// The comparison is constant-time over the candidate and the configured token is never
 /// echoed. A daemon with no token answers `503`; a missing or wrong token is `401`.
-fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiFailure> {
+pub(crate) fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiFailure> {
     let Some(token) = &state.write_token else {
         return Err(ApiFailure::writes_disabled());
     };
@@ -1060,7 +1106,7 @@ async fn unknown_endpoint() -> ApiFailure {
 }
 
 /// Runs blocking store or log work off the async reactor.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, ApiFailure> + Send + 'static,
 ) -> Result<T, ApiFailure> {
     tokio::task::spawn_blocking(work)
@@ -1076,7 +1122,7 @@ pub(crate) struct ApiFailure {
 
 impl ApiFailure {
     /// Builds a failure with no hint.
-    fn new(status: StatusCode, kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             status,
             body: ApiError {
@@ -1090,17 +1136,17 @@ impl ApiFailure {
     }
 
     /// A `400` for an invalid filter, id or query value.
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, ErrorKind::InvalidInput, message)
     }
 
     /// A `404` for an unknown session or inbox item.
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, ErrorKind::NotFound, message)
     }
 
     /// A `409` for an item that is no longer open.
-    fn conflict(message: impl Into<String>) -> Self {
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, ErrorKind::Conflict, message)
     }
 
@@ -1132,7 +1178,7 @@ impl IntoResponse for ApiFailure {
 }
 
 /// A path-free `500` for every store failure.
-fn store_failure() -> ApiFailure {
+pub(crate) fn store_failure() -> ApiFailure {
     ApiFailure::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorKind::Db,

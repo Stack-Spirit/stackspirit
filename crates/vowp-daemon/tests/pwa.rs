@@ -11,7 +11,7 @@ use serde_json::Value;
 use support::{BoardFixture, Server, get};
 
 /// Every static page shell route, including one dynamic session and capsule path.
-const PAGES: [&str; 9] = [
+const PAGES: [&str; 10] = [
     "/",
     "/board",
     "/jobs",
@@ -21,6 +21,7 @@ const PAGES: [&str; 9] = [
     "/cost",
     "/inbox",
     "/nodes",
+    "/import",
 ];
 
 /// A fixed write token used to prove no page or asset embeds it.
@@ -131,7 +132,7 @@ fn service_worker_caches_only_the_shell_and_bypasses_api_and_streams() {
     let body = &response.body;
 
     for needle in [
-        "const CACHE_NAME = \"vowp-shell-v3\";",
+        "const CACHE_NAME = \"vowp-shell-v4\";",
         "const SHELL = [",
         "caches.open(CACHE_NAME)",
         "cache.addAll(SHELL)",
@@ -160,6 +161,7 @@ fn service_worker_caches_only_the_shell_and_bypasses_api_and_streams() {
         "/board",
         "/jobs",
         "/sessions",
+        "/import",
         "/cost",
         "/inbox",
         "/nodes",
@@ -225,4 +227,45 @@ fn every_page_shell_links_the_manifest_and_registers_the_service_worker() {
             "{path} must not embed the daemon write token"
         );
     }
+}
+
+#[test]
+fn service_worker_shell_includes_the_import_page_and_a_bumped_cache_name() {
+    let fixture = BoardFixture::new();
+    let server = Server::start_for_with_token(&fixture.paths, Some(WRITE_TOKEN));
+
+    let worker = get(server.address, "/sw.js");
+    assert_eq!(worker.status, 200, "body: {}", worker.body);
+    assert!(
+        worker.body.contains("const CACHE_NAME = \"vowp-shell-v4\";"),
+        "adding /import must bump the shell cache from v3 to v4"
+    );
+    assert!(
+        !worker.body.contains("vowp-shell-v3"),
+        "the old shell cache name must be gone so activate deletes it"
+    );
+
+    let start = worker.body.find("const SHELL = [").expect("SHELL list");
+    let end = worker.body[start..].find("];").expect("SHELL list end") + start;
+    let shell = &worker.body[start..end];
+    assert!(shell.contains("\"/import\""), "SHELL is missing /import");
+    assert_eq!(shell.matches("\"/import\"").count(), 1, "SHELL lists /import once");
+    assert_no_home(&worker.body, &fixture);
+    assert_no_auth_material(&worker.body);
+
+    let page = get(server.address, "/import");
+    assert_eq!(page.status, 200, "body: {}", page.body);
+    for needle in [
+        "<link rel=\"manifest\" href=\"/manifest.webmanifest\">",
+        "<meta name=\"theme-color\" content=\"#16855b\">",
+        "if ('serviceWorker' in navigator)",
+        "navigator.serviceWorker.register('/sw.js')",
+    ] {
+        assert!(page.body.contains(needle), "/import is missing {needle:?}");
+    }
+    assert_no_home(&page.body, &fixture);
+    assert!(
+        !page.body.contains(WRITE_TOKEN),
+        "/import must not embed the daemon write token"
+    );
 }
