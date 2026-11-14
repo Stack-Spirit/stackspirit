@@ -1477,18 +1477,26 @@ fn preflight(paths: &NodePaths) -> Result<Source, StoreError> {
     })
 }
 
-/// Refuses to migrate while a live supervisor holds the home.
-fn refuse_live_supervisor(paths: &NodePaths) -> Result<(), StoreError> {
+/// Returns the live supervisor pid recorded in `<home>/supervisor.lock`.
+///
+/// A missing lock, an unparsable first line or a pid that is no longer alive all mean no
+/// supervisor holds the home. The caller decides whether this process *is* that supervisor.
+pub(crate) fn live_supervisor_pid(paths: &NodePaths) -> Result<Option<u32>, StoreError> {
     let path = paths.supervisor_lock_path();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(StoreError::io(path.display(), err)),
     };
-    if let Some(pid) = text.lines().next().and_then(|line| line.trim().parse::<u32>().ok())
-        && valid_pid(pid)
-        && pid_alive(pid)
-    {
+    let Some(pid) = text.lines().next().and_then(|line| line.trim().parse::<u32>().ok()) else {
+        return Ok(None);
+    };
+    Ok((valid_pid(pid) && pid_alive(pid)).then_some(pid))
+}
+
+/// Refuses to migrate while a live supervisor holds the home.
+fn refuse_live_supervisor(paths: &NodePaths) -> Result<(), StoreError> {
+    if let Some(pid) = live_supervisor_pid(paths)? {
         return Err(StoreError::Conflict(format!(
             "supervisor pid {pid} is running; stop it before migrating"
         )));

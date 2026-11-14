@@ -267,6 +267,12 @@ impl Store {
             }
             if version == 1 && tables > 0 {
                 configure_connection(&conn, Path::new(&path), true)?;
+                if migration_is_deferred(paths)? {
+                    // The installed binary is newer than the running supervisor's project
+                    // schema. Open the v1 file as-is; `vowp up --replace` migrates it once
+                    // this project has no active runs.
+                    return Ok(());
+                }
                 crate::migrate::migrate_project_v1_to_v2(paths, project, &conn)?;
                 return Ok(());
             }
@@ -301,7 +307,9 @@ impl Store {
                 supported: GLOBAL_SCHEMA_VERSION,
             });
         }
-        if version != GLOBAL_SCHEMA_VERSION {
+        // Read-only handles never migrate. Any split-home version can be read: the core
+        // tables fleet/status/daemon reads share their columns across v2–v6.
+        if version < 2 {
             return Err(StoreError::MigrationRequired);
         }
         let store = Store {
@@ -394,7 +402,7 @@ impl Store {
             ));
         }
         let conn = Connection::open(path)?;
-        Self::from_global_connection(conn, path.display().to_string(), true, None, false)
+        Self::from_global_connection(conn, path.display().to_string(), true, None, false, false)
     }
 
     /// Replaces the clock used for new timestamps.
@@ -610,15 +618,27 @@ impl Store {
 
     /// Opens the global database without binding a project.
     fn open_global_unbound(paths: &NodePaths, auto_bind: bool) -> Result<Store, StoreError> {
-        crate::migrate::resume_migration(paths)?;
-        crate::migrate::migrate_v02_if_needed(paths)?;
-        crate::migrate::migrate_v03_if_needed(paths)?;
-        crate::migrate::migrate_v04_if_needed(paths)?;
-        crate::migrate::migrate_v05_if_needed(paths)?;
+        // A newer binary may be installed while an older supervisor still runs this home.
+        // Its on-disk schema and that supervisor are the authority until it drains, so an
+        // ordinary CLI command opens the older split-home schema without migrating it.
+        let deferred = migration_is_deferred(paths)?;
+        if !deferred {
+            crate::migrate::resume_migration(paths)?;
+            crate::migrate::migrate_v02_if_needed(paths)?;
+            crate::migrate::migrate_v03_if_needed(paths)?;
+            crate::migrate::migrate_v04_if_needed(paths)?;
+            crate::migrate::migrate_v05_if_needed(paths)?;
+        }
         let path = paths.db_path();
         let conn = Connection::open(&path)?;
-        let store =
-            Self::from_global_connection(conn, path.display().to_string(), true, Some(paths.clone()), auto_bind)?;
+        let store = Self::from_global_connection(
+            conn,
+            path.display().to_string(),
+            true,
+            Some(paths.clone()),
+            auto_bind,
+            deferred,
+        )?;
         Ok(store)
     }
 
@@ -629,11 +649,12 @@ impl Store {
         wal: bool,
         paths: Option<NodePaths>,
         auto_bind: bool,
+        allow_older: bool,
     ) -> Result<Store, StoreError> {
         // Check the version before enabling WAL: opening a future or v0.1 database must not
         // touch it.
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        check_global_version(version, Path::new(&path))?;
+        check_global_version(version, Path::new(&path), allow_older)?;
         configure_connection(&conn, Path::new(&path), wal)?;
         if version == 0 {
             let tables: i64 = conn.query_row(
@@ -678,6 +699,10 @@ impl Store {
             .conn
             .query_row("PRAGMA project.user_version", [], |row| row.get(0))?;
         if version != PROJECT_SCHEMA_VERSION {
+            if version == 1 && migration_is_deferred(paths)? {
+                self.set_bound(Some(name.clone()));
+                return Ok(());
+            }
             let _ = self.conn.execute_batch("DETACH DATABASE project");
             if version > PROJECT_SCHEMA_VERSION {
                 return Err(StoreError::SchemaTooNew {
@@ -692,6 +717,10 @@ impl Store {
     }
 
     /// Attaches a read-only project database under the `project` schema.
+    ///
+    /// A v1 project file is accepted: read-only handles never migrate, and the core job
+    /// tables are identical between the two project versions. Only the newer
+    /// `job_placement` table is absent until the supervisor migrates the file.
     fn attach_read_only(&self, paths: &NodePaths, name: &ProjectName) -> Result<(), StoreError> {
         self.detach_project()?;
         let path = paths.project_db_path(name);
@@ -703,7 +732,7 @@ impl Store {
         let version: i64 = self
             .conn
             .query_row("PRAGMA project.user_version", [], |row| row.get(0))?;
-        if version != PROJECT_SCHEMA_VERSION {
+        if !(1..=PROJECT_SCHEMA_VERSION).contains(&version) {
             let _ = self.conn.execute_batch("DETACH DATABASE project");
             if version > PROJECT_SCHEMA_VERSION {
                 return Err(StoreError::SchemaTooNew {
@@ -759,6 +788,15 @@ impl Store {
     }
 }
 
+/// Returns whether an installed newer binary must leave an older split-home schema alone.
+///
+/// True when a live supervisor other than this process holds `<home>/supervisor.lock`.
+/// The supervisor itself opens the store while holding its own lock, so it still migrates
+/// at startup and at the `vowp up --replace` handover boundary.
+pub(crate) fn migration_is_deferred(paths: &NodePaths) -> Result<bool, StoreError> {
+    Ok(crate::migrate::live_supervisor_pid(paths)?.is_some_and(|pid| pid != std::process::id()))
+}
+
 /// Applies connection pragmas shared by every open path.
 fn configure_connection(conn: &Connection, path: &Path, wal: bool) -> Result<(), StoreError> {
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -777,7 +815,11 @@ fn configure_connection(conn: &Connection, path: &Path, wal: bool) -> Result<(),
 }
 
 /// Refuses a global file this build cannot open.
-fn check_global_version(version: i64, _path: &Path) -> Result<(), StoreError> {
+///
+/// `allow_older` admits a valid split-home schema (`2..GLOBAL_SCHEMA_VERSION`) without
+/// migrating it. Only the deferred-migration path passes `true`; every other constructor
+/// still requires the version this build writes.
+fn check_global_version(version: i64, _path: &Path, allow_older: bool) -> Result<(), StoreError> {
     if version == 0 || version == GLOBAL_SCHEMA_VERSION {
         return Ok(());
     }
@@ -786,6 +828,9 @@ fn check_global_version(version: i64, _path: &Path) -> Result<(), StoreError> {
             found: version,
             supported: GLOBAL_SCHEMA_VERSION,
         });
+    }
+    if allow_older && version >= 2 {
+        return Ok(());
     }
     // Version 1 is the v0.1 single-file schema; the migration must split it first.
     Err(StoreError::MigrationRequired)
