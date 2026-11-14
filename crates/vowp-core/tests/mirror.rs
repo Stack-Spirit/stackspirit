@@ -36,7 +36,7 @@ use vowp_protocol::{
     NodeName, OrchestratorApp, SessionId, SessionRole, SurfaceKind, Timestamp, TurnEnded, TurnStarted, UserMessage,
 };
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePaths, Store, hash_lease_token};
 use vowp_tmux::fake::FakeWindows;
 
 fn ts() -> Timestamp {
@@ -1115,7 +1115,10 @@ fn resume_context_builds_capsule_and_tail() {
         context.capsule.as_ref().map(|capsule| capsule.capsule_id.clone()),
         Some(capsule.capsule_id)
     );
-    assert_eq!(context.lease.as_ref().map(|lease| lease.token.clone()), Some(token));
+    assert_eq!(
+        context.lease.as_ref().map(|lease| lease.token.clone()),
+        Some(hash_lease_token(&token))
+    );
     assert_eq!(context.tail.len(), 4, "{:?}", context.tail);
     assert_eq!(context.tail[0].event_type, EventType::TurnStarted);
     let EventBody::TurnStarted(start) = context.tail[0].body().expect("turn body") else {
