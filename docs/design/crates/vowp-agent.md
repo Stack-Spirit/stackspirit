@@ -3,8 +3,8 @@
 Phase 0/1 client for a local node: local config, the ed25519 node key, the SSH stdio transport,
 surface pairing and the `vowp-protocol` frame client. It depends on `vowp-protocol` only; it never opens a store, a
 database or `vowp-core`, and it never dials a home except through the injected transport.
-Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §8.2–§8.5 and
-§12.2.
+Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §6.3–§6.5,
+§8.2–§8.5 and §12.2.
 
 ## 1. Module layout
 
@@ -19,8 +19,10 @@ crates/vowp-agent/
   src/chat.rs       ChatClient, ChatTurnRequest, ChatTurnStatus, lease/turn/replay loop
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
+  src/worktree.rs   PathMap, WorktreeManager, Worktree, push/cleanup and the disk guard
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
   tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
+  tests/worktree.rs temporary origin/clone plus real git for create/reuse/cleanup/push
 ```
 
 `~/.vowp-agent` is the default state directory. `VOWP_AGENT_HOME` overrides it; tests always set
@@ -161,6 +163,42 @@ pub struct AgentStatus {
     pub pending_spool_bytes: u64, pub key_fingerprint: Option<String>,
     pub surface_token_expires_at: Option<Timestamp>,
 }
+
+pub struct PathMap { /* validated canonical roots and allow list */ }
+impl PathMap {
+    pub fn new(map: &AgentPathMap) -> Result<Self, WorktreeError>;
+    pub fn project(&self) -> &ProjectName;
+    pub fn local_root(&self) -> &Path;
+    pub fn worktree_root(&self) -> &Path;
+    pub fn resolve(&self, project: &ProjectName, path_ref: &PathRef) -> Result<PathBuf, WorktreeError>;
+    pub fn worktree_path(&self, job: &JobId) -> Result<PathBuf, WorktreeError>;
+}
+
+pub struct WorktreeSpec { pub job: JobId, pub base_commit: String, pub remote: String, pub reserve_bytes: u64 }
+pub struct WorktreeManager { /* path map + injectable GitRunner */ }
+impl WorktreeManager {
+    pub fn new(map: PathMap) -> Self;
+    pub fn with_git(map: PathMap, git: Arc<dyn GitRunner>) -> Self;
+    pub fn map(&self) -> &PathMap;
+    pub fn create(&self, spec: &WorktreeSpec) -> Result<Worktree, WorktreeError>;
+    pub fn cleanup(&self, job: &JobId) -> Result<(), WorktreeError>;
+}
+
+pub struct Worktree { /* project, job, path, branch, remote, git runner */ }
+impl Worktree {
+    pub fn path(&self) -> &Path;
+    pub fn branch(&self) -> &str;
+    pub fn head_commit(&self) -> Result<String, WorktreeError>;
+    pub fn is_clean(&self) -> Result<bool, WorktreeError>;
+    pub fn push_job(&self, expected_remote_url: &str) -> Result<PushResult, WorktreeError>;
+    pub fn cleanup(self) -> Result<(), WorktreeError>;
+}
+pub struct PushResult { pub branch: String, pub remote: String, pub head_commit: String }
+
+pub trait GitRunner: Send + Sync { fn run(&self, cwd: &Path, args: &[&str]) -> Result<GitOutput, WorktreeError>; }
+pub struct SystemGit { /* git binary name */ }
+pub fn strip_remote_credentials(url: &str) -> String;
+pub const DEFAULT_DISK_RESERVE_BYTES: u64;   // 5 GiB
 ```
 
 ## 4. Behaviour
@@ -264,9 +302,11 @@ memory and never spawn ssh, a socket or the network.
 
 ## 6. Errors
 
-`AgentError` is the crate's single error type: `Io`, `Config`, `Protocol`, `Transport`, `Auth`,
-`ReplayNonce`, `FrameTooLarge`, `NotEnrolled`, `Key`, `Remote { kind, message, retryable }`,
-`Revoked`, `Superseded` and `Json`. `is_fatal` names the errors that must not be retried.
+`AgentError` is the crate's transport and client error type: `Io`, `Config`, `Protocol`,
+`Transport`, `Auth`, `ReplayNonce`, `FrameTooLarge`, `NotEnrolled`, `Key`,
+`Remote { kind, message, retryable }`, `Revoked`, `Superseded` and `Json`. `is_fatal` names the
+errors that must not be retried. The worktree primitives use their own `WorktreeError`, mapped
+to the protocol's refusal vocabulary by `reject_reason`; §8 lists its variants.
 
 ## 7. Named tests
 
@@ -281,12 +321,126 @@ the exact SSH argv and the frame cap. The surface-pairing slice adds the in-memo
 `agent_chat_spools_before_sending`, `agent_chat_replays_from_the_first_unacked`,
 `agent_chat_stops_on_lease_revoked` and `agent_chat_stops_on_spool_full` in `tests/chat.rs`, plus
 `chat_requires_a_paired_surface_for_the_session` and `spool_keeps_unacked_events_and_records_acks`.
+The worktree slice adds, in `tests/worktree.rs`:
+`worktree_is_created_from_the_base_commit_without_touching_the_main_checkout`,
+`worktree_leaves_a_dirty_main_checkout_untouched`,
+`worktree_reuses_a_clean_branch_at_the_expected_base_and_recreates_a_dirty_one`,
+`worktree_cleanup_removes_only_the_vowp_worktree_and_branch`,
+`worktree_path_ref_stays_inside_the_worktree_root`,
+`path_map_rejects_traversal_a_symlink_escape_and_a_case_only_escape`,
+`worktree_refuses_a_remote_that_does_not_match_the_project`,
+`worktree_push_fails_cleanly_and_keeps_the_worktree` and
+`worktree_refuses_a_create_below_the_disk_reserve`, plus the fetch, push-only-job-branch, allow
+list and missing/unwritable-root cases. The case-only test runs the real wrong-case directory on
+a case-insensitive filesystem and a case-only symlink alias on a case-sensitive one; it never
+passes silently.
 
-## 8. Out of scope
+## 8. Worktrees, path maps and result return
+
+`src/worktree.rs` is the §6.4–§6.5 foundation the executor calls after `AssignRun`. It adds no
+frame loop, no harness start and no policy decision. Git runs through the small `GitRunner`
+trait: the default `SystemGit` uses `std::process::Command`, and tests pass a recording wrapper
+around the real binary. Absolute local paths stay in this module and never reach a frame.
+
+### Path map
+
+`PathMap::new` canonicalises `local_root` and `worktree_root` (the latter defaults to
+`<local_root>/.vowp/worktrees`), requires both to exist, be directories and carry a write bit,
+and returns `path_missing` for a missing root or `path_not_writable` for a root without write
+permission. It never panics. The allow list is normalised once; an existing allow entry is
+canonicalised under the local root, so its on-disk case is what later requests are compared with.
+
+`PathMap::resolve(project, path_ref)` returns an absolute local path and refuses:
+
+- a `PathRef` for another project (`ProjectMismatch`);
+- an absolute path, `..`, NUL, a backslash, a control character or an empty, `.` or repeated
+  component (`InvalidPathRef`);
+- a requested subdirectory outside the canonical local root, or a worktree leaf outside the
+  canonical worktree root (`PathOutsideRoot`);
+- a symlink that resolves outside the root (`SymlinkEscape`); a worktree leaf that is any
+  symlink is refused (`SymlinkEscape` when it leaves the root, `WorktreeConflict` otherwise);
+- a component that matches the on-disk entry only by case (`CaseOnlyEscape`); the requested and
+  canonical components are compared exactly, so a case-insensitive filesystem cannot alias
+  another directory through a differently-cased spelling;
+- a subdirectory outside a declared `allow` entry (`OutsideAllow`).
+
+`PathRef::Project` returns the canonical project root. `PathRef::Worktree` returns
+`<worktree_root>/<job>` without requiring the leaf to exist yet, because the agent resolves the
+ref before it creates the worktree. A `Subdir` must exist and be a directory. `Worktree` and
+`Subdir` refs keep the project name; the caller's project must match both the map and the ref.
+
+### Worktree lifecycle
+
+`WorktreeSpec` carries the job, the full base commit, the remote (default `origin`) and the
+free-space reserve (default `DEFAULT_DISK_RESERVE_BYTES`, 5 GiB). `WorktreeManager::create`:
+
+1. Checks free space with `df -Pk` **before** looking at an existing worktree and refuses with
+   `disk_low` when free bytes are below the reserve. It never deletes a worktree to make room.
+2. Resolves the base commit. A commit missing from the main checkout is fetched with
+   `git fetch --no-tags <remote> <sha>`; if that fails, a full `git fetch --no-tags <remote>` is
+   tried before the typed `BaseCommitMissing` error.
+3. Reuses an existing worktree only when all of the following hold: the ownership record and
+   worktree marker name this job, the path is registered with the main checkout as a worktree,
+   `HEAD` is on `job/<id>`, the branch head is exactly the expected base, and
+   `git status --porcelain --untracked-files=normal` is empty. Any other **owned** worktree is
+   removed with `git worktree remove --force` and recreated, so a stale branch or a dirty tree
+   cannot leak into a new run. A directory at the job path without VOWP's ownership record is
+   `worktree_conflict` and is never removed.
+4. Creates the worktree with
+   `git worktree add --detach <worktree_root>/<job> <base>`, writes the ownership marker and
+   record, then runs `git checkout -B job/<id> <base>` inside the new worktree.
+
+The main checkout is only fetched. No command checks out, resets, cleans or otherwise changes
+its index or working tree; a dirty main checkout is ignored and left untouched. The ownership
+record is `<git-common-dir>/vowp/worktrees/<job>.json` (0600) and the marker is
+`<worktree-git-dir>/vowp-job` (0600); both are written by VOWP and must match before a worktree
+is reused or removed.
+
+`WorktreeManager::cleanup(job)` is idempotent. It removes only the agent's own worktree path and
+`job/<id>` branch. It refuses a worktree directory without the matching ownership record and
+marker, and a branch without the matching ownership record (`Refused`); refused paths are left
+in place. When both the worktree and branch are already gone it only clears a stale record.
+`Worktree::cleanup` applies the same checks to the worktree it was created for.
+
+`head_commit` runs `git rev-parse HEAD`; `is_clean` runs
+`git status --porcelain --untracked-files=normal` and treats any output, including an untracked
+file, as dirty. Both are the summary helpers the run reports use.
+
+### Result return
+
+`Worktree::push_job(expected_remote_url)` first reads `git remote get-url <remote>` and strips
+credentials with `strip_remote_credentials` (URL userinfo and the scp-like `user@` prefix). If
+the stripped URL does not equal the home-supplied `projects.remote_url`, it returns
+`remote_mismatch` and does not push.
+
+On a match it pushes exactly one refspec:
+
+```text
+git -c push.followTags=false push <remote> refs/heads/job/<id>:refs/heads/job/<id>
+```
+
+The branch is always `job/<id>`; the default branch, other branches, tags and releases are never
+pushed. A successful push returns `PushResult { branch, remote, head_commit }`. A non-zero push
+exit is `git_push_failed` carrying the command and the last 2 KiB of stderr; the worktree stays
+in place for inspection and no success is reported.
+
+### Errors
+
+`WorktreeError` is the module's typed error: `Io`, `Json`, `ProjectMismatch`, `InvalidPathRef`,
+`InvalidPathMapEntry`, `PathMissing`, `PathNotWritable`, `NotADirectory`, `PathOutsideRoot`,
+`SymlinkEscape`, `CaseOnlyEscape`, `OutsideAllow`, `NotAGitCheckout`, `InvalidCommit`,
+`InvalidRemote`, `BaseCommitMissing`, `DiskLow`, `WorktreeConflict`, `RemoteMismatch`,
+`GitFailed`, `GitPushFailed` and `Refused`. `reject_reason` maps the path, disk, worktree and
+remote cases to the protocol's `RunRejectReason` vocabulary. There is no `unwrap`, `expect` or
+`unsafe` in the module outside tests.
+
+## 9. Out of scope
 
 The home-side gateway, store methods, node enrollment codes, node commands, runs, leases,
 offload, path-map mutation, launchd and WSS ingress are separate jobs. Phase 0 `vowp agent run`
 stays in the foreground; `--role` is accepted and carried in `RunOptions`, but assignment
 handling arrives with the executor job. `vowp agent surface start|attach|detach`, the MCP proxy
 and token rotation are later v0.4 slices. The local chat bridge is this slice; the opencode app
-bridge and MCP proxy remain later.
+bridge and MCP proxy remain later. Wiring `WorktreeManager` into an assignment loop, starting a
+harness and applying offload policy is the executor job; this slice supplies only the path,
+worktree and result-return primitives.

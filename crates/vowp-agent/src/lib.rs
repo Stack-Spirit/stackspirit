@@ -16,6 +16,7 @@ pub mod key;
 pub mod spool;
 pub mod status;
 pub mod transport;
+pub mod worktree;
 
 pub use chat::{
     CHAT_EPOCH, ChatClient, ChatTurnRequest, ChatTurnStatus, EVENT_POLL, LEASE_HEARTBEAT_EVERY, MAX_RECONNECTS,
@@ -34,3 +35,7 @@ pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_p
 pub use spool::{ACKED_FILE, DEFAULT_SPOOL_CAP_BYTES, EVENTS_FILE, SPOOL_DIR, Spool, SpoolAppend, spool_dir};
 pub use status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 pub use transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
+pub use worktree::{
+    DEFAULT_DISK_RESERVE_BYTES, GitOutput, GitRunner, JOB_BRANCH_PREFIX, PathMap, PushResult, STDERR_TAIL_BYTES,
+    SystemGit, Worktree, WorktreeError, WorktreeManager, WorktreeSpec, strip_remote_credentials,
+};
