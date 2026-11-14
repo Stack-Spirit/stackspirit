@@ -24,7 +24,7 @@ pub mod setup;
 pub mod signals;
 pub mod ssh_stream;
 
-pub use cli::{Cli, Command, Global};
+pub use cli::{Cli, Command, Global, SessionCommand};
 pub use ctx::Ctx;
 pub use errors::CliError;
 
@@ -197,6 +197,17 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     // `~/.vowp-agent`. Handle it before the generic remote redirect.
     if let Command::Agent { command } = &command {
         return cmd::agent::run(&global, io, command);
+    }
+    // `chat --agent` is the Mac surface: it runs from `~/.vowp-agent` and the local
+    // checkout's `vowp.toml`, so it needs no local home database and must not be routed
+    // to the home from a control machine.
+    if let Command::Chat(args)
+    | Command::Session {
+        command: SessionCommand::Chat(args),
+    } = &command
+        && args.agent
+    {
+        return chat::agent::run_local(&global, io, args);
     }
     // `surface` is home-only and its `--node` flag names the node the surface runs on, not an
     // SSH redirect. Handle it before the generic `--node` routing.

@@ -166,9 +166,10 @@ These are home-only (exit 5 on a control machine) and require the home store:
 surface. The positional id stays required for the home spelling; `Cli::try_parse_from` in
 `src/cli.rs` inserts the `--session` value before clap parses an agent command, so `vowp chat`
 without an id still fails with clap's missing-argument error and the help tree keeps `<ID>`. The
-parser records `--agent`, and `chat::run_shared` dispatches it to `src/chat/agent.rs` before the
-home lease path. The command still uses the normal chat dispatch, so the invocation's local home
-resolves the session row before the bridge starts.
+parser records `--agent`, and `lib.rs` dispatches it to `src/chat/agent.rs` before the
+control-machine route and before `Ctx::build`. The Mac therefore needs no local home database and
+the command is never forwarded to the home. The bridge resolves its checkout from `--project
+<dir>` or the nearest `vowp.toml`; it does not open the node store.
 
 The handler loads `~/.vowp-agent` (or `VOWP_AGENT_HOME`), the node key and the surface token
 bound to the session, then calls `vowp_agent::ChatClient::turn`. The local checkout's `vowp.toml`

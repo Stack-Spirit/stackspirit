@@ -5,19 +5,22 @@
 //! client acquires the lease, spools events and streams them to the home gateway. It never
 //! takes the home lease and never writes a second session log.
 //!
-//! [`crate::chat::run_shared`] dispatches here when [`crate::cli::agent_chat_requested`]
-//! reports that the parsed command was `chat --agent`. The command still passes through
-//! the normal chat dispatch, so the local home resolves the session row first.
+//! [`crate::execute`] dispatches `chat --agent` here before the control-machine route and
+//! before [`Ctx::build`], so the Mac needs neither a local home database nor a registered
+//! project. The checkout comes from `--project <dir>` or the nearest `vowp.toml`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vowp_agent::{AgentConfig, AgentError, ChatClient, ChatTurnRequest, ChatTurnStatus, SystemAgentClock};
 use vowp_core::AdapterRegistry;
-use vowp_protocol::{EventBody, HarnessEvent, PathRef, ProjectName, RunPurpose, VowpConfig};
+use vowp_protocol::{
+    EventBody, Executor, ExecutorRef, HarnessEvent, NodeName, PathRef, ProjectName, RunPurpose, SessionId, VowpConfig,
+};
 use vowp_store::NodePaths;
 
 use crate::chat::{ChatOptions, write_wrapped};
+use crate::cli::{ChatArgs, Global};
 use crate::{CliError, Ctx, IoStreams};
 
 /// The local checkout an agent chat invocation runs in.
@@ -26,18 +29,98 @@ struct LocalProject {
     config: VowpConfig,
 }
 
-/// Runs the local agent chat bridge for one parsed `chat --agent` command.
+/// Runs the local agent bridge from a parsed command, without building a [`Ctx`].
+///
+/// `vowp chat --agent` must work on a Mac with no VOWP home database and must not be
+/// routed to the home from a control machine. [`crate::execute`] calls this before both
+/// routes; the checkout comes from `--project <dir>` or the nearest `vowp.toml`.
+pub fn run_local(global: &Global, io: &mut dyn IoStreams, args: &ChatArgs) -> Result<i32, CliError> {
+    let opts = options_from_args(global, args)?;
+    let local = local_project(global)?;
+    run_bridge(io, &opts, &local)
+}
+
+/// Runs the local agent chat bridge for a chat that already has a [`Ctx`].
 ///
 /// The home log stays authoritative. This handler loads `~/.vowp-agent/agent.json`, the
 /// node key and the paired surface token, then runs the adapter on this machine while
 /// the agent client spools and streams events to the home gateway. It never takes the
 /// home lease and never writes a second session log.
-///
-/// The local checkout's `vowp.toml` supplies the project name, working directory and
-/// the default executor (the first rung of the `worker` profile); `--executor`
-/// overrides that default. The normal chat dispatch still resolves the session row in
-/// the invocation's local home before this function runs.
 pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32, CliError> {
+    let local = LocalProject {
+        root: ctx.project_root().to_path_buf(),
+        config: ctx.config().clone(),
+    };
+    run_bridge(io, opts, &local)
+}
+
+/// Builds the bridge options from the agent command spelling.
+///
+/// `--node` names the executor node for agent chat; a global `--node` before the
+/// subcommand has the same meaning and is never a redirect target.
+fn options_from_args(global: &Global, args: &ChatArgs) -> Result<ChatOptions, CliError> {
+    let node = args
+        .node
+        .as_deref()
+        .or(global.node.as_deref())
+        .map(NodeName::parse)
+        .transpose()?;
+    let executor = args
+        .executor
+        .as_deref()
+        .map(Executor::parse)
+        .transpose()?
+        .map(|executor| ExecutorRef {
+            executor,
+            node: node.clone(),
+        });
+    Ok(ChatOptions {
+        session: SessionId::parse(&args.id)?,
+        executor,
+        node,
+        follow: args.follow,
+        takeover: args.takeover,
+    })
+}
+
+/// Resolves the checkout without opening the node database.
+///
+/// The Mac has no project registry to consult, so `--project` must name a checkout
+/// directory; without it the nearest ancestor with `vowp.toml` wins.
+fn local_project(global: &Global) -> Result<LocalProject, CliError> {
+    let paths = crate::ctx::node_paths(global)?;
+    let root = match &global.project {
+        Some(value) => {
+            let candidate = PathBuf::from(value);
+            if candidate.is_dir() && candidate.join("vowp.toml").is_file() {
+                candidate
+            } else if candidate.is_dir() {
+                return Err(CliError::NotFound(format!(
+                    "no vowp.toml in {}; run `vowp init`",
+                    candidate.display()
+                )));
+            } else {
+                return Err(CliError::Invalid(format!(
+                    "--project {value} is not a checkout; on the Mac pass the directory containing vowp.toml"
+                )));
+            }
+        }
+        None => {
+            let cwd = std::env::current_dir()?;
+            crate::ctx::find_project_root(&cwd).ok_or_else(|| {
+                CliError::NotFound(
+                    "no vowp.toml in this directory or its parents; run `vowp chat --agent` from a checkout or pass --project <dir>"
+                        .to_owned(),
+                )
+            })?
+        }
+    };
+    let config = crate::ctx::load_project_config(&root.join("vowp.toml"), &paths)?;
+    Ok(LocalProject { root, config })
+}
+
+/// Runs the bridge against one already-resolved checkout.
+fn run_bridge(io: &mut dyn IoStreams, opts: &ChatOptions, local: &LocalProject) -> Result<i32, CliError> {
     if opts.follow {
         return Err(CliError::Invalid(
             "`chat --agent --follow` is not supported; the agent bridge owns the live turn".to_owned(),
@@ -59,10 +142,6 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
             config.node
         )));
     }
-    let local = LocalProject {
-        root: ctx.project_root().to_path_buf(),
-        config: ctx.config().clone(),
-    };
     let executor = match &opts.executor {
         Some(executor) => executor.executor.clone(),
         None => local
@@ -76,7 +155,7 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
                 )
             })?,
     };
-    let cwd = local_working_dir(&local)?;
+    let cwd = local_working_dir(local)?;
     let cwd_ref = path_ref_for(&local.config.project.name, &local.root, &cwd);
     let adapters = AdapterRegistry::from_config(&local.config)?;
     let adapter = adapters

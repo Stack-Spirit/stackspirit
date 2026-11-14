@@ -1313,6 +1313,160 @@ fn run_agent_chat(env: &common::TestEnv, agent_dir: &Path, session: &str, input:
     )
 }
 
+/// Runs `vowp chat --agent` from a Mac-like `HOME` that has no VOWP database.
+///
+/// The checkout and the agent state stay explicit, so the command must reach the
+/// bridge without opening `HOME/.vowp`. `ssh_bin` is prepended to `PATH`.
+fn run_agent_chat_without_home(
+    env: &common::TestEnv,
+    agent_dir: &Path,
+    mac_home: &Path,
+    control: Option<&Path>,
+    ssh_bin: &Path,
+    session: &str,
+    input: &str,
+) -> (i32, String, String) {
+    use std::io::Write as _;
+
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .env("HOME", mac_home)
+        .env_remove("VOWP_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .env("VOWP_AGENT_HOME", agent_dir)
+        .env(
+            "PATH",
+            format!("{}:{}", ssh_bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["chat", "--agent", "--session", session])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(control) = control {
+        command.env("VOWP_CONTROL_HOME", control);
+    }
+    let mut child = command.spawn().expect("spawn agent chat without a home");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write prompt");
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait for agent chat");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Writes a fake `ssh` that records its argv and serves only the agent gateway.
+///
+/// A forwarded `vowp ... chat` command is logged and exits 0 without running anything,
+/// so a control-machine route is visible in the log instead of being masked by a
+/// successful gateway run.
+fn fake_control_ssh(env: &common::TestEnv) -> (PathBuf, PathBuf) {
+    let dir = env.home_path().join("fake-control-bin");
+    std::fs::create_dir_all(&dir).expect("fake control bin");
+    let script = dir.join("ssh");
+    let log = dir.join("ssh.log");
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \" $* \" in\n  *\" agent gateway \"*) exec '{}' --home '{}' --project '{}' --no-color agent gateway --stdio ;;\nesac\nexit 0\n",
+        log.display(),
+        env!("CARGO_BIN_EXE_vowp"),
+        env.home_path().display(),
+        env.project_path().display()
+    );
+    std::fs::write(&script, body).expect("fake control ssh");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    (dir, log)
+}
+
+#[test]
+fn chat_agent_runs_without_a_vowp_home_database() {
+    let env = common::TestEnv::new();
+    configure(&env, "the mac turn landed");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let agent_dir = prepare_agent(&env, &session);
+    let mac_home = tempfile::tempdir().expect("mac home");
+    let ssh = fake_ssh(&env);
+    assert!(!NodePaths::new(mac_home.path()).db_path().is_file());
+
+    let (code, stdout, stderr) = run_agent_chat_without_home(
+        &env,
+        &agent_dir,
+        mac_home.path(),
+        None,
+        &ssh,
+        &id,
+        "hello from the mac\n",
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("the mac turn landed"), "{stdout}");
+    assert!(!stderr.contains("vowp home is not initialised"), "{stderr}");
+    assert!(
+        !NodePaths::new(mac_home.path()).db_path().is_file(),
+        "the Mac home must stay without a VOWP database"
+    );
+    let assistants: Vec<_> = events(&env, &id)
+        .iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::AssistantMessage(message)) => Some(message.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistants, vec!["the mac turn landed".to_owned()]);
+}
+
+#[test]
+fn chat_agent_is_not_forwarded_from_a_control_machine() {
+    let env = common::TestEnv::new();
+    configure(&env, "the controlled mac turn landed");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let agent_dir = prepare_agent(&env, &session);
+    let mac_home = tempfile::tempdir().expect("mac home");
+    let control = tempfile::tempdir().expect("control dir");
+    std::fs::write(
+        control.path().join("control.json"),
+        serde_json::json!({
+            "role": "control",
+            "home": "home-1",
+            "ssh_target": "vps.invalid",
+            "remote_home": "/srv/vowp",
+            "created_at": "2026-11-14T10:00:00Z",
+        })
+        .to_string(),
+    )
+    .expect("control config");
+    let (ssh, log) = fake_control_ssh(&env);
+
+    let (code, stdout, stderr) = run_agent_chat_without_home(
+        &env,
+        &agent_dir,
+        mac_home.path(),
+        Some(control.path()),
+        &ssh,
+        &id,
+        "hello from the mac\n",
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("the controlled mac turn landed"), "{stdout}");
+    let invocations = std::fs::read_to_string(&log).expect("ssh log");
+    assert!(
+        !invocations.contains("vps.invalid"),
+        "chat was forwarded to the home:\n{invocations}"
+    );
+    assert!(
+        !invocations.lines().any(|arg| arg == "chat"),
+        "a forwarded chat reached ssh:\n{invocations}"
+    );
+}
+
 #[test]
 fn chat_agent_help_names_session_and_executor() {
     let env = common::TestEnv::new();

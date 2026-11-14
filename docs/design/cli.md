@@ -136,12 +136,12 @@ adapter on this machine and streams spooled events to the home gateway. The home
 only log. Assistant text, tools, errors and notes print in the same 80-column format as the home
 chat. Ctrl-C stops the adapter and releases the lease. A takeover or lease loss prints
 `This surface is read-only: <reason>` and exits 0; a full spool exits 7. `--follow` and
-`--takeover` are refused in agent mode. The parser records `--agent` and `chat::run_shared`
-dispatches to the agent bridge before the home lease path; the command still passes through the
-normal chat dispatch, so the invocation needs a local home store to resolve the session row. The
-local checkout's `vowp.toml` supplies the project name, working directory and default executor
-(the first rung of the `worker` profile; `--executor` overrides it). The home path keeps its
-required positional id, help tree and missing-id error.
+`--takeover` are refused in agent mode. The parser records `--agent` and the CLI dispatches to
+the agent bridge before the control-machine route and before `Ctx::build`, so the Mac needs no
+local VOWP home database and the command is never forwarded to the home. The local checkout's
+`vowp.toml` supplies the project name, working directory and default executor (the first rung of
+the `worker` profile; `--executor` overrides it). The home path keeps its required positional id,
+help tree and missing-id error.
 
 The Mac-side v0.4 agent commands (`vowp agent enroll`, `vowp agent run`, `vowp agent status`) live
 in §12. They use `~/.vowp-agent` rather than the home/project store.

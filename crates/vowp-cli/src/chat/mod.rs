@@ -62,9 +62,8 @@ pub fn run(ctx: &mut Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<
 /// The command dispatcher only holds `&Ctx`; the chat handler itself needs no mutable
 /// context state. This entry point keeps [`run`]'s frozen signature for callers that do.
 pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32, CliError> {
-    // `chat --agent` is the Mac surface. The parser records the request and this owned
-    // module dispatches it before the home lease path; the normal chat dispatch still
-    // resolves the session row in the invocation's local home first.
+    // `chat --agent` is the Mac surface. The CLI dispatches it before this home path, and
+    // this fallback keeps a direct in-process caller on the same bridge.
     if crate::cli::agent_chat_requested() {
         return agent::run_shared(ctx, io, opts);
     }
