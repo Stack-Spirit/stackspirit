@@ -8,8 +8,9 @@ use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
-    EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateCache, JsonEnginePreferences,
-    Keychain, ModelCatalog, ModelChoice, OsKeychain, ProcessEngineRuntime, bundled_catalog,
+    EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateSnapshot, HostGateCache,
+    JsonEnginePreferences, Keychain, ModelCatalog, ModelChoice, OsKeychain, ProcessEngineRuntime,
+    bundled_catalog,
 };
 use spirit_core::error::SpiritError;
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
@@ -34,7 +35,8 @@ pub struct AppState {
     engine_catalog: ModelCatalog,
     engine_preferences: Arc<dyn EnginePreferencesStore>,
     engine_keychain: Arc<dyn Keychain>,
-    gate_cache: GateCache,
+    gate_cache: HostGateCache,
+    connection: ConnectionManager,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
         let mut core = SpiritCore::desktop(hosts.clone(), engine, KEYCHAIN_SERVICE);
         core.select_engine(saved.choice.clone());
         let events = core.subscribe();
+        let connection = core.connection().clone();
         let keychain: Arc<dyn Keychain> = Arc::new(
             OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
         );
@@ -79,7 +82,8 @@ impl AppState {
                 engine_catalog: bundled_catalog(),
                 engine_preferences: Arc::new(preferences),
                 engine_keychain: keychain,
-                gate_cache: GateCache::new(),
+                gate_cache: HostGateCache::new(),
+                connection,
             },
             events,
         ))
@@ -117,7 +121,7 @@ impl AppState {
         self.engine_keychain.as_ref()
     }
 
-    pub(crate) fn gate_cache(&self) -> &GateCache {
+    pub(crate) fn gate_cache(&self) -> &HostGateCache {
         &self.gate_cache
     }
 
@@ -209,8 +213,10 @@ impl AppState {
 
     pub(crate) fn set_client(&self, client: Option<Arc<dyn VowpClient>>) {
         // Every connect, failed connect and disconnect changes the target connection.
-        // Cached gate evidence must never survive across that boundary.
+        // Cached gate evidence must never survive across that boundary: clear the
+        // in-memory cache and publish the default snapshot so no view keeps a Ready.
         self.gate_cache.clear();
+        self.connection.publish_gates(GateSnapshot::default());
         *self
             .client
             .lock()

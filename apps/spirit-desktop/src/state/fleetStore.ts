@@ -2,7 +2,6 @@ import { create } from "zustand";
 
 import type { SpiritBridge } from "../bridge";
 import { toSpiritError, type SpiritError } from "../bridge/errors";
-import { engineSetupComplete } from "../domain/engine";
 import type {
   CapacityTargetView,
   CapacityView,
@@ -76,7 +75,6 @@ interface FleetState {
 }
 
 let activeUnsubscribe: (() => void) | null = null;
-let activeGateProbe: { hostId: string; promise: Promise<void> } | null = null;
 
 function connectionOfHost(
   hosts: HostProfile[],
@@ -178,9 +176,7 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       get().acceptFleet(fleet.value);
     }
     if (engine.status === "fulfilled") set({ engine: engine.value });
-    if (gates.status === "fulfilled" && get().connection.state === "connected") {
-      set({ gates: gates.value });
-    }
+    if (gates.status === "fulfilled") set({ gates: gates.value });
     if (rawDocument.status === "fulfilled") set({ rawDocument: rawDocument.value });
 
     if (hosts.status === "fulfilled") {
@@ -227,30 +223,15 @@ export const useFleetStore = create<FleetState>((set, get) => ({
         set({ revision: Math.max(state.revision, event.revision) });
         get().acceptFleet(event.fleet, true);
         break;
-      case "engine": {
-        // Engine events are produced inside core, before the desktop can add its
-        // persisted first-run flag. Keep a completed setup sticky in this session.
-        const engine =
-          engineSetupComplete(state.engine) && !engineSetupComplete(event.engine)
-            ? ({ ...event.engine, onboarding_complete: true } as EngineStatus)
-            : event.engine;
+      case "engine":
         set({
           revision: Math.max(state.revision, event.revision),
-          engine,
+          engine: event.engine,
         });
         break;
-      }
-      case "gates": {
-        const revision = Math.max(state.revision, event.revision);
-        // A probe result belongs to the connection that requested it. Never apply a
-        // Ready snapshot while disconnected or while another host is connected.
-        if (get().connection.state === "connected") {
-          set({ revision, gates: event.gates });
-        } else {
-          set({ revision });
-        }
+      case "gates":
+        set({ revision: Math.max(state.revision, event.revision), gates: event.gates });
         break;
-      }
       case "error":
         set({
           revision: Math.max(state.revision, event.revision),
@@ -271,17 +252,9 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       connection.state === "stale" && state.fleet
         ? { ...state.fleet, stale: true }
         : state.fleet;
-    // Gates are cached per host connection (VOWP-CONTRACT §11.5). A disconnect, a
-    // failed connect, or a switch to another host drops the old snapshot immediately.
-    const sameHost =
-      connection.host_id !== null && connection.host_id === state.connection.host_id;
-    const gatesLive =
-      (connection.state === "connected" || connection.state === "stale") && sameHost;
-    const gates = gatesLive ? state.gates : null;
     const now = Date.now();
     set({
       connection,
-      gates,
       fleet,
       capacity: fleet?.capacity ?? state.capacity,
       latencyHistory: history,
@@ -338,13 +311,10 @@ export const useFleetStore = create<FleetState>((set, get) => ({
   connect: async (hostId) => {
     const bridge = get().bridge;
     if (!bridge) return;
-    set({ selectedHostId: hostId, gates: null, lastError: null });
+    set({ selectedHostId: hostId, lastError: null });
     try {
       const connection = await bridge.connection.connect(hostId);
       get().setConnection(connection);
-      // VOWP-CONTRACT §11.5: probe once on a live connection, even when the Engine
-      // view has never been opened. The view's first-open effect shares this promise.
-      void get().probeGates();
       await get().loadHosts();
       const fleet = await bridge.fleet.get();
       if (fleet) get().acceptFleet(fleet);
@@ -455,30 +425,10 @@ export const useFleetStore = create<FleetState>((set, get) => ({
   probeGates: async () => {
     const bridge = get().bridge;
     if (!bridge) return;
-    const connection = get().connection;
-    if (connection.state !== "connected" || !connection.host_id) {
-      set({ gates: null });
-      return;
-    }
-    const hostId = connection.host_id;
-    if (activeGateProbe?.hostId === hostId) return activeGateProbe.promise;
-
-    const run = (async () => {
-      try {
-        const gates = await bridge.gates.probe();
-        const current = get().connection;
-        if (current.state === "connected" && current.host_id === hostId) {
-          set({ gates });
-        }
-      } catch (error) {
-        set({ lastError: toSpiritError(error) });
-      }
-    })();
-    activeGateProbe = { hostId, promise: run };
     try {
-      await run;
-    } finally {
-      if (activeGateProbe?.promise === run) activeGateProbe = null;
+      set({ gates: await bridge.gates.probe() });
+    } catch (error) {
+      set({ lastError: toSpiritError(error) });
     }
   },
 
@@ -489,7 +439,6 @@ export const useFleetStore = create<FleetState>((set, get) => ({
 export function resetFleetStore(): void {
   activeUnsubscribe?.();
   activeUnsubscribe = null;
-  activeGateProbe = null;
   useFleetStore.setState(createInitialFleetState());
 }
 

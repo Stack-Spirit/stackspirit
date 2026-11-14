@@ -240,13 +240,61 @@ impl GateSnapshot {
     }
 }
 
-/// A per-host gate cache, refreshed on connect, version change or explicit re-probe.
+/// A cached gate snapshot, refreshed on connect, version change or explicit re-probe.
 #[derive(Debug, Default)]
 pub struct GateCache {
-    inner: Mutex<HashMap<String, GateSnapshot>>,
+    inner: Mutex<Option<GateSnapshot>>,
 }
 
 impl GateCache {
+    /// Builds an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the cached snapshot while it is younger than ten minutes.
+    #[must_use]
+    pub fn get(&self, now: Timestamp) -> Option<GateSnapshot> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = guard.as_ref()?;
+        if now.since(snapshot.probed_at) > Duration::from_secs(GATE_CACHE_TTL_SECS) {
+            None
+        } else {
+            Some(snapshot.clone())
+        }
+    }
+
+    /// Stores a new snapshot, replacing any older state immediately.
+    pub fn put(&self, snapshot: GateSnapshot) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
+    }
+
+    /// Drops the cache. A later failure cannot leave a sticky `Ready`.
+    pub fn invalidate(&self) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// A per-host gate cache, refreshed on connect, version change or explicit re-probe.
+///
+/// The desktop keeps one entry per host connection so a `Ready` snapshot from host A
+/// is never shown while host B is connected, or while disconnected.
+#[derive(Debug, Default)]
+pub struct HostGateCache {
+    inner: Mutex<HashMap<String, GateSnapshot>>,
+}
+
+impl HostGateCache {
     /// Builds an empty cache.
     #[must_use]
     pub fn new() -> Self {
@@ -1027,5 +1075,25 @@ mod tests {
             ASIF_MILESTONES.map(str::to_owned).to_vec(),
             vec!["v4-asif-core".to_owned(), "v4-asif-cli".to_owned()]
         );
+    }
+
+    #[test]
+    fn engine_host_gate_cache_isolates_hosts_and_invalidates() {
+        let cache = HostGateCache::new();
+        let probed = Timestamp::parse("2026-11-14T12:00:00.000Z").unwrap();
+        let mut snapshot = snapshot(GateFeatureFlags::default());
+        snapshot.probed_at = probed;
+        cache.put("host-a", snapshot.clone());
+
+        assert!(cache.get("host-a", probed.plus_secs(600)).is_some());
+        assert!(cache.get("host-a", probed.plus_secs(601)).is_none());
+        assert!(cache.get("host-b", probed).is_none());
+
+        cache.invalidate("host-a");
+        assert!(cache.get("host-a", probed).is_none());
+
+        cache.put("host-a", snapshot);
+        cache.clear();
+        assert!(cache.get("host-a", probed).is_none());
     }
 }

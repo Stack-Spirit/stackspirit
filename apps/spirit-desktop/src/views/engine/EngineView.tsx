@@ -5,6 +5,7 @@ import type {
   EngineStatus,
   ExternalHarness,
   ExternalHarnessKind,
+  GateSnapshot,
   KeyStatus,
   ModelChoice,
 } from "../../bridge/wire";
@@ -59,6 +60,20 @@ export function EngineView() {
   const [initialStep, setInitialStep] = useState<1 | 2>(1);
   const [gateDetails, setGateDetails] = useState<GateDetails>(null);
   const autoProbedHost = useRef<string | null>(null);
+  const liveConnection =
+    connection.state === "connected" || connection.state === "stale";
+  // A gate snapshot belongs to the connection that requested it (VOWP-CONTRACT
+  // §11.5). The scope records the host and connection generation so a snapshot from
+  // an earlier connection is never displayed for a new one.
+  const [gateScope, setGateScope] = useState<{
+    hostId: string;
+    since: string | null;
+    gates: GateSnapshot;
+  } | null>(() =>
+    liveConnection && connection.host_id && gates
+      ? { hostId: connection.host_id, since: connection.since, gates }
+      : null,
+  );
 
   const loadModels = useCallback(
     async (current: EngineStatus | null) => {
@@ -98,17 +113,71 @@ export function EngineView() {
     };
   }, [bridge]);
 
-  useEffect(() => {
-    if (!bridge) return;
-    if (connection.state !== "connected" || !connection.host_id) {
-      autoProbedHost.current = null;
+  const scopeProbe = useCallback(async () => {
+    const current = useFleetStore.getState().connection;
+    if (current.state !== "connected" && current.state !== "stale") return;
+    if (!current.host_id) return;
+    const hostId = current.host_id;
+    const since = current.since;
+    const before = useFleetStore.getState().gates;
+    await probeGates();
+    const next = useFleetStore.getState().connection;
+    if (
+      (next.state !== "connected" && next.state !== "stale") ||
+      next.host_id !== hostId ||
+      next.since !== since
+    ) {
       return;
     }
-    if (autoProbedHost.current === connection.host_id) return;
-    autoProbedHost.current = connection.host_id;
-    if (gatesProbed(gates)) return;
-    void probeGates();
-  }, [bridge, connection.host_id, connection.state, gates, probeGates]);
+    const latest = useFleetStore.getState().gates;
+    // A failed probe leaves the store untouched. Only a new snapshot from this
+    // connection generation may replace the scope; never reuse the previous host's.
+    if (latest && latest !== before && gatesProbed(latest)) {
+      setGateScope({ hostId, since, gates: latest });
+    }
+  }, [probeGates]);
+
+  useEffect(() => {
+    if (!bridge) return;
+    if (connection.state !== "connected" || !connection.host_id) return;
+    const key = `${connection.host_id}:${connection.since ?? ""}`;
+    if (autoProbedHost.current === key) return;
+    autoProbedHost.current = key;
+    // Only a snapshot already scoped to this connection counts as cached. A snapshot
+    // from the previous connection never suppresses the probe for a new host.
+    if (
+      gateScope &&
+      gateScope.hostId === connection.host_id &&
+      gateScope.since === connection.since &&
+      gatesProbed(gateScope.gates)
+    ) {
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      void scopeProbe();
+    }, 0);
+    return () => window.clearTimeout(handle);
+  }, [
+    bridge,
+    connection.host_id,
+    connection.since,
+    connection.state,
+    gateScope,
+    scopeProbe,
+  ]);
+
+  const handleProbe = useCallback(() => {
+    if (!liveConnection || !connection.host_id) return;
+    void scopeProbe();
+  }, [connection.host_id, liveConnection, scopeProbe]);
+
+  const visibleGates =
+    gateScope &&
+    liveConnection &&
+    gateScope.hostId === connection.host_id &&
+    gateScope.since === connection.since
+      ? gateScope.gates
+      : null;
 
   const loadHarnesses = useCallback(async () => {
     if (!bridge) return;
@@ -343,21 +412,21 @@ export function EngineView() {
           <Panel
             title="Capability gates"
             actions={
-              <Button variant="secondary" size="sm" onClick={() => void probeGates()}>
+              <Button variant="secondary" size="sm" onClick={handleProbe}>
                 Re-probe
               </Button>
             }
           >
-            {gates ? (
+            {visibleGates ? (
               <div className="gate-grid">
                 <GateCard
                   kind="local"
-                  gates={gates}
+                  gates={visibleGates}
                   onDetails={() => setGateDetails("local")}
                 />
                 <GateCard
                   kind="asif"
-                  gates={gates}
+                  gates={visibleGates}
                   onDetails={() => setGateDetails("asif")}
                 />
               </div>
@@ -367,7 +436,7 @@ export function EngineView() {
                 title="Capability gates not probed"
                 body="Connect to the VOWP home and re-probe. A gate is never Ready from a version string alone."
                 actionLabel="Probe gates"
-                onAction={() => void probeGates()}
+                onAction={handleProbe}
               />
             )}
             <p className="muted small">
@@ -392,7 +461,7 @@ export function EngineView() {
 
       <GateDrawer
         kind={gateDetails ?? "local"}
-        gates={gates}
+        gates={visibleGates}
         open={gateDetails !== null}
         onClose={() => setGateDetails(null)}
       />

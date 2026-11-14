@@ -20,8 +20,8 @@ pub use config::{EnginePreferences, EnginePreferencesStore, JsonEnginePreference
 pub use external::{ExternalHarness, HarnessProbe, PathHarnessProbe, scan_external_harnesses};
 pub use gate::{
     ASIF_MILESTONES, AsifGate, GateCache, GateFeatureFlags, GateProbeOptions, GateSnapshot,
-    LocalAgentState, LocalAgentStatus, LocalOrchestratorGate, PHASE3_MILESTONES, phase3_milestones,
-    probe_asif, probe_local_orchestrator,
+    HostGateCache, LocalAgentState, LocalAgentStatus, LocalOrchestratorGate, PHASE3_MILESTONES,
+    phase3_milestones, probe_asif, probe_local_orchestrator,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::OsKeychain;
