@@ -163,12 +163,12 @@ pub enum WorktreeError {
         /// Human-readable reason.
         detail: String,
     },
-    /// The local origin does not match the project remote.
+    /// A local fetch or push URL does not match the project remote.
     #[error("origin {actual} does not match project remote {expected}")]
     RemoteMismatch {
         /// Home-supplied project remote URL.
         expected: String,
-        /// Local origin URL.
+        /// Mismatching push URL, with credentials stripped.
         actual: String,
     },
     /// A git command other than the result push failed.
@@ -1023,19 +1023,27 @@ impl Worktree {
 
     /// Pushes only `job/<id>` and reports the head commit.
     ///
-    /// The local remote URL must match `expected_remote_url` after credentials are stripped.
-    /// A fork or a different push remote is [`WorktreeError::RemoteMismatch`] and no push is
-    /// attempted. A git failure is [`WorktreeError::GitPushFailed`] with the stderr tail; the
-    /// worktree stays in place for inspection.
+    /// Every push URL configured for the remote must match `expected_remote_url` after
+    /// credentials are stripped. The check reads the URLs git will actually push to, so
+    /// `remote.<name>.pushurl`, `url.<base>.pushInsteadOf` and `url.<base>.insteadOf` rewrites
+    /// are all covered. A fork or a different push remote is
+    /// [`WorktreeError::RemoteMismatch`] and no push is attempted; the error reports the
+    /// actual push URL with credentials stripped. A git failure is
+    /// [`WorktreeError::GitPushFailed`] with the stderr tail; the worktree stays in place for
+    /// inspection.
     pub fn push_job(&self, expected_remote_url: &str) -> Result<PushResult, WorktreeError> {
-        let actual = self.remote_url()?.ok_or_else(|| WorktreeError::RemoteMismatch {
-            expected: expected_remote_url.to_owned(),
-            actual: format!("<missing or empty remote {}>", self.remote),
-        })?;
-        if comparable_remote(&actual) != comparable_remote(expected_remote_url) {
+        let actual_urls = self.push_urls()?;
+        if actual_urls.is_empty() {
             return Err(WorktreeError::RemoteMismatch {
                 expected: expected_remote_url.to_owned(),
-                actual,
+                actual: format!("<missing or empty remote {}>", self.remote),
+            });
+        }
+        let expected = comparable_remote(expected_remote_url);
+        if let Some(actual) = actual_urls.iter().find(|actual| comparable_remote(actual) != expected) {
+            return Err(WorktreeError::RemoteMismatch {
+                expected: expected_remote_url.to_owned(),
+                actual: strip_remote_credentials(actual),
             });
         }
         let head = self.head_commit()?;
@@ -1097,17 +1105,25 @@ impl Worktree {
         )
     }
 
-    fn remote_url(&self) -> Result<Option<String>, WorktreeError> {
-        let output = self.git.run(&self.path, &["remote", "get-url", &self.remote])?;
+    /// Returns every URL `git push <remote>` will use, in git's order.
+    ///
+    /// `--push` makes git apply `pushurl`, `pushInsteadOf` and `insteadOf`, so the result is
+    /// the destination set of the later push rather than the fetch URL. A missing remote or an
+    /// empty URL list is an empty vec.
+    fn push_urls(&self) -> Result<Vec<String>, WorktreeError> {
+        let output = self
+            .git
+            .run(&self.path, &["remote", "get-url", "--push", "--all", &self.remote])?;
         if !output.success() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        let url = output.stdout.trim();
-        if url.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(url.to_owned()))
-        }
+        Ok(output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 }
 

@@ -575,6 +575,139 @@ fn worktree_refuses_a_remote_that_does_not_match_the_project() {
 }
 
 #[test]
+fn worktree_refuses_a_fork_push_url() {
+    let fixture = Fixture::new();
+    let job = fixture.job("job-15");
+    let worktree = fixture.manager().create(&fixture.spec(&job)).expect("create");
+    fixture.add_file(&worktree, "change.txt", "change\n");
+
+    let fork = fixture.root.join("fork.git");
+    fixture.git(&fixture.root, &["init", "-q", "--bare", fork.to_str().expect("fork")]);
+    let fork_url = fork.to_str().expect("fork");
+    // Keep the fetch URL on the project origin and redirect only the push.
+    fixture.git(&fixture.main, &["config", "remote.origin.pushurl", fork_url]);
+    assert_eq!(
+        fixture
+            .git(&fixture.main, &["remote", "get-url", "--push", "origin"])
+            .trim(),
+        fork_url
+    );
+
+    let error = worktree
+        .push_job(fixture.origin.to_str().expect("origin"))
+        .expect_err("a fork push url must be refused");
+    match error {
+        WorktreeError::RemoteMismatch { expected, actual } => {
+            assert_eq!(expected, fixture.origin.to_str().expect("origin"));
+            assert_eq!(actual, fork_url);
+        }
+        other => panic!("expected remote_mismatch, got {other}"),
+    }
+    assert!(
+        fixture
+            .git(&fork, &["for-each-ref", "--format=%(refname)"])
+            .trim()
+            .is_empty(),
+        "the fork must not receive the job branch"
+    );
+    assert!(
+        fixture
+            .git(
+                &fixture.origin,
+                &["for-each-ref", "--format=%(refname)", "refs/heads/job/job-15"],
+            )
+            .trim()
+            .is_empty(),
+        "the project origin must not receive the job branch"
+    );
+    assert!(worktree.path().exists());
+}
+
+#[test]
+fn worktree_refuses_a_push_instead_of_rewrite() {
+    let fixture = Fixture::new();
+    let job = fixture.job("job-16");
+    let worktree = fixture.manager().create(&fixture.spec(&job)).expect("create");
+    fixture.add_file(&worktree, "change.txt", "change\n");
+
+    let fork = fixture.root.join("fork.git");
+    fixture.git(&fixture.root, &["init", "-q", "--bare", fork.to_str().expect("fork")]);
+    let fork_url = fork.to_str().expect("fork");
+    let origin_url = fixture.origin.to_str().expect("origin");
+    // `git push origin` rewrites the origin URL to the fork through pushInsteadOf.
+    let rewrite = format!("url.{fork_url}.pushInsteadOf");
+    fixture.git(&fixture.main, &["config", &rewrite, origin_url]);
+    assert_eq!(
+        fixture
+            .git(&fixture.main, &["remote", "get-url", "--push", "origin"])
+            .trim(),
+        fork_url
+    );
+
+    let error = worktree
+        .push_job(origin_url)
+        .expect_err("a pushInsteadOf rewrite must be refused");
+    match error {
+        WorktreeError::RemoteMismatch { expected, actual } => {
+            assert_eq!(expected, origin_url);
+            assert_eq!(actual, fork_url);
+        }
+        other => panic!("expected remote_mismatch, got {other}"),
+    }
+    assert!(
+        fixture
+            .git(&fork, &["for-each-ref", "--format=%(refname)"])
+            .trim()
+            .is_empty(),
+        "the rewritten push destination must not receive the job branch"
+    );
+    assert!(
+        fixture
+            .git(
+                &fixture.origin,
+                &["for-each-ref", "--format=%(refname)", "refs/heads/job/job-16"],
+            )
+            .trim()
+            .is_empty(),
+        "the project origin must not receive the job branch"
+    );
+    assert!(worktree.path().exists());
+}
+
+#[test]
+fn worktree_remote_mismatch_strips_credentials_from_the_actual_url() {
+    let fixture = Fixture::new();
+    let job = fixture.job("job-17");
+    let worktree = fixture.manager().create(&fixture.spec(&job)).expect("create");
+    fixture.add_file(&worktree, "change.txt", "change\n");
+
+    let token = "FAKE-TOKEN-fix-round-1";
+    let credential_url = format!("https://owner:{token}@example.invalid/owner/repo.git");
+    fixture.git(&fixture.main, &["remote", "set-url", "origin", &credential_url]);
+
+    let expected = "https://example.invalid/owner/other.git";
+    let error = worktree
+        .push_job(expected)
+        .expect_err("a different remote must be refused");
+    let display = error.to_string();
+    assert!(
+        !display.contains(token),
+        "the error display leaked credentials: {display}"
+    );
+    match error {
+        WorktreeError::RemoteMismatch {
+            expected: expected_url,
+            actual,
+        } => {
+            assert_eq!(expected_url, expected);
+            assert_eq!(actual, "https://example.invalid/owner/repo.git");
+            assert!(!actual.contains(token), "the actual url leaked credentials: {actual}");
+        }
+        other => panic!("expected remote_mismatch, got {other}"),
+    }
+}
+
+#[test]
 fn worktree_push_sends_only_the_job_branch() {
     let fixture = Fixture::new();
     let job = fixture.job("job-7");

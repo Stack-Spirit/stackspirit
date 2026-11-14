@@ -329,6 +329,9 @@ The worktree slice adds, in `tests/worktree.rs`:
 `worktree_path_ref_stays_inside_the_worktree_root`,
 `path_map_rejects_traversal_a_symlink_escape_and_a_case_only_escape`,
 `worktree_refuses_a_remote_that_does_not_match_the_project`,
+`worktree_refuses_a_fork_push_url`,
+`worktree_refuses_a_push_instead_of_rewrite`,
+`worktree_remote_mismatch_strips_credentials_from_the_actual_url`,
 `worktree_push_fails_cleanly_and_keeps_the_worktree` and
 `worktree_refuses_a_create_below_the_disk_reserve`, plus the fetch, push-only-job-branch, allow
 list and missing/unwritable-root cases. The case-only test runs the real wrong-case directory on
@@ -408,10 +411,12 @@ file, as dirty. Both are the summary helpers the run reports use.
 
 ### Result return
 
-`Worktree::push_job(expected_remote_url)` first reads `git remote get-url <remote>` and strips
-credentials with `strip_remote_credentials` (URL userinfo and the scp-like `user@` prefix). If
-the stripped URL does not equal the home-supplied `projects.remote_url`, it returns
-`remote_mismatch` and does not push.
+`Worktree::push_job(expected_remote_url)` first reads every URL `git push <remote>` will use with
+`git remote get-url --push --all <remote>`, so `remote.<name>.pushurl`,
+`url.<base>.pushInsteadOf` and `url.<base>.insteadOf` rewrites are part of the check. It strips
+credentials with `strip_remote_credentials` (URL userinfo and the scp-like `user@` prefix). If any
+push URL does not equal the home-supplied `projects.remote_url`, it returns `remote_mismatch` with
+the mismatching URL after credential stripping, and does not push.
 
 On a match it pushes exactly one refspec:
 
