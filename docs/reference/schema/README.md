@@ -25,6 +25,10 @@ python3 docs/reference/check-reference.py
 | `AgentRole` | [agent-role.md](agent-role.md) |
 | `ApiError` | [api-error.md](api-error.md) |
 | `ApiErrorBody` | [api-error-body.md](api-error-body.md) |
+| `AsifCounts` | [asif-counts.md](asif-counts.md) |
+| `AsifImportResponse` | [asif-import-response.md](asif-import-response.md) |
+| `AsifLoss` | [asif-loss.md](asif-loss.md) |
+| `AsifReport` | [asif-report.md](asif-report.md) |
 | `AssignmentPayload` | [assignment-payload.md](assignment-payload.md) |
 | `BackupFile` | [backup-file.md](backup-file.md) |
 | `BackupReport` | [backup-report.md](backup-report.md) |

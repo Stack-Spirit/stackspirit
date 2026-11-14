@@ -2080,6 +2080,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vowp-asif"
+version = "0.1.1"
+source = "git+https://github.com/syver777/vowp-asif?rev=466ebb81f58646febb80996874b46c11288d5a97#466ebb81f58646febb80996874b46c11288d5a97"
+dependencies = [
+ "clap",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
 name = "vowp-cli"
 version = "0.3.0"
 dependencies = [
@@ -2119,6 +2133,7 @@ dependencies = [
  "toml",
  "ulid",
  "vowp-adapters",
+ "vowp-asif",
  "vowp-graph",
  "vowp-protocol",
  "vowp-store",

@@ -13,6 +13,7 @@ crates/vowp-core/src/
   deps.rs         Deps, CommandRunner, SystemRunner, GitOps, SystemGit, AdapterRegistry, Rng
   requests.rs     Request enum + (de)serialisation for CLI→supervisor kv requests
   session/        mod.rs service.rs capsule.rs seed.rs switch.rs recovery.rs bundle.rs importer.rs(optional)
+                  asif.rs asif/{export,import,report}.rs
   gates/          mod.rs runner.rs report.rs cmd.rs owns.rs pushed.rs review.rs deploy.rs secret_scan.rs
   ledger/         mod.rs record.rs price.rs board.rs report.rs
   schedules/      mod.rs spec.rs engine.rs
@@ -217,7 +218,57 @@ pub mod bundle {
     pub fn import_with_mode(deps: &Deps, b: &Bundle, executor: Option<ExecutorRef>, cwd: Option<&std::path::Path>, mode: ImportMode) -> Result<SessionId, CoreError>;   // SameId: origin id only when absent, no parent, copies the tail with contiguous local seqs
 }
 pub mod importer { /* optional (nice-to-have): ClaudeTranscriptImporter::scan_once(dir) -> ImportReport, read-only, incremental by byte offset; parses each transcript file with vowp_adapters::claude_code::import_transcript(path, tz_offset_minutes) (crates/vowp-adapters.md §5) */ }
+pub mod asif {
+    pub const MAX_ASIF_ARCHIVE_BYTES: u64;   // the pinned adapter's MAX_ARCHIVE_BYTES
+    #[derive(Default)] pub struct AsifExportOptions {
+        pub redact: Vec<String>, pub keep_host_paths: bool, pub strict: bool,
+        pub allow_loss: bool, pub report_path: Option<PathBuf>,
+    }
+    pub struct AsifExport { pub output: PathBuf, pub bytes: u64, pub report: AsifReport }
+    pub fn export_asif(paths: &NodePaths, session: &SessionId, out: &Path,
+                       opts: &AsifExportOptions) -> Result<AsifExport, CoreError>;
+    pub struct AsifImportOptions {
+        pub cwd: PathBuf, pub branch: Option<String>, pub strict: bool,
+        pub allow_loss: bool, pub session_id: Option<SessionId>,
+        pub report_path: Option<PathBuf>,
+    }
+    pub struct AsifImport { pub session: Session, pub report: AsifReport,
+                            pub warnings: Vec<String> }
+    pub fn import_asif(paths: &NodePaths, store: &Store, input: &Path,
+                       opts: &AsifImportOptions) -> Result<AsifImport, CoreError>;
+}
 ```
+
+`session::asif` is the only VOWP code that calls the pinned `vowp-asif` library; the library is a
+dependency of `vowp-core` only. Export writes one deterministic `.asif.zip` through a private
+`<home>/tmp/asif-<ULID>/` directory, checks the adapter report's source session, applies the VOWP
+strict filter (`Blocking`/`Integrity` only; the adapter always runs with `strict: false`), and
+renames the package to the requested output. Import passes a pre-chosen fresh ULID to the adapter,
+checks the report target, runs the same strict filter, pre-checks the staged log/capsules/adapters
+file (`session.created` first, contiguous sequences, clean tail, globally unique event ids),
+rejects a target row or path entry, renames the stage into `sessions/<id>/`, reindexes, and keeps
+only the expected `project ... left null` / `job ... left null` warnings. Every failure before the
+rename removes the staging directory and leaves no row; a reindex failure removes the new session
+directory. `CoreError::Asif` carries the adapter's stable code and maps it to `InvalidInput`,
+`Conflict`, `Refused` or `Internal`; messages stay path-free. No export or import starts a turn,
+creates a lease, writes a capsule or claims continuation.
+
+Tests (`tests/asif.rs`, hermetic temp `NodePaths` and fixture packages built with
+`vowp_asif::pack`): `asif_export_writes_a_deterministic_package_and_summary`,
+`asif_export_redacts_exact_literal_and_never_echoes_it`,
+`asif_export_strict_refuses_blocking_loss_and_removes_output`,
+`asif_export_keeps_inherent_losses_non_fatal`,
+`asif_import_creates_one_indexed_session_and_no_turn`,
+`asif_import_round_trip_preserves_text_blobs_and_event_order`,
+`asif_import_invalid_package_leaves_no_directory_or_row`,
+`asif_import_existing_id_is_a_conflict_and_changes_nothing`,
+`asif_import_same_package_twice_conflicts_on_event_ids_and_keeps_the_first_session`,
+`asif_import_duplicate_event_id_conflicts_without_a_partial_index`,
+`asif_import_strict_removes_staging_and_reports_the_loss`,
+`asif_import_allow_loss_accepts_a_recoverable_integrity_fixture`,
+`asif_import_multiple_branches_requires_a_selection`,
+`asif_import_selected_branch_maps_only_that_branch`,
+`asif_adapter_version_and_pin_match_the_documented_contract`.
 
 Tests (hermetic: temp `NodePaths`, `FakeClock`, `AdapterRegistry::with("opencode", FakeAdapter)` where `FakeAdapter` replays a fixture through the real `Adapter` trait — defined in `crates/vowp-core/tests/support/fake_adapter.rs`):
 `run_turn_appends_events_and_finishes_run`, `run_turn_frames_attach_then_turn_started_once_per_run_without_adapter_duplicates` (real parsers over claude/opencode fixtures: exactly one `session.executor` attach, one `turn.started`, order attach → turn.started → user.message), `limit_resets_at_gets_single_two_minute_margin` (fixture `|1794164400` → `limits.resets_at = 19:02:00Z`), `run_turn_resumes_native_session_same_harness`, `run_turn_seeds_capsule_on_new_harness`, `run_turn_cwd_outside_allow_list_refused`, `run_turn_cancel_interrupts_adapter`,

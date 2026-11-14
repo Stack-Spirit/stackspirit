@@ -22,6 +22,7 @@ Module → file map:
 | `vault` | v0.2 secret names, metadata, modes and the one-time request (§16.5) |
 | `agent` | v0.4 local-node path refs, capabilities, capacity, frames and redacted cards (§16.7) |
 | `offload` | v0.4 placement, waiting reasons, assignment payload and resume records (§16.8) |
+| `asif` | v0.4 adapter-free ASIF report summaries and import response (§16.11) |
 | `config`, `adapter`, `services`, `schema` | `vowp.toml`, adapter trait, service traits, JSON Schema export |
 
 `lib.rs` re-exports everything at the crate root (`vowp_protocol::Job`), plus `vowp_protocol::prelude::*`.
@@ -1940,3 +1941,37 @@ home does not know the fact and the evaluator refuses (`remote_mismatch`, `no_el
 `node_disk_low` for an unreported disk) instead of assuming the best case. `Decision::Waiting`
 leaves the job `ready`; only the job-level `project_home_only`, `kind_not_allowed` and
 `home_only_secret` are absolute offload refusals.
+
+### 16.11 v0.4 ASIF report types (`asif`)
+
+ASIF 0.4 is a review draft. These types are VOWP's **adapter-free summary** of the
+`vowp-asif-report-v1` document; they never claim conformance, losslessness, exact request
+reconstruction or continuation. The full report (mapping, coverage, loss classes) stays in the
+adapter and is written only through `--report`.
+
+```rust
+pub struct AsifCounts { pub events_in: u64, pub events_out: u64,
+                        pub resources: u64, pub capsules: u64 }
+pub struct AsifLoss { pub kind: String, pub stage: String,
+                      pub scope: Option<String>, pub message: String }
+pub struct AsifReport {
+    pub adapter_version: String, pub asif_version: String, pub asif_pin: String,
+    pub source_session: Option<String>, pub target_session: Option<String>,
+    pub counts: AsifCounts, pub loss_count: u64, pub losses: Vec<AsifLoss>,
+    pub unsupported: Vec<String>,
+}
+pub struct AsifImportResponse { pub session: Session, pub report: AsifReport,
+                               pub warnings: Vec<String> }
+```
+
+`stage` is the adapter's lower-case loss stage (`capture`, `normalization`, `redaction`,
+`translation`); `scope` is the adapter's lower-case coverage domain when it names one.
+`loss_count` equals `losses.len()`. The loss **class** used by `--strict` (`Blocking` /
+`Integrity` versus `Normalization` / `Omission`) is not serialized and never appears in this
+summary. No field carries source text, a secret value, an absolute host path or a temporary
+path. `AsifImportResponse` is shared by `vowp session import --json` and the daemon's import
+route; `session` is the ordinary registered row and `warnings` are the expected post-rename
+`project ... left null` / `job ... left null` reindex warnings.
+
+The four types are exported by `vowp schema` (`AsifCounts`, `AsifLoss`, `AsifReport`,
+`AsifImportResponse`).

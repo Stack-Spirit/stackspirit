@@ -18,6 +18,7 @@ use crate::api::{
     InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, NodePage, Page, SessionDetail, SessionPage,
     SessionSwitchRequest,
 };
+use crate::asif::{AsifCounts, AsifImportResponse, AsifLoss, AsifReport};
 use crate::capacity::{
     BrakeState, CapacityAdvice, CapacityReport, CapacitySnapshot, CapacityTarget, HostSample, RunUsage,
     RunningCapacity, UsageEstimate, WaitReason, WaitingJob,
@@ -182,6 +183,11 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("SurfaceResume", schema_value::<SurfaceResume>());
     schemas.insert("RunResumeResult", schema_value::<RunResumeResult>());
     schemas.insert("SurfaceResumeResult", schema_value::<SurfaceResumeResult>());
+    // v0.4 ASIF report documents (adapter-free summaries).
+    schemas.insert("AsifCounts", schema_value::<AsifCounts>());
+    schemas.insert("AsifLoss", schema_value::<AsifLoss>());
+    schemas.insert("AsifReport", schema_value::<AsifReport>());
+    schemas.insert("AsifImportResponse", schema_value::<AsifImportResponse>());
     schemas
 }
 

@@ -12,6 +12,7 @@
 pub mod adapter;
 pub mod agent;
 pub mod api;
+pub mod asif;
 pub mod capacity;
 pub mod capsule;
 pub mod catalog;
@@ -47,6 +48,8 @@ pub use adapter::*;
 pub use agent::*;
 #[allow(unused_imports)]
 pub use api::*;
+#[allow(unused_imports)]
+pub use asif::*;
 #[allow(unused_imports)]
 pub use capacity::*;
 #[allow(unused_imports)]
@@ -113,6 +116,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// from the other protocol modules.
 #[allow(unused_imports)]
 pub mod prelude {
+    pub use crate::asif::*;
     pub use crate::capsule::*;
     pub use crate::cost::*;
     pub use crate::error::*;
