@@ -99,9 +99,9 @@ To avoid ownership conflicts with the in-flight `v4-asif-*` and `v4-local-2*` wa
 - `crates/vowp-store/src/db.rs`, `crates/vowp-store/src/migrate.rs`,
   `crates/vowp-store/src/error.rs`, `crates/vowp-store/tests/migration.rs`
 - `crates/vowp-core/src/loops/supervisor.rs`, `crates/vowp-core/src/requests.rs`,
-  `crates/vowp-core/src/signals.rs` (or `crates/vowp-cli/src/signals.rs`)
-- `crates/vowp-cli/src/cli.rs`, `crates/vowp-cli/src/cmd/up.rs`,
-  `crates/vowp-cli/tests/up_drain.rs`
+  `crates/vowp-core/tests/node_supervisor.rs`
+- `crates/vowp-cli/src/cli.rs`, `crates/vowp-cli/src/signals.rs`, `crates/vowp-cli/src/cmd/up.rs`,
+  `crates/vowp-cli/tests/up.rs`
 - `docs/design/v0.4/live-upgrade-and-drain.md`, `docs/design/cli.md`,
   `docs/design/crates/vowp-core.md`
 
