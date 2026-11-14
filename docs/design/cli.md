@@ -167,6 +167,11 @@ Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `recei
 ### `vowp node add <name> <ssh-target> · ls · rm <name>`
 `add` records the node and tests `ssh -o BatchMode=yes <target> vowp --version` (stores the result in `capabilities`; failure is a warning unless `--strict`). `add <name> -` registers a surface-only executor node (a laptop that dials the home; the home never dials it). `ls`: `NAME TARGET LOCAL LAST_SEEN VERSION`.
 
+### `vowp node enroll <name> [--label <label>]... · revoke <name> [--yes] · show <name> [--json]`
+These commands are home-only; a control machine exits 5 because the code and credentials need the home store. `enroll` creates an `agent`-kind `pending` node and a one-time 52-character code valid for ten minutes, then prints the code once and the command `vowp agent enroll --target <home-ssh-target> --code-file -`. The code is never written to the log or a file; an existing node is exit 4. `revoke` marks the node `revoked` and revokes every credential (without `--yes` it refuses with exit 5); an unknown node is exit 3. Phase 0 has no live connection registry, so the gateway sends `Revoked` on the node's next frame. `show` prints the redacted `NodeCard`: kind, status, computed presence, labels, latest capacity, mapped projects, agent version, protocol, last error and `last_seen_at`. It never prints a path map, an absolute local path or a secret name. `node ls` and its JSON `Node` shape are unchanged.
+
+JSON: `enroll` prints `{"node":"mac-studio","code":"…","expires_at":"2026-11-14T10:10:00.000Z","command":"vowp agent enroll --target <home-ssh-target> --code-file -"}`; `revoke` prints `{"node":"mac-studio","status":"revoked","credentials_revoked":1}`; `show` prints the flattened `NodeCard` plus `"last_seen_at"` and no path-map field.
+
 ### `vowp loops [--all] [pause <loop> | resume <loop>]`
 No args: table of loop rows (`NAME KIND STATE INTERVAL LAST NEXT STATUS FAILS`). Loop rows are per project; `--all` lists every project's rows with a project column. `pause/resume` set `loops.state` (L1 itself cannot be paused; use `down`). Exit 3 for an unknown loop name. With more than one project and no `--project`, exit 2 listing them.
 
@@ -437,14 +442,19 @@ remains `session_pull_imports_a_child_and_prints_both_ids`.
 
 The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 `agent_status_prints_json`, `agent_enroll_help_names_code_file` and
-`agent_enroll_accepts_code_file_stdin`.
+`agent_enroll_accepts_code_file_stdin`; the home-side node slice adds
+`node_enroll_creates_a_pending_node_and_prints_the_code_once`, `node_enroll_refuses_a_duplicate_node`,
+`node_revoke_marks_the_node_and_revokes_credentials`, `node_show_returns_the_redacted_card` and
+`node_enroll_is_home_only`.
 
 ## 12. Mac agent commands (v0.4 Phase 0)
 
 These commands are the Mac side of the local orchestrator. They use `~/.vowp-agent` (override
 with `VOWP_AGENT_HOME`), never open a project store or `vowp-core`, and never put the node private
-key or the one-time code in argv, `ps`, a log line or a JSON document. Crate API:
-[`crates/vowp-agent.md`](crates/vowp-agent.md).
+key or the one-time code in argv, `ps`, a log line or a JSON document. The hidden
+`vowp agent gateway` command is the home-side exception: it runs on the home and opens the node
+store. Crate APIs: [`crates/vowp-agent.md`](crates/vowp-agent.md) and
+[`crates/vowp-core.md`](crates/vowp-core.md) §9.
 
 ### `vowp agent enroll --target <ssh-target> --code-file <path|->`
 Generates `~/.vowp-agent/node.key` (0600) and `node.pub` when absent, opens
@@ -494,3 +504,14 @@ last state is offline or stopped. `--json` prints:
 `connection` is one of `unknown`, `connecting`, `connected`, `reconnecting`, `revoked`,
 `superseded` or `stopped`. `AgentStatus` is a CLI-local document, not an exported protocol
 schema.
+
+### `vowp agent gateway --stdio` (hidden, home)
+The Phase 0 home side of the SSH stdio transport. It requires `--stdio`, refuses any role but home
+with exit 5, opens the store through `Ctx::store()` and calls `vowp_core::agent::gateway::serve`.
+Stdout carries only newline-delimited `AgentFrame` JSON; errors go to stderr. The first frame is
+`Enroll` or `AgentHello`; enrollment returns `Enrolled` and closes, and the agent reconnects for
+`AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`. Then `Heartbeat` updates presence and
+capacity, `Ping` is answered with `Pong`, and a revoked or unknown node gets `Revoked` or a typed
+`Error` before the connection closes. Frames are capped at 1 MiB and the handshake times out after
+10 seconds. Phase 0 has no `--socket`; the supervisor-socket gateway is Phase 4. It never logs the
+code, the signature, the public-key value or a path map.

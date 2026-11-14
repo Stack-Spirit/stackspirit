@@ -19,7 +19,8 @@ crates/vowp-core/src/
   loops/          mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
-tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs
+  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs
+tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs, agent.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
 
@@ -389,5 +390,74 @@ pub mod bank { pub fn bank_serving(deps: &Deps, env: &EnvConfig, target: &str, t
 Rules: (1) a failing guard ⇒ `Release.state = Refused`, ledger `promote`, exit 5 at the CLI; **no retry, no workaround** (design summary §9). (2) the diff between candidate and the banked serving copy must equal the files of the intended change; otherwise `Refused` ("live is not always git"). (3) the `upload_set` guard runs the project's upload-set check (e.g. `.vercelignore` listing) via `env.probe`-style custom guard: it exists to catch "a local build is not the deploy build". (4) approval `human` ⇒ inbox `approval` item, state `Banked` until answered; the supervisor calls `promote` again on answer. (5) `releases.log` line appended on every terminal state: `<ts> <env> <release id> <state> <from>-><to> rollback: <cmd>`.
 Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp files): `guards_clean_tree_dirty_fails`, `guards_head_equals_remote_behind_fails`, `guard_failure_marks_refused_and_never_deploys`, `serving_bank_runs_before_deploy_order_asserted_via_script_log`, `diff_unexpected_files_refused`, `human_approval_creates_inbox_and_waits`, `answer_approve_then_promote_goes_live_and_records_rollback_cmd`, `policy_approval_with_yes_deploys`, `yes_flag_never_bypasses_human_approval`, `probe_mismatch_marks_failed_with_rollback_available`, `rollback_runs_banked_command_and_links_releases`, `releases_log_lines_appended`, `dry_run_runs_guards_only`.
 
-## 9. Out of scope (v0.2)
+## 9. `agent` — v0.4 Phase 0 home side
+
+Spec: `docs/design/v0.4/local-orchestrator.md` §4.1, §4.2, §4.6, §8.2–§8.3 and §12.1. Phase 0 runs
+the gateway as a home command with the same store access as `session ingest`; the separate
+low-privilege gateway behind the supervisor socket is Phase 4.
+
+```rust
+pub mod agent {
+    pub mod code {
+        pub const ENROLLMENT_CODE_TTL: Duration;                    // 10 minutes
+        pub struct NewEnrollmentCode { pub code: String, pub code_hash: String, pub expires_at: Timestamp }
+        pub fn new_enrollment_code(now: Timestamp) -> NewEnrollmentCode;   // two ULIDs, SHA-256 hex
+        pub fn hash_code(code: &str) -> String;                     // lowercase hex SHA-256
+        pub fn has_code_shape(code: &str) -> bool;                  // 52 ASCII alphanumerics
+    }
+    pub mod enroll {
+        pub struct PendingEnrollment { pub node: NodeName, pub code: String, pub code_hash: String, pub expires_at: Timestamp }
+        pub struct EnrollRequest { pub code: String, pub public_key: String, pub agent_version: String,
+                                   pub capabilities: AgentCapabilities, pub paths: Vec<AgentPathMap> }
+        pub struct Enrolled { pub node: NodeName }
+        pub fn create_pending(store: &Store, node: &NodeName, labels: &[String], now: Timestamp) -> Result<PendingEnrollment, CoreError>;
+        pub fn redeem(store: &Store, request: &EnrollRequest, now: Timestamp) -> Result<Enrolled, CoreError>;
+        pub fn revoke(store: &Store, node: &NodeName, now: Timestamp) -> Result<u64, CoreError>;
+    }
+    pub mod auth {
+        pub fn issue_nonce() -> String;
+        pub fn handshake_payload(nonce: &str, home_id: &str, connection_id: &str) -> Vec<u8>;   // nonce\nhome\nconnection
+        pub fn verify(public_key_hex: &str, signature_hex: &str, nonce: &str, home_id: &str, connection_id: &str) -> bool;
+        pub fn is_public_key_hex(value: &str) -> bool;               // 32 bytes, lowercase hex
+        pub fn is_signature_hex(value: &str) -> bool;                // 64 bytes, lowercase hex
+    }
+    pub mod gateway {
+        pub const MAX_FRAME_BYTES: usize;                            // 1 MiB
+        pub const HANDSHAKE_TIMEOUT: Duration;                       // 10 seconds
+        pub const HEARTBEAT_SECS: u64;                               // 10
+        pub struct GatewayOptions { pub home_id: String, pub heartbeat_secs: u64, pub max_frame_bytes: usize, pub handshake_timeout: Duration }
+        pub enum GatewayOutcome { Enrolled { node: NodeName }, Closed { node: Option<NodeName> } }
+        pub fn serve(store: &Store, deps: &Deps, reader: impl BufRead + Send + 'static, writer: impl Write) -> Result<GatewayOutcome, CoreError>;
+        pub fn serve_with_options(store: &Store, deps: &Deps, reader: impl BufRead + Send + 'static, writer: impl Write, options: GatewayOptions) -> Result<GatewayOutcome, CoreError>;
+    }
+}
+```
+
+Behaviour:
+
+- A code is 52 characters (two ULIDs, 160 random bits). Only its SHA-256 hex hash is stored;
+  `vowp node enroll` prints the plaintext once. Codes expire after ten minutes and are consumed
+  in one immediate transaction, so a race cannot redeem one twice.
+- Redemption requires the node to be `pending`, or a code created after the node's last contact
+  (an explicit fresh re-enrollment). It revokes all previous credentials, binds the new ed25519
+  public key, sets `status=active`, `kind=agent`, `protocol=vowp-agent/1` and `agent_version`, and
+  stores the reported path map in `node_paths`.
+- Authentication is ed25519 over `nonce + "\n" + home_id + "\n" + connection_id`. The nonce is a
+  fresh 52-character token per connection; a signature captured on one challenge does not verify
+  on the next. Public keys and signatures are lowercase hex.
+- The first frame is `Enroll` or `AgentHello`. `Enroll` returns `Enrolled` and closes; the agent
+  reconnects and performs `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`. After the
+  handshake, `Heartbeat` updates `nodes.last_seen_at`, agent version, protocol and capabilities
+  (capacity under `capabilities.capacity`), and `Ping` is answered with `Pong`. A revoked or unknown
+  node gets `Revoked` or a typed `Error` and the connection closes. Frames are bounded at 1 MiB and
+  the handshake has a 10-second deadline.
+- Phase 0 has no runs, surfaces, leases, offload or job dispatch, and no live connection registry:
+  a revoked node is refused on its next frame.
+
+Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_enrolls_a_node_with_a_valid_code`,
+`gateway_refuses_an_expired_or_used_code`, `gateway_auth_rejects_a_bad_signature_and_a_replayed_nonce`,
+`gateway_heartbeat_updates_presence_and_capacity`, `gateway_revoke_marks_and_closes` and
+`gateway_unknown_or_revoked_node_is_refused`.
+
+## 10. Out of scope (v0.2)
 HTTP+SSE daemon, ACP, cross-node live sync, IANA timezone schedules, notification hooks (ntfy), automatic price-table download.

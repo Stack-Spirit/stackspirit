@@ -1,9 +1,11 @@
-//! `agent`: enroll, run and inspect the Mac-side v0.4 agent.
+//! `agent`: enroll, run and inspect the Mac-side v0.4 agent, and serve the hidden home gateway.
 //!
-//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2, §8.2–§8.5, §12.2 and
-//! `docs/design/cli.md` §12. These commands use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
-//! open a project store or `vowp-core`.
+//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2, §8.2–§8.5, §12.2–§12.3 and
+//! `docs/design/cli.md` §12. The Mac commands use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
+//! open a project store or `vowp-core`; the hidden `agent gateway` command is the home-side
+//! exception and opens the store through [`Ctx`].
 
+use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,11 +13,13 @@ use vowp_agent::{
     AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, NodeKey, RunOptions, RunOutcome, SshTransport,
     SystemAgentClock, fingerprint_of, load_public, pending_spool_bytes, surface_token_expiry, validate_enrollment_code,
 };
+use vowp_core::agent::gateway;
 use vowp_protocol::{AGENT_PROTOCOL, AgentRole};
 
-use crate::cli::{AgentCommand, AgentEnrollArgs, AgentRunArgs, AgentStatusArgs};
+use crate::cli::{AgentCommand, AgentEnrollArgs, AgentGatewayArgs, AgentRunArgs, AgentStatusArgs};
+use crate::node_ctx::NodeRole;
 use crate::output::print_json;
-use crate::{CliError, Global, IoStreams};
+use crate::{CliError, Ctx, Global, IoStreams};
 
 /// Runs one agent subcommand.
 pub fn run(global: &Global, io: &mut dyn IoStreams, command: &AgentCommand) -> Result<i32, CliError> {
@@ -23,7 +27,25 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, command: &AgentCommand) -> R
         AgentCommand::Enroll(args) => enroll(global, io, args),
         AgentCommand::Run(args) => run_agent(global, io, args),
         AgentCommand::Status(args) => status(global, io, args),
+        AgentCommand::Gateway(args) => gateway(global, io, args),
     }
+}
+
+/// Serves one Phase 0 agent connection on stdin/stdout.
+fn gateway(global: &Global, io: &mut dyn IoStreams, args: &AgentGatewayArgs) -> Result<i32, CliError> {
+    if !args.stdio {
+        return Err(CliError::Invalid("`vowp agent gateway` requires --stdio".to_owned()));
+    }
+    let ctx = Ctx::build(global, io)?;
+    if ctx.role() != NodeRole::Home {
+        return Err(CliError::Guard(
+            "the gateway needs the home store; run it on the home machine".to_owned(),
+        ));
+    }
+    let store = ctx.store()?;
+    // Frames are the only stdout output; the CLI prints any error to stderr.
+    gateway::serve(&store, ctx.deps(), BufReader::new(std::io::stdin()), std::io::stdout())?;
+    Ok(0)
 }
 
 fn enroll(global: &Global, io: &mut dyn IoStreams, args: &AgentEnrollArgs) -> Result<i32, CliError> {

@@ -73,6 +73,9 @@ python3 docs/reference/check-reference.py
 | [`vowp node add`](#vowp-node-add) | Add a node and probe it |
 | [`vowp node ls`](#vowp-node-ls) | List nodes |
 | [`vowp node rm`](#vowp-node-rm) | Remove a node |
+| [`vowp node enroll`](#vowp-node-enroll) | Create a pending local-agent node and a one-time enrollment code |
+| [`vowp node revoke`](#vowp-node-revoke) | Revoke a node's credentials |
+| [`vowp node show`](#vowp-node-show) | Show the redacted node card |
 | [`vowp loops`](#vowp-loops) | List or pause supervisor loops |
 | [`vowp loops pause`](#vowp-loops-pause) | Pause a loop |
 | [`vowp loops resume`](#vowp-loops-resume) | Resume a loop |
@@ -1269,9 +1272,12 @@ Add, list or remove nodes
 Usage: vowp node [OPTIONS] <COMMAND>
 
 Commands:
-  add  Add a node and probe it
-  ls   List nodes
-  rm   Remove a node
+  add     Add a node and probe it
+  ls      List nodes
+  rm      Remove a node
+  enroll  Create a pending local-agent node and a one-time enrollment code
+  revoke  Revoke a node's credentials
+  show    Show the redacted node card
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -1331,6 +1337,71 @@ Options:
 Remove a node
 
 Usage: vowp node rm [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Node name
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp node enroll`
+
+```text
+Create a pending local-agent node and a one-time enrollment code
+
+Usage: vowp node enroll [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Node name slug
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --label <LABEL>        Owner-assigned label; repeat for several labels
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp node revoke`
+
+```text
+Revoke a node's credentials
+
+Usage: vowp node revoke [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Node name
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --yes                  Revoke without asking for confirmation
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp node show`
+
+```text
+Show the redacted node card
+
+Usage: vowp node show [OPTIONS] <NAME>
 
 Arguments:
   <NAME>  Node name

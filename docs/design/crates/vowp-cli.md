@@ -27,7 +27,7 @@ crates/vowp-cli/
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
-  src/cmd/agent.rs    (`agent enroll|run|status`; no store, project or `vowp-core`)
+  src/cmd/agent.rs    (`agent enroll|run|status` plus hidden `agent gateway`; no store, project or `vowp-core` for the Mac commands)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
 ```
@@ -68,9 +68,10 @@ pub mod remote {
 ## 3. Agent commands (`cmd/agent.rs`)
 
 `vowp agent` is the Phase 0 Mac-side client from
-[`vowp-agent.md`](vowp-agent.md) and `cli.md` §12. It is handled before `Ctx::build` and before the
-generic `--node` redirect: it uses `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never opens a
-project store or `vowp-core`.
+[`vowp-agent.md`](vowp-agent.md) and `cli.md` §12. The Mac commands are handled before `Ctx::build`
+and before the generic `--node` redirect: they use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
+open a project store or `vowp-core`. The hidden `agent gateway` command is the home-side exception:
+it builds a `Ctx`, requires the home role and opens `Ctx::store()`.
 
 - `agent enroll --target <ssh-target> --code-file <path|->` reads `-` from the `IoStreams` stdin,
   trims the line, validates the 52-character code shape and passes it only to
@@ -85,6 +86,10 @@ project store or `vowp-core`.
   command in the message. It fills missing fields from `agent.json` and `node.pub`, recounts
   `spool/`, and prints the human lines `connection`, `node`, `home`, `protocol`, `last heartbeat`,
   `pending spool`, `key`, optional `surface token expires` and optional `last error`.
+- `agent gateway --stdio` (hidden) is the home side: it requires `--stdio`, builds a `Ctx`, refuses
+  any role but home with exit 5, opens `Ctx::store()` and calls
+  `vowp_core::agent::gateway::serve`. Stdout carries JSON frames only; errors go to stderr. Phase 0
+  has no `--socket`.
 
 `AgentStatus` is CLI-local (it is not an exported protocol schema), has no token or secret field,
 and serialises as:
@@ -103,6 +108,24 @@ and serialises as:
 }
 ```
 
+### Node enrollment commands (`cmd/node.rs`)
+
+These are home-only (exit 5 on a control machine) and require the home store:
+
+- `node enroll <name> [--label <label>]...` calls `vowp_core::agent::enroll::create_pending`, which
+  inserts an `agent`-kind `pending` node and a ten-minute code. It prints the 52-character code once
+  and the `vowp agent enroll --target <home-ssh-target> --code-file -` command; `--json` prints
+  `{"node","code","expires_at","command"}`. The code is never written to a file or the log. An
+  existing node is exit 4. `--label` is repeatable.
+- `node revoke <name> [--yes]` calls `enroll::revoke`, which marks the node `revoked` and revokes
+  every credential. Without `--yes` it refuses (exit 5). `--json` prints
+  `{"node","status":"revoked","credentials_revoked":N}`. An unknown node is exit 3. Phase 0 has no
+  live connection registry; the gateway sends `Revoked` on the node's next frame.
+- `node show <name> [--json]` returns the redacted `NodeCard` plus `last_seen_at` from the node row
+  and never a path map, absolute local path or secret name. Human output prints status, presence,
+  labels, capacity, mapped projects, agent version, protocol, last seen and last error. `node ls`
+  and its JSON `Node` shape are unchanged.
+
 ## 4. Rules
 
 1. Every command handler is `fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &XArgs) -> Result<i32, CliError>`; no handler prints directly to `std::io`.
@@ -119,8 +142,10 @@ Listed in `cli.md` §8, grouped by the file table above. Additional: `help_lists
 `no_command_returns_not_implemented`, `json_flag_outputs_valid_json_for_every_listing_command`, `exit_codes_follow_error_kind`, `ctx_build_requires_init`, `io_streams_buffer_impl_captures_output`,
 `capacity_reload_check_reports_without_writing`, `capacity_reload_refuses_when_no_supervisor_runs`;
 the agent slice adds `agent_status_without_enrollment_exits_three`, `agent_status_prints_json`,
-`agent_enroll_help_names_code_file` and `agent_enroll_accepts_code_file_stdin` in
-`tests/agent.rs`.
+`agent_enroll_help_names_code_file` and `agent_enroll_accepts_code_file_stdin`; the node
+enrollment slice adds `node_enroll_creates_a_pending_node_and_prints_the_code_once`,
+`node_enroll_refuses_a_duplicate_node`, `node_revoke_marks_the_node_and_revokes_credentials`,
+`node_show_returns_the_redacted_card` and `node_enroll_is_home_only` in `tests/agent.rs`.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

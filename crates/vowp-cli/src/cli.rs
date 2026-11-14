@@ -846,6 +846,12 @@ pub enum NodeCommand {
     Ls,
     /// Remove a node.
     Rm(NodeRmArgs),
+    /// Create a pending local-agent node and a one-time enrollment code.
+    Enroll(NodeEnrollArgs),
+    /// Revoke a node's credentials.
+    Revoke(NodeRevokeArgs),
+    /// Show the redacted node card.
+    Show(NodeShowArgs),
 }
 
 /// Arguments for `vowp node add`.
@@ -867,6 +873,33 @@ pub struct NodeRmArgs {
     pub name: String,
 }
 
+/// Arguments for `vowp node enroll`.
+#[derive(Debug, Clone, Args)]
+pub struct NodeEnrollArgs {
+    /// Node name slug.
+    pub name: String,
+    /// Owner-assigned label; repeat for several labels.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Vec<String>,
+}
+
+/// Arguments for `vowp node revoke`.
+#[derive(Debug, Clone, Args)]
+pub struct NodeRevokeArgs {
+    /// Node name.
+    pub name: String,
+    /// Revoke without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// Arguments for `vowp node show`.
+#[derive(Debug, Clone, Args)]
+pub struct NodeShowArgs {
+    /// Node name.
+    pub name: String,
+}
+
 /// `vowp agent` subcommands.
 #[derive(Debug, Clone, Subcommand)]
 pub enum AgentCommand {
@@ -876,6 +909,9 @@ pub enum AgentCommand {
     Run(AgentRunArgs),
     /// Show the last local agent status.
     Status(AgentStatusArgs),
+    /// Hidden: serve the home side of one agent stdio connection.
+    #[command(hide = true)]
+    Gateway(AgentGatewayArgs),
 }
 
 /// Arguments for `vowp agent enroll`.
@@ -903,6 +939,14 @@ pub struct AgentRunArgs {
 /// Arguments for `vowp agent status`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct AgentStatusArgs {}
+
+/// Arguments for the hidden `vowp agent gateway`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentGatewayArgs {
+    /// Serve one JSON frame per line on stdin/stdout.
+    #[arg(long)]
+    pub stdio: bool,
+}
 
 /// Arguments for `vowp loops`.
 #[derive(Debug, Clone, Args)]
