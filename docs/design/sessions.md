@@ -1,6 +1,7 @@
 # sessions.md — universal sessions: log, capsule, switch, surfaces, export/import
 
-Status: current for v0.2. File- and protocol-level rules. Consumed by `vowp-store` (files,
+Status: current for v0.2; the v0.3 pull and v0.4 ASIF text in §6 extends it. File- and
+protocol-level rules. Consumed by `vowp-store` (files,
 `SessionLog`, reindex: `crates/vowp-store.md`), `vowp-core::session` (capsule writer, switch,
 remote execution, export/import, `SessionOps` impl), `vowp-core::surface` (leases, takeover, app
 hosts, mirror), `vowp-cli` (`session`, `chat`, `mcp`: `cli.md`). Types are in `types.md` (§5 events,
@@ -174,7 +175,7 @@ limit on the target provider is `409`; an invalid body or executor is `400`. The
 local-node only, uses `drain_secs: 5`, and returns the completed `Switch`; a failed switch is
 an error and leaves the previous executor attached under the abort rules above.
 
-## 6. Export / import (cross-node, v0.1)
+## 6. Export / import (bundle, cross-node, pull and ASIF)
 
 `vowp session export <id> [--tail N] [--out file | -o file]` writes a **single JSON file** (no archive dependency): `vowp-bundle-v1`.
 `vowp session import <file> [--node …]` creates a **child session** on the importing node.
@@ -363,6 +364,40 @@ Still out of scope: automatic merge, a force/overwrite flag, bidirectional sync,
 live lease migration, a daemon transport, offline queueing, a progress display and a configurable
 size limit.
 
+### 6.8 ASIF interchange (v0.4, review draft)
+
+`vowp session export <id> --format asif` and `vowp session import <file> --format asif` add a
+second interchange format beside the bundle; `--format bundle` stays the default and its §6.1–§6.7
+behaviour is unchanged. The mapping and its limits are in
+[`v0.4/asif-integration.md`](v0.4/asif-integration.md) §3 and §5; the command details are in
+[`cli.md`](cli.md) §4.
+
+- **Export** writes one deterministic `.asif.zip` (default `./<resolved-id>.asif.zip`) through
+  the pinned `vowp-asif` adapter. `--out -` writes the package to stdout and is refused on a TTY;
+  `--json` conflicts with it. Export is read-only: it writes no capsule, takes no session lock
+  and moves no lease. `--tail` is refused because an ASIF capture is not a bundle tail.
+- **Redaction** uses `--redact` or the local `--redact-file`; host paths are scrubbed by default
+  and `--keep-host-paths` is opt-in. Both are transformations, not secret discovery.
+- **Import** accepts a `.asif.zip`, a standalone `session.json`, a directory holding it, or `-`
+  stdin. It always creates a new idle session with a fresh ULID; there is no `--same-id`,
+  `--executor`, overwrite or merge. `--cwd` defaults to the selected project path. A
+  multi-branch document needs `--branch`.
+- **Losses** are part of the result: human output prints the count and unique kinds to stderr;
+  `--json` carries the summary; `--report` writes the full `vowp-asif-report-v1`. `--strict`
+  refuses `Blocking`/`Integrity` losses with exit 5; `--allow-loss` lets recoverable
+  integrity/ambiguity problems become declared losses. The two flags conflict.
+- **Remote** `--node` uses the existing SSH transport. Export verifies the streamed byte count
+  and SHA-256 before the local package is written; `--report` is local-only and refused with
+  `--node`, as is a directory input.
+- **Web** `GET /api/v1/sessions/{id}/export/asif` downloads the package and `?report=1` returns
+  the report summary; `POST /api/v1/sessions/import/asif?branch=<id>` is the token-gated import
+  behind `/import`. Both use the safe defaults; the page never claims a lossless export.
+
+ASIF 0.4 is a review draft. This slice does not claim ASIF conformance, an exact or lossless
+round trip, portable continuation or native-harness import. Imported sessions are idle data: no
+turn, capsule, lease or job is created. Jobs, gates, leases and project rows are not in the
+package.
+
 ## 7. `vowp session watch` importer
 
 Records an interactive Claude Code session into the canonical store without running it. **Read-only** on Claude's files.
@@ -550,6 +585,11 @@ The tests live in `crates/vowp-store.md` §6 (log, blob, reindex) and `crates/vo
 | §6.6 full pull refuses a present id without touching it | `session_pull_full_reports_divergence_without_mutating_it` | cli |
 | §6.6 corrupt or over-cap full pull leaves no final directory | `session_pull_full_refuses_a_corrupt_snapshot_without_leaving_a_directory`, `session_pull_full_refuses_an_over_cap_snapshot_before_copying` | cli |
 | §6.6 manifest validation, size cap and digest verification | `session_dir_manifest_verifies_and_detects_corruption`, `session_dir_manifest_refuses_a_directory_over_the_size_cap`, `session_dir_manifest_rejects_traversal_and_reserved_paths` | store |
+| §6.8 ASIF export is deterministic and reports the summary | `asif_export_writes_a_deterministic_package_and_summary` | core |
+| §6.8 ASIF import creates one idle indexed session and no turn | `asif_import_creates_one_indexed_session_and_no_turn` | core |
+| §6.8 ASIF strict export/import refuses `Blocking`/`Integrity` and writes nothing | `asif_export_strict_refuses_blocking_loss_and_removes_output`, `asif_import_strict_removes_staging_and_reports_the_loss` | core |
+| §6.8 ASIF CLI round trip exports, imports and re-exports | `session_export_asif_then_import_round_trip` | cli |
+| §6.8 ASIF download/import routes and pages | `asif_download_returns_zip_attachment_headers_and_exact_bytes`, `asif_import_creates_one_idle_session_with_201_and_location`, `sessions_page_detail_has_the_asif_download_link`, `import_page_posts_raw_zip_with_bearer_and_clears_on_401` | daemon |
 | §1 log, blob and reindex rules | the `log_*`, `blob_*`, `reindex_*` tests of vowp-store.md §6 | store |
 | §8 lease acquire, heartbeat, stale sweep, exact holder | `lease_acquire_is_one_holder`, `heartbeat_keeps_lease_live`, `stale_lease_free_after_sixty_seconds` | core |
 | §8 takeover cuts off the old surface within 2 s | `takeover_cuts_old_surface_within_two_seconds`, `lease_revoked_is_pushed_within_2s` | core |

@@ -1,12 +1,15 @@
-# VOWP ↔ ASIF integration (v0.4 plan)
+# VOWP ↔ ASIF integration (v0.4)
 
-Status: planning. This document is the build plan for making ASIF a first-class VOWP
-interchange format. It contains no code and changes no adapter repository.
+Status: implemented for the v0.4 ASIF slice; ASIF 0.4 remains a review draft. This document is
+the cross-cutting contract for the core facade, the CLI and the daemon routes. The build-job split
+in §8 is the record of how it was built; the independent verification job (E) has not run at the
+time of writing.
 
 - ASIF: `0.4` (review draft dated 5 October 2026), pinned at
   `652d9e23ddbe5656b9ceea311df7e09e93c1cd2f`.
 - Adapter: public `vowp-asif` `0.1.1`, tag `v0.1.1`, commit
-  `466ebb81f58646febb80996874b46c11288d5a97` at the time of this plan.
+  `466ebb81f58646febb80996874b46c11288d5a97`, pinned by `rev` in `Cargo.toml` and
+  `Cargo.lock`.
 - VOWP target: protocol version `1`, capsule version `1`, the v0.2 session-directory
   layout and the v0.3 daemon API.
 - Native bundle: `vowp-bundle-v1` remains the default and is not changed.
@@ -15,6 +18,14 @@ ASIF 0.4 is a review draft, not a released standard. Nothing in this integration
 ASIF conformance, a lossless translation, exact request reconstruction, portable
 continuation or native-harness import.
 
+## Implementation status
+
+The core facade (`vowp_core::session::asif`), the CLI (`vowp session export|import --format
+asif`), the daemon download/report/import routes and the `/import` page are in the tree. The
+command and route surface below is the one those slices implement; `docs/design/cli.md` and
+`docs/design/v0.3/http-api.md` hold the command-local and route-local details. The independent
+verification job (E) and a crates.io release of the pinned adapter are still open; see §9.
+
 ---
 
 ## 1. What exists today
@@ -22,12 +33,14 @@ continuation or native-harness import.
 | Piece | State |
 |---|---|
 | Adapter | Complete public CLI and library: `export`, `validate`, `import`, typed `AsifDocument`, `Report`/`Loss`, deterministic `ZIP_STORED` packages, offline schemas. |
-| VOWP bundle | `vowp session export <id>` writes `./<id>.vowp-bundle.json`; `vowp session import <file>` creates a child, or the same id with `--same-id`; remote export/import over SSH; `session pull`/`session push`. |
+| VOWP bundle | `vowp session export <id>` writes `./<id>.vowp-bundle.json`; `vowp session import <file>` creates a child, or the same id with `--same-id`; remote export/import over SSH; `session pull`/`session push`. Unchanged. |
+| ASIF core facade | `vowp_core::session::asif::export_asif` / `import_asif`, `MAX_ASIF_ARCHIVE_BYTES`, and the adapter-free `AsifReport`/`AsifImportResponse` types in `vowp-protocol`. The adapter is a runtime dependency of `vowp-core` only; `vowp-cli` names it only as a dev-dependency for fixtures. |
+| ASIF CLI | `vowp session export <id> --format asif` writes one deterministic `.asif.zip`; `vowp session import <file> --format asif` creates one new idle session from a package, a standalone `session.json`, a directory or stdin. Redaction, report, strict/allow-loss and the remote stream are implemented. |
 | Session directory | `sessions/<id>/log.jsonl`, `blobs/<sha256>`, `capsules/<at_seq>-<ulid>.json`, `adapters.json`, optional `manifest.json`; jobs, gates, leases and project rows live outside it. |
-| Daemon web | Read-only `/sessions`, `/sessions/{id}`, `/board`, `/cost`, `/inbox`, `/nodes`, `/jobs`; token-gated write routes for inbox answers, session switch and job actions. |
-| Missing | An ASIF format on the CLI, a library dependency, a download/upload path, and the docs/tests that make the compatibility claims reviewable. |
+| Daemon web | Read-only `/sessions`, `/sessions/{id}`, `/board`, `/cost`, `/inbox`, `/nodes`, `/jobs`; token-gated write routes for inbox answers, session switch, job actions and ASIF import; token-free ASIF download and loss preview; the `/import` page and PWA shell entry. |
+| Missing | ASIF conformance, exact request reconstruction, portable continuation, native-harness import, and the first-slice exclusions in §3.6 (`--asif-output`, `--workspace-root`, `--include-raw`, `--vowp-sidecar`, `--allow-unsupported`, `--same-id`/`--executor` for ASIF, `--report` over `--node`). |
 
-This plan adds one format, one library boundary and two web actions. It does not add a
+This integration adds one format, one library boundary and two web actions. It does not add a
 second ASIF implementation.
 
 ---
@@ -108,7 +121,7 @@ stdout is the package bytes only; the summary and warnings go to stderr. `--json
       {"kind": "cwd-omitted", "stage": "translation", "scope": "environment", "message": "..."},
       {"kind": "contexts-reconstructed", "stage": "normalization", "scope": "contexts", "message": "..."}
     ],
-    "unsupported": ["jobs", "gates", "leases"]
+    "unsupported": ["vowp.jobs", "vowp.gates", "vowp.leases", "vowp.project-db"]
   }
 }
 ```
@@ -238,7 +251,9 @@ mode in terms of loss severity:
 
 The adapter's `LossClass` is available on the in-memory report even though it is not
 serialized. The core integration filters on it; the adapter is always called with
-`strict: false`.
+`strict: false`. In `--strict` mode the CLI also passes `allow_loss: true`, so recoverable
+integrity/ambiguity problems are declared by the adapter instead of being refused before the
+VOWP filter sees them; the filter then refuses any `Blocking`/`Integrity` loss.
 
 `--allow-unsupported` is deliberately not exposed. A required ASIF feature this adapter does
 not interpret (`continuation`, `streams`, `external_bindings`, an unknown required extension)
@@ -294,7 +309,7 @@ success the remote prints exactly one JSON line, then the exact package bytes:
  "counts":{"events_in":42,"events_out":42,"resources":3,"capsules":1},
  "loss_count":2,
  "losses":[{"kind":"cwd-omitted","stage":"translation","scope":"environment","message":"..."}],
- "unsupported":["jobs"]}}
+ "unsupported":["vowp.jobs","vowp.gates","vowp.leases","vowp.project-db"]}}
 ```
 
 The line is bounded by the adapter JSON limit (16 MiB + 4 KiB) and parsed before any local
@@ -355,10 +370,10 @@ it to crates.io. This is the only option that is both one implementation and com
 the existing `scripts/release/check-packages.sh` / `publish-crates.sh` gates.
 
 **Until that publication:** use the public git dependency pinned by commit in
-`crates/vowp-core/Cargo.toml`:
+`crates/vowp-core/Cargo.toml`. This is the dependency in the current tree:
 
 ```toml
-vowp-asif = { git = "https://github.com/syver777/vowp-asif", rev = "466ebb81f58646febb80996874b46c11288d5a97" }
+vowp-asif = { git = "https://github.com/syver777/vowp-asif", rev = "466ebb81f58646febb80996874b46c11288d5a97", version = "0.1.1" }
 ```
 
 The build job must verify the tag before committing with:
@@ -383,9 +398,10 @@ asserted in the adapter-version test.
 
 ### 4.3 Build, offline, release, licence and CI implications
 
-- **Build:** `vowp-core` is the only crate that names `vowp-asif`; `vowp-cli` and
-  `vowp-daemon` consume the core facade. `cargo add -p vowp-core --git <url> --rev <sha>`
-  edits the crate manifest and `Cargo.lock`; no handwritten version is added.
+- **Build:** `vowp-core` is the only runtime crate that names `vowp-asif`; `vowp-cli` and
+  `vowp-daemon` consume the core facade, and `vowp-cli` also names it as a dev-dependency for
+  fixture construction. `cargo add -p vowp-core --git <url> --rev <sha>` edits the crate
+  manifest and `Cargo.lock`; no handwritten version is added.
 - **Offline:** a cold checkout needs network access to fetch the git object. CI and the
   release workflow already have network. `cargo fetch --locked` warms the cache; after that
   `--offline` works. This is worse than a crates.io dependency and better than a vendored
@@ -396,6 +412,9 @@ asserted in the adapter-version test.
   `vowp-core` from `check-packages.sh` or by adding `publish = false`. The verification job
   records the exact failure and the owner decision. If the owner publishes `vowp-asif 0.1.1`
   to crates.io, switch the manifest line to `vowp-asif = "=0.1.1"`; no code changes.
+  **Outcome in this tree:** the dependency is still the git source, so the release block in
+  §9.1 is live and `scripts/release/check-packages.sh` is expected to fail for the three
+  crates until the adapter is published.
 - **Licence:** the adapter is MIT. It vendors the two ASIF schemas and fixtures under MIT
   with upstream notices. Regenerate `THIRD-PARTY-LICENSES.md` with
   `python3 scripts/release/generate-third-party-licenses.py` and keep the `--check` gate.
@@ -531,8 +550,9 @@ enforce ASIF instructions, approvals or policies.
 
 ## 6. Web download and upload
 
-The daemon remains loopback-only, one project per process. The sessions list and detail pages
-stay read-only; import is a separate, token-gated action and page.
+The daemon remains loopback-only, one project per process. The ASIF additions keep the sessions
+list and detail page read-only for ASIF: export is a token-free `GET` and import is a separate,
+token-gated action and page.
 
 ### 6.1 Download as `.asif.zip`
 
@@ -705,9 +725,12 @@ byte); do not hand-maintain a second full document.
   create a synthetic session, export, import, inspect the new log/blobs, export again and
   compare the stable fields.
 - `session_export_asif_redact_file_is_read_locally_and_never_echoed`.
+- `session_export_asif_keep_host_paths_is_opt_in`.
 - `session_export_asif_reports_losses_and_writes_report_only_when_asked`.
 - `session_export_asif_strict_exits_five_and_writes_nothing`.
 - `session_import_asif_creates_a_new_session_and_prints_its_id`.
+- `session_import_asif_json_shape_and_full_report`.
+- `session_import_asif_requires_an_existing_cwd`.
 - `session_import_asif_stdin_stages_and_imports`.
 - `session_import_asif_invalid_package_exits_two_and_writes_nothing`.
 - `session_import_asif_same_package_twice_exits_four_and_keeps_the_first_session`.
@@ -716,11 +739,13 @@ byte); do not hand-maintain a second full document.
 - `session_import_asif_strict_and_allow_loss_map_to_the_documented_exit_codes`.
 - `session_export_asif_remote_stream_verifies_bytes_and_hash` (fake ssh).
 - `session_export_asif_remote_failure_writes_no_local_file`.
+- `session_export_asif_remote_report_is_refused_with_exit_two`.
 - `session_import_asif_remote_streams_and_relays_the_response`.
 - `session_import_asif_remote_failure_creates_no_local_session`.
 - `session_import_asif_remote_report_is_refused_with_exit_two`.
+- `session_import_asif_remote_directory_is_refused`.
 
-### 7.3 Web (`crates/vowp-daemon/tests/asif_export_api.rs`, `asif_import_api.rs`, `session_page.rs`)
+### 7.3 Web (`crates/vowp-daemon/tests/asif_export_api.rs`, `asif_import_api.rs`, `session_page.rs`, `pwa.rs`)
 
 - `asif_download_returns_zip_attachment_headers_and_exact_bytes`.
 - `asif_download_report_query_returns_counts_and_losses`.
@@ -754,6 +779,11 @@ byte); do not hand-maintain a second full document.
 
 Each job has one owner per path. The dependency order is A → B/C → D → E. `Cargo.lock` is
 the shared exception: let cargo update it, never edit it by hand.
+
+**Build status.** A (core), B (CLI) and C (web) are implemented in the tree; D updates this
+document and the user documentation; E is the independent verification and remains open. The
+per-job owns lists and gates below are the build record, not a claim that every later v0.4
+slice has shipped.
 
 **Audit-gate qualification.** `scripts/audit/scan.sh --worktree` and
 `scripts/audit/public-tree-check.sh --worktree` already exit 1 in this worktree before any
@@ -1010,6 +1040,15 @@ blocker, not a pass. If the owner publishes the adapter crate first, it must pas
 
 ## 9. Risks and owner decisions
 
+These were the open decisions before the build. The shipped slice resolves 2–8 and 10–11 as
+recommended: one new idle session per successful import, the source project kept or left
+null, token-free download, strict as `Blocking`/`Integrity` only, a summary-only remote
+stream with `--report` refused over `--node`, the adapter's 272 MiB web cap, safe web
+defaults, the document staying under `docs/design/v0.4/`, and event-id conflict on a repeat
+import. 9 is enforced in the CLI, the web copy and this document. 1 and 12 remain release
+and packaging constraints: the dependency is still a pinned git source, so crates.io
+publishing is blocked until the adapter is published; no `asif` Cargo feature was added.
+
 1. **Public git dependency vs release pin.** A git `rev` dependency blocks crates.io
    publishing of `vowp-core`, `vowp-daemon` and `vowp-cli`. Recommended: publish
    `vowp-asif 0.1.1` to crates.io (owner action), then use `=0.1.1`; until then use the git
@@ -1074,3 +1113,7 @@ The plan is specific enough to create the jobs when:
 - the web routes have exact methods, auth, limits, temp-file and response rules;
 - every test listed can fail when the behaviour is wrong and is hermetic;
 - the owner decisions above are answered or explicitly defaulted.
+
+For this slice, A, B, C and D meet those criteria and the gates recorded in §8. The
+independent verification job (E) is the open item, and the crates.io release block in §4.3
+remains an owner action.

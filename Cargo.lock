@@ -2109,6 +2109,7 @@ dependencies = [
  "toml",
  "vowp-adapters",
  "vowp-agent",
+ "vowp-asif",
  "vowp-core",
  "vowp-graph",
  "vowp-protocol",

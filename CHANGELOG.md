@@ -11,6 +11,45 @@ features deliberately left out of v0.3 are in [`docs/roadmap.md`](docs/roadmap.m
 
 ## [Unreleased]
 
+### Added
+
+**ASIF 0.4 interchange (review draft)**
+
+- `vowp session export <id> --format asif` writes one deterministic `.asif.zip` through the
+  pinned `vowp-asif 0.1.1` adapter. The default path is `./<resolved-id>.asif.zip`; `--out -`
+  writes the exact package bytes and is refused on a terminal, and `--json` conflicts with it.
+  Export is read-only: it writes no capsule, takes no session lock and moves no lease.
+- Export redaction: repeatable `--redact` literals and `--redact-file` (read locally, one
+  literal per line). Host paths are scrubbed by default; `--keep-host-paths` is opt-in.
+- `vowp session import <file> --format asif` imports a `.asif.zip`, a standalone `session.json`,
+  a directory holding it or stdin as one new idle session with a fresh ULID. It never
+  overwrites, merges or keeps the source id; `--cwd` defaults to the project path and
+  `--branch` selects one branch of a multi-branch document.
+- Loss reporting and policy: human output prints the count and unique loss kinds to stderr,
+  `--json` carries the summary, and `--report` writes the full `vowp-asif-report-v1`.
+  `--strict` refuses `Blocking`/`Integrity` losses with exit 5 and writes nothing;
+  `--allow-loss` accepts recoverable integrity/ambiguity problems as declared losses. The two
+  flags conflict.
+- Remote export and import over the existing SSH transport. Export verifies the hidden stream's
+  byte count and SHA-256 before writing the local package; `--report` and directory input are
+  refused with `--node`.
+- `vowp_core::session::asif` exposes the adapter-free `AsifReport`/`AsifImportResponse` facade,
+  and `vowp-protocol` exports both documents with their JSON Schemas. The adapter is a runtime
+  dependency of `vowp-core` only; `vowp-cli` uses it as a dev-dependency for fixtures.
+- The daemon serves token-free `GET /api/v1/sessions/{id}/export/asif` (with `?report=1` for
+  the loss preview) and token-gated `POST /api/v1/sessions/import/asif?branch=<id>`. The session
+  detail page gains the download card, `/import` is the upload page, and the PWA shell includes
+  it.
+- The cross-cutting contract is in
+  [`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md); the session
+  narrative is `sessions.md` §6.8, and `cli.md` and `http-api.md` carry the command and route
+  detail.
+
+ASIF 0.4 is a review draft. The slice reports declared losses and does not claim ASIF
+conformance, an exact or lossless round trip, portable continuation or native-harness import.
+The adapter is pinned as a git dependency for now; that is the release blocker recorded in
+[`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md) §4.3, not a pass.
+
 ## [0.3.0] - 2026-11-12
 
 The v0.3 feature set: a loopback HTTP/SSE API and `vowp-daemon`, a web/PWA
