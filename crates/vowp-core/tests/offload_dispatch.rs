@@ -603,6 +603,74 @@ fn run_rejected_keeps_the_job_ready_with_a_reason() {
 }
 
 #[test]
+fn a_reconnected_agent_re_accepts_a_disconnected_run() {
+    let fixture = fixture(FixtureOptions::default());
+    enqueue(&fixture);
+    let claimed = claim(&fixture);
+    let (payload, _, _) = assign_parts(&claimed[0]);
+    let assignment_id = claimed[0].assignment.id.clone();
+
+    dispatch::accept(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &assignment_id,
+        &payload.run_id,
+        1,
+        ts(),
+    )
+    .expect("first accept");
+    let changed = dispatch::disconnect_node(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        "the transport dropped",
+        ts(),
+    )
+    .expect("disconnect");
+    assert_eq!(changed[0].state, AgentAssignmentState::Disconnected);
+
+    // The real agent re-sends RunAccepted for the live run after Resume. That is not a
+    // transport error: the row returns to running and the job stays running.
+    let reaccepted = dispatch::accept(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &assignment_id,
+        &payload.run_id,
+        1,
+        ts(),
+    )
+    .expect("re-accept after reconnect");
+    assert_eq!(reaccepted.state, AgentAssignmentState::Running);
+    assert_eq!(reaccepted.id, assignment_id);
+    assert_eq!(ready_job(&fixture).state, JobState::Running);
+
+    // A fenced run is not silently reopened by a late RunAccepted.
+    dispatch::lose(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &payload.run_id,
+        1,
+        "the run lease expired",
+        ts(),
+    )
+    .expect("fence");
+    let error = dispatch::accept(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &assignment_id,
+        &payload.run_id,
+        1,
+        ts(),
+    )
+    .expect_err("a fenced assignment cannot be re-accepted");
+    assert!(matches!(error, vowp_core::CoreError::Refused(_)), "{error}");
+}
+
+#[test]
 fn resume_returns_the_run_and_surface_tails() {
     let fixture = fixture(FixtureOptions::default());
     enqueue(&fixture);

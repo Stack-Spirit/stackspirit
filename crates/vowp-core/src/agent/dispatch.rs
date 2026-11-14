@@ -453,12 +453,30 @@ pub fn accept(
             "assignment id {assignment_id} does not match run {run_id} epoch {epoch}"
         )));
     }
-    let assignment = store.advance_assignment(
-        &assignment.id,
-        AgentAssignmentState::Accepted,
-        Some(now),
-        "agent accepted the assignment",
-    )?;
+    // A reconnect re-sends `AssignRun` for the same epoch and the agent re-accepts the
+    // run it already holds. Repeats are idempotent, and a `disconnected` row is that
+    // same live run after a transport drop, so it returns to `running` rather than
+    // failing a lifecycle edge the durable state does not allow. Any other state means
+    // the home already fenced or finished this run.
+    let next = match assignment.state {
+        AgentAssignmentState::Sent => AgentAssignmentState::Accepted,
+        AgentAssignmentState::Accepted | AgentAssignmentState::Running => assignment.state,
+        AgentAssignmentState::Disconnected => AgentAssignmentState::Running,
+        state => {
+            return Err(CoreError::Refused(format!(
+                "run {run_id} epoch {epoch} is {} and cannot be accepted",
+                state.as_str()
+            )));
+        }
+    };
+    let detail = if next == assignment.state {
+        assignment.detail.clone()
+    } else if assignment.state == AgentAssignmentState::Disconnected {
+        "agent re-accepted the assignment after a reconnect".to_owned()
+    } else {
+        "agent accepted the assignment".to_owned()
+    };
+    let assignment = store.advance_assignment(&assignment.id, next, Some(now), &detail)?;
     let assignment = store.renew_assignment(&assignment.id, now, now.plus(RUN_LEASE_TTL), &assignment.detail)?;
     let project_store = project_store(deps, store, &assignment.project)?;
     clear_waiting(&project_store, &assignment.payload.job)?;
