@@ -1,0 +1,123 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+import type { SpiritBridge } from "./SpiritBridge";
+import { toSpiritError } from "./errors";
+import type {
+  ActionResult,
+  CapacityTargetView,
+  CapacityView,
+  ConnectionSnapshot,
+  EngineStatus,
+  ExternalHarness,
+  ExternalHarnessKind,
+  FleetView,
+  GateSnapshot,
+  HostDraft,
+  HostKeyPin,
+  HostKeyScan,
+  HostProfile,
+  HostProfilePatch,
+  HostProbe,
+  InboxItemView,
+  JobAction,
+  KeyStatus,
+  ModelChoice,
+  NewHostProfile,
+  RawDocument,
+  SetTargetInput,
+  StateEvent,
+} from "./wire";
+
+async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw toSpiritError(error);
+  }
+}
+
+/**
+ * The only file in the renderer allowed to import `@tauri-apps/api`.
+ * Every method is a thin adapter over a `spirit-core` command.
+ */
+export class TauriBridge implements SpiritBridge {
+  readonly kind = "tauri" as const;
+  readonly preview = false;
+
+  hosts = {
+    list: (): Promise<HostProfile[]> => call("list_hosts"),
+    add: (input: NewHostProfile): Promise<HostProfile> => call("add_host", { input }),
+    update: (id: string, patch: HostProfilePatch): Promise<HostProfile> =>
+      call("update_host", { id, patch }),
+    remove: (id: string): Promise<void> => call("remove_host", { id }),
+    scanFingerprint: (input: HostDraft): Promise<HostKeyScan> =>
+      call("scan_fingerprint", { draft: input }),
+    trustFingerprint: (id: string, pin: HostKeyPin): Promise<HostProfile> =>
+      call("trust_fingerprint", { id, pin }),
+    probe: (input: HostDraft, pin?: HostKeyPin | null): Promise<HostProbe> =>
+      call("probe_host", { draft: input, pin: pin ?? null }),
+  };
+
+  connection = {
+    connect: (hostId: string): Promise<ConnectionSnapshot> => call("connect_host", { hostId }),
+    disconnect: async (hostId: string): Promise<void> => {
+      await call<ConnectionSnapshot>("disconnect_host", { hostId });
+    },
+    status: (): Promise<ConnectionSnapshot> => call("connection_status"),
+    subscribe: (listener: (event: StateEvent) => void): (() => void) => {
+      let disposed = false;
+      let unlisten: UnlistenFn | undefined;
+      void listen<StateEvent>("spirit://state", (event) => listener(event.payload))
+        .then((stop) => {
+          if (disposed) stop();
+          else unlisten = stop;
+        })
+        .catch(() => {
+          // The window can close while the subscription is still starting.
+        });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
+  };
+
+  fleet = {
+    get: (): Promise<FleetView | null> => call("fleet_get"),
+    refresh: (): Promise<FleetView> => call("fleet_refresh"),
+    capacity: async (): Promise<CapacityView | null> => {
+      const fleet = await call<FleetView | null>("fleet_get");
+      return fleet?.capacity ?? null;
+    },
+    jobAction: (jobId: string, action: JobAction): Promise<ActionResult> =>
+      call("job_action", { jobId, action }),
+    inbox: (all: boolean): Promise<InboxItemView[]> => call("fleet_inbox", { all }),
+    answerInbox: (id: string, answer: string): Promise<InboxItemView> =>
+      call("answer_inbox", { id, answer }),
+    setTarget: (input: SetTargetInput): Promise<CapacityTargetView> =>
+      call("set_target", { input }),
+    rawDocument: (): Promise<RawDocument | null> => call("fleet_raw_document"),
+  };
+
+  engine = {
+    status: (): Promise<EngineStatus> => call("engine_status"),
+    models: (): Promise<ModelChoice[]> => call("engine_models"),
+    selectModel: (id: string): Promise<EngineStatus> => call("select_model", { modelId: id }),
+    storeKey: (provider: string, secret: string): Promise<KeyStatus> =>
+      call("store_key", { provider, secret }),
+    verifyKey: (provider: string): Promise<KeyStatus> => call("verify_key", { provider }),
+    deleteKey: (provider: string): Promise<KeyStatus> => call("delete_key", { provider }),
+    keyStatus: (): Promise<KeyStatus[]> => call("key_status"),
+    scanExternal: (): Promise<ExternalHarness[]> => call("scan_external"),
+    selectExternal: (kind: ExternalHarnessKind, path: string): Promise<EngineStatus> =>
+      call("select_external", { kind, path }),
+    useBundled: (): Promise<EngineStatus> => call("use_bundled"),
+    restart: (): Promise<EngineStatus> => call("restart_engine"),
+  };
+
+  gates = {
+    get: (): Promise<GateSnapshot> => call("gates_get"),
+    probe: (): Promise<GateSnapshot> => call("probe_gates"),
+  };
+}

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/spirit-core"]
+members = ["crates/spirit-core", "apps/spirit-desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

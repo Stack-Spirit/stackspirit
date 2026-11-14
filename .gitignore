@@ -1,5 +1,9 @@
 /target/
-/node_modules/
-/dist/
+node_modules/
+dist/
+test-results/
+playwright-report/
+apps/spirit-desktop/src-tauri/binaries/
+apps/spirit-desktop/src-tauri/gen/
 /.vowp/
 .vowp/tmp/

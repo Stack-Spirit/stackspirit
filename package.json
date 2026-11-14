@@ -1,0 +1,18 @@
+{
+  "name": "stackspirit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StackSpirit desktop cockpit over a VOWP home",
+  "workspaces": [
+    "apps/spirit-desktop"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @stackspirit/desktop",
+    "build": "npm run build -w @stackspirit/desktop",
+    "typecheck": "npm run typecheck -w @stackspirit/desktop",
+    "lint": "npm run lint -w @stackspirit/desktop",
+    "test": "npm run test -w @stackspirit/desktop",
+    "test:e2e": "npm run test:e2e -w @stackspirit/desktop",
+    "tauri": "npm run tauri -w @stackspirit/desktop"
+  }
+}
