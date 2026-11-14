@@ -906,13 +906,13 @@ fn drain_mode_finishes_in_flight_run_without_admitting_ready_jobs() {
         store.require_run(&run.id).expect("run").outcome,
         Some(vowp_protocol::RunOutcome::Ok)
     );
-    assert_eq!(node.active_children(), 0, "the run and its harvest completed");
     assert!(node.drain_requested());
-    assert!(node.drain_complete(), "zero active children completes the drain");
 
-    // The foreground loop exits on its own and removes the marker.
+    // The foreground loop keeps ticking maintenance until any gate task spawned by the
+    // harvest has also completed, then exits on its own and removes the marker.
     node.run(&CancelToken::default()).expect("run drains and exits");
     assert!(node.drained());
+    assert_eq!(node.active_children(), 0, "the run, gates and harvest completed");
     assert!(
         !env.paths.root().join("drain").exists(),
         "a completed drain removes the marker"
