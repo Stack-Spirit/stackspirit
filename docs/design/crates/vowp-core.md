@@ -510,7 +510,7 @@ Behaviour:
   paired for this session and scoped `session.write:<id>`. It then runs one immediate
   transaction over the session's lease row. `mode=acquire` replaces only a missing or stale row
   (heartbeat at least 60 seconds old); a live row answers `Error { kind: conflict }` with the
-  holder, since the code and node and never a token. `mode=takeover` replaces a live row and the
+  holder and acquisition time, never a token. `mode=takeover` replaces a live row and the
   gateway pushes `LeaseRevoked { reason, holder }` before `LeaseGrant`.
 - `LeaseGrant` carries the only plaintext lease token, the expiry (`now + 60s`) and the session's
   `tail_seq`. The home stores only the token's SHA-256 in `leases.token_hash`; the token is never
