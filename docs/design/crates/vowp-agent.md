@@ -233,16 +233,20 @@ The working directory stays local: the CLI builds a `PathRef` (project or subdir
 passes the absolute path only to the adapter on this machine. Events are normalized to
 `RemoteLine::Event`, appended to `spool/<session>/<run>/events.jsonl` and fsynced **before** the
 `RemoteLine` envelope is sent. The home assigns `seq` in `IngestAck`; the agent records the id and
-seq in `acked.json`. A `Credit` replenishes the 64-event window. The terminal `TurnEnd { run_id,
-summary }` is spooled the same way and the summary ack sets the reserved `summary` key.
+seq in `acked.json`. The home admits at most 64 event lines per stream window; it sends `Credit`
+before the last acknowledgement and opens the next window only after the agent confirms the
+grant with a lease heartbeat. A refused event is retried after a reconnect, never appended out
+of order. The terminal `TurnEnd { run_id, summary }` is spooled the same way and the summary ack
+sets the reserved `summary` key.
 
 On a transport error the client reconnects with `connect`, sends `LeaseHeartbeat`, sends a fresh
-`RemoteLine::Hello`, and replays every frame not in `acked.json` in order. The home dedupes by
-event id, so an event whose ack was lost becomes a duplicate rather than a second append. A
-takeover or lease loss (`LeaseLost`, `LeaseRevoked`, `IngestAck.lease_revoked`, `RunLost`) stops
-the adapter, returns [`ChatTurnStatus::ReadOnly`] and keeps the spool. A frame that would push
-`events.jsonl` past 2 GiB returns [`ChatTurnStatus::SpoolFull`]; it is never sent. Unacknowledged
-events are never deleted.
+`RemoteLine::Hello`, and replays every frame not in `acked.json` in order. The home resumes the
+run's ingest state from its open run row, paired surface and live lease, then dedupes by event
+id, so an event whose ack was lost becomes a duplicate rather than a second append. A takeover or
+lease loss (`LeaseLost`, `LeaseRevoked`, `IngestAck.lease_revoked`, `RunLost`) stops the adapter,
+returns [`ChatTurnStatus::ReadOnly`] and keeps the spool; that includes a loss reported by the
+reconnect after the first `Hello` send fails. A frame that would push `events.jsonl` past 2 GiB
+returns [`ChatTurnStatus::SpoolFull`]; it is never sent. Unacknowledged events are never deleted.
 
 ## 5. Transport
 

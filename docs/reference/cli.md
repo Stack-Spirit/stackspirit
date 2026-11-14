@@ -794,10 +794,10 @@ Options:
 ```text
 Chat with a session
 
-Usage: vowp session chat [OPTIONS] [ID]
+Usage: vowp session chat [OPTIONS] <ID>
 
 Arguments:
-  [ID]  Session id or unique prefix
+  <ID>  Session id or unique prefix
 
 Options:
       --executor <EXECUTOR>  Switch to this executor before the first turn
@@ -1096,10 +1096,10 @@ Options:
 ```text
 Alias of `session chat`
 
-Usage: vowp chat [OPTIONS] [ID]
+Usage: vowp chat [OPTIONS] <ID>
 
 Arguments:
-  [ID]  Session id or unique prefix
+  <ID>  Session id or unique prefix
 
 Options:
       --executor <EXECUTOR>  Switch to this executor before the first turn

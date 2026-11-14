@@ -5,57 +5,79 @@
 //! client acquires the lease, spools events and streams them to the home gateway. It never
 //! takes the home lease and never writes a second session log.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vowp_agent::{AgentConfig, AgentError, ChatClient, ChatTurnRequest, ChatTurnStatus, SystemAgentClock};
-use vowp_protocol::{EventBody, HarnessEvent, PathRef, ProjectName, RunPurpose, SessionId};
-use vowp_store::session_log::SessionLog;
+use vowp_core::AdapterRegistry;
+use vowp_protocol::{EventBody, Executor, HarnessEvent, PathRef, ProjectName, RunPurpose, SessionId, VowpConfig};
+use vowp_store::NodePaths;
 
-use crate::chat::{ChatOptions, write_wrapped};
-use crate::{CliError, Ctx, IoStreams};
+use crate::chat::write_wrapped;
+use crate::cli::{ChatArgs, Global};
+use crate::{CliError, IoStreams};
 
-/// Runs the local agent chat bridge for one session.
-pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32, CliError> {
-    if opts.follow {
+/// The local checkout an agent chat invocation runs in.
+struct LocalProject {
+    root: PathBuf,
+    config: VowpConfig,
+}
+
+/// Runs the local agent chat bridge for one session without a VOWP database.
+///
+/// The Mac owns only `~/.vowp-agent`; the local checkout's `vowp.toml` supplies the
+/// project name, working directory and the default executor (the first rung of the
+/// `worker` profile). `--executor` overrides that default. Everything else travels over
+/// the agent connection.
+pub fn run_command(global: &Global, io: &mut dyn IoStreams, args: &ChatArgs) -> Result<i32, CliError> {
+    if args.follow {
         return Err(CliError::Invalid(
             "`chat --agent --follow` is not supported; the agent bridge owns the live turn".to_owned(),
         ));
     }
-    if opts.takeover {
+    if args.takeover {
         return Err(CliError::Invalid(
             "`chat --agent --takeover` is not supported; ask the owner to take the session over".to_owned(),
         ));
     }
+    let session =
+        SessionId::parse(&args.id).map_err(|_| CliError::Invalid(format!("invalid session id {:?}", args.id)))?;
     let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
-    let mut chat = ChatClient::from_state_dir(state_dir, opts.session.clone(), Arc::new(SystemAgentClock))
-        .map_err(map_agent_error)?;
-    let store = ctx.store()?;
-    let session = store.require_session(&opts.session)?;
-    let executor = opts
-        .executor
-        .as_ref()
-        .map(|executor| executor.executor.clone())
-        .or_else(|| session.executor.clone())
-        .ok_or_else(|| CliError::Invalid("session has no executor; pass --executor".to_owned()))?;
-    let cwd = if Path::new(&session.cwd).is_dir() {
-        Path::new(&session.cwd).to_path_buf()
-    } else {
-        ctx.project_root().to_path_buf()
+    let config = AgentConfig::load(&state_dir).map_err(map_agent_error)?;
+    let requested_node = args.node.as_deref().or(global.node.as_deref());
+    if let Some(node) = requested_node {
+        let node = vowp_protocol::NodeName::parse(node)?;
+        if node != config.node {
+            return Err(CliError::Invalid(format!(
+                "executor node {node} is not this agent ({})",
+                config.node
+            )));
+        }
+    }
+    let local = local_project(global)?;
+    let executor = match args.executor.as_deref() {
+        Some(executor) => Executor::parse(executor)?,
+        None => local
+            .config
+            .profiles
+            .get("worker")
+            .and_then(|profile| profile.ladder.first().cloned())
+            .ok_or_else(|| {
+                CliError::Invalid(
+                    "no executor: pass --executor or define a non-empty `worker` profile in vowp.toml".to_owned(),
+                )
+            })?,
     };
-    let cwd_ref = path_ref_for(ctx, ctx.project(), &cwd);
-    let adapter = ctx
-        .deps()
-        .adapters
+    let cwd = local_working_dir(&local)?;
+    let cwd_ref = path_ref_for(&local.config.project.name, &local.root, &cwd);
+    let adapters = AdapterRegistry::from_config(&local.config)?;
+    let adapter = adapters
         .get(&executor)
         .ok_or_else(|| CliError::Invalid(format!("harness for {executor} is not installed on this machine")))?;
-    let purpose = if first_turn(ctx, &session.id)? {
-        RunPurpose::Start
-    } else {
-        RunPurpose::Continue
-    };
+    let mut chat = ChatClient::from_state_dir(state_dir.clone(), session.clone(), Arc::new(SystemAgentClock))
+        .map_err(map_agent_error)?;
     let watcher = if io.is_tty() {
-        crate::signals::SignalWatcher::install(ctx.paths()).ok()
+        crate::signals::SignalWatcher::install(&NodePaths::new(&state_dir)).ok()
     } else {
         None
     };
@@ -63,8 +85,8 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32,
     writeln!(
         io.out(),
         "attached session {} on {} through the agent; press Ctrl-C to stop",
-        session.id,
-        ctx.config().node.name
+        session,
+        config.node
     )?;
     loop {
         if cancel.as_ref().is_some_and(vowp_protocol::CancelToken::is_cancelled) {
@@ -91,8 +113,10 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32,
             prompt: line.to_owned(),
             cwd: cwd.clone(),
             cwd_ref: cwd_ref.clone(),
-            job: session.job_id.clone(),
-            purpose,
+            // The home owns the session's job binding and purpose; the local checkout
+            // has no store from which to read them. A continuation is always valid.
+            job: None,
+            purpose: RunPurpose::Continue,
         };
         let mut print_error: Option<CliError> = None;
         let status = chat.turn(
@@ -131,26 +155,66 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32,
     Ok(0)
 }
 
-/// Returns whether the session has no started turn yet.
-fn first_turn(ctx: &Ctx, session: &SessionId) -> Result<bool, CliError> {
-    let Ok(log) = SessionLog::open_read(ctx.paths(), session) else {
-        return Ok(true);
+/// Resolves the local checkout from `--project` or the current directory.
+fn local_project(global: &Global) -> Result<LocalProject, CliError> {
+    let cwd = std::env::current_dir()?;
+    let root = match &global.project {
+        Some(value) => {
+            let candidate = PathBuf::from(value);
+            if candidate.is_dir() {
+                if !candidate.join("vowp.toml").is_file() {
+                    return Err(CliError::NotFound(format!(
+                        "no vowp.toml in {}; run `vowp init`",
+                        candidate.display()
+                    )));
+                }
+                candidate
+            } else {
+                let root = crate::ctx::find_project_root(&cwd)
+                    .ok_or_else(|| CliError::NotFound(format!("project {value}")))?;
+                let config = read_local_config(&root)?;
+                if config.project.name.as_str() != value {
+                    return Err(CliError::NotFound(format!("project {value}")));
+                }
+                root
+            }
+        }
+        None => crate::ctx::find_project_root(&cwd).ok_or_else(|| {
+            CliError::NotFound(
+                "no vowp.toml in this checkout or its parents; run `vowp chat --agent` from a project checkout"
+                    .to_owned(),
+            )
+        })?,
     };
-    let events = log.read_all().map_err(vowp_core::CoreError::from)?;
-    Ok(!events
-        .iter()
-        .any(|event| event.event_type == vowp_protocol::EventType::TurnStarted))
+    let config = read_local_config(&root)?;
+    Ok(LocalProject { root, config })
+}
+
+/// Reads and validates the local `vowp.toml`.
+fn read_local_config(root: &Path) -> Result<VowpConfig, CliError> {
+    let text = std::fs::read_to_string(root.join("vowp.toml"))?;
+    VowpConfig::from_toml(&text).map_err(CliError::from)
+}
+
+/// Returns the directory the adapter starts in: the current directory when it is below
+/// the project root, otherwise the project root itself.
+fn local_working_dir(project: &LocalProject) -> Result<PathBuf, CliError> {
+    let cwd = std::env::current_dir()?;
+    let root = std::fs::canonicalize(&project.root).unwrap_or_else(|_| project.root.clone());
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    Ok(if cwd.starts_with(&root) { cwd } else { root })
 }
 
 /// Builds the project-relative path for a local working directory.
-fn path_ref_for(ctx: &Ctx, project: &ProjectName, cwd: &Path) -> PathRef {
-    let root = ctx.project_root();
+fn path_ref_for(project: &ProjectName, root: &Path, cwd: &Path) -> PathRef {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     if cwd == root {
         return PathRef::Project {
             project: project.clone(),
         };
     }
-    let Ok(relative) = cwd.strip_prefix(root) else {
+    let Ok(relative) = cwd.strip_prefix(&root) else {
         return PathRef::Project {
             project: project.clone(),
         };

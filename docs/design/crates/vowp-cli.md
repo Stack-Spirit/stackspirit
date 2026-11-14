@@ -163,13 +163,16 @@ These are home-only (exit 5 on a control machine) and require the home store:
 ### Local chat (`chat --agent`)
 
 `vowp chat --agent --session <id> [--executor <exec>] [--node <name>]` runs the Phase 1 local
-surface. `ChatArgs` accepts `--session` as an alternative to the positional id; both name the same
-session, and the home path keeps its existing lease/turn loop. `--agent` is recorded by the parser
-and `chat::run_shared` dispatches to `src/chat/agent.rs` before any home lease is taken.
+surface. The positional id stays required for the home spelling; `lib::run` inserts the
+`--session` value before clap parses an agent command, so `vowp chat` without an id still fails
+with clap's missing-argument error and the help tree keeps `<ID>`. Agent mode is dispatched from
+`lib::execute` to `src/chat/agent.rs` before the control-machine redirect and before `Ctx::build`.
 
 The handler loads `~/.vowp-agent` (or `VOWP_AGENT_HOME`), the node key and the surface token
-bound to the session, then calls `vowp_agent::ChatClient::turn`. The agent acquires the lease,
-sends `TurnBegin` with a project-relative `PathRef`, runs the configured adapter on this machine,
+bound to the session, then calls `vowp_agent::ChatClient::turn`. It opens no VOWP database: the
+local checkout's `vowp.toml` supplies the project name, the working directory and the default
+executor (the first rung of the `worker` profile; `--executor` overrides it). The agent acquires
+the lease, sends `TurnBegin` with a project-relative `PathRef`, runs the adapter on this machine,
 spools each event before sending it and prints assistant text, tools, errors and notes in the
 home chat's 80-column format. The home log is authoritative; the CLI never opens a second session
 log or takes the home lease. Ctrl-C (through `SignalWatcher`) stops the adapter and releases the

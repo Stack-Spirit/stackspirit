@@ -580,10 +580,10 @@ pub struct SessionNewArgs {
 
 /// Arguments for `vowp session chat` and `vowp chat`.
 ///
-/// `--session` is the agent spelling; the positional id remains the home spelling. Both
-/// populate the same session field so the existing home handler is unchanged. `--agent`
-/// records the request in a process-local flag that [`crate::chat::run_shared`] reads
-/// before taking the home lease.
+/// `--session` is the agent spelling; the positional id remains the home spelling and
+/// stays required. [`crate::run`] inserts the `--session` value as the positional id
+/// before clap parses an agent command, so the home usage and missing-id error are
+/// unchanged.
 #[derive(Debug, Clone)]
 pub struct ChatArgs {
     /// Session id or unique prefix.
@@ -606,7 +606,7 @@ pub struct ChatArgs {
 #[derive(Debug, Clone, Args)]
 struct ChatArgsFields {
     /// Session id or unique prefix.
-    #[arg(value_name = "ID", default_value = "", hide_default_value = true)]
+    #[arg(value_name = "ID")]
     id: String,
     /// Switch to this executor before the first turn.
     #[arg(long, value_name = "EXECUTOR")]
@@ -628,27 +628,6 @@ struct ChatArgsFields {
     session: Option<String>,
 }
 
-/// The session named by the last parsed `chat --agent`, when any.
-///
-/// A CLI process parses one command, so this is process state, not cross-command state. It is
-/// how the owned `chat` module learns about `--agent` without changing the frozen home handler.
-static AGENT_CHAT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
-
-/// Records the agent-chat request from one parsed command line.
-fn record_agent_chat(agent: bool, session: Option<&str>) {
-    let state = AGENT_CHAT.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(mut state) = state.lock() {
-        *state = if agent { session.map(str::to_owned) } else { None };
-    }
-}
-
-/// Returns the session named by `chat --agent`, when the current process parsed one.
-pub fn agent_chat_session() -> Option<String> {
-    AGENT_CHAT
-        .get()
-        .and_then(|state| state.lock().ok().and_then(|state| state.clone()))
-}
-
 impl Args for ChatArgs {
     fn augment_args(command: clap::Command) -> clap::Command {
         ChatArgsFields::augment_args(command)
@@ -663,7 +642,6 @@ impl FromArgMatches for ChatArgs {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let fields = ChatArgsFields::from_arg_matches(matches)?;
         let id = fields.session.clone().unwrap_or_else(|| fields.id.clone());
-        record_agent_chat(fields.agent, Some(id.as_str()));
         Ok(Self {
             id,
             executor: fields.executor,
@@ -684,7 +662,6 @@ impl FromArgMatches for ChatArgs {
         self.takeover = fields.takeover;
         self.agent = fields.agent;
         self.session = fields.session;
-        record_agent_chat(self.agent, Some(self.id.as_str()));
         Ok(())
     }
 }

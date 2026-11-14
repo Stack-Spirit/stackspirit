@@ -67,9 +67,6 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
             "vowp chat needs the home that owns the session".to_owned(),
         ));
     }
-    if crate::cli::agent_chat_session().is_some_and(|session| session == opts.session.as_str()) {
-        return agent::run(ctx, io, opts);
-    }
     let store = ctx.store()?;
     let mut session = store.require_session(&opts.session)?;
     if !opts.follow {

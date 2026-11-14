@@ -3,7 +3,7 @@
 //! The fake home and the fake adapter speak the public protocol traits in memory: no SSH,
 //! network, store, harness process or real `~/.vowp-agent` is touched by a test.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -67,6 +67,12 @@ enum Behavior {
     LeaseRevoked,
     /// Check that the event is already in the spool when it arrives.
     SpoolCheck(PathBuf),
+    /// Drop the connection when the first run line (the hello) arrives.
+    DropOnFirstRemoteLine,
+    /// Answer the first lease heartbeat with LeaseLost.
+    LeaseLostOnHeartbeat,
+    /// Send a Credit before acknowledging the first event.
+    CreditBeforeAck,
 }
 
 #[derive(Default)]
@@ -76,6 +82,7 @@ struct FakeState {
     per_connection: Vec<Vec<AgentFrame>>,
     seqs: BTreeMap<String, u64>,
     next_seq: u64,
+    runs: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -135,6 +142,9 @@ impl Transport for FakeHome {
             drop_on_next_send: false,
             acked_events: 0,
             next_seq: 1,
+            active_runs: BTreeSet::new(),
+            dropped_initial: false,
+            credit_sent: false,
         }))
     }
 }
@@ -148,6 +158,9 @@ struct FakeStream {
     drop_on_next_send: bool,
     acked_events: usize,
     next_seq: u64,
+    active_runs: BTreeSet<String>,
+    dropped_initial: bool,
+    credit_sent: bool,
 }
 
 impl FakeStream {
@@ -200,6 +213,14 @@ impl FrameStream for FakeStream {
         if self.closed {
             return Err(AgentError::Transport("connection closed".to_owned()));
         }
+        if matches!(&self.behavior, Behavior::DropOnFirstRemoteLine)
+            && !self.dropped_initial
+            && matches!(frame, AgentFrame::RemoteLine { .. })
+        {
+            self.dropped_initial = true;
+            self.closed = true;
+            return Err(AgentError::Transport("connection dropped".to_owned()));
+        }
         if self.drop_on_next_send {
             self.closed = true;
             return Err(AgentError::Transport("connection dropped".to_owned()));
@@ -232,6 +253,10 @@ impl FrameStream for FakeStream {
                 });
             }
             AgentFrame::TurnBegin { .. } => {
+                let mut state = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.runs.insert(run().to_string());
+                drop(state);
+                self.active_runs.insert(run().to_string());
                 self.outbound.push_back(AgentFrame::TurnGrant {
                     run_id: run(),
                     session: session(),
@@ -240,10 +265,45 @@ impl FrameStream for FakeStream {
                     tail_seq: 0,
                 });
             }
+            AgentFrame::LeaseHeartbeat { .. } => {
+                if matches!(&self.behavior, Behavior::LeaseLostOnHeartbeat) {
+                    self.outbound.push_back(AgentFrame::LeaseLost {
+                        reason: "the lease was released or expired; this surface is read-only".to_owned(),
+                    });
+                }
+            }
             AgentFrame::RemoteLine {
+                run_id,
+                line: RemoteLine::Hello { .. },
+                ..
+            } => {
+                let known = self
+                    .shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .runs
+                    .contains(run_id.as_str());
+                if known {
+                    self.active_runs.insert(run_id.to_string());
+                } else {
+                    self.outbound.push_back(AgentFrame::RunLost {
+                        run_id: run_id.clone(),
+                        reason: "run is not active on this connection".to_owned(),
+                    });
+                }
+            }
+            AgentFrame::RemoteLine {
+                run_id,
                 line: RemoteLine::Event { event },
                 ..
             } => {
+                if !self.active_runs.contains(run_id.as_str()) {
+                    self.outbound.push_back(AgentFrame::RunLost {
+                        run_id: run_id.clone(),
+                        reason: "run is not active on this connection".to_owned(),
+                    });
+                    return Ok(());
+                }
                 if let Behavior::SpoolCheck(path) = &self.behavior {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
                     assert!(
@@ -262,6 +322,13 @@ impl FrameStream for FakeStream {
                     });
                     return Ok(());
                 }
+                if matches!(&self.behavior, Behavior::CreditBeforeAck) && !self.credit_sent {
+                    self.credit_sent = true;
+                    self.outbound.push_back(AgentFrame::Credit {
+                        run_id: run(),
+                        count: 64,
+                    });
+                }
                 self.ack_event(event);
                 self.acked_events += 1;
                 if let Behavior::DropAfter(count) = &self.behavior
@@ -270,7 +337,14 @@ impl FrameStream for FakeStream {
                     self.drop_on_next_send = true;
                 }
             }
-            AgentFrame::TurnEnd { .. } => {
+            AgentFrame::TurnEnd { run_id, .. } => {
+                if !self.active_runs.remove(run_id.as_str()) {
+                    self.outbound.push_back(AgentFrame::RunLost {
+                        run_id: run_id.clone(),
+                        reason: "run is not active on this connection".to_owned(),
+                    });
+                    return Ok(());
+                }
                 let mut state = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let seq = state.next_seq;
                 state.next_seq += 1;
@@ -507,6 +581,51 @@ fn agent_chat_replays_from_the_first_unacked() {
     let spool = Spool::open(dir.path(), &session(), &run()).expect("spool");
     assert!(spool.unacked().expect("unacked").is_empty());
     assert!(spool.summary_acked());
+}
+
+#[test]
+fn agent_chat_stops_when_the_initial_hello_reconnect_loses_the_lease() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    agent_state(dir.path());
+    let home = FakeHome::new(vec![Behavior::DropOnFirstRemoteLine, Behavior::LeaseLostOnHeartbeat]);
+    let mut chat = chat_client(dir.path(), home.clone());
+    let adapter = FakeAdapter::new(vec![event("must not run")]);
+    let status = chat.turn(&request(), &adapter, &mut |_| {}, None).expect("turn");
+    match status {
+        ChatTurnStatus::ReadOnly { reason } => assert!(reason.contains("read-only"), "{reason}"),
+        other => panic!("expected ReadOnly, got {other:?}"),
+    }
+    assert_eq!(home.connections(), 2, "the hello send was retried once");
+    assert_eq!(
+        adapter.started.load(Ordering::SeqCst),
+        0,
+        "the adapter never starts after a lost lease during the hello reconnect"
+    );
+    assert!(
+        !home
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::TurnEnd { .. })),
+        "no summary is sent after the lease loss"
+    );
+}
+
+#[test]
+fn agent_chat_consumes_credit_by_refreshing_the_lease() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    agent_state(dir.path());
+    let home = FakeHome::new(vec![Behavior::CreditBeforeAck]);
+    let mut chat = chat_client(dir.path(), home.clone());
+    let adapter = FakeAdapter::new(vec![event("credited")]);
+    let status = chat.turn(&request(), &adapter, &mut |_| {}, None).expect("turn");
+    assert_eq!(status, ChatTurnStatus::Done);
+    assert!(
+        home.frames_on(0)
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::LeaseHeartbeat { .. })),
+        "a Credit is confirmed with the run's lease heartbeat: {:?}",
+        home.frames_on(0)
+    );
 }
 
 #[test]

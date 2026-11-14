@@ -460,7 +460,17 @@ fn run_connection(
                 let result = bound_surface(store, &session.node, &surface, &session_id)
                     .and_then(|_| lease::heartbeat_agent_lease(store, &session_id, &surface, &token, now));
                 match result {
-                    Ok(AgentLeaseHeartbeat::Accepted) => {}
+                    Ok(AgentLeaseHeartbeat::Accepted) => {
+                        // A `Credit` grants the next 64-event window. The agent's next
+                        // accepted heartbeat is the round-trip that confirms it consumed
+                        // the grant, so only then does the home open a new window.
+                        for chat in chats.values_mut().filter(|chat| chat.session == session_id) {
+                            if chat.credit_pending {
+                                chat.in_flight = 0;
+                                chat.credit_pending = false;
+                            }
+                        }
+                    }
                     Ok(AgentLeaseHeartbeat::Lost(reason)) => {
                         fence_session(&mut chats, &session_id, &reason, writer)?;
                         send_frame(writer, &AgentFrame::LeaseLost { reason })?;
@@ -556,6 +566,36 @@ fn run_connection(
                 }
             }
             AgentFrame::RemoteLine { run_id, epoch, line } => {
+                if !chats.contains_key(&run_id) {
+                    // A reconnect opens a new gateway process, so the live map starts
+                    // empty. A `Hello` for a run this home still owns (open run row,
+                    // paired surface and the live lease) resumes its ingest stream;
+                    // events without that proof are fenced as before.
+                    if let RemoteLine::Hello {
+                        session_id,
+                        run_id: hello_run,
+                        lease,
+                        ..
+                    } = &line
+                    {
+                        match resume_chat_stream(store, deps, &session.node, &run_id, hello_run, session_id, lease, now)
+                        {
+                            Ok(stream) => {
+                                chats.insert(run_id.clone(), stream);
+                            }
+                            Err(error) => {
+                                send_frame(
+                                    writer,
+                                    &AgentFrame::RunLost {
+                                        run_id: run_id.clone(),
+                                        reason: error.to_string(),
+                                    },
+                                )?;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let Some(stream) = chats.get_mut(&run_id) else {
                     send_frame(
                         writer,
@@ -580,6 +620,34 @@ fn run_connection(
                     continue;
                 }
                 let is_event = matches!(line, RemoteLine::Event { .. });
+                if is_event {
+                    if stream.credit_pending && stream.in_flight >= CREDIT_WINDOW {
+                        send_frame(
+                            writer,
+                            &AgentFrame::Error {
+                                kind: ErrorKind::Conflict,
+                                message: format!(
+                                    "the {CREDIT_WINDOW}-event in-flight window is exhausted; wait for Credit"
+                                ),
+                                retryable: true,
+                            },
+                        )?;
+                        continue;
+                    }
+                    // Send the replenishment before the acknowledgement of the window's
+                    // last event, so a client that reads one frame per send sees the
+                    // Credit first and can confirm it before the next event.
+                    if stream.in_flight + 1 == CREDIT_WINDOW {
+                        send_frame(
+                            writer,
+                            &AgentFrame::Credit {
+                                run_id: run_id.clone(),
+                                count: CREDIT_WINDOW,
+                            },
+                        )?;
+                        stream.credit_pending = true;
+                    }
+                }
                 let stop = ingest_remote_line(writer, &run_id, stream, &line)?;
                 if stop {
                     send_frame(
@@ -593,17 +661,7 @@ fn run_connection(
                     continue;
                 }
                 if is_event {
-                    stream.events_since_credit = stream.events_since_credit.saturating_add(1);
-                    if stream.events_since_credit >= CREDIT_WINDOW {
-                        stream.events_since_credit = 0;
-                        send_frame(
-                            writer,
-                            &AgentFrame::Credit {
-                                run_id: run_id.clone(),
-                                count: CREDIT_WINDOW,
-                            },
-                        )?;
-                    }
+                    stream.in_flight = stream.in_flight.saturating_add(1);
                 }
             }
             AgentFrame::TurnEnd { run_id, summary } => {
@@ -652,8 +710,10 @@ struct ChatStream<'a> {
     epoch: u64,
     /// Home-side ingest state machine.
     ingest: IngestSession<'a>,
-    /// Events appended since the last `Credit` frame.
-    events_since_credit: u64,
+    /// Events accepted in the current 64-event window.
+    in_flight: u64,
+    /// Whether the next window was granted and awaits the agent's round-trip.
+    credit_pending: bool,
 }
 
 /// A turn begun by a paired surface, ready to ingest.
@@ -670,6 +730,82 @@ struct StartedTurn<'a> {
     tail_seq: u64,
     /// Ingest state for the run.
     stream: ChatStream<'a>,
+}
+
+/// Resumes the ingest stream of an open run after a reconnect.
+///
+/// The new connection has no in-memory stream, so the `Hello` must prove the run is
+/// still the live one: it belongs to this node and the named session, it has not ended,
+/// the named session is on this node, and the presented token is the live lease of a
+/// paired, attached surface. The caller then feeds the `Hello` through `IngestSession`.
+#[allow(clippy::too_many_arguments)]
+fn resume_chat_stream<'a>(
+    store: &'a Store,
+    deps: &'a Deps,
+    node: &NodeName,
+    run_id: &RunId,
+    hello_run: &RunId,
+    session: &SessionId,
+    lease: &str,
+    now: Timestamp,
+) -> Result<ChatStream<'a>, CoreError> {
+    if run_id != hello_run {
+        return Err(CoreError::Invalid(format!(
+            "hello names run {hello_run}, expected {run_id}"
+        )));
+    }
+    let run = store.require_run(run_id)?;
+    if run.session_id.as_ref() != Some(session) {
+        return Err(CoreError::Refused(format!(
+            "run {run_id} does not belong to session {session}"
+        )));
+    }
+    if run.node != *node {
+        return Err(CoreError::Refused(format!(
+            "run {run_id} belongs to node {}, not {node}",
+            run.node
+        )));
+    }
+    if run.ended_at.is_some() {
+        return Err(CoreError::Refused(format!("run {run_id} has already ended")));
+    }
+    let session_row = store.require_session(session)?;
+    if session_row.node != *node {
+        return Err(CoreError::Refused(format!(
+            "session {session} belongs to node {}, not {node}",
+            session_row.node
+        )));
+    }
+    let Some(current) = store.lease(session)? else {
+        return Err(CoreError::Refused(format!("session {session} has no live lease")));
+    };
+    if !lease::is_live(now, &current) {
+        return Err(CoreError::Refused(format!(
+            "session {session} lease has expired; the surface is read-only"
+        )));
+    }
+    let surface = current
+        .surface_id
+        .clone()
+        .ok_or_else(|| CoreError::Refused(format!("session {session} lease has no surface")))?;
+    bound_surface(store, node, &surface, session)?;
+    crate::surface::check_lease_with(store, session, Some(lease))?;
+    let ingest = IngestSession::begin(
+        deps,
+        store,
+        &IngestGrant {
+            session: session.clone(),
+            lease: lease.to_owned(),
+            run: run_id.clone(),
+        },
+    )?;
+    Ok(ChatStream {
+        session: session.clone(),
+        epoch: 0,
+        ingest,
+        in_flight: 0,
+        credit_pending: false,
+    })
 }
 
 /// Validates a `TurnBegin`, writes the framing events and opens its ingest stream.
@@ -689,6 +825,18 @@ fn begin_agent_turn<'a>(
     now: Timestamp,
 ) -> Result<StartedTurn<'a>, CoreError> {
     bound_surface(store, node, surface, session)?;
+    // A paired surface may begin a turn only while it holds the live lease. The
+    // generic ingest path treats a missing lease row as a job session; the agent path
+    // must not, because there is no paired surface then.
+    let Some(current) = store.lease(session)? else {
+        return Err(CoreError::Refused(format!("session {session} has no live lease")));
+    };
+    if !lease::is_live(now, &current) {
+        return Err(CoreError::Refused(format!(
+            "session {session} lease has expired; the surface is read-only"
+        )));
+    }
+    crate::surface::check_lease_with(store, session, Some(lease))?;
     let row = store.require_session(session)?;
     if let Some(project) = cwd_ref_project(cwd_ref)
         && row.project.as_ref() != Some(project)
@@ -735,7 +883,8 @@ fn begin_agent_turn<'a>(
                 run: grant.run_id.clone(),
             },
         )?,
-        events_since_credit: 0,
+        in_flight: 0,
+        credit_pending: false,
     };
     Ok(StartedTurn {
         run_id: grant.run_id,

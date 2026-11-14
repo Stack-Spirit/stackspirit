@@ -149,7 +149,8 @@ impl IoStreams for BufferIo {
 /// Parse errors keep clap's exit code (2 for usage, 0 for `--help`/`--version`); command
 /// errors are printed by [`output::print_error`] and mapped through [`CliError::exit_code`].
 pub fn run(args: Vec<String>, io: &mut dyn IoStreams) -> i32 {
-    let args = if args.is_empty() { vec!["vowp".to_owned()] } else { args };
+    let mut args = if args.is_empty() { vec!["vowp".to_owned()] } else { args };
+    inject_agent_chat_id(&mut args);
     let cli = match Cli::try_parse_from(args.iter().cloned()) {
         Ok(cli) => cli,
         Err(error) => {
@@ -172,6 +173,87 @@ pub fn run(args: Vec<String>, io: &mut dyn IoStreams) -> i32 {
             error.exit_code()
         }
     }
+}
+
+/// Inserts an agent chat's `--session` value as the required positional id.
+///
+/// The home spelling keeps `<ID>` as a required clap argument, so `vowp chat` without an
+/// id still fails with clap's missing-argument error and the help tree is unchanged.
+/// Agent mode accepts `--session <id>` instead; inserting the same id before parsing lets
+/// both spellings share one argument definition without a hidden default.
+fn inject_agent_chat_id(args: &mut Vec<String>) {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return;
+    }
+    let Some(chat) = chat_position(args) else {
+        return;
+    };
+    let mut agent = false;
+    let mut session = None;
+    let mut has_id = false;
+    let rest = args[chat + 1..].to_vec();
+    let mut index = 0;
+    while index < rest.len() {
+        let arg = &rest[index];
+        match arg.as_str() {
+            "--agent" => agent = true,
+            "--session" => {
+                if let Some(value) = rest.get(index + 1) {
+                    session = Some(value.clone());
+                    index += 1;
+                }
+            }
+            "--executor" | "--node" => index += 1,
+            "--" => {
+                has_id = index + 1 < rest.len();
+                break;
+            }
+            value if value.starts_with("--session=") => {
+                session = Some(value["--session=".len()..].to_owned());
+            }
+            value if value.starts_with('-') => {}
+            _ => has_id = true,
+        }
+        index += 1;
+    }
+    if agent
+        && !has_id
+        && let Some(session) = session
+    {
+        args.push(session);
+    }
+}
+
+/// Returns the index of the `chat` command token, including `session chat`.
+fn chat_position(args: &[String]) -> Option<usize> {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "--home" | "--project" | "--node") {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "chat" {
+            return Some(index);
+        }
+        if arg == "session" {
+            let mut next = index + 1;
+            while next < args.len() {
+                if args[next].starts_with('-') {
+                    next += 1;
+                    continue;
+                }
+                return (args[next] == "chat").then_some(next);
+            }
+            return None;
+        }
+        return None;
+    }
+    None
 }
 
 /// Executes a parsed command, handling local-only commands and the `--node` redirect first.
@@ -197,6 +279,11 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     // `~/.vowp-agent`. Handle it before the generic remote redirect.
     if let Command::Agent { command } = &command {
         return cmd::agent::run(&global, io, command);
+    }
+    // `chat --agent` runs on the Mac against `~/.vowp-agent`; it must be handled before the
+    // control-machine redirect and `Ctx::build`, neither of which may require a home database.
+    if let Some(args) = agent_chat_args(&command) {
+        return chat::agent::run_command(&global, io, args);
     }
     // `surface` is home-only and its `--node` flag names the node the surface runs on, not an
     // SSH redirect. Handle it before the generic `--node` routing.
@@ -249,6 +336,17 @@ fn execute_node_scoped(global: &Global, command: &Command, io: &mut dyn IoStream
         Command::Migrate(args) => cmd::migrate::run_node(global, io, args).map(Some),
         Command::Project(args) => cmd::project::run_node(global, io, args).map(Some),
         _ => Ok(None),
+    }
+}
+
+/// Returns the chat arguments when the command asks for agent mode.
+fn agent_chat_args(command: &Command) -> Option<&cli::ChatArgs> {
+    match command {
+        Command::Chat(args) if args.agent => Some(args),
+        Command::Session {
+            command: cli::SessionCommand::Chat(args),
+        } if args.agent => Some(args),
+        _ => None,
     }
 }
 

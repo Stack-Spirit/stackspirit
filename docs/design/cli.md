@@ -136,8 +136,10 @@ adapter on this machine and streams spooled events to the home gateway. The home
 only log. Assistant text, tools, errors and notes print in the same 80-column format as the home
 chat. Ctrl-C stops the adapter and releases the lease. A takeover or lease loss prints
 `This surface is read-only: <reason>` and exits 0; a full spool exits 7. `--follow` and
-`--takeover` are refused in agent mode. Agent mode still resolves the session row in the local
-home used by the invocation, so the follow display and executor default match the home.
+`--takeover` are refused in agent mode. Agent mode runs without a VOWP home database: it reads
+the local checkout's `vowp.toml` for the project name, working directory and default executor
+(the first rung of the `worker` profile; `--executor` overrides it), and the paired surface token
+names the session. The home path keeps its required positional id, help tree and missing-id error.
 
 The Mac-side v0.4 agent commands (`vowp agent enroll`, `vowp agent run`, `vowp agent status`) live
 in §12. They use `~/.vowp-agent` rather than the home/project store.

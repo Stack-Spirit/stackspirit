@@ -1288,10 +1288,7 @@ fn run_agent_chat(env: &common::TestEnv, agent_dir: &Path, session: &str, input:
         .command(env!("CARGO_BIN_EXE_vowp"))
         .env("PATH", path)
         .env("VOWP_AGENT_HOME", agent_dir)
-        .arg("--home")
-        .arg(env.home_path())
-        .arg("--project")
-        .arg(env.project_path())
+        .current_dir(env.project_path())
         .args(["chat", "--agent", "--session", session])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1349,6 +1346,134 @@ fn chat_agent_requires_a_paired_surface() {
     assert_eq!(code, 3, "{stderr}");
     assert!(stderr.contains("paired surface"), "{stderr}");
     assert!(!stderr.contains("not implemented"), "{stderr}");
+}
+
+#[test]
+fn chat_agent_runs_without_a_vowp_home_database() {
+    let env = common::TestEnv::new();
+    configure(&env, "the agent turn landed without a home");
+    let id = create(&env);
+    let session = SessionId::parse(&id).expect("session id");
+    let agent_dir = prepare_agent(&env, &session);
+    let uninitialised = tempfile::tempdir().expect("uninitialised home");
+    let bin = fake_ssh(&env);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .env("HOME", uninitialised.path())
+        .env_remove("VOWP_HOME")
+        .env("PATH", path)
+        .env("VOWP_AGENT_HOME", &agent_dir)
+        .current_dir(env.project_path())
+        .args(["chat", "--agent", "--session", &id])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn agent chat");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"hello from the mac without a database\n")
+        .expect("write prompt");
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait for agent chat");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code().unwrap_or(-1),
+        0,
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("the agent turn landed without a home"), "{stdout}");
+    assert!(
+        !stderr.contains("not initialised"),
+        "the Mac path must not require a VOWP home: {stderr}"
+    );
+}
+
+#[test]
+fn chat_agent_is_not_forwarded_from_a_control_machine() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let env = common::TestEnv::new();
+    configure(&env, "unused");
+    let id = create(&env);
+    let agent_dir = env.home_path().join("agent-control");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let key = vowp_agent::NodeKey::load_or_generate(&agent_dir).expect("key");
+    let _ = key;
+    let config = vowp_agent::AgentConfig::new(
+        "vps",
+        NodeName::parse("mac-studio").expect("node"),
+        agent_dir.clone(),
+        "vps.example",
+    );
+    config.write().expect("agent config");
+
+    let control = tempfile::tempdir().expect("control home");
+    std::fs::write(
+        control.path().join("control.json"),
+        serde_json::json!({
+            "role": "control",
+            "home": "vps",
+            "ssh_target": "vps.example",
+            "remote_home": "/srv/vowp",
+            "created_at": "2026-11-14T10:00:00Z",
+        })
+        .to_string(),
+    )
+    .expect("control.json");
+    let bin = env.home_path().join("control-bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    let log = bin.join("ssh.log");
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n", log.display()),
+    )
+    .expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vowp"))
+        .env("VOWP_CONTROL_HOME", control.path())
+        .env("VOWP_AGENT_HOME", &agent_dir)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .current_dir(env.project_path())
+        .args(["chat", "--agent", "--session", &id])
+        .output()
+        .expect("run agent chat");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code().unwrap_or(-1), 3, "{stderr}");
+    assert!(stderr.contains("paired surface"), "{stderr}");
+    assert!(
+        !log.exists(),
+        "chat --agent must not invoke ssh from a control machine: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+#[test]
+fn home_chat_still_requires_the_positional_id() {
+    let env = common::TestEnv::new();
+    let (code, _, stderr) = env.run(&["chat"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("required arguments"), "{stderr}");
+    let help = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .args(["chat", "--help"])
+        .output()
+        .expect("chat help");
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(help.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Usage: vowp chat [OPTIONS] <ID>"),
+        "the home usage is unchanged: {stdout}"
+    );
+    assert!(!stdout.contains("[ID]"), "the id is not optional: {stdout}");
 }
 
 #[test]

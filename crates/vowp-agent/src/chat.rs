@@ -180,7 +180,22 @@ impl ChatClient {
             if error.is_fatal() {
                 return Err(error);
             }
-            self.reconnect(&mut spool, &run)?;
+            match self.reconnect(&mut spool, &run)? {
+                Ack::Acked | Ack::Duplicate => {}
+                Ack::ReadOnly(reason) => return Ok(ChatTurnStatus::ReadOnly { reason }),
+                Ack::Failed(message) => {
+                    return Err(AgentError::Remote {
+                        kind: vowp_protocol::ErrorKind::Conflict,
+                        message,
+                        retryable: false,
+                    });
+                }
+                Ack::TransportLost => {
+                    return Err(AgentError::Transport(
+                        "the home did not accept the replayed hello".to_owned(),
+                    ));
+                }
+            }
         }
         let start = StartInput {
             session_id: self.session.clone(),
@@ -585,7 +600,21 @@ impl ChatClient {
                     }
                     return Ok(if duplicate { Ack::Duplicate } else { Ack::Acked });
                 }
-                Ok(FrameRead::Frame(AgentFrame::Credit { .. })) => {}
+                Ok(FrameRead::Frame(AgentFrame::Credit { run_id: credit_run, .. })) => {
+                    if credit_run != *run {
+                        continue;
+                    }
+                    // The home opens the next window only after the agent confirms it
+                    // consumed this Credit. A lease heartbeat is a bound, ordered
+                    // round-trip on the run's session, so use it as the confirmation.
+                    if let Some(token) = self.lease.clone() {
+                        self.client.send_frame(&AgentFrame::LeaseHeartbeat {
+                            surface: self.surface.surface_id.clone(),
+                            session: self.session.clone(),
+                            token,
+                        })?;
+                    }
+                }
                 Ok(FrameRead::Frame(AgentFrame::Ping)) => {
                     self.client.send_frame(&AgentFrame::Pong)?;
                 }
@@ -606,6 +635,11 @@ impl ChatClient {
                     message,
                     retryable,
                 })) => {
+                    if retryable && kind == vowp_protocol::ErrorKind::Conflict {
+                        // The home refused this event at the flow-control window. A
+                        // reconnect starts a fresh stream and replay follows.
+                        return Ok(Ack::TransportLost);
+                    }
                     if matches!(
                         kind,
                         vowp_protocol::ErrorKind::Refused | vowp_protocol::ErrorKind::Conflict

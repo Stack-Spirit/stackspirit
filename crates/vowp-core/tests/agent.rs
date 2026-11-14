@@ -1662,6 +1662,44 @@ fn local_chat_turn_appends_to_the_home_log() {
 }
 
 #[test]
+fn local_chat_turn_begin_requires_a_live_lease() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (surface, _) = pair_surface(&store, &name, &session, "chat", ts());
+    let start = gateway.frame_count();
+    gateway.send(&turn_begin_frame(
+        &surface,
+        &session,
+        &"A".repeat(52),
+        PathRef::parse("project:vowp").expect("path ref"),
+    ));
+    let AgentFrame::Error { kind, message, .. } =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected an Error frame");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+    assert!(message.contains("no live lease"), "{message}");
+    assert!(
+        !gateway
+            .output
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::TurnGrant { .. })),
+        "no turn is granted without a lease"
+    );
+    gateway.finish().expect("gateway");
+}
+
+#[test]
 fn local_chat_replays_after_an_ssh_drop_without_gaps() {
     let key = signing_key();
     let name = node_name("mac-studio");
@@ -1673,7 +1711,7 @@ fn local_chat_replays_after_an_ssh_drop_without_gaps() {
 
     let gateway = Gateway::start(home.path(), clock.clone());
     authenticate(&gateway, &name, &key);
-    let (_, _, run, lease) = begin_local_chat(
+    let (surface, _, run, lease) = begin_local_chat(
         &gateway,
         &store,
         &name,
@@ -1702,8 +1740,23 @@ fn local_chat_replays_after_an_ssh_drop_without_gaps() {
     assert!(!duplicate);
     assert!(first_seq < second_seq);
 
-    // The transport dropped before the acknowledgements reached the agent. It replays
-    // from the first unacked id: both lines come back as duplicates and are not appended.
+    // The SSH transport dropped and the agent reconnected: a second gateway process
+    // starts with an empty in-memory map. The heartbeat proves the lease, the fresh
+    // hello resumes the run, and both unacknowledged lines replay as duplicates.
+    gateway.finish().expect("first gateway");
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface,
+        session: session.clone(),
+        token: lease.clone(),
+    });
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease),
+    });
+
     let start = gateway.frame_count();
     gateway.send(&event_line(&run, first_event));
     let (_, first_ack, _, duplicate, _, _) = expect_ack(&gateway, start);
@@ -1736,6 +1789,96 @@ fn local_chat_replays_after_an_ssh_drop_without_gaps() {
         .filter(|id| id == &first || id == &second || id == &third)
         .collect();
     assert_eq!(ids, vec![first, second, third], "each replayed id appears once");
+}
+
+#[test]
+fn local_chat_enforces_the_64_event_window_and_replenishes_it() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (surface, _, run, lease) = begin_local_chat(
+        &gateway,
+        &store,
+        &name,
+        &session,
+        PathRef::parse("project:vowp").expect("path ref"),
+    );
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease),
+    });
+
+    let window_start = gateway.frame_count();
+    let mut accepted = Vec::new();
+    for index in 0..64 {
+        let id = EventId::new();
+        let start = gateway.frame_count();
+        gateway.send(&event_line(&run, assistant_event(&id, &format!("event {index}"))));
+        let (_, ack_id, _, duplicate, _, _) = expect_ack(&gateway, start);
+        assert_eq!(ack_id, Some(id.clone()));
+        assert!(!duplicate);
+        accepted.push(id);
+    }
+    // The 64th event's Credit arrives before its acknowledgement.
+    gateway.expect_after(window_start, |frame| {
+        matches!(frame, AgentFrame::Credit { count: 64, .. })
+    });
+
+    let refused = EventId::new();
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&refused, "past the window")));
+    let AgentFrame::Error {
+        kind,
+        message,
+        retryable,
+    } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected a window error");
+    };
+    assert_eq!(kind, ErrorKind::Conflict);
+    assert!(retryable);
+    assert!(message.contains("64-event in-flight window"), "{message}");
+    assert!(
+        !gateway.output.frames().iter().any(|frame| matches!(
+            frame,
+            AgentFrame::IngestAck { event_id: Some(id), .. } if id == &refused
+        )),
+        "the refused event was not appended"
+    );
+
+    // The lease heartbeat is the agent's confirmation that it consumed the Credit.
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface,
+        session: session.clone(),
+        token: lease.clone(),
+    });
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&refused, "past the window")));
+    let (_, ack_id, _, duplicate, _, _) = expect_ack(&gateway, start);
+    assert_eq!(ack_id, Some(refused.clone()));
+    assert!(!duplicate);
+    accepted.push(refused);
+
+    let start = gateway.frame_count();
+    gateway.send(&turn_end_frame(&run));
+    expect_ack(&gateway, start);
+    gateway.finish().expect("gateway");
+
+    let events = read_log(home.path(), &session);
+    let appended: Vec<EventId> = events
+        .iter()
+        .map(|event| event.id.clone())
+        .filter(|id| accepted.contains(id))
+        .collect();
+    assert_eq!(appended, accepted, "each windowed event appears exactly once");
 }
 
 #[test]
