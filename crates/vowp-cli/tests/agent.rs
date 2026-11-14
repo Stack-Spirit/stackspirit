@@ -3,7 +3,8 @@
 //! Every test uses a temporary `HOME` or in-process parsing; none reads the real
 //! `~/.vowp-agent`, opens a store or starts ssh.
 
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use clap::Parser;
@@ -14,8 +15,8 @@ use vowp_cli::cli::{AgentCommand, Cli, Command};
 use vowp_cli::node_ctx::ControlConfig;
 use vowp_core::agent::pair::{issue_surface_token, verify_surface_token};
 use vowp_protocol::{
-    AGENT_PROTOCOL, NodeKind, NodeName, NodeStatus, ProjectName, Session, SessionId, SessionRole, SessionState,
-    SurfaceId, SurfaceState, Timestamp,
+    AGENT_PROTOCOL, AgentPathMap, NodeKind, NodeName, NodeStatus, ProjectName, Session, SessionId, SessionRole,
+    SessionState, SurfaceId, SurfaceState, Timestamp,
 };
 use vowp_store::{NodeCredential, NodePath};
 
@@ -124,9 +125,177 @@ fn agent_enroll_accepts_code_file_stdin() {
         } => {
             assert_eq!(args.target, "home.example");
             assert_eq!(args.code_file, "-");
+            assert!(args.project.is_empty());
+            assert!(args.worktree_root.is_none());
         }
         other => panic!("expected agent enroll, got {other:?}"),
     }
+}
+
+/// Creates an enrolled agent config under `home` for the path-map commands.
+fn enrolled_agent_config(home: &Path) -> AgentConfig {
+    let state_dir = home.join(".vowp-agent");
+    let config = AgentConfig::new(
+        "home-1",
+        NodeName::parse("mac-studio").expect("node slug"),
+        state_dir,
+        "home.example",
+    );
+    config.write().expect("agent.json");
+    config
+}
+
+/// Creates a temporary checkout and the map `vowp agent paths add` should produce.
+fn checkout_map(home: &Path, directory: &str, project: &str) -> (PathBuf, AgentPathMap) {
+    let root = home.join(directory);
+    let worktrees = root.join(".vowp/worktrees");
+    std::fs::create_dir_all(&worktrees).expect("worktree root");
+    std::fs::write(root.join("vowp.toml"), format!("[project]\nname = \"{project}\"\n")).expect("vowp.toml");
+    let root = std::fs::canonicalize(root).expect("canonical checkout");
+    let worktrees = std::fs::canonicalize(worktrees).expect("canonical worktrees");
+    let map = AgentPathMap {
+        project: ProjectName::parse(project).expect("project slug"),
+        local_root: root.to_str().expect("utf-8").to_owned(),
+        worktree_root: Some(worktrees.to_str().expect("utf-8").to_owned()),
+        allow: Vec::new(),
+    };
+    (root, map)
+}
+
+#[test]
+fn agent_paths_add_update_and_remove_one_project() {
+    let home = TempDir::new().expect("temp home");
+    enrolled_agent_config(home.path());
+    let (checkout, expected) = checkout_map(home.path(), "checkout", "vowp");
+    let checkout_text = checkout.to_str().expect("utf-8 checkout");
+
+    let (code, stdout, stderr) = run_binary(
+        home.path(),
+        &["agent", "paths", "add", "--project", checkout_text, "--allow", "src"],
+    );
+    assert_eq!(code, 0, "paths add failed: {stderr}");
+    assert!(stdout.contains("vowp"), "{stdout}");
+    assert!(
+        stdout.contains(&expected.local_root),
+        "the owner sees the root: {stdout}"
+    );
+
+    let state_dir = home.path().join(".vowp-agent");
+    let config = AgentConfig::load(&state_dir).expect("stored config");
+    let map = config.path_map(&expected.project).expect("added map").clone();
+    assert_eq!(map.local_root, expected.local_root);
+    assert_eq!(map.worktree_root, expected.worktree_root);
+    assert_eq!(map.allow, vec!["src".to_owned()]);
+    let mode = std::fs::metadata(AgentConfig::file_path(&state_dir))
+        .expect("agent.json")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+
+    let (code, list, stderr) = run_binary(home.path(), &["--json", "agent", "paths", "ls"]);
+    assert_eq!(code, 0, "paths ls failed: {stderr}");
+    let list: serde_json::Value = serde_json::from_str(&list).expect("paths JSON");
+    assert_eq!(list[0]["project"], "vowp");
+    assert_eq!(list[0]["local_root"], expected.local_root);
+
+    let other = home.path().join("other-worktrees");
+    let other_text = other.to_str().expect("utf-8");
+    let (code, _stdout, stderr) = run_binary(
+        home.path(),
+        &[
+            "agent",
+            "paths",
+            "add",
+            "--project",
+            checkout_text,
+            "--worktree-root",
+            other_text,
+            "--allow",
+            "src",
+            "--allow",
+            "docs",
+        ],
+    );
+    assert_eq!(code, 0, "paths update failed: {stderr}");
+    let config = AgentConfig::load(&state_dir).expect("updated config");
+    let map = config.path_map(&expected.project).expect("updated map");
+    assert_eq!(
+        map.worktree_root.as_deref(),
+        Some(
+            std::fs::canonicalize(&other)
+                .expect("canonical")
+                .to_str()
+                .expect("utf-8")
+        )
+    );
+    assert_eq!(map.allow, vec!["src".to_owned(), "docs".to_owned()]);
+
+    let (code, stdout, stderr) = run_binary(home.path(), &["agent", "paths", "rm", "vowp"]);
+    assert_eq!(code, 0, "paths rm failed: {stderr}");
+    assert!(stdout.contains("unmapped project vowp"), "{stdout}");
+    let config = AgentConfig::load(&state_dir).expect("config after rm");
+    assert!(config.path_maps.is_empty());
+
+    let (code, _stdout, stderr) = run_binary(home.path(), &["agent", "paths", "rm", "vowp"]);
+    assert_eq!(code, 3, "an unknown project is not found: {stderr}");
+    assert!(stderr.contains("not mapped"), "{stderr}");
+}
+
+#[test]
+fn agent_status_redacts_absolute_paths_from_the_snapshot_cache() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let (_checkout, map) = checkout_map(home.path(), "checkout", "vowp");
+    let config = AgentConfig::new(
+        "home-1",
+        NodeName::parse("mac-studio").expect("node slug"),
+        state_dir.clone(),
+        "home.example",
+    )
+    .with_path_maps(vec![map.clone()]);
+    config.write().expect("agent.json");
+
+    let status = AgentStatus {
+        connection: ConnectionState::Connected,
+        node: Some(NodeName::parse("mac-studio").expect("node slug")),
+        home: Some("home-1".to_owned()),
+        protocol: Some(AGENT_PROTOCOL.to_owned()),
+        last_heartbeat: Some(Timestamp::parse("2026-11-14T10:00:00Z").expect("timestamp")),
+        last_error: None,
+        pending_spool_bytes: 0,
+        key_fingerprint: Some("sha256:0123456789abcdef".to_owned()),
+        surface_token_expires_at: None,
+    };
+    status.write(&state_dir).expect("status.json");
+    let cached_before = std::fs::read_to_string(AgentStatus::file_path(&state_dir)).expect("status cache");
+
+    let (code, stdout, stderr) = run_binary(home.path(), &["--json", "agent", "status"]);
+    assert_eq!(code, 0, "status failed: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("status JSON");
+    assert_eq!(value["paths"][0]["project"], "vowp");
+    assert_eq!(
+        value["paths"][0]["local_root"], map.local_root,
+        "the owner-only JSON may carry the absolute root"
+    );
+
+    let cached_after = std::fs::read_to_string(AgentStatus::file_path(&state_dir)).expect("status cache");
+    assert_eq!(
+        cached_before, cached_after,
+        "status must not rewrite its cache with a path map"
+    );
+    assert!(
+        !cached_after.contains(&map.local_root),
+        "the status snapshot cache keeps names only: {cached_after}"
+    );
+
+    let (code, human, stderr) = run_binary(home.path(), &["agent", "status"]);
+    assert_eq!(code, 0, "human status failed: {stderr}");
+    assert!(human.contains("paths:"), "{human}");
+    assert!(
+        human.contains(&map.local_root),
+        "the owner sees the mapped root: {human}"
+    );
 }
 
 #[test]

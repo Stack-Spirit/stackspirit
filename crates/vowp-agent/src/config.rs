@@ -5,13 +5,14 @@
 //! created 0700. Paired surface tokens live below `surfaces/<id>/token`, also 0600, in a
 //! 0700 directory.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use vowp_protocol::{NodeName, SessionId, SurfaceId};
+use vowp_protocol::{AgentPathMap, MAX_PATH_REF_LEN, NodeName, ProjectName, SessionId, SurfaceId};
 
 use crate::error::AgentError;
 
@@ -114,6 +115,8 @@ pub const SURFACE_TOKEN_FILE: &str = "token";
 pub const SURFACE_SESSION_FILE: &str = "session";
 /// RFC 3339 surface-token expiry file name inside a surface directory.
 pub const SURFACE_EXPIRY_FILE: &str = "expires_at";
+/// Default worktree directory below a project checkout.
+pub const DEFAULT_WORKTREE_DIR: &str = ".vowp/worktrees";
 
 /// The persisted enrollment and transport settings of this agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +129,12 @@ pub struct AgentConfig {
     pub state_dir: PathBuf,
     /// How to reach the home.
     pub transport: TransportConfig,
+    /// Projects this node can run in, with their local roots and allow lists.
+    ///
+    /// Absolute roots live only in this 0600 file and in the `PathMapUpdate`/`Enroll` frames
+    /// the home stores in its owner-only `node_paths` rows.
+    #[serde(default)]
+    pub path_maps: Vec<AgentPathMap>,
 }
 
 /// The transport section of [`AgentConfig`].
@@ -147,7 +156,50 @@ impl AgentConfig {
             node,
             state_dir,
             transport: TransportConfig::Ssh { target: target.into() },
+            path_maps: Vec::new(),
         }
+    }
+
+    /// Replaces the mapped projects.
+    pub fn with_path_maps(mut self, path_maps: Vec<AgentPathMap>) -> Self {
+        self.path_maps = path_maps;
+        self
+    }
+
+    /// Returns the default worktree root for a checkout: `<local_root>/.vowp/worktrees`.
+    pub fn default_worktree_root(local_root: &Path) -> PathBuf {
+        local_root.join(DEFAULT_WORKTREE_DIR)
+    }
+
+    /// Returns every mapped project.
+    pub fn path_maps(&self) -> &[AgentPathMap] {
+        &self.path_maps
+    }
+
+    /// Returns the map for one project, when it is mapped.
+    pub fn path_map(&self, project: &ProjectName) -> Option<&AgentPathMap> {
+        self.path_maps.iter().find(|map| &map.project == project)
+    }
+
+    /// Adds or replaces one project map and validates the resulting map set.
+    ///
+    /// The change stays in memory until [`AgentConfig::write`] persists it.
+    pub fn set_path_map(&mut self, map: AgentPathMap) -> Result<(), AgentError> {
+        let mut path_maps = self.path_maps.clone();
+        match path_maps.iter_mut().find(|entry| entry.project == map.project) {
+            Some(entry) => *entry = map,
+            None => path_maps.push(map),
+        }
+        Self::validate_path_maps(&self.state_dir, &path_maps)?;
+        self.path_maps = path_maps;
+        Ok(())
+    }
+
+    /// Removes one project map. Returns false when the project was not mapped.
+    pub fn remove_path_map(&mut self, project: &ProjectName) -> bool {
+        let before = self.path_maps.len();
+        self.path_maps.retain(|map| &map.project != project);
+        self.path_maps.len() != before
     }
 
     /// Returns the default state directory (`$VOWP_AGENT_HOME`, else `$HOME/.vowp-agent`).
@@ -225,13 +277,114 @@ impl AgentConfig {
         }
     }
 
+    /// Validates a project path-map set before it is persisted or sent.
+    ///
+    /// The rules match the home's `validate_paths` and the worktree resolver: unique project
+    /// names, absolute UTF-8 roots without `..` or NUL, an existing local checkout, a worktree
+    /// root that exists (or is created when it is below the agent state directory), and allow
+    /// entries that are already normalised relative paths.
+    pub fn validate_path_maps(state_dir: &Path, path_maps: &[AgentPathMap]) -> Result<(), AgentError> {
+        let mut projects = BTreeSet::new();
+        for map in path_maps {
+            if !projects.insert(map.project.as_str().to_owned()) {
+                return Err(AgentError::Config(format!(
+                    "project {} is mapped more than once",
+                    map.project
+                )));
+            }
+            validate_root(&map.project, "local root", Path::new(&map.local_root), state_dir, false)?;
+            match &map.worktree_root {
+                Some(root) => validate_root(&map.project, "worktree root", Path::new(root), state_dir, true)?,
+                None => {
+                    let default = Self::default_worktree_root(Path::new(&map.local_root));
+                    validate_root(&map.project, "worktree root", &default, state_dir, true)?;
+                }
+            }
+            for entry in &map.allow {
+                validate_allow_entry(&map.project, entry)?;
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), AgentError> {
         if self.home.trim().is_empty() {
             return Err(AgentError::Config("home name must not be empty".to_owned()));
         }
         self.ssh_target()?;
+        Self::validate_path_maps(&self.state_dir, &self.path_maps)?;
         Ok(())
     }
+}
+
+fn validate_root(
+    project: &ProjectName,
+    label: &str,
+    root: &Path,
+    state_dir: &Path,
+    creatable_below_state_dir: bool,
+) -> Result<(), AgentError> {
+    let Some(text) = root.to_str() else {
+        return Err(AgentError::Config(format!(
+            "project {project} {label} must be a UTF-8 path"
+        )));
+    };
+    if text.is_empty() || !root.is_absolute() {
+        return Err(AgentError::Config(format!(
+            "project {project} {label} must be an absolute path"
+        )));
+    }
+    if text.contains('\0') {
+        return Err(AgentError::Config(format!(
+            "project {project} {label} must not contain a NUL byte"
+        )));
+    }
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(AgentError::Config(format!(
+            "project {project} {label} must not contain parent traversal"
+        )));
+    }
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(AgentError::Config(format!(
+            "project {project} {label} is not a directory"
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if creatable_below_state_dir && root.starts_with(state_dir) {
+                fs::create_dir_all(root)?;
+                Ok(())
+            } else {
+                Err(AgentError::Config(format!("project {project} {label} is missing")))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(AgentError::Config(format!("project {project} {label} is not readable")))
+        }
+        Err(error) => Err(AgentError::Io(error)),
+    }
+}
+
+fn validate_allow_entry(project: &ProjectName, entry: &str) -> Result<(), AgentError> {
+    let invalid = || {
+        AgentError::Config(format!(
+            "project {project} allow entry must be a normalised relative path"
+        ))
+    };
+    if entry.is_empty() || entry.len() > MAX_PATH_REF_LEN || entry.contains('\0') || entry.contains('\\') {
+        return Err(invalid());
+    }
+    if entry.starts_with('/') {
+        return Err(invalid());
+    }
+    for part in entry.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.chars().any(char::is_control) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 /// Creates `path` and every missing parent, then makes `path` mode 0700.

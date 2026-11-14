@@ -23,6 +23,7 @@ crates/vowp-agent/
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
   src/worktree.rs   PathMap, WorktreeManager, Worktree, push/cleanup and the disk guard
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
+  tests/config.rs   path-map persistence, validation, enrollment and update frames
   tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
   tests/executor.rs fake home and fake handler for assignments, acks, replay and fencing
   tests/worktree.rs temporary origin/clone plus real git for create/reuse/cleanup/push
@@ -35,7 +36,7 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 
 | File | Mode | Contents |
 |---|---|---|
-| `agent.json` | 0600 | `home`, `node`, `state_dir`, `transport = { kind = "ssh", target }` |
+| `agent.json` | 0600 | `home`, `node`, `state_dir`, `transport = { kind = "ssh", target }`, and the `path_maps` array |
 | `node.key` | 0600 | the 32-byte ed25519 secret as lowercase hex |
 | `node.pub` | 0644 | the 32-byte public key as lowercase hex |
 | `status.json` | 0600 | the last `AgentStatus` document |
@@ -56,17 +57,26 @@ and the enrollment code are never logged, echoed, put in argv or written to `sta
 ## 3. Public API
 
 ```rust
-pub struct AgentConfig { pub home: String, pub node: NodeName, pub state_dir: PathBuf, pub transport: TransportConfig }
+pub struct AgentConfig { pub home: String, pub node: NodeName, pub state_dir: PathBuf,
+                         pub transport: TransportConfig, pub path_maps: Vec<AgentPathMap> }
 pub enum TransportConfig { Ssh { target: String } }
+pub const DEFAULT_WORKTREE_DIR: &str;                               // ".vowp/worktrees"
 
 impl AgentConfig {
     pub fn new(home: impl Into<String>, node: NodeName, state_dir: PathBuf, target: impl Into<String>) -> Self;
+    pub fn with_path_maps(self, path_maps: Vec<AgentPathMap>) -> Self;
     pub fn default_state_dir() -> Result<PathBuf, AgentError>;          // $VOWP_AGENT_HOME, else $HOME/.vowp-agent
     pub fn file_path(state_dir: &Path) -> PathBuf;
     pub fn surfaces_dir(state_dir: &Path) -> PathBuf;                   // state_dir/surfaces
     pub fn surface_dir(state_dir: &Path, surface: &SurfaceId) -> PathBuf;
     pub fn surface_token_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf;
     pub fn surface_expiry_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf;
+    pub fn default_worktree_root(local_root: &Path) -> PathBuf;         // <local_root>/.vowp/worktrees
+    pub fn validate_path_maps(state_dir: &Path, path_maps: &[AgentPathMap]) -> Result<(), AgentError>;
+    pub fn path_maps(&self) -> &[AgentPathMap];
+    pub fn path_map(&self, project: &ProjectName) -> Option<&AgentPathMap>;
+    pub fn set_path_map(&mut self, map: AgentPathMap) -> Result<(), AgentError>;
+    pub fn remove_path_map(&mut self, project: &ProjectName) -> bool;
     pub fn load(state_dir: &Path) -> Result<Self, AgentError>;          // NotEnrolled when missing
     pub fn write(&self) -> Result<(), AgentError>;                      // agent.json, 0600
     pub fn ssh_target(&self) -> Result<&str, AgentError>;
@@ -111,9 +121,12 @@ impl AgentClient {
     pub fn unenrolled(state_dir: PathBuf, key: NodeKey, transport: Box<dyn Transport>, clock: Arc<dyn AgentClock>) -> Self;
     pub fn from_state_dir(state_dir: PathBuf, clock: Arc<dyn AgentClock>) -> Result<Self, AgentError>;
     pub fn with_backoff(self, backoff: Backoff) -> Self;
+    pub fn with_path_maps(self, path_maps: Vec<AgentPathMap>) -> Self;
+    pub fn path_maps(&self) -> &[AgentPathMap];
     pub fn enroll(&mut self, target: &str, code: &str) -> Result<Enrollment, AgentError>;
     pub fn pair(&mut self, request: &SurfacePairRequest) -> Result<PairedSurface, AgentError>;
     pub fn connect(&mut self) -> Result<(), AgentError>;
+    pub fn refresh_path_maps(&mut self) -> Result<usize, AgentError>;
     pub fn heartbeat(&mut self) -> Result<Timestamp, AgentError>;
     pub fn run(&mut self, options: &RunOptions) -> Result<RunOutcome, AgentError>;
     pub fn run_with_handler(&mut self, options: &RunOptions, handler: Arc<dyn RunHandler>)
@@ -242,10 +255,35 @@ pub const DEFAULT_DISK_RESERVE_BYTES: u64;   // 5 GiB
 
 `AgentClient::enroll` validates that the code is 52 ASCII alphanumeric characters, generates or
 loads the node key, opens the transport and sends one `Enroll` frame with the public key (lowercase
-hex), agent version, OS, arch, empty labels/capabilities/path maps. `Enrolled` supplies `home_id`,
-`node`, `protocol` and `heartbeat_secs`. The client closes that stream, reconnects and performs the
-handshake; only after the handshake succeeds does it write `agent.json`. The code is consumed by
+hex), agent version, OS, arch, empty labels, names-only capabilities and the configured path map.
+`capabilities.projects` lists each mapped project name; the roots travel only in `paths`, the
+owner-only `node_paths` payload. `Enrolled` supplies `home_id`, `node`, `protocol` and
+`heartbeat_secs`. The client closes that stream, reconnects and performs the handshake; only after
+the handshake succeeds does it write `agent.json` (including `path_maps`). The code is consumed by
 the home and is never written locally.
+
+### Path map
+
+`AgentConfig.path_maps` is a `Vec<AgentPathMap>` persisted in the same 0600 `agent.json` as the
+enrollment. `serde(default)` keeps an older file without the array loadable; it starts empty.
+`validate_path_maps` requires unique project names, an absolute UTF-8 `local_root` without `..`
+or NUL that exists and is a directory, a `worktree_root` that exists or is created only when it
+is below the agent state directory, and allow entries that are already normalised relative paths
+(no leading `/`, empty, `.` or `..` component, NUL, backslash or control character). A map with
+no `worktree_root` is validated against `<local_root>/.vowp/worktrees`. `AgentConfig::write`
+validates every map, `load` validates again, and `set_path_map`/`remove_path_map` edit one entry
+in memory before the caller writes the file. The default worktree root for a checkout is
+`<local_root>/.vowp/worktrees` (`DEFAULT_WORKTREE_DIR`).
+
+`vowp agent run` reloads `agent.json` on every heartbeat. A fresh process reports the saved map
+after its first handshake, so a project added while the agent was stopped reaches the home
+without re-enrollment. `AgentClient::refresh_path_maps` sends one `PathMapUpdate { map }` for each
+project added or changed since the last report and remembers the sent set, so an unchanged map is
+not sent twice. A removal changes only local eligibility;
+the frame vocabulary has no removal message. A home that predates `PathMapUpdate` answers `Error`;
+the client disables further updates for that process rather than reconnecting in a loop. Absolute
+roots appear only in `agent.json`, the `Enroll.paths`/`PathMapUpdate` frames and the owner-only
+`vowp agent status --json`/human output, never in `status.json`, a log line or a run frame.
 
 ### Surface pairing
 
@@ -280,8 +318,9 @@ a `Revoked`/`Superseded` node credential keeps its existing meaning. The client 
 `run` opens a connection, sends one heartbeat immediately, then sends another every
 `heartbeat_secs` (10 by default). A heartbeat carries `Timestamp::now` from the injected clock, a
 local capacity snapshot (CPU count, `/proc/loadavg` and `/proc/meminfo` when available, `df -Pk`
-free bytes, zero busy slots) and the current `spool/` byte count. Every heartbeat rewrites
-`status.json` 0600.
+free bytes, zero busy slots) and the current `spool/` byte count. Each heartbeat also reloads
+`agent.json` and sends any changed `PathMapUpdate` frames. Every heartbeat rewrites
+`status.json` 0600; that file holds names and counts, never a path map.
 
 `Ping` is answered with `Pong`. `Revoked` and `Superseded` end the loop with the matching
 `RunOutcome`. A dropped transport, EOF or retryable home error is reported in `status.json` and
@@ -430,7 +469,13 @@ to the protocol's refusal vocabulary by `reject_reason`; §8 lists its variants.
 `agent_key_is_created_0600`, `agent_enroll_sends_a_public_key_and_stores_the_node`,
 `agent_handshake_rejects_a_bad_signature`, `agent_handshake_rejects_a_replayed_nonce`,
 `agent_reconnects_with_backoff_after_a_drop`, `agent_heartbeats_on_the_interval`,
-`agent_stops_on_revoked`, `agent_stops_on_superseded`. The transport tests
+`agent_stops_on_revoked`, `agent_stops_on_superseded`. The path-map slice adds, in
+`tests/config.rs`, `agent_enroll_sends_the_configured_path_map`,
+`agent_path_map_persists_0600_and_reloads`,
+`agent_path_map_rejects_a_relative_root_a_traversal_and_a_missing_checkout`,
+`agent_paths_add_update_and_remove_one_project` and
+`agent_path_map_update_is_sent_when_the_map_changes`; the CLI adds
+`agent_status_redacts_absolute_paths_from_the_snapshot_cache`. The transport tests
 `ssh_argv_matches_the_documented_command` and `read_line_limited_rejects_an_oversized_frame` cover
 the exact SSH argv and the frame cap. The surface-pairing slice adds the in-memory home tests
 `agent_pair_writes_0600_token_and_prints_no_secret`, `agent_pair_refuses_a_replayed_code` and
@@ -472,7 +517,8 @@ the fake handler implements `RunHandler`/`RunSink`.
 `src/worktree.rs` is the §6.4–§6.5 foundation the executor calls after `AssignRun`. It adds no
 frame loop, no harness start and no policy decision. Git runs through the small `GitRunner`
 trait: the default `SystemGit` uses `std::process::Command`, and tests pass a recording wrapper
-around the real binary. Absolute local paths stay in this module and never reach a frame.
+around the real binary. Absolute local paths stay in this module; the only frames that carry a
+root are `Enroll.paths` and `PathMapUpdate`, which the home stores in its owner-only `node_paths`.
 
 ### Path map
 
@@ -571,7 +617,8 @@ remote cases to the protocol's `RunRejectReason` vocabulary. There is no `unwrap
 ## 9. Out of scope
 
 The home-side gateway, store methods, node enrollment codes, node commands, runs, leases,
-offload, path-map mutation, launchd and WSS ingress are separate jobs. Phase 0 `vowp agent run`
+offload, home-side path-map storage and `vowp node paths`, launchd and WSS ingress are separate
+jobs. Phase 0 `vowp agent run`
 stays in the foreground; `--role` is accepted and carried in `RunOptions`, and the run-assignment
 frame loop is `run_with_handler` with an injected handler. `vowp agent surface
 start|attach|detach`, the MCP proxy and token rotation are later v0.4 slices. The local chat

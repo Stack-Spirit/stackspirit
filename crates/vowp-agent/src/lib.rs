@@ -28,8 +28,8 @@ pub use client::{
     validate_enrollment_code, validate_pairing_code, validate_surface_id,
 };
 pub use config::{
-    AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, PairedToken, STATUS_FILE, SURFACE_EXPIRY_FILE, SURFACE_SESSION_FILE,
-    SURFACE_TOKEN_FILE, SURFACES_DIR, TransportConfig, paired_token_for_session,
+    AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, DEFAULT_WORKTREE_DIR, PairedToken, STATUS_FILE, SURFACE_EXPIRY_FILE,
+    SURFACE_SESSION_FILE, SURFACE_TOKEN_FILE, SURFACES_DIR, TransportConfig, paired_token_for_session,
 };
 pub use error::AgentError;
 pub use executor::{

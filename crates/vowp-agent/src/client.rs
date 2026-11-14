@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{
-    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentRole, ErrorKind, NodeName, SessionId, SurfaceId,
-    SurfaceScope, Timestamp,
+    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, ErrorKind, NodeName,
+    SessionId, SurfaceId, SurfaceScope, Timestamp,
 };
 
 use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surface_binding};
@@ -221,6 +221,10 @@ pub struct AgentClient {
     status: AgentStatus,
     seen_nonces: HashSet<String>,
     backoff: Backoff,
+    pending_path_maps: Vec<AgentPathMap>,
+    sent_path_maps: Vec<AgentPathMap>,
+    path_map_updates: bool,
+    awaiting_path_map_reply: bool,
 }
 
 struct Connection {
@@ -245,6 +249,7 @@ impl AgentClient {
         clock: Arc<dyn AgentClock>,
     ) -> Self {
         let status = base_status(&state_dir, Some(&config), &key);
+        let pending_path_maps = config.path_maps.clone();
         Self {
             state_dir,
             key,
@@ -255,6 +260,12 @@ impl AgentClient {
             status,
             seen_nonces: HashSet::new(),
             backoff: Backoff::new(),
+            pending_path_maps,
+            // A fresh process reports the saved map after its first handshake, so a project
+            // added while the agent was stopped reaches the home without a re-enrollment.
+            sent_path_maps: Vec::new(),
+            path_map_updates: true,
+            awaiting_path_map_reply: false,
         }
     }
 
@@ -276,6 +287,10 @@ impl AgentClient {
             status,
             seen_nonces: HashSet::new(),
             backoff: Backoff::new(),
+            pending_path_maps: Vec::new(),
+            sent_path_maps: Vec::new(),
+            path_map_updates: true,
+            awaiting_path_map_reply: false,
         }
     }
 
@@ -299,6 +314,27 @@ impl AgentClient {
         self
     }
 
+    /// Sets the project path map sent by the next [`AgentClient::enroll`].
+    ///
+    /// Callers validate the maps with [`AgentConfig::validate_path_maps`] before enrolling.
+    /// On an already enrolled client the maps replace the in-memory config; the file changes
+    /// only when the caller writes it.
+    pub fn with_path_maps(mut self, path_maps: Vec<AgentPathMap>) -> Self {
+        self.pending_path_maps = path_maps.clone();
+        if let Some(config) = self.config.as_mut() {
+            config.path_maps = path_maps;
+        }
+        self
+    }
+
+    /// Returns the current project path map.
+    pub fn path_maps(&self) -> &[AgentPathMap] {
+        self.config
+            .as_ref()
+            .map(|config| config.path_maps.as_slice())
+            .unwrap_or(&self.pending_path_maps)
+    }
+
     /// Redeems a one-time code, reconnects and performs the handshake.
     pub fn enroll(&mut self, target: &str, code: &str) -> Result<Enrollment, AgentError> {
         validate_enrollment_code(code)?;
@@ -306,6 +342,8 @@ impl AgentClient {
             return Err(AgentError::Config("ssh target must not be empty".to_owned()));
         }
         let public_key = self.key.public_key_hex();
+        let path_maps = self.path_maps().to_vec();
+        AgentConfig::validate_path_maps(&self.state_dir, &path_maps)?;
         let mut stream = self.transport.open()?;
         stream.send(&AgentFrame::Enroll {
             code: code.to_owned(),
@@ -314,8 +352,8 @@ impl AgentClient {
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             labels: Vec::new(),
-            capabilities: capabilities(),
-            paths: Vec::new(),
+            capabilities: capabilities(&path_maps),
+            paths: path_maps.clone(),
         })?;
         let enrolled = match next_handshake_frame(&mut *stream)? {
             AgentFrame::Enrolled {
@@ -348,13 +386,16 @@ impl AgentClient {
             enrolled.node.clone(),
             self.state_dir.clone(),
             target,
-        );
+        )
+        .with_path_maps(path_maps);
         self.config = Some(config.clone());
         if let Err(error) = self.connect() {
             self.config = None;
             return Err(error);
         }
         config.write()?;
+        self.pending_path_maps = config.path_maps.clone();
+        self.sent_path_maps = config.path_maps.clone();
         self.status = base_status(&self.state_dir, Some(&config), &self.key);
         self.status.connection = ConnectionState::Stopped;
         self.save_status()?;
@@ -467,7 +508,7 @@ impl AgentClient {
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             labels: Vec::new(),
-            capabilities: capabilities(),
+            capabilities: capabilities(&config.path_maps),
         })?;
 
         let challenge = match next_handshake_frame(&mut *stream)? {
@@ -554,6 +595,45 @@ impl AgentClient {
         Ok(())
     }
 
+    /// Reports path-map changes since the last report.
+    ///
+    /// `vowp agent paths add` and `rm` edit `agent.json` while `vowp agent run` is connected.
+    /// Each heartbeat reloads the file and sends one [`AgentFrame::PathMapUpdate`] for every
+    /// project that was added or changed. A home that predates the frame answers `Error`; the
+    /// client then stops sending updates on this process instead of reconnecting in a loop.
+    pub fn refresh_path_maps(&mut self) -> Result<usize, AgentError> {
+        if self.connection.is_none() || !self.path_map_updates {
+            return Ok(0);
+        }
+        let current = match AgentConfig::load(&self.state_dir) {
+            Ok(config) => config.path_maps,
+            Err(AgentError::NotEnrolled(_)) => return Ok(0),
+            // `vowp agent paths add|rm` rewrites the file in place. A heartbeat that catches
+            // the write mid-flight, or a hand edit that is not valid yet, keeps the last good
+            // map and retries on the next heartbeat instead of ending the run loop.
+            Err(AgentError::Json(_) | AgentError::Config(_)) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        if let Some(config) = self.config.as_mut() {
+            config.path_maps = current.clone();
+        }
+        let changed: Vec<AgentPathMap> = current
+            .iter()
+            .filter(|map| !self.sent_path_maps.iter().any(|sent| sent == *map))
+            .cloned()
+            .collect();
+        if changed.is_empty() {
+            self.sent_path_maps = current;
+            return Ok(0);
+        }
+        for map in &changed {
+            self.send_frame(&AgentFrame::PathMapUpdate { map: map.clone() })?;
+        }
+        self.sent_path_maps = current;
+        self.awaiting_path_map_reply = true;
+        Ok(changed.len())
+    }
+
     /// Sends one heartbeat and updates `status.json`.
     pub fn heartbeat(&mut self) -> Result<Timestamp, AgentError> {
         let now = self.clock.now();
@@ -563,6 +643,7 @@ impl AgentClient {
             capacity: collect_capacity(&self.state_dir),
             pending_spool_bytes: spool,
         })?;
+        self.refresh_path_maps()?;
         self.status.connection = ConnectionState::Connected;
         self.status.last_heartbeat = Some(now);
         self.status.pending_spool_bytes = spool;
@@ -737,61 +818,75 @@ impl AgentClient {
                     }
                 }
                 FrameRead::Closed => return ServeOutcome::Disconnected("connection closed".to_owned()),
-                FrameRead::Frame(frame) => match frame {
-                    AgentFrame::Ping => {
-                        if let Err(error) = self.send_frame(&AgentFrame::Pong) {
+                FrameRead::Frame(frame) => {
+                    if self.awaiting_path_map_reply && !matches!(&frame, AgentFrame::Error { .. }) {
+                        self.awaiting_path_map_reply = false;
+                    }
+                    match frame {
+                        AgentFrame::Ping => {
+                            if let Err(error) = self.send_frame(&AgentFrame::Pong) {
+                                return disconnected_or_failed(error);
+                            }
+                        }
+                        AgentFrame::AssignRun {
+                            assignment,
+                            lease_token,
+                            lease_expires_at,
+                        } => {
+                            if let Err(error) = driver.handle_assign(self, assignment, lease_token, lease_expires_at) {
+                                return disconnected_or_failed(error);
+                            }
+                        }
+                        AgentFrame::CancelRun { run_id, epoch, reason } => {
+                            driver.handle_cancel(self, &run_id, epoch, &reason)
+                        }
+                        AgentFrame::RunLost { run_id, reason } => driver.handle_run_lost(self, &run_id, &reason),
+                        AgentFrame::Cleanup { run_id, job, .. } => driver.handle_cleanup(self, &run_id, &job),
+                        AgentFrame::Credit { run_id, count } => driver.handle_credit(&run_id, count),
+                        AgentFrame::IngestAck {
+                            run_id,
+                            event_id,
+                            seq,
+                            duplicate,
+                            lease_revoked,
+                            error,
+                        } => driver.handle_ack(&run_id, event_id.as_ref(), seq, duplicate, lease_revoked, error),
+                        AgentFrame::Revoked { reason } => {
+                            self.status.connection = ConnectionState::Revoked;
+                            self.status.last_error = Some(reason.clone());
+                            if let Err(error) = self.save_status() {
+                                return ServeOutcome::Failed(error);
+                            }
+                            return ServeOutcome::Stopped(RunOutcome::Revoked { reason });
+                        }
+                        AgentFrame::Superseded { connection_id } => {
+                            self.status.connection = ConnectionState::Superseded;
+                            self.status.last_error = Some(format!("superseded by {connection_id}"));
+                            if let Err(error) = self.save_status() {
+                                return ServeOutcome::Failed(error);
+                            }
+                            return ServeOutcome::Stopped(RunOutcome::Superseded { connection_id });
+                        }
+                        AgentFrame::Error {
+                            kind,
+                            message,
+                            retryable,
+                        } => {
+                            if self.awaiting_path_map_reply {
+                                // Older homes answer an unknown `PathMapUpdate` with `Error`
+                                // and close the connection. Keep the connection usable by
+                                // not sending more map updates; the next process retries.
+                                self.awaiting_path_map_reply = false;
+                                self.path_map_updates = false;
+                                self.sent_path_maps = self.path_maps().to_vec();
+                                continue;
+                            }
+                            let error = remote_error(kind, message, retryable);
                             return disconnected_or_failed(error);
                         }
+                        _ => {}
                     }
-                    AgentFrame::AssignRun {
-                        assignment,
-                        lease_token,
-                        lease_expires_at,
-                    } => {
-                        if let Err(error) = driver.handle_assign(self, assignment, lease_token, lease_expires_at) {
-                            return disconnected_or_failed(error);
-                        }
-                    }
-                    AgentFrame::CancelRun { run_id, epoch, reason } => {
-                        driver.handle_cancel(self, &run_id, epoch, &reason)
-                    }
-                    AgentFrame::RunLost { run_id, reason } => driver.handle_run_lost(self, &run_id, &reason),
-                    AgentFrame::Cleanup { run_id, job, .. } => driver.handle_cleanup(self, &run_id, &job),
-                    AgentFrame::Credit { run_id, count } => driver.handle_credit(&run_id, count),
-                    AgentFrame::IngestAck {
-                        run_id,
-                        event_id,
-                        seq,
-                        duplicate,
-                        lease_revoked,
-                        error,
-                    } => driver.handle_ack(&run_id, event_id.as_ref(), seq, duplicate, lease_revoked, error),
-                    AgentFrame::Revoked { reason } => {
-                        self.status.connection = ConnectionState::Revoked;
-                        self.status.last_error = Some(reason.clone());
-                        if let Err(error) = self.save_status() {
-                            return ServeOutcome::Failed(error);
-                        }
-                        return ServeOutcome::Stopped(RunOutcome::Revoked { reason });
-                    }
-                    AgentFrame::Superseded { connection_id } => {
-                        self.status.connection = ConnectionState::Superseded;
-                        self.status.last_error = Some(format!("superseded by {connection_id}"));
-                        if let Err(error) = self.save_status() {
-                            return ServeOutcome::Failed(error);
-                        }
-                        return ServeOutcome::Stopped(RunOutcome::Superseded { connection_id });
-                    }
-                    AgentFrame::Error {
-                        kind,
-                        message,
-                        retryable,
-                    } => {
-                        let error = remote_error(kind, message, retryable);
-                        return disconnected_or_failed(error);
-                    }
-                    _ => {}
-                },
+                }
             }
         }
     }
@@ -924,7 +1019,7 @@ fn remote_error(kind: ErrorKind, message: String, retryable: bool) -> AgentError
     }
 }
 
-fn capabilities() -> AgentCapabilities {
+fn capabilities(path_maps: &[AgentPathMap]) -> AgentCapabilities {
     AgentCapabilities {
         os: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
@@ -933,7 +1028,7 @@ fn capabilities() -> AgentCapabilities {
         git_version: None,
         labels: Vec::new(),
         secret_names: Vec::new(),
-        projects: Vec::new(),
+        projects: path_maps.iter().map(|map| map.project.clone()).collect(),
     }
 }
 

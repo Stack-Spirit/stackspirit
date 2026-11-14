@@ -143,8 +143,8 @@ local VOWP home database and the command is never forwarded to the home. The loc
 the `worker` profile; `--executor` overrides it). The home path keeps its required positional id,
 help tree and missing-id error.
 
-The Mac-side v0.4 agent commands (`vowp agent enroll`, `vowp agent run`, `vowp agent status`) live
-in §12. They use `~/.vowp-agent` rather than the home/project store.
+The Mac-side v0.4 agent commands (`vowp agent enroll`, `vowp agent paths`, `vowp agent run`,
+`vowp agent status`) live in §12. They use `~/.vowp-agent` rather than the home/project store.
 
 ### Hidden session interfaces
 
@@ -476,26 +476,53 @@ The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 
 These commands are the Mac side of the local orchestrator. They use `~/.vowp-agent` (override
 with `VOWP_AGENT_HOME`), never open a project store or `vowp-core`, and never put the node private
-key or the one-time code in argv, `ps`, a log line or a JSON document. The hidden
+key or the one-time code in argv, `ps`, a log line or a JSON document. `agent enroll --project`
+and `agent paths add|rm|ls` manage the local project path map the offload executor resolves
+`PathRef`s against. The hidden
 `vowp agent gateway` command is the home-side exception: it runs on the home and opens the node
 store. Crate APIs: [`crates/vowp-agent.md`](crates/vowp-agent.md) and
 [`crates/vowp-core.md`](crates/vowp-core.md) §9.
 
-### `vowp agent enroll --target <ssh-target> --code-file <path|->`
+### `vowp agent enroll --target <ssh-target> --code-file <path|-> [--project <PATH>]... [--worktree-root <PATH>]`
 Generates `~/.vowp-agent/node.key` (0600) and `node.pub` when absent, opens
 `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <ssh-target> vowp agent gateway --stdio`,
-sends `Enroll { code, public_key, … }` and waits for `Enrolled`. It then reconnects and performs
-the `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome` handshake. The code is a
-52-character one-time value; `--code-file -` reads it from stdin. Success writes `agent.json`
-(0600) and prints the node, home and protocol:
+sends `Enroll { code, public_key, …, paths }` and waits for `Enrolled`. Each repeatable
+`--project <PATH>` maps one local checkout: the project name comes from `[project].name` in its
+`vowp.toml` (else the directory name), and the worktree root defaults to
+`<checkout>/.vowp/worktrees` unless `--worktree-root` is given. The roots must be absolute and
+the local checkout must exist. Without `--project`, enrollment reuses the saved map. It then
+reconnects and performs the `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`
+handshake. The code is a 52-character one-time value; `--code-file -` reads it from stdin.
+Success writes `agent.json` (0600), including the path map, and prints the node, home and protocol:
 
 ```sh
 vowp agent enroll --target home.example --code-file -
+vowp agent enroll --target home.example --code-file - --project ~/src/vowp
 ```
 
 Human output is `enrolled node mac-studio in home home-1 (vowp-agent/1)`; `--json` prints
 `{"node":"mac-studio","home":"home-1","protocol":"vowp-agent/1","heartbeat_secs":10}`. The
 private key, public key and code are never printed.
+
+### `vowp agent paths add --project <PATH> [--name <NAME>] [--worktree-root <PATH>] [--allow <REL>]...`
+Adds or updates one project without re-enrolling. The project name defaults to
+`[project].name` from the checkout's `vowp.toml`, then the directory name; `--name` overrides it.
+The worktree root defaults to `<checkout>/.vowp/worktrees` and is created when missing.
+`--allow` is a repeatable normalised relative path below the checkout; with no entry the whole
+checkout is allowed. The command validates the roots, writes `agent.json` 0600, and prints the
+owner-only mapping `vowp /Users/owner/src/vowp worktrees /Users/owner/src/vowp/.vowp/worktrees`;
+`--json` prints the `AgentPathMap`. A running `vowp agent run` reloads the file on its next
+heartbeat and sends `PathMapUpdate`. Without enrollment it exits 3 with the enrollment hint.
+
+### `vowp agent paths rm <PROJECT>`
+Removes one project from the local map and writes `agent.json` 0600. An unknown project is
+exit 3. Human output is `unmapped project <name>`; `--json` prints
+`{"project":"vowp","removed":true}`.
+
+### `vowp agent paths ls [--json]`
+Lists the local map. Human output is one line per project with its absolute local root, worktree
+root and allow list; `--json` prints the `AgentPathMap` array. These roots are owner-only: this
+command and `agent status` may print them, but no home snapshot, log or `status.json` cache does.
 
 ### `vowp agent pair --code-file <path|-> --surface <id> --session <id> [--app <app>]`
 
@@ -522,8 +549,11 @@ launchd service is Phase 4.
 ### `vowp agent status [--json]`
 Reads `status.json` and prints the last connection state, node, home, protocol, last heartbeat,
 last error, pending spool bytes, key fingerprint and surface-token expiry when one is paired.
-Without an enrollment it exits 3 with the `vowp agent enroll` hint. It also exits 0 when the
-last state is offline or stopped. `--json` prints:
+When projects are mapped, the human output adds a `paths:` block with each project name, local
+root and worktree root; `--json` adds a `paths` array of `AgentPathMap`. These absolute roots are
+owner-only output built from `agent.json`: `status.json` stays a names-and-counts cache and never
+contains them. Without an enrollment it exits 3 with the `vowp agent enroll` hint. It also exits
+0 when the last state is offline or stopped. `--json` prints:
 
 ```json
 {
@@ -535,7 +565,15 @@ last state is offline or stopped. `--json` prints:
   "last_error": null,
   "pending_spool_bytes": 42,
   "key_fingerprint": "sha256:0123456789abcdef",
-  "surface_token_expires_at": null
+  "surface_token_expires_at": null,
+  "paths": [
+    {
+      "project": "vowp",
+      "local_root": "/Users/owner/src/vowp",
+      "worktree_root": "/Users/owner/src/vowp/.vowp/worktrees",
+      "allow": []
+    }
+  ]
 }
 ```
 

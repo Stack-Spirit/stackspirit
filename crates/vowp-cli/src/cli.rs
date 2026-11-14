@@ -1205,6 +1205,8 @@ pub struct OffloadStatusArgs {}
 pub enum AgentCommand {
     /// Enroll this Mac with a one-time code.
     Enroll(AgentEnrollArgs),
+    /// Add, remove or list the local project path map.
+    Paths(AgentPathsArgs),
     /// Redeem a home surface pairing code and store the token.
     Pair(AgentPairArgs),
     /// Run the agent client until revoked or superseded.
@@ -1225,7 +1227,61 @@ pub struct AgentEnrollArgs {
     /// File holding the one-time code, or `-` for stdin.
     #[arg(long, value_name = "PATH|-")]
     pub code_file: String,
+    /// Map a local project checkout; repeat for more projects.
+    #[arg(long, value_name = "PATH")]
+    pub project: Vec<String>,
+    /// Worktree root for every --project; defaults to `<checkout>/.vowp/worktrees`.
+    #[arg(long, value_name = "PATH")]
+    pub worktree_root: Option<PathBuf>,
 }
+
+/// Arguments for `vowp agent paths`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentPathsArgs {
+    /// The path-map subcommand.
+    #[command(subcommand)]
+    pub command: AgentPathsCommand,
+}
+
+/// `vowp agent paths` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum AgentPathsCommand {
+    /// Add or update one project checkout.
+    Add(AgentPathsAddArgs),
+    /// Remove one project from the map.
+    Rm(AgentPathsRmArgs),
+    /// List the local project path map.
+    Ls(AgentPathsLsArgs),
+}
+
+/// Arguments for `vowp agent paths add`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentPathsAddArgs {
+    /// Local project checkout to map.
+    #[arg(long, value_name = "PATH")]
+    pub project: String,
+    /// Project name override; defaults to `[project].name` in its `vowp.toml`.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Worktree root; defaults to `<checkout>/.vowp/worktrees`.
+    #[arg(long, value_name = "PATH")]
+    pub worktree_root: Option<PathBuf>,
+    /// Allowed relative path below the checkout; repeat for more.
+    #[arg(long, value_name = "REL")]
+    pub allow: Vec<String>,
+}
+
+/// Arguments for `vowp agent paths rm`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentPathsRmArgs {
+    /// Project name slug to remove.
+    #[arg(value_name = "PROJECT")]
+    pub project_name: String,
+}
+
+/// Arguments for `vowp agent paths ls`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentPathsLsArgs {}
 
 /// Arguments for `vowp agent pair`.
 #[derive(Debug, Clone, Args)]

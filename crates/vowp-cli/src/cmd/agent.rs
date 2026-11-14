@@ -9,15 +9,19 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::Serialize;
 use vowp_agent::{
     AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, NodeKey, RunOptions, RunOutcome, SshTransport,
     SurfacePairRequest, SystemAgentClock, fingerprint_of, load_public, pending_spool_bytes, surface_token_expiry,
     validate_enrollment_code,
 };
 use vowp_core::agent::gateway;
-use vowp_protocol::{AGENT_PROTOCOL, AgentRole, ErrorKind, SessionId, SurfaceId};
+use vowp_protocol::{AGENT_PROTOCOL, AgentPathMap, AgentRole, ErrorKind, ProjectName, SessionId, SurfaceId};
 
-use crate::cli::{AgentCommand, AgentEnrollArgs, AgentGatewayArgs, AgentPairArgs, AgentRunArgs, AgentStatusArgs};
+use crate::cli::{
+    AgentCommand, AgentEnrollArgs, AgentGatewayArgs, AgentPairArgs, AgentPathsAddArgs, AgentPathsArgs,
+    AgentPathsCommand, AgentPathsRmArgs, AgentRunArgs, AgentStatusArgs,
+};
 use crate::node_ctx::NodeRole;
 use crate::output::print_json;
 use crate::{CliError, Ctx, Global, IoStreams};
@@ -26,6 +30,7 @@ use crate::{CliError, Ctx, Global, IoStreams};
 pub fn run(global: &Global, io: &mut dyn IoStreams, command: &AgentCommand) -> Result<i32, CliError> {
     match command {
         AgentCommand::Enroll(args) => enroll(global, io, args),
+        AgentCommand::Paths(args) => paths(global, io, args),
         AgentCommand::Pair(args) => pair(global, io, args),
         AgentCommand::Run(args) => run_agent(global, io, args),
         AgentCommand::Status(args) => status(global, io, args),
@@ -52,11 +57,13 @@ fn gateway(global: &Global, io: &mut dyn IoStreams, args: &AgentGatewayArgs) -> 
 
 fn enroll(global: &Global, io: &mut dyn IoStreams, args: &AgentEnrollArgs) -> Result<i32, CliError> {
     let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let path_maps = enrollment_path_maps(&state_dir, args)?;
     let code = read_code(io, &args.code_file)?;
     validate_enrollment_code(&code).map_err(map_agent_error)?;
     let key = NodeKey::load_or_generate(&state_dir).map_err(map_agent_error)?;
     let transport = Box::new(SshTransport::new(&args.target));
-    let mut client = AgentClient::unenrolled(state_dir, key, transport, Arc::new(SystemAgentClock));
+    let mut client =
+        AgentClient::unenrolled(state_dir, key, transport, Arc::new(SystemAgentClock)).with_path_maps(path_maps);
     let enrollment = client.enroll(&args.target, &code).map_err(map_agent_error)?;
 
     if global.json {
@@ -71,6 +78,191 @@ fn enroll(global: &Global, io: &mut dyn IoStreams, args: &AgentEnrollArgs) -> Re
         )?;
     }
     Ok(0)
+}
+
+/// Builds the map sent by enrollment: explicit `--project` flags win, else the saved map.
+fn enrollment_path_maps(state_dir: &Path, args: &AgentEnrollArgs) -> Result<Vec<AgentPathMap>, CliError> {
+    let path_maps = if args.project.is_empty() {
+        if args.worktree_root.is_some() {
+            return Err(CliError::Invalid(
+                "--worktree-root needs at least one --project".to_owned(),
+            ));
+        }
+        AgentConfig::load(state_dir)
+            .map(|config| config.path_maps)
+            .unwrap_or_default()
+    } else {
+        let mut path_maps = Vec::with_capacity(args.project.len());
+        for project in &args.project {
+            path_maps.push(path_map_from_checkout(
+                Path::new(project),
+                None,
+                args.worktree_root.as_deref(),
+                &[],
+            )?);
+        }
+        path_maps
+    };
+    AgentConfig::validate_path_maps(state_dir, &path_maps).map_err(map_agent_error)?;
+    Ok(path_maps)
+}
+
+fn paths(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsArgs) -> Result<i32, CliError> {
+    match &args.command {
+        AgentPathsCommand::Add(args) => paths_add(global, io, args),
+        AgentPathsCommand::Rm(args) => paths_rm(global, io, args),
+        AgentPathsCommand::Ls(_) => paths_ls(global, io),
+    }
+}
+
+fn paths_add(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsAddArgs) -> Result<i32, CliError> {
+    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let mut config = load_agent_config(&state_dir)?;
+    let map = path_map_from_checkout(
+        Path::new(&args.project),
+        args.name.as_deref(),
+        args.worktree_root.as_deref(),
+        &args.allow,
+    )?;
+    config.set_path_map(map.clone()).map_err(map_agent_error)?;
+    config.write().map_err(map_agent_error)?;
+    if global.json {
+        print_json(io, &map)?;
+    } else {
+        print_path_map(io, &map)?;
+    }
+    Ok(0)
+}
+
+fn paths_rm(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsRmArgs) -> Result<i32, CliError> {
+    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let mut config = load_agent_config(&state_dir)?;
+    let project = ProjectName::parse(&args.project_name)
+        .map_err(|_| CliError::Invalid(format!("invalid project name {:?}", args.project_name)))?;
+    if !config.remove_path_map(&project) {
+        return Err(CliError::NotFound(format!("project {project} is not mapped")));
+    }
+    config.write().map_err(map_agent_error)?;
+    if global.json {
+        print_json(io, &serde_json::json!({ "project": project.as_str(), "removed": true }))?;
+    } else {
+        writeln!(io.out(), "unmapped project {project}")?;
+    }
+    Ok(0)
+}
+
+fn paths_ls(global: &Global, io: &mut dyn IoStreams) -> Result<i32, CliError> {
+    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let config = load_agent_config(&state_dir)?;
+    if global.json {
+        print_json(io, &config.path_maps)?;
+    } else if config.path_maps.is_empty() {
+        writeln!(io.out(), "no projects mapped")?;
+    } else {
+        for map in &config.path_maps {
+            print_path_map(io, map)?;
+        }
+    }
+    Ok(0)
+}
+
+fn load_agent_config(state_dir: &Path) -> Result<AgentConfig, CliError> {
+    AgentConfig::load(state_dir).map_err(|error| match error {
+        AgentError::NotEnrolled(_) => CliError::NotFound(format!(
+            "agent is not enrolled under {}; run `vowp agent enroll --target <ssh-target> --code-file -`",
+            state_dir.display()
+        )),
+        other => map_agent_error(other),
+    })
+}
+
+/// Builds one validated map from a checkout and the CLI flags.
+fn path_map_from_checkout(
+    project: &Path,
+    name: Option<&str>,
+    worktree_root: Option<&Path>,
+    allow: &[String],
+) -> Result<AgentPathMap, CliError> {
+    let local_root = std::fs::canonicalize(project).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CliError::NotFound(format!("project checkout {}", project.display()))
+        } else {
+            CliError::Io(error)
+        }
+    })?;
+    if !local_root.is_dir() {
+        return Err(CliError::Invalid(format!(
+            "project checkout {} is not a directory",
+            local_root.display()
+        )));
+    }
+    let project_name = match name {
+        Some(name) => {
+            ProjectName::parse(name).map_err(|_| CliError::Invalid(format!("invalid project name {name:?}")))?
+        }
+        None => project_name_for(&local_root)?,
+    };
+    let worktree_root = match worktree_root {
+        Some(root) if root.is_absolute() => root.to_path_buf(),
+        Some(root) => std::env::current_dir().map_err(CliError::Io)?.join(root),
+        None => local_root.join(vowp_agent::DEFAULT_WORKTREE_DIR),
+    };
+    std::fs::create_dir_all(&worktree_root).map_err(CliError::Io)?;
+    let worktree_root = std::fs::canonicalize(&worktree_root).map_err(CliError::Io)?;
+    let local_root = local_root
+        .to_str()
+        .ok_or_else(|| CliError::Invalid("project checkout must be a UTF-8 path".to_owned()))?
+        .to_owned();
+    let worktree_root = worktree_root
+        .to_str()
+        .ok_or_else(|| CliError::Invalid("worktree root must be a UTF-8 path".to_owned()))?
+        .to_owned();
+    Ok(AgentPathMap {
+        project: project_name,
+        local_root,
+        worktree_root: Some(worktree_root),
+        allow: allow.to_vec(),
+    })
+}
+
+/// Reads `[project].name` from a checkout's `vowp.toml`, else uses the directory name.
+fn project_name_for(local_root: &Path) -> Result<ProjectName, CliError> {
+    let config_path = local_root.join("vowp.toml");
+    if config_path.is_file() {
+        let text = std::fs::read_to_string(&config_path).map_err(CliError::Io)?;
+        let value: toml::Value = toml::from_str(&text)
+            .map_err(|error| CliError::Invalid(format!("invalid {}: {error}", config_path.display())))?;
+        if let Some(name) = value
+            .get("project")
+            .and_then(|project| project.get("name"))
+            .and_then(toml::Value::as_str)
+        {
+            return ProjectName::parse(name)
+                .map_err(|_| CliError::Invalid(format!("invalid project name {name:?} in {}", config_path.display())));
+        }
+    }
+    let name = local_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CliError::Invalid(format!("cannot derive a project name from {}", local_root.display())))?;
+    ProjectName::parse(name).map_err(|_| {
+        CliError::Invalid(format!(
+            "cannot derive a project name from {}; pass --name",
+            local_root.display()
+        ))
+    })
+}
+
+fn print_path_map(io: &mut dyn IoStreams, map: &AgentPathMap) -> Result<(), CliError> {
+    write!(io.out(), "{} {}", map.project, map.local_root)?;
+    if let Some(root) = &map.worktree_root {
+        write!(io.out(), " worktrees {root}")?;
+    }
+    if !map.allow.is_empty() {
+        write!(io.out(), " allow {}", map.allow.join(","))?;
+    }
+    writeln!(io.out())?;
+    Ok(())
 }
 
 fn pair(global: &Global, io: &mut dyn IoStreams, args: &AgentPairArgs) -> Result<i32, CliError> {
@@ -163,11 +355,32 @@ fn status(global: &Global, io: &mut dyn IoStreams, _args: &AgentStatusArgs) -> R
     }
 
     if global.json {
-        print_json(io, &status)?;
+        print_json(
+            io,
+            &StatusDocument {
+                status: &status,
+                paths: &config.path_maps,
+            },
+        )?;
     } else {
         print_status(io, &status)?;
+        if !config.path_maps.is_empty() {
+            writeln!(io.out(), "paths:")?;
+            for map in &config.path_maps {
+                write!(io.out(), "  ")?;
+                print_path_map(io, map)?;
+            }
+        }
     }
     Ok(0)
+}
+
+#[derive(Serialize)]
+struct StatusDocument<'a> {
+    #[serde(flatten)]
+    status: &'a AgentStatus,
+    /// Absolute roots, printed only by this owner-only command (never by `status.json`).
+    paths: &'a [AgentPathMap],
 }
 
 fn print_status(io: &mut dyn IoStreams, status: &AgentStatus) -> Result<(), CliError> {
