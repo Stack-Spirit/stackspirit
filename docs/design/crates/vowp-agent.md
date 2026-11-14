@@ -1,7 +1,7 @@
 # crate `vowp-agent` — Mac-side v0.4 agent client
 
-Phase 0 client for a local node: local config, the ed25519 node key, the SSH stdio transport and
-the `vowp-protocol` frame client. It depends on `vowp-protocol` only; it never opens a store, a
+Phase 0/1 client for a local node: local config, the ed25519 node key, the SSH stdio transport,
+surface pairing and the `vowp-protocol` frame client. It depends on `vowp-protocol` only; it never opens a store, a
 database or `vowp-core`, and it never dials a home except through the injected transport.
 Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §8.2–§8.5 and
 §12.2.
