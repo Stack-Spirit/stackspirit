@@ -265,7 +265,7 @@ impl Supervisor {
             steps.push(self.step("gates", |this| this.step_gates(now)));
             steps.push(self.step("verify", |this| this.step_verify(now)));
             steps.push(self.step("merge", |this| this.step_merge(now)));
-            if mode == ProjectTickMode::Active {
+            if mode == ProjectTickMode::Active && !self.drain_requested() {
                 steps.push(self.step("dispatch", |this| this.step_dispatch(now)));
                 steps.push(self.step("triggers", |this| this.step_triggers(now)));
                 steps.push(self.step("probes", |this| this.step_probes(now)));
@@ -507,6 +507,9 @@ impl Supervisor {
                 "wake",
                 request_name(request),
             ),
+            Request::RestartWebWindow | Request::ReloadProject { .. } => Err(CoreError::Invalid(
+                "subsystem restart requests are applied by the node supervisor".to_owned(),
+            )),
         }
     }
 
@@ -541,6 +544,15 @@ impl Supervisor {
         let (open, active) = self.open_runs_snapshot()?;
         let count = reconcile::orphaned_runs(&self.deps, &self.store, &open, &active)?;
         Ok(format!("{count} orphaned run(s)"))
+    }
+
+    /// Returns whether `<home>/drain` asks this project to admit no new work.
+    ///
+    /// The node supervisor decides the tick mode, but a drain can appear mid-tick; the
+    /// dispatch gate re-reads the marker so one slow pass cannot admit a job after
+    /// `vowp down --drain` has returned.
+    fn drain_requested(&self) -> bool {
+        self.deps.paths.root().join("drain").is_file()
     }
 
     /// Step 2: harvest finished runs and feed their outcome to the job state machine.
@@ -1290,6 +1302,9 @@ impl Supervisor {
 
     /// Step 8: plan and dispatch ready jobs, starting each runner thread.
     fn step_dispatch(&mut self, now: Timestamp) -> Result<String, CoreError> {
+        if self.drain_requested() {
+            return Ok("draining: dispatch skipped".to_owned());
+        }
         if !self.loop_active("l2-worker") {
             return Ok("l2-worker paused".to_owned());
         }
@@ -2364,6 +2379,41 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Returns the number of runner threads and background tasks still doing work.
+    ///
+    /// A finished gate or merge handle that has not been joined yet is not work: the next
+    /// maintenance tick reaps it without running anything new.
+    pub(crate) fn active_work(&self) -> usize {
+        let gates = self.gate_tasks.values().filter(|task| !task.is_finished()).count();
+        let merge = usize::from(self.merge_task.as_ref().is_some_and(|task| !task.is_finished()));
+        self.runners.active() + self.session_runners.live_sessions().len() + gates + merge
+    }
+
+    /// Returns whether a finished run is still waiting for the harvest step.
+    ///
+    /// The runner sets its own finished flag before the supervisor polls the thread; a
+    /// drain that stopped on the flag alone could leave the job `running` with a finished
+    /// run row. One more maintenance pass harvests it.
+    pub(crate) fn has_pending_harvest(&self) -> Result<bool, CoreError> {
+        let jobs = self.store.list_jobs(&JobFilter {
+            project: Some(self.project.clone()),
+            ..JobFilter::default()
+        })?;
+        for job in jobs {
+            let Some(run) = self.store.last_run_of_job(&job.id)? else {
+                continue;
+            };
+            if run.ended_at.is_none() || self.handled_runs.contains(&run.id) {
+                continue;
+            }
+            let marker = self.store.kv_get(&format!("l6:{}", run.id))?;
+            if marker.as_deref() != Some("harvested") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Returns gate results for a job's current attempt.
     pub fn gate_results(&self, job: &JobId) -> Result<Vec<GateResult>, CoreError> {
         let job = self.store.require_job(job)?;
@@ -2377,6 +2427,7 @@ pub struct ProjectSupervisor {
     project: ProjectName,
     inner: Supervisor,
     started: bool,
+    generation: u64,
 }
 
 impl ProjectSupervisor {
@@ -2393,6 +2444,13 @@ impl ProjectSupervisor {
     /// Returns the project store handle.
     pub fn store(&self) -> &Store {
         &self.inner.store
+    }
+
+    /// Returns how many times this supervisor was re-opened by a reload request.
+    ///
+    /// A project loaded normally starts at zero; every `ReloadProject` increments it.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -2441,6 +2499,9 @@ pub struct NodeSupervisor {
     wake_rx: Option<Receiver<()>>,
     last_failure: BTreeMap<ProjectName, String>,
     pending_migration: Option<MigrationReport>,
+    pending_reloads: BTreeSet<ProjectName>,
+    web_window_restart: bool,
+    drain_finished: bool,
 }
 
 impl NodeSupervisor {
@@ -2471,6 +2532,9 @@ impl NodeSupervisor {
             wake_rx: Some(wake_rx),
             last_failure: BTreeMap::new(),
             pending_migration: None,
+            pending_reloads: BTreeSet::new(),
+            web_window_restart: false,
+            drain_finished: false,
         };
         supervisor.reload_projects()?;
         Ok(supervisor)
@@ -2573,6 +2637,17 @@ impl NodeSupervisor {
         let mut projects = BTreeMap::new();
         let mut skipped = Vec::new();
         let mut ticked = Vec::new();
+        let draining = self.drain_requested();
+        if draining {
+            self.deps.log.log(
+                Level::Info,
+                "node",
+                &format!(
+                    "drain marker present; maintenance tick ({} active child thread(s))",
+                    self.active_children()
+                ),
+            );
+        }
         for name in &rotation {
             let Some(entry) = super::registry::project_entry(&self.global, name)? else {
                 skipped.push((name.clone(), "not registered".to_owned()));
@@ -2590,6 +2665,9 @@ impl NodeSupervisor {
                     continue;
                 }
             };
+            // A node drain starts no new work in any project. Every active project runs
+            // the maintenance subset until its runners and gate tasks reach zero.
+            let mode = if draining { ProjectTickMode::Maintenance } else { mode };
             let Some(project) = self.projects.get_mut(name) else {
                 skipped.push((name.clone(), "not loaded".to_owned()));
                 continue;
@@ -2644,6 +2722,7 @@ impl NodeSupervisor {
             self.refresh_fail_streak(name)?;
         }
         self.advance_rotation();
+        self.process_pending_reloads()?;
         // Registry entries that never got a supervisor (archived, parked broken at load)
         // are still reported, so the node tick explains why a project is missing.
         for entry in super::registry::project_entries(&self.global)? {
@@ -2843,19 +2922,94 @@ impl NodeSupervisor {
                 }
                 Ok(false)
             }
+            Request::RestartWebWindow => {
+                self.web_window_restart = true;
+                Ok(true)
+            }
+            Request::ReloadProject { project } => {
+                if !self.projects.contains_key(project) {
+                    return Ok(false);
+                }
+                self.pending_reloads.insert(project.clone());
+                Ok(true)
+            }
         }
     }
 
     /// Startup then tick every `[node].tick_secs` or on wake, until `cancel`.
     pub fn run(&mut self, cancel: &CancelToken) -> Result<(), CoreError> {
+        self.run_with(cancel, |_| {})
+    }
+
+    /// Runs the node loop and calls `after_tick` after every pass.
+    ///
+    /// The foreground CLI uses the hook to restart the optional web-window child when a
+    /// `restart_web_window` request was applied, without stopping any project supervisor.
+    /// When `<home>/drain` exists and every project has zero active runner threads and gate
+    /// tasks, the loop exits cleanly, removes the drain file and sets [`Self::drained`].
+    pub fn run_with<F>(&mut self, cancel: &CancelToken, mut after_tick: F) -> Result<(), CoreError>
+    where
+        F: FnMut(&mut Self),
+    {
         self.startup()?;
         let tick = Duration::from_secs(self.deps.config.node.tick_secs.max(1));
         while !cancel.is_cancelled() {
             self.tick()?;
+            after_tick(self);
+            if self.drain_ready()? {
+                self.drain_finished = true;
+                let _ = std::fs::remove_file(self.deps.paths.root().join("drain"));
+                break;
+            }
             if !wait_for_next_tick(self.wake_rx.as_ref(), tick, &self.global, cancel)? {
                 break;
             }
         }
+        self.shutdown()?;
+        Ok(())
+    }
+
+    /// Returns whether `<home>/drain` asks this supervisor to stop admitting work.
+    pub fn drain_requested(&self) -> bool {
+        self.deps.paths.root().join("drain").is_file()
+    }
+
+    /// Returns the runner threads and gate/merge tasks still active across every project.
+    pub fn active_children(&self) -> usize {
+        self.projects.values().map(|project| project.inner.active_work()).sum()
+    }
+
+    /// Returns whether a requested drain has reached zero active work.
+    pub fn drain_complete(&self) -> bool {
+        self.drain_ready().unwrap_or(false)
+    }
+
+    /// Returns whether the drain can stop: no active work and no finished run awaiting
+    /// harvest.
+    fn drain_ready(&self) -> Result<bool, CoreError> {
+        if !self.drain_requested() || self.active_children() != 0 {
+            return Ok(false);
+        }
+        for project in self.projects.values() {
+            if project.inner.has_pending_harvest()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Returns whether [`Self::run_with`] exited because a drain completed.
+    pub fn drained(&self) -> bool {
+        self.drain_finished
+    }
+
+    /// Takes a pending `restart_web_window` request exactly once.
+    pub fn take_web_window_restart(&mut self) -> bool {
+        std::mem::take(&mut self.web_window_restart)
+    }
+
+    /// Stops every project's runner threads and marks its open runs stalled.
+    pub fn shutdown(&mut self) -> Result<(), CoreError> {
         for project in self.projects.values_mut() {
             if let Err(error) = project.inner.shutdown() {
                 self.deps.log.log(
@@ -2891,6 +3045,105 @@ impl NodeSupervisor {
     /// Returns one loaded project's supervisor.
     pub fn project(&self, name: &ProjectName) -> Option<&ProjectSupervisor> {
         self.projects.get(name)
+    }
+
+    /// Reloads every requested project that has reached zero active work.
+    ///
+    /// A project with a live runner thread is left alone until a later pass; this is what
+    /// makes `reload_project` safe while other projects keep working.
+    fn process_pending_reloads(&mut self) -> Result<(), CoreError> {
+        if self.pending_reloads.is_empty() {
+            return Ok(());
+        }
+        let pending: Vec<ProjectName> = self.pending_reloads.iter().cloned().collect();
+        for name in pending {
+            if self
+                .projects
+                .get(&name)
+                .is_some_and(|project| project.inner.active_work() > 0)
+            {
+                continue;
+            }
+            self.pending_reloads.remove(&name);
+            self.reload_project(&name)?;
+        }
+        Ok(())
+    }
+
+    /// Closes and re-opens one project's supervisor without touching the others.
+    fn reload_project(&mut self, name: &ProjectName) -> Result<(), CoreError> {
+        let Some(entry) = super::registry::project_entry(&self.global, name)? else {
+            self.deps
+                .log
+                .log(Level::Warn, "node", &format!("cannot reload {name}: not registered"));
+            return Ok(());
+        };
+        if entry.state == ProjectState::Archived
+            || (entry.state == ProjectState::Paused && entry.paused_reason.starts_with("broken:"))
+        {
+            if let Some(mut old) = self.projects.remove(name) {
+                let _ = old.inner.shutdown();
+            }
+            self.refresh_order();
+            return Ok(());
+        }
+        let generation = self
+            .projects
+            .get(name)
+            .map_or(0, ProjectSupervisor::generation)
+            .saturating_add(1);
+        if let Some(mut old) = self.projects.remove(name)
+            && let Err(error) = old.inner.shutdown()
+        {
+            self.deps.log.log(
+                Level::Error,
+                "node",
+                &format!("shutdown before reloading {name}: {error}"),
+            );
+        }
+        match project_supervisor(&self.deps, &entry) {
+            Ok(mut project) => {
+                project.generation = generation;
+                match project.inner.startup() {
+                    Ok(_) => {
+                        project.started = true;
+                        // A reloaded project gets the same cross-file repair as a restart:
+                        // sessions whose run vanished, dangling turns and missing cost rows.
+                        if let Err(error) = project.inner.store.reconcile_cross_db() {
+                            self.deps.log.log(
+                                Level::Warn,
+                                "node",
+                                &format!("cross-db reconcile for {name} after reload: {error}"),
+                            );
+                        }
+                        self.projects.insert(name.clone(), project);
+                        self.last_failure.remove(name);
+                        self.deps
+                            .log
+                            .log(Level::Info, "node", &format!("project {name} reloaded"));
+                    }
+                    Err(error) => {
+                        self.last_failure.insert(name.clone(), error.to_string());
+                        self.park_broken(name, &format!("reload startup failed: {error}"))?;
+                    }
+                }
+            }
+            Err(error) => {
+                self.park_broken(name, &format!("cannot reload project: {error}"))?;
+            }
+        }
+        self.refresh_order();
+        Ok(())
+    }
+
+    /// Rebuilds the rotation after a project is added, removed or replaced.
+    fn refresh_order(&mut self) {
+        self.order = self.projects.keys().cloned().collect();
+        if self.order.is_empty() {
+            self.next = 0;
+        } else {
+            self.next %= self.order.len();
+        }
     }
 
     /// Reloads registry entries and builds supervisors for new projects.
@@ -3146,6 +3399,7 @@ fn project_supervisor(base: &Deps, entry: &ProjectEntry) -> Result<ProjectSuperv
         project: entry.name.clone(),
         inner,
         started: false,
+        generation: 0,
     })
 }
 
@@ -3266,6 +3520,8 @@ fn request_name(request: &crate::requests::Request) -> &'static str {
         Request::PauseLoop { .. } => "pause_loop",
         Request::ResumeLoop { .. } => "resume_loop",
         Request::Wake => "wake",
+        Request::RestartWebWindow => "restart_web_window",
+        Request::ReloadProject { .. } => "reload_project",
     }
 }
 
