@@ -597,11 +597,12 @@ fetchability and `require_clean_base`.
 
 `home` is a target for `home`, `any` and the explicit `node:<name>+home` fallback. `any` returns
 the home plus every eligible node, so a transient node fact is not a waiting reason there. The
-job-level `project_home_only`, `kind_not_allowed` and `home_only_secret` reasons cannot be
-overridden by a per-job placement and are returned even for `any`. A node at its `max_workers` or
-the fleet at `max_remote_runs` reports `node_busy`, never `no_eligible_node`. Every optional
-`NodeFacts` field is a refusal when `None`; the evaluator never assumes a missing fact is good.
-`Decision::Waiting` leaves the job `ready`; no variant is an error.
+job-level `project_home_only`, `kind_not_allowed` and `home_only_secret` reasons are never
+overridden by a per-job placement: they remove every node target, while `any` still keeps the
+home, so they become a waiting reason only when the home is unavailable too. A node at its
+`max_workers` or the fleet at `max_remote_runs` reports `node_busy`, never `no_eligible_node`.
+Every optional `NodeFacts` field is a refusal when `None`; the evaluator never assumes a missing
+fact is good. `Decision::Waiting` leaves the job `ready`; no variant is an error.
 
 Tests (`tests/offload.rs`, values only, no store, tmux or network):
 `placement_home_node_and_any_choose_the_documented_targets`,

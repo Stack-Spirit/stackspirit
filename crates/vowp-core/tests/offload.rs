@@ -260,6 +260,60 @@ fn home_only_project_and_denied_kind_are_refused() {
             targets: vec![Target::Home]
         }
     );
+
+    // `any` still has the home: a policy refusal removes the node, never the home.
+    let any_home_only = JobRequest::new(JobKind::Build, Some(Placement::Any));
+    let decision = evaluate(
+        &policy,
+        &project(),
+        &home_only,
+        &any_home_only,
+        &home(),
+        &[healthy_node("mac-studio")],
+    );
+    assert_eq!(
+        decision,
+        Decision::Eligible {
+            targets: vec![Target::Home]
+        }
+    );
+
+    let any_denied = JobRequest::new(JobKind::Merge, Some(Placement::Any));
+    let decision = evaluate(
+        &policy,
+        &project(),
+        &default_policy,
+        &any_denied,
+        &home(),
+        &[healthy_node("mac-studio")],
+    );
+    assert_eq!(
+        decision,
+        Decision::Eligible {
+            targets: vec![Target::Home]
+        }
+    );
+
+    // With no home target left, the job-level refusal is the reason the job waits.
+    let braked = HomeFacts {
+        brake_active: true,
+        active_remote_runs: 0,
+    };
+    let mut paused = policy.clone();
+    paused.pause_on_home_brake = true;
+    let decision = evaluate(
+        &paused,
+        &project(),
+        &home_only,
+        &any_home_only,
+        &braked,
+        &[healthy_node("mac-studio")],
+    );
+    assert_eq!(
+        decision.waiting_reason(),
+        Some(WaitingReason::ProjectHomeOnly),
+        "{decision:?}"
+    );
 }
 
 #[test]
@@ -322,6 +376,30 @@ fn home_only_secret_is_refused_and_a_node_secret_that_is_declared_is_allowed() {
         "{decision:?}"
     );
     assert!(decision.detail().expect("detail").contains("PROD_DEPLOY_KEY"));
+
+    // `any` keeps the home target when the secret is home-only.
+    let any_home_only = JobRequest {
+        kind: JobKind::Build,
+        placement: Some(Placement::Any),
+        requires: JobRequirements {
+            secrets: vec![secret("BUILD_TOKEN"), secret("PROD_DEPLOY_KEY")],
+            ..JobRequirements::default()
+        },
+    };
+    let decision = evaluate(
+        &policy,
+        &project(),
+        &project_policy,
+        &any_home_only,
+        &home(),
+        std::slice::from_ref(&facts),
+    );
+    assert_eq!(
+        decision,
+        Decision::Eligible {
+            targets: vec![Target::Home]
+        }
+    );
 
     // A project-allowed secret the node does not declare is `missing_secret`.
     let mut undeclared = facts;

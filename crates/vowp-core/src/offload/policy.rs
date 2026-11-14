@@ -3,9 +3,10 @@
 //! The evaluator is a pure function of the effective policy and caller-supplied facts.
 //! It never reads a store, a clock or the filesystem: a fact the caller cannot supply is
 //! a refusal, never an implicit pass. A job-level policy refusal (`project_home_only`,
-//! `kind_not_allowed`, `home_only_secret`) is returned even for `any`, because it can
-//! never be satisfied by a node; a transient node fact is a `WaitingReason` only for a
-//! pinned placement, since `any` still has the home.
+//! `kind_not_allowed`, `home_only_secret`) removes every node target, because no node can
+//! satisfy it; for `any` the home stays a target, so the refusal becomes a waiting reason
+//! only when the home is unavailable too. A transient node fact is a `WaitingReason` only
+//! for a pinned placement, since `any` still has the home.
 
 use std::fmt;
 
@@ -288,20 +289,19 @@ fn evaluate_any(
     home: &HomeFacts,
     nodes: &[NodeFacts],
 ) -> Decision {
-    if let Some((reason, detail)) = job_level_refusal(project, project_policy, job) {
-        return Decision::Waiting {
-            reason,
-            detail,
-            node: None,
-        };
-    }
+    // A job-level refusal removes every node target, but the home still runs the job: a
+    // `home_only` project, a denied kind and a home-only secret are reasons to stay home,
+    // not reasons to park the job.
+    let refusal = job_level_refusal(project, project_policy, job);
 
     let mut targets = Vec::new();
     let mut node_reasons = Vec::new();
-    for facts in nodes {
-        match check_node(fleet, project, job, home, facts) {
-            Ok(()) => targets.push(Target::Node(facts.name.clone())),
-            Err(reason) => node_reasons.push((facts.name.clone(), reason)),
+    if refusal.is_none() {
+        for facts in nodes {
+            match check_node(fleet, project, job, home, facts) {
+                Ok(()) => targets.push(Target::Node(facts.name.clone())),
+                Err(reason) => node_reasons.push((facts.name.clone(), reason)),
+            }
         }
     }
     let home_reason = match home_target(fleet, home) {
@@ -313,6 +313,13 @@ fn evaluate_any(
     };
 
     if targets.is_empty() {
+        if let Some((reason, detail)) = refusal {
+            return Decision::Waiting {
+                reason,
+                detail,
+                node: None,
+            };
+        }
         if let Some((node, (reason, detail))) = node_reasons.into_iter().next() {
             return Decision::Waiting {
                 reason,
