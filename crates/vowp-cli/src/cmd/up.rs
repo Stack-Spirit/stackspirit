@@ -33,6 +33,12 @@ use crate::{CliError, Ctx, IoStreams, signals};
 /// How long `down` waits for a cooperative stop before reporting a conflict.
 const DOWN_WAIT: Duration = Duration::from_secs(30);
 
+/// How long `down --drain` or `up --replace` waits for active work to finish.
+///
+/// A drain deliberately lets in-flight runs complete, so this is much longer than a plain
+/// stop. `--force` still escalates after this deadline.
+const DRAIN_WAIT: Duration = Duration::from_secs(30 * 60);
+
 /// How long `down --force` waits after SIGTERM before giving up.
 ///
 /// Longer than the child cleanup window in a foreground supervisor, so a cooperative
@@ -564,11 +570,16 @@ fn run_up(
 ) -> Result<i32, CliError> {
     let json = global.json;
     if let Some(pid) = live_supervisor_pid(paths) {
-        return Err(CliError::Conflict(format!(
-            "supervisor already running (pid {pid}); `vowp status` shows it"
-        )));
+        if args.replace {
+            drain_and_wait(paths, deps, pid, DRAIN_WAIT)?;
+        } else {
+            return Err(CliError::Conflict(format!(
+                "supervisor already running (pid {pid}); `vowp status` shows it"
+            )));
+        }
     }
     signals::clear_stop(paths)?;
+    signals::clear_drain(paths)?;
     signals::clear_stopped(paths)?;
     // A crashed supervisor may leave an address behind; never surface a stale window.
     let _ = std::fs::remove_file(web_window_file(paths));
@@ -836,7 +847,31 @@ where
         }
         wake.wake();
     });
-    let result = supervisor.run(&cancel);
+    let result = supervisor.run_with(&cancel, |node| {
+        if !node.take_web_window_restart() {
+            return;
+        }
+        if let Some(window) = web_window.as_mut() {
+            window.stop();
+        }
+        web_window = match select_daemon_project(paths, checkout) {
+            Ok(Some(project)) => start_web_window(paths, &project, io),
+            Ok(None) => {
+                let _ = writeln!(
+                    io.err(),
+                    "warning: web window not restarted: no single project to serve"
+                );
+                None
+            }
+            Err(error) => {
+                let _ = writeln!(io.err(), "warning: web window not restarted: {error}");
+                None
+            }
+        };
+        if !json && let Some(address) = web_window.as_ref().and_then(WebWindow::address) {
+            let _ = print_web_window(io, address);
+        }
+    });
     // A failed startup returns before the stop watcher cancels; release the wake thread.
     watcher.cancel();
     let _ = wake_thread.join();
@@ -867,6 +902,37 @@ fn live_supervisor_pid(paths: &NodePaths) -> Option<u32> {
     let text = std::fs::read_to_string(paths.root().join("supervisor.lock")).ok()?;
     let pid: u32 = text.lines().next()?.trim().parse().ok()?;
     process_alive(pid).then_some(pid)
+}
+
+/// Writes `<home>/drain`, wakes the supervisor and waits for `pid` to release the lock.
+///
+/// The supervisor keeps ticking in maintenance mode (harvest, gates, merge and inbox) and
+/// exits once its runner threads and gate tasks reach zero. The caller then continues with
+/// the normal `up` path, so any pending schema migration runs with no active children.
+fn drain_and_wait(paths: &NodePaths, deps: &Deps, pid: u32, timeout: Duration) -> Result<(), CliError> {
+    std::fs::write(signals::drain_file(paths), deps.clock.now().unix_secs().to_string())?;
+    wake_supervisor(paths)?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline && live_supervisor_pid(paths) == Some(pid) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if live_supervisor_pid(paths) == Some(pid) {
+        return Err(CliError::Conflict(format!(
+            "supervisor (pid {pid}) did not drain; active runs are still finishing"
+        )));
+    }
+    if live_supervisor_pid(paths).is_none() {
+        remove_lock(paths);
+    }
+    let _ = signals::clear_drain(paths);
+    Ok(())
+}
+
+/// Enqueues a `wake` request so an idle supervisor ticks immediately.
+fn wake_supervisor(paths: &NodePaths) -> Result<(), CliError> {
+    let store = Store::open_global(paths)?;
+    vowp_core::requests::push(&store, &vowp_core::requests::Request::Wake)?;
+    Ok(())
 }
 
 /// Waits for direct children (adapter and gate processes) to exit after cancellation.
@@ -1146,11 +1212,13 @@ fn run_down(
     io: &mut dyn IoStreams,
     args: &DownArgs,
 ) -> Result<i32, CliError> {
-    let stop = signals::stop_file(paths);
-    std::fs::write(&stop, deps.clock.now().unix_secs().to_string())?;
+    if !args.drain {
+        std::fs::write(signals::stop_file(paths), deps.clock.now().unix_secs().to_string())?;
+    }
 
     let Some(pid) = live_supervisor_pid(paths) else {
         remove_lock(paths);
+        let _ = signals::clear_drain(paths);
         // A crashed supervisor may leave only its window address behind.
         let _ = std::fs::remove_file(web_window_file(paths));
         if args.kill_windows {
@@ -1172,7 +1240,15 @@ fn run_down(
         return Ok(0);
     };
 
-    let deadline = Instant::now() + DOWN_WAIT;
+    if args.drain {
+        // A stale stop file would cancel the supervisor before it can finish its runs.
+        signals::clear_stop(paths)?;
+        std::fs::write(signals::drain_file(paths), deps.clock.now().unix_secs().to_string())?;
+        wake_supervisor(paths)?;
+    }
+
+    let wait = if args.drain { DRAIN_WAIT } else { DOWN_WAIT };
+    let deadline = Instant::now() + wait;
     while Instant::now() < deadline && live_supervisor_pid(paths) == Some(pid) {
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1186,13 +1262,19 @@ fn run_down(
             }
         }
         if live_supervisor_pid(paths) == Some(pid) {
+            let hint = if args.drain {
+                "the supervisor is still finishing active work; wait or drop --drain"
+            } else {
+                "use `vowp down --force`"
+            };
             return Err(CliError::Conflict(format!(
-                "supervisor (pid {pid}) did not stop; use `vowp down --force`"
+                "supervisor (pid {pid}) did not stop; {hint}"
             )));
         }
     }
 
     remove_lock(paths);
+    let _ = signals::clear_drain(paths);
     if args.kill_windows {
         kill_windows(paths, deps)?;
     }

@@ -387,11 +387,17 @@ pub struct UpArgs {
     /// Run exactly one supervisor tick and exit.
     #[arg(long)]
     pub once: bool,
+    /// Drain a running supervisor, apply pending migrations and start this binary.
+    #[arg(long)]
+    pub replace: bool,
 }
 
 /// Arguments for `vowp down`.
 #[derive(Debug, Clone, Args)]
 pub struct DownArgs {
+    /// Let active runs and gate tasks finish; admit no new work.
+    #[arg(long)]
+    pub drain: bool,
     /// Send SIGTERM if the supervisor does not stop by itself.
     #[arg(long)]
     pub force: bool,
