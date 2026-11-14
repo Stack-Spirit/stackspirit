@@ -887,9 +887,11 @@ impl RunDriver {
             if run.stopped {
                 continue;
             }
-            // Rebuild the replay queue from the durable spool once. Events appended after
-            // this read arrive on the driver channel and are skipped by event id when the
-            // same line was already queued.
+            // Mark the run online before taking the spool snapshot. An event appended
+            // after this store is also sent on the driver channel; an event appended
+            // before it is in the snapshot. The overlap (an append that raced the store)
+            // is skipped by event id when the same line was already queued.
+            run.shared.online.store(true, Ordering::SeqCst);
             let frames = read_unacked(&run.shared)?;
             run.pending.clear();
             run.queued_ids.clear();
@@ -913,7 +915,6 @@ impl RunDriver {
             // The home opens a fresh ingest stream on this connection, so the old window
             // credit is meaningless. Start every resumable run with a full window.
             run.credits = EVENT_WINDOW;
-            run.shared.online.store(true, Ordering::SeqCst);
         }
         for run_id in accepted {
             self.send_hello(client, &run_id)?;
