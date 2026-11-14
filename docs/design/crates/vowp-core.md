@@ -22,7 +22,7 @@ crates/vowp-core/src/
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
   agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs dispatch.rs result.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs,
-                  agent.rs, offload_dispatch.rs, offload_result.rs
+                  agent.rs, offload_dispatch.rs, offload_result.rs, offload_e2e.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
 
@@ -797,6 +797,37 @@ summary through the real ingest state machine, no network or harness):
 `gateway_returns_an_offloaded_result_to_the_gating_path`, which opens the offload ingest stream
 from the agent-kind run lease, pushes a temporary branch and observes the job reach `gating`
 through the same gateway process.
+
+### 9.3 Offload end to end (`tests/offload_e2e.rs`)
+
+`offload_e2e.rs` is the §14.3 `fake_gateway_full_turn_and_job_end_to_end` exit test. It uses a
+temporary bare origin, a real home clone, a real node clone, an in-memory gateway transport and a
+fake adapter script. The fake node is a small protocol client, not a second home: it resolves
+`PathRef::Worktree`, creates a real git worktree at the assigned base commit, runs the adapter's
+recorded JSONL into ordered events, commits, and pushes only `job/<id>`. The home half is the real
+`gateway::serve_with_options` plus `dispatch` and `result`.
+
+The named test asserts the whole contract: the `AssignRun` payload carries the worktree `PathRef`,
+base commit, prompt, env/secret names, remote and epoch; the run-lease token appears only in the
+frame and only its hash is stored; the events append in order with gapless `seq`; the home fetches
+`job/<id>`, verifies the reported head against the fetched head and the assigned base, runs
+`owns_respected` and `secret_scan`, records the result, and moves the job to `gating`. The origin's
+default branch and the main checkout do not move, and no merge ledger row is written.
+
+The rest of the file pins the refusals and recovery edges. A home-only project and a denied kind
+stay `ready` with their documented waiting reason and receive no `AssignRun`; a pinned offline node
+waits with `node_offline` and never falls back to the home; a mid-run disconnect resumes with
+`ResumeOk`, replays the spool with duplicate acknowledgements, leaves a gapless log with one row per
+event id, and finishes the job; a failed `job/<id>` push settles as `git_push_failed` with the job
+and node worktree kept for a retry; and a head outside the job's `owns` fails the authoritative gate
+without a merge. The reconnect test also covers the dispatcher rule that a `RunAccepted` for a
+`disconnected` assignment returns it to `running` while a fenced or finished assignment is refused;
+the real agent sends that frame after `Resume`.
+
+What remains Phase 3/4: the fake node stands in for `vowp-agent`'s `WorktreeManager` and
+`CoreRunHandler` (their own tests cover creation, reuse and push), the gateway is the in-process
+stdio server rather than the SSH forced command, and the suite stops at `gating` rather than running
+the merge queue. The WSS transport, bundle result, launchd and a separate node user are not built.
 
 ## 10. `offload` — pure offload eligibility (v0.4 Phase 2)
 
