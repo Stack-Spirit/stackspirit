@@ -67,7 +67,8 @@ pub async fn select_model(
     preferences.selected_model_id = Some(selected_id);
     preferences.onboarding_complete = true;
     state.save_engine_preferences(&preferences)?;
-    Ok(state.core().await.engine_status())
+    let status = state.core().await.engine_status();
+    Ok(state.engine_status_with_preferences(status))
 }
 
 #[tauri::command]
@@ -94,6 +95,13 @@ pub async fn store_key(
         .engine_keychain()
         .set(&provider, &secret)
         .map_err(keychain_error)?;
+
+    // A saved BYOK key completes the local setup path even though no included model
+    // is selected. Persist it so a relaunch does not show the first-run flow again.
+    let mut preferences = state.load_engine_preferences();
+    preferences.onboarding_complete = true;
+    state.save_engine_preferences(&preferences)?;
+
     Ok(KeyStatus {
         provider,
         state: "saved".to_owned(),
@@ -209,7 +217,7 @@ pub async fn select_external(
     preferences.choice = EngineChoice::External { path, kind };
     preferences.onboarding_complete = true;
     state.save_engine_preferences(&preferences)?;
-    Ok(status)
+    Ok(state.engine_status_with_preferences(status))
 }
 
 #[tauri::command]
@@ -222,7 +230,7 @@ pub async fn use_bundled(state: State<'_, AppState>) -> CommandResult<EngineStat
     let mut preferences = state.load_engine_preferences();
     preferences.choice = EngineChoice::Bundled;
     state.save_engine_preferences(&preferences)?;
-    Ok(status)
+    Ok(state.engine_status_with_preferences(status))
 }
 
 #[tauri::command]
@@ -239,7 +247,8 @@ pub async fn restart_engine(state: State<'_, AppState>) -> CommandResult<EngineS
         core.restart_engine().await;
     }
     state.apply_saved_model().await;
-    Ok(state.core().await.engine_status())
+    let status = state.core().await.engine_status();
+    Ok(state.engine_status_with_preferences(status))
 }
 
 fn to_key_status(status: ProviderKeyStatus) -> KeyStatus {

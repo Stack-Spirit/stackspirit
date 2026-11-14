@@ -1,10 +1,28 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { engineWith, readyAsifGates, readyLocalGates, renderEngine, waitingGates } from "./helpers";
+import { MockBridge } from "../../bridge/MockBridge";
+import {
+  engineWith,
+  readyAsifGates,
+  readyLocalGates,
+  renderEngine,
+  unprobedGates,
+  waitingGates,
+} from "./helpers";
 
 describe("VOWP capability gate cards", () => {
+  it("engine_view_probes_automatically_on_a_live_connection", async () => {
+    const bridge = new MockBridge({ scenario: "engine-ready" });
+    const probe = vi.spyOn(bridge.gates, "probe");
+    renderEngine(engineWith(), { bridge, gates: unprobedGates() });
+
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("gate_actions_disabled_when_waiting", () => {
     renderEngine(engineWith(), { gates: waitingGates() });
     const local = screen.getByTestId("gate-card-local");

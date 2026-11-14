@@ -4,6 +4,7 @@
 //! string alone. Evidence strings contain command labels, exit codes, versions and
 //! capability names; never paths, bodies, tokens or secrets.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -239,10 +240,10 @@ impl GateSnapshot {
     }
 }
 
-/// A cached gate snapshot, refreshed on connect, version change or explicit re-probe.
+/// A per-host gate cache, refreshed on connect, version change or explicit re-probe.
 #[derive(Debug, Default)]
 pub struct GateCache {
-    inner: Mutex<Option<GateSnapshot>>,
+    inner: Mutex<HashMap<String, GateSnapshot>>,
 }
 
 impl GateCache {
@@ -252,14 +253,14 @@ impl GateCache {
         Self::default()
     }
 
-    /// Returns the cached snapshot while it is younger than ten minutes.
+    /// Returns one host's snapshot while it is younger than ten minutes.
     #[must_use]
-    pub fn get(&self, now: Timestamp) -> Option<GateSnapshot> {
+    pub fn get(&self, host_id: &str, now: Timestamp) -> Option<GateSnapshot> {
         let guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snapshot = guard.as_ref()?;
+        let snapshot = guard.get(host_id)?;
         if now.since(snapshot.probed_at) > Duration::from_secs(GATE_CACHE_TTL_SECS) {
             None
         } else {
@@ -267,20 +268,28 @@ impl GateCache {
         }
     }
 
-    /// Stores a new snapshot, replacing any older state immediately.
-    pub fn put(&self, snapshot: GateSnapshot) {
-        *self
-            .inner
+    /// Stores a host's new snapshot, replacing any older state immediately.
+    pub fn put(&self, host_id: impl Into<String>, snapshot: GateSnapshot) {
+        self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(host_id.into(), snapshot);
     }
 
-    /// Drops the cache. A later failure cannot leave a sticky `Ready`.
-    pub fn invalidate(&self) {
-        *self
-            .inner
+    /// Drops one host's cache. A later failure cannot leave a sticky `Ready`.
+    pub fn invalidate(&self, host_id: &str) {
+        self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(host_id);
+    }
+
+    /// Drops every cached host. Used when no host is connected.
+    pub fn clear(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -880,12 +889,7 @@ async fn probe_local_agent(local_runner: Option<&dyn CommandRunner>) -> LocalAge
             ..LocalAgentStatus::default()
         };
     };
-    let argv = vec![
-        "vowp".to_owned(),
-        "--json".to_owned(),
-        "agent".to_owned(),
-        "status".to_owned(),
-    ];
+    let argv = vec!["--json".to_owned(), "agent".to_owned(), "status".to_owned()];
     let spec =
         crate::ssh::command::CommandSpec::new("vowp", argv).with_timeout(Duration::from_secs(10));
     match runner.run(&spec).await {

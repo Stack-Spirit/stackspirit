@@ -3,7 +3,7 @@ import { useId, type ReactNode } from "react";
 import { Badge } from "../../components";
 import type { ModelChoice } from "../../bridge/wire";
 import { formatDateTime } from "../../domain/format";
-import { modelContextLabel, providerLabel } from "../../domain/engine";
+import { modelContextLabel, modelNotes, modelProviderLabel } from "../../domain/engine";
 
 export interface ModelPickerProps {
   models: ModelChoice[];
@@ -52,12 +52,12 @@ export function ModelPicker({
                   checked={checked}
                   disabled={disabled}
                   onChange={() => onSelect(model.id)}
-                  aria-label={`${model.label}, ${providerLabel(model.provider)}`}
+                  aria-label={`${model.label}, ${modelProviderLabel(model.provider)}`}
                 />{" "}
                 <strong>{model.label}</strong>
               </span>
               <span className="engine-model__meta">
-                <span>{providerLabel(model.provider)}</span>
+                <span>{modelProviderLabel(model.provider)}</span>
                 <span>{modelContextLabel(model.context_tokens)}</span>
                 <Badge tone="ok">Included · no key</Badge>
                 <span>
@@ -66,7 +66,9 @@ export function ModelPicker({
                     : "not verified"}
                 </span>
               </span>
-              <span className="engine-model__notes">{model.notes}</span>
+              <span className="engine-model__notes">
+                {modelNotes(model.provider, model.notes)}
+              </span>
             </span>
           </label>
         );

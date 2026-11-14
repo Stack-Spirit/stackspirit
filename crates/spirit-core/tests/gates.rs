@@ -61,6 +61,41 @@ impl CommandRunner for RouteRunner {
     }
 }
 
+struct RecordingRunner {
+    output: CommandOutput,
+    calls: Mutex<Vec<CommandSpec>>,
+}
+
+impl RecordingRunner {
+    fn new(output: CommandOutput) -> Self {
+        Self {
+            output,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<CommandSpec> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl CommandRunner for RecordingRunner {
+    async fn run(
+        &self,
+        spec: &CommandSpec,
+    ) -> Result<CommandOutput, spirit_core::error::SpiritError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(spec.clone());
+        Ok(self.output.clone())
+    }
+}
+
 fn out(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
     CommandOutput {
         status,
@@ -412,6 +447,24 @@ async fn phase3_probe_separates_home_capability_from_local_agent_status() {
 }
 
 #[tokio::test]
+async fn engine_local_agent_probe_passes_vowp_once_as_the_program() {
+    let local = RecordingRunner::new(ok(
+        r#"{"connection":"connected","node":"mac-studio","home":"vps","protocol":"vowp-agent/1","last_heartbeat":"2026-11-14T12:05:00.000Z","last_error":null}"#,
+    ));
+    let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
+    let (_, status) = probe_local_orchestrator(&runner, Some(&local), &options()).await;
+    assert_eq!(status.state, LocalAgentState::Connected);
+
+    let calls = local.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].program, "vowp");
+    assert_eq!(
+        calls[0].args,
+        vec!["--json".to_owned(), "agent".to_owned(), "status".to_owned()]
+    );
+}
+
+#[tokio::test]
 async fn local_agent_states_map_exactly() {
     let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
     for (connection, expected) in [
@@ -463,32 +516,40 @@ async fn gate_evidence_has_no_paths_or_secrets() {
 }
 
 #[test]
-fn gate_cache_expires_and_downgrades() {
+fn engine_gate_cache_expires_downgrades_and_is_per_host() {
     let cache = GateCache::new();
     let probed = Timestamp::parse("2026-11-14T12:00:00.000Z").unwrap();
     let mut snapshot: GateSnapshot = serde_json::from_str(GATE_PHASE3_READY).unwrap();
     snapshot.probed_at = probed;
-    cache.put(snapshot);
-    let fresh = cache.get(probed.plus_secs(600)).unwrap();
+    cache.put("host-a", snapshot);
+    let fresh = cache.get("host-a", probed.plus_secs(600)).unwrap();
     assert!(matches!(
         fresh.local_orchestrator,
         LocalOrchestratorGate::Ready { .. }
     ));
-    assert!(cache.get(probed.plus_secs(601)).is_none());
+    assert!(cache.get("host-a", probed.plus_secs(601)).is_none());
+    assert!(cache.get("host-b", probed.plus_secs(600)).is_none());
     assert!(
         cache
-            .get(Timestamp::parse("2026-11-14T12:10:01.000Z").unwrap())
+            .get(
+                "host-a",
+                Timestamp::parse("2026-11-14T12:10:01.000Z").unwrap()
+            )
             .is_none()
     );
 
     let mut waiting: GateSnapshot = serde_json::from_str(GATE_ASIF_READY).unwrap();
     waiting.probed_at = probed.plus_secs(700);
-    cache.put(waiting);
-    let downgraded = cache.get(probed.plus_secs(701)).unwrap();
+    cache.put("host-a", waiting);
+    let downgraded = cache.get("host-a", probed.plus_secs(701)).unwrap();
     assert!(matches!(
         downgraded.local_orchestrator,
         LocalOrchestratorGate::WaitingForVowpPhase3 { .. }
     ));
+
+    cache.invalidate("host-a");
+    assert!(cache.get("host-a", probed.plus_secs(701)).is_none());
+    cache.clear();
 }
 
 #[test]

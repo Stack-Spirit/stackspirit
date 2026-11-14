@@ -40,6 +40,9 @@ const PROVIDER_LABELS: Record<string, string> = {
   xai: "xAI",
 };
 
+/** Providers that belong to the bundled engine's implementation details. */
+const ENGINE_INTERNAL_PROVIDERS = new Set(["opencode", "opencode-go"]);
+
 /** Display name with a safe fallback to the provider id. */
 export function providerLabel(provider: string): string {
   const trimmed = provider.trim();
@@ -50,6 +53,22 @@ export function providerLabel(provider: string): string {
   return words
     .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
     .join(" ") || trimmed;
+}
+
+/**
+ * The provider shown on an included-model row. The bundled engine's own provider id
+ * is an implementation detail (PLAN §8.5.1), so it is presented as StackSpirit Engine.
+ */
+export function modelProviderLabel(provider: string): string {
+  return ENGINE_INTERNAL_PROVIDERS.has(provider.trim().toLowerCase())
+    ? "StackSpirit Engine"
+    : providerLabel(provider);
+}
+
+/** Keeps bundled engine implementation branding out of included-model notes. */
+export function modelNotes(provider: string, notes: string): string {
+  if (!ENGINE_INTERNAL_PROVIDERS.has(provider.trim().toLowerCase())) return notes;
+  return notes.replace(/\bopencode\b/gi, "StackSpirit Engine");
 }
 
 /** A small provider catalog for BYOK. Unknown providers fall back to their id. */
@@ -101,15 +120,31 @@ export function modelAvailable(
   return Boolean(modelId) && models.some((model) => model.id === modelId);
 }
 
+/**
+ * The saved local first-run flag returned with `engine_status`. It is not part of the
+ * D2 bridge interface, so it is read structurally from the status object.
+ */
+export function engineSetupComplete(status: EngineStatus | null): boolean {
+  if (!status) return false;
+  return (status as { onboarding_complete?: unknown }).onboarding_complete === true;
+}
+
 /** True when the first-run flow should own the Engine view. */
 export function needsEngineOnboarding(
   status: EngineStatus | null,
   onboardingComplete: boolean,
 ): boolean {
-  if (!status || onboardingComplete) return false;
+  if (!status || onboardingComplete || engineSetupComplete(status)) return false;
   if (status.choice.type === "external") return false;
   if (status.state.state === "not_configured") return true;
   return status.selected_model === null;
+}
+
+/** A default, never-probed snapshot must not suppress the automatic probe. */
+export function gatesProbed(gates: GateSnapshot | null): boolean {
+  if (!gates) return false;
+  const probedAt = Date.parse(gates.probed_at);
+  return Number.isFinite(probedAt) && probedAt > 0;
 }
 
 export function externalHarnessLabel(harness: ExternalHarness): string {

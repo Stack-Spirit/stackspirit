@@ -74,7 +74,8 @@ function parseArgs(argv) {
 }
 
 function hostTriple() {
-  const arch = process.arch === "arm64" ? "aarch64" : process.arch;
+  const arch = { arm64: "aarch64", x64: "x86_64" }[process.arch];
+  if (!arch) return null;
   if (process.platform === "darwin") return `${arch}-apple-darwin`;
   if (process.platform === "linux") return `${arch}-unknown-linux-gnu`;
   if (process.platform === "win32") return `${arch}-pc-windows-msvc`;
@@ -165,7 +166,7 @@ async function fetchTarget(manifest, triple, target, options, lock) {
   const destination = bundledBinaryPath(triple);
   if (existsSync(destination) && !options.force) {
     const digest = sha256File(destination);
-    const recorded = lock.targets?.[triple]?.sha256;
+    const recorded = lock.targets?.[triple]?.binary_sha256;
     if (recorded === digest) {
       console.log(`engine ${triple}: already present and verified`);
       return;

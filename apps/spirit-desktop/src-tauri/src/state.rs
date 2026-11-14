@@ -8,8 +8,8 @@ use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
-    EngineStatus, EngineSupervisor, EngineSupervisorConfig, JsonEnginePreferences, Keychain,
-    ModelCatalog, ModelChoice, OsKeychain, ProcessEngineRuntime, bundled_catalog,
+    EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateCache, JsonEnginePreferences,
+    Keychain, ModelCatalog, ModelChoice, OsKeychain, ProcessEngineRuntime, bundled_catalog,
 };
 use spirit_core::error::SpiritError;
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
@@ -34,6 +34,7 @@ pub struct AppState {
     engine_catalog: ModelCatalog,
     engine_preferences: Arc<dyn EnginePreferencesStore>,
     engine_keychain: Arc<dyn Keychain>,
+    gate_cache: GateCache,
 }
 
 impl AppState {
@@ -78,6 +79,7 @@ impl AppState {
                 engine_catalog: bundled_catalog(),
                 engine_preferences: Arc::new(preferences),
                 engine_keychain: keychain,
+                gate_cache: GateCache::new(),
             },
             events,
         ))
@@ -113,6 +115,10 @@ impl AppState {
 
     pub(crate) fn engine_keychain(&self) -> &dyn Keychain {
         self.engine_keychain.as_ref()
+    }
+
+    pub(crate) fn gate_cache(&self) -> &GateCache {
+        &self.gate_cache
     }
 
     pub(crate) fn load_engine_preferences(&self) -> EnginePreferences {
@@ -153,24 +159,39 @@ impl AppState {
             }
         }
         self.apply_saved_model().await;
-        self.core().await.engine_status()
+        let status = self.core().await.engine_status();
+        self.engine_status_with_preferences(status)
     }
 
-    /// Re-applies the saved model id only when the runtime verifies it. A model the
-    /// engine no longer reports is left unselected.
+    /// Re-applies the saved model id only when the runtime verifies it. A currently
+    /// selected model is re-verified too; a model the engine no longer reports is left
+    /// unselected, and no replacement is selected automatically.
     pub(crate) async fn apply_saved_model(&self) {
         let status = self.core().await.engine_status();
-        if !matches!(status.state, EngineState::Ready) || status.selected_model.is_some() {
+        if !matches!(status.state, EngineState::Ready) {
+            return;
+        }
+        let models = self.verified_engine_models(&status).await;
+        let current_selected_is_live = status
+            .selected_model
+            .as_ref()
+            .is_some_and(|selected| models.iter().any(|model| model.id == selected.id));
+        if current_selected_is_live {
             return;
         }
         let preferences = self.load_engine_preferences();
         let Some(model_id) = preferences.selected_model_id else {
             return;
         };
-        let models = self.verified_engine_models(&status).await;
         if let Some(model) = models.into_iter().find(|model| model.id == model_id) {
             self.core().await.select_model(model);
         }
+    }
+
+    /// Adds the persisted local first-run flag to an engine status reply.
+    pub(crate) fn engine_status_with_preferences(&self, mut status: EngineStatus) -> EngineStatus {
+        status.onboarding_complete = self.load_engine_preferences().onboarding_complete;
+        status
     }
 
     /// Returns the build-time catalog entries the running engine actually reports.
@@ -187,6 +208,9 @@ impl AppState {
     }
 
     pub(crate) fn set_client(&self, client: Option<Arc<dyn VowpClient>>) {
+        // Every connect, failed connect and disconnect changes the target connection.
+        // Cached gate evidence must never survive across that boundary.
+        self.gate_cache.clear();
         *self
             .client
             .lock()

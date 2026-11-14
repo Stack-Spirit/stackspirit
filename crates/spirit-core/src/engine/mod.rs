@@ -122,6 +122,9 @@ pub struct EngineStatus {
     pub started_at: Option<Timestamp>,
     /// Last safe error.
     pub last_error: Option<String>,
+    /// True after the user completes the local first-run flow.
+    #[serde(default)]
+    pub onboarding_complete: bool,
 }
 
 impl Default for EngineStatus {
@@ -136,6 +139,7 @@ impl Default for EngineStatus {
             included_models_available: false,
             started_at: None,
             last_error: None,
+            onboarding_complete: false,
         }
     }
 }

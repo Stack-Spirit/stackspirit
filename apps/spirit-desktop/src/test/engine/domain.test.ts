@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import type { GateSnapshot } from "../../bridge/wire";
+import type { EngineStatus, GateSnapshot } from "../../bridge/wire";
 import {
   GATE_NOT_IMPLEMENTED_ASIF,
   GATE_NOT_IMPLEMENTED_LOCAL,
   PHASE3_MILESTONES,
+  engineSetupComplete,
   gateActionEnabled,
   gateActionReason,
+  gatesProbed,
   includedModels,
   localAgentLabel,
   modelContextLabel,
+  modelNotes,
+  modelProviderLabel,
   needsEngineOnboarding,
   providerLabel,
   providerOptions,
@@ -24,6 +28,44 @@ describe("engine domain helpers", () => {
     expect(
       providerOptions([], []).map((option) => option.label),
     ).toContain("OpenAI");
+  });
+
+  it("included models keep engine implementation branding out of the main path", () => {
+    expect(modelProviderLabel("opencode")).toBe("StackSpirit Engine");
+    expect(modelProviderLabel("opencode-go")).toBe("StackSpirit Engine");
+    expect(modelProviderLabel("deepseek")).toBe("DeepSeek");
+    expect(modelNotes("opencode", "Free OpenCode model for a limited time")).toBe(
+      "Free StackSpirit Engine model for a limited time",
+    );
+    expect(modelNotes("deepseek", "Any note")).toBe("Any note");
+  });
+
+  it("a saved setup and a probed snapshot are distinguishable from defaults", () => {
+    const status = {
+      ...engineWithoutModel(),
+      onboarding_complete: true,
+    } as EngineStatus;
+    expect(engineSetupComplete(status)).toBe(true);
+    expect(needsEngineOnboarding(status, false)).toBe(false);
+    expect(engineSetupComplete(engineWithoutModel())).toBe(false);
+
+    expect(gatesProbed(null)).toBe(false);
+    expect(
+      gatesProbed({
+        probed_at: "1970-01-01T00:00:00.000Z",
+        local_orchestrator: { state: "unknown" },
+        asif: { state: "unknown" },
+        local_agent: {
+          state: "unknown",
+          node: null,
+          protocol: null,
+          last_heartbeat: null,
+          last_error: null,
+        },
+        features: { asif_actions: false, local_orchestrator_actions: false },
+      }),
+    ).toBe(false);
+    expect(gatesProbed(readyLocalGates())).toBe(true);
   });
 
   it("models mark included access and context windows", () => {

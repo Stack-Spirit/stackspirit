@@ -10,6 +10,7 @@ import type {
 } from "../../bridge/wire";
 import { toSpiritError } from "../../bridge/errors";
 import {
+  gatesProbed,
   includedModels,
   needsEngineOnboarding,
   providerOptions,
@@ -57,7 +58,7 @@ export function EngineView() {
   const [onboardingComplete, setOnboardingComplete] = useState(false);
   const [initialStep, setInitialStep] = useState<1 | 2>(1);
   const [gateDetails, setGateDetails] = useState<GateDetails>(null);
-  const autoProbed = useRef(false);
+  const autoProbedHost = useRef<string | null>(null);
 
   const loadModels = useCallback(
     async (current: EngineStatus | null) => {
@@ -98,12 +99,16 @@ export function EngineView() {
   }, [bridge]);
 
   useEffect(() => {
-    if (autoProbed.current || !bridge) return;
-    if (connection.state !== "connected") return;
-    if (gates) return;
-    autoProbed.current = true;
+    if (!bridge) return;
+    if (connection.state !== "connected" || !connection.host_id) {
+      autoProbedHost.current = null;
+      return;
+    }
+    if (autoProbedHost.current === connection.host_id) return;
+    autoProbedHost.current = connection.host_id;
+    if (gatesProbed(gates)) return;
     void probeGates();
-  }, [bridge, connection.state, gates, probeGates]);
+  }, [bridge, connection.host_id, connection.state, gates, probeGates]);
 
   const loadHarnesses = useCallback(async () => {
     if (!bridge) return;

@@ -131,6 +131,18 @@ mod tests {
     }
 
     #[test]
+    fn engine_bundled_catalog_keeps_implementation_branding_out_of_model_copy() {
+        let catalog = bundled_catalog();
+        assert!(
+            catalog.entries.iter().all(|entry| {
+                !entry.label.to_ascii_lowercase().contains("opencode")
+                    && !entry.notes.to_ascii_lowercase().contains("opencode")
+            }),
+            "the included-model list must not show engine implementation branding"
+        );
+    }
+
+    #[test]
     fn engine_bundled_catalog_contains_no_secret_values() {
         let source = BUNDLED_CATALOG;
         assert!(!source.contains(concat!("s", "k-")));

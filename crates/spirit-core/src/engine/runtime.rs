@@ -130,11 +130,16 @@ impl FakeEngineRuntime {
     /// Makes every model request return these models.
     #[must_use]
     pub fn with_models(self, models: Vec<RuntimeModel>) -> Self {
+        self.set_models(models);
+        self
+    }
+
+    /// Replaces the model list reported by the fake engine.
+    pub fn set_models(&self, models: Vec<RuntimeModel>) {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .models = models;
-        self
     }
 
     /// Makes the next key verification return `result`; the default is `Unverified`.

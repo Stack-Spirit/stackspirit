@@ -36,6 +36,23 @@ export function readyAsifGates(): GateSnapshot {
   return structuredClone(gates);
 }
 
+/** The default snapshot gates_get returns before any probe. */
+export function unprobedGates(): GateSnapshot {
+  return {
+    probed_at: "1970-01-01T00:00:00.000Z",
+    local_orchestrator: { state: "unknown" },
+    asif: { state: "unknown" },
+    local_agent: {
+      state: "unknown",
+      node: null,
+      protocol: null,
+      last_heartbeat: null,
+      last_error: null,
+    },
+    features: { asif_actions: false, local_orchestrator_actions: false },
+  };
+}
+
 export function renderEngine(
   engine: EngineStatus,
   options: {

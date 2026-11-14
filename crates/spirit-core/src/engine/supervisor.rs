@@ -113,6 +113,9 @@ impl EngineSupervisor {
         }
         if self.handle.is_some() {
             if self.status.state == EngineState::Ready {
+                if let Some(info) = self.handle.clone() {
+                    self.reverify_selected_model(&info).await;
+                }
                 return self.status.clone();
             }
             self.stop_runtime().await;
@@ -135,13 +138,19 @@ impl EngineSupervisor {
             match self.runtime.probe_health(&info).await {
                 Ok(health) => {
                     self.consecutive_failures = 0;
-                    let models = self.runtime.models(info.port).await.unwrap_or_default();
+                    match self.runtime.models(info.port).await {
+                        Ok(models) => {
+                            self.reconcile_selected_model(&models);
+                            self.status.included_models_available =
+                                models.iter().any(|model| model.free);
+                        }
+                        Err(_) => self.status.included_models_available = false,
+                    }
                     self.status.state = EngineState::Ready;
                     self.status.version = health.version.or_else(|| info.version.clone());
                     self.status.binary_path = info.binary_path.clone();
                     self.status.port = Some(info.port);
                     self.status.started_at = Some(self.clock.now());
-                    self.status.included_models_available = models.iter().any(|model| model.free);
                     self.status.last_error = None;
                     self.handle = Some(info);
                     return self.status.clone();
@@ -235,6 +244,25 @@ impl EngineSupervisor {
     async fn stop_runtime(&mut self) {
         if let Some(info) = self.handle.take() {
             let _ = self.runtime.shutdown(&info).await;
+        }
+    }
+
+    /// Re-checks the selected model against a live engine and unselects it when the
+    /// engine no longer reports it. It never selects a replacement automatically.
+    fn reconcile_selected_model(&mut self, models: &[RuntimeModel]) {
+        let stale = self
+            .status
+            .selected_model
+            .as_ref()
+            .is_some_and(|selected| models.iter().all(|model| model.id != selected.id));
+        if stale {
+            self.status.selected_model = None;
+        }
+    }
+
+    async fn reverify_selected_model(&mut self, info: &EngineRuntimeInfo) {
+        if let Ok(models) = self.runtime.models(info.port).await {
+            self.reconcile_selected_model(&models);
         }
     }
 
@@ -388,6 +416,77 @@ mod tests {
         drop(supervisor);
         // The fake records no kill count; the process runtime has its own drop test.
         assert_eq!(runtime.spawns(), 1);
+    }
+
+    fn runtime_model(id: &str) -> RuntimeModel {
+        RuntimeModel {
+            id: id.to_owned(),
+            provider: "opencode".to_owned(),
+            label: id.to_owned(),
+            context_tokens: None,
+            free: true,
+        }
+    }
+
+    fn model_choice(id: &str) -> ModelChoice {
+        ModelChoice {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            provider: "opencode".to_owned(),
+            access: crate::engine::ModelAccess::Included,
+            context_tokens: None,
+            notes: String::new(),
+            verified_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_restart_unselects_a_model_the_engine_no_longer_reports() {
+        let runtime = Arc::new(FakeEngineRuntime::new().with_models(vec![
+            runtime_model("opencode/kept"),
+            runtime_model("opencode/dropped"),
+        ]));
+        let mut supervisor = EngineSupervisor::new(
+            runtime.clone(),
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        assert!(matches!(supervisor.start().await.state, EngineState::Ready));
+        supervisor.select_model(model_choice("opencode/dropped"));
+
+        runtime.set_models(vec![runtime_model("opencode/kept")]);
+        let status = supervisor.restart().await;
+        assert!(matches!(status.state, EngineState::Ready));
+        assert!(
+            status.selected_model.is_none(),
+            "a dropped model must not stay selected: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_start_while_ready_reverifies_the_selected_model() {
+        let runtime =
+            Arc::new(FakeEngineRuntime::new().with_models(vec![runtime_model("opencode/dropped")]));
+        let mut supervisor = EngineSupervisor::new(
+            runtime.clone(),
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        assert!(matches!(supervisor.start().await.state, EngineState::Ready));
+        supervisor.select_model(model_choice("opencode/dropped"));
+
+        runtime.set_models(Vec::new());
+        let status = supervisor.start().await;
+        assert!(matches!(status.state, EngineState::Ready));
+        assert!(status.selected_model.is_none());
     }
 
     use crate::engine::FakeEngineRuntime;
