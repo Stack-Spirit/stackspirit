@@ -139,6 +139,17 @@ const LISTED_TYPES: &[&str] = &[
     "LeaseMode",
     "AgentFrame",
     "TurnSummary",
+    // v0.4 offload wire documents.
+    "Placement",
+    "NodeFallback",
+    "WaitingReason",
+    "AssignmentPayload",
+    "RunRejectReason",
+    "RemoteRunState",
+    "RunResume",
+    "SurfaceResume",
+    "RunResumeResult",
+    "SurfaceResumeResult",
 ];
 
 /// Decodes one JSON value into a concrete type.

@@ -27,6 +27,7 @@ pub mod job;
 pub mod limit;
 pub mod log;
 pub mod loops;
+pub mod offload;
 pub mod ops;
 pub mod release;
 pub mod report;
@@ -70,6 +71,8 @@ pub use limit::*;
 pub use log::*;
 #[allow(unused_imports)]
 pub use loops::*;
+#[allow(unused_imports)]
+pub use offload::*;
 #[allow(unused_imports)]
 pub use ops::*;
 #[allow(unused_imports)]

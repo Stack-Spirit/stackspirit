@@ -1106,7 +1106,7 @@ pub enum ServiceError { #[error("{0}")] Failed(String), #[error("not found: {0}"
 /// Capsule, CapsuleDraft, Job, NewJob, Gate, Evidence, ReportFrontMatter, BriefFrontMatter,
 /// VowpConfig, Schedule, Release, InboxItem, Run, Session, Limit, Cost, ...; plus the v0.2
 /// capacity, surface/lease, snapshot, catalog, vault, fleet, tunnel and migration types in
-/// §16).
+/// §16, and the v0.4 local-node and offload types in §16.7–16.8).
 pub fn all_schemas() -> std::collections::BTreeMap<&'static str, serde_json::Value>;
 pub fn schema_for_name(name: &str) -> Option<serde_json::Value>;
 ```
@@ -1632,6 +1632,18 @@ pub enum AgentFrame {
     Credit { run_id: RunId, count: u64 },
     TurnEnd { run_id: RunId, summary: TurnSummary },
     RunLost { run_id: RunId, reason: String },
+    AssignRun { assignment: AssignmentPayload, lease_token: String,
+                lease_expires_at: Timestamp },
+    RunAccepted { assignment_id: String, run_id: RunId, epoch: u64 },
+    RunRejected { assignment_id: String, run_id: RunId, epoch: u64,
+                  reason: RunRejectReason, detail: String },
+    RunState { run_id: RunId, epoch: u64, state: RemoteRunState,
+               spool_bytes: u64, head_commit: Option<String>, detail: String },
+    CancelRun { run_id: RunId, epoch: u64, reason: String },
+    Resume { runs: Vec<RunResume>, surfaces: Vec<SurfaceResume> },
+    ResumeOk { runs: Vec<RunResumeResult>, surfaces: Vec<SurfaceResumeResult> },
+    PathMapUpdate { map: AgentPathMap },
+    Cleanup { run_id: RunId, job: JobId, worktree: PathRef },
     Ping,
     Pong,
     Revoked { reason: String },
@@ -1649,10 +1661,11 @@ pub struct TurnSummary {
 
 `NodeCard` is the redacted read model: it has no path-map field and no secret names. The
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
-snapshot or log. `AgentFrame` covers Phase 0, surface pairing, lease control and the Phase 1
-local-chat stream. `TurnBegin.cwd_ref` is a project-relative [`PathRef`]; the home never receives
-the Mac's absolute working directory. `RemoteLine` wraps the existing v0.2 event, heartbeat and
-summary line with a run id and epoch, and `IngestAck` carries the home-assigned sequence or a
+snapshot or log. `AgentFrame` covers Phase 0, surface pairing, lease control, the Phase 1
+local-chat stream and the Phase 2 offload assignment/resume frames in §16.8.
+`TurnBegin.cwd_ref` is a project-relative [`PathRef`]; the home never receives the Mac's
+absolute working directory. `RemoteLine` wraps the existing v0.2 event, heartbeat and summary
+line with a run id and epoch, and `IngestAck` carries the home-assigned sequence or a
 takeover/rejection notice. `TurnSummary` is the terminal summary. `SurfaceKind` includes the
 `agent` wire variant, and the v5 store schema accepts it. `SurfaceIssued.token` (like
 `SurfacePair.code`) and the lease token are secret frame values: they are written 0600 on the
@@ -1661,3 +1674,88 @@ The home stores only their SHA-256 hashes — a surface token in `surface_tokens
 lease token in `leases.token_hash`. `LeaseAcquire.surface_token` authenticates the acquire
 frame; `LeaseHeartbeat` and `LeaseRelease` carry only the lease token, and the home binds them
 to the surface row and the connection node.
+
+`AssignRun.lease_token` is likewise a frame-only secret. It is issued when the home sends the
+frame, never stored in [`AssignmentPayload`] (§16.8) and never written to the assignment row;
+the home stores only its hash in the lease row and issues a fresh token on resume.
+
+### 16.8 v0.4 offload wire format (`offload`)
+
+```rust
+#[serde(rename_all = "snake_case")]
+pub enum NodeFallback { Home }
+
+#[serde(try_from = "String", into = "String")]
+pub enum Placement {
+    Home,
+    Any,
+    Node { node: NodeName, fallback: Option<NodeFallback> },
+}
+// Wire strings: `home`, `any`, `node:<name>`, `node:<name>+home`. `Default` is `Home`.
+// Parse rejects an unknown selector, an empty node, whitespace, `/` or `:` inside the
+// node part and an unknown fallback; the node is a NodeName slug.
+
+#[serde(rename_all = "snake_case")]
+pub enum WaitingReason {
+    NodeOffline, NodeRevoked, NodeBusy, NodeBattery, NodeDiskLow, NodeLimit,
+    PathUnmapped, PathMissing, MissingSecret, HomeOnlySecret, KindNotAllowed,
+    ProjectHomeOnly, RemoteMismatch, NoEligibleNode,
+}
+
+pub struct AssignmentPayload {
+    pub assignment_id: String, pub run_id: RunId, pub session_id: SessionId,
+    pub project: ProjectName, pub job: JobId, pub executor: Executor,
+    pub purpose: RunPurpose, pub prompt: String, pub cwd_ref: PathRef,
+    pub base_commit: String, pub remote: String, pub env_names: Vec<String>,
+    pub secret_names: Vec<SecretName>, pub epoch: u64,
+    pub deadline: Option<Timestamp>, pub spool_cap_bytes: u64,
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum RunRejectReason {
+    NodeInactive, ProjectUnmapped, PathMissing, PathNotWritable,
+    CwdOutsideAllow, HarnessMissing, EnvMissing, DiskLow, WorktreeConflict,
+    OriginMismatch, Other,
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum RemoteRunState { Running, Disconnected, Finishing }
+
+pub struct RunResume { pub run_id: RunId, pub epoch: u64, pub last_acked: u64 }
+pub struct SurfaceResume { pub surface: SurfaceId, pub last_acked: u64 }
+pub struct RunResumeResult {
+    pub run_id: RunId, pub epoch: u64, pub accepted: bool,
+    pub reason: Option<String>, pub tail_seq: u64,
+}
+pub struct SurfaceResumeResult {
+    pub surface: SurfaceId, pub accepted: bool,
+    pub reason: Option<String>, pub tail_seq: u64,
+}
+```
+
+[`Placement`] is the job's placement value from §7.1: `home` is the default, `any` lets the
+dispatcher choose the home or any eligible node, and `node:<name>` pins one node. The
+`+home` suffix is the explicit, opt-in `fallback = "home"`; there is no silent fallback to the
+home when a pinned node is ineligible. The node part is a `NodeName` slug and carries no
+whitespace, `/`, `:` or `+`.
+
+[`WaitingReason`] is the §7.5 vocabulary a ready job records instead of running, in the
+documented order. It is a first-class read-model value, not a log line.
+
+[`AssignmentPayload`] is the durable payload the home stores in its assignment row and sends
+inside [`crate::agent::AgentFrame::AssignRun`]. It carries environment and secret **names**
+only, a project-relative `PathRef`, the base commit, the remote name, the epoch, an optional
+deadline and the per-run spool cap. It never contains a lease token, a secret value or an
+absolute local path. The `AssignRun` frame adds `lease_token` and `lease_expires_at` next to
+the payload: the token is frame-only, written to the lease row only as a SHA-256 hash and
+re-issued on resume.
+
+[`RunRejectReason`] is the machine-readable class of a pre-start refusal; the matching
+`RunRejected.detail` carries the human-readable text and never a secret value.
+[`RemoteRunState`] is the state an agent reports in `RunState` while a run is active.
+
+`Resume` and `ResumeOk` reconcile runs and surfaces after a reconnect: the agent offers each
+run and surface with `last_acked`, and the home answers `accepted`, an optional `reason` and
+the `tail_seq` the holder may continue from. `PathMapUpdate` carries one owner-only
+[`AgentPathMap`] whose absolute roots never appear in a card, snapshot or log. `Cleanup` names
+the run, job and project-relative worktree to remove; the agent resolves the worktree locally.

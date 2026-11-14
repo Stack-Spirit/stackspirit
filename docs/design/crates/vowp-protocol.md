@@ -29,6 +29,7 @@ crates/vowp-protocol/
   src/gate.rs         // Gate, GateKind, Evidence, GateResult, SecretHit, default_gates
   src/report.rs       // Report, ReportFrontMatter, Brief, BriefFrontMatter, Verdict, ReportStatus
   src/run.rs          // Run, RunRole, RunPurpose, RunOutcome, Worker*
+  src/offload.rs      // types.md §16.8: Placement, NodeFallback, WaitingReason, AssignmentPayload, RunRejectReason, RemoteRunState, RunResume*, SurfaceResume*
   src/session.rs      // Session, SessionState, SessionRole, EventIndexRow, Switch, SwitchState, Node, Project, LedgerEntry, LedgerKind
   src/inbox.rs        // InboxItem, InboxKind, InboxState
   src/loops.rs        // Loop, LoopKind, LoopBounds, ActiveState, Schedule*, MissedPolicy, ScheduleAction
@@ -45,6 +46,9 @@ crates/vowp-protocol/
 `src/agent.rs` holds the v0.4 local-node documents (`PathRef`, `AgentRole`,
 `AgentCapabilities`, `AgentCapacity`, `AgentPathMap`, `NodeCard`, `NodeKind`, `NodeStatus`,
 `NodePresence`, `SurfaceInfo`, `SurfaceScope`, `SurfaceState` and `AgentFrame`); see rule 14.
+`src/offload.rs` holds the v0.4 offload wire format (`Placement`, `NodeFallback`,
+`WaitingReason`, `AssignmentPayload`, `RunRejectReason`, `RemoteRunState` and the resume
+records); see rule 15.
 
 `lib.rs` declares **all** modules and re-exports with `pub use <module>::*;` for every module.
 
@@ -137,7 +141,10 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"Tunnel"`, `"TurnGrant"`, `"UsageEstimate"`, `"VowpConfig"`, `"WaitReason"`, `"WaitingJob"`, `"Worker"`.
     The v0.4 local-node set adds `"AgentCapabilities"`, `"AgentCapacity"`, `"AgentFrame"`,
     `"AgentPathMap"`, `"AgentRole"`, `"NodeCard"`, `"NodeKind"`, `"NodePresence"`, `"NodeStatus"`,
-    `"PathRef"`, `"SurfaceInfo"`, `"SurfaceScope"`, `"SurfaceState"`, `"LeaseMode"`.
+    `"PathRef"`, `"SurfaceInfo"`, `"SurfaceScope"`, `"SurfaceState"`, `"LeaseMode"`, `"TurnSummary"`.
+    The v0.4 offload set adds `"AssignmentPayload"`, `"NodeFallback"`, `"Placement"`,
+    `"RemoteRunState"`, `"RunRejectReason"`, `"RunResume"`, `"RunResumeResult"`,
+    `"SurfaceResume"`, `"SurfaceResumeResult"`, `"WaitingReason"`.
     Output is deterministic (BTreeMap, stable ordering).
 13. **No panics**: all constructors/parsers return `Result`; regex literals inside use `// invariant:` comments.
 14. **v0.4 agent protocol.** `PathRef` serialises as one string (`project:vowp`,
@@ -146,8 +153,10 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     components normalised. `AgentFrame` is the tagged union (`type` is `snake_case`):
     `AgentHello`, `HomeChallenge`, `AgentAuth`, `HomeWelcome`, `Enroll`, `Enrolled`, `Heartbeat`,
     `SurfacePair`, `SurfaceIssued`, `SurfaceRevoked`, `LeaseAcquire`, `LeaseHeartbeat`,
-    `LeaseRelease`, `LeaseGrant`, `LeaseLost`, `LeaseRevoked`, `Ping`, `Pong`, `Revoked`,
-    `Superseded` and `Error`. `SurfacePair.code` and `SurfaceIssued.token` are secret frame values: never logged,
+    `LeaseRelease`, `LeaseGrant`, `LeaseLost`, `LeaseRevoked`, `TurnBegin`, `TurnGrant`,
+    `RemoteLine`, `IngestAck`, `Credit`, `TurnEnd`, `RunLost`, `AssignRun`, `RunAccepted`,
+    `RunRejected`, `RunState`, `CancelRun`, `Resume`, `ResumeOk`, `PathMapUpdate`, `Cleanup`,
+    `Ping`, `Pong`, `Revoked`, `Superseded` and `Error`. `SurfacePair.code` and `SurfaceIssued.token` are secret frame values: never logged,
     echoed or put in a URL. `SurfaceScope` is a transparent string (`session.read:<id>`,
     `fleet.read`, `tool:<name>`); `SurfaceState` is `pending|attached|revoked`; `SurfaceInfo` is
     the state-bearing read model and carries no token. `NodeCard` carries no path map and no
@@ -155,6 +164,19 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `LeaseMode` is `acquire|takeover`. `LeaseGrant.lease_token`, `LeaseAcquire.surface_token`,
     `LeaseHeartbeat.token` and `LeaseRelease.token` are secret frame values: never logged,
     echoed or written to the database in plaintext; the store keeps only SHA-256 hashes.
+
+15. **v0.4 offload wire format.** `Placement` serialises as one string — `home`, `any`,
+    `node:<name>` or `node:<name>+home` — and parses strictly: an unknown selector, an empty
+    node, whitespace, `/` or `:` inside the node part and an unknown fallback are rejected with
+    `InvalidInput`. The node is a `NodeName` slug; `Default` is `Home`, and `+home` is the only
+    explicit fallback (there is no silent one). `WaitingReason` is the §7.5 vocabulary and
+    `RunRejectReason` the pre-start refusal vocabulary, both `snake_case`. `AssignmentPayload`
+    is the durable, token-free payload carried by `AssignRun`; it contains environment and
+    secret names only, a project-relative `PathRef`, and never a lease token, a secret value or
+    an absolute local path. `AssignRun.lease_token` is frame-only: the home stores only its hash
+    and re-issues a token on resume. `RemoteRunState` is `running|disconnected|finishing`.
+    `RunResume`/`SurfaceResume` carry `last_acked`; `RunResumeResult`/`SurfaceResumeResult`
+    carry `accepted`, an optional `reason` and the `tail_seq` the holder may continue from.
 
 ## 5. Error enum
 
@@ -222,11 +244,25 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `node_card_serializes_without_absolute_paths_or_secret_names` | no absolute string, path-map field or secret name appears in the card JSON |
 | `all_schemas_includes_agent_types` | every v0.4 agent type is in `all_schemas()` and `schema_for_name` |
 | `surface_kind_agent_wire_name_is_agent` | `SurfaceKind::Agent` serialises as `"agent"` and back |
+| `placement_round_trips_home_any_and_node` | `home`, `any` and `node:<name>` display, parse and JSON-round-trip; `Default` is `home` |
+| `placement_with_home_fallback_round_trips` | `node:<name>+home` keeps `Some(NodeFallback::Home)` through display, parse and JSON |
+| `placement_rejects_an_unknown_or_malformed_selector` | unknown selectors, empty/uppercase/whitespace/slashed/colonned nodes and unknown fallbacks return `InvalidInput` |
+| `waiting_reason_matches_the_documented_wire_values` | all 14 §7.5 values round-trip and an unknown value fails |
+| `assignment_payload_round_trips_without_a_lease_token` | the payload round-trips, has no `lease_token` and no absolute local path, and keeps `cwd_ref` a `PathRef` string |
+| `assign_run_frame_carries_the_lease_token_but_the_payload_does_not` | `AssignRun.lease_token` is frame-only; the nested payload never contains it |
+| `run_reject_reason_covers_the_documented_values` | all 11 refusal values round-trip and an unknown value fails |
+| `resume_frame_round_trips_runs_and_surfaces` | `Resume` and `ResumeOk` carry run/surface records and results through JSON with their type tags |
+| `path_map_update_round_trips_an_agent_path_map` | `PathMapUpdate` round-trips its owner-only `AgentPathMap` |
+| `run_state_reports_the_remote_state_and_head_commit` | every `RemoteRunState` value serialises as its wire name and `RunState` round-trips |
+| `agent_frame_round_trips_run_assignment_frames` | `assign_run`, `run_accepted`, `run_rejected`, `run_state`, `cancel_run` and `cleanup` round-trip with their type tags |
+| `unknown_frame_type_is_rejected` | an unknown type and a missing required field both fail and name the offending type/field |
 
 ## 7. Out of scope / v0.2
 
 ACP event mapping, permission.request/resolve events, IANA timezone support, signed/hash-chained logs (field reserved: none in v0.1).
 The v0.3 loopback API documents live in `src/api.rs`; see `docs/design/v0.3/http-api.md`.
 The v0.4 local-node protocol lives in `src/agent.rs`; see `docs/design/v0.4/local-orchestrator.md`
-§8.3 and §11.3. Assignment and `RemoteLine`/`IngestAck` streaming frames are later phases and
-are not defined here; surface pairing and lease control are defined.
+§8.3 and §11.3. Surface pairing, lease control and the local-chat stream are defined there.
+The Phase 2 offload wire format lives in `src/offload.rs`; the assignment store, dispatcher,
+policy evaluation, agent executor and CLI commands that use it are later phases and are not
+defined here.

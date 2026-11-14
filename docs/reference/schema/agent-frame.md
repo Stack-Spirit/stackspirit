@@ -200,6 +200,110 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
       ],
       "type": "object"
     },
+    "AssignmentPayload": {
+      "description": "The durable, token-free payload the home stores and sends with `AssignRun`.\n\nIt carries environment and secret **names** only, a project-relative [`PathRef`],\nthe base commit, the remote name, the epoch, an optional deadline and the per-run\nspool cap. It **never** contains a lease token, a secret value or an absolute local\npath. The lease token travels only in [`crate::agent::AgentFrame::AssignRun`].",
+      "properties": {
+        "assignment_id": {
+          "description": "Durable assignment id.",
+          "type": "string"
+        },
+        "base_commit": {
+          "description": "Base commit the run starts from.",
+          "type": "string"
+        },
+        "cwd_ref": {
+          "$ref": "#/$defs/PathRef",
+          "description": "Project-relative working directory; the agent resolves it locally."
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deadline after which the home fences the run, when any."
+        },
+        "env_names": {
+          "description": "Environment variable names to resolve on the node; never values.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "epoch": {
+          "description": "Assignment epoch; a higher epoch supersedes a lower one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "executor": {
+          "$ref": "#/$defs/Executor",
+          "description": "Executor to start."
+        },
+        "job": {
+          "$ref": "#/$defs/JobId",
+          "description": "Job the run belongs to."
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectName",
+          "description": "Project the run works in."
+        },
+        "prompt": {
+          "description": "Home-seeded prompt.",
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/RunPurpose",
+          "description": "Why the run starts."
+        },
+        "remote": {
+          "description": "Git remote name on the node.",
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run id assigned by the home."
+        },
+        "secret_names": {
+          "description": "Secret names to resolve on the node; never values.",
+          "items": {
+            "$ref": "#/$defs/SecretName"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the run writes to."
+        },
+        "spool_cap_bytes": {
+          "description": "Per-run spool cap in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assignment_id",
+        "run_id",
+        "session_id",
+        "project",
+        "job",
+        "executor",
+        "purpose",
+        "prompt",
+        "cwd_ref",
+        "base_commit",
+        "remote",
+        "env_names",
+        "secret_names",
+        "epoch",
+        "spool_cap_bytes"
+      ],
+      "type": "object"
+    },
     "BuildMode": {
       "description": "Inference about how warm the job's target directory was.",
       "oneOf": [
@@ -487,6 +591,10 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
           "type": "string"
         }
       ]
+    },
+    "Executor": {
+      "description": "One concrete way to run a model: `harness:model[@effort][#variant]`.\n\nExamples:\n* `claude-code:model-a@medium`\n* `opencode:provider/model-b#max`\n* `cli:codex`",
+      "type": "string"
     },
     "HarnessKind": {
       "description": "A harness that runs a model.",
@@ -826,6 +934,26 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "RemoteRunState": {
+      "description": "The state an agent reports for one remote run.",
+      "oneOf": [
+        {
+          "const": "running",
+          "description": "The harness is running and events are flowing.",
+          "type": "string"
+        },
+        {
+          "const": "disconnected",
+          "description": "The home connection dropped; the run may resume within the grace period.",
+          "type": "string"
+        },
+        {
+          "const": "finishing",
+          "description": "The summary or result push is in progress.",
+          "type": "string"
+        }
+      ]
+    },
     "RemoteUsage": {
       "description": "What a remote `__exec` measured on the executor node.",
       "properties": {
@@ -1016,6 +1144,132 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "RunRejectReason": {
+      "description": "Why an agent refused an assignment before starting it.",
+      "oneOf": [
+        {
+          "const": "node_inactive",
+          "description": "The node is not active (revoked, pending or offline).",
+          "type": "string"
+        },
+        {
+          "const": "project_unmapped",
+          "description": "The project has no path map on the node.",
+          "type": "string"
+        },
+        {
+          "const": "path_missing",
+          "description": "A mapped local root or worktree root is missing.",
+          "type": "string"
+        },
+        {
+          "const": "path_not_writable",
+          "description": "A mapped local root or worktree root is not writable.",
+          "type": "string"
+        },
+        {
+          "const": "cwd_outside_allow",
+          "description": "The working directory is outside the project's allowlist.",
+          "type": "string"
+        },
+        {
+          "const": "harness_missing",
+          "description": "The harness binary is not installed on the node.",
+          "type": "string"
+        },
+        {
+          "const": "env_missing",
+          "description": "A required environment name is absent on the node.",
+          "type": "string"
+        },
+        {
+          "const": "disk_low",
+          "description": "Free disk space is below the reserve.",
+          "type": "string"
+        },
+        {
+          "const": "worktree_conflict",
+          "description": "Another run already holds the job's worktree.",
+          "type": "string"
+        },
+        {
+          "const": "origin_mismatch",
+          "description": "The local `origin` does not match the project remote.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Another refusal; [`crate::agent::AgentFrame::RunRejected`] carries the detail.",
+          "type": "string"
+        }
+      ]
+    },
+    "RunResume": {
+      "description": "One run offered back to the home after a reconnect.",
+      "properties": {
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_acked": {
+          "description": "Last sequence number the node saw acknowledged by the home.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the node still holds."
+        }
+      },
+      "required": [
+        "run_id",
+        "epoch",
+        "last_acked"
+      ],
+      "type": "object"
+    },
+    "RunResumeResult": {
+      "description": "The home's answer for one resumed run.",
+      "properties": {
+        "accepted": {
+          "description": "Whether the node may continue the run.",
+          "type": "boolean"
+        },
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Human-readable refusal reason when `accepted` is false.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the result belongs to."
+        },
+        "tail_seq": {
+          "description": "Last session sequence the node may continue from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "epoch",
+        "accepted",
+        "tail_seq"
+      ],
+      "type": "object"
+    },
     "SecretName": {
       "description": "A validated secret name: `^[A-Z][A-Z0-9_]{0,63}$`.",
       "type": "string"
@@ -1062,6 +1316,58 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
     "SurfaceId": {
       "description": "A surface instance id (ULID, 26 characters).",
       "type": "string"
+    },
+    "SurfaceResume": {
+      "description": "One surface offered back to the home after a reconnect.",
+      "properties": {
+        "last_acked": {
+          "description": "Last sequence number the node saw acknowledged by the home.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface the node still holds."
+        }
+      },
+      "required": [
+        "surface",
+        "last_acked"
+      ],
+      "type": "object"
+    },
+    "SurfaceResumeResult": {
+      "description": "The home's answer for one resumed surface.",
+      "properties": {
+        "accepted": {
+          "description": "Whether the node may keep the surface attached.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Human-readable refusal reason when `accepted` is false.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface the result belongs to."
+        },
+        "tail_seq": {
+          "description": "Last session sequence the surface may continue from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "surface",
+        "accepted",
+        "tail_seq"
+      ],
+      "type": "object"
     },
     "SurfaceScope": {
       "description": "One capability granted to a surface token.\n\nThe wire form is one short string, for example `session.read:<id>`, `session.write:<id>`,\n`project.read:<name>`, `fleet.read` or `tool:<name>`. The store keeps the list in\n`surface_tokens.scopes_json`; unknown scopes are preserved verbatim so a newer home can\nextend the vocabulary without breaking older readers.",
@@ -2077,6 +2383,287 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "type",
         "run_id",
         "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: offload one run assignment.\n\n`lease_token` is a frame-only secret. The home issues it when it sends this\nframe, stores only its hash in the lease row and re-issues a token on resume. It\nis never part of [`AssignmentPayload`] and must never be logged or stored.",
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentPayload",
+          "description": "Durable, token-free assignment payload."
+        },
+        "lease_expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the run lease goes stale without a heartbeat."
+        },
+        "lease_token": {
+          "description": "Short-lived run lease token; frame-only, never stored in the payload.",
+          "type": "string"
+        },
+        "type": {
+          "const": "assign_run",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "assignment",
+        "lease_token",
+        "lease_expires_at"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: the assignment passed validation.",
+      "properties": {
+        "assignment_id": {
+          "description": "Assignment id from the payload.",
+          "type": "string"
+        },
+        "epoch": {
+          "description": "Assignment epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run id from the assignment."
+        },
+        "type": {
+          "const": "run_accepted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "assignment_id",
+        "run_id",
+        "epoch"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: the assignment was refused before it started.",
+      "properties": {
+        "assignment_id": {
+          "description": "Assignment id from the payload.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Human-readable detail; never a secret value.",
+          "type": "string"
+        },
+        "epoch": {
+          "description": "Assignment epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/RunRejectReason",
+          "description": "Machine-readable refusal class."
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run id from the assignment."
+        },
+        "type": {
+          "const": "run_rejected",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "assignment_id",
+        "run_id",
+        "epoch",
+        "reason",
+        "detail"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: the current state of one remote run.",
+      "properties": {
+        "detail": {
+          "description": "Human-readable detail; never a secret value.",
+          "type": "string"
+        },
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head_commit": {
+          "description": "Head commit the node pushed, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run being reported."
+        },
+        "spool_bytes": {
+          "description": "Bytes waiting in the run's spool.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/RemoteRunState",
+          "description": "Current remote run state."
+        },
+        "type": {
+          "const": "run_state",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "state",
+        "spool_bytes",
+        "detail"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: cancel a run.",
+      "properties": {
+        "epoch": {
+          "description": "Run epoch; a stale epoch is ignored.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Human-readable reason.",
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run to cancel."
+        },
+        "type": {
+          "const": "cancel_run",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: the runs and surfaces this node still holds after a reconnect.",
+      "properties": {
+        "runs": {
+          "description": "Runs with their last acknowledged sequence.",
+          "items": {
+            "$ref": "#/$defs/RunResume"
+          },
+          "type": "array"
+        },
+        "surfaces": {
+          "description": "Surfaces with their last acknowledged sequence.",
+          "items": {
+            "$ref": "#/$defs/SurfaceResume"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "resume",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "runs",
+        "surfaces"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: per-run and per-surface resume results.",
+      "properties": {
+        "runs": {
+          "description": "Run resume results.",
+          "items": {
+            "$ref": "#/$defs/RunResumeResult"
+          },
+          "type": "array"
+        },
+        "surfaces": {
+          "description": "Surface resume results.",
+          "items": {
+            "$ref": "#/$defs/SurfaceResumeResult"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "resume_ok",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "runs",
+        "surfaces"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: a project's local path map changed.",
+      "properties": {
+        "map": {
+          "$ref": "#/$defs/AgentPathMap",
+          "description": "Updated path map for one project."
+        },
+        "type": {
+          "const": "path_map_update",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "map"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: remove a finished run's worktree.",
+      "properties": {
+        "job": {
+          "$ref": "#/$defs/JobId",
+          "description": "Job whose worktree is removed."
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run whose worktree is removed."
+        },
+        "type": {
+          "const": "cleanup",
+          "type": "string"
+        },
+        "worktree": {
+          "$ref": "#/$defs/PathRef",
+          "description": "Worktree to remove; the agent resolves it locally."
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "job",
+        "worktree"
       ],
       "type": "object"
     }

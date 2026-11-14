@@ -13,7 +13,9 @@ use vowp_protocol::agent::{
 use vowp_protocol::cost::Cost;
 use vowp_protocol::error::ErrorKind;
 use vowp_protocol::event::StopReason;
+use vowp_protocol::executor::Executor;
 use vowp_protocol::ids::{EventId, JobId, NodeName, ProjectName, RunId, SessionId};
+use vowp_protocol::offload::{AssignmentPayload, RemoteRunState, RunRejectReason};
 use vowp_protocol::run::{RunOutcome, RunPurpose};
 use vowp_protocol::schema::{all_schemas, schema_for_name};
 use vowp_protocol::surface::{RemoteLine, SurfaceId, SurfaceKind};
@@ -73,6 +75,31 @@ fn path_map() -> AgentPathMap {
         local_root: "/Users/dev/vowp".to_owned(),
         worktree_root: Some("/Users/dev/vowp-wt".to_owned()),
         allow: vec!["src".to_owned(), "docs".to_owned()],
+    }
+}
+
+/// Builds a token-free assignment payload.
+fn assignment() -> AssignmentPayload {
+    AssignmentPayload {
+        assignment_id: "assign-01".to_owned(),
+        run_id: RunId::new(),
+        session_id: SessionId::new(),
+        project: project("vowp"),
+        job: job("graph-engine"),
+        executor: Executor::parse("opencode:deepseek/deepseek-flash#max").expect("executor"),
+        purpose: RunPurpose::Start,
+        prompt: "Implement the offload wire format.".to_owned(),
+        cwd_ref: PathRef::Worktree {
+            project: project("vowp"),
+            job: job("graph-engine"),
+        },
+        base_commit: "abc1234".to_owned(),
+        remote: "origin".to_owned(),
+        env_names: vec!["CI".to_owned()],
+        secret_names: vec![SecretName::parse("HOME_GITHUB_TOKEN").expect("secret name")],
+        epoch: 1,
+        deadline: Some(at()),
+        spool_cap_bytes: 512 * 1024 * 1024,
     }
 }
 
@@ -645,4 +672,91 @@ fn surface_kind_agent_wire_name_is_agent() {
     );
     let decoded: SurfaceKind = serde_json::from_value(json!("agent")).expect("surface kind back");
     assert_eq!(decoded, SurfaceKind::Agent);
+}
+
+#[test]
+fn agent_frame_round_trips_run_assignment_frames() {
+    let assignment = assignment();
+    let frames = vec![
+        (
+            "assign_run",
+            AgentFrame::AssignRun {
+                assignment: assignment.clone(),
+                lease_token: "FAKE-LEASE-TOKEN-NOT-A-REAL-SECRET".to_owned(),
+                lease_expires_at: at(),
+            },
+        ),
+        (
+            "run_accepted",
+            AgentFrame::RunAccepted {
+                assignment_id: assignment.assignment_id.clone(),
+                run_id: assignment.run_id.clone(),
+                epoch: assignment.epoch,
+            },
+        ),
+        (
+            "run_rejected",
+            AgentFrame::RunRejected {
+                assignment_id: assignment.assignment_id.clone(),
+                run_id: assignment.run_id.clone(),
+                epoch: assignment.epoch,
+                reason: RunRejectReason::EnvMissing,
+                detail: "CI is not set on the node".to_owned(),
+            },
+        ),
+        (
+            "run_state",
+            AgentFrame::RunState {
+                run_id: assignment.run_id.clone(),
+                epoch: assignment.epoch,
+                state: RemoteRunState::Finishing,
+                spool_bytes: 4096,
+                head_commit: Some("abc1234".to_owned()),
+                detail: "pushed job branch".to_owned(),
+            },
+        ),
+        (
+            "cancel_run",
+            AgentFrame::CancelRun {
+                run_id: assignment.run_id.clone(),
+                epoch: assignment.epoch,
+                reason: "owner cancelled the job".to_owned(),
+            },
+        ),
+        (
+            "cleanup",
+            AgentFrame::Cleanup {
+                run_id: assignment.run_id.clone(),
+                job: assignment.job.clone(),
+                worktree: PathRef::Worktree {
+                    project: project("vowp"),
+                    job: job("graph-engine"),
+                },
+            },
+        ),
+    ];
+
+    assert_eq!(frames.len(), 6, "every run assignment frame variant is covered");
+    for (wire, frame) in frames {
+        let value = serde_json::to_value(&frame).expect("run assignment frame JSON");
+        assert_eq!(value["type"], wire, "wire name for {wire}");
+        let decoded: AgentFrame = serde_json::from_value(value).expect("run assignment frame back");
+        assert_eq!(decoded, frame);
+    }
+}
+
+#[test]
+fn unknown_frame_type_is_rejected() {
+    let err = serde_json::from_value::<AgentFrame>(json!({"type": "assign_run_teleport"}))
+        .expect_err("unknown frame type must fail");
+    assert!(
+        err.to_string().contains("assign_run_teleport"),
+        "error names the type: {err}"
+    );
+
+    let missing = serde_json::from_value::<AgentFrame>(json!({"type": "assign_run"})).expect_err("missing fields");
+    assert!(
+        missing.to_string().contains("missing field"),
+        "error names the field: {missing}"
+    );
 }

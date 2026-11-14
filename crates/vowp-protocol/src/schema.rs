@@ -33,6 +33,10 @@ use crate::inbox::InboxItem;
 use crate::job::{Edge, Job, JobPatch, NewJob};
 use crate::limit::Limit;
 use crate::loops::{Loop, Schedule};
+use crate::offload::{
+    AssignmentPayload, NodeFallback, Placement, RemoteRunState, RunRejectReason, RunResume, RunResumeResult,
+    SurfaceResume, SurfaceResumeResult, WaitingReason,
+};
 use crate::ops::{FleetQueueRow, FleetStatus, MigrationCount, MigrationReport, Tunnel};
 use crate::release::Release;
 use crate::report::{BriefFrontMatter, ReportFrontMatter};
@@ -167,6 +171,17 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("LeaseMode", schema_value::<LeaseMode>());
     schemas.insert("TurnSummary", schema_value::<TurnSummary>());
     schemas.insert("AgentFrame", schema_value::<AgentFrame>());
+    // v0.4 offload wire documents.
+    schemas.insert("Placement", schema_value::<Placement>());
+    schemas.insert("NodeFallback", schema_value::<NodeFallback>());
+    schemas.insert("WaitingReason", schema_value::<WaitingReason>());
+    schemas.insert("AssignmentPayload", schema_value::<AssignmentPayload>());
+    schemas.insert("RunRejectReason", schema_value::<RunRejectReason>());
+    schemas.insert("RemoteRunState", schema_value::<RemoteRunState>());
+    schemas.insert("RunResume", schema_value::<RunResume>());
+    schemas.insert("SurfaceResume", schema_value::<SurfaceResume>());
+    schemas.insert("RunResumeResult", schema_value::<RunResumeResult>());
+    schemas.insert("SurfaceResumeResult", schema_value::<SurfaceResumeResult>());
     schemas
 }
 

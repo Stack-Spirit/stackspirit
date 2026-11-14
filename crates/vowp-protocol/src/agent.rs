@@ -16,6 +16,9 @@ use crate::cost::Cost;
 use crate::error::{ErrorKind, ProtocolError};
 use crate::event::{LimitEvent, StopReason};
 use crate::ids::{EventId, JobId, NodeName, ProjectName, RunId, SessionId};
+use crate::offload::{
+    AssignmentPayload, RemoteRunState, RunRejectReason, RunResume, RunResumeResult, SurfaceResume, SurfaceResumeResult,
+};
 use crate::run::{RunOutcome, RunPurpose};
 use crate::surface::{RemoteLine as SurfaceRemoteLine, SurfaceId, SurfaceKind};
 use crate::time::Timestamp;
@@ -649,6 +652,93 @@ pub enum AgentFrame {
         run_id: RunId,
         /// Human-readable reason.
         reason: String,
+    },
+    /// Home -> agent: offload one run assignment.
+    ///
+    /// `lease_token` is a frame-only secret. The home issues it when it sends this
+    /// frame, stores only its hash in the lease row and re-issues a token on resume. It
+    /// is never part of [`AssignmentPayload`] and must never be logged or stored.
+    AssignRun {
+        /// Durable, token-free assignment payload.
+        assignment: AssignmentPayload,
+        /// Short-lived run lease token; frame-only, never stored in the payload.
+        lease_token: String,
+        /// When the run lease goes stale without a heartbeat.
+        lease_expires_at: Timestamp,
+    },
+    /// Agent -> home: the assignment passed validation.
+    RunAccepted {
+        /// Assignment id from the payload.
+        assignment_id: String,
+        /// Run id from the assignment.
+        run_id: RunId,
+        /// Assignment epoch.
+        epoch: u64,
+    },
+    /// Agent -> home: the assignment was refused before it started.
+    RunRejected {
+        /// Assignment id from the payload.
+        assignment_id: String,
+        /// Run id from the assignment.
+        run_id: RunId,
+        /// Assignment epoch.
+        epoch: u64,
+        /// Machine-readable refusal class.
+        reason: RunRejectReason,
+        /// Human-readable detail; never a secret value.
+        detail: String,
+    },
+    /// Agent -> home: the current state of one remote run.
+    RunState {
+        /// Run being reported.
+        run_id: RunId,
+        /// Run epoch.
+        epoch: u64,
+        /// Current remote run state.
+        state: RemoteRunState,
+        /// Bytes waiting in the run's spool.
+        spool_bytes: u64,
+        /// Head commit the node pushed, when known.
+        head_commit: Option<String>,
+        /// Human-readable detail; never a secret value.
+        detail: String,
+    },
+    /// Home -> agent: cancel a run.
+    CancelRun {
+        /// Run to cancel.
+        run_id: RunId,
+        /// Run epoch; a stale epoch is ignored.
+        epoch: u64,
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// Agent -> home: the runs and surfaces this node still holds after a reconnect.
+    Resume {
+        /// Runs with their last acknowledged sequence.
+        runs: Vec<RunResume>,
+        /// Surfaces with their last acknowledged sequence.
+        surfaces: Vec<SurfaceResume>,
+    },
+    /// Home -> agent: per-run and per-surface resume results.
+    ResumeOk {
+        /// Run resume results.
+        runs: Vec<RunResumeResult>,
+        /// Surface resume results.
+        surfaces: Vec<SurfaceResumeResult>,
+    },
+    /// Agent -> home: a project's local path map changed.
+    PathMapUpdate {
+        /// Updated path map for one project.
+        map: AgentPathMap,
+    },
+    /// Home -> agent: remove a finished run's worktree.
+    Cleanup {
+        /// Run whose worktree is removed.
+        run_id: RunId,
+        /// Job whose worktree is removed.
+        job: JobId,
+        /// Worktree to remove; the agent resolves it locally.
+        worktree: PathRef,
     },
 }
 

@@ -25,6 +25,7 @@ python3 docs/reference/check-reference.py
 | `AgentRole` | [agent-role.md](agent-role.md) |
 | `ApiError` | [api-error.md](api-error.md) |
 | `ApiErrorBody` | [api-error-body.md](api-error-body.md) |
+| `AssignmentPayload` | [assignment-payload.md](assignment-payload.md) |
 | `BackupFile` | [backup-file.md](backup-file.md) |
 | `BackupReport` | [backup-report.md](backup-report.md) |
 | `BlockedJobCard` | [blocked-job-card.md](blocked-job-card.md) |
@@ -80,6 +81,7 @@ python3 docs/reference/check-reference.py
 | `NewJob` | [new-job.md](new-job.md) |
 | `Node` | [node.md](node.md) |
 | `NodeCard` | [node-card.md](node-card.md) |
+| `NodeFallback` | [node-fallback.md](node-fallback.md) |
 | `NodeKind` | [node-kind.md](node-kind.md) |
 | `NodePage` | [node-page.md](node-page.md) |
 | `NodePresence` | [node-presence.md](node-presence.md) |
@@ -87,6 +89,7 @@ python3 docs/reference/check-reference.py
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
 | `Page` | [page.md](page.md) |
 | `PathRef` | [path-ref.md](path-ref.md) |
+| `Placement` | [placement.md](placement.md) |
 | `Profile` | [profile.md](profile.md) |
 | `Project` | [project.md](project.md) |
 | `ProjectEntry` | [project-entry.md](project-entry.md) |
@@ -95,8 +98,12 @@ python3 docs/reference/check-reference.py
 | `Release` | [release.md](release.md) |
 | `RemoteEvent` | [remote-event.md](remote-event.md) |
 | `RemoteLine` | [remote-line.md](remote-line.md) |
+| `RemoteRunState` | [remote-run-state.md](remote-run-state.md) |
 | `ReportFrontMatter` | [report-front-matter.md](report-front-matter.md) |
 | `Run` | [run.md](run.md) |
+| `RunRejectReason` | [run-reject-reason.md](run-reject-reason.md) |
+| `RunResume` | [run-resume.md](run-resume.md) |
+| `RunResumeResult` | [run-resume-result.md](run-resume-result.md) |
 | `RunUsage` | [run-usage.md](run-usage.md) |
 | `RunningCapacity` | [running-capacity.md](running-capacity.md) |
 | `RunningJobCard` | [running-job-card.md](running-job-card.md) |
@@ -113,6 +120,8 @@ python3 docs/reference/check-reference.py
 | `Surface` | [surface.md](surface.md) |
 | `SurfaceInfo` | [surface-info.md](surface-info.md) |
 | `SurfaceRef` | [surface-ref.md](surface-ref.md) |
+| `SurfaceResume` | [surface-resume.md](surface-resume.md) |
+| `SurfaceResumeResult` | [surface-resume-result.md](surface-resume-result.md) |
 | `SurfaceScope` | [surface-scope.md](surface-scope.md) |
 | `SurfaceState` | [surface-state.md](surface-state.md) |
 | `Switch` | [switch.md](switch.md) |
@@ -124,4 +133,5 @@ python3 docs/reference/check-reference.py
 | `VowpConfig` | [vowp-config.md](vowp-config.md) |
 | `WaitReason` | [wait-reason.md](wait-reason.md) |
 | `WaitingJob` | [waiting-job.md](waiting-job.md) |
+| `WaitingReason` | [waiting-reason.md](waiting-reason.md) |
 | `Worker` | [worker.md](worker.md) |
