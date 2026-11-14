@@ -524,7 +524,8 @@ Route: `GET /api/v1/sessions/{id}/export/asif`.
 - **Body:** streamed from a private temporary file under `<home>/tmp/asif-export-<ulid>/`.
   The adapter writes the deterministic package and report there; the handler streams 64 KiB
   chunks and removes the directory when the response ends or the client disconnects. The
-  package is never buffered whole in the daemon for a normal session.
+  handler does not buffer the package whole, but the adapter's own export step may hold it
+  in memory up to its 272 MiB archive limit.
 - **Loss preview:** `GET /api/v1/sessions/{id}/export/asif?report=1` runs the same export,
   discards the package and returns the `AsifReport` JSON summary (counts, the loss list,
   unsupported list, adapter/ASIF versions). `report` accepts only `1`/`true`; anything else
