@@ -8,8 +8,8 @@ use vowp_core::offload::{
 };
 use vowp_protocol::config::{OffloadConfig, OffloadNodeConfig, OffloadProjectConfig};
 use vowp_protocol::{
-    AgentCapacity, JobKind, LimitKind, NodeName, NodePresence, NodeStatus, Placement, ProjectName, SecretName,
-    WaitingReason,
+    AgentCapacity, JobKind, LimitKind, NodeFallback, NodeName, NodePresence, NodeStatus, Placement, ProjectName,
+    SecretName, WaitingReason,
 };
 
 /// The project used by every fixture.
@@ -155,11 +155,50 @@ fn placement_home_node_and_any_choose_the_documented_targets() {
     );
 
     let any = JobRequest::new(JobKind::Build, Some(Placement::Any));
-    let decision = evaluate(&policy, &project(), &project_policy, &any, &home(), &[facts]);
+    let decision = evaluate(
+        &policy,
+        &project(),
+        &project_policy,
+        &any,
+        &home(),
+        std::slice::from_ref(&facts),
+    );
     assert_eq!(
         decision,
         Decision::Eligible {
             targets: vec![Target::Home, Target::Node(node("mac-studio"))]
+        }
+    );
+
+    // `node:<name>+home` uses the node when it is eligible and the home when it is not.
+    let fallback = JobRequest::new(
+        JobKind::Build,
+        Some(Placement::Node {
+            node: node("mac-studio"),
+            fallback: Some(NodeFallback::Home),
+        }),
+    );
+    let decision = evaluate(
+        &policy,
+        &project(),
+        &project_policy,
+        &fallback,
+        &home(),
+        std::slice::from_ref(&facts),
+    );
+    assert_eq!(
+        decision,
+        Decision::Eligible {
+            targets: vec![Target::Node(node("mac-studio"))]
+        }
+    );
+    let mut offline = facts;
+    offline.presence = NodePresence::Offline;
+    let decision = evaluate(&policy, &project(), &project_policy, &fallback, &home(), &[offline]);
+    assert_eq!(
+        decision,
+        Decision::Eligible {
+            targets: vec![Target::Home]
         }
     );
 
