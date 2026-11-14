@@ -158,9 +158,11 @@ ASIF import rules:
    creates a lease or dispatches a job.
 6. **Warnings are not losses.** A source project or job that is absent locally leaves the
    session's `project`/`job_id` null, exactly as `reindex` already does for a bundle import;
-   those warnings go to stderr, not to the ASIF loss list. A session imported from another
-   project may consequently not appear in the served project's `session ls`; it is still
-   reachable by id. Binding it to the local project instead is an owner decision (§10).
+   those warnings go to stderr, not to the ASIF loss list. A source project name that is not
+   a valid VOWP project slug is invalid input (exit 2), not a partial session. A session
+   imported from another project may consequently not appear in the served project's
+   `session ls`; it is still reachable by id. Binding it to the local project instead is an
+   owner decision (§10).
 7. **Event identity is global.** ASIF import preserves VOWP-origin event IDs. Importing the
    same package twice into one home therefore conflicts on the unique event id, even though
    the target session id is new: exit 4, the first session is untouched, and the second
