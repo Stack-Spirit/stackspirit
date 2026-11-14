@@ -27,7 +27,8 @@ crates/vowp-cli/
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
-  src/cmd/agent.rs    (`agent enroll|pair|run|status` plus hidden `agent gateway`; no store, project or `vowp-core` for the Mac commands)
+  src/cmd/agent.rs    (`agent enroll|pair|run|status` plus hidden `agent gateway`; no store or project context for the Mac commands)
+  src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`)
   src/cmd/surface.rs  (`surface pair|ls|revoke`; home-only global-store surface pairing)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
@@ -71,8 +72,9 @@ pub mod remote {
 `vowp agent` is the Phase 0 Mac-side client from
 [`vowp-agent.md`](vowp-agent.md) and `cli.md` §12. The Mac commands are handled before `Ctx::build`
 and before the generic `--node` redirect: they use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
-open a project store or `vowp-core`. The hidden `agent gateway` command is the home-side exception:
-it builds a `Ctx`, requires the home role and opens `Ctx::store()`.
+open a project store. `agent run` and `chat --agent` build adapters through
+`vowp_core::AdapterRegistry`; neither opens a database. The hidden `agent gateway` command is the
+home-side exception: it builds a `Ctx`, requires the home role and opens `Ctx::store()`.
 
 - `agent enroll --target <ssh-target> --code-file <path|->` reads `-` from the `IoStreams` stdin,
   trims the line, validates the 52-character code shape and passes it only to
@@ -85,9 +87,10 @@ it builds a `Ctx`, requires the home role and opens `Ctx::store()`.
   is written only to `~/.vowp-agent/surfaces/<id>/token` (0600) and is never printed. A bad or
   replayed code is a non-retryable refusal (exit 5).
 - `agent run [--foreground] [--role surface|executor|both]` loads `agent.json` and `node.key`,
-  builds the SSH transport, and calls `AgentClient::run`. `status.json` is rewritten on every
-  heartbeat. Phase 0 always runs in the foreground; `--foreground` is accepted for the documented
-  surface. A revoked credential exits 5 and a superseded connection exits 4.
+  builds the SSH transport, wraps a `CoreRunHandler` in an `Arc` and calls
+  `AgentClient::run_with_handler`. `status.json` is rewritten on every heartbeat. The Phase 0
+  role spellings are unchanged and always run in the foreground; `--foreground` is accepted for
+  the documented surface. A revoked credential exits 5 and a superseded connection exits 4.
 - `agent status [--json]` loads `status.json`; without `agent.json` it exits 3 with the enrollment
   command in the message. It fills missing fields from `agent.json` and `node.pub`, recounts
   `spool/`, and prints the human lines `connection`, `node`, `home`, `protocol`, `last heartbeat`,
@@ -113,6 +116,56 @@ and serialises as:
   "surface_token_expires_at": null
 }
 ```
+
+### Assignment executor (`agent_exec.rs`)
+
+`CoreRunHandler` is the [`vowp-agent`](vowp-agent.md) `RunHandler` behind `agent run`. It uses
+the merged worktree, path-map and run-sink APIs; it does not change the `vowp-agent` trait and
+does not open a store. One handler lives for one agent connection.
+
+- **Accept.** The assignment's project must exist in the saved path map (`ProjectUnmapped`).
+  `PathMap::new` canonicalises the local and worktree roots and checks they exist, are
+  directories and carry a write bit (`PathMissing`/`PathNotWritable`/`NotADirectory`); the
+  `cwd_ref` is resolved through the same map, so traversal, a symlink escape, a case-only alias
+  and a subdirectory outside the allow list (`CwdOutsideAllow`) are refused. The checkout's
+  `vowp.toml` supplies the harness registry; a missing or unprobeable harness is
+  `HarnessMissing`. Every `env_names` and `secret_names` entry must resolve locally, otherwise
+  the rejection is `EnvMissing` with the **name** in the detail. Free disk below the 5 GiB
+  reserve is `DiskLow`, an active run for the same job or an existing unowned worktree is
+  `WorktreeConflict`, and an invalid base commit/remote is `Other`. The handler reads
+  `agent.json` on each accept, so `agent paths add|rm` is visible without a restart.
+- **Worktree.** `run` calls `WorktreeManager::create` with the home-supplied base commit, the
+  assignment's remote and the reserve, producing `<worktree_root>/<job>` on `job/<id>`. A
+  clean, owned worktree at exactly the base is reused; a stale owned one is recreated; an
+  unowned directory is refused. The main checkout is never checked out, reset or cleaned.
+- **Adapter and events.** The adapter starts in the worktree with the assignment prompt and the
+  resolved environment. `adapter_for` is shared with `chat --agent`, so the `vowp.toml` harness
+  configuration is read in one place. Events are converted to `RemoteEvent`s with fresh stable
+  ids and streamed through the injected `RunSink`; the adapter's terminal `turn.ended` is
+  skipped because the terminal `TurnSummary` is canonical. A quiet adapter gets a liveness
+  heartbeat every ten seconds. The loop stops the adapter when the sink is stopped, when cancel
+  or a fence arrives, or when the sink reports the spool cap; the summary records `cancelled`,
+  `fenced` or `spool_full` in its result text and uses `Killed`/`Interrupted` or `Error`/`Error`
+  as appropriate.
+- **Env, secrets and redaction.** Only names cross the wire. Values resolve from this machine's
+  environment, are passed to the adapter, and are replaced with `[REDACTED:<NAME>]` in every
+  event payload, raw line, limit message and result text before the sink sees them. The known
+  worktree and project roots are replaced with `worktree:<project>/<job>` and
+  `project:<project>`; the agent state directory becomes `<agent-home>`. Rejection details,
+  push failures and local error summaries carry no absolute path and no value.
+- **Result return and cleanup.** After the adapter exits the summary carries the exit code,
+  outcome, native id, cost, head commit and `PushStatus`. A non-empty `remote_url` causes
+  `Worktree::push_job(remote_url)`: only `refs/heads/job/<id>` is pushed, the push URL must
+  match the home project after credentials are stripped, no tag or default-branch push is
+  attempted, and a mismatch or git failure is `PushStatus::Failed` with the worktree kept for
+  inspection. An empty `remote_url` is `PushStatus::NotRequested`. `Cleanup` removes only the
+  job worktree and `job/<id>` branch through `WorktreeManager::cleanup`; it never touches the
+  main checkout or a directory VOWP did not create, and it waits briefly for a cancelled run to
+  leave the worktree.
+
+`agent status` is unchanged. The `status.json` snapshot carries the connection fields and no
+path map, secret name or secret value. The human view keeps its local-only `paths` block, and
+`--json` includes the same `paths`, exactly as before.
 
 ### Surface commands (`cmd/surface.rs`)
 
@@ -237,7 +290,15 @@ plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`. 
 offload-policy slice adds `job_add_refuses_node_placement_when_offload_is_disabled`,
 `job_add_persists_any_placement_and_job_show_reads_it`,
 `offload_policy_json_is_the_effective_policy` and
-`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`.
+`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`. The
+assignment-executor slice adds `agent_run_creates_a_worktree_and_streams_adapter_events`,
+`agent_run_pushes_only_the_job_branch_and_reports_the_head`,
+`agent_run_refuses_a_missing_env_name_and_redacts_injected_values`,
+`agent_run_keeps_the_worktree_on_push_failure`,
+`agent_run_cleans_up_after_a_terminal_summary`, `agent_run_cancel_stops_the_adapter`,
+`agent_run_does_not_touch_the_main_checkout` and `agent_run_rejects_an_unmapped_project` in
+`tests/agent.rs`. They use a fake adapter script, a fake in-process gateway, real git in
+temporary repositories and a temporary `VOWP_AGENT_HOME`.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.
