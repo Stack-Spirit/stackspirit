@@ -1,9 +1,10 @@
 # v0.4 — the local orchestrator: a local surface and a local node on the home's terms
 
-Status: **draft; decisions accepted (2026-11-13).** No code is implemented. The owner accepted
-the transport, result-return, phase-order and offload/secret proposals; §16.1 records them and
-the remaining MVP defaults. Where this note conflicts with the v0.2 specification, the v0.2
-specification still governs the shipped tree and this note is a proposal.
+Status: **draft; decisions accepted (2026-11-13); Phase 0 and Phase 1 implemented, Phase 2 in
+progress (2026-11-14).** The owner accepted the transport, result-return, phase-order and
+offload/secret proposals; §16.1 records them and the remaining MVP defaults. Where this note
+conflicts with the v0.2 specification, the v0.2 specification still governs the shipped tree and
+this note is a proposal.
 
 The **home** is the VPS. It stays the only home: the global DB, every project DB, every session
 log, every lease, the snapshot and the supervisor are there. v0.4 adds two things on the owner's
@@ -1686,43 +1687,107 @@ longer blocks the first implementation slice.
 
 ### 16.3 Implementation tracking
 
-Phase 0 is tracked as four build jobs on the `vowp` project. Each build has a `review` gate, so the
-supervisor creates its own verifier (`<id>-verify-<attempt>`) and the merge queue; no verify job is
-added by hand.
+Status as of 2026-11-14. The job graph is the source of truth: "done" means the branch merged on
+`main`; "running" and "pending" are the graph states on that date. These lists record the graph,
+not a promise.
 
-| Phase | Job | Depends on | Current state |
-|---|---|---|---|
-| 0a | `v4-local-0-protocol` | — | ready |
-| 0b | `v4-local-0-store` | 0a | pending |
-| 0c | `v4-local-0-agent-client` | 0a | pending |
-| 0d | `v4-local-0-gateway` | 0b, 0c | pending |
+Phase 0 is four build jobs. Each build has a `review` gate, so the supervisor creates its own
+verifier (`<id>-verify-<attempt>`) and the merge queue; no verify job is added by hand. The graph
+order is `v4-local-0-protocol` → `v4-local-0-store` and `v4-local-0-agent-client` →
+`v4-local-0-gateway`. The protocol job also waited on `v4-a1-job-actions-api` (done 2026-11-13)
+because both touch the shared protocol schema.
+
+| Phase | Job | Depends on | State | Merged on `main` |
+|---|---|---|---|---|
+| 0 | `v4-local-0-protocol` | `v4-a1-job-actions-api` (done) | done | `b9d25c4` vowp-protocol: add v0.4 local-node agent wire types; `90fb09e` vowp-protocol: wire SurfaceKind::Agent through downstream matches |
+| 0 | `v4-local-0-store` | `v4-local-0-protocol` | done | `f6a86db` vowp-store: add the v3 global node-enrollment schema and migration; `062bbc8` vowp-store: add node credentials, enrollment codes, paths and cards; `ca74a9a` vowp-store: test the v3 migration and node-enrollment records |
+| 0 | `v4-local-0-agent-client` | `v4-local-0-protocol` | done | `cff611a` vowp-agent: add the Phase 0 Mac agent client; `8cf5875` docs: regenerate the reference schema pages |
+| 0 | `v4-local-0-gateway` | `v4-local-0-store`, `v4-local-0-agent-client` | done | `4003401` vowp-core: add Phase 0 enrollment, node-key auth and gateway; `001c79e` vowp-cli: add node enroll, revoke and show plus the agent gateway |
+
+Phase 1 is complete. The graph order is `v4-local-1a-surface-format` →
+`v4-local-1b-surface-core` → `v4-local-1c-surface-pair` → `v4-local-1d-lease-core` →
+`v4-local-1e-local-chat`; `v4-local-1b-surface-core` also waits for the Phase 0 gateway.
+
+| Phase | Job | Depends on | State | Merged on `main` |
+|---|---|---|---|---|
+| 1 | `v4-local-1a-surface-format` | — | done | `8e91582` vowp-protocol: add surface pairing frames and surface types; `f91047a` vowp-store: add surface tokens and the v4 global schema |
+| 1 | `v4-local-1b-surface-core` | `v4-local-0-gateway`, `v4-local-1a-surface-format` | done | `351f8c7` vowp-core: add surface pairing and scoped surface tokens; `0ae07be` vowp-core: require an active node when redeeming a pairing code |
+| 1 | `v4-local-1c-surface-pair` | `v4-local-1b-surface-core` | done | `5297a9a` vowp-cli: add home surface pairing commands and agent pair |
+| 1 | `v4-local-1d-lease-core` | `v4-local-1c-surface-pair` | done | `8c66cc9` vowp-core: add hashed lease control over the agent gateway; `d8443d4` vowp-core: hash lease token comparisons in the orchestrator; `e0d305b` docs: document the orchestrator lease-hash path |
+| 1 | `v4-local-1e-local-chat` | `v4-local-1d-lease-core` | done | `5eb1d20` v4-local-1e: add the local agent chat slice; `4adb4c0` v4-local-1e: fix local chat replay, Mac routing and flow control; `d4b971c` vowp-cli: dispatch agent chat before home routing |
+
+`v4-local-1d-lease-core` took three fix rounds: the lease-token hash change broke the orchestrator
+callers, and the fix that touched `crates/vowp-core/src/surface/orchestrator.rs` needed a planner
+widening of the job's `owns` before it could pass `owns_respected`.
+
+`v4-local-1e-local-chat` also landed the Mac entry point: `vowp chat --agent` is dispatched before
+`Ctx::build` and before the control-machine route, so it runs from `~/.vowp-agent` and the local
+checkout without a local home database; it still reads the local checkout's `vowp.toml`. The
+graph's follow-up `v4-local-1e-local-chat-mac-entry` was cancelled as a duplicate after the final
+fix commit landed that path.
+
+Phase 2 has started. `v4-local-2a-offload-format` is running; `v4-local-2b-offload-store` needs
+`v4-local-2a-offload-format`, and `v4-local-2c-offload-policy` needs both. The three slices are the
+wire format, the store tables and migrations, and the policy evaluator plus read-only CLI. Nothing
+from Phase 2 is on `main` yet.
+
+| Phase | Job | Depends on | State | Scope |
+|---|---|---|---|---|
+| 2 | `v4-local-2a-offload-format` | `v4-local-1e-local-chat` | running | `Placement`, assignment/run-state frames, waiting reasons and resume records in `vowp-protocol`; no store, dispatcher, executor or policy. |
+| 2 | `v4-local-2b-offload-store` | `v4-local-2a-offload-format` | pending | `job_placement`, `agent_assignments` and `node_limits` with the global v6 and project v2 migrations. |
+| 2 | `v4-local-2c-offload-policy` | `v4-local-2a-offload-format`, `v4-local-2b-offload-store` | pending | `[offload]` config, the §7.2 eligibility evaluator, `vowp offload policy`/`status` and `vowp job add --placement`. |
+
+The rest of the accepted Phase 2 scope is planned by the phase table in §14.1, not done, and has no
+job in the graph yet: the home dispatcher, the agent executor (worktree, harness, events and push),
+the home result return, and node capacity plus waiting reasons.
 
 The supervisor owns dispatch, gates, verify, fix and merge. Track with:
 
 ```sh
-vowp job show v4-local-0-protocol --runs --gates
-vowp graph --mermaid
+vowp job ls --all
+vowp job show v4-local-2a-offload-format --runs --gates
+vowp graph --json
 vowp fleet queue
 ```
 
-The main checkout stays clean because the design note is committed. GitHub pushes are parked: the
-`origin` push URL points at the local bare repository `/home/dev/vowp-local-push.git`; fetches still
-use the real origin. Restore the GitHub push URL when the owner is ready to publish.
+The main checkout stays clean because the design note is committed. GitHub pushes remain parked:
+`origin` is a local bare repository used by the merge queue, and the `github` remote keeps the real
+upstream. Restore the GitHub push URL when the owner is ready to publish.
 
-### 16.4 Known framework gap: live provider caps (2026-11-13)
+Phase 2 is in progress: the three current jobs are `v4-local-2a-offload-format`,
+`v4-local-2b-offload-store` and `v4-local-2c-offload-policy`; the next slices are the home
+dispatcher, the agent executor, home result return and node capacity/waiting reasons. A future
+agent should start from `vowp job ls --all` and `vowp graph --json`, not from this table alone.
 
-The capacity **target** is live: on 2026-11-13 the owner set it to 4 (fixed override) while two fix
-runs were active, and neither run was stopped. The **provider concurrency cap** is not live:
-`[providers.<name>].max_concurrent` is read at supervisor startup, so changing it requires a restart
-and a restart would disturb active runs. That is a framework gap, not a provider limit.
+### 16.4 Framework notes: live provider caps and fix-job owns (2026-11-13; updated 2026-11-14)
 
-`v4-c1-live-limits` tracks the fix for the next version: reload provider caps and the target without
-a restart, keep active runs' slots, admit more on the next tick after a raise, never kill a run when
-the cap is lowered, and keep the old config when the new one is invalid. Until it lands, raise the
-provider cap only in a quiet window with no active workers.
+**Live provider caps (resolved).** The gap was closed on 2026-11-14 by `v4-c1-live-limits`. The
+capacity **target** is live: on 2026-11-13 the owner set it to 4 (fixed override) while two fix runs
+were active, and neither run was stopped. The **provider concurrency cap** was not live then:
+`[providers.<name>].max_concurrent` was read at supervisor startup, so changing it required a
+restart, and a restart could disturb active runs. That was a framework gap, not a provider limit. At
+that time, the Phase 0 protocol job stayed ready while the two fix runs held the two provider slots;
+the target change alone did not create a third provider slot.
 
-The Phase 0 protocol job remains ready while the two fix runs hold the two provider slots; the target
-change alone does not create a third provider slot.
+`v4-c1-live-limits` closed the gap. `core: reload provider caps and target without a restart`
+(`f4550c8`) keeps the effective config in a live cell, compares the project `vowp.toml` and node
+`config.toml` with the applied fingerprint once per project tick, and swaps a changed valid config
+atomically. A raised `max_concurrent` frees slots on the next dispatch tick; a lowered cap stops new
+admissions and never kills, interrupts or pauses an active run; an invalid or unparseable file keeps
+the previous config, logs the path and error and opens one node-inbox notice. `vowp capacity reload
+[--check]` validates or asks the running supervisor to apply the same path without a restart.
+`core: skip the ledger row for an unchanged forced reload` (`c6fec10`) stops a reload request that
+finds the config already current from writing a false applied row. The old caution to raise the cap
+only in a quiet window no longer applies; `vowp capacity report` shows the effective caps and
+whether the on-disk file differs from the applied config.
+
+**Fix-job owns handoff (open).** A fix child copies its parent's `owns` when it is created
+(`crates/vowp-core/src/loops/dispatch.rs`), so a verifier finding in a path outside that list
+cannot be fixed in that child. `v4-local-1d-lease-core` hit this: fix-2 failed `owns_respected` on
+the orchestrator files, the planner widened the original job's `owns`, and the next fix round
+inherited the widened list and landed the change. The follow-up for a future job is the same
+planner widening; no job in the graph tracks a code change to the handoff, and this note does not
+promise one.
 
 ## 17. Alternatives considered
 
