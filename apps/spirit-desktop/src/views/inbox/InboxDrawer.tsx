@@ -18,6 +18,7 @@ export function InboxDrawer({ open, onClose }: { open: boolean; onClose: () => v
   const [items, setItems] = useState<InboxItemView[]>([]);
   const [tab, setTab] = useState<InboxTab>("open");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -28,10 +29,11 @@ export function InboxDrawer({ open, onClose }: { open: boolean; onClose: () => v
     let cancelled = false;
     void bridge.fleet
       .inbox(true)
-      .then((loaded) => {
+      .then((entries) => {
         if (cancelled) return;
-        setItems(loaded);
-        setSelectedId((selected) => selected ?? loaded.find((item) => item.state === "open")?.id ?? loaded[0]?.id ?? null);
+        setItems(entries);
+        setLoaded(true);
+        setSelectedId((selected) => selected ?? entries.find((item) => item.state === "open")?.id ?? entries[0]?.id ?? null);
       })
       .catch((caught: unknown) => {
         if (!cancelled) setError(toSpiritError(caught).message);
@@ -45,8 +47,9 @@ export function InboxDrawer({ open, onClose }: { open: boolean; onClose: () => v
   }, [open, bridge]);
 
   // Before the full-item read resolves, show the snapshot summaries rather than an
-  // empty inbox. Bodies are absent there and the item says so honestly.
-  const source = items.length > 0 ? items : (fleet?.inbox ?? []);
+  // empty inbox. Once it resolves, its result is authoritative even when empty: an
+  // empty full read must not fall back to stale snapshot items.
+  const source = loaded ? items : (fleet?.inbox ?? []);
   const visible = tab === "open" ? source.filter((item) => item.state === "open") : source;
   const selected = visible.find((item) => item.id === selectedId) ?? visible[0] ?? null;
   const openCount = source.filter((item) => item.state === "open").length;

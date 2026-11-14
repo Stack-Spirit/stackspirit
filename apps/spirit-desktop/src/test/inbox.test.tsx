@@ -33,6 +33,21 @@ describe("inbox drawer", () => {
     ).toBeInTheDocument();
   });
 
+  it("treats an empty full read as authoritative over stale snapshot summaries", async () => {
+    const fixture = scenario("fresh-single");
+    const bridge = await connectedBridge();
+    vi.spyOn(bridge.fleet, "inbox").mockResolvedValue([]);
+    seedStore(fixture.fleet, { bridge });
+    render(<InboxDrawer open onClose={() => undefined} />);
+
+    expect(await screen.findByText("Inbox is clear")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Choose the included model set"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("list")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("inbox-body")).not.toBeInTheDocument();
+  });
+
   it("answers through the bridge and refreshes without moving the job locally", async () => {
     const fixture = scenario("fresh-single");
     const bridge = await connectedBridge();
