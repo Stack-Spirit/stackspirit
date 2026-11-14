@@ -2,9 +2,10 @@ import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
-import type { ConnectionSnapshot } from "../../bridge/wire";
+import type { ConnectionSnapshot, EngineStatus } from "../../bridge/wire";
+import { engineSetupComplete } from "../../domain/engine";
 import { resetFleetStore, useFleetStore } from "../../state/fleetStore";
-import { readyLocalGates } from "./helpers";
+import { engineWithoutModel, readyLocalGates } from "./helpers";
 
 const NOW = "2026-11-14T12:00:00.000Z";
 const HOST_A = "01MOCKHOST000000000000000001";
@@ -63,6 +64,21 @@ describe("gate state lifecycle", () => {
       expect(probe).toHaveBeenCalledTimes(1);
     });
     expect(useFleetStore.getState().gates).not.toBeNull();
+  });
+
+  it("engine_events_do_not_clear_the_persisted_setup_flag", () => {
+    useFleetStore.setState({
+      engine: {
+        ...engineWithoutModel(),
+        onboarding_complete: true,
+      } as EngineStatus,
+    });
+    useFleetStore.getState().applyEvent({
+      kind: "engine",
+      revision: 1,
+      engine: engineWithoutModel(),
+    });
+    expect(engineSetupComplete(useFleetStore.getState().engine)).toBe(true);
   });
 
   it("a_new_connection_does_not_reuse_a_gate_snapshot_from_another_host", () => {
