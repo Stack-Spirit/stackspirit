@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 
 use crate::agent::{
     AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, LeaseMode, NodeCard, NodeKind, NodePresence,
-    NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState,
+    NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState, TurnSummary,
 };
 use crate::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
@@ -165,6 +165,7 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("SurfaceScope", schema_value::<SurfaceScope>());
     schemas.insert("SurfaceState", schema_value::<SurfaceState>());
     schemas.insert("LeaseMode", schema_value::<LeaseMode>());
+    schemas.insert("TurnSummary", schema_value::<TurnSummary>());
     schemas.insert("AgentFrame", schema_value::<AgentFrame>());
     schemas
 }

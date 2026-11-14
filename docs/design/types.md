@@ -1621,20 +1621,42 @@ pub enum AgentFrame {
     LeaseGrant { lease_token: String, expires_at: Timestamp, tail_seq: u64 },
     LeaseLost { reason: String },
     LeaseRevoked { reason: String, holder: String },
+    TurnBegin { surface: SurfaceId, session: SessionId, lease_token: String,
+                prompt: String, executor: String, cwd_ref: PathRef,
+                job: Option<JobId>, purpose: RunPurpose },
+    TurnGrant { run_id: RunId, session: SessionId, lease_token: String,
+                expires_at: Timestamp, tail_seq: u64 },
+    RemoteLine { run_id: RunId, epoch: u64, line: RemoteLine },
+    IngestAck { run_id: RunId, event_id: Option<EventId>, seq: Option<u64>,
+                duplicate: bool, lease_revoked: Option<String>, error: Option<String> },
+    Credit { run_id: RunId, count: u64 },
+    TurnEnd { run_id: RunId, summary: TurnSummary },
+    RunLost { run_id: RunId, reason: String },
     Ping,
     Pong,
     Revoked { reason: String },
     Superseded { connection_id: String },
     Error { kind: ErrorKind, message: String, retryable: bool },
 }
+
+pub struct TurnSummary {
+    pub exit_code: Option<i32>, pub outcome: RunOutcome,
+    pub native_session_id: Option<String>, pub cost: Cost,
+    pub limit: Option<LimitEvent>, pub result_text: Option<String>,
+    pub stop_reason: StopReason, pub usage: Option<RemoteUsage>,
+}
 ```
 
 `NodeCard` is the redacted read model: it has no path-map field and no secret names. The
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
-snapshot or log. `AgentFrame` covers Phase 0, surface pairing and lease control; assignment and
-`RemoteLine`/`IngestAck` streaming are later phases. `SurfaceKind` includes the `agent` wire
-variant, and the v5 store schema accepts it. `SurfaceIssued.token` (like `SurfacePair.code`) and
-the lease token are secret frame values: they are written 0600 on the agent and never logged.
+snapshot or log. `AgentFrame` covers Phase 0, surface pairing, lease control and the Phase 1
+local-chat stream. `TurnBegin.cwd_ref` is a project-relative [`PathRef`]; the home never receives
+the Mac's absolute working directory. `RemoteLine` wraps the existing v0.2 event, heartbeat and
+summary line with a run id and epoch, and `IngestAck` carries the home-assigned sequence or a
+takeover/rejection notice. `TurnSummary` is the terminal summary. `SurfaceKind` includes the
+`agent` wire variant, and the v5 store schema accepts it. `SurfaceIssued.token` (like
+`SurfacePair.code`) and the lease token are secret frame values: they are written 0600 on the
+agent and never logged.
 The home stores only their SHA-256 hashes — a surface token in `surface_tokens.token_hash`, a
 lease token in `leases.token_hash`. `LeaseAcquire.surface_token` authenticates the acquire
 frame; `LeaseHeartbeat` and `LeaseRelease` carry only the lease token, and the home binds them

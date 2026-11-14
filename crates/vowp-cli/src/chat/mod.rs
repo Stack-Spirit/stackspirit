@@ -32,6 +32,8 @@ use vowp_store::session_log::SessionLog;
 use crate::node_ctx::NodeRole;
 use crate::{CliError, Ctx, IoStreams};
 
+pub mod agent;
+
 /// Display width for wrapped assistant text and event summaries.
 pub const CHAT_WIDTH: usize = 80;
 
@@ -64,6 +66,9 @@ pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Resu
         return Err(CliError::Guard(
             "vowp chat needs the home that owns the session".to_owned(),
         ));
+    }
+    if crate::cli::agent_chat_session().is_some_and(|session| session == opts.session.as_str()) {
+        return agent::run(ctx, io, opts);
     }
     let store = ctx.store()?;
     let mut session = store.require_session(&opts.session)?;

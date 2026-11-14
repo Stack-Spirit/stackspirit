@@ -455,6 +455,26 @@ home and the home remains the only writer.
 Wire types: `RemoteEvent`, `RemoteLine`, `IngestAck`, `TurnGrant` (types.md §16.2). The
 `vowp-adapters` `proc` scope and `run_usage` measurement are in `capacity`/`types.md` §16.1.
 
+### 9.1 Local chat over the agent gateway
+
+`vowp chat --agent --session <id>` is the same home-owned turn with the agent connection as the
+transport. The Mac sends `LeaseAcquire`, then `TurnBegin { surface, session, lease_token, prompt,
+executor, cwd_ref, job, purpose }`; the home validates the paired surface and the lease, calls the
+existing `begin_turn` path, and returns `TurnGrant { run_id, session, lease_token, expires_at,
+tail_seq }`. The grant carries no absolute path: `cwd_ref` is a project-relative `PathRef` and the
+agent resolves it on its own machine. The home therefore records no `/Users/...` path in a frame,
+event or run row.
+
+Each adapter event becomes `RemoteLine { run_id, epoch, line: RemoteLine::Event }`. The home feeds
+the existing `IngestSession` state machine one line at a time, so `seq` assignment, duplicate
+detection, blob spill, summary finalisation, ledger rows and `run_usage` are exactly the §9 path.
+`IngestAck` carries the event id and assigned (or existing) sequence; the home sends `Credit` every
+64 event lines. `TurnEnd { run_id, summary }` carries the classified summary. A takeover, lease
+loss or run fence answers `LeaseRevoked`/`LeaseLost`/`RunLost` and drops the ingest state; no later
+line is appended. The Mac spool is `~/.vowp-agent/spool/<session>/<run>/events.jsonl` with
+`acked.json`; it is fsynced before send, replayed from the first unacked id, capped at 2 GiB, and
+never deleted without the owner.
+
 ## 10. App hosts, transcript mirror and resume
 
 The primary surfaces are the apps people already use. VOWP hosts the session and gives the app a

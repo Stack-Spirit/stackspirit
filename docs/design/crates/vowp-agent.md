@@ -16,8 +16,11 @@ crates/vowp-agent/
   src/key.rs        NodeKey, handshake_payload, fingerprints
   src/transport.rs  Transport + FrameStream traits, SshTransport, 1 MiB JSON-line framing
   src/client.rs     AgentClient, AgentClock, Backoff, RunOptions, RunOutcome, SurfacePairRequest
+  src/chat.rs       ChatClient, ChatTurnRequest, ChatTurnStatus, lease/turn/replay loop
+  src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
+  tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
 ```
 
 `~/.vowp-agent` is the default state directory. `VOWP_AGENT_HOME` overrides it; tests always set
@@ -34,7 +37,10 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `spool/` | — | pending bytes counted by `status`, never opened as a database |
 | `surfaces/` | 0700 | one directory per paired surface |
 | `surfaces/<id>/token` | 0600 | the `vowp_surf_` token returned by `SurfaceIssued`; never printed |
+| `surfaces/<id>/session` | 0600 | the session id the surface was paired for |
 | `surfaces/<id>/expires_at` | 0600 | RFC 3339 surface-token expiry, read by `agent status` |
+| `spool/<session>/<run>/events.jsonl` | 0600 | every sent event and the terminal summary, fsynced before send |
+| `spool/<session>/<run>/acked.json` | 0600 | event id to home sequence, plus `summary` after the terminal ack |
 
 The state directory is created 0700. Private files are created with `OpenOptionsExt::mode(0o600)`
 and their mode is set again after writing, so an existing wider file is tightened. The private key
@@ -116,6 +122,38 @@ pub struct Enrollment { pub node: NodeName, pub home: String, pub protocol: Stri
 pub enum RunOutcome { Revoked { reason: String }, Superseded { connection_id: String } }
 pub struct RunOptions { pub role: AgentRole, pub foreground: bool }
 
+pub struct PairedToken { pub surface_id: SurfaceId, pub token: String }   // Debug redacts token
+pub fn paired_token_for_session(state_dir: &Path, session: &SessionId) -> Result<Option<PairedToken>, AgentError>;
+
+pub struct ChatClient { /* client, surface, session, lease, spool cap */ }
+impl ChatClient {
+    pub fn new(client: AgentClient, surface: PairedToken, session: SessionId) -> Self;
+    pub fn from_state_dir(state_dir: PathBuf, session: SessionId, clock: Arc<dyn AgentClock>) -> Result<Self, AgentError>;
+    pub fn with_spool_cap(self, cap: u64) -> Self;
+    pub fn surface_id(&self) -> &SurfaceId;
+    pub fn lease_token(&self) -> Option<&str>;
+    pub fn turn(&mut self, request: &ChatTurnRequest, adapter: &dyn Adapter,
+                on_event: &mut dyn FnMut(&HarnessEvent), cancel: Option<&CancelToken>)
+        -> Result<ChatTurnStatus, AgentError>;
+    pub fn release(&mut self) -> Result<(), AgentError>;
+}
+pub struct ChatTurnRequest { pub executor: Executor, pub prompt: String, pub cwd: PathBuf,
+                             pub cwd_ref: PathRef, pub job: Option<JobId>, pub purpose: RunPurpose }
+pub enum ChatTurnStatus { Done, ReadOnly { reason: String }, SpoolFull { bytes: u64, cap: u64 }, Interrupted }
+
+pub struct Spool { /* dir, cap, events file, acked map */ }
+impl Spool {
+    pub fn open(state_dir: &Path, session: &SessionId, run: &RunId) -> Result<Self, AgentError>;
+    pub fn with_cap(state_dir: &Path, session: &SessionId, run: &RunId, cap: u64) -> Result<Self, AgentError>;
+    pub fn append(&mut self, frame: &AgentFrame) -> Result<SpoolAppend, AgentError>;
+    pub fn mark_acked(&mut self, event_id: &str, seq: u64) -> Result<(), AgentError>;
+    pub fn mark_summary_acked(&mut self) -> Result<(), AgentError>;
+    pub fn summary_acked(&self) -> bool;
+    pub fn unacked(&self) -> Result<Vec<AgentFrame>, AgentError>;
+    pub fn unacked_events(&self) -> Result<usize, AgentError>;
+}
+pub enum SpoolAppend { Written, Full { bytes: u64, cap: u64 } }
+
 pub enum ConnectionState { Unknown, Connecting, Connected, Reconnecting, Revoked, Superseded, Stopped }
 pub struct AgentStatus {
     pub connection: ConnectionState, pub node: Option<NodeName>, pub home: Option<String>,
@@ -183,6 +221,29 @@ fingerprint fields from `agent.json` and `node.pub`, and recounts `spool/` so th
 count is current even when the agent is stopped. A missing enrollment is exit 3 with the
 enrollment hint.
 
+### Local chat
+
+`ChatClient::from_state_dir` loads `agent.json`, `node.key` and the surface token bound to the
+session. `turn` first sends `LeaseAcquire { mode: acquire }`; a live lease held by another surface
+is a conflict and never a silent takeover. It then sends `TurnBegin { surface, session,
+lease_token, prompt, executor, cwd_ref, job, purpose }` and waits for `TurnGrant { run_id,
+session, lease_token, expires_at, tail_seq }`.
+
+The working directory stays local: the CLI builds a `PathRef` (project or subdir) for the home and
+passes the absolute path only to the adapter on this machine. Events are normalized to
+`RemoteLine::Event`, appended to `spool/<session>/<run>/events.jsonl` and fsynced **before** the
+`RemoteLine` envelope is sent. The home assigns `seq` in `IngestAck`; the agent records the id and
+seq in `acked.json`. A `Credit` replenishes the 64-event window. The terminal `TurnEnd { run_id,
+summary }` is spooled the same way and the summary ack sets the reserved `summary` key.
+
+On a transport error the client reconnects with `connect`, sends `LeaseHeartbeat`, sends a fresh
+`RemoteLine::Hello`, and replays every frame not in `acked.json` in order. The home dedupes by
+event id, so an event whose ack was lost becomes a duplicate rather than a second append. A
+takeover or lease loss (`LeaseLost`, `LeaseRevoked`, `IngestAck.lease_revoked`, `RunLost`) stops
+the adapter, returns [`ChatTurnStatus::ReadOnly`] and keeps the spool. A frame that would push
+`events.jsonl` past 2 GiB returns [`ChatTurnStatus::SpoolFull`]; it is never sent. Unacknowledged
+events are never deleted.
+
 ## 5. Transport
 
 `SshTransport::argv` is exactly the documented command:
@@ -212,12 +273,16 @@ memory and never spawn ssh, a socket or the network.
 `ssh_argv_matches_the_documented_command` and `read_line_limited_rejects_an_oversized_frame` cover
 the exact SSH argv and the frame cap. The surface-pairing slice adds the in-memory home tests
 `agent_pair_writes_0600_token_and_prints_no_secret`, `agent_pair_refuses_a_replayed_code` and
-`agent_pair_surfaces_path_is_private` in `tests/surface_pair.rs`.
+`agent_pair_surfaces_path_is_private` in `tests/surface_pair.rs`. The local-chat slice adds
+`agent_chat_spools_before_sending`, `agent_chat_replays_from_the_first_unacked`,
+`agent_chat_stops_on_lease_revoked` and `agent_chat_stops_on_spool_full` in `tests/chat.rs`, plus
+`chat_requires_a_paired_surface_for_the_session` and `spool_keeps_unacked_events_and_records_acks`.
 
 ## 8. Out of scope
 
 The home-side gateway, store methods, node enrollment codes, node commands, runs, leases,
 offload, path-map mutation, launchd and WSS ingress are separate jobs. Phase 0 `vowp agent run`
 stays in the foreground; `--role` is accepted and carried in `RunOptions`, but assignment
-handling arrives with the executor job. `vowp agent surface start|attach|detach`, local chat,
-the MCP proxy and token rotation are later v0.4 slices.
+handling arrives with the executor job. `vowp agent surface start|attach|detach`, the MCP proxy
+and token rotation are later v0.4 slices. The local chat bridge is this slice; the opencode app
+bridge and MCP proxy remain later.

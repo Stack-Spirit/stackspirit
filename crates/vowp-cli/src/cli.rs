@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, FromArgMatches, Parser, Subcommand};
 
 use crate::cmd::capacity::CapacityArgs;
 use crate::cmd::control::ControlArgs;
@@ -579,22 +579,114 @@ pub struct SessionNewArgs {
 }
 
 /// Arguments for `vowp session chat` and `vowp chat`.
-#[derive(Debug, Clone, Args)]
+///
+/// `--session` is the agent spelling; the positional id remains the home spelling. Both
+/// populate the same session field so the existing home handler is unchanged. `--agent`
+/// records the request in a process-local flag that [`crate::chat::run_shared`] reads
+/// before taking the home lease.
+#[derive(Debug, Clone)]
 pub struct ChatArgs {
     /// Session id or unique prefix.
     pub id: String,
     /// Switch to this executor before the first turn.
-    #[arg(long, value_name = "EXECUTOR")]
     pub executor: Option<String>,
     /// Node that runs the turn; defaults to this surface's machine.
-    #[arg(long, value_name = "NAME")]
     pub node: Option<String>,
     /// Follow the log read-only, without taking the lease.
-    #[arg(long)]
     pub follow: bool,
     /// Take the lease from a live surface before the first turn.
-    #[arg(long)]
     pub takeover: bool,
+    /// Run the local agent chat bridge instead of the home surface.
+    pub agent: bool,
+    /// Session id for `--agent`; equivalent to the positional id.
+    pub session: Option<String>,
+}
+
+/// The clap field set behind [`ChatArgs`].
+#[derive(Debug, Clone, Args)]
+struct ChatArgsFields {
+    /// Session id or unique prefix.
+    #[arg(value_name = "ID", default_value = "", hide_default_value = true)]
+    id: String,
+    /// Switch to this executor before the first turn.
+    #[arg(long, value_name = "EXECUTOR")]
+    executor: Option<String>,
+    /// Node that runs the turn; defaults to this surface's machine.
+    #[arg(long, value_name = "NAME")]
+    node: Option<String>,
+    /// Follow the log read-only, without taking the lease.
+    #[arg(long)]
+    follow: bool,
+    /// Take the lease from a live surface before the first turn.
+    #[arg(long)]
+    takeover: bool,
+    /// Run the local agent chat bridge instead of the home surface.
+    #[arg(long)]
+    agent: bool,
+    /// Session id for `--agent`; equivalent to the positional id.
+    #[arg(long, value_name = "ID")]
+    session: Option<String>,
+}
+
+/// The session named by the last parsed `chat --agent`, when any.
+///
+/// A CLI process parses one command, so this is process state, not cross-command state. It is
+/// how the owned `chat` module learns about `--agent` without changing the frozen home handler.
+static AGENT_CHAT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+
+/// Records the agent-chat request from one parsed command line.
+fn record_agent_chat(agent: bool, session: Option<&str>) {
+    let state = AGENT_CHAT.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut state) = state.lock() {
+        *state = if agent { session.map(str::to_owned) } else { None };
+    }
+}
+
+/// Returns the session named by `chat --agent`, when the current process parsed one.
+pub fn agent_chat_session() -> Option<String> {
+    AGENT_CHAT
+        .get()
+        .and_then(|state| state.lock().ok().and_then(|state| state.clone()))
+}
+
+impl Args for ChatArgs {
+    fn augment_args(command: clap::Command) -> clap::Command {
+        ChatArgsFields::augment_args(command)
+    }
+
+    fn augment_args_for_update(command: clap::Command) -> clap::Command {
+        ChatArgsFields::augment_args_for_update(command)
+    }
+}
+
+impl FromArgMatches for ChatArgs {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let fields = ChatArgsFields::from_arg_matches(matches)?;
+        let id = fields.session.clone().unwrap_or_else(|| fields.id.clone());
+        record_agent_chat(fields.agent, Some(id.as_str()));
+        Ok(Self {
+            id,
+            executor: fields.executor,
+            node: fields.node,
+            follow: fields.follow,
+            takeover: fields.takeover,
+            agent: fields.agent,
+            session: fields.session,
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        let fields = ChatArgsFields::from_arg_matches(matches)?;
+        self.id = fields.session.clone().unwrap_or_else(|| fields.id.clone());
+        self.executor = fields.executor;
+        self.node = fields.node;
+        self.follow = fields.follow;
+        self.takeover = fields.takeover;
+        self.agent = fields.agent;
+        self.session = fields.session;
+        record_agent_chat(self.agent, Some(self.id.as_str()));
+        Ok(())
+    }
 }
 
 /// Arguments for `vowp session switch`.

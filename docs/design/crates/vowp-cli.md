@@ -160,6 +160,22 @@ These are home-only (exit 5 on a control machine) and require the home store:
   labels, capacity, mapped projects, agent version, protocol, last seen and last error. `node ls`
   and its JSON `Node` shape are unchanged.
 
+### Local chat (`chat --agent`)
+
+`vowp chat --agent --session <id> [--executor <exec>] [--node <name>]` runs the Phase 1 local
+surface. `ChatArgs` accepts `--session` as an alternative to the positional id; both name the same
+session, and the home path keeps its existing lease/turn loop. `--agent` is recorded by the parser
+and `chat::run_shared` dispatches to `src/chat/agent.rs` before any home lease is taken.
+
+The handler loads `~/.vowp-agent` (or `VOWP_AGENT_HOME`), the node key and the surface token
+bound to the session, then calls `vowp_agent::ChatClient::turn`. The agent acquires the lease,
+sends `TurnBegin` with a project-relative `PathRef`, runs the configured adapter on this machine,
+spools each event before sending it and prints assistant text, tools, errors and notes in the
+home chat's 80-column format. The home log is authoritative; the CLI never opens a second session
+log or takes the home lease. Ctrl-C (through `SignalWatcher`) stops the adapter and releases the
+lease; a takeover or lease loss prints `This surface is read-only: <reason>` and exits 0; a full
+spool exits 7 with the cap in the message. `--follow` and `--takeover` are refused in agent mode.
+
 ## 4. Rules
 
 1. Every command handler is `fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &XArgs) -> Result<i32, CliError>`; no handler prints directly to `std::io`.

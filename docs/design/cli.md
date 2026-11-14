@@ -108,6 +108,7 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is the v0
 | `session show <id> [--capsule] [--events <n>] [--lineage]` | metadata, executor history (`session.executor` events), switches, last capsule; `--events n` prints the last n events pretty |
 | `session new [--title t] [--executor <exec>] [--cwd dir] [--node n]` | creates an interactive session (role `user`), prints its id (used by `chat`) |
 | `session chat <id> [--executor <exec>] [--node <n>] [--follow] [--takeover]` | the same v0.2 terminal surface as `vowp chat` (the alias is kept) |
+| `chat --agent --session <id> [--executor <exec>] [--node <n>]` | the Phase 1 local surface: the agent holds the lease and runs the adapter on this machine |
 | `session switch <id> --to <executor> [--node <n>] [--reason user\|limit\|…] [--force]` | runs the switch protocol (`sessions.md` §5): prints the capsule path and the new executor; exit 6 if the target provider is limited, 4 if the session is running a turn and `--force` is not given. A remote target is probed with `vowp doctor` first. |
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
 | `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
@@ -126,6 +127,17 @@ supports `/switch <executor> [--node n]`, `/status`, `/takeover`, `/follow`, `/c
 A takeover by another surface prints
 `Taken over by phone at 14:05. This surface is now read-only (follow mode).` and keeps showing new
 events. See `sessions.md` §8–§11.
+
+### `vowp chat --agent --session <id> [--executor <exec>] [--node <n>]`
+The Phase 1 local surface on the Mac. `--session` is equivalent to the positional id. The command
+loads `~/.vowp-agent/agent.json`, the node key and the paired surface token, then the agent client
+acquires the lease, sends `TurnBegin` with a project-relative `PathRef`, runs the configured
+adapter on this machine and streams spooled events to the home gateway. The home log remains the
+only log. Assistant text, tools, errors and notes print in the same 80-column format as the home
+chat. Ctrl-C stops the adapter and releases the lease. A takeover or lease loss prints
+`This surface is read-only: <reason>` and exits 0; a full spool exits 7. `--follow` and
+`--takeover` are refused in agent mode. Agent mode still resolves the session row in the local
+home used by the invocation, so the follow display and executor default match the home.
 
 The Mac-side v0.4 agent commands (`vowp agent enroll`, `vowp agent run`, `vowp agent status`) live
 in §12. They use `~/.vowp-agent` rather than the home/project store.
@@ -606,4 +618,5 @@ succeeds with zero tokens revoked. Human output is
 `{"surface":"…","status":"revoked","tokens_revoked":N}`. No token is printed.
 
 The reverse flow (the Mac asks and the home opens an approval inbox item), `surface rotate`, the
-live `SurfaceRevoked` push, leases, local chat and the MCP proxy are later v0.4 slices.
+live `SurfaceRevoked` push and the MCP proxy are later v0.4 slices. Leases and the Phase 1 local
+chat are implemented.

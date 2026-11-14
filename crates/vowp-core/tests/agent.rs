@@ -20,10 +20,12 @@ use vowp_core::agent::{
 };
 use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
-    AgentCapabilities, AgentFrame, AgentPathMap, Clock, ErrorKind, FakeClock, LeaseMode, MemoryLog, NodeName,
-    NodePresence, NodeStatus, ProjectName, Session, SessionId, SessionRole, SessionState, SurfaceId, SurfaceKind,
-    SurfaceScope, SurfaceState, Timestamp,
+    Actor, AgentCapabilities, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId, EventSource,
+    FakeClock, HarnessKind, LeaseMode, MemoryLog, NodeName, NodePresence, NodeStatus, PathRef, ProjectName,
+    RemoteEvent, RemoteLine, RunId, RunOutcome, RunPurpose, Session, SessionId, SessionRole, SessionState, StopReason,
+    SurfaceId, SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary,
 };
+use vowp_store::session_log::SessionLog;
 use vowp_store::{NodePaths, Store, hash_lease_token};
 
 fn ts() -> Timestamp {
@@ -263,9 +265,9 @@ struct Gateway {
 
 impl Gateway {
     fn start(root: &Path, clock: Arc<FakeClock>) -> Self {
-        let store = test_store(root, &clock);
         let log = Arc::new(MemoryLog::new());
         let deps = test_deps(root, clock.clone(), log.clone());
+        let store = deps.open_store().expect("bound store");
         let input = TestReader::new();
         let output = TestWriter::default();
         let reader = BufReader::new(input.clone());
@@ -288,7 +290,10 @@ impl Gateway {
     }
 
     fn store(&self) -> Store {
-        test_store(&self.root, &self.clock)
+        let log = Arc::new(MemoryLog::new());
+        test_deps(&self.root, self.clock.clone(), log)
+            .open_store()
+            .expect("bound store")
     }
 
     fn send(&self, frame: &AgentFrame) {
@@ -371,6 +376,135 @@ fn expect_grant(gateway: &Gateway, start: usize) -> (String, Timestamp, u64) {
         panic!("expected LeaseGrant");
     };
     (lease_token, expires_at, tail_seq)
+}
+
+/// Creates a session row and an empty log file so `begin_turn` can append.
+fn chat_session(root: &Path, store: &Store, node: &NodeName, id: &str, clock: &Arc<FakeClock>) -> SessionId {
+    let session = seed_session(store, node, "vowp", id, clock.now());
+    let log = SessionLog::create(&NodePaths::new(root), &session, clock.clone()).expect("session log");
+    log.sync().expect("sync empty log");
+    session
+}
+
+/// Builds a `TurnBegin` for the paired surface.
+fn turn_begin_frame(surface: &SurfaceId, session: &SessionId, lease: &str, cwd_ref: PathRef) -> AgentFrame {
+    AgentFrame::TurnBegin {
+        surface: surface.clone(),
+        session: session.clone(),
+        lease_token: lease.to_owned(),
+        prompt: "hello from the Mac".to_owned(),
+        executor: "opencode:deepseek/deepseek-flash#max".to_owned(),
+        cwd_ref,
+        job: None,
+        purpose: RunPurpose::Start,
+    }
+}
+
+/// Reads the first `TurnGrant` after `start`.
+fn expect_turn_grant(gateway: &Gateway, start: usize) -> (RunId, SessionId, String, u64) {
+    let AgentFrame::TurnGrant {
+        run_id,
+        session,
+        lease_token,
+        tail_seq,
+        ..
+    } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::TurnGrant { .. }))
+    else {
+        panic!("expected TurnGrant");
+    };
+    (run_id, session, lease_token, tail_seq)
+}
+
+/// Builds the first `RemoteLine` of a run.
+fn hello_line(session: &SessionId, run: &RunId, lease: &str) -> RemoteLine {
+    RemoteLine::Hello {
+        session_id: session.clone(),
+        run_id: run.clone(),
+        executor: "opencode:deepseek/deepseek-flash#max".to_owned(),
+        node: node_name("mac-studio"),
+        spool_id: "test-spool".to_owned(),
+        lease: lease.to_owned(),
+    }
+}
+
+/// Builds one assistant event with a fixed body.
+fn assistant_event(id: &EventId, text: &str) -> RemoteEvent {
+    let body = EventBody::AssistantMessage(vowp_protocol::AssistantMessage { text: text.to_owned() });
+    RemoteEvent {
+        id: id.clone(),
+        ts: ts(),
+        event_type: body.event_type(),
+        actor: Actor::Assistant,
+        source: EventSource {
+            harness: HarnessKind::Opencode,
+            model: Some("deepseek/deepseek-flash".to_owned()),
+            node: Some(node_name("mac-studio")),
+            native_session_id: None,
+        },
+        payload: body.to_value(),
+        raw: None,
+        replayable: true,
+    }
+}
+
+/// Builds an event line for a run.
+fn event_line(run: &RunId, event: RemoteEvent) -> AgentFrame {
+    AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: RemoteLine::Event { event },
+    }
+}
+
+/// Builds the terminal `TurnEnd` for a run.
+fn turn_end_frame(run: &RunId) -> AgentFrame {
+    AgentFrame::TurnEnd {
+        run_id: run.clone(),
+        summary: TurnSummary {
+            exit_code: Some(0),
+            outcome: RunOutcome::Ok,
+            native_session_id: Some("ses_mac".to_owned()),
+            cost: Cost::unknown(),
+            limit: None,
+            result_text: Some("done".to_owned()),
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        },
+    }
+}
+
+/// Reads one session's canonical log.
+fn read_log(root: &Path, session: &SessionId) -> Vec<vowp_protocol::EventEnvelope> {
+    SessionLog::open_read(&NodePaths::new(root), session)
+        .expect("open session log")
+        .read_all()
+        .expect("read session log")
+}
+
+/// Waits for an `IngestAck` after `start`.
+fn expect_ack(
+    gateway: &Gateway,
+    start: usize,
+) -> (
+    RunId,
+    Option<EventId>,
+    Option<u64>,
+    bool,
+    Option<String>,
+    Option<String>,
+) {
+    let AgentFrame::IngestAck {
+        run_id,
+        event_id,
+        seq,
+        duplicate,
+        lease_revoked,
+        error,
+    } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::IngestAck { .. }))
+    else {
+        panic!("expected IngestAck");
+    };
+    (run_id, event_id, seq, duplicate, lease_revoked, error)
 }
 
 #[test]
@@ -1441,5 +1575,341 @@ fn lease_stale_after_sixty_seconds() {
         token: old_lease_token,
     });
     gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }));
+    gateway.finish().expect("gateway");
+}
+
+/// Pairs a surface, acquires its lease and begins one local chat turn.
+fn begin_local_chat(
+    gateway: &Gateway,
+    store: &Store,
+    name: &NodeName,
+    session: &SessionId,
+    cwd_ref: PathRef,
+) -> (SurfaceId, String, RunId, String) {
+    let (surface, surface_token) = pair_surface(store, name, session, "chat", ts());
+    gateway.send(&acquire_frame(&surface, session, &surface_token, LeaseMode::Acquire));
+    let (lease_token, _, _) = expect_grant(gateway, 0);
+    let start = gateway.frame_count();
+    gateway.send(&turn_begin_frame(&surface, session, &lease_token, cwd_ref));
+    let (run, granted_session, granted_lease, _) = expect_turn_grant(gateway, start);
+    assert_eq!(granted_session, *session);
+    assert_eq!(granted_lease, lease_token);
+    (surface, surface_token, run, lease_token)
+}
+
+#[test]
+fn local_chat_turn_appends_to_the_home_log() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (_, _, run, lease) = begin_local_chat(
+        &gateway,
+        &store,
+        &name,
+        &session,
+        PathRef::parse("project:vowp").expect("path ref"),
+    );
+
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease),
+    });
+    let event = assistant_event(&EventId::new(), "the turn landed");
+    let event_id = event.id.clone();
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, event));
+    let (ack_run, ack_id, ack_seq, duplicate, _, error) = expect_ack(&gateway, start);
+    assert_eq!(ack_run, run);
+    assert_eq!(ack_id, Some(event_id.clone()));
+    assert!(!duplicate);
+    assert!(error.is_none());
+    assert!(ack_seq.is_some());
+
+    let start = gateway.frame_count();
+    gateway.send(&turn_end_frame(&run));
+    let (_, _, _, duplicate, _, error) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(error.is_none());
+
+    let events = read_log(home.path(), &session);
+    for pair in events.windows(2) {
+        assert_eq!(pair[1].seq, pair[0].seq + 1, "the home log is gapless");
+    }
+    let assistants: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::AssistantMessage(message)) => Some(message.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistants, vec!["the turn landed".to_owned()]);
+    let run_row = gateway.store().require_run(&run).expect("run row");
+    assert_eq!(run_row.outcome, Some(RunOutcome::Ok));
+    assert_eq!(run_row.session_id.as_ref(), Some(&session));
+    gateway.finish().expect("gateway");
+    for event in &events {
+        let text = serde_json::to_string(event).expect("event JSON");
+        assert!(!text.contains("/Users/"), "no Mac absolute path: {text}");
+    }
+}
+
+#[test]
+fn local_chat_replays_after_an_ssh_drop_without_gaps() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (_, _, run, lease) = begin_local_chat(
+        &gateway,
+        &store,
+        &name,
+        &session,
+        PathRef::parse("project:vowp").expect("path ref"),
+    );
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease),
+    });
+
+    let first = EventId::new();
+    let second = EventId::new();
+    let third = EventId::new();
+    let first_event = assistant_event(&first, "one");
+    let second_event = assistant_event(&second, "two");
+
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, first_event.clone()));
+    let (_, _, first_seq, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, second_event.clone()));
+    let (_, _, second_seq, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(first_seq < second_seq);
+
+    // The transport dropped before the acknowledgements reached the agent. It replays
+    // from the first unacked id: both lines come back as duplicates and are not appended.
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, first_event));
+    let (_, first_ack, _, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(duplicate, "the first replayed event is a duplicate");
+    assert_eq!(first_ack, Some(first.clone()));
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, second_event));
+    let (_, second_ack, _, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(duplicate, "the second replayed event is a duplicate");
+    assert_eq!(second_ack, Some(second.clone()));
+
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&third, "three")));
+    let (_, _, third_seq, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(second_seq < third_seq);
+
+    let start = gateway.frame_count();
+    gateway.send(&turn_end_frame(&run));
+    expect_ack(&gateway, start);
+    gateway.finish().expect("gateway");
+
+    let events = read_log(home.path(), &session);
+    for pair in events.windows(2) {
+        assert_eq!(pair[1].seq, pair[0].seq + 1, "no gap after replay");
+    }
+    let ids: Vec<EventId> = events
+        .iter()
+        .map(|event| event.id.clone())
+        .filter(|id| id == &first || id == &second || id == &third)
+        .collect();
+    assert_eq!(ids, vec![first, second, third], "each replayed id appears once");
+}
+
+#[test]
+fn local_chat_rejects_a_duplicate_event_id_with_different_content() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (_, _, run, lease) = begin_local_chat(
+        &gateway,
+        &store,
+        &name,
+        &session,
+        PathRef::parse("project:vowp").expect("path ref"),
+    );
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease),
+    });
+
+    let event_id = EventId::new();
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&event_id, "original")));
+    expect_ack(&gateway, start);
+
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&event_id, "different")));
+    let (_, ack_id, _, _, revoked, error) = expect_ack(&gateway, start);
+    assert!(ack_id.is_none());
+    assert!(revoked.is_none());
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("duplicate-conflict")),
+        "the ack names the conflict: {error:?}"
+    );
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::RunLost { .. }));
+
+    // The run is fenced: a later line is never appended.
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&EventId::new(), "late")));
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::RunLost { .. }));
+    gateway.finish().expect("gateway");
+
+    let events = read_log(home.path(), &session);
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::AssistantMessage(message)) => Some(message.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["original".to_owned()], "no conflicting or late content");
+}
+
+#[test]
+fn local_chat_takeover_fences_the_old_run() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (_, _, run, lease) = begin_local_chat(
+        &gateway,
+        &store,
+        &name,
+        &session,
+        PathRef::parse("project:vowp").expect("path ref"),
+    );
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease),
+    });
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&EventId::new(), "before takeover")));
+    expect_ack(&gateway, start);
+
+    let (phone, phone_token) = pair_surface(&store, &name, &session, "chat", ts());
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&phone, &session, &phone_token, LeaseMode::Takeover));
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }));
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::RunLost { .. }));
+    expect_grant(&gateway, start);
+    // The new surface holds the lease.
+    let current = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(current.surface_id.as_ref(), Some(&phone));
+
+    let late = EventId::new();
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, assistant_event(&late, "after takeover")));
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::RunLost { .. }));
+    gateway.finish().expect("gateway");
+
+    let events = read_log(home.path(), &session);
+    assert!(
+        !events.iter().any(|event| event.id == late),
+        "a fenced run never appends a later line"
+    );
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::AssistantMessage(message)) => Some(message.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["before takeover".to_owned()]);
+}
+
+#[test]
+fn local_chat_uses_a_path_ref_not_an_absolute_path() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = chat_session(home.path(), &store, &name, SESSION, &clock);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let (surface, surface_token) = pair_surface(&store, &name, &session, "chat", ts());
+    gateway.send(&acquire_frame(&surface, &session, &surface_token, LeaseMode::Acquire));
+    let (lease, _, _) = expect_grant(&gateway, 0);
+
+    let frame = turn_begin_frame(
+        &surface,
+        &session,
+        &lease,
+        PathRef::parse("worktree:vowp/local-chat").expect("path ref"),
+    );
+    let wire = serde_json::to_string(&frame).expect("TurnBegin JSON");
+    assert!(wire.contains("\"cwd_ref\":\"worktree:vowp/local-chat\""), "{wire}");
+    assert!(!wire.contains("/Users/"), "no absolute path in the frame: {wire}");
+
+    // A path ref for another project is refused rather than silently used.
+    let other = AgentFrame::TurnBegin {
+        surface: surface.clone(),
+        session: session.clone(),
+        lease_token: lease.clone(),
+        prompt: "wrong project".to_owned(),
+        executor: "opencode:deepseek/deepseek-flash#max".to_owned(),
+        cwd_ref: PathRef::parse("project:another").expect("path ref"),
+        job: None,
+        purpose: RunPurpose::Continue,
+    };
+    let start = gateway.frame_count();
+    gateway.send(&other);
+    let AgentFrame::Error { kind, .. } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+
+    let start = gateway.frame_count();
+    gateway.send(&frame);
+    let (run, _, _, _) = expect_turn_grant(&gateway, start);
+
+    // The home records the run without the Mac's working directory.
+    let row = gateway.store().require_run(&run).expect("run row");
+    if let Some(cwd) = &row.cwd {
+        assert!(!cwd.contains("/Users/"), "the run row has no Mac path: {cwd}");
+    }
     gateway.finish().expect("gateway");
 }

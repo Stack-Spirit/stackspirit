@@ -119,6 +119,7 @@ python3 docs/reference/check-reference.py
 | `TakeoverReport` | [takeover-report.md](takeover-report.md) |
 | `Tunnel` | [tunnel.md](tunnel.md) |
 | `TurnGrant` | [turn-grant.md](turn-grant.md) |
+| `TurnSummary` | [turn-summary.md](turn-summary.md) |
 | `UsageEstimate` | [usage-estimate.md](usage-estimate.md) |
 | `VowpConfig` | [vowp-config.md](vowp-config.md) |
 | `WaitReason` | [wait-reason.md](wait-reason.md) |

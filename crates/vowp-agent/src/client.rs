@@ -14,7 +14,7 @@ use vowp_protocol::{
     SurfaceScope, Timestamp,
 };
 
-use crate::config::{AgentConfig, ensure_private_dir, write_private};
+use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surface_binding};
 use crate::error::AgentError;
 use crate::key::NodeKey;
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
@@ -442,6 +442,7 @@ impl AgentClient {
             }
         };
         let token_path = write_surface_token(&self.state_dir, &request.surface_id, &token, expires_at)?;
+        write_surface_binding(&self.state_dir, &request.surface_id, &request.session)?;
         Ok(PairedSurface {
             surface_id: request.surface_id.clone(),
             scopes,
@@ -652,6 +653,26 @@ impl AgentClient {
         status
     }
 
+    /// Returns the agent state directory.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    /// Returns the node name this agent enrolled as.
+    pub fn node(&self) -> NodeName {
+        self.config
+            .as_ref()
+            .map(|config| config.node.clone())
+            .or_else(|| self.status.node.clone())
+            // invariant: "agent" is a valid node slug and an enrolled client has one.
+            .unwrap_or_else(|| NodeName::parse("agent").expect("invariant: 'agent' is a valid node slug"))
+    }
+
+    /// Sleeps through the injected clock (tests advance fake time).
+    pub(crate) fn sleep(&self, duration: Duration) {
+        self.clock.sleep(duration);
+    }
+
     fn serve(&mut self) -> ServeOutcome {
         if let Err(error) = self.heartbeat() {
             return disconnected_or_failed(error);
@@ -711,7 +732,7 @@ impl AgentClient {
         }
     }
 
-    fn send_frame(&mut self, frame: &AgentFrame) -> Result<(), AgentError> {
+    pub(crate) fn send_frame(&mut self, frame: &AgentFrame) -> Result<(), AgentError> {
         let connection = self
             .connection
             .as_mut()
@@ -725,7 +746,7 @@ impl AgentClient {
         connection.stream.send(frame)
     }
 
-    fn recv_frame(&mut self, timeout: Option<Duration>) -> Result<FrameRead, AgentError> {
+    pub(crate) fn recv_frame(&mut self, timeout: Option<Duration>) -> Result<FrameRead, AgentError> {
         self.connection
             .as_mut()
             .ok_or_else(|| AgentError::Transport("not connected".to_owned()))?

@@ -12,20 +12,23 @@
 //! authenticated connection; a refused `SurfacePair` keeps the connection open so the agent
 //! can retry with a fresh code, while an internal store failure closes it.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use vowp_protocol::{
-    AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Lease, LeaseMode, Level, NodeName, NodeStatus, SessionId,
-    SurfaceId, SurfaceInfo, SurfaceState,
+    AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Executor, ExecutorRef, IngestAck, Lease, LeaseMode,
+    Level, NodeName, NodeStatus, RemoteLine, RunId, RunPurpose, SessionId, SurfaceId, SurfaceInfo, SurfaceState,
+    Timestamp, TurnSummary,
 };
 use vowp_store::{NodeCredential, Store};
 
 use super::{auth, enroll, pair};
 use crate::deps::Deps;
 use crate::error::CoreError;
+use crate::session::remote::{BeginTurn, IngestGrant, IngestSession};
 use crate::surface::lease::{self, AgentLeaseAcquire, AgentLeaseGrant, AgentLeaseHeartbeat, AgentLeaseRelease};
 
 /// Largest accepted frame, in bytes (1 MiB).
@@ -296,6 +299,10 @@ fn run_connection(
     writer: &mut dyn Write,
     options: &GatewayOptions,
 ) -> Result<GatewayOutcome, CoreError> {
+    // One live local-chat stream per run on this connection. The ingest state machine
+    // owns the session log handle, so a fenced run is dropped here and its later frames
+    // are answered with `RunLost` instead of being appended.
+    let mut chats: BTreeMap<RunId, ChatStream<'_>> = BTreeMap::new();
     loop {
         let Some(frame) = read_frame(incoming, None, writer, options.max_frame_bytes)? else {
             return Ok(GatewayOutcome::Closed {
@@ -316,6 +323,7 @@ fn run_connection(
             return Ok(GatewayOutcome::Closed { node: None });
         };
         if card.status == NodeStatus::Revoked {
+            fence_all(&mut chats, "node was revoked", writer)?;
             send_frame(
                 writer,
                 &AgentFrame::Revoked {
@@ -413,6 +421,14 @@ fn run_connection(
                                 },
                             )?;
                         }
+                        // A live run under the old lease is fenced now, before the new holder
+                        // can write. Its later frames get `RunLost` and are never appended.
+                        fence_session(
+                            &mut chats,
+                            &session_id,
+                            &format!("session {session_id} was taken over by {holder}"),
+                            writer,
+                        )?;
                         deps.log.log(
                             Level::Info,
                             &format!("agent {}", session.node),
@@ -446,9 +462,11 @@ fn run_connection(
                 match result {
                     Ok(AgentLeaseHeartbeat::Accepted) => {}
                     Ok(AgentLeaseHeartbeat::Lost(reason)) => {
+                        fence_session(&mut chats, &session_id, &reason, writer)?;
                         send_frame(writer, &AgentFrame::LeaseLost { reason })?;
                     }
                     Ok(AgentLeaseHeartbeat::Revoked { reason, holder }) => {
+                        fence_session(&mut chats, &session_id, &reason, writer)?;
                         send_frame(writer, &AgentFrame::LeaseRevoked { reason, holder })?;
                     }
                     Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
@@ -465,17 +483,150 @@ fn run_connection(
                 let result = bound_surface(store, &session.node, &surface, &session_id)
                     .and_then(|_| lease::release_agent_lease(store, &session_id, &surface, &token));
                 match result {
-                    Ok(AgentLeaseRelease::Released) => {}
+                    Ok(AgentLeaseRelease::Released) => {
+                        fence_session(&mut chats, &session_id, "lease was released", writer)?;
+                    }
                     Ok(AgentLeaseRelease::Lost(reason)) => {
+                        fence_session(&mut chats, &session_id, &reason, writer)?;
                         send_frame(writer, &AgentFrame::LeaseLost { reason })?;
                     }
                     Ok(AgentLeaseRelease::Revoked { reason, holder }) => {
+                        fence_session(&mut chats, &session_id, &reason, writer)?;
                         send_frame(writer, &AgentFrame::LeaseRevoked { reason, holder })?;
                     }
                     Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
                         send_error(writer, error.kind(), error.to_string(), false)?;
                     }
                     Err(error) => return Err(error),
+                }
+            }
+            AgentFrame::TurnBegin {
+                surface,
+                session: session_id,
+                lease_token,
+                prompt,
+                executor,
+                cwd_ref,
+                job,
+                purpose,
+            } => {
+                if chats.values().any(|chat| chat.session == session_id) {
+                    send_error(
+                        writer,
+                        ErrorKind::Conflict,
+                        format!("session {session_id} already has a local chat run"),
+                        false,
+                    )?;
+                    continue;
+                }
+                match begin_agent_turn(
+                    store,
+                    deps,
+                    &session.node,
+                    &surface,
+                    &session_id,
+                    &lease_token,
+                    prompt,
+                    &executor,
+                    &cwd_ref,
+                    job,
+                    purpose,
+                    now,
+                ) {
+                    Ok(started) => {
+                        let grant = AgentFrame::TurnGrant {
+                            run_id: started.run_id.clone(),
+                            session: started.session.clone(),
+                            lease_token: started.lease.clone(),
+                            expires_at: started.expires_at,
+                            tail_seq: started.tail_seq,
+                        };
+                        chats.insert(started.run_id.clone(), started.stream);
+                        send_frame(writer, &grant)?;
+                    }
+                    Err(
+                        error @ (CoreError::Refused(_)
+                        | CoreError::Invalid(_)
+                        | CoreError::NotFound(_)
+                        | CoreError::Store(vowp_store::StoreError::Conflict(_))),
+                    ) => {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            AgentFrame::RemoteLine { run_id, epoch, line } => {
+                let Some(stream) = chats.get_mut(&run_id) else {
+                    send_frame(
+                        writer,
+                        &AgentFrame::RunLost {
+                            run_id,
+                            reason: "run is not active on this connection".to_owned(),
+                        },
+                    )?;
+                    continue;
+                };
+                if stream.epoch == 0 {
+                    stream.epoch = epoch;
+                } else if stream.epoch != epoch {
+                    send_frame(
+                        writer,
+                        &AgentFrame::RunLost {
+                            run_id: run_id.clone(),
+                            reason: format!("stale run epoch {epoch}; expected {}", stream.epoch),
+                        },
+                    )?;
+                    chats.remove(&run_id);
+                    continue;
+                }
+                let is_event = matches!(line, RemoteLine::Event { .. });
+                let stop = ingest_remote_line(writer, &run_id, stream, &line)?;
+                if stop {
+                    send_frame(
+                        writer,
+                        &AgentFrame::RunLost {
+                            run_id: run_id.clone(),
+                            reason: "ingest stopped; the surface is read-only".to_owned(),
+                        },
+                    )?;
+                    chats.remove(&run_id);
+                    continue;
+                }
+                if is_event {
+                    stream.events_since_credit = stream.events_since_credit.saturating_add(1);
+                    if stream.events_since_credit >= CREDIT_WINDOW {
+                        stream.events_since_credit = 0;
+                        send_frame(
+                            writer,
+                            &AgentFrame::Credit {
+                                run_id: run_id.clone(),
+                                count: CREDIT_WINDOW,
+                            },
+                        )?;
+                    }
+                }
+            }
+            AgentFrame::TurnEnd { run_id, summary } => {
+                let Some(mut stream) = chats.remove(&run_id) else {
+                    send_frame(
+                        writer,
+                        &AgentFrame::RunLost {
+                            run_id,
+                            reason: "run is not active on this connection".to_owned(),
+                        },
+                    )?;
+                    continue;
+                };
+                let line = summary_line(summary);
+                let stop = ingest_remote_line(writer, &run_id, &mut stream, &line)?;
+                if stop {
+                    send_frame(
+                        writer,
+                        &AgentFrame::RunLost {
+                            run_id,
+                            reason: "ingest stopped; the surface is read-only".to_owned(),
+                        },
+                    )?;
                 }
             }
             AgentFrame::Ping => send_frame(writer, &AgentFrame::Pong)?,
@@ -488,6 +639,270 @@ fn run_connection(
             }
         }
     }
+}
+
+/// The in-flight event window replenished by a `Credit` frame.
+const CREDIT_WINDOW: u64 = 64;
+
+/// One live local-chat stream on this connection.
+struct ChatStream<'a> {
+    /// Session the run belongs to.
+    session: SessionId,
+    /// Run epoch; zero until the first line arrives.
+    epoch: u64,
+    /// Home-side ingest state machine.
+    ingest: IngestSession<'a>,
+    /// Events appended since the last `Credit` frame.
+    events_since_credit: u64,
+}
+
+/// A turn begun by a paired surface, ready to ingest.
+struct StartedTurn<'a> {
+    /// Run id assigned by the home.
+    run_id: RunId,
+    /// Session the run continues.
+    session: SessionId,
+    /// Lease token the run is fenced by.
+    lease: String,
+    /// Lease expiry.
+    expires_at: Timestamp,
+    /// Last sequence at turn begin.
+    tail_seq: u64,
+    /// Ingest state for the run.
+    stream: ChatStream<'a>,
+}
+
+/// Validates a `TurnBegin`, writes the framing events and opens its ingest stream.
+#[allow(clippy::too_many_arguments)]
+fn begin_agent_turn<'a>(
+    store: &'a Store,
+    deps: &'a Deps,
+    node: &NodeName,
+    surface: &SurfaceId,
+    session: &SessionId,
+    lease: &str,
+    prompt: String,
+    executor: &str,
+    cwd_ref: &vowp_protocol::PathRef,
+    job: Option<vowp_protocol::JobId>,
+    purpose: RunPurpose,
+    now: Timestamp,
+) -> Result<StartedTurn<'a>, CoreError> {
+    bound_surface(store, node, surface, session)?;
+    let row = store.require_session(session)?;
+    if let Some(project) = cwd_ref_project(cwd_ref)
+        && row.project.as_ref() != Some(project)
+    {
+        return Err(CoreError::Refused(format!(
+            "cwd ref is for project {project}, but session {session} belongs to another project"
+        )));
+    }
+    if let Some(job) = &job
+        && row.job_id.as_ref() != Some(job)
+    {
+        return Err(CoreError::Refused(format!(
+            "turn names job {job}, but session {session} belongs to another job"
+        )));
+    }
+    let executor = Executor::parse(executor)?;
+    let grant = crate::session::remote::begin_turn(
+        deps,
+        store,
+        &BeginTurn {
+            session: session.clone(),
+            lease: lease.to_owned(),
+            executor: ExecutorRef {
+                executor,
+                node: Some(row.node.clone()),
+            },
+            purpose,
+            node: row.node.clone(),
+            // The agent resolves its own working directory locally; the home must not
+            // record a Mac absolute path in a run row or an event.
+            cwd: None,
+            prompt,
+        },
+    )?;
+    let stream = ChatStream {
+        session: session.clone(),
+        epoch: 0,
+        ingest: IngestSession::begin(
+            deps,
+            store,
+            &IngestGrant {
+                session: session.clone(),
+                lease: grant.lease_token.clone(),
+                run: grant.run_id.clone(),
+            },
+        )?,
+        events_since_credit: 0,
+    };
+    Ok(StartedTurn {
+        run_id: grant.run_id,
+        session: session.clone(),
+        lease: grant.lease_token,
+        expires_at: now.plus(lease::STALE_AFTER),
+        tail_seq: grant.tail_seq,
+        stream,
+    })
+}
+
+/// Returns the project a path ref belongs to.
+fn cwd_ref_project(cwd_ref: &vowp_protocol::PathRef) -> Option<&vowp_protocol::ProjectName> {
+    match cwd_ref {
+        vowp_protocol::PathRef::Project { project }
+        | vowp_protocol::PathRef::Worktree { project, .. }
+        | vowp_protocol::PathRef::Subdir { project, .. } => Some(project),
+    }
+}
+
+/// Feeds one v0.2 line through the ingest state machine and forwards every acknowledgement.
+///
+/// Returns `true` when the stream must stop: a takeover, a rejection or a conflict. The run
+/// is then fenced by the caller and no later line is appended.
+fn ingest_remote_line(
+    writer: &mut dyn Write,
+    run_id: &RunId,
+    stream: &mut ChatStream<'_>,
+    line: &RemoteLine,
+) -> Result<bool, CoreError> {
+    let mut text = serde_json::to_string(line).map_err(vowp_protocol::ProtocolError::from)?;
+    text.push('\n');
+    let mut ack_bytes = Vec::new();
+    let result = stream.ingest.line(&text, &mut ack_bytes);
+    let acks = parse_ingest_acks(&ack_bytes)?;
+    let mut stop = result.is_err();
+    let mut ack_sent = false;
+    for ack in acks {
+        let terminal = matches!(ack, IngestAck::LeaseRevoked { .. } | IngestAck::Error { .. });
+        send_frame(writer, &agent_ack_frame(run_id, ack))?;
+        ack_sent = true;
+        stop |= terminal;
+    }
+    if let Err(error) = result
+        && !ack_sent
+    {
+        send_error(writer, error.kind(), error.to_string(), false)?;
+    }
+    Ok(stop)
+}
+
+/// Parses the acknowledgement lines the ingest state machine wrote.
+fn parse_ingest_acks(bytes: &[u8]) -> Result<Vec<IngestAck>, CoreError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut acks = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        acks.push(
+            serde_json::from_str(line)
+                .map_err(|error| CoreError::Command(format!("invalid ingest acknowledgement: {error}")))?,
+        );
+    }
+    Ok(acks)
+}
+
+/// Maps one v0.2 acknowledgement onto the agent envelope.
+fn agent_ack_frame(run_id: &RunId, ack: IngestAck) -> AgentFrame {
+    match ack {
+        IngestAck::Ack { event_id, seq } => AgentFrame::IngestAck {
+            run_id: run_id.clone(),
+            event_id: Some(event_id),
+            seq: Some(seq),
+            duplicate: false,
+            lease_revoked: None,
+            error: None,
+        },
+        IngestAck::Duplicate { event_id, seq } => AgentFrame::IngestAck {
+            run_id: run_id.clone(),
+            event_id: Some(event_id),
+            seq: Some(seq),
+            duplicate: true,
+            lease_revoked: None,
+            error: None,
+        },
+        IngestAck::Summary { .. } => AgentFrame::IngestAck {
+            run_id: run_id.clone(),
+            event_id: None,
+            seq: None,
+            duplicate: false,
+            lease_revoked: None,
+            error: None,
+        },
+        IngestAck::LeaseRevoked { reason, last_seq, .. } => AgentFrame::IngestAck {
+            run_id: run_id.clone(),
+            event_id: None,
+            seq: Some(last_seq),
+            duplicate: false,
+            lease_revoked: Some(reason),
+            error: None,
+        },
+        IngestAck::Error { message, .. } => AgentFrame::IngestAck {
+            run_id: run_id.clone(),
+            event_id: None,
+            seq: None,
+            duplicate: false,
+            lease_revoked: None,
+            error: Some(message),
+        },
+    }
+}
+
+/// Converts the terminal agent summary into the v0.2 summary line.
+fn summary_line(summary: TurnSummary) -> RemoteLine {
+    RemoteLine::Summary {
+        exit_code: summary.exit_code,
+        outcome: summary.outcome,
+        native_session_id: summary.native_session_id,
+        cost: summary.cost,
+        limit: summary.limit,
+        result_text: summary.result_text,
+        stop_reason: summary.stop_reason,
+        usage: summary.usage,
+    }
+}
+
+/// Fences every live run of one session and tells the peer why.
+fn fence_session(
+    chats: &mut BTreeMap<RunId, ChatStream<'_>>,
+    session: &SessionId,
+    reason: &str,
+    writer: &mut dyn Write,
+) -> Result<(), CoreError> {
+    let runs: Vec<RunId> = chats
+        .iter()
+        .filter(|(_, chat)| chat.session == *session)
+        .map(|(run, _)| run.clone())
+        .collect();
+    for run in runs {
+        chats.remove(&run);
+        send_frame(
+            writer,
+            &AgentFrame::RunLost {
+                run_id: run,
+                reason: reason.to_owned(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Fences every live run on the connection and tells the peer why.
+fn fence_all(
+    chats: &mut BTreeMap<RunId, ChatStream<'_>>,
+    reason: &str,
+    writer: &mut dyn Write,
+) -> Result<(), CoreError> {
+    let runs: Vec<RunId> = chats.keys().cloned().collect();
+    for run in runs {
+        chats.remove(&run);
+        send_frame(
+            writer,
+            &AgentFrame::RunLost {
+                run_id: run,
+                reason: reason.to_owned(),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// The answer to one lease acquire frame.

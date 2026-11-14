@@ -10,6 +10,31 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
 ```json
 {
   "$defs": {
+    "Actor": {
+      "description": "Who produced an event line.",
+      "oneOf": [
+        {
+          "const": "user",
+          "description": "The human using VOWP.",
+          "type": "string"
+        },
+        {
+          "const": "assistant",
+          "description": "The harness's assistant.",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "VOWP itself (session framing, limits, cost, switches, capsules).",
+          "type": "string"
+        },
+        {
+          "const": "tool",
+          "description": "A tool invoked by the assistant.",
+          "type": "string"
+        }
+      ]
+    },
     "AgentCapabilities": {
       "description": "Names-only capabilities advertised by an agent; values never cross the wire.",
       "properties": {
@@ -175,6 +200,77 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
       ],
       "type": "object"
     },
+    "BuildMode": {
+      "description": "Inference about how warm the job's target directory was.",
+      "oneOf": [
+        {
+          "const": "cold",
+          "description": "A cold build with no usable target directory.",
+          "type": "string"
+        },
+        {
+          "const": "warm",
+          "description": "A warm build with a populated target directory.",
+          "type": "string"
+        },
+        {
+          "const": "incremental",
+          "description": "An incremental build.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The build mode could not be told.",
+          "type": "string"
+        }
+      ]
+    },
+    "Cost": {
+      "description": "A cost amount with its token usage and provenance.",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/CostSource",
+          "description": "Where the amount came from."
+        },
+        "tokens": {
+          "$ref": "#/$defs/Tokens",
+          "description": "Token usage that produced the amount."
+        },
+        "usd": {
+          "description": "Amount in USD; `None` exactly when `source` is [`CostSource::Unknown`].",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tokens",
+        "source"
+      ],
+      "type": "object"
+    },
+    "CostSource": {
+      "description": "Where a cost amount came from.",
+      "oneOf": [
+        {
+          "const": "receipt",
+          "description": "The harness reported it (`opencode` `step_finish.cost`, `claude` `result.total_cost_usd`).",
+          "type": "string"
+        },
+        {
+          "const": "price-table",
+          "description": "Estimated from `[providers.*.prices]` in `vowp.toml`.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "No usable price: `usd` is `None`.",
+          "type": "string"
+        }
+      ]
+    },
     "ErrorKind": {
       "description": "Stable machine-readable error classes, used in `error` events, `--json` output and\nCLI exit-code mapping.",
       "oneOf": [
@@ -260,6 +356,172 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "EventId": {
+      "description": "Event id: 26-character ULID.",
+      "type": "string"
+    },
+    "EventSource": {
+      "description": "Where an event came from: the harness, and optionally its model, node and native session.",
+      "properties": {
+        "harness": {
+          "$ref": "#/$defs/HarnessKind",
+          "description": "Harness that produced the event; [`HarnessKind::Vowp`] for VOWP's own events."
+        },
+        "model": {
+          "description": "Model name as the harness knows it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "native_session_id": {
+          "description": "Harness-side session id, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node the harness ran on."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "type": "object"
+    },
+    "EventType": {
+      "description": "Every canonical event type, named by its dotted wire string.",
+      "oneOf": [
+        {
+          "const": "session.created",
+          "description": "A session was created.",
+          "type": "string"
+        },
+        {
+          "const": "session.executor",
+          "description": "An executor was attached to or detached from a session.",
+          "type": "string"
+        },
+        {
+          "const": "turn.started",
+          "description": "A turn started.",
+          "type": "string"
+        },
+        {
+          "const": "turn.ended",
+          "description": "A turn ended.",
+          "type": "string"
+        },
+        {
+          "const": "user.message",
+          "description": "The user sent a message.",
+          "type": "string"
+        },
+        {
+          "const": "assistant.message",
+          "description": "The assistant sent a message.",
+          "type": "string"
+        },
+        {
+          "const": "assistant.reasoning",
+          "description": "The assistant emitted reasoning (never replayed).",
+          "type": "string"
+        },
+        {
+          "const": "tool.call",
+          "description": "The assistant called a tool.",
+          "type": "string"
+        },
+        {
+          "const": "tool.result",
+          "description": "A tool returned a result.",
+          "type": "string"
+        },
+        {
+          "const": "file.change",
+          "description": "A file was created, modified, deleted or renamed.",
+          "type": "string"
+        },
+        {
+          "const": "plan",
+          "description": "The assistant published or updated a plan.",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "description": "A provider limit was observed.",
+          "type": "string"
+        },
+        {
+          "const": "cost",
+          "description": "A cost was recorded.",
+          "type": "string"
+        },
+        {
+          "const": "switch",
+          "description": "A session switched executors.",
+          "type": "string"
+        },
+        {
+          "const": "capsule",
+          "description": "A capsule was written.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "An error was recorded.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "A free-form note.",
+          "type": "string"
+        }
+      ]
+    },
+    "HarnessKind": {
+      "description": "A harness that runs a model.",
+      "oneOf": [
+        {
+          "const": "claude-code",
+          "description": "Claude Code (`claude`).",
+          "type": "string"
+        },
+        {
+          "const": "opencode",
+          "description": "opencode.",
+          "type": "string"
+        },
+        {
+          "const": "cli",
+          "description": "The generic mapping-file CLI adapter.",
+          "type": "string"
+        },
+        {
+          "const": "acp",
+          "description": "An Agent Client Protocol (ACP) server.",
+          "type": "string"
+        },
+        {
+          "const": "vowp",
+          "description": "Events VOWP itself writes (system events, shell and gate runs).",
+          "type": "string"
+        }
+      ]
+    },
+    "JobId": {
+      "description": "Job id slug, for example `example-job`.",
+      "type": "string"
+    },
     "LeaseMode": {
       "description": "How a surface asks for a session lease.\n\n`Acquire` fails with a `Conflict` error when another surface holds a live lease;\n`Takeover` replaces it and fences the old holder.",
       "oneOf": [
@@ -275,13 +537,484 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "LimitEvent": {
+      "description": "Payload of `limit`.",
+      "properties": {
+        "http_status": {
+          "default": null,
+          "description": "HTTP status that carried the limit, when known.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/LimitKind",
+          "description": "Kind of limit."
+        },
+        "message": {
+          "description": "Redacted classifier input excerpt of at most 300 characters.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Provider key, for example `claude` or `deepseek`.",
+          "type": "string"
+        },
+        "resets_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the limit lifts, when the harness reports it."
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "message"
+      ],
+      "type": "object"
+    },
+    "LimitKind": {
+      "description": "The kind of limit reported in a `limit` event.",
+      "oneOf": [
+        {
+          "const": "quota",
+          "description": "A rolling provider quota window was exhausted.",
+          "type": "string"
+        },
+        {
+          "const": "credits",
+          "description": "The account ran out of credits.",
+          "type": "string"
+        },
+        {
+          "const": "rate",
+          "description": "A request rate limit was hit.",
+          "type": "string"
+        },
+        {
+          "const": "context",
+          "description": "The model context window was exhausted.",
+          "type": "string"
+        },
+        {
+          "const": "auth",
+          "description": "Authentication failed or expired.",
+          "type": "string"
+        }
+      ]
+    },
     "NodeName": {
       "description": "Node name slug, for example `vps`.",
+      "type": "string"
+    },
+    "PathRef": {
+      "description": "A project-relative path the agent resolves locally.\n\nThe wire form is one short string: `project:vowp`, `worktree:vowp/<job>` or\n`subdir:vowp/src`. Parsing rejects `..`, absolute paths, backslashes, NUL, an empty\nproject and an empty subdirectory, and normalises repeated `/` and `.` components.",
       "type": "string"
     },
     "ProjectName": {
       "description": "Project name slug, for example `vowp`.\n\n`_node` is the reserved project that owns project-less session runs.",
       "type": "string"
+    },
+    "RemoteEvent": {
+      "description": "The serializable part of one remote event, without the home-assigned session id and seq.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/Actor",
+          "description": "Who produced the event."
+        },
+        "id": {
+          "$ref": "#/$defs/EventId",
+          "description": "Event id assigned by the executor."
+        },
+        "payload": {
+          "description": "Raw typed payload."
+        },
+        "raw": {
+          "description": "Original harness event, kept for display only."
+        },
+        "replayable": {
+          "description": "Whether the event may be replayed to a harness.",
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/EventSource",
+          "description": "Harness and model that produced the event."
+        },
+        "ts": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "Event timestamp."
+        },
+        "type": {
+          "$ref": "#/$defs/EventType",
+          "description": "Event type."
+        }
+      },
+      "required": [
+        "id",
+        "ts",
+        "type",
+        "actor",
+        "source",
+        "payload",
+        "replayable"
+      ],
+      "type": "object"
+    },
+    "RemoteLine": {
+      "description": "One JSON line exchanged between `__exec` and `session ingest`.",
+      "oneOf": [
+        {
+          "description": "First line of a connection; carries the lease token and is never spooled.",
+          "properties": {
+            "executor": {
+              "description": "Executor string.",
+              "type": "string"
+            },
+            "lease": {
+              "description": "Lease token.",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/$defs/NodeName",
+              "description": "Executor node."
+            },
+            "run_id": {
+              "$ref": "#/$defs/RunId",
+              "description": "Run id."
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId",
+              "description": "Session the run belongs to."
+            },
+            "spool_id": {
+              "description": "Spool identifier.",
+              "type": "string"
+            },
+            "type": {
+              "const": "hello",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "run_id",
+            "executor",
+            "node",
+            "spool_id",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One adapter event.",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/RemoteEvent",
+              "description": "The event."
+            },
+            "type": {
+              "const": "event",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A periodic liveness line.",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/Timestamp",
+              "description": "When the heartbeat was sent."
+            },
+            "type": {
+              "const": "heartbeat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The final line of a run.",
+          "properties": {
+            "cost": {
+              "$ref": "#/$defs/Cost",
+              "description": "Cost of the run."
+            },
+            "exit_code": {
+              "description": "Process exit code.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "limit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LimitEvent"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider limit, when one ended the run."
+            },
+            "native_session_id": {
+              "description": "Harness-side session id.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "$ref": "#/$defs/RunOutcome",
+              "description": "Run outcome."
+            },
+            "result_text": {
+              "description": "Final assistant text, when any.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "$ref": "#/$defs/StopReason",
+              "description": "Why the harness stopped."
+            },
+            "type": {
+              "const": "summary",
+              "type": "string"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RemoteUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resource usage measured on the executor, when available."
+            }
+          },
+          "required": [
+            "type",
+            "outcome",
+            "cost",
+            "stop_reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RemoteUsage": {
+      "description": "What a remote `__exec` measured on the executor node.",
+      "properties": {
+        "anon_peak_bytes": {
+          "description": "Sampled anonymous memory at the peak, when sampled.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "build_mode": {
+          "$ref": "#/$defs/BuildMode",
+          "description": "Build-mode inference."
+        },
+        "cpu_usec": {
+          "description": "CPU time in microseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_peak_bytes": {
+          "description": "Sampled file-backed pages at the peak, when sampled.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kernel_peak_bytes": {
+          "description": "Sampled kernel memory at the peak, when sampled.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_cpu_cores": {
+          "description": "Maximum CPU cores observed.",
+          "format": "double",
+          "type": "number"
+        },
+        "mean_cpu_cores": {
+          "description": "Mean CPU cores used.",
+          "format": "double",
+          "type": "number"
+        },
+        "oom_killed": {
+          "description": "Whether the kernel OOM killer ended the run.",
+          "type": "boolean"
+        },
+        "peak_rss_bytes": {
+          "description": "Peak resident memory in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/UsageSource",
+          "description": "Measurement source."
+        }
+      },
+      "required": [
+        "peak_rss_bytes",
+        "cpu_usec",
+        "mean_cpu_cores",
+        "max_cpu_cores",
+        "build_mode",
+        "oom_killed",
+        "source"
+      ],
+      "type": "object"
+    },
+    "RunId": {
+      "description": "Run id: 26-character ULID.",
+      "type": "string"
+    },
+    "RunOutcome": {
+      "description": "How a run ended.",
+      "oneOf": [
+        {
+          "const": "ok",
+          "description": "Completed normally.",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "description": "Hit a provider quota limit.",
+          "type": "string"
+        },
+        {
+          "const": "credits",
+          "description": "Ran out of credits.",
+          "type": "string"
+        },
+        {
+          "const": "auth",
+          "description": "Authentication failed.",
+          "type": "string"
+        },
+        {
+          "const": "context",
+          "description": "Exhausted the context window.",
+          "type": "string"
+        },
+        {
+          "const": "rate",
+          "description": "Hit a request rate limit.",
+          "type": "string"
+        },
+        {
+          "const": "crash",
+          "description": "The harness crashed.",
+          "type": "string"
+        },
+        {
+          "const": "stalled",
+          "description": "The supervisor declared it stalled.",
+          "type": "string"
+        },
+        {
+          "const": "killed",
+          "description": "A human or supervisor killed it.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Ended with an error.",
+          "type": "string"
+        }
+      ]
+    },
+    "RunPurpose": {
+      "description": "Why a run was started.",
+      "oneOf": [
+        {
+          "const": "start",
+          "description": "First run of a job.",
+          "type": "string"
+        },
+        {
+          "const": "continue",
+          "description": "Continue a job run that made progress.",
+          "type": "string"
+        },
+        {
+          "const": "fix",
+          "description": "Fix round after a failed verify.",
+          "type": "string"
+        },
+        {
+          "const": "verify",
+          "description": "Verify another job.",
+          "type": "string"
+        },
+        {
+          "const": "plan",
+          "description": "Plan work.",
+          "type": "string"
+        },
+        {
+          "const": "keep",
+          "description": "Diagnose stalled or failed jobs.",
+          "type": "string"
+        },
+        {
+          "const": "capsule",
+          "description": "Write a capsule.",
+          "type": "string"
+        },
+        {
+          "const": "probe",
+          "description": "Probe a limited provider.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "Merge work.",
+          "type": "string"
+        },
+        {
+          "const": "gate",
+          "description": "Evaluate gates.",
+          "type": "string"
+        }
+      ]
     },
     "SecretName": {
       "description": "A validated secret name: `^[A-Z][A-Z0-9_]{0,63}$`.",
@@ -290,6 +1023,41 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
     "SessionId": {
       "description": "Session id: 26-character ULID.",
       "type": "string"
+    },
+    "StopReason": {
+      "description": "Why a turn ended.",
+      "oneOf": [
+        {
+          "const": "end_turn",
+          "description": "The model finished its turn normally.",
+          "type": "string"
+        },
+        {
+          "const": "max_turns",
+          "description": "The harness hit its maximum turn count.",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "description": "A provider limit stopped the turn.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "The harness reported an error.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "A human or the supervisor interrupted the turn.",
+          "type": "string"
+        },
+        {
+          "const": "crash",
+          "description": "The harness process crashed.",
+          "type": "string"
+        }
+      ]
     },
     "SurfaceId": {
       "description": "A surface instance id (ULID, 26 characters).",
@@ -302,6 +1070,134 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
     "Timestamp": {
       "description": "A UTC instant with millisecond precision.\n\nThe wire/DB form is RFC 3339 with a `Z` suffix and exactly three fractional digits,\nfor example `2026-11-08T19:25:47.123Z`.",
       "type": "string"
+    },
+    "Tokens": {
+      "description": "Token usage broken down by kind.",
+      "properties": {
+        "cache_read": {
+          "default": 0,
+          "description": "Tokens read from the prompt cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write": {
+          "default": 0,
+          "description": "Tokens written to the prompt cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input": {
+          "default": 0,
+          "description": "Non-cached input tokens.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output": {
+          "default": 0,
+          "description": "Output tokens.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reasoning": {
+          "default": 0,
+          "description": "Reasoning tokens, when the harness reports them separately.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "TurnSummary": {
+      "description": "The terminal summary an agent sends in [`AgentFrame::TurnEnd`].",
+      "properties": {
+        "cost": {
+          "$ref": "#/$defs/Cost",
+          "description": "Cost and token usage reported by the harness."
+        },
+        "exit_code": {
+          "description": "Process exit code, when the harness produced one.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LimitEvent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Provider limit that ended the run, when one was classified."
+        },
+        "native_session_id": {
+          "description": "Harness-side session id, when one was reported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/RunOutcome",
+          "description": "Classified run outcome."
+        },
+        "result_text": {
+          "description": "Final assistant text, when any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_reason": {
+          "$ref": "#/$defs/StopReason",
+          "description": "Why the run stopped."
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resource usage measured on the agent, when available."
+        }
+      },
+      "required": [
+        "outcome",
+        "cost",
+        "stop_reason"
+      ],
+      "type": "object"
+    },
+    "UsageSource": {
+      "description": "Where a [`RunUsage`] row came from.",
+      "oneOf": [
+        {
+          "const": "cgroup",
+          "description": "Measured through a cgroup v2 scope.",
+          "type": "string"
+        },
+        {
+          "const": "proc_tree",
+          "description": "Measured by walking the process tree under `/proc`.",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "description": "The compiled default because neither measurement was available.",
+          "type": "string"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -924,6 +1820,263 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "kind",
         "message",
         "retryable"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: start one local chat turn after the lease was granted.",
+      "properties": {
+        "cwd_ref": {
+          "$ref": "#/$defs/PathRef",
+          "description": "Project-relative working directory; the agent resolves it locally."
+        },
+        "executor": {
+          "description": "Executor string, for example `opencode:deepseek/deepseek-flash#max`.",
+          "type": "string"
+        },
+        "job": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Job the run belongs to, when the session is job-scoped."
+        },
+        "lease_token": {
+          "description": "Plaintext lease token returned by `LeaseGrant`; never logged.",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "Prompt for this turn.",
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/RunPurpose",
+          "description": "Why the run starts."
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the turn continues."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Paired surface that owns the turn."
+        },
+        "type": {
+          "const": "turn_begin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "surface",
+        "session",
+        "lease_token",
+        "prompt",
+        "executor",
+        "cwd_ref",
+        "purpose"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the turn started and the run id is assigned.",
+      "properties": {
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the lease goes stale without a heartbeat."
+        },
+        "lease_token": {
+          "description": "Lease token for the run; the same value the agent presented.",
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run id assigned by the home."
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the run belongs to."
+        },
+        "tail_seq": {
+          "description": "Last session sequence the agent may continue from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "turn_grant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "session",
+        "lease_token",
+        "expires_at",
+        "tail_seq"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: one v0.2 remote line wrapped with its run and epoch.",
+      "properties": {
+        "epoch": {
+          "description": "Run epoch; a later frame with another epoch is fenced.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "$ref": "#/$defs/RemoteLine",
+          "description": "The v0.2 event, heartbeat or summary line."
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the line belongs to."
+        },
+        "type": {
+          "const": "remote_line",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "line"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the result of one remote line.\n\nExactly one of the optional fields is set for each acknowledgement kind:\n`event_id`/`seq` for an append or duplicate, `seq` for a summary,\n`lease_revoked` for a takeover and `error` for a rejection.",
+      "properties": {
+        "duplicate": {
+          "description": "Whether the event was already present.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "Human-readable rejection; the stream stops.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Event id that was appended or already present."
+        },
+        "lease_revoked": {
+          "description": "Human-readable takeover reason; the stream stops.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the acknowledgement belongs to."
+        },
+        "seq": {
+          "description": "Assigned or existing sequence number.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "ingest_ack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "duplicate"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: replenish the in-flight event window.",
+      "properties": {
+        "count": {
+          "description": "Number of additional in-flight events allowed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the credit belongs to."
+        },
+        "type": {
+          "const": "credit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "count"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: the run finished with one classified summary.",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run that finished."
+        },
+        "summary": {
+          "$ref": "#/$defs/TurnSummary",
+          "description": "Classified terminal summary."
+        },
+        "type": {
+          "const": "turn_end",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "summary"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the run was fenced; stop the harness and keep the spool.",
+      "properties": {
+        "reason": {
+          "description": "Human-readable reason.",
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run that was fenced."
+        },
+        "type": {
+          "const": "run_lost",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "reason"
       ],
       "type": "object"
     }

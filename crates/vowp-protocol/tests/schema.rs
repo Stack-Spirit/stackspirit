@@ -138,6 +138,7 @@ const LISTED_TYPES: &[&str] = &[
     "SurfaceState",
     "LeaseMode",
     "AgentFrame",
+    "TurnSummary",
 ];
 
 /// Decodes one JSON value into a concrete type.

@@ -8,12 +8,15 @@ use serde_json::{Value, json};
 
 use vowp_protocol::agent::{
     AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, LeaseMode, MAX_PATH_REF_LEN,
-    NodeCard, NodeKind, NodePresence, NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState,
+    NodeCard, NodeKind, NodePresence, NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState, TurnSummary,
 };
+use vowp_protocol::cost::Cost;
 use vowp_protocol::error::ErrorKind;
-use vowp_protocol::ids::{JobId, NodeName, ProjectName, SessionId};
+use vowp_protocol::event::StopReason;
+use vowp_protocol::ids::{EventId, JobId, NodeName, ProjectName, RunId, SessionId};
+use vowp_protocol::run::{RunOutcome, RunPurpose};
 use vowp_protocol::schema::{all_schemas, schema_for_name};
-use vowp_protocol::surface::{SurfaceId, SurfaceKind};
+use vowp_protocol::surface::{RemoteLine, SurfaceId, SurfaceKind};
 use vowp_protocol::time::Timestamp;
 use vowp_protocol::vault::SecretName;
 
@@ -372,6 +375,136 @@ fn agent_frame_round_trips_lease_frames() {
     }))
     .expect_err("unknown lease mode must fail");
     assert!(err.to_string().contains("steal"), "error names the mode: {err}");
+}
+
+#[test]
+fn agent_frame_round_trips_local_chat_frames() {
+    let surface_id = SurfaceId::new();
+    let session = SessionId::new();
+    let run = RunId::new();
+    let event_id = EventId::new();
+    let frames = vec![
+        (
+            "turn_begin",
+            AgentFrame::TurnBegin {
+                surface: surface_id.clone(),
+                session: session.clone(),
+                lease_token: "D".repeat(52),
+                prompt: "summarise the design note".to_owned(),
+                executor: "opencode:deepseek/deepseek-flash#max".to_owned(),
+                cwd_ref: PathRef::Worktree {
+                    project: project("vowp"),
+                    job: job("local-chat"),
+                },
+                job: Some(job("local-chat")),
+                purpose: RunPurpose::Continue,
+            },
+        ),
+        (
+            "turn_grant",
+            AgentFrame::TurnGrant {
+                run_id: run.clone(),
+                session: session.clone(),
+                lease_token: "E".repeat(52),
+                expires_at: at(),
+                tail_seq: 42,
+            },
+        ),
+        (
+            "remote_line",
+            AgentFrame::RemoteLine {
+                run_id: run.clone(),
+                epoch: 3,
+                line: RemoteLine::Heartbeat { at: at() },
+            },
+        ),
+        (
+            "ingest_ack",
+            AgentFrame::IngestAck {
+                run_id: run.clone(),
+                event_id: Some(event_id.clone()),
+                seq: Some(43),
+                duplicate: false,
+                lease_revoked: None,
+                error: None,
+            },
+        ),
+        (
+            "credit",
+            AgentFrame::Credit {
+                run_id: run.clone(),
+                count: 64,
+            },
+        ),
+        (
+            "turn_end",
+            AgentFrame::TurnEnd {
+                run_id: run.clone(),
+                summary: TurnSummary {
+                    exit_code: Some(0),
+                    outcome: RunOutcome::Ok,
+                    native_session_id: Some("ses_mac".to_owned()),
+                    cost: Cost::unknown(),
+                    limit: None,
+                    result_text: Some("done".to_owned()),
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                },
+            },
+        ),
+        (
+            "run_lost",
+            AgentFrame::RunLost {
+                run_id: run.clone(),
+                reason: "session was taken over by phone".to_owned(),
+            },
+        ),
+    ];
+
+    assert_eq!(frames.len(), 7, "every local-chat frame variant is covered");
+    for (wire, frame) in frames {
+        let value = serde_json::to_value(&frame).expect("local chat frame JSON");
+        assert_eq!(value["type"], wire, "wire name for {wire}");
+        let decoded: AgentFrame = serde_json::from_value(value).expect("local chat frame back");
+        assert_eq!(decoded, frame);
+    }
+
+    let turn_begin = serde_json::to_value(AgentFrame::TurnBegin {
+        surface: surface_id,
+        session,
+        lease_token: "D".repeat(52),
+        prompt: "prompt".to_owned(),
+        executor: "opencode:deepseek/deepseek-flash#max".to_owned(),
+        cwd_ref: PathRef::parse("subdir:vowp/src").expect("path ref"),
+        job: None,
+        purpose: RunPurpose::Start,
+    })
+    .expect("turn begin JSON");
+    assert_eq!(turn_begin["cwd_ref"], json!("subdir:vowp/src"));
+    let text = serde_json::to_string(&turn_begin).expect("turn begin text");
+    assert!(!text.contains("/Users/"), "no absolute path in a frame: {text}");
+}
+
+#[test]
+fn local_chat_schema_is_exported() {
+    let schemas = all_schemas();
+    for name in ["AgentFrame", "TurnSummary"] {
+        assert!(schemas.contains_key(name), "all_schemas is missing {name}");
+        assert!(schema_for_name(name).is_some(), "schema_for_name is missing {name}");
+    }
+    let frame = schema_for_name("AgentFrame").expect("AgentFrame schema");
+    let text = serde_json::to_string(&frame).expect("schema text");
+    for variant in [
+        "turn_begin",
+        "turn_grant",
+        "remote_line",
+        "ingest_ack",
+        "credit",
+        "turn_end",
+        "run_lost",
+    ] {
+        assert!(text.contains(variant), "AgentFrame schema is missing {variant}: {text}");
+    }
 }
 
 #[test]

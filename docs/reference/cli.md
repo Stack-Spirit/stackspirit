@@ -794,10 +794,10 @@ Options:
 ```text
 Chat with a session
 
-Usage: vowp session chat [OPTIONS] <ID>
+Usage: vowp session chat [OPTIONS] [ID]
 
 Arguments:
-  <ID>  Session id or unique prefix
+  [ID]  Session id or unique prefix
 
 Options:
       --executor <EXECUTOR>  Switch to this executor before the first turn
@@ -807,8 +807,10 @@ Options:
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --takeover             Take the lease from a live surface before the first turn
+      --agent                Run the local agent chat bridge instead of the home surface
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
+      --session <ID>         Session id for `--agent`; equivalent to the positional id
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
 ```
@@ -1094,10 +1096,10 @@ Options:
 ```text
 Alias of `session chat`
 
-Usage: vowp chat [OPTIONS] <ID>
+Usage: vowp chat [OPTIONS] [ID]
 
 Arguments:
-  <ID>  Session id or unique prefix
+  [ID]  Session id or unique prefix
 
 Options:
       --executor <EXECUTOR>  Switch to this executor before the first turn
@@ -1107,8 +1109,10 @@ Options:
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --takeover             Take the lease from a live surface before the first turn
+      --agent                Run the local agent chat bridge instead of the home surface
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
+      --session <ID>         Session id for `--agent`; equivalent to the positional id
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
 ```

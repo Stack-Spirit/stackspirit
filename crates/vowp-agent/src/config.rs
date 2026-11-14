@@ -11,9 +11,94 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use vowp_protocol::{NodeName, SurfaceId};
+use vowp_protocol::{NodeName, SessionId, SurfaceId};
 
 use crate::error::AgentError;
+
+/// One paired surface token, kept in memory for one chat process.
+///
+/// `Debug` redacts the token so a status line or an error cannot print it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairedToken {
+    /// Surface the token belongs to.
+    pub surface_id: SurfaceId,
+    /// Plaintext `vowp_surf_` token; never logged.
+    pub token: String,
+}
+
+impl std::fmt::Debug for PairedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairedToken")
+            .field("surface_id", &self.surface_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Returns the paired surface token for `session`, when one is stored.
+///
+/// The binding lives in `surfaces/<surface>/session`; `vowp agent pair` writes it next to
+/// the token. A directory without a binding is ignored, so tokens from older agents remain
+/// readable without being attributed to the wrong session.
+pub fn paired_token_for_session(state_dir: &Path, session: &SessionId) -> Result<Option<PairedToken>, AgentError> {
+    let dir = AgentConfig::surfaces_dir(state_dir);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AgentError::Io(error)),
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let bound = match fs::read_to_string(path.join(SURFACE_SESSION_FILE)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AgentError::Io(error)),
+        };
+        if bound.trim() != session.as_str() {
+            continue;
+        }
+        let token = fs::read_to_string(path.join(SURFACE_TOKEN_FILE))?.trim().to_owned();
+        if token.is_empty() {
+            return Err(AgentError::Config(format!(
+                "surface token at {} is empty",
+                path.join(SURFACE_TOKEN_FILE).display()
+            )));
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        found.push(PairedToken {
+            surface_id: SurfaceId(name.to_owned()),
+            token,
+        });
+    }
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.pop()),
+        _ => Err(AgentError::Config(format!(
+            "more than one paired surface is bound to session {session}"
+        ))),
+    }
+}
+
+/// Writes the session binding for a paired surface.
+pub(crate) fn write_surface_binding(
+    state_dir: &Path,
+    surface: &SurfaceId,
+    session: &SessionId,
+) -> Result<(), AgentError> {
+    ensure_private_dir(state_dir)?;
+    ensure_private_dir(&AgentConfig::surfaces_dir(state_dir))?;
+    ensure_private_dir(&AgentConfig::surface_dir(state_dir, surface))?;
+    write_private(
+        &AgentConfig::surface_session_path(state_dir, surface),
+        session.as_str().as_bytes(),
+    )
+}
 
 /// Default directory name below `$HOME`.
 pub const AGENT_DIR_NAME: &str = ".vowp-agent";
@@ -25,6 +110,8 @@ pub const STATUS_FILE: &str = "status.json";
 pub const SURFACES_DIR: &str = "surfaces";
 /// Secret surface token file name inside a surface directory.
 pub const SURFACE_TOKEN_FILE: &str = "token";
+/// Session binding written when the surface was paired.
+pub const SURFACE_SESSION_FILE: &str = "session";
 /// RFC 3339 surface-token expiry file name inside a surface directory.
 pub const SURFACE_EXPIRY_FILE: &str = "expires_at";
 
@@ -91,6 +178,11 @@ impl AgentConfig {
     /// Returns `state_dir/surfaces/<id>/token`.
     pub fn surface_token_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf {
         Self::surface_dir(state_dir, surface).join(SURFACE_TOKEN_FILE)
+    }
+
+    /// Returns `state_dir/surfaces/<id>/session`.
+    pub fn surface_session_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf {
+        Self::surface_dir(state_dir, surface).join(SURFACE_SESSION_FILE)
     }
 
     /// Returns `state_dir/surfaces/<id>/expires_at`.

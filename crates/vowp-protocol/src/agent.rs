@@ -11,9 +11,13 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::capacity::RemoteUsage;
+use crate::cost::Cost;
 use crate::error::{ErrorKind, ProtocolError};
-use crate::ids::{JobId, NodeName, ProjectName, SessionId};
-use crate::surface::{SurfaceId, SurfaceKind};
+use crate::event::{LimitEvent, StopReason};
+use crate::ids::{EventId, JobId, NodeName, ProjectName, RunId, SessionId};
+use crate::run::{RunOutcome, RunPurpose};
+use crate::surface::{RemoteLine as SurfaceRemoteLine, SurfaceId, SurfaceKind};
 use crate::time::Timestamp;
 use crate::vault::SecretName;
 
@@ -565,4 +569,106 @@ pub enum AgentFrame {
         /// Whether a retry may succeed.
         retryable: bool,
     },
+    /// Agent -> home: start one local chat turn after the lease was granted.
+    TurnBegin {
+        /// Paired surface that owns the turn.
+        surface: SurfaceId,
+        /// Session the turn continues.
+        session: SessionId,
+        /// Plaintext lease token returned by `LeaseGrant`; never logged.
+        lease_token: String,
+        /// Prompt for this turn.
+        prompt: String,
+        /// Executor string, for example `opencode:deepseek/deepseek-flash#max`.
+        executor: String,
+        /// Project-relative working directory; the agent resolves it locally.
+        cwd_ref: PathRef,
+        /// Job the run belongs to, when the session is job-scoped.
+        job: Option<JobId>,
+        /// Why the run starts.
+        purpose: RunPurpose,
+    },
+    /// Home -> agent: the turn started and the run id is assigned.
+    TurnGrant {
+        /// Run id assigned by the home.
+        run_id: RunId,
+        /// Session the run belongs to.
+        session: SessionId,
+        /// Lease token for the run; the same value the agent presented.
+        lease_token: String,
+        /// When the lease goes stale without a heartbeat.
+        expires_at: Timestamp,
+        /// Last session sequence the agent may continue from.
+        tail_seq: u64,
+    },
+    /// Agent -> home: one v0.2 remote line wrapped with its run and epoch.
+    RemoteLine {
+        /// Run the line belongs to.
+        run_id: RunId,
+        /// Run epoch; a later frame with another epoch is fenced.
+        epoch: u64,
+        /// The v0.2 event, heartbeat or summary line.
+        line: SurfaceRemoteLine,
+    },
+    /// Home -> agent: the result of one remote line.
+    ///
+    /// Exactly one of the optional fields is set for each acknowledgement kind:
+    /// `event_id`/`seq` for an append or duplicate, `seq` for a summary,
+    /// `lease_revoked` for a takeover and `error` for a rejection.
+    IngestAck {
+        /// Run the acknowledgement belongs to.
+        run_id: RunId,
+        /// Event id that was appended or already present.
+        event_id: Option<EventId>,
+        /// Assigned or existing sequence number.
+        seq: Option<u64>,
+        /// Whether the event was already present.
+        duplicate: bool,
+        /// Human-readable takeover reason; the stream stops.
+        lease_revoked: Option<String>,
+        /// Human-readable rejection; the stream stops.
+        error: Option<String>,
+    },
+    /// Home -> agent: replenish the in-flight event window.
+    Credit {
+        /// Run the credit belongs to.
+        run_id: RunId,
+        /// Number of additional in-flight events allowed.
+        count: u64,
+    },
+    /// Agent -> home: the run finished with one classified summary.
+    TurnEnd {
+        /// Run that finished.
+        run_id: RunId,
+        /// Classified terminal summary.
+        summary: TurnSummary,
+    },
+    /// Home -> agent: the run was fenced; stop the harness and keep the spool.
+    RunLost {
+        /// Run that was fenced.
+        run_id: RunId,
+        /// Human-readable reason.
+        reason: String,
+    },
+}
+
+/// The terminal summary an agent sends in [`AgentFrame::TurnEnd`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnSummary {
+    /// Process exit code, when the harness produced one.
+    pub exit_code: Option<i32>,
+    /// Classified run outcome.
+    pub outcome: RunOutcome,
+    /// Harness-side session id, when one was reported.
+    pub native_session_id: Option<String>,
+    /// Cost and token usage reported by the harness.
+    pub cost: Cost,
+    /// Provider limit that ended the run, when one was classified.
+    pub limit: Option<LimitEvent>,
+    /// Final assistant text, when any.
+    pub result_text: Option<String>,
+    /// Why the run stopped.
+    pub stop_reason: StopReason,
+    /// Resource usage measured on the agent, when available.
+    pub usage: Option<RemoteUsage>,
 }

@@ -8,23 +8,29 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod chat;
 pub mod client;
 pub mod config;
 pub mod error;
 pub mod key;
+pub mod spool;
 pub mod status;
 pub mod transport;
 
+pub use chat::{
+    CHAT_EPOCH, ChatClient, ChatTurnRequest, ChatTurnStatus, EVENT_POLL, LEASE_HEARTBEAT_EVERY, MAX_RECONNECTS,
+};
 pub use client::{
     AGENT_VERSION, AgentClient, AgentClock, Backoff, Enrollment, HEARTBEAT_SECS, MAX_BACKOFF, PAIR_TIMEOUT,
     PairedSurface, RunOptions, RunOutcome, STABLE_CONNECTION, SurfacePairRequest, SystemAgentClock,
     validate_enrollment_code, validate_pairing_code, validate_surface_id,
 };
 pub use config::{
-    AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, STATUS_FILE, SURFACE_EXPIRY_FILE, SURFACE_TOKEN_FILE, SURFACES_DIR,
-    TransportConfig,
+    AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, PairedToken, STATUS_FILE, SURFACE_EXPIRY_FILE, SURFACE_SESSION_FILE,
+    SURFACE_TOKEN_FILE, SURFACES_DIR, TransportConfig, paired_token_for_session,
 };
 pub use error::AgentError;
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
+pub use spool::{ACKED_FILE, DEFAULT_SPOOL_CAP_BYTES, EVENTS_FILE, SPOOL_DIR, Spool, SpoolAppend, spool_dir};
 pub use status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 pub use transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
