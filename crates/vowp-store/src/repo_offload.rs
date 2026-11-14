@@ -60,6 +60,51 @@ impl AgentAssignmentState {
             Self::Rejected => "rejected",
         }
     }
+
+    /// Returns whether the assignment still holds a run or a dispatch slot.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Sent | Self::Accepted | Self::Running | Self::Disconnected
+        )
+    }
+
+    /// Returns whether no further state change is expected for this row.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished | Self::Lost | Self::Cancelled | Self::Rejected)
+    }
+
+    /// Returns whether `self` may move to `next` in the assignment lifecycle.
+    ///
+    /// A state may repeat itself: the agent protocol is idempotent, so a duplicate
+    /// `RunAccepted` or a replayed state report is accepted. The only backwards edge is
+    /// `sent -> queued`, used when the home could not issue the run lease and returns the
+    /// row to the dispatch queue without losing it.
+    pub fn can_transition_to(&self, next: Self) -> bool {
+        if *self == next {
+            return true;
+        }
+        match self {
+            Self::Queued => matches!(next, Self::Sent | Self::Lost | Self::Cancelled),
+            Self::Sent => matches!(
+                next,
+                Self::Queued
+                    | Self::Accepted
+                    | Self::Running
+                    | Self::Disconnected
+                    | Self::Rejected
+                    | Self::Lost
+                    | Self::Cancelled
+            ),
+            Self::Accepted => matches!(
+                next,
+                Self::Running | Self::Disconnected | Self::Lost | Self::Cancelled | Self::Finished
+            ),
+            Self::Running => matches!(next, Self::Disconnected | Self::Lost | Self::Cancelled | Self::Finished),
+            Self::Disconnected => matches!(next, Self::Running | Self::Lost | Self::Cancelled | Self::Finished),
+            Self::Finished | Self::Lost | Self::Cancelled | Self::Rejected => false,
+        }
+    }
 }
 
 /// One durable assignment: the dispatch queue row and the reconnect record.
@@ -350,6 +395,18 @@ impl Store {
         )
     }
 
+    /// Lists assignments whose token-free payload names `job`, oldest first.
+    ///
+    /// The job id lives in `payload_json` by design: the durable queue does not duplicate
+    /// job metadata in a column, so the dispatcher filters on the JSON field it stored.
+    pub fn assignments_for_job(&self, job: &JobId) -> Result<Vec<AgentAssignment>, StoreError> {
+        self.query_assignments(
+            "WHERE json_extract(payload_json, '$.job') = ?1 ORDER BY created_at, id",
+            vec![Box::new(job.as_str().to_owned())],
+            None,
+        )
+    }
+
     /// Lists assignments matching `filter`.
     pub fn list_assignments(&self, filter: &AssignmentFilter) -> Result<Vec<AgentAssignment>, StoreError> {
         let mut query = String::from("WHERE 1 = 1");
@@ -406,7 +463,9 @@ impl Store {
     /// Writes a new durable state, claim time and detail for one assignment.
     ///
     /// Returns the updated row. A missing id is [`StoreError::NotFound`]; the epoch and
-    /// payload are never changed by this method.
+    /// payload are never changed by this method. This unchecked write is kept for callers
+    /// that already made the lifecycle decision; the dispatcher uses
+    /// [`Store::advance_assignment`] instead.
     pub fn set_assignment_state(
         &self,
         id: &str,
@@ -424,6 +483,149 @@ impl Store {
             )?;
             assignment.state = state;
             assignment.claimed_at = claimed_at;
+            assignment.detail = detail.to_owned();
+            Ok(assignment)
+        })
+    }
+
+    /// Atomically claims up to `limit` queued assignments for `node`.
+    ///
+    /// Every selected row moves to `sent`, gets `claimed_at` and `expires_at`, and is
+    /// returned after the update. The `state = 'queued'` predicate is repeated in the
+    /// `UPDATE`, so a concurrent claim cannot send the same row twice.
+    pub fn claim_assignments(
+        &self,
+        node: &NodeName,
+        limit: u32,
+        claimed_at: Timestamp,
+        expires_at: Timestamp,
+    ) -> Result<Vec<AgentAssignment>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.transaction(|tx| {
+            let ids: Vec<String> = {
+                let mut statement = tx.conn.prepare(
+                    "SELECT id FROM main.agent_assignments
+                     WHERE node = ?1 AND state = 'queued'
+                     ORDER BY created_at, id LIMIT ?2",
+                )?;
+                let rows = statement.query_map(params![node.as_str(), i64::from(limit)], |row| row.get(0))?;
+                let mut ids = Vec::new();
+                for row in rows {
+                    ids.push(row?);
+                }
+                ids
+            };
+            let mut claimed = Vec::with_capacity(ids.len());
+            for id in ids {
+                tx.conn.execute(
+                    "UPDATE main.agent_assignments
+                     SET state = ?1, claimed_at = ?2, expires_at = ?3
+                     WHERE id = ?4 AND state = 'queued'",
+                    params![
+                        enum_to_text(&AgentAssignmentState::Sent)?,
+                        ts_to_text(claimed_at),
+                        ts_to_text(expires_at),
+                        id,
+                    ],
+                )?;
+                let assignment = tx
+                    .assignment(&id)?
+                    .ok_or_else(|| StoreError::not_found("assignment", &id))?;
+                claimed.push(assignment);
+            }
+            Ok(claimed)
+        })
+    }
+
+    /// Applies one checked state transition and returns the updated row.
+    ///
+    /// An illegal edge is [`StoreError::Conflict`]. `claimed_at`, when given, replaces the
+    /// existing claim time; the epoch and payload never change.
+    pub fn advance_assignment(
+        &self,
+        id: &str,
+        state: AgentAssignmentState,
+        claimed_at: Option<Timestamp>,
+        detail: &str,
+    ) -> Result<AgentAssignment, StoreError> {
+        self.transaction(|tx| {
+            let mut assignment = tx
+                .assignment(id)?
+                .ok_or_else(|| StoreError::not_found("assignment", id))?;
+            if !assignment.state.can_transition_to(state) {
+                return Err(StoreError::Conflict(format!(
+                    "assignment {id} cannot move from {} to {}",
+                    assignment.state.as_str(),
+                    state.as_str()
+                )));
+            }
+            tx.conn.execute(
+                "UPDATE main.agent_assignments
+                 SET state = ?1, claimed_at = COALESCE(?2, claimed_at), detail = ?3
+                 WHERE id = ?4",
+                params![enum_to_text(&state)?, opt_ts_to_text(claimed_at), detail, id,],
+            )?;
+            assignment.state = state;
+            if claimed_at.is_some() {
+                assignment.claimed_at = claimed_at;
+            }
+            assignment.detail = detail.to_owned();
+            Ok(assignment)
+        })
+    }
+
+    /// Renews the run lease timestamps of an active assignment without changing its state.
+    ///
+    /// A terminal row is [`StoreError::Conflict`]: a finished or lost run is never resumed.
+    pub fn renew_assignment(
+        &self,
+        id: &str,
+        claimed_at: Timestamp,
+        expires_at: Timestamp,
+        detail: &str,
+    ) -> Result<AgentAssignment, StoreError> {
+        self.transaction(|tx| {
+            let mut assignment = tx
+                .assignment(id)?
+                .ok_or_else(|| StoreError::not_found("assignment", id))?;
+            if !assignment.state.is_active() {
+                return Err(StoreError::Conflict(format!(
+                    "assignment {id} is {} and cannot be renewed",
+                    assignment.state.as_str()
+                )));
+            }
+            tx.conn.execute(
+                "UPDATE main.agent_assignments SET claimed_at = ?1, expires_at = ?2, detail = ?3 WHERE id = ?4",
+                params![ts_to_text(claimed_at), ts_to_text(expires_at), detail, id],
+            )?;
+            assignment.claimed_at = Some(claimed_at);
+            assignment.expires_at = Some(expires_at);
+            assignment.detail = detail.to_owned();
+            Ok(assignment)
+        })
+    }
+
+    /// Sets the row's expiry without changing its state.
+    ///
+    /// Used for a rejected assignment's retry cooldown and for tests; the dispatcher's
+    /// normal lease path uses [`Store::claim_assignments`] and [`Store::renew_assignment`].
+    pub fn set_assignment_expiry(
+        &self,
+        id: &str,
+        expires_at: Timestamp,
+        detail: &str,
+    ) -> Result<AgentAssignment, StoreError> {
+        self.transaction(|tx| {
+            let mut assignment = tx
+                .assignment(id)?
+                .ok_or_else(|| StoreError::not_found("assignment", id))?;
+            tx.conn.execute(
+                "UPDATE main.agent_assignments SET expires_at = ?1, detail = ?2 WHERE id = ?3",
+                params![ts_to_text(expires_at), detail, id],
+            )?;
+            assignment.expires_at = Some(expires_at);
             assignment.detail = detail.to_owned();
             Ok(assignment)
         })

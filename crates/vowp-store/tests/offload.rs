@@ -705,3 +705,89 @@ fn node_limit_clears_and_cascades_with_the_node() {
         "node_limits cascades with its node"
     );
 }
+
+#[test]
+fn claim_assignments_is_atomic_and_returns_the_updated_rows() {
+    let fixture = fixture();
+    for id in ["assign-a", "assign-b", "assign-c"] {
+        fixture
+            .store
+            .insert_assignment(&assignment(&fixture, id, 1))
+            .expect("insert");
+    }
+    let mac = NodeName::parse("mac-studio").expect("node");
+    let claimed = fixture.store.claim_assignments(&mac, 2, now(), later()).expect("claim");
+    assert_eq!(claimed.len(), 2, "the limit is honoured");
+    for item in &claimed {
+        assert_eq!(item.state, AgentAssignmentState::Sent);
+        assert_eq!(item.claimed_at, Some(now()));
+        assert_eq!(item.expires_at, Some(later()));
+    }
+    let again = fixture
+        .store
+        .claim_assignments(&mac, 2, now(), later())
+        .expect("second claim");
+    assert_eq!(again.len(), 1, "claimed rows are not claimed twice");
+    assert!(again[0].id != claimed[0].id && again[0].id != claimed[1].id);
+    assert!(
+        fixture
+            .store
+            .claim_assignments(&mac, 0, now(), later())
+            .expect("zero limit")
+            .is_empty()
+    );
+}
+
+#[test]
+fn advance_assignment_rejects_an_invalid_transition_but_is_idempotent() {
+    let fixture = fixture();
+    let item = assignment(&fixture, "assign-a", 1);
+    fixture.store.insert_assignment(&item).expect("insert");
+
+    let sent = fixture
+        .store
+        .advance_assignment(&item.id, AgentAssignmentState::Sent, Some(now()), "sent")
+        .expect("queued -> sent");
+    assert_eq!(sent.state, AgentAssignmentState::Sent);
+
+    let lost = fixture
+        .store
+        .advance_assignment(&item.id, AgentAssignmentState::Lost, None, "lost")
+        .expect("sent -> lost");
+    assert_eq!(lost.state, AgentAssignmentState::Lost);
+    let error = fixture
+        .store
+        .advance_assignment(&item.id, AgentAssignmentState::Accepted, None, "late accept")
+        .expect_err("a lost assignment cannot be accepted");
+    assert!(matches!(error, StoreError::Conflict(_)), "{error}");
+    assert_eq!(
+        fixture.store.assignment(&item.id).expect("read").expect("exists").state,
+        AgentAssignmentState::Lost,
+        "a refused transition leaves the row unchanged"
+    );
+
+    // The same state is an idempotent replay for the agent protocol.
+    let replay = fixture
+        .store
+        .advance_assignment(&item.id, AgentAssignmentState::Lost, None, "lost again")
+        .expect("same-state replay");
+    assert_eq!(replay.state, AgentAssignmentState::Lost);
+}
+
+#[test]
+fn assignments_for_job_filters_on_the_durable_payload() {
+    let fixture = fixture();
+    fixture
+        .store
+        .insert_assignment(&assignment(&fixture, "assign-a", 1))
+        .expect("insert");
+    let other_job = JobId::parse("job-b").expect("job id");
+    let mut other = assignment(&fixture, "assign-b", 1);
+    other.payload.job = other_job.clone();
+    fixture.store.insert_assignment(&other).expect("insert");
+
+    let rows = fixture.store.assignments_for_job(&fixture.job).expect("by job");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "assign-a");
+    assert!(fixture.store.assignments_for_job(&other_job).expect("other job")[0].id == "assign-b");
+}
