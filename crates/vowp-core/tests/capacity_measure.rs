@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use vowp_adapters::proc::{ProcUsage, RunHandle, SpawnSpec, child_env};
@@ -425,17 +425,36 @@ fn scope_begin_measures_a_real_child() {
     let run_id = RunId::new();
     insert_run(&store, &job, &run_id, &NodeName::parse("local").unwrap());
     let deps = test_deps(&root);
+    // A fixed short child races the scope setup: under load the first sample can run
+    // after `sleep 0.2` has exited and read zeros. Keep a real child alive and busy until
+    // the scope has observed it, then poll for the measurement instead of betting on one
+    // sample.
     let mut child = std::process::Command::new("sh")
-        .args(["-c", "sleep 0.2"])
+        .args(["-c", "while :; do :; done"])
         .spawn()
         .unwrap();
     let scope = RunScope::begin(&deps, &run_id, child.id()).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
-    let sample = scope.sample().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut sample = scope.sample().unwrap();
+    while sample.peak_rss_bytes == 0 || sample.cpu_usec == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the real child was not measured within 10s: {sample:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        sample = scope.sample().unwrap();
+    }
     assert!(sample.peak_rss_bytes > 0, "no memory measured: {sample:?}");
+    assert!(sample.cpu_usec > 0, "no CPU measured: {sample:?}");
+    let _ = child.kill();
     let _ = child.wait();
     let usage = scope.finish(&store, BuildMode::Unknown).unwrap();
     assert!(usage.peak_rss_bytes > 0);
+    assert!(usage.cpu_usec > 0, "the usage row lost the child's CPU: {usage:?}");
+    assert!(
+        matches!(usage.source, UsageSource::Cgroup | UsageSource::ProcTree),
+        "the usage row did not come from a real scope: {usage:?}"
+    );
     assert_eq!(usage.run_id, run_id);
 }
 
