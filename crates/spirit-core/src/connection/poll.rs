@@ -112,22 +112,24 @@ impl PollScheduler {
             PollPhase::Backoff => self.policy.fleet_idle,
             PollPhase::StaleBackoff => self.policy.stale_backoff,
         };
-        let jitter = if self.policy.jitter_fraction <= 0.0 {
+        let fraction = self.policy.jitter_fraction.clamp(0.0, 0.5);
+        let span = (base.as_millis() as f64 * fraction).round() as u128;
+        let offset = if span == 0 {
             0
         } else {
-            let fraction = self.policy.jitter_fraction.clamp(0.0, 0.5);
-            let span = (base.as_millis() as f64 * fraction).round() as u128;
-            if span == 0 {
-                0
-            } else {
-                self.seed = self
-                    .seed
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                u128::from(self.seed) % ((span * 2) + 1)
-            }
+            self.seed = self
+                .seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            // Sample in `0..=2 * span`, then subtract `span`: the documented
+            // cadence is `base ± jitter_fraction`, not `base .. base + 2 * span`.
+            u128::from(self.seed) % ((span * 2) + 1)
         };
-        let millis = base.as_millis().saturating_add(jitter);
+        let millis = if offset >= span {
+            base.as_millis().saturating_add(offset - span)
+        } else {
+            base.as_millis().saturating_sub(span - offset)
+        };
         Duration::from_millis(u64::try_from(millis).unwrap_or(u64::MAX))
     }
 

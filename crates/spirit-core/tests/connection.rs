@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use spirit_core::connection::{
-    ConnectionManager, ConnectionState, PollPolicy, Revision, SpiritEvent,
+    ConnectionManager, ConnectionState, PollPolicy, PollScheduler, Revision, SpiritEvent,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::host::HostId;
@@ -175,6 +175,33 @@ async fn stale_snapshot_keeps_a_non_timeout_error_code() {
     assert_eq!(error.retryable, original.retryable);
     assert_eq!(error.message, original.message);
     assert_eq!(error.hint, original.hint);
+}
+
+#[tokio::test]
+async fn parse_failure_marks_the_last_good_view_stale_immediately() {
+    let manager = ConnectionManager::default();
+    let client = mock();
+    manager.connect(&client, host()).await.unwrap();
+    let original = SpiritError::parse("fleet status", "missing home");
+    let failing = client.clone().failing_status(original.clone());
+
+    let error = manager.poll_once(&failing).await.unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::Parse);
+    assert_eq!(manager.consecutive_failures(), 1);
+    assert!(
+        matches!(manager.state(), ConnectionState::Stale { .. }),
+        "one parse failure must not leave the state Connected"
+    );
+    assert!(!manager.mutations_allowed());
+    let view = manager.fleet_view().expect("the last good view is kept");
+    assert!(view.stale, "a parse failure must mark the view stale");
+    assert!(view.mutations_disabled());
+
+    let snapshot = manager.status();
+    assert_eq!(snapshot.state, "stale");
+    let reported = snapshot.error.expect("the parse error must be visible");
+    assert_eq!(reported.code, SpiritErrorCode::Parse);
+    assert_eq!(reported.message, original.message);
 }
 
 #[tokio::test]
@@ -376,6 +403,33 @@ fn latency_stats_are_deterministic() {
     assert!(stats.ewma_ms > 40.0 && stats.ewma_ms < 60.0);
     assert_eq!(stats.p50_ms, 40);
     assert_eq!(stats.p95_ms, 60);
+}
+
+#[test]
+fn poll_jitter_is_symmetric_around_the_connected_cadence() {
+    let mut scheduler = PollScheduler::new(PollPolicy::default());
+    let minimum = Duration::from_millis(3_600);
+    let maximum = Duration::from_millis(4_400);
+    let mut seen_min = Duration::MAX;
+    let mut seen_max = Duration::ZERO;
+    let mut total_ms = 0_u128;
+    for _ in 0..10_000 {
+        let delay = scheduler.next_delay();
+        assert!(
+            delay >= minimum && delay <= maximum,
+            "default poll delay {delay:?} is outside the documented 4s ±10% range"
+        );
+        seen_min = seen_min.min(delay);
+        seen_max = seen_max.max(delay);
+        total_ms += delay.as_millis();
+    }
+    assert!(seen_min < Duration::from_secs(4), "jitter never subtracts");
+    assert!(seen_max > Duration::from_secs(4), "jitter never adds");
+    let mean_ms = total_ms / 10_000;
+    assert!(
+        (3_900..=4_100).contains(&mean_ms),
+        "mean delay {mean_ms}ms is biased away from 4s"
+    );
 }
 
 #[test]

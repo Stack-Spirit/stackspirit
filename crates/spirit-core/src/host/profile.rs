@@ -250,30 +250,35 @@ impl HostProfile {
     }
 
     /// Applies a partial update and returns whether anything changed.
+    ///
+    /// The patch is applied to a candidate copy and validated before it replaces
+    /// `self`, so a rejected patch leaves the stored profile untouched.
     pub fn apply_patch(
         &mut self,
         patch: HostProfilePatch,
         now: Timestamp,
     ) -> Result<bool, SpiritError> {
         let before = self.clone();
+        let mut candidate = self.clone();
         if let Some(label) = patch.label {
-            self.label = label;
+            candidate.label = label;
         }
         if let Some(ssh) = patch.ssh {
-            self.ssh = ssh;
+            candidate.ssh = ssh;
         }
         if let Some(identity_file) = patch.identity_file {
-            self.identity_file = identity_file;
+            candidate.identity_file = identity_file;
         }
         if let Some(vowp_home) = patch.vowp_home {
-            self.vowp_home = vowp_home.filter(|value| !value.is_empty());
+            candidate.vowp_home = vowp_home.filter(|value| !value.is_empty());
         }
         if let Some(default_project) = patch.default_project {
-            self.default_project = default_project.filter(|value| !value.is_empty());
+            candidate.default_project = default_project.filter(|value| !value.is_empty());
         }
-        self.label = self.label.trim().to_owned();
-        self.updated_at = now;
-        self.validate()?;
+        candidate.label = candidate.label.trim().to_owned();
+        candidate.updated_at = now;
+        candidate.validate()?;
+        *self = candidate;
         Ok(*self != before)
     }
 

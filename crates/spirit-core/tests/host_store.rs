@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use spirit_core::error::SpiritErrorCode;
 use spirit_core::host::{
-    HostDraft, HostKeyPin, HostProfile, HostProfilePatch, HostStore, JsonHostStore, NewHostProfile,
-    verify_pin_against_scan,
+    HostDraft, HostKeyPin, HostProfile, HostProfilePatch, HostStore, InMemoryHostStore,
+    JsonHostStore, NewHostProfile, verify_pin_against_scan,
 };
 use spirit_core::ssh::fingerprint::{parse_fingerprint_output, parse_keyscan_output};
 use spirit_core::ssh::known_hosts::{contains_key, write_known_hosts};
@@ -176,6 +176,24 @@ fn host_store_update_remove_and_repin() {
         store.remove(&profile.id).unwrap_err().code,
         SpiritErrorCode::NotFound
     );
+}
+
+#[test]
+fn failed_in_memory_update_leaves_the_stored_profile_unchanged() {
+    let store = InMemoryHostStore::new();
+    let profile = store.add(new_host("original")).unwrap();
+    let patch = HostProfilePatch {
+        label: Some("   ".to_owned()),
+        ..HostProfilePatch::default()
+    };
+    let error = store.update(&profile.id, patch).unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::InvalidInput);
+    let stored = store
+        .get(&profile.id)
+        .unwrap()
+        .expect("host is still present");
+    assert_eq!(stored.label, "original");
+    assert_eq!(stored.updated_at, profile.updated_at);
 }
 
 #[test]

@@ -185,9 +185,19 @@ async fn live_client_keeps_parse_warnings_until_the_caller_drains_them() {
     capacity.as_object_mut().unwrap().remove("reload_pending");
     let capacity_body = serde_json::to_vec(&capacity).unwrap();
 
+    let mut queue: serde_json::Value = serde_json::from_str(QUEUE).unwrap();
+    queue[0]["state"] = serde_json::Value::String("quantum".to_owned());
+    let queue_body = serde_json::to_vec(&queue).unwrap();
+
+    let mut inbox: serde_json::Value = serde_json::from_str(INBOX).unwrap();
+    inbox[0]["kind"] = serde_json::Value::String("quantum".to_owned());
+    let inbox_body = serde_json::to_vec(&inbox).unwrap();
+
     let fake = Arc::new(FakeCommandRunner::new(vec![
         CommandOutput::ok(status_body),
         CommandOutput::ok(capacity_body),
+        CommandOutput::ok(queue_body),
+        CommandOutput::ok(inbox_body),
     ]));
     let client = SshVowpClient::new(fake, target(), options(false), None);
 
@@ -211,6 +221,20 @@ async fn live_client_keeps_parse_warnings_until_the_caller_drains_them() {
             .iter()
             .any(|warning| warning.path == "reload_pending"),
         "capacity report warnings must not be dropped: {warnings:?}"
+    );
+
+    let _ = client.fleet_queue().await.unwrap();
+    let warnings = client.take_warnings();
+    assert!(
+        warnings.iter().any(|warning| warning.path == "[0].state"),
+        "fleet queue warnings must not be dropped: {warnings:?}"
+    );
+
+    let _ = client.fleet_inbox(true).await.unwrap();
+    let warnings = client.take_warnings();
+    assert!(
+        warnings.iter().any(|warning| warning.path == "[0].kind"),
+        "fleet inbox warnings must not be dropped: {warnings:?}"
     );
 }
 
@@ -294,6 +318,28 @@ async fn ssh_transport_failure_maps_to_remote_or_host_key_errors() {
     let client = SshVowpClient::new(fake, target(), options(false), None);
     let error = client.probe().await.unwrap_err();
     assert_eq!(error.code, SpiritErrorCode::HostKeyMismatch);
+}
+
+#[tokio::test]
+async fn refused_and_invalid_input_exits_are_not_retryable() {
+    let fake = Arc::new(FakeCommandRunner::new(vec![
+        CommandOutput::fail(5, "lane is guarded"),
+        CommandOutput::fail(2, "invalid capacity mode"),
+        CommandOutput::fail(7, "remote failure"),
+    ]));
+    let client = SshVowpClient::new(fake, target(), options(false), None);
+
+    let error = client.fleet_queue().await.unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::Refused);
+    assert!(!error.retryable, "refused must wait for changed input");
+
+    let error = client.fleet_queue().await.unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::InvalidInput);
+    assert!(!error.retryable, "invalid input cannot succeed on a retry");
+
+    let error = client.fleet_queue().await.unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::Remote);
+    assert!(error.retryable, "remote failures still retry with backoff");
 }
 
 #[test]

@@ -401,7 +401,8 @@ impl ConnectionManager {
         Ok(snapshot)
     }
 
-    /// Polls `fleet status` once. Three consecutive failures move the state to `Stale`
+    /// Polls `fleet status` once. A parse failure marks the retained view stale at
+    /// once; other failures move the state to `Stale` after three consecutive polls
     /// and start the longer backoff.
     pub async fn poll_once(
         &self,
@@ -495,7 +496,12 @@ impl ConnectionManager {
                     ));
                 }
                 let failures = inner.scheduler.record_failure();
-                if failures >= inner.scheduler.phase_threshold() {
+                // A parse failure invalidates the snapshot immediately: keep the last
+                // good view, but mark it stale and surface the parse error. Transport
+                // failures still wait for the three-failure threshold so a single
+                // dropped packet does not disable writes.
+                let parse_failure = error.code == SpiritErrorCode::Parse;
+                if parse_failure || failures >= inner.scheduler.phase_threshold() {
                     let last_ok_at = inner.last_ok_at.unwrap_or_else(Timestamp::now);
                     inner.state = ConnectionState::Stale {
                         host_id: host_id.clone(),

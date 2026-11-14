@@ -95,7 +95,7 @@ pub fn scan_external_harnesses(probe: &dyn HarnessProbe) -> Vec<ExternalHarness>
         let version = probe.version(&path);
         found.push(ExternalHarness {
             kind,
-            usable: version.is_some() || path.is_file(),
+            usable: version.is_some() || is_executable(&path),
             path,
             version,
         });
@@ -107,4 +107,18 @@ pub fn scan_external_harnesses(probe: &dyn HarnessProbe) -> Vec<ExternalHarness>
             .then_with(|| left.path.cmp(&right.path))
     });
     found
+}
+
+/// Returns true when `path` is a regular file with an executable bit set.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }

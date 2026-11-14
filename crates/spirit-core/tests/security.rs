@@ -51,6 +51,38 @@ fn redact_removes_authorization_headers_with_a_scheme() {
         "basic credential leaked: {output}"
     );
     assert!(!output.contains("Basic"), "scheme leaked: {output}");
+
+    let output = redact("Authorization: token abcdef");
+    assert!(
+        !output.contains("abcdef"),
+        "token credential leaked: {output}"
+    );
+    assert!(!output.contains("token"), "scheme leaked: {output}");
+
+    let output = redact("Authorization: Digest username=\"user\", response=\"abcdef\"");
+    assert!(
+        !output.contains("abcdef"),
+        "digest credential leaked: {output}"
+    );
+    assert!(
+        !output.contains("username"),
+        "digest fields leaked: {output}"
+    );
+}
+
+#[test]
+fn redact_removes_hyphenated_headers_and_detached_assignments() {
+    let output = redact("X-Api-Key: abcdef");
+    assert!(!output.contains("abcdef"), "header value leaked: {output}");
+
+    let output = redact("X-Auth-Token: abcdef");
+    assert!(!output.contains("abcdef"), "auth token leaked: {output}");
+
+    let output = redact("api_key = abcdef");
+    assert!(
+        !output.contains("abcdef"),
+        "detached value leaked: {output}"
+    );
 }
 
 #[test]

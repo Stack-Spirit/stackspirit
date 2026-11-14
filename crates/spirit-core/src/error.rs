@@ -234,22 +234,38 @@ pub fn redact(input: &str) -> String {
     const LIMIT: usize = 2048;
     let sanitized = redact_pem_blocks(input);
     let mut out = String::with_capacity(sanitized.len().min(LIMIT));
-    let mut redact_next = false;
+    let mut awaiting_value = false;
+    let mut redact_line = false;
     for token in sanitized.split_inclusive(char::is_whitespace) {
         let bare = token.trim();
-        let lower = bare.trim_matches(':').to_ascii_lowercase();
-        // `Authorization: Bearer abcdef` has two consecutive scheme tokens: the
-        // header name and the scheme. Keep redacting after the scheme so the
-        // credential itself is removed too.
-        let auth_scheme = matches!(lower.as_str(), "bearer" | "basic" | "authorization");
-        // A trailing `key:` / `key=` separates the value into the next token
-        // (`api_key: super-secret-value`).
-        let key_without_value = looks_like_secret_key(bare);
-        let rendered = if redact_next || looks_like_secret(bare) {
-            redact_next = auth_scheme;
+        let rendered = if redact_line {
+            if token.contains('\n') {
+                redact_line = false;
+            }
             "[redacted]"
-        } else if auth_scheme || key_without_value {
-            redact_next = true;
+        } else if is_authorization_header(bare) {
+            // An Authorization header can carry several credential tokens
+            // (`Basic <blob>`, `Digest username=..., response=...`). Redact the value
+            // through the end of the header line.
+            redact_line = !token.contains('\n');
+            "[redacted]"
+        } else if awaiting_value {
+            if bare.is_empty() || is_value_separator(bare) {
+                // Preserve a detached `=` / `:` so `api_key = value` keeps its shape
+                // while the value itself is still redacted.
+                token
+            } else if is_auth_scheme(bare) {
+                // `Authorization: <scheme> <credential>` has two tokens before the
+                // credential. Redact the scheme and keep waiting for the value.
+                "[redacted]"
+            } else {
+                awaiting_value = false;
+                "[redacted]"
+            }
+        } else if looks_like_secret(bare) {
+            "[redacted]"
+        } else if looks_like_secret_key(bare) || is_auth_scheme(bare) {
+            awaiting_value = true;
             "[redacted]"
         } else {
             token
@@ -338,8 +354,9 @@ fn looks_like_secret(token: &str) -> bool {
     false
 }
 
-/// Returns true when `token` is a sensitive key name with the value in the next
-/// whitespace-delimited token, for example `api_key:` or `authorization:`.
+/// Returns true when `token` is a sensitive key name, possibly followed by a
+/// detached separator, for example `api_key`, `api_key:`, `X-Api-Key:` or
+/// `api_key=`.
 fn looks_like_secret_key(token: &str) -> bool {
     let token = token.trim_matches(|c: char| {
         matches!(
@@ -347,10 +364,59 @@ fn looks_like_secret_key(token: &str) -> bool {
             '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
         )
     });
-    token
-        .strip_suffix(':')
-        .or_else(|| token.strip_suffix('='))
-        .is_some_and(is_sensitive_name)
+    is_sensitive_name(token)
+}
+
+/// Returns true when `token` is a detached assignment separator.
+fn is_value_separator(token: &str) -> bool {
+    matches!(token, "=" | ":" | "=>")
+}
+
+/// Returns true when `token` names an HTTP authorization scheme.
+fn is_auth_scheme(token: &str) -> bool {
+    let token = token
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+            )
+        })
+        .trim_end_matches(':')
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    matches!(
+        token.as_str(),
+        "bearer"
+            | "basic"
+            | "token"
+            | "digest"
+            | "negotiate"
+            | "ntlm"
+            | "hoba"
+            | "mutual"
+            | "oauth"
+            | "jwt"
+            | "saml"
+            | "aws4_hmac_sha256"
+            | "sso_key"
+            | "api_key"
+            | "apikey"
+    )
+}
+
+/// Returns true when `token` starts an HTTP Authorization header.
+fn is_authorization_header(token: &str) -> bool {
+    let token = token
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+            )
+        })
+        .trim_end_matches(':');
+    let name = token.split([':', '=']).next().unwrap_or(token);
+    let name = name.to_ascii_lowercase().replace('-', "_");
+    name == "authorization" || name.ends_with("_authorization")
 }
 
 /// Splits a `key=value` or `key:value` token at its first separator.
@@ -361,21 +427,35 @@ fn split_key_value(token: &str) -> Option<(&str, &str)> {
 }
 
 /// Returns true when a key name is on the redaction list.
+///
+/// Header names are case-insensitive and may use hyphens (`X-Api-Key`) where the
+/// list uses underscores, so the comparison normalizes both and accepts a
+/// well-known suffix such as `_api_key` or `_token`.
 fn is_sensitive_name(name: &str) -> bool {
     let name = name
         .trim_matches(|c: char| matches!(c, '"' | '\'' | ' '))
-        .to_ascii_lowercase();
-    const SENSITIVE: [&str; 8] = [
+        .trim_end_matches([':', '='])
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    let name = name.trim();
+    const SENSITIVE: [&str; 10] = [
         "api_key",
         "apikey",
+        "access_key",
         "token",
         "secret",
         "password",
         "passphrase",
         "authorization",
         "credential",
+        "private_key",
     ];
-    SENSITIVE.iter().any(|needle| name.contains(needle))
+    SENSITIVE.iter().any(|needle| {
+        name == *needle
+            || name
+                .strip_suffix(needle)
+                .is_some_and(|prefix| prefix.ends_with('_'))
+    })
 }
 
 /// Maps a VOWP CLI exit code to a StackSpirit code, per `VOWP-CONTRACT.md` §8.2.

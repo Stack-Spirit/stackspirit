@@ -168,7 +168,15 @@ impl SshVowpClient {
         } else {
             format!("vowp exited {}: {}", output.status, first_line(&stderr))
         };
-        let error = SpiritError::new(code, detail).retryable();
+        let error = SpiritError::new(code, detail);
+        let error = if matches!(
+            code,
+            SpiritErrorCode::InvalidInput | SpiritErrorCode::Refused
+        ) {
+            error
+        } else {
+            error.retryable()
+        };
         if code == SpiritErrorCode::VowpMissing {
             Err(error.with_hint("Install VOWP on the host, then re-probe."))
         } else {
@@ -248,7 +256,9 @@ impl VowpClient for SshVowpClient {
         argv.extend(["fleet".to_owned(), "queue".to_owned()]);
         let output = self.run(&argv, READ_TIMEOUT).await?;
         let output = self.check_output(output)?;
-        Ok(parse_fleet_queue(&output.stdout)?.value)
+        let parsed = parse_fleet_queue(&output.stdout)?;
+        self.record_warnings(parsed.warnings);
+        Ok(parsed.value)
     }
 
     async fn fleet_inbox(&self, all: bool) -> Result<Vec<InboxItem>, SpiritError> {
@@ -260,7 +270,9 @@ impl VowpClient for SshVowpClient {
         }
         let output = self.run(&argv, READ_TIMEOUT).await?;
         let output = self.check_output(output)?;
-        Ok(parse_fleet_inbox(&output.stdout)?.value)
+        let parsed = parse_fleet_inbox(&output.stdout)?;
+        self.record_warnings(parsed.warnings);
+        Ok(parsed.value)
     }
 
     async fn job_action(

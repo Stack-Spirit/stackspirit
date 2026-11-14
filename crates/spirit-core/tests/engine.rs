@@ -211,10 +211,22 @@ fn path_probe_finds_exact_names_only() {
     let other = directory.path().join("opencode-extra");
     std::fs::write(&other, b"#!/bin/sh\n").unwrap();
     let probe = spirit_core::engine::PathHarnessProbe::new(vec![directory.path().to_path_buf()]);
-    assert_eq!(probe.locate("opencode"), Some(opencode));
+    assert_eq!(probe.locate("opencode"), Some(opencode.clone()));
     assert_eq!(probe.locate("opencode-extra"), Some(other));
     assert_eq!(probe.locate("node"), None);
     let found = scan_external_harnesses(&probe);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, ExternalHarnessKind::Opencode);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert!(
+            !found[0].usable,
+            "a non-executable file must not be reported as usable"
+        );
+        std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = scan_external_harnesses(&probe);
+        assert!(executable[0].usable, "an executable harness is usable");
+    }
 }
