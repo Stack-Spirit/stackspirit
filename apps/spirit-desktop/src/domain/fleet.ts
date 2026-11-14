@@ -44,14 +44,25 @@ const LANE_KEYS: readonly LaneKey[] = [
   "done",
 ];
 
-const ACTIVE_STATES = new Set([
+/** `vowp job retry` accepts only these states (docs/guides/jobs.md). */
+const RETRYABLE_STATES = new Set(["failed", "parked", "stalled"]);
+
+/**
+ * Park and cancel accept every non-terminal state. `active` is a view alias for a
+ * running card; unknown states are deliberately absent so they stay read-only.
+ */
+const NON_TERMINAL_STATES = new Set([
   "active",
+  "pending",
+  "ready",
   "running",
   "stalled",
   "gating",
   "reviewing",
   "fixing",
   "merging",
+  "failed",
+  "parked",
 ]);
 
 /**
@@ -159,9 +170,12 @@ export function selectFleet(fleet: FleetView, projectFilter: string | null): Fle
   const counts = countsFromProjects(projects);
   lanes.counts = Object.fromEntries(LANE_KEYS.map((key) => [key, counts[key]]));
   lanes.queue_shown = lanes.ready.length + lanes.parked_blocked.length;
+  // The flag is global ("any project reached the cap"), so only repeat it for a
+  // filtered project when its own visible queue also reached the cap.
   lanes.queue_truncated =
     fleet.lanes.queue_truncated &&
-    (lanes.queue_shown > 0 || counts.ready >= fleet.lanes.queue_cap);
+    fleet.lanes.queue_cap > 0 &&
+    lanes.queue_shown >= fleet.lanes.queue_cap;
   return {
     projects,
     running,
@@ -278,10 +292,16 @@ export function sortWorkerCards(cards: readonly WorkerCardView[]): WorkerCardVie
   });
 }
 
-/** Finds a title when a queue or gate-failure card carries one. */
-export function findJobTitle(fleet: FleetView, jobId: string): string | null {
+/** Finds a title when a queue or gate-failure card carries one, keyed like the lanes. */
+export function findJobTitle(
+  fleet: FleetView,
+  project: string,
+  jobId: string,
+): string | null {
   for (const lane of LANE_KEYS) {
-    const card = fleet.lanes[lane].find((candidate) => candidate.job_id === jobId);
+    const card = fleet.lanes[lane].find(
+      (candidate) => candidate.project === project && candidate.job_id === jobId,
+    );
     if (card?.title) return card.title;
   }
   return null;
@@ -359,8 +379,8 @@ export interface ActionEligibility {
 export type JobActionEligibility = Record<JobActionName, ActionEligibility>;
 
 /**
- * Action legality is intentionally conservative: an action is enabled only for the
- * states VOWP documents as lock-holding or terminal, and never while data is stale.
+ * Action legality follows VOWP exactly: retry only for failed/parked/stalled, and
+ * park/cancel for every non-terminal state, never while data is stale or unknown.
  */
 export function jobActionEligibility(
   job: JobCardView,
@@ -373,9 +393,9 @@ export function jobActionEligibility(
       cancel: { enabled: false, reason: "Refresh before changing a job." },
     };
   }
-  const active = ACTIVE_STATES.has(job.state);
-  const retryable = job.state === "parked" || job.state === "failed" || job.state === "cancelled";
-  if (!active && !retryable) {
+  const retryable = RETRYABLE_STATES.has(job.state);
+  const mutable = NON_TERMINAL_STATES.has(job.state);
+  if (!retryable && !mutable) {
     const reason = `VOWP does not allow job actions for state "${job.state}".`;
     return {
       retry: { enabled: false, reason },
@@ -386,13 +406,22 @@ export function jobActionEligibility(
   return {
     retry: retryable
       ? { enabled: true, reason: null }
-      : { enabled: false, reason: `Retry is not allowed while the job is ${job.state}.` },
-    park: active
+      : {
+          enabled: false,
+          reason: `Retry is only allowed for a failed, parked or stalled job, not "${job.state}".`,
+        },
+    park: mutable
       ? { enabled: true, reason: null }
-      : { enabled: false, reason: "Park is only allowed for an active job." },
-    cancel: active
+      : {
+          enabled: false,
+          reason: `Park is only allowed for a non-terminal job, not "${job.state}".`,
+        },
+    cancel: mutable
       ? { enabled: true, reason: null }
-      : { enabled: false, reason: "Cancel is only allowed for an active job." },
+      : {
+          enabled: false,
+          reason: `Cancel is only allowed for a non-terminal job, not "${job.state}".`,
+        },
   };
 }
 

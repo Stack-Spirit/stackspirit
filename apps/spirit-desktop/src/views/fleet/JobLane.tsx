@@ -19,7 +19,11 @@ export function JobLane({
   showProject?: boolean;
   onOpenJob: (job: JobCardView) => void;
 }) {
-  const truncation = truncated ? queueTruncationText(queueCap) : null;
+  // The queue cap is VOWP's row bound; repeat it in the DOM so a changed cap never
+  // turns into an unbounded card list (PLAN §9.5).
+  const visibleCards = cards.slice(0, Math.max(0, queueCap));
+  const capped = visibleCards.length < cards.length;
+  const truncation = truncated || capped ? queueTruncationText(queueCap) : null;
 
   return (
     <section
@@ -43,7 +47,7 @@ export function JobLane({
         ) : cards.length === 0 ? (
           <p className="job-lane__empty">No jobs</p>
         ) : (
-          cards.map((job) => (
+          visibleCards.map((job) => (
             <JobCard
               key={`${job.project}:${job.job_id}`}
               job={job}

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
@@ -59,6 +59,34 @@ describe("inbox drawer", () => {
     const submit = await screen.findByTestId("inbox-answer-submit");
     expect(submit).toBeDisabled();
     expect(answer).not.toHaveBeenCalled();
+  });
+
+  it("bounds answers by UTF-8 bytes, not UTF-16 code units", async () => {
+    const fixture = scenario("fresh-single");
+    const bridge = await connectedBridge();
+    seedStore(fixture.fleet, { bridge });
+    render(<InboxDrawer open onClose={() => undefined} />);
+    const submit = await screen.findByTestId("inbox-answer-submit");
+    expect(submit).toBeDisabled();
+    const field = screen.getByRole("textbox", { name: /^Answer/ });
+
+    // 4,000 two-byte characters are 8,000 UTF-8 bytes and fit the limit.
+    fireEvent.input(field, { target: { value: "é".repeat(4_000) } });
+    await waitFor(() =>
+      expect(screen.getByText(/bytes\. Empty answers/)).toHaveTextContent(
+        "8000 / 10000 bytes",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("inbox-answer-submit")).toBeEnabled(),
+    );
+
+    // 5,001 two-byte characters are 10,002 bytes and must be rejected locally.
+    fireEvent.input(field, { target: { value: "é".repeat(5_001) } });
+    await waitFor(() =>
+      expect(screen.getByTestId("inbox-answer-submit")).toBeDisabled(),
+    );
+    expect(screen.getByText(/10002 \/ 10000 bytes/)).toBeInTheDocument();
   });
 
   it("disables answers while the snapshot is stale", async () => {

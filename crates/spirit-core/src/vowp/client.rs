@@ -56,12 +56,13 @@ pub trait VowpClient: Send + Sync {
     async fn fleet_queue(&self) -> Result<Vec<FleetQueueRow>, SpiritError>;
     /// Reads and parses `vowp --json fleet inbox [--all]`.
     async fn fleet_inbox(&self, all: bool) -> Result<Vec<InboxItem>, SpiritError>;
-    /// Runs `vowp --project <p> --json job <action> <job>`.
+    /// Runs `vowp --project <p> --json job <action> <job>`; park requires a reason.
     async fn job_action(
         &self,
         project: &str,
         job: &str,
         action: JobAction,
+        reason: Option<&str>,
     ) -> Result<(), SpiritError>;
     /// Runs `vowp [--project <p>] --json inbox answer <id> <answer>`.
     async fn answer_inbox(
@@ -221,6 +222,27 @@ fn push_json(argv: &mut Vec<String>) {
     argv.push("--json".to_owned());
 }
 
+/// Validates the user-visible park reason before it reaches `vowp job park --reason`.
+fn validated_park_reason(reason: Option<&str>) -> Result<&str, SpiritError> {
+    let trimmed = reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SpiritError::invalid_input("reason", "is required when parking a job"))?;
+    if trimmed.chars().count() > 200 {
+        return Err(SpiritError::invalid_input(
+            "reason",
+            "must be at most 200 characters",
+        ));
+    }
+    if trimmed.contains('\u{0}') {
+        return Err(SpiritError::invalid_input(
+            "reason",
+            "must not contain a NUL byte",
+        ));
+    }
+    Ok(trimmed)
+}
+
 #[async_trait]
 impl VowpClient for SshVowpClient {
     async fn probe(&self) -> Result<VowpProbe, SpiritError> {
@@ -299,15 +321,21 @@ impl VowpClient for SshVowpClient {
         project: &str,
         job: &str,
         action: JobAction,
+        reason: Option<&str>,
     ) -> Result<(), SpiritError> {
         ProjectName::parse(project)?;
         JobId::parse(job)?;
+        let park_reason = if action == JobAction::Park {
+            Some(validated_park_reason(reason)?)
+        } else {
+            None
+        };
         let mut argv = self.base_argv();
         argv.extend(["--project".to_owned(), project.to_owned()]);
         push_json(&mut argv);
         argv.extend(["job".to_owned(), action.as_str().to_owned(), job.to_owned()]);
-        if action == JobAction::Park {
-            argv.extend(["--reason".to_owned(), "parked from StackSpirit".to_owned()]);
+        if let Some(reason) = park_reason {
+            argv.extend(["--reason".to_owned(), reason.to_owned()]);
         }
         let output = self.run(&argv, WRITE_TIMEOUT).await?;
         self.check_output(output)?;
@@ -406,7 +434,7 @@ struct MockState {
     fail_probe: Option<SpiritError>,
     fail_status: Option<SpiritError>,
     status_calls: u32,
-    actions: Vec<(String, String, JobAction)>,
+    actions: Vec<(String, String, JobAction, Option<String>)>,
     targets: Vec<SetTargetInput>,
     warnings: Vec<WireWarning>,
 }
@@ -521,7 +549,7 @@ impl MockVowpClient {
 
     /// Returns recorded job actions.
     #[must_use]
-    pub fn actions(&self) -> Vec<(String, String, JobAction)> {
+    pub fn actions(&self) -> Vec<(String, String, JobAction, Option<String>)> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -597,12 +625,18 @@ impl VowpClient for MockVowpClient {
         project: &str,
         job: &str,
         action: JobAction,
+        reason: Option<&str>,
     ) -> Result<(), SpiritError> {
+        let park_reason = if action == JobAction::Park {
+            Some(validated_park_reason(reason)?.to_owned())
+        } else {
+            None
+        };
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .actions
-            .push((project.to_owned(), job.to_owned(), action));
+            .push((project.to_owned(), job.to_owned(), action, park_reason));
         Ok(())
     }
 

@@ -87,7 +87,12 @@ async fn fixture_client_implements_the_contract() {
     assert_eq!(target.target_workers, 9);
     assert!(target.is_override);
     client
-        .job_action("vowp", "ss-1-core", spirit_core::wire::JobAction::Retry)
+        .job_action(
+            "vowp",
+            "ss-1-core",
+            spirit_core::wire::JobAction::Retry,
+            None,
+        )
         .await
         .unwrap();
 }

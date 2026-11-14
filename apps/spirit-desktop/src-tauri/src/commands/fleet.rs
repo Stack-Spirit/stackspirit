@@ -98,6 +98,7 @@ pub async fn job_action(
     state: State<'_, AppState>,
     job_id: String,
     action: JobAction,
+    reason: Option<String>,
 ) -> CommandResult<ActionResult> {
     let client = state.client()?;
     let manager = state.connection_manager().await;
@@ -111,7 +112,9 @@ pub async fn job_action(
             )
             .with_hint("Refresh the fleet view and try again.")
         })?;
-    client.job_action(&project, &job_id, action).await?;
+    client
+        .job_action(&project, &job_id, action, reason.as_deref())
+        .await?;
     let refreshed = manager.poll_once(client.as_ref()).await.is_ok();
     Ok(ActionResult {
         job_id,

@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { JobCardView } from "../../bridge/wire";
+import type { JobCardView, JobLanes } from "../../bridge/wire";
 import { Badge, Button, EmptyState } from "../../components";
 import { formatAge, formatClock } from "../../domain/format";
 import { LANES, selectFleet } from "../../domain/fleet";
@@ -20,6 +20,27 @@ import { VpsRootCard } from "./VpsRootCard";
 import { WorkerSlotRing } from "./WorkerSlotRing";
 import "./fleet.css";
 
+interface SelectedJobKey {
+  project: string;
+  job_id: string;
+}
+
+/** Resolves the live card by the lane de-dup key, so an open drawer follows polls. */
+function findCurrentJob(
+  lanes: JobLanes,
+  key: SelectedJobKey | null,
+): JobCardView | null {
+  if (!key) return null;
+  for (const lane of LANES) {
+    const card = lanes[lane.key].find(
+      (candidate) =>
+        candidate.project === key.project && candidate.job_id === key.job_id,
+    );
+    if (card) return card;
+  }
+  return null;
+}
+
 export function FleetCanvas({ onOpenHosts }: { onOpenHosts?: () => void }) {
   const fleet = useFleet();
   const connection = useConnection();
@@ -27,7 +48,7 @@ export function FleetCanvas({ onOpenHosts }: { onOpenHosts?: () => void }) {
   const projectFilter = useProjectFilter();
   const mutationsAllowed = useMutationsAllowed();
   const refresh = useFleetStore((state) => state.refresh);
-  const [selectedJob, setSelectedJob] = useState<JobCardView | null>(null);
+  const [selectedJobKey, setSelectedJobKey] = useState<SelectedJobKey | null>(null);
 
   if (!fleet) {
     return (
@@ -48,6 +69,7 @@ export function FleetCanvas({ onOpenHosts }: { onOpenHosts?: () => void }) {
   }
 
   const selection = selectFleet(fleet, projectFilter);
+  const selectedJob = findCurrentJob(fleet.lanes, selectedJobKey);
   const refreshDisabled =
     connection.state !== "connected" && connection.state !== "stale";
 
@@ -118,16 +140,22 @@ export function FleetCanvas({ onOpenHosts }: { onOpenHosts?: () => void }) {
               (lane.key === "ready" || lane.key === "parked_blocked")
             }
             showProject={projectFilter === null}
-            onOpenJob={setSelectedJob}
+            onOpenJob={(job) =>
+              setSelectedJobKey({ project: job.project, job_id: job.job_id })
+            }
           />
         ))}
       </section>
 
       <JobDrawer
-        key={selectedJob?.job_id ?? "closed"}
+        key={
+          selectedJobKey
+            ? `${selectedJobKey.project}:${selectedJobKey.job_id}`
+            : "closed"
+        }
         job={selectedJob}
         open={selectedJob !== null}
-        onClose={() => setSelectedJob(null)}
+        onClose={() => setSelectedJobKey(null)}
         mutationsAllowed={mutationsAllowed}
       />
     </div>

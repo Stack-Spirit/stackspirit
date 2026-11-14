@@ -7,6 +7,7 @@ import {
   workerRingModel,
   jobActionEligibility,
   jobStateChip,
+  findJobTitle,
 } from "../domain/fleet";
 import {
   groupWaiting,
@@ -69,6 +70,40 @@ describe("fleet domain", () => {
     expect(fixture.fleet.capacity.running.runs).toBe(3);
   });
 
+  it("labels truncation only for the project whose queue reached the cap", () => {
+    const fixture = scenario("multi-project");
+    fixture.fleet.lanes.queue_truncated = true;
+    const northnoir = selectFleet(fixture.fleet, "northnoir");
+    expect(northnoir.queueShown).toBe(1);
+    expect(northnoir.queueTruncated).toBe(false);
+
+    fixture.fleet.lanes.queue_cap = 1;
+    const capped = selectFleet(fixture.fleet, "vowp");
+    expect(capped.queueShown).toBe(2);
+    expect(capped.queueTruncated).toBe(true);
+  });
+
+  it("matches a title by project and job id, like the lane de-dup key", () => {
+    const fixture = scenario("multi-project");
+    const base = fixture.fleet.lanes.ready[0];
+    expect(base).toBeDefined();
+    if (!base) return;
+    fixture.fleet.lanes.ready = [
+      { ...base, project: "vowp", job_id: "duplicate-id", title: "vowp title" },
+      {
+        ...base,
+        project: "northnoir",
+        job_id: "duplicate-id",
+        title: "northnoir title",
+      },
+    ];
+    expect(findJobTitle(fixture.fleet, "vowp", "duplicate-id")).toBe("vowp title");
+    expect(findJobTitle(fixture.fleet, "northnoir", "duplicate-id")).toBe(
+      "northnoir title",
+    );
+    expect(findJobTitle(fixture.fleet, "vowp-asif", "duplicate-id")).toBeNull();
+  });
+
   it("renders three busy of eight and a plain-language summary", () => {
     const fixture = scenario("fresh-single");
     const ring = workerRingModel(fixture.fleet);
@@ -113,23 +148,37 @@ describe("fleet domain", () => {
     expect(jobStateChip("quarantined")).toEqual({ label: "Unknown", tone: "unknown" });
   });
 
-  it("disables job actions for ineligible states and stale data", () => {
+  it("matches VOWP's legal job action matrix", () => {
     const fixture = scenario("fresh-single");
-    const done = fixture.fleet.lanes.review_fix[0];
-    expect(done).toBeDefined();
-    if (!done) return;
-    const ineligible = jobActionEligibility({ ...done, state: "done" }, true);
-    expect(ineligible.retry.enabled).toBe(false);
-    expect(ineligible.park.enabled).toBe(false);
-    expect(ineligible.cancel.enabled).toBe(false);
-    expect(ineligible.cancel.reason).toContain("done");
+    const card = fixture.fleet.lanes.review_fix[0];
+    expect(card).toBeDefined();
+    if (!card) return;
 
-    const active = jobActionEligibility({ ...done, state: "active" }, true);
-    expect(active.park.enabled).toBe(true);
-    expect(active.cancel.enabled).toBe(true);
-    expect(active.retry.enabled).toBe(false);
+    for (const state of ["failed", "parked", "stalled"]) {
+      const eligibility = jobActionEligibility({ ...card, state }, true);
+      expect(eligibility.retry.enabled).toBe(true);
+      expect(eligibility.park.enabled).toBe(true);
+      expect(eligibility.cancel.enabled).toBe(true);
+    }
 
-    const stale = jobActionEligibility({ ...done, state: "active" }, false);
+    for (const state of ["pending", "ready", "running", "gating", "reviewing", "fixing", "merging", "active"]) {
+      const eligibility = jobActionEligibility({ ...card, state }, true);
+      expect(eligibility.retry.enabled).toBe(false);
+      expect(eligibility.park.enabled).toBe(true);
+      expect(eligibility.cancel.enabled).toBe(true);
+    }
+
+    for (const state of ["done", "replanned", "cancelled", "quarantined"]) {
+      const eligibility = jobActionEligibility({ ...card, state }, true);
+      expect(eligibility.retry.enabled).toBe(false);
+      expect(eligibility.park.enabled).toBe(false);
+      expect(eligibility.cancel.enabled).toBe(false);
+      expect(eligibility.cancel.reason).toContain(state);
+    }
+
+    const stale = jobActionEligibility({ ...card, state: "running" }, false);
+    expect(stale.retry.enabled).toBe(false);
+    expect(stale.park.enabled).toBe(false);
     expect(stale.cancel.enabled).toBe(false);
     expect(stale.cancel.reason).toContain("Refresh");
   });

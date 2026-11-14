@@ -391,8 +391,9 @@ impl VowpClient for FixtureVowpClient {
         project: &str,
         job: &str,
         action: crate::wire::JobAction,
+        reason: Option<&str>,
     ) -> Result<(), SpiritError> {
-        self.inner.job_action(project, job, action).await
+        self.inner.job_action(project, job, action, reason).await
     }
 
     async fn answer_inbox(

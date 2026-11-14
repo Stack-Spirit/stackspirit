@@ -4,7 +4,13 @@ import type { InboxItemView } from "../../bridge/wire";
 import { Badge, Button } from "../../components";
 import { formatAgeParts, formatDateTime } from "../../domain/format";
 
-const MAX_ANSWER = 10_000;
+const MAX_ANSWER_BYTES = 10_000;
+const UTF8_ENCODER = new TextEncoder();
+
+/** The contract bounds answers in UTF-8 bytes, not JavaScript UTF-16 code units. */
+function utf8Length(value: string): number {
+  return UTF8_ENCODER.encode(value).length;
+}
 
 export function InboxItem({
   item,
@@ -22,12 +28,13 @@ export function InboxItem({
   const [answer, setAnswer] = useState("");
   const answered = item.state === "answered";
   const trimmed = answer.trim();
+  const answerBytes = utf8Length(trimmed);
   const canSubmit =
     !answered &&
     !busy &&
     !disabled &&
     trimmed.length > 0 &&
-    answer.length <= MAX_ANSWER;
+    answerBytes <= MAX_ANSWER_BYTES;
 
   return (
     <article className="inbox-item" data-testid="inbox-item" data-state={item.state}>
@@ -82,13 +89,13 @@ export function InboxItem({
             <textarea
               className="input inbox-item__textarea"
               value={answer}
-              maxLength={MAX_ANSWER}
+              maxLength={MAX_ANSWER_BYTES}
               rows={4}
               placeholder="Type an answer for VOWP…"
               onChange={(event) => setAnswer(event.target.value)}
             />
             <span className="field__hint">
-              {answer.length} / {MAX_ANSWER} characters. Empty answers are rejected
+              {answerBytes} / {MAX_ANSWER_BYTES} bytes. Empty answers are rejected
               locally; VOWP remains authoritative.
             </span>
           </label>

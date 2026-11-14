@@ -90,8 +90,11 @@ export class TauriBridge implements SpiritBridge {
       const fleet = await call<FleetView | null>("fleet_get");
       return fleet?.capacity ?? null;
     },
-    jobAction: (jobId: string, action: JobAction): Promise<ActionResult> =>
-      call("job_action", { jobId, action }),
+    jobAction: (
+      jobId: string,
+      action: JobAction,
+      reason?: string | null,
+    ): Promise<ActionResult> => call("job_action", { jobId, action, reason: reason ?? null }),
     inbox: (all: boolean): Promise<InboxItemView[]> => call("fleet_inbox", { all }),
     answerInbox: (id: string, answer: string): Promise<InboxItemView> =>
       call("answer_inbox", { id, answer }),

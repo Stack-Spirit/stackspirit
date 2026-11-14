@@ -64,7 +64,11 @@ export function JobDrawer({
     setBusy(action);
     setError(null);
     try {
-      await bridge.fleet.jobAction(job!.job_id, action satisfies JobAction);
+      await bridge.fleet.jobAction(
+        job!.job_id,
+        action satisfies JobAction,
+        action === "park" ? reason.trim() : null,
+      );
       // A write always triggers a refresh; the drawer never invents the new state.
       await refresh();
       setConfirm(null);
@@ -220,7 +224,11 @@ export function JobDrawer({
             <Button
               variant={confirm === "cancel" ? "danger" : "primary"}
               size="sm"
-              disabled={busy !== null || (confirm === "park" && reason.trim().length === 0)}
+              disabled={
+                busy !== null ||
+                (confirm === "park" && reason.trim().length === 0) ||
+                (confirm !== null && !eligibility[confirm].enabled)
+              }
               onClick={() => {
                 if (confirm) void runAction(confirm);
               }}

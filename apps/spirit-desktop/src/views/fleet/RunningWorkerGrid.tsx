@@ -31,7 +31,7 @@ export function RunningWorkerGrid({
             <WorkerCard
               key={`${card.project}:${card.job_id}`}
               card={card}
-              title={findJobTitle(fleet, card.job_id)}
+              title={findJobTitle(fleet, card.project, card.job_id)}
               showProject={showProject}
             />
           ))}

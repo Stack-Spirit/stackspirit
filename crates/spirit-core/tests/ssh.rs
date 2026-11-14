@@ -265,6 +265,7 @@ async fn live_client_keeps_parse_warnings_until_the_caller_drains_them() {
 async fn ssh_write_commands_quote_user_text_and_validate_input() {
     let fake = Arc::new(FakeCommandRunner::new(vec![
         CommandOutput::ok("{}"),
+        CommandOutput::ok("{}"),
         CommandOutput::ok(
             serde_json::to_vec(&serde_json::json!({
                 "mode": "fixed",
@@ -280,7 +281,21 @@ async fn ssh_write_commands_quote_user_text_and_validate_input() {
     ]));
     let client = SshVowpClient::new(fake.clone(), target(), options(false), None);
     client
-        .job_action("vowp", "ss-1-core", spirit_core::wire::JobAction::Retry)
+        .job_action(
+            "vowp",
+            "ss-1-core",
+            spirit_core::wire::JobAction::Retry,
+            None,
+        )
+        .await
+        .unwrap();
+    client
+        .job_action(
+            "vowp",
+            "ss-2-desktop-shell",
+            spirit_core::wire::JobAction::Park,
+            Some("owner asked"),
+        )
         .await
         .unwrap();
     client
@@ -290,12 +305,26 @@ async fn ssh_write_commands_quote_user_text_and_validate_input() {
     let calls = fake.calls();
     let job = calls[0].args.last().unwrap();
     assert!(job.contains("'--project' 'vowp' '--json' 'job' 'retry' 'ss-1-core'"));
-    let target_call = calls[1].args.last().unwrap();
+    let park = calls[1].args.last().unwrap();
+    assert!(park.contains(
+        "'--project' 'vowp' '--json' 'job' 'park' 'ss-2-desktop-shell' '--reason' 'owner asked'"
+    ));
+    let target_call = calls[2].args.last().unwrap();
     assert!(target_call.contains("'--target' '9' '--mode' 'fixed' '--override'"));
     assert!(target_call.contains("'--reason' 'owner asked' '--by' 'stackspirit'"));
+    let missing_reason = client
+        .job_action(
+            "vowp",
+            "ss-2-desktop-shell",
+            spirit_core::wire::JobAction::Park,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing_reason.code, SpiritErrorCode::InvalidInput);
     assert!(
         client
-            .job_action("../bad", "job", spirit_core::wire::JobAction::Retry)
+            .job_action("../bad", "job", spirit_core::wire::JobAction::Retry, None)
             .await
             .is_err()
     );

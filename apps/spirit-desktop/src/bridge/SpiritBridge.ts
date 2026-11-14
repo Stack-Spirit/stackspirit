@@ -59,7 +59,7 @@ export interface SpiritBridge {
     get(): Promise<FleetView | null>;
     refresh(): Promise<FleetView>;
     capacity(): Promise<CapacityView | null>;
-    jobAction(jobId: string, action: JobAction): Promise<ActionResult>;
+    jobAction(jobId: string, action: JobAction, reason?: string | null): Promise<ActionResult>;
     inbox(all: boolean): Promise<InboxItemView[]>;
     answerInbox(id: string, answer: string): Promise<InboxItemView>;
     setTarget(input: SetTargetInput): Promise<CapacityTargetView>;

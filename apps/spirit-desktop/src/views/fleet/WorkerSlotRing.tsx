@@ -120,7 +120,8 @@ export function WorkerSlotRing({
               textAnchor="middle"
               data-testid="ring-overflow"
             >
-              +{model.aggregateOverflow}
+              <title>{`${model.target} worker slots, ${model.busy} busy`}</title>
+              {`+${model.aggregateOverflow}`}
             </text>
           ) : null}
         </svg>

@@ -1,13 +1,15 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { useState } from "react";
 import { describe, expect, it } from "vitest";
 
+import { MockBridge } from "../bridge/MockBridge";
 import type { JobCardView } from "../bridge/wire";
 import { parseExecutor } from "../domain/executor";
 import { seedStore } from "./render";
 import { scenario } from "./scenarios/fixtures";
+import { useFleetStore } from "../state/fleetStore";
 import { FleetCanvas } from "../views/fleet/FleetCanvas";
 import { JobDrawer } from "../views/fleet/JobDrawer";
 import { JobLane } from "../views/fleet/JobLane";
@@ -25,6 +27,13 @@ async function wcagViolations(container: HTMLElement) {
     runOnly: { type: "tag", values: WCAG_TAGS },
   });
   return results.violations;
+}
+
+async function connectedBridge(): Promise<MockBridge> {
+  const bridge = new MockBridge("fresh");
+  const host = (await bridge.hosts.list())[0];
+  if (host) await bridge.connection.connect(host.id);
+  return bridge;
 }
 
 describe("VPS root and worker slots", () => {
@@ -56,6 +65,9 @@ describe("VPS root and worker slots", () => {
     fixture.fleet.capacity.advised_workers = 16;
     render(<WorkerSlotRing fleet={fixture.fleet} />);
     expect(screen.getByTestId("ring-overflow")).toHaveTextContent("+4");
+    expect(screen.getByTestId("ring-overflow").querySelector("title")?.textContent).toBe(
+      "16 worker slots, 3 busy",
+    );
     const ring = screen.getByTestId("worker-slot-ring");
     expect(ring.querySelectorAll("[data-slot-state]")).toHaveLength(12);
   });
@@ -142,6 +154,31 @@ describe("running worker cards", () => {
     render(<RunningWorkerGrid fleet={fixture.fleet} cards={[]} />);
     expect(screen.getByText("No running workers")).toBeInTheDocument();
   });
+
+  it("matches running card titles by project and job id", () => {
+    const fixture = scenario("multi-project");
+    const card = {
+      ...fixture.fleet.running[1]!,
+      project: "northnoir",
+      job_id: "duplicate-id",
+    };
+    const base = fixture.fleet.lanes.ready[0];
+    expect(base).toBeDefined();
+    if (!base) return;
+    fixture.fleet.lanes.ready = [
+      { ...base, project: "vowp", job_id: "duplicate-id", title: "Wrong project" },
+      {
+        ...base,
+        project: "northnoir",
+        job_id: "duplicate-id",
+        title: "North Noir title",
+      },
+    ];
+    render(<RunningWorkerGrid fleet={fixture.fleet} cards={[card]} />);
+    expect(screen.getByTestId("worker-title-duplicate-id")).toHaveTextContent(
+      "North Noir title",
+    );
+  });
 });
 
 describe("job lanes", () => {
@@ -216,6 +253,32 @@ describe("job lanes", () => {
       "showing the first 200 jobs",
     );
   });
+
+  it("never renders more cards than the queue cap", () => {
+    const fixture = scenario("queue-cap");
+    const lane = LANES.find((candidate) => candidate.key === "ready");
+    expect(lane).toBeDefined();
+    if (!lane) return;
+    const extra = {
+      ...fixture.fleet.lanes.ready[0]!,
+      job_id: "ss-999-overflow",
+    };
+    render(
+      <JobLane
+        lane={lane}
+        cards={[...fixture.fleet.lanes.ready, extra]}
+        count={201}
+        queueCap={200}
+        onOpenJob={() => undefined}
+      />,
+    );
+    expect(
+      within(screen.getByTestId("lane-ready")).getAllByTestId(/job-card-/),
+    ).toHaveLength(200);
+    expect(screen.getByTestId("lane-truncated-ready")).toHaveTextContent(
+      "showing the first 200 jobs",
+    );
+  });
 });
 
 function DrawerHarness({ job }: { job: JobCardView }) {
@@ -279,6 +342,26 @@ describe("job drawer", () => {
     expect(await screen.findByRole("dialog", { name: /Cancel ss-9-gate-check/ })).toBeVisible();
     expect(screen.getByRole("button", { name: "Cancel job" })).toBeInTheDocument();
   });
+
+  it("sends the entered park reason to VOWP", async () => {
+    const fixture = scenario("fresh-single");
+    const bridge = await connectedBridge();
+    seedStore(fixture.fleet, { bridge });
+    const job = { ...fixture.fleet.lanes.review_fix[0]!, state: "reviewing" };
+    render(<JobDrawer job={job} open mutationsAllowed onClose={() => undefined} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("job-action-park"));
+    const reason = await screen.findByRole("textbox", { name: /Reason/ });
+    await user.clear(reason);
+    await user.type(reason, "Owner paused the run");
+    await user.click(screen.getByRole("button", { name: "Park job" }));
+    expect(bridge.recordedActions()).toHaveLength(1);
+    expect(bridge.recordedActions()[0]).toMatchObject({
+      job_id: "ss-9-gate-check",
+      action: "park",
+      reason: "Owner paused the run",
+    });
+  });
 });
 
 describe("fleet canvas", () => {
@@ -315,6 +398,37 @@ describe("fleet canvas", () => {
     expect(screen.getAllByText("nn-4-score").length).toBeGreaterThan(0);
     expect(screen.queryAllByText("ss-2-desktop-shell")).toHaveLength(0);
     expect(screen.getByTestId("lane-count-ready")).toHaveTextContent("1");
+  });
+
+  it("keeps the open drawer in sync with a polled card", async () => {
+    const fixture = scenario("fresh-single");
+    seedStore(fixture.fleet);
+    render(<FleetCanvas />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("job-card-ss-2-desktop-shell"));
+    expect(
+      await screen.findByRole("dialog", { name: /Job ss-2-desktop-shell/ }),
+    ).toBeVisible();
+    expect(screen.getByTestId("job-action-cancel")).toBeEnabled();
+
+    act(() => {
+      const fleet = useFleetStore.getState().fleet;
+      if (!fleet) throw new Error("fleet missing");
+      useFleetStore.getState().acceptFleet({
+        ...fleet,
+        revision: fleet.revision + 1,
+        lanes: {
+          ...fleet.lanes,
+          running: fleet.lanes.running.map((card) =>
+            card.job_id === "ss-2-desktop-shell" ? { ...card, state: "done" } : card,
+          ),
+        },
+      });
+    });
+
+    expect(screen.getByTestId("job-action-cancel")).toBeDisabled();
+    expect(screen.getByTestId("job-action-park")).toBeDisabled();
+    expect(screen.getByTestId("job-action-retry")).toBeDisabled();
   });
 
   it("shows stale data with a reason and a refresh action", () => {

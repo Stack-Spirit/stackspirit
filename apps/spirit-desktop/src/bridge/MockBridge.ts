@@ -89,6 +89,11 @@ interface MockOptions {
   hosts?: HostProfile[];
 }
 
+/** One recorded job action including the park reason the UI supplied. */
+export interface MockJobAction extends ActionResult {
+  reason: string | null;
+}
+
 export class MockBridge implements SpiritBridge {
   readonly kind = "mock" as const;
   readonly preview = true;
@@ -107,7 +112,7 @@ export class MockBridge implements SpiritBridge {
   private latencySamples: number[] = [];
   private failures = 0;
   private backendDown: boolean;
-  private actions: ActionResult[] = [];
+  private actions: MockJobAction[] = [];
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
 
@@ -432,7 +437,11 @@ export class MockBridge implements SpiritBridge {
     },
     capacity: async (): Promise<CapacityView | null> =>
       this.fleetView ? clone(this.fleetView.capacity) : null,
-    jobAction: async (jobId: string, action: JobAction): Promise<ActionResult> => {
+    jobAction: async (
+      jobId: string,
+      action: JobAction,
+      reason?: string | null,
+    ): Promise<ActionResult> => {
       const known = this.fleetView
         ? [
             ...this.fleetView.running.map((card) => card.job_id),
@@ -442,11 +451,19 @@ export class MockBridge implements SpiritBridge {
           ].includes(jobId)
         : false;
       if (!known) throw errorDto("not_found", `Job ${jobId} was not found.`);
-      const result: ActionResult = {
+      const trimmedReason = reason?.trim() ?? "";
+      if (action === "park" && trimmedReason.length === 0) {
+        throw errorDto("invalid_input", "reason: must not be empty when parking a job");
+      }
+      if (trimmedReason.length > 200) {
+        throw errorDto("invalid_input", "reason: must be at most 200 characters");
+      }
+      const result: MockJobAction = {
         job_id: jobId,
         action,
         request: null,
         refreshed: false,
+        reason: action === "park" ? trimmedReason : null,
       };
       this.actions.push(result);
       return clone(result);
@@ -591,7 +608,7 @@ export class MockBridge implements SpiritBridge {
   gates = this.gatesApi;
 
   /** Test hook: recorded job actions. */
-  recordedActions(): ActionResult[] {
+  recordedActions(): MockJobAction[] {
     return clone(this.actions);
   }
 
