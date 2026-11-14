@@ -1,7 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "./e2e",
+  // D3 browser-mode flows live under src/test/e2e so they stay inside the job's
+  // ownership; D2's shell flows remain in e2e/.
+  testDir: ".",
+  testMatch: ["e2e/**/*.spec.ts", "src/test/e2e/**/*.spec.ts"],
   timeout: 30_000,
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
@@ -13,9 +16,12 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: "VITE_SPIRIT_MOCK=1 npm run dev",
+    // Build once with the MockBridge inlined, then serve the production preview.
+    command:
+      "npm run build && npm run preview -- --host 127.0.0.1 --port 1420 --strictPort",
     url: "http://127.0.0.1:1420",
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    reuseExistingServer: false,
+    timeout: 120_000,
+    env: { VITE_SPIRIT_MOCK: "1" },
   },
 });

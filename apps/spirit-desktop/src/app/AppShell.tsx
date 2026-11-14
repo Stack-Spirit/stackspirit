@@ -3,12 +3,13 @@ import { useEffect, useState } from "react";
 import type { SpiritBridge } from "../bridge";
 import { Badge, Drawer } from "../components";
 import { useFleetStore, usePreview } from "../state/fleetStore";
-import { CapacityPlaceholder } from "../views/capacity/Placeholder";
+import { CapacityRail } from "../views/capacity/CapacityRail";
+import { RawDocumentDrawer } from "../views/capacity/RawDocumentDrawer";
 import { EnginePlaceholder } from "../views/engine/Placeholder";
-import { FleetPlaceholder } from "../views/fleet/Placeholder";
+import { FleetCanvas } from "../views/fleet/FleetCanvas";
 import { HostManager } from "../views/hosts/HostManager";
 import { HostRail } from "../views/hosts/HostRail";
-import { InboxDrawer, RawDocumentDrawer } from "./Drawers";
+import { InboxDrawer } from "../views/inbox/InboxDrawer";
 import { StatusStrip } from "./StatusStrip";
 import { TopBar, type AppView } from "./TopBar";
 
@@ -89,7 +90,7 @@ export function AppShell({ bridge }: { bridge: SpiritBridge }) {
             </div>
           </div>
 
-          {view === "fleet" ? <FleetPlaceholder onOpenHosts={() => setView("hosts")} /> : null}
+          {view === "fleet" ? <FleetCanvas onOpenHosts={() => setView("hosts")} /> : null}
           {view === "engine" ? <EnginePlaceholder /> : null}
           {view === "hosts" ? <HostManager /> : null}
         </main>
@@ -99,13 +100,17 @@ export function AppShell({ bridge }: { bridge: SpiritBridge }) {
           aria-label="Capacity and storage"
           tabIndex={0}
         >
-          <CapacityPlaceholder onOpenHosts={() => setView("hosts")} />
+          <CapacityRail onOpenHosts={() => setView("hosts")} />
         </aside>
       </div>
 
       <StatusStrip onOpenRaw={() => setRawOpen(true)} />
 
-      <InboxDrawer open={inboxOpen} onClose={() => setInboxOpen(false)} />
+      <InboxDrawer
+        key={inboxOpen ? "inbox-open" : "inbox-closed"}
+        open={inboxOpen}
+        onClose={() => setInboxOpen(false)}
+      />
       <RawDocumentDrawer open={rawOpen} onClose={() => setRawOpen(false)} />
 
       {capacityOpen ? (
@@ -114,7 +119,7 @@ export function AppShell({ bridge }: { bridge: SpiritBridge }) {
           title="Capacity & VPS Storage"
           onClose={() => setCapacityOpen(false)}
         >
-          <CapacityPlaceholder onOpenHosts={() => setView("hosts")} />
+          <CapacityRail onOpenHosts={() => setView("hosts")} />
         </Drawer>
       ) : null}
     </div>
