@@ -1,12 +1,15 @@
 //! Home-side v0.4 local-node agent support.
 //!
-//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.1, §4.2, §4.6, §8.2–§8.3 and §12.1.
+//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.1, §4.2, §4.6, §6.3, §8.2–§8.3 and §12.1.
 //! Phase 0 implements enrollment, node-key authentication, heartbeat presence/capacity and the
 //! stdio gateway. Phase 1 adds surface pairing: a one-time code becomes a scoped, node-bound
-//! surface token. Leases, local chat, offload and job dispatch are later phases.
+//! surface token. Phase 2 adds the home-side offload dispatcher: ready jobs become durable
+//! assignments, and the gateway sends `AssignRun`, applies agent frames and fences expired
+//! run leases. The agent executor, worktree creation and result return are later phases.
 
 pub mod auth;
 pub mod code;
+pub mod dispatch;
 pub mod enroll;
 pub mod gateway;
 pub mod pair;

@@ -3,6 +3,8 @@
 //! Every test uses a temporary node home and an in-memory duplex; no test opens the real
 //! `~/.vowp`, starts tmux, touches the network or signs with a real node key.
 
+mod support;
+
 use std::collections::VecDeque;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
@@ -12,21 +14,23 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
+use support::fake_git::FakeGit;
 use tempfile::TempDir;
 use vowp_core::agent::gateway::{self, GatewayOptions, GatewayOutcome};
 use vowp_core::agent::{
     EnrollRequest, auth, create_pending, create_pending_surface, hash_code, issue_surface_token, redeem, revoke,
     revoke_surface,
 };
-use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng, SystemGit, SystemRunner};
+use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng, SystemRunner};
 use vowp_protocol::{
-    Actor, AgentCapabilities, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId, EventSource,
-    FakeClock, HarnessKind, LeaseMode, MemoryLog, NodeName, NodePresence, NodeStatus, PathRef, ProjectName,
-    RemoteEvent, RemoteLine, RunId, RunOutcome, RunPurpose, Session, SessionId, SessionRole, SessionState, StopReason,
-    SurfaceId, SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary,
+    Actor, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId,
+    EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, MemoryLog, NewJob, NodeName,
+    NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, Role, RunId,
+    RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId,
+    SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
-use vowp_store::{NodePaths, Store, hash_lease_token};
+use vowp_store::{NodePath, NodePaths, StateChange, Store, hash_lease_token};
 
 fn ts() -> Timestamp {
     Timestamp::parse("2026-11-14T10:00:00Z").expect("timestamp")
@@ -53,28 +57,34 @@ fn signature_hex(key: &SigningKey, nonce: &str, home: &str, connection: &str) ->
 }
 
 fn capabilities() -> AgentCapabilities {
+    let mut harnesses = std::collections::BTreeMap::new();
+    harnesses.insert("opencode".to_owned(), "1.0.0".to_owned());
     AgentCapabilities {
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         agent_version: "0.3.0".to_owned(),
-        harnesses: Default::default(),
+        harnesses,
         git_version: Some("git version 2.47.0".to_owned()),
         labels: vec!["test".to_owned()],
-        secret_names: Vec::new(),
-        projects: Vec::new(),
+        secret_names: vec![SecretName::parse("BUILD_TOKEN").expect("secret name")],
+        projects: vec![ProjectName::parse("vowp").expect("project")],
     }
 }
 
 fn test_deps(root: &Path, clock: Arc<FakeClock>, log: Arc<MemoryLog>) -> Deps {
+    test_deps_with_config(root, clock, log, VowpConfig::with_defaults_for_tests())
+}
+
+fn test_deps_with_config(root: &Path, clock: Arc<FakeClock>, log: Arc<MemoryLog>, config: VowpConfig) -> Deps {
     Deps {
         paths: NodePaths::new(root),
-        config: Arc::new(vowp_protocol::VowpConfig::with_defaults_for_tests()),
+        config: Arc::new(config),
         node: NodeName::parse("home-1").expect("home node"),
         clock,
         log,
         adapters: Arc::new(AdapterRegistry::new()),
         windows: Arc::new(vowp_tmux::fake::FakeWindows::new()),
-        git: Arc::new(SystemGit::default()),
+        git: Arc::new(FakeGit::new().with_head_sha("0123456789abcdef0123456789abcdef01234567")),
         cmd: Arc::new(SystemRunner),
         rng: Arc::new(FixedRng(0)),
     }
@@ -265,8 +275,12 @@ struct Gateway {
 
 impl Gateway {
     fn start(root: &Path, clock: Arc<FakeClock>) -> Self {
+        Self::start_with_config(root, clock, VowpConfig::with_defaults_for_tests())
+    }
+
+    fn start_with_config(root: &Path, clock: Arc<FakeClock>, config: VowpConfig) -> Self {
         let log = Arc::new(MemoryLog::new());
-        let deps = test_deps(root, clock.clone(), log.clone());
+        let deps = test_deps_with_config(root, clock.clone(), log.clone(), config);
         let store = deps.open_store().expect("bound store");
         let input = TestReader::new();
         let output = TestWriter::default();
@@ -2055,4 +2069,149 @@ fn local_chat_uses_a_path_ref_not_an_absolute_path() {
         assert!(!cwd.contains("/Users/"), "the run row has no Mac path: {cwd}");
     }
     gateway.finish().expect("gateway");
+}
+
+/// Inserts one ready offload job under `project`.
+fn insert_ready_offload_job(store: &Store, project: &ProjectName, id: &str) -> JobId {
+    let new = NewJob {
+        id: JobId::parse(id).expect("job id"),
+        title: format!("job {id}"),
+        kind: JobKind::Build,
+        role: Role::Worker,
+        profile: Some("worker".to_owned()),
+        needs: Vec::new(),
+        owns: vec!["src/**".to_owned()],
+        reads: Vec::new(),
+        gates: None,
+        priority: None,
+        loop_: None,
+        brief_text: None,
+    };
+    let job = store.insert_job(project, &new, "test").expect("insert job");
+    store
+        .set_job_state(
+            &job.id,
+            JobState::Ready,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("ready job");
+    job.id
+}
+
+/// One heartbeat with the given slot occupancy.
+fn offload_heartbeat(busy_slots: u32, max_slots: u32) -> AgentFrame {
+    AgentFrame::Heartbeat {
+        at: ts(),
+        capacity: AgentCapacity {
+            cpu_cores: 8,
+            load1: 0.1,
+            mem_total_bytes: 16 * 1024 * 1024 * 1024,
+            mem_free_bytes: 8 * 1024 * 1024 * 1024,
+            disk_free_bytes: 100 * 1024 * 1024 * 1024,
+            busy_slots,
+            max_slots,
+            on_battery: Some(false),
+            thermal_state: Some("nominal".to_owned()),
+        },
+        pending_spool_bytes: 0,
+    }
+}
+
+#[test]
+fn heartbeat_dispatches_at_most_the_node_slots() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let project = ProjectName::parse("vowp").expect("project");
+    let setup = test_store(home.path(), &clock);
+    setup
+        .upsert_project(&Project {
+            name: project.clone(),
+            path: home.path().join("project").display().to_string(),
+            remote_url: Some("https://example.invalid/acme/vowp.git".to_owned()),
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: ts(),
+            updated_at: ts(),
+        })
+        .expect("project row");
+    activate(home.path(), &clock, &name, &key);
+    setup
+        .upsert_node_path(&NodePath {
+            node: name.clone(),
+            project: project.clone(),
+            local_root: "/srv/vowp".to_owned(),
+            worktree_root: "/srv/vowp-wt".to_owned(),
+            allow: Vec::new(),
+            updated_at: ts(),
+        })
+        .expect("path map");
+    for id in ["offload-a", "offload-b", "offload-c"] {
+        insert_ready_offload_job(&setup, &project, id);
+    }
+
+    let mut config = VowpConfig::with_defaults_for_tests();
+    config.project.name = project.clone();
+    config.project.path = Some(home.path().join("project").display().to_string());
+    config.offload.enabled = true;
+    config.offload.default = Placement::Any;
+    let gateway = Gateway::start_with_config(home.path(), clock.clone(), config);
+    authenticate(&gateway, &name, &key);
+    gateway.send(&offload_heartbeat(0, 2));
+
+    let count_assign = |gateway: &Gateway| {
+        gateway
+            .output
+            .frames()
+            .into_iter()
+            .filter(|frame| matches!(frame, AgentFrame::AssignRun { .. }))
+            .count()
+    };
+    wait_until(|| count_assign(&gateway) == 2);
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(count_assign(&gateway), 2, "one heartbeat sends only the free slots");
+
+    // The two sent rows occupy the slots even though the agent reports idle capacity.
+    gateway.send(&offload_heartbeat(0, 2));
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(count_assign(&gateway), 2, "a second heartbeat must not over-dispatch");
+
+    let store = gateway.store();
+    let assignments = store.assignments_for_node(&name).expect("assignments");
+    assert_eq!(assignments.len(), 3, "all three jobs are durably queued");
+    assert_eq!(
+        assignments
+            .iter()
+            .filter(|assignment| assignment.state == vowp_store::repo_offload::AgentAssignmentState::Sent)
+            .count(),
+        2
+    );
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn agent_second_connection_supersedes_the_first() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+
+    let first = Gateway::start(home.path(), clock.clone());
+    authenticate(&first, &name, &key);
+    let second = Gateway::start(home.path(), clock.clone());
+    authenticate(&second, &name, &key);
+
+    let AgentFrame::Superseded { connection_id } = first.expect(|frame| matches!(frame, AgentFrame::Superseded { .. }))
+    else {
+        panic!("expected Superseded");
+    };
+    assert!(!connection_id.is_empty());
+    let outcome = first.finish().expect("first gateway closes cleanly");
+    assert!(matches!(outcome, GatewayOutcome::Closed { node: Some(node) } if node == name));
+    second.finish().expect("second gateway");
 }

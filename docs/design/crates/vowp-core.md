@@ -19,7 +19,7 @@ crates/vowp-core/src/
   loops/          mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
-  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs
+  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs dispatch.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs, agent.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
@@ -390,12 +390,13 @@ pub mod bank { pub fn bank_serving(deps: &Deps, env: &EnvConfig, target: &str, t
 Rules: (1) a failing guard ⇒ `Release.state = Refused`, ledger `promote`, exit 5 at the CLI; **no retry, no workaround** (design summary §9). (2) the diff between candidate and the banked serving copy must equal the files of the intended change; otherwise `Refused` ("live is not always git"). (3) the `upload_set` guard runs the project's upload-set check (e.g. `.vercelignore` listing) via `env.probe`-style custom guard: it exists to catch "a local build is not the deploy build". (4) approval `human` ⇒ inbox `approval` item, state `Banked` until answered; the supervisor calls `promote` again on answer. (5) `releases.log` line appended on every terminal state: `<ts> <env> <release id> <state> <from>-><to> rollback: <cmd>`.
 Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp files): `guards_clean_tree_dirty_fails`, `guards_head_equals_remote_behind_fails`, `guard_failure_marks_refused_and_never_deploys`, `serving_bank_runs_before_deploy_order_asserted_via_script_log`, `diff_unexpected_files_refused`, `human_approval_creates_inbox_and_waits`, `answer_approve_then_promote_goes_live_and_records_rollback_cmd`, `policy_approval_with_yes_deploys`, `yes_flag_never_bypasses_human_approval`, `probe_mismatch_marks_failed_with_rollback_available`, `rollback_runs_banked_command_and_links_releases`, `releases_log_lines_appended`, `dry_run_runs_guards_only`.
 
-## 9. `agent` — v0.4 home side: enrollment, auth, surface pairing and lease control
+## 9. `agent` — v0.4 home side: enrollment, auth, surface pairing, lease control and offload dispatch
 
-Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.6, §8.2–§8.3 and §12.1. Phase 0 runs
-the gateway as a home command with the same store access as `session ingest`; Phase 1 adds the
-surface-token pairing service and the lease backend on the same authenticated connection. The separate low-privilege
-gateway behind the supervisor socket is Phase 4.
+Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.6, §6.3, §7.1–§7.5, §8.2–§8.3, §9
+and §12.1. The gateway runs as a home command with the same store access as `session ingest`;
+Phase 1 adds the surface-token pairing service and the lease backend on the same authenticated
+connection, and Phase 2 adds the offload dispatcher. The separate low-privilege gateway behind
+the supervisor socket is Phase 4.
 
 ```rust
 pub mod agent {
@@ -458,6 +459,7 @@ pub mod agent {
         pub fn serve(store: &Store, deps: &Deps, reader: impl BufRead + Send + 'static, writer: impl Write) -> Result<GatewayOutcome, CoreError>;
         pub fn serve_with_options(store: &Store, deps: &Deps, reader: impl BufRead + Send + 'static, writer: impl Write, options: GatewayOptions) -> Result<GatewayOutcome, CoreError>;
     }
+    pub mod dispatch { /* see §9.1 */ }
 }
 ```
 
@@ -531,9 +533,112 @@ Behaviour:
 - The gateway does not restart the supervisor, stop a live run or drain a harness on a takeover
   or an expired lease. Surface event appends, the takeover note/switch and run fencing are later
   slices; this slice only owns the lease row and the control frames.
-- Phase 0 has no runs, local chat, offload or job dispatch, and no live connection registry: a
-  revoked node is refused on its next frame. Lease control needs no registry because the only
-  push in this slice (`LeaseRevoked` on takeover) is written on the acquiring connection.
+- The gateway keeps a process-wide `(home root, node)` connection registry. A second
+  authenticated connection supersedes the first: the first is answered `Superseded` and closes,
+  and the new connection resumes the still-active assignments with `Resume`. When a *current*
+  connection closes without a successor, its accepted or running assignments move to
+  `disconnected` for the grace period. A revoked node fences every active assignment before it
+  sends `Revoked`.
+
+### 9.1 Offload dispatcher (`agent/dispatch.rs`)
+
+The dispatcher is the home half of §6.3. It never creates a worktree, starts a harness, pushes a
+branch or opens a second run log. It reuses `session::remote::begin_turn` for the session's run
+row and framing events, and `surface::lease` for the token shape and hash rule. A run lease is
+separate from the chat surface lease: it is stored as a `leases` row with `surface_kind=agent`
+and no surface id, and only its SHA-256 is durable.
+
+```rust
+pub mod dispatch {
+    pub const RUN_LEASE_TTL: Duration;      // 600 s; no run-lease heartbeat in this slice
+    pub const SPOOL_CAP_BYTES: u64;         // 512 MiB, §6.5
+    pub const REJECT_RETRY: Duration;       // 60 s rejection cooldown
+    pub const WAITING_PREFIX: &str;         // "waiting: offload "
+
+    pub struct EnqueueReport { pub enqueued: Vec<AgentAssignment>, pub waiting: Vec<WaitingJob>, pub home: usize }
+    pub struct WaitingJob { pub project: ProjectName, pub job: JobId, pub reason: WaitingReason,
+                            pub detail: String, pub node: Option<NodeName>, pub placement: Placement }
+    pub struct ClaimedAssignment { pub assignment: AgentAssignment, pub frame: AgentFrame }
+    pub struct ResumeOutcome { pub resume_ok: AgentFrame, pub assignments: Vec<ClaimedAssignment>,
+                               pub lost: Vec<(RunId, String)> }
+
+    pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<EnqueueReport, CoreError>;
+    pub fn claim_for_node(deps: &Deps, store: &Store, node: &NodeName, now: Timestamp)
+        -> Result<Vec<ClaimedAssignment>, CoreError>;
+    pub fn claim_for_node_with_slots(deps: &Deps, store: &Store, node: &NodeName,
+                                     max_slots: Option<u32>, now: Timestamp)
+        -> Result<Vec<ClaimedAssignment>, CoreError>;
+    pub fn accept(...) -> Result<AgentAssignment, CoreError>;
+    pub fn reject(...) -> Result<AgentAssignment, CoreError>;
+    pub fn update_state(...) -> Result<AgentAssignment, CoreError>;
+    pub fn lose(...) -> Result<AgentAssignment, CoreError>;
+    pub fn sweep_expired(...) -> Result<Vec<AgentAssignment>, CoreError>;
+    pub fn resume_assignment(...) -> Result<Option<ClaimedAssignment>, CoreError>;
+    pub fn supersede_assignment(...) -> Result<AgentAssignment, CoreError>;
+    pub fn resume_connection(...) -> Result<ResumeOutcome, CoreError>;
+    pub fn cancel_job(...) -> Result<Vec<AgentFrame>, CoreError>;
+    pub fn cleanup_assignment(...) -> Result<Option<AgentFrame>, CoreError>;
+    pub fn disconnect_node(...) -> Result<Vec<AgentAssignment>, CoreError>;
+    pub fn fence_node(...) -> Result<Vec<AgentAssignment>, CoreError>;
+}
+```
+
+- **Queue.** `enqueue_ready_jobs` reads every registered project's `ready` jobs. A job whose
+  effective placement is `home` is skipped. For every other job it builds the §7.2 request from
+  the selected profile executor, the harness `env_pass` names (as environment *and* required
+  secret names) and the node cards, then runs the pure `offload::evaluate`. A waiting decision
+  writes `jobs.note = "waiting: offload <reason>: <detail>"` and leaves the job `ready`; it never
+  fails the job. The note is the read model consumed by `vowp fleet status`/`queue`. A job with
+  only a home target is left for the L2 loop. A job with a live assignment is skipped, so a
+  heartbeat cannot create a second row for the same job, run or epoch. A fresh rejection has a
+  60-second cooldown. The payload has a fresh run id, the job session, the executor, purpose,
+  path-free prompt, `PathRef::Worktree`, the project HEAD as base commit, the remote name, the
+  project remote URL with userinfo stripped, environment and secret **names**, epoch, optional
+  deadline and the spool cap.
+- **Claim and send.** `claim_for_node_with_slots` computes free slots as the node's
+  `max_slots` (or the stricter `[offload.nodes.<name>].max_workers`) minus assignments in
+  `sent`/`accepted`/`running`/`disconnected`. `Store::claim_assignments` selects queued rows and
+  moves them to `sent` in one `BEGIN IMMEDIATE` transaction, so a row cannot be claimed twice.
+  The dispatcher then mints a run token, writes only its hash through `Store::take_lease`, and
+  returns `AssignRun`. If the lease cannot be issued or the frame cannot be written, the row goes
+  back to `queued`; it is never dropped. At most the free slots are sent per heartbeat.
+- **Accept / reject / state.** `RunAccepted` moves the row to `accepted` and the job to
+  `running`. `RunRejected` moves it to `rejected`, finishes the open run with `outcome=error`,
+  releases the lease and puts the job back to `ready` with the refusal reason and detail. A
+  `RunState` report moves `accepted`/`disconnected` to `running` or `running` to `disconnected`;
+  `finishing` keeps the row `running` with a redacted detail (spool bytes, optional short head
+  commit). No detail contains a token, secret value or home absolute path.
+- **Resume and epochs.** A duplicate `AssignRun` for the same `(run, epoch)` calls
+  `resume_assignment`: the payload and epoch are unchanged, a fresh token and expiry are minted,
+  and no second row is created. A higher epoch is inserted by `supersede_assignment`, which copies
+  the newest payload with the new epoch and marks older active rows `lost` while keeping the run
+  open. `Resume` returns `ResumeOk` with the session tail for each run and surface, then re-sends
+  `AssignRun` for accepted runs. A surface is accepted when its row is attached on the connection
+  node; its tail is the session stored in its metadata.
+- **Fence, cancel and cleanup.** An expired lease (`expires_at <= now`), a `RunLost` decision or a
+  revoked node fences the assignment to `lost`, closes the run with `outcome=error`, releases the
+  lease and returns the job to `ready`. `sweep_expired` runs on heartbeats and before a resume.
+  `cancel_job` moves each active row to `cancelled`, closes the run, releases the lease and returns
+  `CancelRun`. `cleanup_assignment` returns `Cleanup` for a terminal row with a
+  `PathRef::Worktree`; the agent removes the worktree later.
+- **Secrets and leases.** The durable payload carries `env_names` and `secret_names` only. The
+  plaintext run token exists only in the `AssignRun` frame; `leases.token_hash` is its SHA-256.
+  Agent-supplied detail is bounded and has the home root replaced before it is stored.
+
+Tests (`tests/offload_dispatch.rs`, temp home, fake git/clock, enrolled node row, no network,
+tmux or harness): `dispatcher_places_an_any_job_on_an_eligible_node`,
+`dispatcher_waits_when_a_pinned_node_is_offline`,
+`offload_refuses_a_home_only_project_and_a_denied_kind`,
+`offload_refuses_a_job_that_needs_a_home_only_secret`, `offload_requires_a_valid_path_map`,
+`assignment_payload_is_durable_and_has_no_lease_token`,
+`duplicate_assign_run_for_the_same_epoch_resumes_and_a_higher_epoch_supersedes`,
+`run_rejected_keeps_the_job_ready_with_a_reason`, `resume_returns_the_run_and_surface_tails`,
+`cancelled_job_sends_cancel_run_and_fences_the_assignment` and
+`run_lost_after_an_expired_lease_marks_the_assignment_lost`. The gateway adds
+`heartbeat_dispatches_at_most_the_node_slots` and `agent_second_connection_supersedes_the_first`.
+The store tests add `claim_assignments_is_atomic_and_returns_the_updated_rows`,
+`advance_assignment_rejects_an_invalid_transition_but_is_idempotent` and
+`assignments_for_job_filters_on_the_durable_payload`.
 
 Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_enrolls_a_node_with_a_valid_code`,
 `gateway_refuses_an_expired_or_used_code`, `gateway_auth_rejects_a_bad_signature_and_a_replayed_nonce`,

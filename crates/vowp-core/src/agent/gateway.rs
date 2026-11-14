@@ -1,20 +1,24 @@
-//! The Phase 0 stdio gateway: enroll, authenticate, heartbeat, ping, revocation and surface
-//! pairing.
+//! The stdio gateway: enroll, authenticate, heartbeat, ping, revocation, surface pairing,
+//! local chat and offload dispatch.
 //!
-//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2–§4.3, §8.2–§8.3, §12.1 and §12.3.
+//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2–§4.3, §6.3, §8.2–§8.3, §12.1 and §12.3.
 //! [`serve`] reads one JSON [`AgentFrame`] per line from stdin and writes one JSON frame per
 //! line to stdout. Standard error is the caller's; this module never logs a code, surface
-//! token, signature, public-key value or path map.
+//! token, signature, public-key value or path map, and the run lease token exists only in the
+//! `AssignRun` frame.
 //!
-//! Phase 0 runs the gateway as a home command with the same store access as `session ingest`.
-//! The low-privilege gateway behind the supervisor socket is Phase 4. There are no runs,
-//! leases, local chat, offload or job dispatch here. Surface pairing is answered on the
-//! authenticated connection; a refused `SurfacePair` keeps the connection open so the agent
-//! can retry with a fresh code, while an internal store failure closes it.
+//! The gateway runs as a home command with the same store access as `session ingest`. The
+//! low-privilege gateway behind the supervisor socket is Phase 4. After the handshake it
+//! enqueues ready jobs; each heartbeat sweeps expired run leases, enqueues again and sends at
+//! most the node's free slots as `AssignRun`. Surface pairing, chat frames and offload frames
+//! are answered on the same authenticated connection. A refused `SurfacePair` keeps the
+//! connection open so the agent can retry with a fresh code, while an internal store failure
+//! closes it.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,7 +29,7 @@ use vowp_protocol::{
 };
 use vowp_store::{NodeCredential, Store};
 
-use super::{auth, enroll, pair};
+use super::{auth, dispatch, enroll, pair};
 use crate::deps::Deps;
 use crate::error::CoreError;
 use crate::session::remote::{BeginTurn, IngestGrant, IngestSession};
@@ -185,6 +189,7 @@ struct Hello {
 /// A connection that passed the challenge-response handshake.
 struct Session {
     node: NodeName,
+    connection_id: String,
     agent_version: String,
     capabilities: serde_json::Value,
 }
@@ -280,11 +285,13 @@ fn authenticate(
             protocol: AGENT_PROTOCOL.to_owned(),
             home_id,
             node: hello.node.clone(),
-            connection_id,
+            connection_id: connection_id.clone(),
         },
     )?;
+    register_connection(store, &hello.node, &connection_id);
     Ok(Some(Session {
         node: hello.node,
+        connection_id,
         agent_version: hello.agent_version,
         capabilities: enroll::capabilities_value(&hello.capabilities)?,
     }))
@@ -299,15 +306,53 @@ fn run_connection(
     writer: &mut dyn Write,
     options: &GatewayOptions,
 ) -> Result<GatewayOutcome, CoreError> {
+    let node = session.node.clone();
+    let connection_id = session.connection_id.clone();
+    let result = run_connection_inner(store, deps, session, incoming, writer, options);
+    let was_current = connection_is_current(store, &node, &connection_id);
+    unregister_connection(store, &node, &connection_id);
+    // A superseded connection must not disturb the runs the new connection owns. A current
+    // connection that closes leaves its accepted runs resumable for the grace period.
+    if was_current {
+        let _ = dispatch::disconnect_node(deps, store, &node, "the agent connection closed", deps.clock.now());
+    }
+    result
+}
+
+/// The body of one authenticated connection.
+fn run_connection_inner(
+    store: &Store,
+    deps: &Deps,
+    session: Session,
+    incoming: &Receiver<Incoming>,
+    writer: &mut dyn Write,
+    options: &GatewayOptions,
+) -> Result<GatewayOutcome, CoreError> {
+    // Offload is enqueued once after the handshake; the first heartbeat sends frames, so
+    // the node's reported slots are fresh and the connection has a writer to use.
+    dispatch::enqueue_ready_jobs(deps, store, deps.clock.now())?;
     // One live local-chat stream per run on this connection. The ingest state machine
     // owns the session log handle, so a fenced run is dropped here and its later frames
     // are answered with `RunLost` instead of being appended.
     let mut chats: BTreeMap<RunId, ChatStream<'_>> = BTreeMap::new();
     loop {
-        let Some(frame) = read_frame(incoming, None, writer, options.max_frame_bytes)? else {
-            return Ok(GatewayOutcome::Closed {
-                node: Some(session.node),
-            });
+        let frame = match poll_frame(incoming, writer, options.max_frame_bytes)? {
+            Polled::Frame(frame) => frame,
+            Polled::Timeout => {
+                if !connection_is_current(store, &session.node, &session.connection_id) {
+                    let current = current_connection(store, &session.node).unwrap_or_default();
+                    send_frame(writer, &AgentFrame::Superseded { connection_id: current })?;
+                    return Ok(GatewayOutcome::Closed {
+                        node: Some(session.node),
+                    });
+                }
+                continue;
+            }
+            Polled::Closed => {
+                return Ok(GatewayOutcome::Closed {
+                    node: Some(session.node),
+                });
+            }
         };
 
         // Presence is derived from `last_seen_at`, so a revoked node is refused on the next
@@ -324,6 +369,7 @@ fn run_connection(
         };
         if card.status == NodeStatus::Revoked {
             fence_all(&mut chats, "node was revoked", writer)?;
+            dispatch::fence_node(deps, store, &session.node, "the node was revoked", now)?;
             send_frame(
                 writer,
                 &AgentFrame::Revoked {
@@ -356,6 +402,106 @@ fn run_connection(
                     Some(AGENT_PROTOCOL),
                     &capabilities,
                 )?;
+                // Dispatch on the heartbeat so the slot count is the node's latest
+                // report. Expired run leases are fenced before they can be resumed.
+                let lost = dispatch::sweep_expired(deps, store, &session.node, now)?;
+                for assignment in lost {
+                    send_frame(
+                        writer,
+                        &AgentFrame::RunLost {
+                            run_id: assignment.run_id,
+                            reason: "the run lease expired".to_owned(),
+                        },
+                    )?;
+                }
+                dispatch::enqueue_ready_jobs(deps, store, now)?;
+                let claimed = dispatch::claim_for_node(deps, store, &session.node, now)?;
+                for (index, item) in claimed.iter().enumerate() {
+                    if let Err(error) = send_frame(writer, &item.frame) {
+                        let _ = dispatch::return_claimed_to_queue(
+                            store,
+                            &claimed[index..],
+                            "the AssignRun frame could not be sent; the assignment stays queued",
+                        );
+                        return Err(error);
+                    }
+                }
+            }
+            AgentFrame::RunAccepted {
+                assignment_id,
+                run_id,
+                epoch,
+            } => match dispatch::accept(deps, store, &session.node, &assignment_id, &run_id, epoch, now) {
+                Ok(_) => {}
+                Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                    send_error(writer, error.kind(), error.to_string(), false)?;
+                }
+                Err(error) => return Err(error),
+            },
+            AgentFrame::RunRejected {
+                assignment_id,
+                run_id,
+                epoch,
+                reason,
+                detail,
+            } => match dispatch::reject(
+                deps,
+                store,
+                &session.node,
+                &assignment_id,
+                &run_id,
+                epoch,
+                reason,
+                &detail,
+                now,
+            ) {
+                Ok(_) => {}
+                Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                    send_error(writer, error.kind(), error.to_string(), false)?;
+                }
+                Err(error) => return Err(error),
+            },
+            AgentFrame::RunState {
+                run_id,
+                epoch,
+                state,
+                spool_bytes,
+                head_commit,
+                detail,
+            } => match dispatch::update_state(
+                deps,
+                store,
+                &session.node,
+                &run_id,
+                epoch,
+                state,
+                spool_bytes,
+                head_commit.as_deref(),
+                &detail,
+                now,
+            ) {
+                Ok(_) => {}
+                Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                    send_error(writer, error.kind(), error.to_string(), false)?;
+                }
+                Err(error) => return Err(error),
+            },
+            AgentFrame::Resume { runs, surfaces } => {
+                match dispatch::resume_connection(deps, store, &session.node, &runs, &surfaces, now) {
+                    Ok(outcome) => {
+                        send_frame(writer, &outcome.resume_ok)?;
+                        for (run_id, reason) in outcome.lost {
+                            send_frame(writer, &AgentFrame::RunLost { run_id, reason })?;
+                        }
+                        for claimed in outcome.assignments {
+                            send_frame(writer, &claimed.frame)?;
+                        }
+                    }
+                    Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             AgentFrame::SurfacePair {
                 code,
@@ -1217,6 +1363,33 @@ fn read_line_limited(reader: &mut impl BufRead, max: usize) -> Result<Option<Str
     }
 }
 
+/// One item read and decoded during the connection loop.
+#[allow(clippy::large_enum_variant)]
+enum Polled {
+    /// A decoded frame.
+    Frame(AgentFrame),
+    /// The poll interval elapsed without input.
+    Timeout,
+    /// The peer closed or sent unreadable input.
+    Closed,
+}
+
+/// Polls one frame without writing a timeout error to the peer.
+fn poll_frame(
+    incoming: &Receiver<Incoming>,
+    writer: &mut dyn Write,
+    max_frame_bytes: usize,
+) -> Result<Polled, CoreError> {
+    match incoming.recv_timeout(Duration::from_millis(200)) {
+        Ok(item) => match decode_incoming(item, writer, max_frame_bytes)? {
+            Some(frame) => Ok(Polled::Frame(frame)),
+            None => Ok(Polled::Closed),
+        },
+        Err(RecvTimeoutError::Timeout) => Ok(Polled::Timeout),
+        Err(RecvTimeoutError::Disconnected) => Ok(Polled::Closed),
+    }
+}
+
 /// Reads and decodes one frame, answering malformed or oversized input with a typed `Error`.
 fn read_frame(
     incoming: &Receiver<Incoming>,
@@ -1241,7 +1414,15 @@ fn read_frame(
             Err(_) => Incoming::Eof,
         },
     };
+    decode_incoming(item, writer, max_frame_bytes)
+}
 
+/// Decodes one item read from the input thread.
+fn decode_incoming(
+    item: Incoming,
+    writer: &mut dyn Write,
+    max_frame_bytes: usize,
+) -> Result<Option<AgentFrame>, CoreError> {
     match item {
         Incoming::Line(line) => match serde_json::from_str(&line) {
             Ok(frame) => Ok(Some(frame)),
@@ -1268,6 +1449,48 @@ fn read_frame(
             path: "agent gateway input".to_owned(),
             source: error,
         }),
+    }
+}
+
+/// The process-wide live connection id per `(home root, node)`.
+fn connections() -> &'static Mutex<BTreeMap<String, String>> {
+    static CONNECTIONS: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+    CONNECTIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Builds the registry key without leaking a path into a log or frame.
+fn connection_key(store: &Store, node: &NodeName) -> String {
+    let root = store
+        .paths()
+        .map(|paths| paths.root().display().to_string())
+        .unwrap_or_default();
+    format!("{root}:{node}")
+}
+
+/// Records `connection_id` as the live connection for the node.
+fn register_connection(store: &Store, node: &NodeName, connection_id: &str) {
+    let mut live = connections().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    live.insert(connection_key(store, node), connection_id.to_owned());
+}
+
+/// Returns whether `connection_id` is still the live connection for the node.
+fn connection_is_current(store: &Store, node: &NodeName, connection_id: &str) -> bool {
+    let live = connections().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    live.get(&connection_key(store, node)).map(String::as_str) == Some(connection_id)
+}
+
+/// Returns the live connection id for the node, when one is registered.
+fn current_connection(store: &Store, node: &NodeName) -> Option<String> {
+    let live = connections().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    live.get(&connection_key(store, node)).cloned()
+}
+
+/// Removes the registration when this connection is still the live one.
+fn unregister_connection(store: &Store, node: &NodeName, connection_id: &str) {
+    let mut live = connections().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = connection_key(store, node);
+    if live.get(&key).map(String::as_str) == Some(connection_id) {
+        live.remove(&key);
     }
 }
 
