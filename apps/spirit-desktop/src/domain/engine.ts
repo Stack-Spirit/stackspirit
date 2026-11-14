@@ -217,15 +217,14 @@ export function gateMissingMilestones(gates: GateSnapshot | null): {
   local: readonly string[];
   asif: readonly string[];
 } {
-  if (!gates) return { local: PHASE3_MILESTONES, asif: ASIF_MILESTONES };
+  const probedLocal =
+    gates?.local_orchestrator.state === "waiting_for_vowp_phase3"
+      ? gates.local_orchestrator.missing
+      : [];
+  const probedAsif =
+    gates?.asif.state === "waiting_for_vowp_asif" ? gates.asif.missing : [];
   return {
-    local:
-      gates.local_orchestrator.state === "waiting_for_vowp_phase3"
-        ? gates.local_orchestrator.missing
-        : PHASE3_MILESTONES,
-    asif:
-      gates.asif.state === "waiting_for_vowp_asif"
-        ? gates.asif.missing
-        : ASIF_MILESTONES,
+    local: [...new Set([...PHASE3_MILESTONES, ...probedLocal])],
+    asif: [...new Set([...ASIF_MILESTONES, ...probedAsif])],
   };
 }

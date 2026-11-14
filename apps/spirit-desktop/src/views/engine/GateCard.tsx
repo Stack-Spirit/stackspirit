@@ -5,6 +5,7 @@ import {
   localAgentLabel,
   gateActionEnabled,
   gateActionReason,
+  gateMissingMilestones,
 } from "../../domain/engine";
 
 export interface GateCardProps {
@@ -53,10 +54,10 @@ export function GateCard({ kind, gates, onDetails }: GateCardProps) {
   const missing =
     kind === "local"
       ? local.state === "waiting_for_vowp_phase3"
-        ? local.missing
+        ? gateMissingMilestones(gates).local
         : []
       : asif.state === "waiting_for_vowp_asif"
-        ? asif.missing
+        ? gateMissingMilestones(gates).asif
         : [];
 
   const localEnabled = gateActionEnabled(gates, "local_orchestrator");

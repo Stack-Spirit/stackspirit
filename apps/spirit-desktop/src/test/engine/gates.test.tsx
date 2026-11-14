@@ -14,6 +14,8 @@ describe("VOWP capability gate cards", () => {
     expect(
       within(local).getAllByText(/local opencode app host/).length,
     ).toBeGreaterThan(0);
+    expect(within(local).getAllByText(/backfill/).length).toBeGreaterThan(0);
+    expect(within(local).getAllByText(/local cache/).length).toBeGreaterThan(0);
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();
     expect(
       within(local).getAllByText(/Waiting for VOWP Phase 2\/3/).length,
