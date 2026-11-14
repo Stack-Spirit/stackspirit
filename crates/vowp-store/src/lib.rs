@@ -43,11 +43,11 @@ pub use db::{
 pub use error::StoreError;
 pub use migrate::{
     MigrationCount, MigrationReport, migrate_rollback, migrate_v01, migrate_v01_dry_run, migrate_v02, migrate_v03,
-    resume_migration,
+    migrate_v04, resume_migration,
 };
 pub use paths::NodePaths;
 pub use reconcile::{CrossDbReconcile, ReconcileCounts};
-pub use repo_surfaces::SurfaceToken;
+pub use repo_surfaces::{SurfaceToken, hash_lease_token};
 
 /// The reserved project that owns project-less session runs and node-wide history.
 pub const RESERVED_NODE_PROJECT: &str = "_node";

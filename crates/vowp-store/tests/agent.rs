@@ -12,7 +12,7 @@ use vowp_protocol::{
 };
 use vowp_store::{
     EnrollmentCode, EnrollmentKind, NodeCredential, NodePath, NodePaths, Store, StoreError, SurfaceToken, migrate_v02,
-    migrate_v03,
+    migrate_v03, migrate_v04,
 };
 
 const T0: &str = "2026-01-01T00:00:00.000Z";
@@ -62,6 +62,19 @@ fn v2_home() -> (TempDir, NodePaths) {
          SELECT id, kind, node, holder, app, cwd, metadata_json, created_at, last_seen_at FROM surfaces;
          DROP TABLE surfaces;
          ALTER TABLE surfaces_v2 RENAME TO surfaces;
+         DROP TABLE leases;
+         CREATE TABLE leases (
+           session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+           surface_id   TEXT REFERENCES surfaces(id) ON DELETE SET NULL,
+           surface_kind TEXT NOT NULL CHECK (surface_kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
+           node         TEXT NOT NULL,
+           holder       TEXT NOT NULL,
+           token        TEXT NOT NULL,
+           acquired_at  TEXT NOT NULL,
+           heartbeat_at TEXT NOT NULL,
+           CHECK (length(token) = 52)
+         ) STRICT;
+         CREATE INDEX leases_heartbeat ON leases(heartbeat_at);
          CREATE TABLE nodes_v2 (
            name         TEXT PRIMARY KEY,
            ssh_target   TEXT,
@@ -162,7 +175,7 @@ fn migration_v2_to_v3_preserves_nodes_projects_and_sessions() {
     drop(backup);
 
     let store = Store::open(&paths).expect("open migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 4);
+    assert_eq!(store.global_schema_version().expect("version"), 5);
     assert_eq!(store.list_nodes().expect("nodes").len(), 2);
     assert_eq!(store.kv_get("node_id").expect("kv"), Some("preserved-id".to_owned()));
     let projects = store.list_projects().expect("projects");
@@ -682,6 +695,19 @@ fn v3_home() -> (TempDir, NodePaths, SurfaceId, SessionId) {
          SELECT id, kind, node, holder, app, cwd, metadata_json, created_at, last_seen_at FROM surfaces;
          DROP TABLE surfaces;
          ALTER TABLE surfaces_v3 RENAME TO surfaces;
+         DROP TABLE leases;
+         CREATE TABLE leases (
+           session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+           surface_id   TEXT REFERENCES surfaces(id) ON DELETE SET NULL,
+           surface_kind TEXT NOT NULL CHECK (surface_kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
+           node         TEXT NOT NULL,
+           holder       TEXT NOT NULL,
+           token        TEXT NOT NULL,
+           acquired_at  TEXT NOT NULL,
+           heartbeat_at TEXT NOT NULL,
+           CHECK (length(token) = 52)
+         ) STRICT;
+         CREATE INDEX leases_heartbeat ON leases(heartbeat_at);
          PRAGMA user_version = 3;",
     )
     .expect("v3 schema");
@@ -809,7 +835,7 @@ fn migration_v3_to_v4_preserves_surfaces_and_rows() {
     drop(backup);
 
     let store = Store::open(&paths).expect("open migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 4);
+    assert_eq!(store.global_schema_version().expect("version"), 5);
     assert_eq!(store.kv_get("node_id").expect("kv"), Some("preserved-id".to_owned()));
     assert_eq!(store.require_session(&session_id).expect("session").title, "kept");
     let stored_surface = store
@@ -821,7 +847,10 @@ fn migration_v3_to_v4_preserves_surfaces_and_rows() {
     assert_eq!(stored_surface.revoked_at, None);
     assert_eq!(stored_surface.metadata, serde_json::json!({"kept": true}));
     assert!(store.list_surface_tokens(&surface_id).expect("tokens").is_empty());
-    assert!(store.lease(&session_id).expect("lease").is_some(), "lease preserved");
+    assert!(
+        store.lease(&session_id).expect("lease").is_none(),
+        "the v5 migration clears the ephemeral plaintext lease"
+    );
 
     // The rebuilt kind check now accepts an `agent` surface.
     let agent = surface(&SurfaceId::new());
@@ -832,6 +861,179 @@ fn migration_v3_to_v4_preserves_surfaces_and_rows() {
         .expect("agent surface");
     assert_eq!(agent_state.kind, SurfaceKind::Agent);
     assert_eq!(agent_state.state, SurfaceState::Pending);
+}
+
+/// Builds a real v4 global database: the v5 schema with plaintext lease tokens restored.
+fn v4_home() -> (TempDir, NodePaths, SurfaceId, SessionId) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = NodePaths::new(tmp.path());
+    paths.ensure().expect("dirs");
+    let conn = Connection::open(paths.db_path()).expect("v4 db");
+    conn.pragma_update(None, "journal_mode", "WAL").expect("wal");
+    conn.execute_batch(include_str!("../src/schema/global.sql"))
+        .expect("v5 base schema");
+    conn.execute_batch(
+        "DROP TABLE leases;
+         CREATE TABLE leases (
+           session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+           surface_id   TEXT REFERENCES surfaces(id) ON DELETE SET NULL,
+           surface_kind TEXT NOT NULL CHECK (surface_kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
+           node         TEXT NOT NULL,
+           holder       TEXT NOT NULL,
+           token        TEXT NOT NULL,
+           acquired_at  TEXT NOT NULL,
+           heartbeat_at TEXT NOT NULL,
+           CHECK (length(token) = 52)
+         ) STRICT;
+         CREATE INDEX leases_heartbeat ON leases(heartbeat_at);
+         PRAGMA user_version = 4;",
+    )
+    .expect("v4 schema");
+
+    let session_id = SessionId::parse(SESSION_ID).expect("session id");
+    let surface_id = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAY".to_owned());
+    conn.execute(
+        "INSERT INTO kv (key, value, updated_at) VALUES ('node_id', 'preserved-id', ?1)",
+        [T0],
+    )
+    .expect("kv");
+    conn.execute(
+        "INSERT INTO nodes (name, ssh_target, is_local, capabilities, last_seen_at, created_at)
+         VALUES ('local', NULL, 1, '{}', ?1, ?1)",
+        [T0],
+    )
+    .expect("node");
+    conn.execute(
+        "INSERT INTO projects (name, path, remote_url, default_branch, config_json, state, weight,
+                               paused_reason, archived_at, created_at, updated_at)
+         VALUES ('alpha', '/tmp/alpha', NULL, 'main', '{}', 'active', 1, '', NULL, ?1, ?1)",
+        [T0],
+    )
+    .expect("project");
+    conn.execute(
+        "INSERT INTO sessions (id, project, job_id, role, title, parent_session_id, node, cwd, state,
+                               executor, last_seq, last_capsule_id, log_bytes, compacted_at, created_at, updated_at)
+         VALUES (?1, 'alpha', NULL, 'user', 'kept', NULL, 'local', '/tmp', 'idle', NULL, 0, NULL, 0, NULL, ?2, ?2)",
+        params![SESSION_ID, T0],
+    )
+    .expect("session");
+    conn.execute(
+        "INSERT INTO surfaces (id, kind, node, holder, app, cwd, metadata_json, created_at, last_seen_at)
+         VALUES (?1, 'chat', 'local', 'laptop', 'vowp chat', '/tmp', '{\"kept\":true}', ?2, ?2)",
+        params![surface_id.0.as_str(), T0],
+    )
+    .expect("surface");
+    conn.execute(
+        "INSERT INTO surface_tokens (id, surface_id, token_hash, prefix, scopes_json, created_at)
+         VALUES ('token-1', ?1, ?2, 'vowp_surf_ab', '[]', ?3)",
+        params![surface_id.0.as_str(), "b".repeat(64), T0],
+    )
+    .expect("surface token");
+    conn.execute(
+        "INSERT INTO leases (session_id, surface_id, surface_kind, node, holder, token, acquired_at, heartbeat_at)
+         VALUES (?1, ?2, 'chat', 'local', 'laptop', ?3, ?4, ?4)",
+        params![SESSION_ID, surface_id.0.as_str(), "A".repeat(52), T0],
+    )
+    .expect("lease");
+    drop(conn);
+    (tmp, paths, surface_id, session_id)
+}
+
+#[test]
+fn migration_v4_to_v5_clears_leases_and_preserves_surfaces() {
+    let (_tmp, paths, surface_id, session_id) = v4_home();
+    let source_tables: Vec<String> = {
+        let source = Connection::open(paths.db_path()).expect("source db");
+        let mut statement = source
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .expect("source tables");
+        statement
+            .query_map([], |row| row.get(0))
+            .expect("source table rows")
+            .map(|row| row.expect("source table name"))
+            .collect()
+    };
+    assert_eq!(source_tables.len(), 25, "the v4 schema has 25 tables");
+
+    let report = migrate_v04(&paths).expect("migrate");
+    assert_eq!(report.from_version, 4);
+    assert_eq!(report.to_version, 5);
+    assert!(report.verified);
+    assert!(std::path::Path::new(&report.backup).is_file(), "backup exists");
+    for table in &source_tables {
+        assert!(
+            report.tables.contains_key(&format!("global:{table}")),
+            "the migration did not copy v4 table {table}"
+        );
+        if table == "leases" {
+            continue;
+        }
+        assert_eq!(
+            report.tables[&format!("global:{table}")].before,
+            report.tables[&format!("global:{table}")].after,
+            "row count drift for {table}"
+        );
+    }
+    assert_eq!(report.tables["global:leases"].before, 1);
+    assert_eq!(report.tables["global:leases"].after, 0);
+    assert_eq!(report.tables["global:surfaces"].before, 1);
+    assert_eq!(report.tables["global:surfaces"].after, 1);
+    assert_eq!(report.tables["global:surface_tokens"].after, 1);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("cleared 1 ephemeral lease")),
+        "the report records the cleared lease: {:?}",
+        report.warnings
+    );
+
+    let backup = Connection::open(&report.backup).expect("backup db");
+    let backup_version: i64 = backup
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("backup version");
+    assert_eq!(backup_version, 4, "the backup is the untouched v4 file");
+    let backup_lease: String = backup
+        .query_row("SELECT token FROM leases WHERE session_id = ?1", [SESSION_ID], |row| {
+            row.get(0)
+        })
+        .expect("backup keeps the plaintext lease row");
+    assert_eq!(backup_lease, "A".repeat(52));
+    drop(backup);
+
+    let store = Store::open(&paths).expect("open migrated home");
+    assert_eq!(store.global_schema_version().expect("version"), 5);
+    assert_eq!(store.kv_get("node_id").expect("kv"), Some("preserved-id".to_owned()));
+    assert_eq!(store.require_session(&session_id).expect("session").title, "kept");
+    let stored_surface = store
+        .surface_by_id(&surface_id)
+        .expect("surface lookup")
+        .expect("surface preserved");
+    assert_eq!(stored_surface.holder, "laptop");
+    assert_eq!(stored_surface.state, SurfaceState::Attached);
+    assert_eq!(
+        store.list_surface_tokens(&surface_id).expect("tokens").len(),
+        1,
+        "surface tokens are preserved"
+    );
+    assert!(
+        store.lease(&session_id).expect("lease").is_none(),
+        "the ephemeral lease is cleared on upgrade"
+    );
+
+    let conn = Connection::open(paths.db_path()).expect("migrated db");
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('leases') ORDER BY cid")
+        .expect("lease columns")
+        .query_map([], |row| row.get(0))
+        .expect("column rows")
+        .map(|row| row.expect("column name"))
+        .collect();
+    assert!(columns.iter().any(|column| column == "token_hash"));
+    assert!(!columns.iter().any(|column| column == "token"));
 }
 
 #[test]

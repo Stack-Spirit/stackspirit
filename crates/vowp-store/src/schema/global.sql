@@ -251,13 +251,14 @@ CREATE TABLE surfaces (
 CREATE TABLE leases (
   session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   surface_id   TEXT REFERENCES surfaces(id) ON DELETE SET NULL,
-  surface_kind TEXT NOT NULL CHECK (surface_kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
+  surface_kind TEXT NOT NULL CHECK (surface_kind IN ('chat','opencode','claude-code','mcp','mirror','api','agent')),
   node         TEXT NOT NULL,
   holder       TEXT NOT NULL,
-  token        TEXT NOT NULL,            -- 52 chars: two ULIDs; never logged
+  token_hash   TEXT NOT NULL
+                 CHECK (length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'),
+                 -- lowercase hex SHA-256; never the plaintext
   acquired_at  TEXT NOT NULL,
-  heartbeat_at TEXT NOT NULL,
-  CHECK (length(token) = 52)
+  heartbeat_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX leases_heartbeat ON leases(heartbeat_at);
 
@@ -402,4 +403,4 @@ CREATE TABLE secret_index (
   updated_at TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;

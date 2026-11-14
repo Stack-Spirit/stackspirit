@@ -7,6 +7,7 @@
 //! never both believe they own a session.
 
 use rusqlite::{OptionalExtension, Row, params};
+use sha2::{Digest, Sha256};
 use vowp_protocol::{
     Lease, NodeName, SessionId, Surface, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState, Timestamp,
 };
@@ -48,7 +49,7 @@ pub struct SurfaceToken {
 const SURFACE_COLUMNS: &str = "id, kind, node, holder, app, cwd, metadata_json, created_at, last_seen_at";
 
 /// Column list shared by every `leases` query.
-const LEASE_COLUMNS: &str = "session_id, surface_id, surface_kind, node, holder, token, acquired_at, heartbeat_at";
+const LEASE_COLUMNS: &str = "session_id, surface_id, surface_kind, node, holder, token_hash, acquired_at, heartbeat_at";
 
 /// Column list used to read a surface with its v0.4 state.
 const SURFACE_INFO_COLUMNS: &str =
@@ -78,7 +79,7 @@ struct LeaseRow {
     surface_kind: String,
     node: String,
     holder: String,
-    token: String,
+    token_hash: String,
     acquired_at: String,
     heartbeat_at: String,
 }
@@ -121,13 +122,16 @@ fn read_lease_row(row: &Row<'_>) -> rusqlite::Result<LeaseRow> {
         surface_kind: row.get(2)?,
         node: row.get(3)?,
         holder: row.get(4)?,
-        token: row.get(5)?,
+        token_hash: row.get(5)?,
         acquired_at: row.get(6)?,
         heartbeat_at: row.get(7)?,
     })
 }
 
 /// Converts a raw `leases` row into a protocol [`Lease`].
+///
+/// `Lease::token` carries the stored lowercase hex SHA-256, never the plaintext token.
+/// The plaintext exists only in the grant returned once to the caller.
 fn lease_from_row(raw: LeaseRow) -> Result<Lease, StoreError> {
     Ok(Lease {
         session_id: SessionId::parse(&raw.session_id)?,
@@ -135,10 +139,18 @@ fn lease_from_row(raw: LeaseRow) -> Result<Lease, StoreError> {
         surface_kind: surface_kind_from_text(&raw.surface_kind, "leases.surface_kind")?,
         node: NodeName::parse(&raw.node)?,
         holder: raw.holder,
-        token: raw.token,
+        token: raw.token_hash,
         acquired_at: ts_from_text(&raw.acquired_at, "leases.acquired_at")?,
         heartbeat_at: ts_from_text(&raw.heartbeat_at, "leases.heartbeat_at")?,
     })
+}
+
+/// Returns the lowercase hex SHA-256 of a plaintext lease token.
+///
+/// The database stores only this value. The 52-character token itself is returned once in
+/// `LeaseGrant` and is never written to the database or a log.
+pub fn hash_lease_token(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 /// Raw values of one `surfaces` row with its v0.4 lifecycle columns.
@@ -333,10 +345,12 @@ impl Store {
 
     /// Replaces the session's lease with `lease` in one transaction.
     ///
-    /// Returns the previous holder, or `None` when the session had no lease. The write is
-    /// a single `BEGIN IMMEDIATE` transaction, so concurrent callers cannot both see an
-    /// empty row and both insert.
+    /// `lease.token` is the plaintext token; only its SHA-256 hash is written. Returns the
+    /// previous row, or `None` when the session had no lease. The write is a single
+    /// `BEGIN IMMEDIATE` transaction, so concurrent callers cannot both see an empty row
+    /// and both insert.
     pub fn take_lease(&self, lease: &Lease) -> Result<Option<Lease>, StoreError> {
+        let token_hash = hash_lease_token(&lease.token);
         self.transaction(|tx| {
             if tx.session(&lease.session_id)?.is_none() {
                 return Err(StoreError::not_found("session", lease.session_id.as_str()));
@@ -344,14 +358,14 @@ impl Store {
             let previous = tx.lease(&lease.session_id)?;
             tx.conn.execute(
                 "INSERT INTO main.leases (
-                    session_id, surface_id, surface_kind, node, holder, token, acquired_at, heartbeat_at
+                    session_id, surface_id, surface_kind, node, holder, token_hash, acquired_at, heartbeat_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(session_id) DO UPDATE SET
                    surface_id = excluded.surface_id,
                    surface_kind = excluded.surface_kind,
                    node = excluded.node,
                    holder = excluded.holder,
-                   token = excluded.token,
+                   token_hash = excluded.token_hash,
                    acquired_at = excluded.acquired_at,
                    heartbeat_at = excluded.heartbeat_at",
                 params![
@@ -360,7 +374,7 @@ impl Store {
                     surface_kind_to_text(lease.surface_kind),
                     lease.node.as_str(),
                     lease.holder,
-                    lease.token,
+                    token_hash,
                     ts_to_text(lease.acquired_at),
                     ts_to_text(lease.heartbeat_at),
                 ],
@@ -369,36 +383,46 @@ impl Store {
         })
     }
 
-    /// Stamps the lease's heartbeat when `token` still holds it.
+    /// Stamps the lease's heartbeat when the plaintext `token` still holds it.
     ///
-    /// Returns false when the session has no lease or another surface holds it.
+    /// The presented token is hashed and compared with `token_hash`. Returns false when
+    /// the session has no lease or another surface holds it.
     pub fn heartbeat_lease(&self, session: &SessionId, token: &str, at: Timestamp) -> Result<bool, StoreError> {
+        let token_hash = hash_lease_token(token);
         let changed = self.conn.execute(
-            "UPDATE main.leases SET heartbeat_at = ?1 WHERE session_id = ?2 AND token = ?3",
-            params![ts_to_text(at), session.as_str(), token],
+            "UPDATE main.leases SET heartbeat_at = ?1 WHERE session_id = ?2 AND token_hash = ?3",
+            params![ts_to_text(at), session.as_str(), token_hash],
         )?;
         Ok(changed > 0)
     }
 
-    /// Deletes the lease when `token` still holds it; returns whether it was deleted.
+    /// Deletes the lease when the plaintext `token` still holds it; returns whether it was
+    /// deleted.
     pub fn release_lease(&self, session: &SessionId, token: &str) -> Result<bool, StoreError> {
+        let token_hash = hash_lease_token(token);
         let changed = self.conn.execute(
-            "DELETE FROM main.leases WHERE session_id = ?1 AND token = ?2",
-            params![session.as_str(), token],
+            "DELETE FROM main.leases WHERE session_id = ?1 AND token_hash = ?2",
+            params![session.as_str(), token_hash],
         )?;
         Ok(changed > 0)
     }
 
-    /// Deletes a lease only when it is still stale at `before`.
+    /// Deletes a lease only when its stored hash still matches and it is stale at `before`.
     ///
+    /// `token_hash` is the stored value read from [`Store::lease`], not a plaintext token.
     /// The heartbeat predicate is part of the same DELETE, so a heartbeat committed
     /// between `stale_leases` and this call keeps the lease. The sweep must use this
-    /// method rather than `release_lease`, which matches only `session_id` and `token`.
-    pub fn release_stale_lease(&self, session: &SessionId, token: &str, before: Timestamp) -> Result<bool, StoreError> {
+    /// method rather than `release_lease`, which hashes a plaintext token.
+    pub fn release_stale_lease(
+        &self,
+        session: &SessionId,
+        token_hash: &str,
+        before: Timestamp,
+    ) -> Result<bool, StoreError> {
         let changed = self.conn.execute(
             "DELETE FROM main.leases
-             WHERE session_id = ?1 AND token = ?2 AND heartbeat_at < ?3",
-            params![session.as_str(), token, ts_to_text(before)],
+             WHERE session_id = ?1 AND token_hash = ?2 AND heartbeat_at < ?3",
+            params![session.as_str(), token_hash, ts_to_text(before)],
         )?;
         Ok(changed > 0)
     }

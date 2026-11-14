@@ -357,7 +357,20 @@ pub struct SurfaceInfo {
     pub revoked_at: Option<Timestamp>,
 }
 
-/// One Phase 0 agent protocol frame, tagged by `type`.
+/// How a surface asks for a session lease.
+///
+/// `Acquire` fails with a `Conflict` error when another surface holds a live lease;
+/// `Takeover` replaces it and fences the old holder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseMode {
+    /// Take the lease only when it is free or stale.
+    Acquire,
+    /// Replace a live lease after the owner agreed.
+    Takeover,
+}
+
+/// One agent protocol frame, tagged by `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentFrame {
@@ -469,6 +482,56 @@ pub enum AgentFrame {
         surface_id: SurfaceId,
         /// Human-readable reason.
         reason: String,
+    },
+    /// Agent -> home: acquire or take over the session lease.
+    LeaseAcquire {
+        /// Surface asking for the lease.
+        surface: SurfaceId,
+        /// Session the lease protects.
+        session: SessionId,
+        /// Scoped surface token issued by `SurfaceIssued`; never logged.
+        surface_token: String,
+        /// Whether a live lease may be replaced.
+        mode: LeaseMode,
+    },
+    /// Agent -> home: keep the held lease alive.
+    LeaseHeartbeat {
+        /// Surface holding the lease.
+        surface: SurfaceId,
+        /// Session the lease protects.
+        session: SessionId,
+        /// Plaintext lease token returned by `LeaseGrant`; never logged.
+        token: String,
+    },
+    /// Agent -> home: release the lease on detach.
+    LeaseRelease {
+        /// Surface releasing the lease.
+        surface: SurfaceId,
+        /// Session the lease protects.
+        session: SessionId,
+        /// Plaintext lease token returned by `LeaseGrant`; never logged.
+        token: String,
+    },
+    /// Home -> agent: the lease is granted for this surface.
+    LeaseGrant {
+        /// Plaintext lease token; shown once in the grant, never logged.
+        lease_token: String,
+        /// When the lease goes stale without a heartbeat.
+        expires_at: Timestamp,
+        /// Session sequence the new holder may continue from.
+        tail_seq: u64,
+    },
+    /// Home -> agent: the lease was taken over or expired; the surface is read-only.
+    LeaseLost {
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// Home -> agent: another surface now holds the lease; stop sending events.
+    LeaseRevoked {
+        /// Human-readable reason.
+        reason: String,
+        /// Human-visible holder of the lease now.
+        holder: String,
     },
     /// Agent -> home: capacity and spool state.
     Heartbeat {

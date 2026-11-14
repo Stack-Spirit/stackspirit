@@ -7,8 +7,8 @@ use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 
 use vowp_protocol::agent::{
-    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, MAX_PATH_REF_LEN, NodeCard,
-    NodeKind, NodePresence, NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState,
+    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, LeaseMode, MAX_PATH_REF_LEN,
+    NodeCard, NodeKind, NodePresence, NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState,
 };
 use vowp_protocol::error::ErrorKind;
 use vowp_protocol::ids::{JobId, NodeName, ProjectName, SessionId};
@@ -296,6 +296,85 @@ fn agent_frame_round_trips_surface_pair_frames() {
 }
 
 #[test]
+fn agent_frame_round_trips_lease_frames() {
+    let surface_id = SurfaceId::new();
+    let session = SessionId::new();
+    let frames = vec![
+        (
+            "lease_acquire",
+            AgentFrame::LeaseAcquire {
+                surface: surface_id.clone(),
+                session: session.clone(),
+                surface_token: "vowp_surf_abcdef".to_owned(),
+                mode: LeaseMode::Acquire,
+            },
+        ),
+        (
+            "lease_heartbeat",
+            AgentFrame::LeaseHeartbeat {
+                surface: surface_id.clone(),
+                session: session.clone(),
+                token: "A".repeat(52),
+            },
+        ),
+        (
+            "lease_release",
+            AgentFrame::LeaseRelease {
+                surface: surface_id.clone(),
+                session: session.clone(),
+                token: "B".repeat(52),
+            },
+        ),
+        (
+            "lease_grant",
+            AgentFrame::LeaseGrant {
+                lease_token: "C".repeat(52),
+                expires_at: at(),
+                tail_seq: 42,
+            },
+        ),
+        (
+            "lease_lost",
+            AgentFrame::LeaseLost {
+                reason: "lease expired".to_owned(),
+            },
+        ),
+        (
+            "lease_revoked",
+            AgentFrame::LeaseRevoked {
+                reason: "session taken over".to_owned(),
+                holder: "mac opencode".to_owned(),
+            },
+        ),
+    ];
+
+    for (wire, frame) in frames {
+        let value = serde_json::to_value(&frame).expect("lease frame JSON");
+        assert_eq!(value["type"], wire, "wire name for {wire}");
+        let decoded: AgentFrame = serde_json::from_value(value).expect("lease frame back");
+        assert_eq!(decoded, frame);
+    }
+
+    assert_eq!(
+        serde_json::to_value(LeaseMode::Acquire).expect("acquire JSON"),
+        json!("acquire")
+    );
+    assert_eq!(
+        serde_json::to_value(LeaseMode::Takeover).expect("takeover JSON"),
+        json!("takeover")
+    );
+    let err = serde_json::from_value::<AgentFrame>(json!({
+        "type": "lease_acquire",
+        "surface": surface_id,
+        "session": session,
+        "surface_token": "vowp_surf_abcdef",
+        "mode": "steal",
+    }))
+    .expect_err("unknown lease mode must fail");
+    assert!(err.to_string().contains("steal"), "error names the mode: {err}");
+}
+
+#[test]
 fn surface_types_round_trip_and_have_stable_wire_names() {
     for (state, wire) in [
         (SurfaceState::Pending, "pending"),
@@ -417,6 +496,7 @@ fn all_schemas_includes_agent_types() {
         "SurfaceInfo",
         "SurfaceScope",
         "SurfaceState",
+        "LeaseMode",
         "AgentFrame",
     ] {
         assert!(schemas.contains_key(name), "all_schemas is missing {name}");

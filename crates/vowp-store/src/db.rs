@@ -22,7 +22,7 @@ use crate::error::StoreError;
 use crate::paths::NodePaths;
 
 /// Schema version of the global database written by this build.
-pub const GLOBAL_SCHEMA_VERSION: i64 = 4;
+pub const GLOBAL_SCHEMA_VERSION: i64 = 5;
 
 /// Schema version of every project database written by this build.
 pub const PROJECT_SCHEMA_VERSION: i64 = 1;
@@ -33,7 +33,7 @@ pub const PROJECT_SCHEMA_VERSION: i64 = 1;
 /// historical value 1 so external users of the v0.1 API are not surprised.
 pub const SCHEMA_VERSION: i64 = PROJECT_SCHEMA_VERSION;
 
-/// Embedded global schema (user_version 4).
+/// Embedded global schema (user_version 5).
 pub(crate) const GLOBAL_SCHEMA_SQL: &str = include_str!("schema/global.sql");
 
 /// Embedded project schema (user_version 1).
@@ -597,6 +597,7 @@ impl Store {
         crate::migrate::resume_migration(paths)?;
         crate::migrate::migrate_v02_if_needed(paths)?;
         crate::migrate::migrate_v03_if_needed(paths)?;
+        crate::migrate::migrate_v04_if_needed(paths)?;
         let path = paths.db_path();
         let conn = Connection::open(&path)?;
         let store =
@@ -838,11 +839,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_versions_are_global_4_project_1() {
-        assert_eq!(GLOBAL_SCHEMA_VERSION, 4);
+    fn schema_versions_are_global_5_project_1() {
+        assert_eq!(GLOBAL_SCHEMA_VERSION, 5);
         assert_eq!(PROJECT_SCHEMA_VERSION, 1);
         assert_eq!(SCHEMA_VERSION, 1);
-        assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 4;"));
+        assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 5;"));
         assert!(PROJECT_SCHEMA.contains("PRAGMA user_version = 1;"));
     }
 

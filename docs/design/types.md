@@ -1347,7 +1347,8 @@ pub struct SurfaceInfo {
 pub struct Lease {
     pub session_id: SessionId, pub surface_id: Option<SurfaceId>,
     pub surface_kind: SurfaceKind, pub node: NodeName, pub holder: String,
-    pub token: String, pub acquired_at: Timestamp, pub heartbeat_at: Timestamp,
+    pub token: String,  // lowercase hex SHA-256; the plaintext exists only in the grant
+    pub acquired_at: Timestamp, pub heartbeat_at: Timestamp,
 }
 pub struct SurfaceRef {
     pub surface_id: SurfaceId, pub kind: SurfaceKind, pub holder: String,
@@ -1590,6 +1591,9 @@ pub struct NodeCard {
     pub protocol: Option<String>, pub last_error: Option<String>,
 }
 
+#[serde(rename_all = "snake_case")]
+pub enum LeaseMode { Acquire, Takeover }
+
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentFrame {
     AgentHello { node: NodeName, key_id: String, agent_version: String,
@@ -1610,6 +1614,13 @@ pub enum AgentFrame {
     SurfaceIssued { surface_id: SurfaceId, token: String,
                     scopes: Vec<SurfaceScope>, expires_at: Timestamp },
     SurfaceRevoked { surface_id: SurfaceId, reason: String },
+    LeaseAcquire { surface: SurfaceId, session: SessionId,
+                   surface_token: String, mode: LeaseMode },
+    LeaseHeartbeat { surface: SurfaceId, session: SessionId, token: String },
+    LeaseRelease { surface: SurfaceId, session: SessionId, token: String },
+    LeaseGrant { lease_token: String, expires_at: Timestamp, tail_seq: u64 },
+    LeaseLost { reason: String },
+    LeaseRevoked { reason: String, holder: String },
     Ping,
     Pong,
     Revoked { reason: String },
@@ -1620,8 +1631,11 @@ pub enum AgentFrame {
 
 `NodeCard` is the redacted read model: it has no path-map field and no secret names. The
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
-snapshot or log. `AgentFrame` covers Phase 0 plus the surface pairing frames; assignment,
-lease and `AssignRun`/`RemoteLine` frames are later phases. `SurfaceKind` includes the `agent`
-wire variant, and the v4 store schema accepts it. `SurfaceIssued.token` (like `SurfacePair.code`)
-is a secret frame value: it is written 0600 on the agent and never logged; the home stores only
-its SHA-256 hash, a short prefix and the scopes in `surface_tokens`.
+snapshot or log. `AgentFrame` covers Phase 0, surface pairing and lease control; assignment and
+`RemoteLine`/`IngestAck` streaming are later phases. `SurfaceKind` includes the `agent` wire
+variant, and the v5 store schema accepts it. `SurfaceIssued.token` (like `SurfacePair.code`) and
+the lease token are secret frame values: they are written 0600 on the agent and never logged.
+The home stores only their SHA-256 hashes — a surface token in `surface_tokens.token_hash`, a
+lease token in `leases.token_hash`. `LeaseAcquire.surface_token` authenticates the acquire
+frame; `LeaseHeartbeat` and `LeaseRelease` carry only the lease token, and the home binds them
+to the surface row and the connection node.

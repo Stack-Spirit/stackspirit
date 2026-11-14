@@ -110,15 +110,16 @@ Migration/pragma rules (all in `Store::open*`):
 5. Insert `kv('schema_created_at')` and `kv('node_id')` (a fresh ULID) on first creation.
 6. `open_writable(paths, project)` is the daemon's narrow write constructor. It requires the
    existing `vowp.db` (missing → `NotFound`), uses read-write flags without create, sets the busy
-   timeout and foreign keys, checks `user_version = 4` (newer → `SchemaTooNew`, older →
+   timeout and foreign keys, checks `user_version = 5` (newer → `SchemaTooNew`, older →
    `MigrationRequired`), and attaches an existing registered project with the same schema check.
    It never calls `paths.ensure`, `resume_migration` or a schema file, so opening it cannot create
    or migrate a home. It is not a general write-open: `Store::open` remains the CLI/supervisor
    constructor.
-7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3 and an
-   existing v3 file to v4 before opening it. `migrate_v02` follows the v0.1 migration's
+7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3, an
+   existing v3 file to v4 and an existing v4 file to v5 before opening it. `migrate_v02` follows the v0.1 migration's
    staged-swap recipe: it copies the original file to `backups/pre-0.3-<ms>.db`, writes a fresh
-   v3 file in `tmp/` (the embedded v4 schema shaped back to the v3 `surfaces` table), copies all
+   v3 file in `tmp/` (the embedded v5 schema shaped back to the v3 `surfaces` and
+   plaintext-`leases` tables), copies all
    21 v2 global tables (including `native_events`), verifies per-table counts, integrity and
    foreign keys, and then renames the staged file into place. `nodes` is copied with an explicit
    column list and a `CASE` that maps `is_local` to `kind`; the other tables keep their v2
@@ -131,7 +132,15 @@ Migration/pragma rules (all in `Store::open*`):
    foreign keys, and swaps the staged file into place. `migration.json` makes the swap
    restartable; projects, session logs and the project schema are untouched. The existing
    v0.1 → v2 `migrate_v01` path is not renumbered: it writes the current embedded schema and
-   therefore leaves the home at v4.
+   therefore leaves the home at v5.
+9. `migrate_v04` copies the original file to `backups/pre-0.5-<ms>.db`, builds a fresh v5 file in
+   `tmp/`, copies every v4 table except `leases`, verifies per-table counts, integrity and
+   foreign keys, and swaps the staged file into place. The v5 `leases` table replaces the
+   plaintext `token` column with `token_hash` (64 lowercase hex characters) and accepts the
+   `agent` surface kind. Lease rows are cleared rather than migrated: a v4 lease token is
+   plaintext and every lease is stale within 60 seconds, so surfaces re-acquire after the
+   upgrade. Surfaces, `surface_tokens` and every other row are preserved; the migration report
+   records the cleared lease count under `tables["global:leases"]` and in `warnings`.
 
 ### 3.3 Filters and small structs
 
@@ -237,8 +246,13 @@ pub fn surface_token_by_hash(&self, hash: &str) -> Result<Option<SurfaceToken>, 
 pub fn list_surface_tokens(&self, surface: &SurfaceId) -> Result<Vec<SurfaceToken>, StoreError>;  // oldest first
 pub fn revoke_surface_token(&self, id: &str, at: Timestamp) -> Result<bool, StoreError>;
 pub fn touch_surface_token(&self, id: &str, at: Timestamp) -> Result<bool, StoreError>;
-pub fn lease(&self, session: &SessionId) -> Result<Option<Lease>, StoreError>;
+pub fn lease(&self, session: &SessionId) -> Result<Option<Lease>, StoreError>;  // Lease::token is the stored hash
 pub fn list_leases(&self) -> Result<Vec<Lease>, StoreError>;
+pub fn take_lease(&self, lease: &Lease) -> Result<Option<Lease>, StoreError>;  // hashes Lease::token on write
+pub fn heartbeat_lease(&self, session: &SessionId, token: &str, at: Timestamp) -> Result<bool, StoreError>;  // hashes the presented token
+pub fn release_lease(&self, session: &SessionId, token: &str) -> Result<bool, StoreError>;  // hashes the presented token
+pub fn release_stale_lease(&self, session: &SessionId, token_hash: &str, before: Timestamp) -> Result<bool, StoreError>;
+pub fn hash_lease_token(token: &str) -> String;  // lowercase hex SHA-256
 
 pub fn upsert_project(&self, p: &Project) -> Result<(), StoreError>;
 pub fn project(&self, name: &ProjectName) -> Result<Option<Project>, StoreError>;
@@ -585,7 +599,8 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `open_is_idempotent` | open twice on the same file: no error, `node_id` kv unchanged |
 | `open_writable_answers_and_never_creates_or_migrates` | `open_writable` opens an existing home, answers an inbox item and reads it back; a missing `vowp.db` is `NotFound` and its directory is not created; an empty zero-byte file is `MigrationRequired` and stays untouched |
 | `migration_v2_to_v3_preserves_nodes_projects_and_sessions` | a v2 fixture with nodes, a project and a session migrates to v3; counts, `kv('node_id')`, project and session rows survive; the backup still reports v2 |
-| `migration_v3_to_v4_preserves_surfaces_and_rows` | a v3 fixture with a project, session, credential, path map, surface, lease and native event migrates to v4; every v3 table count is unchanged, the surface keeps its holder/metadata with `state='attached'`, `surface_tokens` starts empty, the backup still reports v3, and the rebuilt kind check accepts `agent` |
+| `migration_v3_to_v4_preserves_surfaces_and_rows` | a v3 fixture with a project, session, credential, path map, surface, lease and native event migrates to v4; every v3 table count is unchanged, the surface keeps its holder/metadata with `state='attached'`, `surface_tokens` starts empty, the backup still reports v3, and the rebuilt kind check accepts `agent`; opening the migrated home then runs the v4→v5 upgrade and clears the ephemeral lease |
+| `migration_v4_to_v5_clears_leases_and_preserves_surfaces` | a v4 fixture with a surface, surface token, session and plaintext lease migrates to v5; every non-lease table count is unchanged, the lease count goes from 1 to 0 with a warning, the backup still reports v4 and keeps the plaintext row, and the migrated `leases` declares `token_hash`, not `token` |
 | `surface_token_round_trips_and_hash_is_unique` | insert, lookup by hash and list round-trip scopes/timestamps; a second row with the same hash is `Conflict` |
 | `surface_token_revoke_and_expiry_are_recorded` | `expires_at` round-trips, `touch_surface_token` records `last_used_at`, the first revoke records `revoked_at`, a second revoke is false |
 | `surface_state_round_trips_pending_attached_revoked` | a pending surface reads back as `pending`, `attached` clears `revoked_at`, `revoked` records it, and a missing id is `NotFound` |
@@ -653,7 +668,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 
 HTTP/daemon access, replication/libSQL, FTS search over events, sidecar tail index for huge logs, log signing/hash chain, automatic backup scheduling (that is a `vowp schedule` command item in core), blob garbage collection.
 
-The v0.4 Phase 0 store stops at enrollment plus the surface-token/state layer:
-`agent_assignments`, `node_limits`, lease token hashing, the project `runs` columns and the agent
-gateway are later phases. Token generation and constant-time verification are core/gateway work;
-this crate only persists the hash, prefix and scopes.
+The v0.4 Phase 0 store stops at enrollment, the surface-token/state layer and the v5 lease
+hash: `agent_assignments`, `node_limits`, the project `runs` columns and the agent gateway are
+later phases. Token generation and constant-time verification are core/gateway work; this crate
+only persists the hash, prefix and scopes (for surface tokens) or the hash (for leases).

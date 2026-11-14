@@ -20,11 +20,11 @@ use vowp_core::agent::{
 };
 use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
-    AgentCapabilities, AgentFrame, AgentPathMap, Clock, ErrorKind, FakeClock, MemoryLog, NodeName, NodePresence,
-    NodeStatus, ProjectName, Session, SessionId, SessionRole, SessionState, SurfaceKind, SurfaceScope, SurfaceState,
-    Timestamp,
+    AgentCapabilities, AgentFrame, AgentPathMap, Clock, ErrorKind, FakeClock, LeaseMode, MemoryLog, NodeName,
+    NodePresence, NodeStatus, ProjectName, Session, SessionId, SessionRole, SessionState, SurfaceId, SurfaceKind,
+    SurfaceScope, SurfaceState, Timestamp,
 };
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePaths, Store, hash_lease_token};
 
 fn ts() -> Timestamp {
     Timestamp::parse("2026-11-14T10:00:00Z").expect("timestamp")
@@ -339,6 +339,38 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "condition was not met in time");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Pairs one surface and returns its id and plaintext surface token.
+fn pair_surface(store: &Store, node: &NodeName, session: &SessionId, app: &str, now: Timestamp) -> (SurfaceId, String) {
+    let pending =
+        create_pending_surface(store, node, session, SurfaceKind::Opencode, Some(app), now).expect("pending surface");
+    let issued = issue_surface_token(store, node, &pending.surface.id, session, app, &pending.code, now)
+        .expect("issued surface token");
+    (issued.surface_id, issued.token)
+}
+
+/// Sends one `LeaseAcquire` frame for a paired surface.
+fn acquire_frame(surface: &SurfaceId, session: &SessionId, token: &str, mode: LeaseMode) -> AgentFrame {
+    AgentFrame::LeaseAcquire {
+        surface: surface.clone(),
+        session: session.clone(),
+        surface_token: token.to_owned(),
+        mode,
+    }
+}
+
+/// Reads the first `LeaseGrant` after `start`.
+fn expect_grant(gateway: &Gateway, start: usize) -> (String, Timestamp, u64) {
+    let AgentFrame::LeaseGrant {
+        lease_token,
+        expires_at,
+        tail_seq,
+    } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseGrant { .. }))
+    else {
+        panic!("expected LeaseGrant");
+    };
+    (lease_token, expires_at, tail_seq)
 }
 
 #[test]
@@ -1018,4 +1050,396 @@ fn surface_token_never_appears_in_logs() {
         .expect("hash lookup")
         .expect("token row");
     assert_ne!(stored.token_hash, token);
+}
+
+#[test]
+fn lease_acquire_grants_and_heartbeats() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, surface_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&acquire_frame(&surface, &session, &surface_token, LeaseMode::Acquire));
+    let (lease_token, expires_at, tail_seq) = expect_grant(&gateway, 0);
+
+    assert_eq!(lease_token.len(), 52, "two ULIDs");
+    assert_eq!(expires_at, clock.now().plus(Duration::from_secs(60)));
+    assert_eq!(tail_seq, 0);
+    let stored = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(stored.holder, "opencode");
+    assert_eq!(stored.surface_id.as_ref(), Some(&surface));
+    assert_eq!(stored.token, hash_lease_token(&lease_token));
+    assert_ne!(stored.token, lease_token, "the plaintext token is not stored");
+    assert_eq!(stored.token.len(), 64);
+
+    let acquired = stored.heartbeat_at;
+    clock.advance(Duration::from_secs(5));
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface: surface.clone(),
+        session: session.clone(),
+        token: lease_token.clone(),
+    });
+    let heartbeat_store = gateway.store();
+    wait_until(|| {
+        heartbeat_store
+            .lease(&session)
+            .expect("lease lookup")
+            .is_some_and(|lease| lease.heartbeat_at > acquired)
+    });
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    assert!(
+        !gateway
+            .output
+            .frames()
+            .iter()
+            .any(|frame| { matches!(frame, AgentFrame::LeaseLost { .. } | AgentFrame::LeaseRevoked { .. }) }),
+        "a valid heartbeat produces no loss notice"
+    );
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn lease_conflict_without_takeover() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (first, first_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let (second, second_token) = pair_surface(&store, &name, &session, "claude", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&acquire_frame(&first, &session, &first_token, LeaseMode::Acquire));
+    let (first_lease_token, _, _) = expect_grant(&gateway, 0);
+    let before = store.lease(&session).expect("lease lookup").expect("held");
+
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&second, &session, &second_token, LeaseMode::Acquire));
+    let AgentFrame::Error {
+        kind,
+        message,
+        retryable,
+    } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Conflict);
+    assert!(!retryable);
+    assert!(message.contains("opencode"), "conflict names the holder: {message}");
+    assert!(!message.contains(&first_lease_token), "no lease token is echoed");
+    assert!(!message.contains(&second_token), "no surface token is echoed");
+
+    let after = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(after.surface_id.as_ref(), Some(&first));
+    assert_eq!(after.token, before.token, "the refused acquire changed nothing");
+
+    // The refusal keeps the authenticated connection open.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn lease_takeover_pushes_lease_revoked() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (old, old_surface_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let (new, new_surface_token) = pair_surface(&store, &name, &session, "claude", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&acquire_frame(&old, &session, &old_surface_token, LeaseMode::Acquire));
+    let (old_lease_token, _, _) = expect_grant(&gateway, 0);
+
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&new, &session, &new_surface_token, LeaseMode::Takeover));
+    let AgentFrame::LeaseRevoked { reason, holder } =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }))
+    else {
+        panic!("expected LeaseRevoked");
+    };
+    assert!(reason.contains("taken over"), "{reason}");
+    assert_eq!(holder, "claude");
+    assert!(!reason.contains(&old_lease_token));
+    let (new_lease_token, _, _) = expect_grant(&gateway, start);
+
+    let current = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(current.surface_id.as_ref(), Some(&new));
+    assert_eq!(current.holder, "claude");
+    assert_eq!(current.token, hash_lease_token(&new_lease_token));
+
+    // The old surface's next heartbeat is refused and names the new holder.
+    clock.advance(Duration::from_secs(5));
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface: old.clone(),
+        session: session.clone(),
+        token: old_lease_token.clone(),
+    });
+    let AgentFrame::LeaseRevoked { reason, holder } =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }))
+    else {
+        panic!("expected LeaseRevoked");
+    };
+    assert_eq!(holder, "claude");
+    assert!(reason.contains("read-only"), "{reason}");
+    assert_eq!(
+        store.lease(&session).expect("lease lookup").expect("held").token,
+        hash_lease_token(&new_lease_token),
+        "the old heartbeat did not touch the new row"
+    );
+
+    // The old surface's release leaves the new holder's row alone.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::LeaseRelease {
+        surface: old.clone(),
+        session: session.clone(),
+        token: old_lease_token,
+    });
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }));
+    assert_eq!(
+        store.lease(&session).expect("lease lookup").expect("held").holder,
+        "claude"
+    );
+
+    // The new holder can release normally.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::LeaseRelease {
+        surface: new,
+        session: session.clone(),
+        token: new_lease_token,
+    });
+    let release_store = gateway.store();
+    wait_until(|| release_store.lease(&session).expect("lease lookup").is_none());
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn lease_release_removes_the_row() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, surface_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&acquire_frame(&surface, &session, &surface_token, LeaseMode::Acquire));
+    let (lease_token, _, _) = expect_grant(&gateway, 0);
+    assert!(store.lease(&session).expect("lease lookup").is_some());
+
+    gateway.send(&AgentFrame::LeaseRelease {
+        surface: surface.clone(),
+        session: session.clone(),
+        token: lease_token.clone(),
+    });
+    let release_store = gateway.store();
+    wait_until(|| release_store.lease(&session).expect("lease lookup").is_none());
+    assert!(store.lease(&session).expect("lease lookup").is_none());
+
+    // A second release is idempotent; a heartbeat after release is LeaseLost.
+    gateway.send(&AgentFrame::LeaseRelease {
+        surface: surface.clone(),
+        session: session.clone(),
+        token: lease_token.clone(),
+    });
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface,
+        session: session.clone(),
+        token: lease_token,
+    });
+    let AgentFrame::LeaseLost { reason } =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseLost { .. }))
+    else {
+        panic!("expected LeaseLost");
+    };
+    assert!(reason.contains("read-only"), "{reason}");
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn surface_token_must_match_the_paired_surface() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let other_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let other_name = node_name("mac-mini");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    activate(home.path(), &clock, &other_name, &other_key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (first, first_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let (second, second_token) = pair_surface(&store, &name, &session, "claude", clock.now());
+    let other_session = seed_session(&store, &name, "vowp", "01ARZ3NDEKTSV4RRFFQ69G5FAZ", clock.now());
+    let (_, other_session_token) = pair_surface(&store, &name, &other_session, "opencode", clock.now());
+    let (foreign, foreign_token) = pair_surface(&store, &other_name, &session, "opencode", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+
+    // A token for surface B cannot acquire as surface A.
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&first, &session, &second_token, LeaseMode::Acquire));
+    let AgentFrame::Error { kind, .. } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+
+    // A token paired for another session cannot acquire this one.
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(
+        &first,
+        &session,
+        &other_session_token,
+        LeaseMode::Acquire,
+    ));
+    let AgentFrame::Error { kind, .. } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+
+    // A surface on another node cannot acquire over this connection.
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&foreign, &session, &foreign_token, LeaseMode::Acquire));
+    let AgentFrame::Error { kind, .. } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+
+    // The real pairing still works and no refused attempt created a lease.
+    assert!(store.lease(&session).expect("lease lookup").is_none());
+    gateway.send(&acquire_frame(&first, &session, &first_token, LeaseMode::Acquire));
+    let (lease_token, _, _) = expect_grant(&gateway, start);
+    assert_eq!(lease_token.len(), 52);
+    assert_eq!(
+        store
+            .lease(&session)
+            .expect("lease lookup")
+            .expect("held")
+            .surface_id
+            .as_ref(),
+        Some(&first)
+    );
+    let _ = second;
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn lease_token_is_stored_only_as_a_hash() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, surface_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    let log = gateway.log.clone();
+    authenticate(&gateway, &name, &key);
+    gateway.send(&acquire_frame(&surface, &session, &surface_token, LeaseMode::Acquire));
+    let (lease_token, _, _) = expect_grant(&gateway, 0);
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface,
+        session: session.clone(),
+        token: lease_token.clone(),
+    });
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    gateway.finish().expect("gateway");
+
+    let stored = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(stored.token.len(), 64, "SHA-256 hex is 64 characters");
+    assert!(
+        stored
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "the stored value is lowercase hex: {}",
+        stored.token
+    );
+    assert_eq!(stored.token, hash_lease_token(&lease_token));
+    assert_ne!(stored.token, lease_token, "the plaintext token is not stored");
+    for (_, target, message) in log.lines() {
+        assert!(!target.contains(&lease_token), "the lease token reached a log target");
+        assert!(!message.contains(&lease_token), "the lease token reached a log message");
+    }
+}
+
+#[test]
+fn lease_stale_after_sixty_seconds() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (old, old_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let (new, new_token) = pair_surface(&store, &name, &session, "claude", clock.now());
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&acquire_frame(&old, &session, &old_token, LeaseMode::Acquire));
+    let (old_lease_token, _, _) = expect_grant(&gateway, 0);
+
+    // 59.999 seconds old is live.
+    clock.advance(Duration::from_secs(60) - Duration::from_millis(1));
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&new, &session, &new_token, LeaseMode::Acquire));
+    let AgentFrame::Error { kind, .. } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Conflict);
+
+    // Exactly 60 seconds is stale and may be replaced without takeover.
+    clock.advance(Duration::from_millis(1));
+    let start = gateway.frame_count();
+    gateway.send(&acquire_frame(&new, &session, &new_token, LeaseMode::Acquire));
+    let (new_lease_token, expires_at, _) = expect_grant(&gateway, start);
+    assert_eq!(expires_at, clock.now().plus(Duration::from_secs(60)));
+    assert_ne!(new_lease_token, old_lease_token);
+    let current = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(current.surface_id.as_ref(), Some(&new));
+    assert_eq!(current.token, hash_lease_token(&new_lease_token));
+
+    // The old token is gone; its heartbeat is refused.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::LeaseHeartbeat {
+        surface: old,
+        session: session.clone(),
+        token: old_lease_token,
+    });
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }));
+    gateway.finish().expect("gateway");
 }

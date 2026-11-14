@@ -136,6 +136,7 @@ const LISTED_TYPES: &[&str] = &[
     "SurfaceInfo",
     "SurfaceScope",
     "SurfaceState",
+    "LeaseMode",
     "AgentFrame",
 ];
 

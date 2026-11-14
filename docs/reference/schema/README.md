@@ -69,6 +69,7 @@ python3 docs/reference/check-reference.py
 | `JobPatch` | [job-patch.md](job-patch.md) |
 | `JoinInstructions` | [join-instructions.md](join-instructions.md) |
 | `Lease` | [lease.md](lease.md) |
+| `LeaseMode` | [lease-mode.md](lease-mode.md) |
 | `LeaseStatus` | [lease-status.md](lease-status.md) |
 | `LedgerEntry` | [ledger-entry.md](ledger-entry.md) |
 | `Limit` | [limit.md](limit.md) |

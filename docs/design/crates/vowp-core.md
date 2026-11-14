@@ -390,11 +390,11 @@ pub mod bank { pub fn bank_serving(deps: &Deps, env: &EnvConfig, target: &str, t
 Rules: (1) a failing guard ⇒ `Release.state = Refused`, ledger `promote`, exit 5 at the CLI; **no retry, no workaround** (design summary §9). (2) the diff between candidate and the banked serving copy must equal the files of the intended change; otherwise `Refused` ("live is not always git"). (3) the `upload_set` guard runs the project's upload-set check (e.g. `.vercelignore` listing) via `env.probe`-style custom guard: it exists to catch "a local build is not the deploy build". (4) approval `human` ⇒ inbox `approval` item, state `Banked` until answered; the supervisor calls `promote` again on answer. (5) `releases.log` line appended on every terminal state: `<ts> <env> <release id> <state> <from>-><to> rollback: <cmd>`.
 Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp files): `guards_clean_tree_dirty_fails`, `guards_head_equals_remote_behind_fails`, `guard_failure_marks_refused_and_never_deploys`, `serving_bank_runs_before_deploy_order_asserted_via_script_log`, `diff_unexpected_files_refused`, `human_approval_creates_inbox_and_waits`, `answer_approve_then_promote_goes_live_and_records_rollback_cmd`, `policy_approval_with_yes_deploys`, `yes_flag_never_bypasses_human_approval`, `probe_mismatch_marks_failed_with_rollback_available`, `rollback_runs_banked_command_and_links_releases`, `releases_log_lines_appended`, `dry_run_runs_guards_only`.
 
-## 9. `agent` — v0.4 home side: enrollment, auth and surface pairing
+## 9. `agent` — v0.4 home side: enrollment, auth, surface pairing and lease control
 
-Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.3, §4.6, §8.2–§8.3 and §12.1. Phase 0 runs
+Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.6, §8.2–§8.3 and §12.1. Phase 0 runs
 the gateway as a home command with the same store access as `session ingest`; Phase 1 adds the
-surface-token pairing service on the same authenticated connection. The separate low-privilege
+surface-token pairing service and the lease backend on the same authenticated connection. The separate low-privilege
 gateway behind the supervisor socket is Phase 4.
 
 ```rust
@@ -435,6 +435,19 @@ pub mod agent {
         pub fn verify_surface_token(store: &Store, token: &str, now: Timestamp) -> Result<VerifiedSurface, CoreError>;
         pub fn revoke_surface_token(store: &Store, id: &str, now: Timestamp) -> Result<(), CoreError>;
         pub fn revoke_surface(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError>;
+    }
+    pub mod lease_control {                                         // crate::surface::lease
+        pub const HEARTBEAT_INTERVAL: Duration;                     // 5 seconds
+        pub const STALE_AFTER: Duration;                            // 60 seconds
+        pub struct AgentLeaseGrant { pub lease_token: String, pub expires_at: Timestamp, pub tail_seq: u64 }
+        pub struct LeaseConflict { pub holder: String, pub since: Timestamp, pub surface_kind: SurfaceKind }
+        pub enum AgentLeaseAcquire { Granted { grant: AgentLeaseGrant, previous: Option<Lease> }, Conflict(LeaseConflict) }
+        pub enum AgentLeaseHeartbeat { Accepted, Lost(String), Revoked { reason: String, holder: String } }
+        pub enum AgentLeaseRelease { Released, Lost(String), Revoked { reason: String, holder: String } }
+        pub fn acquire_agent_lease(store: &Store, session: &SessionId, surface: &SurfaceInfo, mode: LeaseMode, now: Timestamp) -> Result<AgentLeaseAcquire, CoreError>;
+        pub fn heartbeat_agent_lease(store: &Store, session: &SessionId, surface: &SurfaceId, token: &str, now: Timestamp) -> Result<AgentLeaseHeartbeat, CoreError>;
+        pub fn release_agent_lease(store: &Store, session: &SessionId, surface: &SurfaceId, token: &str) -> Result<AgentLeaseRelease, CoreError>;
+        pub fn is_live(now: Timestamp, lease: &Lease) -> bool;
     }
     pub mod gateway {
         pub const MAX_FRAME_BYTES: usize;                            // 1 MiB
@@ -492,16 +505,42 @@ Behaviour:
   The success log line carries only the surface id and session id, never the code or token.
   There is no live connection registry, so a revoked surface is refused on its next surface
   frame rather than pushed.
-- Phase 0 has no runs, leases, local chat, offload or job dispatch, and no live connection
-  registry: a revoked node is refused on its next frame.
+- `LeaseAcquire { surface, session, surface_token, mode }` first verifies the surface token
+  against `surface_tokens`, requires the surface row to be `attached`, on the connection node,
+  paired for this session and scoped `session.write:<id>`. It then runs one immediate
+  transaction over the session's lease row. `mode=acquire` replaces only a missing or stale row
+  (heartbeat at least 60 seconds old); a live row answers `Error { kind: conflict }` with the
+  holder, since the code and node and never a token. `mode=takeover` replaces a live row and the
+  gateway pushes `LeaseRevoked { reason, holder }` before `LeaseGrant`.
+- `LeaseGrant` carries the only plaintext lease token, the expiry (`now + 60s`) and the session's
+  `tail_seq`. The home stores only the token's SHA-256 in `leases.token_hash`; the token is never
+  logged, echoed in an error or written to a note.
+- `LeaseHeartbeat` hashes the presented token and advances `heartbeat_at` with the home's clock.
+  A missing row answers `LeaseLost`; a row now held by another surface answers `LeaseRevoked`.
+  `LeaseRelease` deletes the row when the hash matches, is idempotent when the row is gone, and
+  never deletes another surface's row. An old surface's heartbeat or release after a takeover is
+  therefore `LeaseRevoked`, and no write may append without the current lease.
+- Per-frame authentication is deliberately minimal: `LeaseAcquire` carries the scoped surface
+  token, while `LeaseHeartbeat` and `LeaseRelease` carry only the lease token and are bound by
+  hashing that token and checking the surface row, its paired session and the connection node.
+  The agent holds the lease token; local clients never read it.
+- The gateway does not restart the supervisor, stop a live run or drain a harness on a takeover
+  or an expired lease. Surface event appends, the takeover note/switch and run fencing are later
+  slices; this slice only owns the lease row and the control frames.
+- Phase 0 has no runs, local chat, offload or job dispatch, and no live connection registry: a
+  revoked node is refused on its next frame. Lease control needs no registry because the only
+  push in this slice (`LeaseRevoked` on takeover) is written on the acquiring connection.
 
 Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_enrolls_a_node_with_a_valid_code`,
 `gateway_refuses_an_expired_or_used_code`, `gateway_auth_rejects_a_bad_signature_and_a_replayed_nonce`,
 `gateway_heartbeat_updates_presence_and_capacity`, `gateway_revoke_marks_and_closes`,
 `gateway_unknown_or_revoked_node_is_refused`, `gateway_surface_pair_issues_and_persists_hash`,
 `gateway_surface_pair_refuses_a_bad_or_replayed_code`, `gateway_surface_pair_binds_the_connection_node`,
-`gateway_surface_pair_refuses_a_revoked_surface` and `surface_token_never_appears_in_logs`. The
-service tests in `src/agent/pair.rs` are
+`gateway_surface_pair_refuses_a_revoked_surface`, `surface_token_never_appears_in_logs`,
+`lease_acquire_grants_and_heartbeats`, `lease_conflict_without_takeover`,
+`lease_takeover_pushes_lease_revoked`, `lease_release_removes_the_row`,
+`surface_token_must_match_the_paired_surface`, `lease_token_is_stored_only_as_a_hash` and
+`lease_stale_after_sixty_seconds`. The service tests in `src/agent/pair.rs` are
 `surface_pair_issues_a_scoped_token_and_stores_only_its_hash`,
 `surface_pair_refuses_expired_or_used_code`, `surface_pair_binds_node_and_session` and
 `surface_token_verify_rejects_revoked_and_expired`.

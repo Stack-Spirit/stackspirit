@@ -18,13 +18,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use vowp_protocol::{
-    AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Level, NodeName, NodeStatus, SurfaceState,
+    AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Lease, LeaseMode, Level, NodeName, NodeStatus, SessionId,
+    SurfaceId, SurfaceInfo, SurfaceState,
 };
 use vowp_store::{NodeCredential, Store};
 
 use super::{auth, enroll, pair};
 use crate::deps::Deps;
 use crate::error::CoreError;
+use crate::surface::lease::{self, AgentLeaseAcquire, AgentLeaseGrant, AgentLeaseHeartbeat, AgentLeaseRelease};
 
 /// Largest accepted frame, in bytes (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -387,6 +389,95 @@ fn run_connection(
                 }
                 Err(error) => return Err(error),
             },
+            AgentFrame::LeaseAcquire {
+                surface,
+                session: session_id,
+                surface_token,
+                mode,
+            } => {
+                let result = acquire_lease(store, &session.node, &surface, &session_id, &surface_token, mode, now);
+                match result {
+                    Ok(LeaseResponse::Granted {
+                        grant,
+                        previous,
+                        holder,
+                    }) => {
+                        if let Some(previous) = &previous
+                            && lease::is_live(now, previous)
+                        {
+                            send_frame(
+                                writer,
+                                &AgentFrame::LeaseRevoked {
+                                    reason: format!("session {session_id} was taken over by {holder}"),
+                                    holder: holder.clone(),
+                                },
+                            )?;
+                        }
+                        deps.log.log(
+                            Level::Info,
+                            &format!("agent {}", session.node),
+                            &format!("surface {surface} acquired the lease on session {session_id}"),
+                        );
+                        send_frame(
+                            writer,
+                            &AgentFrame::LeaseGrant {
+                                lease_token: grant.lease_token,
+                                expires_at: grant.expires_at,
+                                tail_seq: grant.tail_seq,
+                            },
+                        )?;
+                    }
+                    Ok(LeaseResponse::Conflict(message)) => {
+                        send_error(writer, ErrorKind::Conflict, message, false)?;
+                    }
+                    Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            AgentFrame::LeaseHeartbeat {
+                surface,
+                session: session_id,
+                token,
+            } => {
+                let result = bound_surface(store, &session.node, &surface, &session_id)
+                    .and_then(|_| lease::heartbeat_agent_lease(store, &session_id, &surface, &token, now));
+                match result {
+                    Ok(AgentLeaseHeartbeat::Accepted) => {}
+                    Ok(AgentLeaseHeartbeat::Lost(reason)) => {
+                        send_frame(writer, &AgentFrame::LeaseLost { reason })?;
+                    }
+                    Ok(AgentLeaseHeartbeat::Revoked { reason, holder }) => {
+                        send_frame(writer, &AgentFrame::LeaseRevoked { reason, holder })?;
+                    }
+                    Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            AgentFrame::LeaseRelease {
+                surface,
+                session: session_id,
+                token,
+            } => {
+                let result = bound_surface(store, &session.node, &surface, &session_id)
+                    .and_then(|_| lease::release_agent_lease(store, &session_id, &surface, &token));
+                match result {
+                    Ok(AgentLeaseRelease::Released) => {}
+                    Ok(AgentLeaseRelease::Lost(reason)) => {
+                        send_frame(writer, &AgentFrame::LeaseLost { reason })?;
+                    }
+                    Ok(AgentLeaseRelease::Revoked { reason, holder }) => {
+                        send_frame(writer, &AgentFrame::LeaseRevoked { reason, holder })?;
+                    }
+                    Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             AgentFrame::Ping => send_frame(writer, &AgentFrame::Pong)?,
             AgentFrame::Pong => {}
             _ => {
@@ -397,6 +488,91 @@ fn run_connection(
             }
         }
     }
+}
+
+/// The answer to one lease acquire frame.
+enum LeaseResponse {
+    /// The surface now holds the lease.
+    Granted {
+        /// The one-time grant.
+        grant: AgentLeaseGrant,
+        /// The row this acquisition replaced.
+        previous: Option<Box<Lease>>,
+        /// Human-visible holder name of the new surface.
+        holder: String,
+    },
+    /// A live lease is held by another surface and no takeover was requested.
+    Conflict(String),
+}
+
+/// Verifies the surface token and acquires or takes over the session lease.
+///
+/// The token is checked against the v4 `surface_tokens` row and must belong to a surface
+/// on the connection's node whose metadata names this session and whose scope grants
+/// `session.write:<id>`. No token or code value is logged or echoed.
+fn acquire_lease(
+    store: &Store,
+    node: &NodeName,
+    surface_id: &SurfaceId,
+    session: &SessionId,
+    surface_token: &str,
+    mode: LeaseMode,
+    now: vowp_protocol::Timestamp,
+) -> Result<LeaseResponse, CoreError> {
+    let verified = pair::verify_surface_token(store, surface_token, now)?;
+    if verified.surface.id != *surface_id {
+        return Err(CoreError::Refused("surface token is for another surface".to_owned()));
+    }
+    let surface = bound_surface(store, node, surface_id, session)?;
+    let write_scope = format!("session.write:{}", session.as_str());
+    if !verified.token.scopes.iter().any(|scope| scope.as_str() == write_scope) {
+        return Err(CoreError::Refused(format!(
+            "surface token does not grant {write_scope}"
+        )));
+    }
+    match lease::acquire_agent_lease(store, session, &surface, mode, now)? {
+        AgentLeaseAcquire::Granted { grant, previous } => Ok(LeaseResponse::Granted {
+            grant,
+            previous: previous.map(Box::new),
+            holder: surface.holder,
+        }),
+        AgentLeaseAcquire::Conflict(conflict) => Ok(LeaseResponse::Conflict(format!(
+            "session {session} is held by {} ({}) since {}",
+            conflict.holder,
+            lease::surface_kind_name(conflict.surface_kind),
+            conflict.since.as_rfc3339()
+        ))),
+    }
+}
+
+/// Resolves a surface that is attached to `node` and paired for `session`.
+///
+/// This is the per-frame binding for heartbeats and releases, which carry no surface
+/// token: the lease token authenticates the holder, while the surface row and its metadata
+/// bind the frame to the connection node and the paired session.
+fn bound_surface(
+    store: &Store,
+    node: &NodeName,
+    surface_id: &SurfaceId,
+    session: &SessionId,
+) -> Result<SurfaceInfo, CoreError> {
+    let Some(surface) = store.surface_by_id(surface_id)? else {
+        return Err(CoreError::NotFound(format!("surface {surface_id}")));
+    };
+    if surface.node != *node {
+        return Err(CoreError::Refused("surface belongs to another node".to_owned()));
+    }
+    if surface.state != SurfaceState::Attached {
+        return Err(CoreError::Refused("surface is not attached".to_owned()));
+    }
+    if surface.metadata.get("session").and_then(serde_json::Value::as_str) != Some(session.as_str()) {
+        return Err(CoreError::Refused("surface is paired for another session".to_owned()));
+    }
+    let session_row = store.require_session(session)?;
+    if session_row.node != *node {
+        return Err(CoreError::Refused("session belongs to another node".to_owned()));
+    }
+    Ok(surface)
 }
 
 /// One item read from the input thread.

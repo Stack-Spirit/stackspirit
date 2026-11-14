@@ -260,6 +260,21 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "LeaseMode": {
+      "description": "How a surface asks for a session lease.\n\n`Acquire` fails with a `Conflict` error when another surface holds a live lease;\n`Takeover` replaces it and fences the old holder.",
+      "oneOf": [
+        {
+          "const": "acquire",
+          "description": "Take the lease only when it is free or stale.",
+          "type": "string"
+        },
+        {
+          "const": "takeover",
+          "description": "Replace a live lease after the owner agreed.",
+          "type": "string"
+        }
+      ]
+    },
     "NodeName": {
       "description": "Node name slug, for example `vps`.",
       "type": "string"
@@ -290,7 +305,7 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "One Phase 0 agent protocol frame, tagged by `type`.",
+  "description": "One agent protocol frame, tagged by `type`.",
   "oneOf": [
     {
       "description": "Agent -> home: identity and capabilities.",
@@ -629,6 +644,166 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "type",
         "surface_id",
         "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: acquire or take over the session lease.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/LeaseMode",
+          "description": "Whether a live lease may be replaced."
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the lease protects."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface asking for the lease."
+        },
+        "surface_token": {
+          "description": "Scoped surface token issued by `SurfaceIssued`; never logged.",
+          "type": "string"
+        },
+        "type": {
+          "const": "lease_acquire",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "surface",
+        "session",
+        "surface_token",
+        "mode"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: keep the held lease alive.",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the lease protects."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface holding the lease."
+        },
+        "token": {
+          "description": "Plaintext lease token returned by `LeaseGrant`; never logged.",
+          "type": "string"
+        },
+        "type": {
+          "const": "lease_heartbeat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "surface",
+        "session",
+        "token"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: release the lease on detach.",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the lease protects."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface releasing the lease."
+        },
+        "token": {
+          "description": "Plaintext lease token returned by `LeaseGrant`; never logged.",
+          "type": "string"
+        },
+        "type": {
+          "const": "lease_release",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "surface",
+        "session",
+        "token"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the lease is granted for this surface.",
+      "properties": {
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the lease goes stale without a heartbeat."
+        },
+        "lease_token": {
+          "description": "Plaintext lease token; shown once in the grant, never logged.",
+          "type": "string"
+        },
+        "tail_seq": {
+          "description": "Session sequence the new holder may continue from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "lease_grant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "lease_token",
+        "expires_at",
+        "tail_seq"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the lease was taken over or expired; the surface is read-only.",
+      "properties": {
+        "reason": {
+          "description": "Human-readable reason.",
+          "type": "string"
+        },
+        "type": {
+          "const": "lease_lost",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: another surface now holds the lease; stop sending events.",
+      "properties": {
+        "holder": {
+          "description": "Human-visible holder of the lease now.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Human-readable reason.",
+          "type": "string"
+        },
+        "type": {
+          "const": "lease_revoked",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "reason",
+        "holder"
       ],
       "type": "object"
     },

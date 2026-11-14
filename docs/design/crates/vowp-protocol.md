@@ -137,7 +137,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"Tunnel"`, `"TurnGrant"`, `"UsageEstimate"`, `"VowpConfig"`, `"WaitReason"`, `"WaitingJob"`, `"Worker"`.
     The v0.4 local-node set adds `"AgentCapabilities"`, `"AgentCapacity"`, `"AgentFrame"`,
     `"AgentPathMap"`, `"AgentRole"`, `"NodeCard"`, `"NodeKind"`, `"NodePresence"`, `"NodeStatus"`,
-    `"PathRef"`, `"SurfaceInfo"`, `"SurfaceScope"`, `"SurfaceState"`.
+    `"PathRef"`, `"SurfaceInfo"`, `"SurfaceScope"`, `"SurfaceState"`, `"LeaseMode"`.
     Output is deterministic (BTreeMap, stable ordering).
 13. **No panics**: all constructors/parsers return `Result`; regex literals inside use `// invariant:` comments.
 14. **v0.4 agent protocol.** `PathRef` serialises as one string (`project:vowp`,
@@ -145,12 +145,16 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     or empty project/subdirectory, at most `MAX_PATH_REF_LEN` bytes, with repeated `/` and `.`
     components normalised. `AgentFrame` is the tagged union (`type` is `snake_case`):
     `AgentHello`, `HomeChallenge`, `AgentAuth`, `HomeWelcome`, `Enroll`, `Enrolled`, `Heartbeat`,
-    `SurfacePair`, `SurfaceIssued`, `SurfaceRevoked`, `Ping`, `Pong`, `Revoked`, `Superseded` and
-    `Error`. `SurfacePair.code` and `SurfaceIssued.token` are secret frame values: never logged,
+    `SurfacePair`, `SurfaceIssued`, `SurfaceRevoked`, `LeaseAcquire`, `LeaseHeartbeat`,
+    `LeaseRelease`, `LeaseGrant`, `LeaseLost`, `LeaseRevoked`, `Ping`, `Pong`, `Revoked`,
+    `Superseded` and `Error`. `SurfacePair.code` and `SurfaceIssued.token` are secret frame values: never logged,
     echoed or put in a URL. `SurfaceScope` is a transparent string (`session.read:<id>`,
     `fleet.read`, `tool:<name>`); `SurfaceState` is `pending|attached|revoked`; `SurfaceInfo` is
     the state-bearing read model and carries no token. `NodeCard` carries no path map and no
     secret name; `NodeStatus`/`NodePresence` are separate so a revoked node is always `revoked`.
+    `LeaseMode` is `acquire|takeover`. `LeaseGrant.lease_token`, `LeaseAcquire.surface_token`,
+    `LeaseHeartbeat.token` and `LeaseRelease.token` are secret frame values: never logged,
+    echoed or written to the database in plaintext; the store keeps only SHA-256 hashes.
 
 ## 5. Error enum
 
@@ -212,6 +216,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `path_ref_round_trips_through_json` | each form serialises as its Display string and deserialises back; a traversal string fails |
 | `agent_frame_round_trips_every_phase_zero_variant` | all 12 Phase 0 variants have their `snake_case` `type` and round-trip through JSON |
 | `agent_frame_round_trips_surface_pair_frames` | `surface_pair`, `surface_issued` and `surface_revoked` round-trip with their `snake_case` type tags |
+| `agent_frame_round_trips_lease_frames` | `lease_acquire`, `lease_heartbeat`, `lease_release`, `lease_grant`, `lease_lost` and `lease_revoked` round-trip; `LeaseMode` is `acquire`/`takeover` and an unknown mode fails |
 | `agent_frame_rejects_unknown_type` | an unknown `type`, an unknown surface variant and a missing required field all fail |
 | `surface_types_round_trip_and_have_stable_wire_names` | `SurfaceState` is `pending`/`attached`/`revoked`, `SurfaceScope` is a string and `SurfaceInfo` round-trips |
 | `node_card_serializes_without_absolute_paths_or_secret_names` | no absolute string, path-map field or secret name appears in the card JSON |
@@ -223,5 +228,5 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 ACP event mapping, permission.request/resolve events, IANA timezone support, signed/hash-chained logs (field reserved: none in v0.1).
 The v0.3 loopback API documents live in `src/api.rs`; see `docs/design/v0.3/http-api.md`.
 The v0.4 local-node protocol lives in `src/agent.rs`; see `docs/design/v0.4/local-orchestrator.md`
-§8.3 and §11.3. Assignment, surface-token, lease and `RemoteLine` wrapper frames are later
-phases and are not defined here.
+§8.3 and §11.3. Assignment and `RemoteLine`/`IngestAck` streaming frames are later phases and
+are not defined here; surface pairing and lease control are defined.
