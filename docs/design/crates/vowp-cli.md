@@ -163,15 +163,17 @@ These are home-only (exit 5 on a control machine) and require the home store:
 ### Local chat (`chat --agent`)
 
 `vowp chat --agent --session <id> [--executor <exec>] [--node <name>]` runs the Phase 1 local
-surface. The positional id stays required for the home spelling; `lib::run` inserts the
-`--session` value before clap parses an agent command, so `vowp chat` without an id still fails
-with clap's missing-argument error and the help tree keeps `<ID>`. Agent mode is dispatched from
-`lib::execute` to `src/chat/agent.rs` before the control-machine redirect and before `Ctx::build`.
+surface. The positional id stays required for the home spelling; `Cli::try_parse_from` in
+`src/cli.rs` inserts the `--session` value before clap parses an agent command, so `vowp chat`
+without an id still fails with clap's missing-argument error and the help tree keeps `<ID>`. The
+parser records `--agent`, and `chat::run_shared` dispatches it to `src/chat/agent.rs` before the
+home lease path. The command still uses the normal chat dispatch, so the invocation's local home
+resolves the session row before the bridge starts.
 
 The handler loads `~/.vowp-agent` (or `VOWP_AGENT_HOME`), the node key and the surface token
-bound to the session, then calls `vowp_agent::ChatClient::turn`. It opens no VOWP database: the
-local checkout's `vowp.toml` supplies the project name, the working directory and the default
-executor (the first rung of the `worker` profile; `--executor` overrides it). The agent acquires
+bound to the session, then calls `vowp_agent::ChatClient::turn`. The local checkout's `vowp.toml`
+supplies the project name, the working directory and the default executor (the first rung of the
+`worker` profile; `--executor` overrides it). The agent acquires
 the lease, sends `TurnBegin` with a project-relative `PathRef`, runs the adapter on this machine,
 spools each event before sending it and prints assistant text, tools, errors and notes in the
 home chat's 80-column format. The home log is authoritative; the CLI never opens a second session

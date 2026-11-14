@@ -4,9 +4,11 @@
 //! This file fixes every v0.2 top-level command, subcommand and flag; each command's
 //! handler and its `Args` struct live in `cmd/<name>.rs`.
 
+use std::cell::Cell;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::cmd::capacity::CapacityArgs;
 use crate::cmd::control::ControlArgs;
@@ -53,6 +55,17 @@ pub const V0_2_COMMANDS: &[&str] = &[
 ];
 
 /// The parsed command line.
+#[derive(Debug)]
+pub struct Cli {
+    /// Global flags accepted before or after the command.
+    pub global: Global,
+    /// Command to run.
+    pub command: Command,
+}
+
+// The clap-generated parser behind `Cli`. The public type carries the same two fields.
+// This mirror lets `Cli` override `Parser::try_parse_from` for the agent chat spelling
+// while every other parser method keeps clap's generated behaviour.
 #[derive(Debug, Parser)]
 #[command(
     name = "vowp",
@@ -60,13 +73,137 @@ pub const V0_2_COMMANDS: &[&str] = &[
     about = "VOWP: local-first supervisor for AI coding agents",
     disable_help_subcommand = true
 )]
-pub struct Cli {
-    /// Global flags accepted before or after the command.
+struct ParsedCli {
     #[command(flatten)]
-    pub global: Global,
-    /// Command to run.
+    global: Global,
     #[command(subcommand)]
-    pub command: Command,
+    command: Command,
+}
+
+impl CommandFactory for Cli {
+    fn command() -> clap::Command {
+        ParsedCli::command()
+    }
+
+    fn command_for_update() -> clap::Command {
+        ParsedCli::command_for_update()
+    }
+}
+
+impl FromArgMatches for Cli {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let parsed = ParsedCli::from_arg_matches(matches)?;
+        Ok(Self {
+            global: parsed.global,
+            command: parsed.command,
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        let parsed = ParsedCli::from_arg_matches(matches)?;
+        self.global = parsed.global;
+        self.command = parsed.command;
+        Ok(())
+    }
+}
+
+impl Parser for Cli {
+    /// Parses a command line, filling an agent chat's positional id from `--session`.
+    ///
+    /// `vowp chat --agent --session <id>` spells the session as a flag while the home
+    /// `vowp chat` keeps a required positional `<ID>`; inserting the value before clap
+    /// parses lets both spellings share one definition, so the home usage, help tree and
+    /// missing-id error stay unchanged. Every other command line is untouched.
+    fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let mut args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        record_agent_chat(false);
+        inject_agent_chat_id(&mut args);
+        ParsedCli::try_parse_from(args).map(|parsed| Self {
+            global: parsed.global,
+            command: parsed.command,
+        })
+    }
+}
+
+/// Inserts an agent chat's `--session` value as the required positional id.
+fn inject_agent_chat_id(args: &mut Vec<OsString>) {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return;
+    }
+    let Some(chat) = chat_position(args) else {
+        return;
+    };
+    let mut agent = false;
+    let mut session = None;
+    let mut has_id = false;
+    let rest = args[chat + 1..].to_vec();
+    let mut index = 0;
+    while index < rest.len() {
+        let arg = rest[index].to_string_lossy();
+        match arg.as_ref() {
+            "--agent" => agent = true,
+            "--session" => {
+                if let Some(value) = rest.get(index + 1) {
+                    session = Some(value.clone());
+                    index += 1;
+                }
+            }
+            "--executor" | "--node" => index += 1,
+            "--" => {
+                has_id = index + 1 < rest.len();
+                break;
+            }
+            value if value.starts_with("--session=") => {
+                session = Some(OsString::from(&value["--session=".len()..]));
+            }
+            value if value.starts_with('-') => {}
+            _ => has_id = true,
+        }
+        index += 1;
+    }
+    if agent
+        && !has_id
+        && let Some(session) = session
+    {
+        args.push(session);
+    }
+}
+
+/// Returns the index of the `chat` command token, including `session chat`.
+fn chat_position(args: &[OsString]) -> Option<usize> {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        if matches!(arg.as_ref(), "--home" | "--project" | "--node") {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "chat" {
+            return Some(index);
+        }
+        if arg == "session" {
+            let mut next = index + 1;
+            while next < args.len() {
+                let value = args[next].to_string_lossy();
+                if value.starts_with('-') {
+                    next += 1;
+                    continue;
+                }
+                return (value == "chat").then_some(next);
+            }
+            return None;
+        }
+        return None;
+    }
+    None
 }
 
 /// Global flags accepted by every command.
@@ -580,10 +717,11 @@ pub struct SessionNewArgs {
 
 /// Arguments for `vowp session chat` and `vowp chat`.
 ///
-/// `--session` is the agent spelling; the positional id remains the home spelling and
-/// stays required. [`crate::run`] inserts the `--session` value as the positional id
-/// before clap parses an agent command, so the home usage and missing-id error are
-/// unchanged.
+/// `--session` is the agent spelling and the positional id the home spelling. Both name
+/// the same session: [`Cli::try_parse_from`] fills the required positional from
+/// `--session` for an agent command, so the home usage, help tree and missing-id error
+/// stay unchanged. [`agent_chat_requested`] lets the owned `chat` module dispatch the
+/// agent bridge before the home lease path.
 #[derive(Debug, Clone)]
 pub struct ChatArgs {
     /// Session id or unique prefix.
@@ -628,6 +766,21 @@ struct ChatArgsFields {
     session: Option<String>,
 }
 
+thread_local! {
+    /// Whether the last chat command parsed on this thread asked for `--agent`.
+    static AGENT_CHAT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Records whether one parsed chat command asked for `--agent`.
+fn record_agent_chat(agent: bool) {
+    AGENT_CHAT.with(|flag| flag.set(agent));
+}
+
+/// Returns whether this thread last parsed a `chat --agent` command.
+pub fn agent_chat_requested() -> bool {
+    AGENT_CHAT.with(Cell::get)
+}
+
 impl Args for ChatArgs {
     fn augment_args(command: clap::Command) -> clap::Command {
         ChatArgsFields::augment_args(command)
@@ -642,6 +795,7 @@ impl FromArgMatches for ChatArgs {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let fields = ChatArgsFields::from_arg_matches(matches)?;
         let id = fields.session.clone().unwrap_or_else(|| fields.id.clone());
+        record_agent_chat(fields.agent);
         Ok(Self {
             id,
             executor: fields.executor,
@@ -656,6 +810,7 @@ impl FromArgMatches for ChatArgs {
     fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
         let fields = ChatArgsFields::from_arg_matches(matches)?;
         self.id = fields.session.clone().unwrap_or_else(|| fields.id.clone());
+        record_agent_chat(fields.agent);
         self.executor = fields.executor;
         self.node = fields.node;
         self.follow = fields.follow;

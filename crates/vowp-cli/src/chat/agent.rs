@@ -4,18 +4,21 @@
 //! key and the paired surface token, then runs the adapter on this machine while the agent
 //! client acquires the lease, spools events and streams them to the home gateway. It never
 //! takes the home lease and never writes a second session log.
+//!
+//! [`crate::chat::run_shared`] dispatches here when [`crate::cli::agent_chat_requested`]
+//! reports that the parsed command was `chat --agent`. The command still passes through
+//! the normal chat dispatch, so the local home resolves the session row first.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vowp_agent::{AgentConfig, AgentError, ChatClient, ChatTurnRequest, ChatTurnStatus, SystemAgentClock};
 use vowp_core::AdapterRegistry;
-use vowp_protocol::{EventBody, Executor, HarnessEvent, PathRef, ProjectName, RunPurpose, SessionId, VowpConfig};
+use vowp_protocol::{EventBody, HarnessEvent, PathRef, ProjectName, RunPurpose, VowpConfig};
 use vowp_store::NodePaths;
 
-use crate::chat::write_wrapped;
-use crate::cli::{ChatArgs, Global};
-use crate::{CliError, IoStreams};
+use crate::chat::{ChatOptions, write_wrapped};
+use crate::{CliError, Ctx, IoStreams};
 
 /// The local checkout an agent chat invocation runs in.
 struct LocalProject {
@@ -23,40 +26,45 @@ struct LocalProject {
     config: VowpConfig,
 }
 
-/// Runs the local agent chat bridge for one session without a VOWP database.
+/// Runs the local agent chat bridge for one parsed `chat --agent` command.
 ///
-/// The Mac owns only `~/.vowp-agent`; the local checkout's `vowp.toml` supplies the
-/// project name, working directory and the default executor (the first rung of the
-/// `worker` profile). `--executor` overrides that default. Everything else travels over
-/// the agent connection.
-pub fn run_command(global: &Global, io: &mut dyn IoStreams, args: &ChatArgs) -> Result<i32, CliError> {
-    if args.follow {
+/// The home log stays authoritative. This handler loads `~/.vowp-agent/agent.json`, the
+/// node key and the paired surface token, then runs the adapter on this machine while
+/// the agent client spools and streams events to the home gateway. It never takes the
+/// home lease and never writes a second session log.
+///
+/// The local checkout's `vowp.toml` supplies the project name, working directory and
+/// the default executor (the first rung of the `worker` profile); `--executor`
+/// overrides that default. The normal chat dispatch still resolves the session row in
+/// the invocation's local home before this function runs.
+pub fn run_shared(ctx: &Ctx, io: &mut dyn IoStreams, opts: &ChatOptions) -> Result<i32, CliError> {
+    if opts.follow {
         return Err(CliError::Invalid(
             "`chat --agent --follow` is not supported; the agent bridge owns the live turn".to_owned(),
         ));
     }
-    if args.takeover {
+    if opts.takeover {
         return Err(CliError::Invalid(
             "`chat --agent --takeover` is not supported; ask the owner to take the session over".to_owned(),
         ));
     }
-    let session =
-        SessionId::parse(&args.id).map_err(|_| CliError::Invalid(format!("invalid session id {:?}", args.id)))?;
+    let session = opts.session.clone();
     let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
     let config = AgentConfig::load(&state_dir).map_err(map_agent_error)?;
-    let requested_node = args.node.as_deref().or(global.node.as_deref());
-    if let Some(node) = requested_node {
-        let node = vowp_protocol::NodeName::parse(node)?;
-        if node != config.node {
-            return Err(CliError::Invalid(format!(
-                "executor node {node} is not this agent ({})",
-                config.node
-            )));
-        }
+    if let Some(node) = opts.node.as_ref()
+        && node != &config.node
+    {
+        return Err(CliError::Invalid(format!(
+            "executor node {node} is not this agent ({})",
+            config.node
+        )));
     }
-    let local = local_project(global)?;
-    let executor = match args.executor.as_deref() {
-        Some(executor) => Executor::parse(executor)?,
+    let local = LocalProject {
+        root: ctx.project_root().to_path_buf(),
+        config: ctx.config().clone(),
+    };
+    let executor = match &opts.executor {
+        Some(executor) => executor.executor.clone(),
         None => local
             .config
             .profiles
@@ -153,47 +161,6 @@ pub fn run_command(global: &Global, io: &mut dyn IoStreams, args: &ChatArgs) -> 
     }
     let _ = chat.release();
     Ok(0)
-}
-
-/// Resolves the local checkout from `--project` or the current directory.
-fn local_project(global: &Global) -> Result<LocalProject, CliError> {
-    let cwd = std::env::current_dir()?;
-    let root = match &global.project {
-        Some(value) => {
-            let candidate = PathBuf::from(value);
-            if candidate.is_dir() {
-                if !candidate.join("vowp.toml").is_file() {
-                    return Err(CliError::NotFound(format!(
-                        "no vowp.toml in {}; run `vowp init`",
-                        candidate.display()
-                    )));
-                }
-                candidate
-            } else {
-                let root = crate::ctx::find_project_root(&cwd)
-                    .ok_or_else(|| CliError::NotFound(format!("project {value}")))?;
-                let config = read_local_config(&root)?;
-                if config.project.name.as_str() != value {
-                    return Err(CliError::NotFound(format!("project {value}")));
-                }
-                root
-            }
-        }
-        None => crate::ctx::find_project_root(&cwd).ok_or_else(|| {
-            CliError::NotFound(
-                "no vowp.toml in this checkout or its parents; run `vowp chat --agent` from a project checkout"
-                    .to_owned(),
-            )
-        })?,
-    };
-    let config = read_local_config(&root)?;
-    Ok(LocalProject { root, config })
-}
-
-/// Reads and validates the local `vowp.toml`.
-fn read_local_config(root: &Path) -> Result<VowpConfig, CliError> {
-    let text = std::fs::read_to_string(root.join("vowp.toml"))?;
-    VowpConfig::from_toml(&text).map_err(CliError::from)
 }
 
 /// Returns the directory the adapter starts in: the current directory when it is below
