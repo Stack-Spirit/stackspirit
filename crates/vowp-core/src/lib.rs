@@ -18,6 +18,7 @@ pub mod gates;
 pub mod ledger;
 pub mod lifecycle;
 pub mod loops;
+pub mod offload;
 pub mod promote;
 pub mod requests;
 pub mod schedules;
