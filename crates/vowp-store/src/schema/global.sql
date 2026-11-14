@@ -235,12 +235,15 @@ CREATE TRIGGER node_ledger_no_delete BEFORE DELETE ON node_ledger
 -- ---------------------------------------------------------------- surfaces and leases (§7.3)
 CREATE TABLE surfaces (
   id            TEXT PRIMARY KEY,        -- ULID
-  kind          TEXT NOT NULL CHECK (kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
+  kind          TEXT NOT NULL CHECK (kind IN ('chat','opencode','claude-code','mcp','mirror','api','agent')),
   node          TEXT NOT NULL,
   holder        TEXT NOT NULL,           -- human-visible: 'laptop', 'phone', 'mac opencode'
   app           TEXT,                    -- 'opencode-desktop', 'claude-code', ...
   cwd           TEXT,
   metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+  state         TEXT NOT NULL DEFAULT 'attached'
+                  CHECK (state IN ('pending','attached','revoked')),
+  revoked_at    TEXT,
   created_at    TEXT NOT NULL,
   last_seen_at  TEXT NOT NULL
 ) STRICT;
@@ -257,6 +260,20 @@ CREATE TABLE leases (
   CHECK (length(token) = 52)
 ) STRICT;
 CREATE INDEX leases_heartbeat ON leases(heartbeat_at);
+
+-- A surface token is stored only as SHA-256 plus a short display prefix (§4.6).
+CREATE TABLE surface_tokens (
+  id           TEXT PRIMARY KEY,
+  surface_id   TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+  token_hash   TEXT NOT NULL,
+  prefix       TEXT NOT NULL,
+  scopes_json  TEXT NOT NULL CHECK (json_valid(scopes_json)),
+  created_at   TEXT NOT NULL,
+  expires_at   TEXT,
+  revoked_at   TEXT,
+  last_used_at TEXT
+) STRICT;
+CREATE UNIQUE INDEX surface_tokens_hash ON surface_tokens(token_hash);
 
 -- ---------------------------------------------------------------- catalog (§10)
 CREATE TABLE catalog (
@@ -385,4 +402,4 @@ CREATE TABLE secret_index (
   updated_at TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;

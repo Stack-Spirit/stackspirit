@@ -51,7 +51,7 @@ fn schema_file_is_identical_to_design() {
 fn open_creates_schema_version_1() {
     let (_tmp, paths, store) = file_store();
     assert_eq!(store.schema_version().expect("compat version"), 1);
-    assert_eq!(store.global_schema_version().expect("global version"), 3);
+    assert_eq!(store.global_schema_version().expect("global version"), 4);
     assert!(store.bound_project().is_none(), "a fresh home binds no project");
     assert!(matches!(store.project_schema_version(), Err(StoreError::NoProject)));
 
@@ -120,7 +120,7 @@ fn open_refuses_newer_schema() {
     match error {
         StoreError::SchemaTooNew { found, supported } => {
             assert_eq!(found, 99);
-            assert_eq!(supported, 3);
+            assert_eq!(supported, 4);
         }
         other => panic!("expected SchemaTooNew, got {other:?}"),
     }

@@ -7,17 +7,56 @@
 //! never both believe they own a session.
 
 use rusqlite::{OptionalExtension, Row, params};
-use vowp_protocol::{Lease, NodeName, SessionId, Surface, SurfaceId, SurfaceKind, Timestamp};
+use vowp_protocol::{
+    Lease, NodeName, SessionId, Surface, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState, Timestamp,
+};
 
-use crate::convert::{corrupt, json_from_text, json_to_text, ts_from_text, ts_to_text};
+use crate::convert::{
+    corrupt, enum_from_text, enum_to_text, json_from_text, json_to_text, opt_ts_from_text, opt_ts_to_text,
+    ts_from_text, ts_to_text,
+};
 use crate::db::Store;
 use crate::error::StoreError;
+
+/// One durable surface token, stored only as a hash plus a display prefix.
+///
+/// The plaintext token is returned once by the home and is never written here. Comparisons of
+/// a presented token against `token_hash` are the caller's job and must be constant-time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceToken {
+    /// Token row id (ULID).
+    pub id: String,
+    /// Surface the token belongs to.
+    pub surface_id: SurfaceId,
+    /// Lowercase hex SHA-256 of the token.
+    pub token_hash: String,
+    /// Short display prefix; never enough to reconstruct the token.
+    pub prefix: String,
+    /// Scopes granted to the token.
+    pub scopes: Vec<SurfaceScope>,
+    /// When the token was issued.
+    pub created_at: Timestamp,
+    /// When the token expires; `None` means no expiry.
+    pub expires_at: Option<Timestamp>,
+    /// When the token was revoked; `None` while it is active.
+    pub revoked_at: Option<Timestamp>,
+    /// Last successful use.
+    pub last_used_at: Option<Timestamp>,
+}
 
 /// Column list shared by every `surfaces` query.
 const SURFACE_COLUMNS: &str = "id, kind, node, holder, app, cwd, metadata_json, created_at, last_seen_at";
 
 /// Column list shared by every `leases` query.
 const LEASE_COLUMNS: &str = "session_id, surface_id, surface_kind, node, holder, token, acquired_at, heartbeat_at";
+
+/// Column list used to read a surface with its v0.4 state.
+const SURFACE_INFO_COLUMNS: &str =
+    "id, kind, node, holder, app, cwd, metadata_json, state, created_at, last_seen_at, revoked_at";
+
+/// Column list shared by every `surface_tokens` query.
+const SURFACE_TOKEN_COLUMNS: &str =
+    "id, surface_id, token_hash, prefix, scopes_json, created_at, expires_at, revoked_at, last_used_at";
 
 /// Raw values of one `surfaces` row before protocol conversion.
 struct SurfaceRow {
@@ -99,6 +138,98 @@ fn lease_from_row(raw: LeaseRow) -> Result<Lease, StoreError> {
         token: raw.token,
         acquired_at: ts_from_text(&raw.acquired_at, "leases.acquired_at")?,
         heartbeat_at: ts_from_text(&raw.heartbeat_at, "leases.heartbeat_at")?,
+    })
+}
+
+/// Raw values of one `surfaces` row with its v0.4 lifecycle columns.
+struct SurfaceInfoRow {
+    id: String,
+    kind: String,
+    node: String,
+    holder: String,
+    app: Option<String>,
+    cwd: Option<String>,
+    metadata: String,
+    state: String,
+    created_at: String,
+    last_seen_at: String,
+    revoked_at: Option<String>,
+}
+
+/// Raw values of one `surface_tokens` row before protocol conversion.
+struct SurfaceTokenRow {
+    id: String,
+    surface_id: String,
+    token_hash: String,
+    prefix: String,
+    scopes: String,
+    created_at: String,
+    expires_at: Option<String>,
+    revoked_at: Option<String>,
+    last_used_at: Option<String>,
+}
+
+/// Reads the columns of a `surfaces` row with lifecycle state.
+fn read_surface_info_row(row: &Row<'_>) -> rusqlite::Result<SurfaceInfoRow> {
+    Ok(SurfaceInfoRow {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        node: row.get(2)?,
+        holder: row.get(3)?,
+        app: row.get(4)?,
+        cwd: row.get(5)?,
+        metadata: row.get(6)?,
+        state: row.get(7)?,
+        created_at: row.get(8)?,
+        last_seen_at: row.get(9)?,
+        revoked_at: row.get(10)?,
+    })
+}
+
+/// Converts a raw `surfaces` row into a [`SurfaceInfo`].
+fn surface_info_from_row(raw: SurfaceInfoRow) -> Result<SurfaceInfo, StoreError> {
+    Ok(SurfaceInfo {
+        id: SurfaceId(raw.id),
+        kind: surface_kind_from_text(&raw.kind, "surfaces.kind")?,
+        node: NodeName::parse(&raw.node)?,
+        holder: raw.holder,
+        app: raw.app,
+        cwd: raw.cwd,
+        metadata: json_from_text(&raw.metadata, "surfaces.metadata_json")?,
+        state: enum_from_text(&raw.state, "surfaces.state")?,
+        created_at: ts_from_text(&raw.created_at, "surfaces.created_at")?,
+        last_seen_at: ts_from_text(&raw.last_seen_at, "surfaces.last_seen_at")?,
+        revoked_at: opt_ts_from_text(raw.revoked_at.as_deref(), "surfaces.revoked_at")?,
+    })
+}
+
+/// Reads the columns of a `surface_tokens` row.
+fn read_surface_token_row(row: &Row<'_>) -> rusqlite::Result<SurfaceTokenRow> {
+    Ok(SurfaceTokenRow {
+        id: row.get(0)?,
+        surface_id: row.get(1)?,
+        token_hash: row.get(2)?,
+        prefix: row.get(3)?,
+        scopes: row.get(4)?,
+        created_at: row.get(5)?,
+        expires_at: row.get(6)?,
+        revoked_at: row.get(7)?,
+        last_used_at: row.get(8)?,
+    })
+}
+
+/// Converts a raw `surface_tokens` row into a [`SurfaceToken`].
+fn surface_token_from_row(raw: SurfaceTokenRow) -> Result<SurfaceToken, StoreError> {
+    Ok(SurfaceToken {
+        id: raw.id,
+        surface_id: SurfaceId(raw.surface_id),
+        token_hash: raw.token_hash,
+        prefix: raw.prefix,
+        scopes: json_from_text(&raw.scopes, "surface_tokens.scopes_json")?,
+        created_at: ts_from_text(&raw.created_at, "surface_tokens.created_at")?,
+        expires_at: opt_ts_from_text(raw.expires_at.as_deref(), "surface_tokens.expires_at")?,
+        revoked_at: opt_ts_from_text(raw.revoked_at.as_deref(), "surface_tokens.revoked_at")?,
+        last_used_at: opt_ts_from_text(raw.last_used_at.as_deref(), "surface_tokens.last_used_at")?,
     })
 }
 
@@ -297,5 +428,131 @@ impl Store {
             leases.push(lease_from_row(row?)?);
         }
         Ok(leases)
+    }
+
+    /// Inserts one surface in the `pending` state, with no revocation time.
+    ///
+    /// The v0.2 [`Surface`] has no state field, so pairing uses this constructor rather than
+    /// [`Store::upsert_surface`], which leaves the state at its `attached` default.
+    pub fn insert_pending_surface(&self, surface: &Surface) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO main.surfaces (
+                id, kind, node, holder, app, cwd, metadata_json, state, revoked_at, created_at, last_seen_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', NULL, ?8, ?9)",
+            params![
+                surface.id.0.as_str(),
+                surface_kind_to_text(surface.kind),
+                surface.node.as_str(),
+                surface.holder,
+                surface.app,
+                surface.cwd,
+                json_to_text(&surface.metadata)?,
+                ts_to_text(surface.created_at),
+                ts_to_text(surface.last_seen_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the surface called `id` with its lifecycle state, when it exists.
+    pub fn surface_by_id(&self, id: &SurfaceId) -> Result<Option<SurfaceInfo>, StoreError> {
+        let raw = self
+            .conn
+            .query_row(
+                &format!("SELECT {SURFACE_INFO_COLUMNS} FROM main.surfaces WHERE id = ?1"),
+                [id.0.as_str()],
+                read_surface_info_row,
+            )
+            .optional()?;
+        raw.map(surface_info_from_row).transpose()
+    }
+
+    /// Sets the lifecycle state of `id`, recording `at` when it becomes revoked.
+    ///
+    /// A `pending` or `attached` transition clears `revoked_at`; `revoked` sets it to `at`.
+    /// Returns [`StoreError::NotFound`] when the surface does not exist.
+    pub fn set_surface_state(&self, id: &SurfaceId, state: SurfaceState, at: Timestamp) -> Result<(), StoreError> {
+        let revoked_at = if state == SurfaceState::Revoked {
+            Some(ts_to_text(at))
+        } else {
+            None
+        };
+        let changed = self.conn.execute(
+            "UPDATE main.surfaces SET state = ?1, revoked_at = ?2 WHERE id = ?3",
+            params![enum_to_text(&state)?, revoked_at, id.0.as_str()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::not_found("surface", id.0.as_str()));
+        }
+        Ok(())
+    }
+
+    /// Inserts one surface token; the unique hash index rejects a duplicate token.
+    pub fn insert_surface_token(&self, token: &SurfaceToken) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO main.surface_tokens (
+                id, surface_id, token_hash, prefix, scopes_json, created_at, expires_at, revoked_at, last_used_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                token.id,
+                token.surface_id.0.as_str(),
+                token.token_hash,
+                token.prefix,
+                json_to_text(&token.scopes)?,
+                ts_to_text(token.created_at),
+                opt_ts_to_text(token.expires_at),
+                opt_ts_to_text(token.revoked_at),
+                opt_ts_to_text(token.last_used_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the token row with `token_hash`, when one exists.
+    ///
+    /// The caller compares the presented token against `token_hash` in constant time; this
+    /// method only performs the indexed lookup.
+    pub fn surface_token_by_hash(&self, token_hash: &str) -> Result<Option<SurfaceToken>, StoreError> {
+        let raw = self
+            .conn
+            .query_row(
+                &format!("SELECT {SURFACE_TOKEN_COLUMNS} FROM main.surface_tokens WHERE token_hash = ?1"),
+                [token_hash],
+                read_surface_token_row,
+            )
+            .optional()?;
+        raw.map(surface_token_from_row).transpose()
+    }
+
+    /// Lists one surface's tokens, oldest first.
+    pub fn list_surface_tokens(&self, surface: &SurfaceId) -> Result<Vec<SurfaceToken>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {SURFACE_TOKEN_COLUMNS} FROM main.surface_tokens
+             WHERE surface_id = ?1 ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([surface.0.as_str()], read_surface_token_row)?;
+        let mut tokens = Vec::new();
+        for row in rows {
+            tokens.push(surface_token_from_row(row?)?);
+        }
+        Ok(tokens)
+    }
+
+    /// Revokes one token at `at`; returns false when it was already revoked or is unknown.
+    pub fn revoke_surface_token(&self, id: &str, at: Timestamp) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE main.surface_tokens SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
+            params![ts_to_text(at), id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Records a successful use of one token at `at`; returns false when the id is unknown.
+    pub fn touch_surface_token(&self, id: &str, at: Timestamp) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE main.surface_tokens SET last_used_at = ?1 WHERE id = ?2",
+            params![ts_to_text(at), id],
+        )?;
+        Ok(changed > 0)
     }
 }

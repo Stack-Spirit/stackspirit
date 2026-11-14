@@ -24,6 +24,7 @@ crates/vowp-store/
   src/db.rs             // Store, open/migrate/pragmas/transaction/backup/integrity_check
   src/convert.rs        // private: row <-> protocol type helpers, ts/enum <-> TEXT
   src/agent.rs          // node credentials, enrollment codes, node path maps, NodeCard
+  src/repo_surfaces.rs  // surfaces, leases, surface tokens and surface state
   src/repo_nodes.rs     // nodes, projects
   src/repo_jobs.rs      // jobs, edges
   src/repo_runs.rs      // runs, gate_results, workers
@@ -109,22 +110,28 @@ Migration/pragma rules (all in `Store::open*`):
 5. Insert `kv('schema_created_at')` and `kv('node_id')` (a fresh ULID) on first creation.
 6. `open_writable(paths, project)` is the daemon's narrow write constructor. It requires the
    existing `vowp.db` (missing → `NotFound`), uses read-write flags without create, sets the busy
-   timeout and foreign keys, checks `user_version = 3` (newer → `SchemaTooNew`, older →
+   timeout and foreign keys, checks `user_version = 4` (newer → `SchemaTooNew`, older →
    `MigrationRequired`), and attaches an existing registered project with the same schema check.
    It never calls `paths.ensure`, `resume_migration` or a schema file, so opening it cannot create
    or migrate a home. It is not a general write-open: `Store::open` remains the CLI/supervisor
    constructor.
-7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3 before opening
-   it. `migrate_v02` follows the v0.1 migration's staged-swap recipe: it copies the original file
-   to `backups/pre-0.3-<ms>.db`, writes a fresh v3 file in `tmp/`, copies all 21 v2 global tables
-   (including `native_events`), verifies per-table counts, integrity and foreign keys, and then
-   renames the staged file into place. `nodes` is copied with an explicit column list and a
-   `CASE` that maps `is_local` to `kind`; the other tables keep their v2 definitions and are
-   copied column-for-column with `INSERT ... SELECT *`. A `migration.json` manifest makes the
-   swap restartable. Projects, session logs and the project schema are untouched. The local row
-   (`is_local = 1`) becomes `kind = 'home'`; every other v2 node becomes `kind = 'ssh'` with
-   `status = 'active'`. The existing v0.1 → v2 `migrate_v01` path is not renumbered: it writes
-   the current embedded schema and therefore leaves the home at v3.
+7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3 and an
+   existing v3 file to v4 before opening it. `migrate_v02` follows the v0.1 migration's
+   staged-swap recipe: it copies the original file to `backups/pre-0.3-<ms>.db`, writes a fresh
+   v3 file in `tmp/` (the embedded v4 schema shaped back to the v3 `surfaces` table), copies all
+   21 v2 global tables (including `native_events`), verifies per-table counts, integrity and
+   foreign keys, and then renames the staged file into place. `nodes` is copied with an explicit
+   column list and a `CASE` that maps `is_local` to `kind`; the other tables keep their v2
+   definitions and copy column-for-column. The local row (`is_local = 1`) becomes
+   `kind = 'home'`; every other v2 node becomes `kind = 'ssh'` with `status = 'active'`.
+8. `migrate_v03` copies the original file to `backups/pre-0.4-<ms>.db`, builds a fresh v4 file in
+   `tmp/`, copies every v3 table, rebuilds `surfaces` with an explicit column list (adding
+   `state = 'attached'` and `revoked_at = NULL`, preserving every row), creates an empty
+   `surface_tokens` table with its unique hash index, verifies per-table counts, integrity and
+   foreign keys, and swaps the staged file into place. `migration.json` makes the swap
+   restartable; projects, session logs and the project schema are untouched. The existing
+   v0.1 → v2 `migrate_v01` path is not renumbered: it writes the current embedded schema and
+   therefore leaves the home at v4.
 
 ### 3.3 Filters and small structs
 
@@ -168,7 +175,17 @@ pub struct EnrollmentCode { pub code_hash: String, pub node: NodeName, pub kind:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodePath { pub node: NodeName, pub project: ProjectName, pub local_root: String,
                       pub worktree_root: String, pub allow: Vec<String>, pub updated_at: Timestamp }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceToken { pub id: String, pub surface_id: SurfaceId, pub token_hash: String,
+                          pub prefix: String, pub scopes: Vec<SurfaceScope>,
+                          pub created_at: Timestamp, pub expires_at: Option<Timestamp>,
+                          pub revoked_at: Option<Timestamp>, pub last_used_at: Option<Timestamp> }
 ```
+
+`SurfaceToken` is the durable half of a surface credential: `token_hash` is the lowercase hex
+SHA-256 of the token, `prefix` is the short display prefix, and the plaintext token is never
+stored. `SurfaceState` (`pending|attached|revoked`) and `SurfaceInfo` live in
+`vowp_protocol::agent`; `SurfaceInfo` is the state-bearing read model and carries no token.
 
 `consume_enrollment_code` is one `BEGIN IMMEDIATE` transaction: it updates `used_at` only for an
 unused row whose `expires_at > now`, then reads back the winner. Two racing callers therefore get
@@ -208,6 +225,20 @@ pub fn consume_enrollment_code(&self, code_hash: &str, now: Timestamp) -> Result
 pub fn purge_expired_enrollment_codes(&self, before: Timestamp) -> Result<u64, StoreError>;
 pub fn upsert_node_path(&self, path: &NodePath) -> Result<(), StoreError>;
 pub fn list_node_paths(&self, node: &NodeName) -> Result<Vec<NodePath>, StoreError>;
+
+// ---- surfaces / leases / surface tokens (repo_surfaces.rs)
+pub fn upsert_surface(&self, s: &Surface) -> Result<(), StoreError>;             // leaves state at 'attached'
+pub fn surface(&self, id: &SurfaceId) -> Result<Option<Surface>, StoreError>;
+pub fn insert_pending_surface(&self, s: &Surface) -> Result<(), StoreError>;     // state='pending'
+pub fn surface_by_id(&self, id: &SurfaceId) -> Result<Option<SurfaceInfo>, StoreError>;  // state-bearing
+pub fn set_surface_state(&self, id: &SurfaceId, state: SurfaceState, at: Timestamp) -> Result<(), StoreError>;
+pub fn insert_surface_token(&self, t: &SurfaceToken) -> Result<(), StoreError>;  // unique hash index
+pub fn surface_token_by_hash(&self, hash: &str) -> Result<Option<SurfaceToken>, StoreError>;  // indexed lookup only
+pub fn list_surface_tokens(&self, surface: &SurfaceId) -> Result<Vec<SurfaceToken>, StoreError>;  // oldest first
+pub fn revoke_surface_token(&self, id: &str, at: Timestamp) -> Result<bool, StoreError>;
+pub fn touch_surface_token(&self, id: &str, at: Timestamp) -> Result<bool, StoreError>;
+pub fn lease(&self, session: &SessionId) -> Result<Option<Lease>, StoreError>;
+pub fn list_leases(&self) -> Result<Vec<Lease>, StoreError>;
 
 pub fn upsert_project(&self, p: &Project) -> Result<(), StoreError>;
 pub fn project(&self, name: &ProjectName) -> Result<Option<Project>, StoreError>;
@@ -554,6 +585,11 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `open_is_idempotent` | open twice on the same file: no error, `node_id` kv unchanged |
 | `open_writable_answers_and_never_creates_or_migrates` | `open_writable` opens an existing home, answers an inbox item and reads it back; a missing `vowp.db` is `NotFound` and its directory is not created; an empty zero-byte file is `MigrationRequired` and stays untouched |
 | `migration_v2_to_v3_preserves_nodes_projects_and_sessions` | a v2 fixture with nodes, a project and a session migrates to v3; counts, `kv('node_id')`, project and session rows survive; the backup still reports v2 |
+| `migration_v3_to_v4_preserves_surfaces_and_rows` | a v3 fixture with a project, session, credential, path map, surface, lease and native event migrates to v4; every v3 table count is unchanged, the surface keeps its holder/metadata with `state='attached'`, `surface_tokens` starts empty, the backup still reports v3, and the rebuilt kind check accepts `agent` |
+| `surface_token_round_trips_and_hash_is_unique` | insert, lookup by hash and list round-trip scopes/timestamps; a second row with the same hash is `Conflict` |
+| `surface_token_revoke_and_expiry_are_recorded` | `expires_at` round-trips, `touch_surface_token` records `last_used_at`, the first revoke records `revoked_at`, a second revoke is false |
+| `surface_state_round_trips_pending_attached_revoked` | a pending surface reads back as `pending`, `attached` clears `revoked_at`, `revoked` records it, and a missing id is `NotFound` |
+| `surface_token_schema_has_no_plaintext_token` | `surface_tokens` declares `token_hash`/`prefix` and no plaintext token column; a stored row never contains the plaintext token |
 | `local_node_is_home_after_migration` | `is_local = 1` becomes `kind = 'home'`; other nodes become `kind = 'ssh'` with `status = 'active'` |
 | `enrollment_code_is_single_use` | one sequential redemption, then `None`; two racing connections produce exactly one winner |
 | `enrollment_code_expires` | a code is invalid at its expiry instant; `purge_expired_enrollment_codes` removes it |
@@ -617,5 +653,7 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 
 HTTP/daemon access, replication/libSQL, FTS search over events, sidecar tail index for huge logs, log signing/hash chain, automatic backup scheduling (that is a `vowp schedule` command item in core), blob garbage collection.
 
-The v0.4 Phase 0 store stops at enrollment: `surface_tokens`, `agent_assignments`, `node_limits`,
-lease token hashing, the project `runs` columns and the agent gateway are later phases.
+The v0.4 Phase 0 store stops at enrollment plus the surface-token/state layer:
+`agent_assignments`, `node_limits`, lease token hashing, the project `runs` columns and the agent
+gateway are later phases. Token generation and constant-time verification are core/gateway work;
+this crate only persists the hash, prefix and scopes.
