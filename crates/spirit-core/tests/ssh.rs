@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use spirit_core::error::SpiritErrorCode;
-use spirit_core::ssh::command::{CommandOutput, CommandSpec, remote_command};
+use spirit_core::ssh::command::{
+    CommandOutput, CommandSpec, INITIAL_TIMEOUT, READ_TIMEOUT, remote_command,
+};
 use spirit_core::ssh::{
     CommandRunner, FakeCommandRunner, SshOptions, SshTarget, SystemCommandRunner, ssh_command,
 };
@@ -170,6 +172,27 @@ async fn ssh_read_command_uses_the_expected_vowp_json_forms() {
     assert!(commands[2].contains("'--json' 'fleet' 'queue'"));
     assert!(commands[3].contains("'--json' 'fleet' 'inbox' '--all'"));
     assert!(commands.iter().all(|command| command.starts_with("'vowp'")));
+}
+
+#[tokio::test]
+async fn initial_fleet_status_uses_the_initial_timeout_and_polls_use_the_read_timeout() {
+    let fake = Arc::new(FakeCommandRunner::new(vec![
+        CommandOutput::ok(FRESH),
+        CommandOutput::ok(FRESH),
+    ]));
+    let client = SshVowpClient::new(fake.clone(), target(), options(false), None);
+    client.fleet_status_initial().await.unwrap();
+    client.fleet_status().await.unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].timeout, INITIAL_TIMEOUT,
+        "the connect read keeps the 60 s initial timeout"
+    );
+    assert_eq!(
+        calls[1].timeout, READ_TIMEOUT,
+        "a normal 4 s poll must use the 20 s read timeout"
+    );
 }
 
 #[tokio::test]

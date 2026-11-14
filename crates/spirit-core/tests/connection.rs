@@ -28,13 +28,28 @@ fn host() -> HostId {
     HostId("01JCF5WQ8ZK3M2V7N4P6R8T0AB".to_owned())
 }
 
-/// A client whose `fleet_status` blocks until the future is dropped, so a test can
-/// disconnect while a poll is genuinely in flight.
+/// A client whose `fleet_status` or `capacity_report` blocks until the future is
+/// dropped, so a test can disconnect while a poll is genuinely in flight.
 struct BlockingClient {
     inner: MockVowpClient,
     started: Arc<Notify>,
+    capacity_started: Arc<Notify>,
     release: Arc<Notify>,
     block: Arc<AtomicBool>,
+    block_capacity: Arc<AtomicBool>,
+}
+
+impl BlockingClient {
+    fn new(block_status: bool, block_capacity: bool) -> Arc<Self> {
+        Arc::new(Self {
+            inner: mock(),
+            started: Arc::new(Notify::new()),
+            capacity_started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            block: Arc::new(AtomicBool::new(block_status)),
+            block_capacity: Arc::new(AtomicBool::new(block_capacity)),
+        })
+    }
 }
 
 #[async_trait]
@@ -52,6 +67,10 @@ impl VowpClient for BlockingClient {
     }
 
     async fn capacity_report(&self) -> Result<spirit_core::wire::CapacityReportDoc, SpiritError> {
+        if self.block_capacity.load(Ordering::SeqCst) {
+            self.capacity_started.notify_one();
+            self.release.notified().await;
+        }
         self.inner.capacity_report().await
     }
 
@@ -205,6 +224,117 @@ async fn parse_failure_marks_the_last_good_view_stale_immediately() {
 }
 
 #[tokio::test]
+async fn hard_poll_failures_invalidate_the_view_immediately() {
+    for original in [
+        SpiritError::new(
+            SpiritErrorCode::HostKeyMismatch,
+            "host key changed: pinned SHA256:old, server offered SHA256:new",
+        ),
+        SpiritError::vowp_incompatible("snapshot.schema", "expected vowp-snapshot/1"),
+    ] {
+        let manager = ConnectionManager::default();
+        let client = mock();
+        manager.connect(&client, host()).await.unwrap();
+        let failing = client.clone().failing_status(original.clone());
+
+        let error = manager.poll_once(&failing).await.unwrap_err();
+        assert_eq!(error.code, original.code);
+        assert_eq!(manager.consecutive_failures(), 1);
+        assert!(
+            matches!(manager.state(), ConnectionState::Stale { .. }),
+            "a hard failure must not leave the state Connected"
+        );
+        assert!(
+            !manager.mutations_allowed(),
+            "a hard failure must disable mutations immediately"
+        );
+        assert!(
+            manager.fleet_view().expect("last good view").stale,
+            "the retained view must be dimmed"
+        );
+        let snapshot = manager.status();
+        assert_eq!(snapshot.state, "stale");
+        assert_eq!(
+            snapshot.error.expect("hard failure is visible").code,
+            original.code
+        );
+    }
+}
+
+#[tokio::test]
+async fn capacity_refresh_does_not_clear_a_stale_view() {
+    let policy = PollPolicy {
+        jitter_fraction: 0.0,
+        ..PollPolicy::default()
+    };
+    let manager = ConnectionManager::new(policy);
+    let client = mock();
+    manager.connect(&client, host()).await.unwrap();
+    let failing = client
+        .clone()
+        .failing_status(SpiritError::remote_timeout(20));
+    for _ in 0..3 {
+        let _ = manager.poll_once(&failing).await;
+    }
+    assert!(matches!(manager.state(), ConnectionState::Stale { .. }));
+    assert!(manager.fleet_view().unwrap().stale);
+
+    let mut receiver = manager.subscribe();
+    let result = manager.refresh_capacity(&client).await.unwrap();
+    assert!(
+        result.is_none(),
+        "a capacity read while stale must not produce a fresh view"
+    );
+    assert!(
+        manager.fleet_view().unwrap().stale,
+        "a capacity refresh must not clear the stale flag"
+    );
+    assert!(matches!(manager.state(), ConnectionState::Stale { .. }));
+    assert!(
+        manager.last_capacity_report().is_none(),
+        "a stale capacity report must not be published"
+    );
+    while let Ok(event) = receiver.try_recv() {
+        assert!(
+            !matches!(event, SpiritEvent::Fleet { .. }),
+            "a stale capacity refresh must not publish a fleet event"
+        );
+    }
+}
+
+#[tokio::test]
+async fn disconnect_cancels_an_in_flight_capacity_refresh() {
+    let manager = ConnectionManager::default();
+    let client = BlockingClient::new(false, true);
+    manager.connect(client.as_ref(), host()).await.unwrap();
+    let mut receiver = manager.subscribe();
+    let refresh = tokio::spawn({
+        let manager = manager.clone();
+        let client = client.clone();
+        async move { manager.refresh_capacity(client.as_ref()).await }
+    });
+    client.capacity_started.notified().await;
+    let snapshot = manager.disconnect();
+    assert_eq!(snapshot.state, "disconnected");
+    let result = tokio::time::timeout(Duration::from_secs(2), refresh)
+        .await
+        .expect("an in-flight capacity read must stop when the connection is cancelled")
+        .unwrap();
+    assert!(result.is_err());
+    assert!(matches!(manager.state(), ConnectionState::Disconnected));
+    assert!(
+        manager.last_capacity_report().is_none(),
+        "a report completing after disconnect must not be stored"
+    );
+    while let Ok(event) = receiver.try_recv() {
+        assert!(
+            !matches!(event, SpiritEvent::Fleet { .. }),
+            "a capacity refresh completing after disconnect must not publish a fleet event"
+        );
+    }
+}
+
+#[tokio::test]
 async fn disconnect_cancels_in_flight_polls() {
     let manager = ConnectionManager::default();
     let client = mock();
@@ -225,12 +355,7 @@ async fn disconnect_cancels_in_flight_polls() {
 #[tokio::test]
 async fn disconnect_aborts_a_poll_that_is_already_in_flight() {
     let manager = ConnectionManager::default();
-    let client = Arc::new(BlockingClient {
-        inner: mock(),
-        started: Arc::new(Notify::new()),
-        release: Arc::new(Notify::new()),
-        block: Arc::new(AtomicBool::new(false)),
-    });
+    let client = BlockingClient::new(false, false);
     manager.connect(client.as_ref(), host()).await.unwrap();
     client.block.store(true, Ordering::SeqCst);
     let mut receiver = manager.subscribe();
@@ -260,12 +385,7 @@ async fn disconnect_aborts_a_poll_that_is_already_in_flight() {
 #[tokio::test]
 async fn disconnect_aborts_a_connect_that_is_already_in_flight() {
     let manager = ConnectionManager::default();
-    let client = Arc::new(BlockingClient {
-        inner: mock(),
-        started: Arc::new(Notify::new()),
-        release: Arc::new(Notify::new()),
-        block: Arc::new(AtomicBool::new(true)),
-    });
+    let client = BlockingClient::new(true, false);
     let mut receiver = manager.subscribe();
     let connect = tokio::spawn({
         let manager = manager.clone();

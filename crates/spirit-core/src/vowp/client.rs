@@ -37,8 +37,19 @@ pub struct VowpProbe {
 pub trait VowpClient: Send + Sync {
     /// Reads `vowp --version`.
     async fn probe(&self) -> Result<VowpProbe, SpiritError>;
-    /// Reads and parses `vowp --json fleet status`.
+    /// Reads and parses `vowp --json fleet status` with the normal read timeout.
+    ///
+    /// This is the method every poll uses. The initial connect read uses
+    /// [`Self::fleet_status_initial`] instead.
     async fn fleet_status(&self) -> Result<FleetStatus, SpiritError>;
+    /// Reads `vowp --json fleet status` with the longer initial-connect timeout.
+    ///
+    /// The default delegates to [`Self::fleet_status`] so clients that do not
+    /// distinguish the two calls keep working; the live SSH client allows 60 s only
+    /// here and 20 s for every later poll.
+    async fn fleet_status_initial(&self) -> Result<FleetStatus, SpiritError> {
+        self.fleet_status().await
+    }
     /// Reads and parses `vowp --json capacity report`.
     async fn capacity_report(&self) -> Result<CapacityReportDoc, SpiritError>;
     /// Reads and parses `vowp --json fleet queue`.
@@ -183,6 +194,17 @@ impl SshVowpClient {
             Err(error)
         }
     }
+
+    async fn read_fleet_status(&self, timeout: Duration) -> Result<FleetStatus, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend(["fleet".to_owned(), "status".to_owned()]);
+        let output = self.run(&argv, timeout).await?;
+        let output = self.check_output(output)?;
+        let parsed = parse_fleet_status(&output.stdout)?;
+        self.record_warnings(parsed.warnings);
+        Ok(parsed.value)
+    }
 }
 
 fn first_line(input: &str) -> String {
@@ -229,14 +251,11 @@ impl VowpClient for SshVowpClient {
     }
 
     async fn fleet_status(&self) -> Result<FleetStatus, SpiritError> {
-        let mut argv = self.base_argv();
-        push_json(&mut argv);
-        argv.extend(["fleet".to_owned(), "status".to_owned()]);
-        let output = self.run(&argv, INITIAL_TIMEOUT).await?;
-        let output = self.check_output(output)?;
-        let parsed = parse_fleet_status(&output.stdout)?;
-        self.record_warnings(parsed.warnings);
-        Ok(parsed.value)
+        self.read_fleet_status(READ_TIMEOUT).await
+    }
+
+    async fn fleet_status_initial(&self) -> Result<FleetStatus, SpiritError> {
+        self.read_fleet_status(INITIAL_TIMEOUT).await
     }
 
     async fn capacity_report(&self) -> Result<CapacityReportDoc, SpiritError> {

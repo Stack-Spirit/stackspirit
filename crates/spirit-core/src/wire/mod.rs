@@ -449,6 +449,14 @@ fn collect_capacity_sample_warnings(
     capacity: &CapacitySnapshot,
     warnings: &mut Vec<WireWarning>,
 ) {
+    if let Some(host) = &capacity.measured {
+        if !host.source.is_known() {
+            warnings.push(WireWarning::unknown_enum(
+                format!("{base}.measured.source"),
+                host.source.as_str(),
+            ));
+        }
+    }
     if !capacity.brake.active {
         return;
     }

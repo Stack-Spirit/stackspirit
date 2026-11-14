@@ -397,6 +397,34 @@ fn lane_count(lanes: &spirit_core::view::JobLanes, lane: &str) -> u32 {
 }
 
 #[test]
+fn unknown_snapshot_host_sample_source_produces_a_warning() {
+    let mut value: Value = serde_json::from_str(FRESH).unwrap();
+    value["snapshot"]["capacity"]["measured"]["source"] = json!("ebpf");
+    let parsed = parse_fleet_status(value.to_string().as_bytes()).unwrap();
+    assert_eq!(
+        parsed
+            .value
+            .snapshot
+            .capacity
+            .measured
+            .as_ref()
+            .unwrap()
+            .source
+            .as_str(),
+        "ebpf"
+    );
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.path == "capacity.measured.source"
+                && warning.code == spirit_core::wire::WireWarningCode::UnknownEnum),
+        "unknown host-sample source must warn: {:?}",
+        parsed.warnings
+    );
+}
+
+#[test]
 fn unknown_object_field_is_ignored() {
     let mut value: Value = serde_json::from_str(FRESH).unwrap();
     value["future_top_level"] = json!({"anything": true});

@@ -136,6 +136,35 @@ async fn supervisor_starts_healthy_and_stops_cleanly() {
 }
 
 #[tokio::test]
+async fn supervisor_start_is_idempotent_and_never_orphans_a_runtime() {
+    let runtime = Arc::new(FakeEngineRuntime::new());
+    let config = EngineSupervisorConfig {
+        restart_budget: 3,
+        health_attempts: 3,
+        retry_delay: Duration::ZERO,
+        port: 0,
+    };
+    let mut supervisor = EngineSupervisor::new(runtime.clone(), config);
+    let first = supervisor.start().await;
+    assert!(matches!(first.state, EngineState::Ready));
+    let second = supervisor.start().await;
+    assert!(matches!(second.state, EngineState::Ready));
+    assert_eq!(
+        runtime.spawns(),
+        1,
+        "a second start while Ready must not spawn another runtime"
+    );
+    assert_eq!(runtime.shutdowns(), 0, "the live runtime must stay alive");
+    let stopped = supervisor.stop().await;
+    assert!(matches!(stopped.state, EngineState::Stopped));
+    assert_eq!(
+        runtime.shutdowns(),
+        1,
+        "the single live runtime must be shut down exactly once"
+    );
+}
+
+#[tokio::test]
 async fn supervisor_spawn_failure_is_failed_then_degraded_after_restart_budget() {
     let runtime = Arc::new(FakeEngineRuntime::new().with_spawn_failures(100));
     let config = EngineSupervisorConfig {

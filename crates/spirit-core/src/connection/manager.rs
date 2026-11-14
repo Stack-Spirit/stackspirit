@@ -346,7 +346,7 @@ impl ConnectionManager {
         self.set_connecting(&host_id, ConnectStage::ReadingSnapshot)?;
         let started = Instant::now();
         let status = match tokio::select! {
-            result = client.fleet_status() => result,
+            result = client.fleet_status_initial() => result,
             () = token.cancelled() => return Err(connect_cancelled()),
         } {
             Ok(status) => status,
@@ -496,12 +496,13 @@ impl ConnectionManager {
                     ));
                 }
                 let failures = inner.scheduler.record_failure();
-                // A parse failure invalidates the snapshot immediately: keep the last
-                // good view, but mark it stale and surface the parse error. Transport
-                // failures still wait for the three-failure threshold so a single
-                // dropped packet does not disable writes.
-                let parse_failure = error.code == SpiritErrorCode::Parse;
-                if parse_failure || failures >= inner.scheduler.phase_threshold() {
+                // A parse failure or any hard (non-retryable) failure invalidates the
+                // snapshot immediately: keep the last good view, but mark it stale and
+                // surface the original error. Transient transport failures still wait
+                // for the three-failure threshold so a single dropped packet does not
+                // disable writes.
+                let hard_failure = !error.retryable;
+                if hard_failure || failures >= inner.scheduler.phase_threshold() {
                     let last_ok_at = inner.last_ok_at.unwrap_or_else(Timestamp::now);
                     inner.state = ConnectionState::Stale {
                         host_id: host_id.clone(),
@@ -531,11 +532,24 @@ impl ConnectionManager {
     }
 
     /// Refreshes the capacity report and re-derives the fleet view.
+    ///
+    /// The report is applied only while the connection is healthy. A stale or failed
+    /// connection keeps its dimmed view, and `disconnect` cancels an in-flight read so
+    /// a late report cannot publish fresh data after the connection is gone.
     pub async fn refresh_capacity(
         &self,
         client: &dyn VowpClient,
     ) -> Result<Option<FleetView>, SpiritError> {
-        let report = match client.capacity_report().await {
+        let mut token = self.guard().cancel.clone();
+        let report = match tokio::select! {
+            result = client.capacity_report() => result,
+            () = token.cancelled() => {
+                return Err(SpiritError::new(
+                    SpiritErrorCode::RemoteTimeout,
+                    "capacity refresh cancelled",
+                ));
+            }
+        } {
             Ok(report) => report,
             Err(error) => {
                 let revision = self.guard().revision.advance();
@@ -549,6 +563,15 @@ impl ConnectionManager {
         let capacity_warnings = client.take_warnings();
         let (revision, view) = {
             let mut inner = self.guard();
+            if inner.cancel.is_cancelled() {
+                return Err(SpiritError::new(
+                    SpiritErrorCode::RemoteTimeout,
+                    "capacity refresh cancelled",
+                ));
+            }
+            if !matches!(inner.state, ConnectionState::Connected { .. }) {
+                return Ok(None);
+            }
             inner.last_report = Some(report.clone());
             inner.last_capacity_warnings = capacity_warnings;
             let Some(status) = inner.last_status.clone() else {

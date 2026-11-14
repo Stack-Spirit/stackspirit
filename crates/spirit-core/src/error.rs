@@ -429,33 +429,50 @@ fn split_key_value(token: &str) -> Option<(&str, &str)> {
 /// Returns true when a key name is on the redaction list.
 ///
 /// Header names are case-insensitive and may use hyphens (`X-Api-Key`) where the
-/// list uses underscores, so the comparison normalizes both and accepts a
-/// well-known suffix such as `_api_key` or `_token`.
+/// list uses underscores, so the comparison normalizes both. Compound names such as
+/// `secret_key`, `client_secret` or `X-Secret-Key` match because one of their
+/// underscore-separated segments is sensitive; `secretary` does not.
 fn is_sensitive_name(name: &str) -> bool {
-    let name = name
+    let normalized = name
         .trim_matches(|c: char| matches!(c, '"' | '\'' | ' '))
         .trim_end_matches([':', '='])
         .to_ascii_lowercase()
         .replace('-', "_");
-    let name = name.trim();
-    const SENSITIVE: [&str; 10] = [
-        "api_key",
-        "apikey",
-        "access_key",
+    let name = normalized.trim();
+
+    const COMPACT: [&str; 3] = ["apikey", "accesskey", "privatekey"];
+    if COMPACT.contains(&name) {
+        return true;
+    }
+
+    const PAIRS: [&str; 4] = ["api_key", "apikey", "access_key", "private_key"];
+    if PAIRS.iter().any(|needle| contains_name_part(name, needle)) {
+        return true;
+    }
+
+    const SEGMENTS: [&str; 6] = [
         "token",
         "secret",
         "password",
         "passphrase",
         "authorization",
         "credential",
-        "private_key",
     ];
-    SENSITIVE.iter().any(|needle| {
-        name == *needle
-            || name
-                .strip_suffix(needle)
-                .is_some_and(|prefix| prefix.ends_with('_'))
-    })
+    name.split('_').any(|segment| SEGMENTS.contains(&segment))
+}
+
+/// Returns true when `name` contains `needle` as a whole underscore-delimited part.
+fn contains_name_part(name: &str, needle: &str) -> bool {
+    name == needle
+        || name
+            .strip_prefix(needle)
+            .is_some_and(|rest| rest.starts_with('_'))
+        || name
+            .strip_suffix(needle)
+            .is_some_and(|prefix| prefix.ends_with('_'))
+        || name
+            .split_once(needle)
+            .is_some_and(|(before, after)| before.ends_with('_') && after.starts_with('_'))
 }
 
 /// Maps a VOWP CLI exit code to a StackSpirit code, per `VOWP-CONTRACT.md` §8.2.

@@ -94,7 +94,17 @@ impl EngineSupervisor {
     }
 
     /// Starts the engine and waits for health.
+    ///
+    /// Calling `start` again while the engine is `Ready` is idempotent: the live
+    /// runtime is returned and never orphaned. Any other stale handle is shut down
+    /// before a new spawn.
     pub async fn start(&mut self) -> EngineStatus {
+        if self.handle.is_some() {
+            if self.status.state == EngineState::Ready {
+                return self.status.clone();
+            }
+            self.stop_runtime().await;
+        }
         self.status.state = EngineState::Starting;
         self.status.last_error = None;
         let info = match self.runtime.spawn(self.config.port).await {

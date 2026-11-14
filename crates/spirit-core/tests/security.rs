@@ -86,6 +86,28 @@ fn redact_removes_hyphenated_headers_and_detached_assignments() {
 }
 
 #[test]
+fn redact_removes_secret_key_assignments_and_headers() {
+    for input in [
+        "X-Secret-Key: abcdef",
+        "secret_key=abcdef",
+        "SECRET_KEY=abcdef",
+        "client_secret: abcdef",
+        "refresh_token=abcdef",
+    ] {
+        let output = redact(input);
+        assert!(
+            !output.contains("abcdef"),
+            "{input:?} leaked its value: {output:?}"
+        );
+    }
+    assert_eq!(
+        redact("monkey business is harmless"),
+        "monkey business is harmless",
+        "a non-secret word containing 'key' must not be redacted"
+    );
+}
+
+#[test]
 fn redact_removes_colon_separated_secret_values() {
     let output = redact("api_key: super-secret-value");
     assert!(

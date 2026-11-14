@@ -56,8 +56,9 @@ pub enum ConnectionState {
         /// Round-trip latency statistics.
         latency: LatencyStats,
     },
-    /// Three consecutive polls failed, or a parse failure invalidated the last view;
-    /// live data is dimmed and writes are disabled.
+    /// A hard (non-retryable) poll failure invalidated the last view, or three
+    /// consecutive transient polls failed. Live data is dimmed and writes are
+    /// disabled until a refresh succeeds.
     Stale {
         /// Previously connected host.
         host_id: HostId,
