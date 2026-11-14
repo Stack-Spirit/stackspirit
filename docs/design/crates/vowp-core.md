@@ -586,8 +586,10 @@ pub mod dispatch {
 - **Queue.** `enqueue_ready_jobs` reads every registered project's `ready` jobs. A job whose
   effective placement is `home` is skipped. For every other job it builds the §7.2 request from
   the selected profile executor, the harness `env_pass` names (as environment *and* required
-  secret names) and the node cards, then runs the pure `offload::evaluate`. A waiting decision
-  writes `jobs.note = "waiting: offload <reason>: <detail>"` and leaves the job `ready`; it never
+  secret names) and the node cards, then runs the pure `offload::evaluate`. The home facts are
+  rebuilt for every job, so the fleet `max_remote_runs` check sees each assignment inserted
+  earlier in the same pass. A waiting decision writes
+  `jobs.note = "waiting: offload <reason>: <detail>"` and leaves the job `ready`; it never
   fails the job. The note is the read model consumed by `vowp fleet status`/`queue`. A job with
   only a home target is left for the L2 loop. A job with a live assignment is skipped, so a
   heartbeat cannot create a second row for the same job, run or epoch. A fresh rejection has a
@@ -597,11 +599,13 @@ pub mod dispatch {
   deadline and the spool cap.
 - **Claim and send.** `claim_for_node_with_slots` computes free slots as the node's
   `max_slots` (or the stricter `[offload.nodes.<name>].max_workers`) minus assignments in
-  `sent`/`accepted`/`running`/`disconnected`. `Store::claim_assignments` selects queued rows and
-  moves them to `sent` in one `BEGIN IMMEDIATE` transaction, so a row cannot be claimed twice.
-  The dispatcher then mints a run token, writes only its hash through `Store::take_lease`, and
-  returns `AssignRun`. If the lease cannot be issued or the frame cannot be written, the row goes
-  back to `queued`; it is never dropped. At most the free slots are sent per heartbeat.
+  `sent`/`accepted`/`running`/`disconnected`, then takes the smaller of that and the fleet
+  `offload.max_remote_runs` minus the same active states across every node.
+  `Store::claim_assignments` selects queued rows and moves them to `sent` in one
+  `BEGIN IMMEDIATE` transaction, so a row cannot be claimed twice. The dispatcher then mints a
+  run token, writes only its hash through `Store::take_lease`, and returns `AssignRun`. If the
+  lease cannot be issued or the frame cannot be written, the row goes back to `queued`; it is
+  never dropped. At most the free slots and the remaining fleet cap are sent per heartbeat.
 - **Accept / reject / state.** `RunAccepted` moves the row to `accepted` and the job to
   `running`. `RunRejected` moves it to `rejected`, finishes the open run with `outcome=error`,
   releases the lease and puts the job back to `ready` with the refusal reason and detail. A
@@ -633,8 +637,10 @@ tmux or harness): `dispatcher_places_an_any_job_on_an_eligible_node`,
 `assignment_payload_is_durable_and_has_no_lease_token`,
 `duplicate_assign_run_for_the_same_epoch_resumes_and_a_higher_epoch_supersedes`,
 `run_rejected_keeps_the_job_ready_with_a_reason`, `resume_returns_the_run_and_surface_tails`,
-`cancelled_job_sends_cancel_run_and_fences_the_assignment` and
-`run_lost_after_an_expired_lease_marks_the_assignment_lost`. The gateway adds
+`cancelled_job_sends_cancel_run_and_fences_the_assignment`,
+`run_lost_after_an_expired_lease_marks_the_assignment_lost`,
+`claim_is_bounded_by_the_fleet_remote_run_cap` and
+`enqueue_counts_each_insert_against_the_fleet_cap`. The gateway adds
 `heartbeat_dispatches_at_most_the_node_slots` and `agent_second_connection_supersedes_the_first`.
 The store tests add `claim_assignments_is_atomic_and_returns_the_updated_rows`,
 `advance_assignment_rejects_an_invalid_transition_but_is_idempotent` and

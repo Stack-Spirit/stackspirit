@@ -178,12 +178,15 @@ pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<
             .iter()
             .map(|card| node_facts(deps, store, card, &entry.name, &base_commit, remote_url.as_deref()))
             .collect::<Result<Vec<_>, _>>()?;
-        let home = HomeFacts {
-            brake_active: home_brake_active(deps),
-            active_remote_runs: active_runs,
-        };
+        let brake_active = home_brake_active(deps);
 
         for job in &jobs {
+            // The fleet cap is checked against the count after every insert earlier in this
+            // pass, so a batch of ready jobs never all sees the pre-pass count.
+            let home = HomeFacts {
+                brake_active,
+                active_remote_runs: active_runs,
+            };
             let job_placement = project_store.job_placement(&job.id)?;
             let placement = effective_placement(&project_store, job, &project_config)?;
             if placement == Placement::Home {
@@ -351,8 +354,10 @@ pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<
 /// Claims up to the node's free worker/verifier slots and returns their `AssignRun` frames.
 ///
 /// The slot limit is `[offload.nodes.<name>].max_workers` when set, then the node's reported
-/// `max_slots`; a caller may pass an explicit cap. A row that was selected but whose lease
-/// cannot be issued is returned to `queued` with a retryable detail; it is never dropped.
+/// `max_slots`; a caller may pass an explicit cap. The claim is also bounded by the fleet-wide
+/// `offload.max_remote_runs` minus the assignments that already occupy a run slot on every
+/// node. A row that was selected but whose lease cannot be issued is returned to `queued` with
+/// a retryable detail; it is never dropped.
 pub fn claim_for_node(
     deps: &Deps,
     store: &Store,
@@ -373,7 +378,9 @@ pub fn claim_for_node_with_slots(
     let Some(card) = store.node_card(node, now)? else {
         return Ok(Vec::new());
     };
-    let configured = deps.config_now().offload.node_policy(node).max_workers;
+    let config = deps.config_now();
+    let configured = config.offload.node_policy(node).max_workers;
+    let max_remote_runs = config.offload.max_remote_runs;
     let max_slots = max_slots
         .or(configured)
         .or_else(|| card.capacity.as_ref().map(|capacity| capacity.max_slots))
@@ -385,7 +392,9 @@ pub fn claim_for_node_with_slots(
             ..AssignmentFilter::default()
         })?
         .len();
-    let free = max_slots.saturating_sub(u32::try_from(occupied).unwrap_or(u32::MAX));
+    let node_free = max_slots.saturating_sub(u32::try_from(occupied).unwrap_or(u32::MAX));
+    let fleet_free = max_remote_runs.saturating_sub(active_assignment_count(store)?);
+    let free = node_free.min(fleet_free);
     if free == 0 {
         return Ok(Vec::new());
     }

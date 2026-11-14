@@ -241,6 +241,27 @@ fn ready_job(fixture: &Fixture) -> Job {
     fixture.store.require_job(&fixture.job.id).expect("job")
 }
 
+/// Adds one more ready job to the fixture's project.
+fn add_ready_job(fixture: &Fixture, id: &str, placement: Placement) -> Job {
+    let job = insert_job(&fixture.store, &fixture.project, id, JobKind::Build);
+    fixture
+        .store
+        .set_job_placement(&job.id, placement, ts())
+        .expect("job placement");
+    fixture
+        .store
+        .set_job_state(
+            &job.id,
+            JobState::Ready,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("ready job");
+    job
+}
+
 fn enqueue(fixture: &Fixture) -> dispatch::EnqueueReport {
     enqueue_ready_jobs(&fixture.deps, &fixture.store, fixture.clock.now()).expect("enqueue")
 }
@@ -293,6 +314,65 @@ fn dispatcher_places_an_any_job_on_an_eligible_node() {
     assert_eq!(lease.token, hash_lease_token(token), "only the hash is stored");
     assert_ne!(lease.token, token);
     assert_eq!(lease.token.len(), 64);
+}
+
+#[test]
+fn claim_is_bounded_by_the_fleet_remote_run_cap() {
+    let fixture = fixture(FixtureOptions::default());
+    add_ready_job(&fixture, "job-b", Placement::Any);
+    add_ready_job(&fixture, "job-c", Placement::Any);
+
+    // Queued rows do not occupy a run slot yet, so a later pass can queue the third job
+    // even though the enqueue side stopped at the cap in the first pass.
+    assert_eq!(enqueue(&fixture).enqueued.len(), 2);
+    assert_eq!(enqueue(&fixture).enqueued.len(), 1);
+    let claimed = claim(&fixture);
+    assert_eq!(
+        claimed.len(),
+        2,
+        "the fleet cap, not the node's four slots, bounds one heartbeat"
+    );
+    let rows = fixture.store.assignments_for_node(&fixture.node).expect("assignments");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.state == AgentAssignmentState::Sent)
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.state == AgentAssignmentState::Queued)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn enqueue_counts_each_insert_against_the_fleet_cap() {
+    let pinned = Placement::Node {
+        node: node(),
+        fallback: None,
+    };
+    let fixture = fixture(FixtureOptions {
+        placement: pinned.clone(),
+        ..FixtureOptions::default()
+    });
+    assert_eq!(enqueue(&fixture).enqueued.len(), 1);
+    assert_eq!(claim(&fixture).len(), 1, "the first job occupies one fleet slot");
+    add_ready_job(&fixture, "job-b", pinned.clone());
+    add_ready_job(&fixture, "job-c", pinned);
+
+    let report = enqueue(&fixture);
+    assert_eq!(report.enqueued.len(), 1, "only one of the two fleet slots remains");
+    assert_eq!(report.waiting.len(), 1, "{report:?}");
+    assert_eq!(report.waiting[0].job.as_str(), "job-c");
+    assert_eq!(report.waiting[0].reason, vowp_protocol::WaitingReason::NodeBusy);
+    assert!(report.waiting[0].detail.contains("max_remote_runs"));
+    let waiting = fixture.store.require_job(&report.waiting[0].job).expect("waiting job");
+    assert_eq!(waiting.state, JobState::Ready, "a capped job stays ready");
+    assert!(waiting.note.starts_with(WAITING_PREFIX), "{:?}", waiting.note);
+    assert!(waiting.note.contains("max_remote_runs"), "{:?}", waiting.note);
 }
 
 #[test]

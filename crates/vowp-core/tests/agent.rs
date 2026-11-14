@@ -2159,6 +2159,8 @@ fn heartbeat_dispatches_at_most_the_node_slots() {
     config.project.path = Some(home.path().join("project").display().to_string());
     config.offload.enabled = true;
     config.offload.default = Placement::Any;
+    // Keep the fleet cap above the node's two slots so this test measures the node limit.
+    config.offload.max_remote_runs = 3;
     let gateway = Gateway::start_with_config(home.path(), clock.clone(), config);
     authenticate(&gateway, &name, &key);
     gateway.send(&offload_heartbeat(0, 2));
