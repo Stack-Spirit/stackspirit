@@ -430,14 +430,17 @@ fn acp_stop_kills_the_process_group() {
     assert!(matches!(first.body, EventBody::ToolCall(_)));
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !child_pid_path.exists() && Instant::now() < deadline {
+    let child_pid: u32 = loop {
+        // The fake creates the file before it writes the pid, so an existing file can still be
+        // empty. Wait for parseable contents rather than for the path alone.
+        if let Ok(contents) = fs::read_to_string(&child_pid_path) {
+            if let Ok(pid) = contents.trim().parse() {
+                break pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "fake server records its child pid");
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let child_pid: u32 = fs::read_to_string(&child_pid_path)
-        .expect("fake server records its child pid")
-        .trim()
-        .parse()
-        .expect("child pid is a number");
+    };
 
     let stopped = Instant::now();
     run.stop().expect("stop the ACP run");
