@@ -238,10 +238,17 @@ pub fn redact(input: &str) -> String {
     for token in sanitized.split_inclusive(char::is_whitespace) {
         let bare = token.trim();
         let lower = bare.trim_matches(':').to_ascii_lowercase();
+        // `Authorization: Bearer abcdef` has two consecutive scheme tokens: the
+        // header name and the scheme. Keep redacting after the scheme so the
+        // credential itself is removed too.
+        let auth_scheme = matches!(lower.as_str(), "bearer" | "basic" | "authorization");
+        // A trailing `key:` / `key=` separates the value into the next token
+        // (`api_key: super-secret-value`).
+        let key_without_value = looks_like_secret_key(bare);
         let rendered = if redact_next || looks_like_secret(bare) {
-            redact_next = false;
+            redact_next = auth_scheme;
             "[redacted]"
-        } else if lower == "bearer" || lower == "basic" || lower == "authorization" {
+        } else if auth_scheme || key_without_value {
             redact_next = true;
             "[redacted]"
         } else {
@@ -300,7 +307,7 @@ fn looks_like_secret(token: &str) -> bool {
     let token = token.trim_matches(|c: char| {
         matches!(
             c,
-            '"' | '\'' | ',' | ';' | ':' | ')' | '(' | '[' | ']' | '{' | '}'
+            '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
         )
     });
     if token.is_empty() {
@@ -323,23 +330,52 @@ fn looks_like_secret(token: &str) -> bool {
     if lower.contains("begin") && lower.contains("private key") {
         return true;
     }
-    if let Some((name, _value)) = token.split_once('=') {
-        let name = name.trim().to_ascii_lowercase();
-        const SENSITIVE: [&str; 8] = [
-            "api_key",
-            "apikey",
-            "token",
-            "secret",
-            "password",
-            "passphrase",
-            "authorization",
-            "credential",
-        ];
-        if SENSITIVE.iter().any(|needle| name.contains(needle)) {
+    if let Some((name, value)) = split_key_value(token) {
+        if !value.is_empty() && is_sensitive_name(name) {
             return true;
         }
     }
     false
+}
+
+/// Returns true when `token` is a sensitive key name with the value in the next
+/// whitespace-delimited token, for example `api_key:` or `authorization:`.
+fn looks_like_secret_key(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+        )
+    });
+    token
+        .strip_suffix(':')
+        .or_else(|| token.strip_suffix('='))
+        .is_some_and(is_sensitive_name)
+}
+
+/// Splits a `key=value` or `key:value` token at its first separator.
+fn split_key_value(token: &str) -> Option<(&str, &str)> {
+    let index = token.find(['=', ':'])?;
+    let (name, value) = token.split_at(index);
+    Some((name, &value[1..]))
+}
+
+/// Returns true when a key name is on the redaction list.
+fn is_sensitive_name(name: &str) -> bool {
+    let name = name
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | ' '))
+        .to_ascii_lowercase();
+    const SENSITIVE: [&str; 8] = [
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "passphrase",
+        "authorization",
+        "credential",
+    ];
+    SENSITIVE.iter().any(|needle| name.contains(needle))
 }
 
 /// Maps a VOWP CLI exit code to a StackSpirit code, per `VOWP-CONTRACT.md` §8.2.

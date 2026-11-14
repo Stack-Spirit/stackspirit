@@ -62,8 +62,9 @@ pub enum ConnectionState {
         host_id: HostId,
         /// Last successful poll.
         last_ok_at: Timestamp,
-        /// Safe error summary.
-        error: String,
+        /// The safe error that made the snapshot stale, with its original code
+        /// and retry policy.
+        error: SpiritError,
     },
     /// A disconnect is in progress.
     Disconnecting {
@@ -168,10 +169,7 @@ impl ConnectionState {
                 since: None,
                 latency: None,
                 last_ok_at: Some(*last_ok_at),
-                error: Some(SpiritError::new(
-                    crate::error::SpiritErrorCode::RemoteTimeout,
-                    error.clone(),
-                )),
+                error: Some(error.clone()),
             },
             Self::Disconnecting { host_id } => ConnectionSnapshot {
                 state: self.label().to_owned(),

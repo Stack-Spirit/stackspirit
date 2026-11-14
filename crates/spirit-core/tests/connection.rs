@@ -148,6 +148,33 @@ async fn three_failures_mark_the_snapshot_stale_and_back_off() {
     assert!(!manager.state().allows_mutations());
     assert!(manager.fleet_view().unwrap().stale);
     assert!(manager.next_poll_delay() >= Duration::from_secs(30));
+    let snapshot = manager.status();
+    let error = snapshot.error.expect("stale snapshot carries the failure");
+    assert_eq!(error.code, SpiritErrorCode::RemoteTimeout);
+    assert!(error.retryable, "the original retry policy must survive");
+}
+
+#[tokio::test]
+async fn stale_snapshot_keeps_a_non_timeout_error_code() {
+    let policy = PollPolicy {
+        jitter_fraction: 0.0,
+        ..PollPolicy::default()
+    };
+    let manager = ConnectionManager::new(policy);
+    let client = mock();
+    manager.connect(&client, host()).await.unwrap();
+    let original = SpiritError::parse("fleet status", "missing home");
+    let failing = client.clone().failing_status(original.clone());
+    for _ in 0..3 {
+        let _ = manager.poll_once(&failing).await;
+    }
+    let snapshot = manager.status();
+    assert_eq!(snapshot.state, "stale");
+    let error = snapshot.error.expect("stale snapshot carries the failure");
+    assert_eq!(error.code, original.code);
+    assert_eq!(error.retryable, original.retryable);
+    assert_eq!(error.message, original.message);
+    assert_eq!(error.hint, original.hint);
 }
 
 #[tokio::test]
@@ -201,6 +228,54 @@ async fn disconnect_aborts_a_poll_that_is_already_in_flight() {
             "a poll completing after disconnect must not publish a fleet event"
         );
     }
+}
+
+#[tokio::test]
+async fn disconnect_aborts_a_connect_that_is_already_in_flight() {
+    let manager = ConnectionManager::default();
+    let client = Arc::new(BlockingClient {
+        inner: mock(),
+        started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        block: Arc::new(AtomicBool::new(true)),
+    });
+    let mut receiver = manager.subscribe();
+    let connect = tokio::spawn({
+        let manager = manager.clone();
+        let client = client.clone();
+        async move { manager.connect(client.as_ref(), host()).await }
+    });
+    client.started.notified().await;
+    let snapshot = manager.disconnect();
+    assert_eq!(snapshot.state, "disconnected");
+    let result = tokio::time::timeout(Duration::from_secs(2), connect)
+        .await
+        .expect("an in-flight connect must stop when the connection is cancelled")
+        .unwrap();
+    assert!(result.is_err());
+    assert!(matches!(manager.state(), ConnectionState::Disconnected));
+    assert_eq!(manager.status().state, "disconnected");
+    assert!(
+        manager.fleet_view().is_none(),
+        "a cancelled connect must not publish a view"
+    );
+    let mut last_connection: Option<String> = None;
+    while let Ok(event) = receiver.try_recv() {
+        match event {
+            SpiritEvent::Fleet { .. } => {
+                panic!("a cancelled connect must not publish a fleet event");
+            }
+            SpiritEvent::Connection { connection, .. } => {
+                last_connection = Some(connection.state);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        last_connection.as_deref(),
+        Some("disconnected"),
+        "the last connection event must be the disconnect"
+    );
 }
 
 #[tokio::test]

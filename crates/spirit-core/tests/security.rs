@@ -40,6 +40,32 @@ fn redact_removes_common_secret_shapes() {
 }
 
 #[test]
+fn redact_removes_authorization_headers_with_a_scheme() {
+    let output = redact("authorization: Bearer abcdef");
+    assert!(!output.contains("abcdef"), "bearer token leaked: {output}");
+    assert!(!output.contains("Bearer"), "scheme leaked: {output}");
+
+    let output = redact("Authorization: Basic dXNlcjpwYXNz");
+    assert!(
+        !output.contains("dXNlcjpwYXNz"),
+        "basic credential leaked: {output}"
+    );
+    assert!(!output.contains("Basic"), "scheme leaked: {output}");
+}
+
+#[test]
+fn redact_removes_colon_separated_secret_values() {
+    let output = redact("api_key: super-secret-value");
+    assert!(
+        !output.contains("super-secret-value"),
+        "api key leaked: {output}"
+    );
+
+    let output = redact("password: hunter2");
+    assert!(!output.contains("hunter2"), "password leaked: {output}");
+}
+
+#[test]
 fn redact_removes_whole_private_key_blocks() {
     let begin = pem_header();
     let end = ["-----END ", "OPENSSH ", "PRIVATE KEY", "-----"].concat();

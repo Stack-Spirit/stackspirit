@@ -253,34 +253,40 @@ impl ConnectionManager {
         accepts_revision(self.guard().revision.current(), incoming)
     }
 
-    fn set_connecting(&self, host_id: &HostId, stage: ConnectStage) {
-        let (revision, snapshot) = {
-            let mut inner = self.guard();
-            inner.state = ConnectionState::Connecting {
-                host_id: host_id.clone(),
-                stage,
-            };
-            let revision = inner.revision.advance();
-            (revision, inner.state.snapshot())
+    fn set_connecting(&self, host_id: &HostId, stage: ConnectStage) -> Result<(), SpiritError> {
+        let mut inner = self.guard();
+        if inner.cancel.is_cancelled() {
+            return Err(connect_cancelled());
+        }
+        inner.state = ConnectionState::Connecting {
+            host_id: host_id.clone(),
+            stage,
         };
+        let revision = inner.revision.advance();
+        let snapshot = inner.state.snapshot();
+        // Emit while the lock is held so a concurrent `disconnect` cannot place
+        // its disconnected snapshot before this one with a lower revision.
         self.emit(SpiritEvent::Connection {
             revision,
             connection: snapshot,
         });
+        Ok(())
     }
 
     fn fail(&self, host_id: &HostId, stage: ConnectStage, error: SpiritError) -> SpiritError {
-        let (revision, snapshot, event_revision) = {
-            let mut inner = self.guard();
-            inner.last_failed_stage = Some(stage);
-            inner.state = ConnectionState::Failed {
-                host_id: host_id.clone(),
-                error: error.clone(),
-                retryable: error.retryable,
-            };
-            let revision = inner.revision.advance();
-            (revision, inner.state.snapshot(), inner.revision.advance())
+        let mut inner = self.guard();
+        if inner.cancel.is_cancelled() {
+            return connect_cancelled();
+        }
+        inner.last_failed_stage = Some(stage);
+        inner.state = ConnectionState::Failed {
+            host_id: host_id.clone(),
+            error: error.clone(),
+            retryable: error.retryable,
         };
+        let revision = inner.revision.advance();
+        let snapshot = inner.state.snapshot();
+        let event_revision = inner.revision.advance();
         self.emit(SpiritEvent::Connection {
             revision,
             connection: snapshot,
@@ -294,22 +300,29 @@ impl ConnectionManager {
 
     /// Connects to one host through a client. The sequence reports the exact failing
     /// stage when it fails.
+    ///
+    /// `disconnect` cancels an in-flight attempt: the returned future stops at its
+    /// current stage, the manager stays `Disconnected`, and no fleet event is emitted.
     pub async fn connect(
         &self,
         client: &dyn VowpClient,
         host_id: HostId,
     ) -> Result<ConnectionSnapshot, SpiritError> {
-        {
+        let mut token = {
             let mut inner = self.guard();
             inner.cancel = CancellationToken::new();
             inner.last_failed_stage = None;
             inner.last_report = None;
             inner.scheduler.record_success();
-        }
-        self.set_connecting(&host_id, ConnectStage::ResolvingHostKey);
-        self.set_connecting(&host_id, ConnectStage::OpeningSsh);
+            inner.cancel.clone()
+        };
+        self.set_connecting(&host_id, ConnectStage::ResolvingHostKey)?;
+        self.set_connecting(&host_id, ConnectStage::OpeningSsh)?;
 
-        let probe = match client.probe().await {
+        let probe = match tokio::select! {
+            result = client.probe() => result,
+            () = token.cancelled() => return Err(connect_cancelled()),
+        } {
             Ok(probe) => probe,
             Err(error) => {
                 let stage = if error.code == SpiritErrorCode::VowpMissing {
@@ -321,7 +334,7 @@ impl ConnectionManager {
             }
         };
 
-        self.set_connecting(&host_id, ConnectStage::CheckingVowp);
+        self.set_connecting(&host_id, ConnectStage::CheckingVowp)?;
         if !probe.protocol_compatible {
             let error = SpiritError::vowp_incompatible(
                 "vowp version",
@@ -330,9 +343,12 @@ impl ConnectionManager {
             return Err(self.fail(&host_id, ConnectStage::CheckingVowp, error));
         }
 
-        self.set_connecting(&host_id, ConnectStage::ReadingSnapshot);
+        self.set_connecting(&host_id, ConnectStage::ReadingSnapshot)?;
         let started = Instant::now();
-        let status = match client.fleet_status().await {
+        let status = match tokio::select! {
+            result = client.fleet_status() => result,
+            () = token.cancelled() => return Err(connect_cancelled()),
+        } {
             Ok(status) => status,
             Err(error) => {
                 return Err(self.fail(&host_id, ConnectStage::ReadingSnapshot, error));
@@ -341,8 +357,13 @@ impl ConnectionManager {
         let status_warnings = client.take_warnings();
         let round_trip_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let now = Timestamp::now();
-        let (snapshot, fleet_event, connection_event) = {
+        let snapshot = {
             let mut inner = self.guard();
+            // A `disconnect` can land after `fleet_status` resolves but before
+            // this lock; never resurrect a connected snapshot in that case.
+            if inner.cancel.is_cancelled() {
+                return Err(connect_cancelled());
+            }
             inner.latency.record(round_trip_ms);
             inner.scheduler.record_success();
             inner.last_status = Some(status.clone());
@@ -365,20 +386,18 @@ impl ConnectionManager {
             );
             inner.last_view = Some(view.clone());
             let connection = inner.state.snapshot();
-            (
-                connection.clone(),
-                SpiritEvent::Fleet {
-                    revision,
-                    fleet: Box::new(view),
-                },
-                SpiritEvent::Connection {
-                    revision,
-                    connection,
-                },
-            )
+            // Emit while the lock is held so a concurrent `disconnect` cannot
+            // interleave its event before this connected snapshot.
+            self.emit(SpiritEvent::Fleet {
+                revision,
+                fleet: Box::new(view),
+            });
+            self.emit(SpiritEvent::Connection {
+                revision,
+                connection: connection.clone(),
+            });
+            connection
         };
-        self.emit(fleet_event);
-        self.emit(connection_event);
         Ok(snapshot)
     }
 
@@ -481,7 +500,7 @@ impl ConnectionManager {
                     inner.state = ConnectionState::Stale {
                         host_id: host_id.clone(),
                         last_ok_at,
-                        error: error.message.clone(),
+                        error: error.clone(),
                     };
                     if let Some(view) = &mut inner.last_view {
                         view.stale = true;
@@ -578,4 +597,9 @@ impl ConnectionManager {
         let revision = self.guard().revision.advance();
         self.emit(SpiritEvent::Gates { revision, gates });
     }
+}
+
+/// The error returned when `disconnect` cancels an in-flight connect.
+fn connect_cancelled() -> SpiritError {
+    SpiritError::new(SpiritErrorCode::RemoteTimeout, "connect cancelled")
 }
