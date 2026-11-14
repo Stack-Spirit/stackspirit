@@ -1,0 +1,2 @@
+StackSpirit engine checksum self-test fixture.
+The release script must reject any digest other than the pinned one.

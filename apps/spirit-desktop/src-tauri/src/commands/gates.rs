@@ -1,9 +1,12 @@
-//! Capability gate reads and read-only probes. D2 never turns a gate Ready without
+//! Capability gate reads and read-only probes. A gate never turns Ready without
 //! evidence from core's capability probes.
 
+use spirit_core::engine::GateFeatureFlags;
 use spirit_core::engine::gate::{
-    GateProbeOptions, GateSnapshot, probe_asif, probe_local_orchestrator,
+    AsifGate, GateProbeOptions, GateSnapshot, LocalOrchestratorGate, probe_asif,
+    probe_local_orchestrator,
 };
+use spirit_core::ssh::SystemCommandRunner;
 use spirit_core::time::Timestamp;
 use tauri::State;
 
@@ -35,18 +38,30 @@ pub async fn probe_gates(state: State<'_, AppState>) -> CommandResult<GateSnapsh
         home: host.vowp_home.clone(),
         active_project,
     };
+
+    let probing = GateSnapshot {
+        probed_at: Timestamp::now(),
+        local_orchestrator: LocalOrchestratorGate::Probing,
+        asif: AsifGate::Probing,
+        local_agent: state.core().await.gates().local_agent,
+        features: GateFeatureFlags::default(),
+    };
+    state.core().await.set_gates(probing);
+
     let runner = state.runner();
+    let local_runner = SystemCommandRunner;
     let (local_orchestrator, local_agent) =
-        probe_local_orchestrator(runner.as_ref(), None, &options).await;
+        probe_local_orchestrator(runner.as_ref(), Some(&local_runner), &options).await;
     let asif = probe_asif(runner.as_ref(), &options).await;
 
-    let features = state.core().await.gates().features;
+    // D4 deliberately leaves both action flags false. D5/D6 flip exactly one flag when
+    // the corresponding action ships, never before the probe says Ready.
     let snapshot = GateSnapshot {
         probed_at: Timestamp::now(),
         local_orchestrator,
         asif,
         local_agent,
-        features,
+        features: GateFeatureFlags::default(),
     };
     state.core().await.set_gates(snapshot.clone());
     Ok(snapshot)

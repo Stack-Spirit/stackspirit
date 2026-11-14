@@ -1,9 +1,11 @@
 //! Local StackSpirit Engine types: choice, state, status and model access.
 
 pub mod catalog;
+pub mod config;
 pub mod external;
 pub mod gate;
 pub mod keychain;
+pub mod process;
 pub mod runtime;
 pub mod supervisor;
 
@@ -13,16 +15,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::time::Timestamp;
 
-pub use catalog::{CatalogEntry, CatalogVerification, ModelCatalog};
+pub use catalog::{CatalogEntry, CatalogVerification, ModelCatalog, bundled_catalog};
+pub use config::{EnginePreferences, EnginePreferencesStore, JsonEnginePreferences};
 pub use external::{ExternalHarness, HarnessProbe, PathHarnessProbe, scan_external_harnesses};
 pub use gate::{
-    AsifGate, GateCache, GateFeatureFlags, GateProbeOptions, GateSnapshot, LocalAgentState,
-    LocalAgentStatus, LocalOrchestratorGate, probe_asif, probe_local_orchestrator,
+    ASIF_MILESTONES, AsifGate, GateCache, GateFeatureFlags, GateProbeOptions, GateSnapshot,
+    LocalAgentState, LocalAgentStatus, LocalOrchestratorGate, PHASE3_MILESTONES, phase3_milestones,
+    probe_asif, probe_local_orchestrator,
 };
+#[cfg(feature = "keychain")]
+pub use keychain::OsKeychain;
 pub use keychain::{
-    FakeKeychain, Keychain, KeychainError, KeychainErrorClass, SecretStore, SecretString,
+    FakeKeychain, Keychain, KeychainError, KeychainErrorClass, ProviderKeyState, ProviderKeyStatus,
+    SecretStore, SecretString, verify_provider_key,
 };
-pub use runtime::{EngineRuntime, EngineRuntimeInfo, FakeEngineRuntime};
+pub use process::{
+    EngineBinaryLocator, EngineLogBuffer, ProcessEngineRuntime, current_target_triple,
+    loopback_host, reserve_loopback_port, serve_args, sidecar_file_name,
+};
+pub use runtime::{
+    EngineHealth, EngineRuntime, EngineRuntimeInfo, FakeEngineRuntime, KeyVerification,
+    RuntimeModel,
+};
 pub use supervisor::{EngineSupervisor, EngineSupervisorConfig};
 
 /// Which engine StackSpirit should use.

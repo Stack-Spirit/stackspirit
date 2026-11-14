@@ -6,14 +6,21 @@ use std::sync::{Arc, Mutex};
 
 use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
-use spirit_core::engine::{EngineSupervisor, EngineSupervisorConfig, FakeEngineRuntime};
+use spirit_core::engine::{
+    EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
+    EngineStatus, EngineSupervisor, EngineSupervisorConfig, JsonEnginePreferences, Keychain,
+    ModelCatalog, ModelChoice, OsKeychain, ProcessEngineRuntime, bundled_catalog,
+};
 use spirit_core::error::SpiritError;
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
 use spirit_core::ssh::{CommandRunner, SshOptions, SystemCommandRunner};
+use spirit_core::time::Timestamp;
 use spirit_core::vowp::{SshVowpClient, VowpClient};
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 use crate::error::CommandResult;
+
+const KEYCHAIN_SERVICE: &str = "com.stackspirit.desktop";
 
 /// Everything a Tauri command may touch.
 pub struct AppState {
@@ -23,6 +30,10 @@ pub struct AppState {
     runner: Arc<dyn CommandRunner>,
     client: Mutex<Option<Arc<dyn VowpClient>>>,
     active_host: Mutex<Option<HostProfile>>,
+    engine_runtime: Arc<dyn EngineRuntime>,
+    engine_catalog: ModelCatalog,
+    engine_preferences: Arc<dyn EnginePreferencesStore>,
+    engine_keychain: Arc<dyn Keychain>,
 }
 
 impl AppState {
@@ -42,14 +53,18 @@ impl AppState {
         let hosts: Arc<dyn HostStore> = host_store;
         let known_hosts = app_data_dir.join("known_hosts");
 
-        // D2 ships the engine boundary and state machine. D4 replaces the fake runtime
-        // with the bundled opencode sidecar launcher.
-        let engine = EngineSupervisor::new(
-            Arc::new(FakeEngineRuntime::new()),
-            EngineSupervisorConfig::default(),
-        );
-        let core = SpiritCore::desktop(hosts.clone(), engine, "com.stackspirit.desktop");
+        // The bundled choice resolves only the sidecar next to the application binary or
+        // in its resource directory. It never consults PATH.
+        let runtime: Arc<dyn EngineRuntime> = Arc::new(ProcessEngineRuntime::for_current_exe());
+        let engine = EngineSupervisor::new(runtime.clone(), EngineSupervisorConfig::default());
+        let preferences = JsonEnginePreferences::new(app_data_dir.join("engine.json"));
+        let saved = preferences.load().unwrap_or_default();
+        let mut core = SpiritCore::desktop(hosts.clone(), engine, KEYCHAIN_SERVICE);
+        core.select_engine(saved.choice.clone());
         let events = core.subscribe();
+        let keychain: Arc<dyn Keychain> = Arc::new(
+            OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
+        );
 
         Ok((
             Self {
@@ -59,6 +74,10 @@ impl AppState {
                 runner: Arc::new(SystemCommandRunner),
                 client: Mutex::new(None),
                 active_host: Mutex::new(None),
+                engine_runtime: runtime,
+                engine_catalog: bundled_catalog(),
+                engine_preferences: Arc::new(preferences),
+                engine_keychain: keychain,
             },
             events,
         ))
@@ -86,6 +105,85 @@ impl AppState {
 
     pub(crate) async fn connection_manager(&self) -> ConnectionManager {
         self.core.lock().await.connection().clone()
+    }
+
+    pub(crate) fn engine_runtime(&self) -> Arc<dyn EngineRuntime> {
+        self.engine_runtime.clone()
+    }
+
+    pub(crate) fn engine_keychain(&self) -> &dyn Keychain {
+        self.engine_keychain.as_ref()
+    }
+
+    pub(crate) fn load_engine_preferences(&self) -> EnginePreferences {
+        self.engine_preferences.load().unwrap_or_default()
+    }
+
+    pub(crate) fn save_engine_preferences(
+        &self,
+        preferences: &EnginePreferences,
+    ) -> CommandResult<()> {
+        self.engine_preferences
+            .save(preferences)
+            .map_err(|error| error.with_hint("The engine selection was not saved locally."))
+    }
+
+    /// Starts the bundled engine on first run and restores the saved model when the
+    /// runtime still reports it. An external choice is never started by this app.
+    pub(crate) async fn ensure_engine_setup(&self) -> EngineStatus {
+        {
+            let mut core = self.core().await;
+            let status = core.engine_status();
+            if matches!(status.choice, EngineChoice::Bundled) {
+                if matches!(status.state, EngineState::NotConfigured) {
+                    core.start_engine().await;
+                } else if matches!(status.state, EngineState::Ready)
+                    && let Some(port) = status.port
+                {
+                    let info = spirit_core::engine::EngineRuntimeInfo {
+                        pid: None,
+                        port,
+                        version: status.version.clone(),
+                        binary_path: status.binary_path.clone(),
+                    };
+                    if self.engine_runtime.probe_health(&info).await.is_err() {
+                        core.restart_engine().await;
+                    }
+                }
+            }
+        }
+        self.apply_saved_model().await;
+        self.core().await.engine_status()
+    }
+
+    /// Re-applies the saved model id only when the runtime verifies it. A model the
+    /// engine no longer reports is left unselected.
+    pub(crate) async fn apply_saved_model(&self) {
+        let status = self.core().await.engine_status();
+        if !matches!(status.state, EngineState::Ready) || status.selected_model.is_some() {
+            return;
+        }
+        let preferences = self.load_engine_preferences();
+        let Some(model_id) = preferences.selected_model_id else {
+            return;
+        };
+        let models = self.verified_engine_models(&status).await;
+        if let Some(model) = models.into_iter().find(|model| model.id == model_id) {
+            self.core().await.select_model(model);
+        }
+    }
+
+    /// Returns the build-time catalog entries the running engine actually reports.
+    pub(crate) async fn verified_engine_models(&self, status: &EngineStatus) -> Vec<ModelChoice> {
+        if !matches!(status.state, EngineState::Ready) {
+            return Vec::new();
+        }
+        let Some(port) = status.port else {
+            return Vec::new();
+        };
+        let runtime_models = self.engine_runtime.models(port).await.unwrap_or_default();
+        let ids: Vec<String> = runtime_models.into_iter().map(|model| model.id).collect();
+        self.engine_catalog.verify(&ids, Timestamp::now()).models
     }
 
     pub(crate) fn set_client(&self, client: Option<Arc<dyn VowpClient>>) {

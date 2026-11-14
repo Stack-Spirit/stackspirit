@@ -17,6 +17,28 @@ use crate::time::Timestamp;
 const GATE_CACHE_TTL_SECS: u64 = 10 * 60;
 const NIL_ULID: &str = "00000000000000000000000000";
 
+/// The complete Phase 3 capability set named by `VOWP-CONTRACT.md` §11.3.
+pub const PHASE3_MILESTONES: [&str; 6] = [
+    "local opencode app host",
+    "surface bridge",
+    "MCP proxy",
+    "orchestrator materialization",
+    "backfill",
+    "local cache",
+];
+
+/// The VOWP milestones the ASIF gate needs.
+pub const ASIF_MILESTONES: [&str; 2] = ["v4-asif-core", "v4-asif-cli"];
+
+/// Returns the complete Phase 3 capability set for a details drawer.
+#[must_use]
+pub fn phase3_milestones() -> Vec<String> {
+    PHASE3_MILESTONES
+        .iter()
+        .map(|item| (*item).to_owned())
+        .collect()
+}
+
 /// Local-orchestrator capability state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -916,5 +938,90 @@ async fn probe_local_agent(local_runner: Option<&dyn CommandRunner>) -> LocalAge
             last_error: Some(safe_detail(&error)),
             ..LocalAgentStatus::default()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(features: GateFeatureFlags) -> GateSnapshot {
+        GateSnapshot {
+            probed_at: Timestamp::epoch(),
+            local_orchestrator: LocalOrchestratorGate::Ready {
+                agent_protocol: "vowp-agent/1".to_owned(),
+                node: Some("mac-studio".to_owned()),
+                capabilities: vec!["surface_start".to_owned()],
+                evidence: vec!["test".to_owned()],
+            },
+            asif: AsifGate::Ready {
+                export: true,
+                import: false,
+                detected_version: Some("0.4.0".to_owned()),
+                evidence: vec!["test".to_owned()],
+            },
+            local_agent: LocalAgentStatus {
+                state: LocalAgentState::Connected,
+                node: Some("mac-studio".to_owned()),
+                protocol: Some("vowp-agent/1".to_owned()),
+                last_heartbeat: None,
+                last_error: None,
+            },
+            features,
+        }
+    }
+
+    #[test]
+    fn engine_gate_ready_fixture_still_disables_unimplemented_actions() {
+        let snapshot = snapshot(GateFeatureFlags::default());
+        assert!(matches!(
+            snapshot.local_orchestrator,
+            LocalOrchestratorGate::Ready { .. }
+        ));
+        assert!(!snapshot.local_orchestrator_enabled());
+        assert!(!snapshot.asif_export_enabled());
+        assert!(!snapshot.asif_import_enabled());
+    }
+
+    #[test]
+    fn engine_asif_export_and_import_enable_independently_after_d5_flag() {
+        let mut snapshot = snapshot(GateFeatureFlags {
+            asif_actions: true,
+            local_orchestrator_actions: false,
+        });
+        assert!(snapshot.asif_export_enabled());
+        assert!(!snapshot.asif_import_enabled());
+        assert!(!snapshot.local_orchestrator_enabled());
+
+        snapshot.asif = AsifGate::Ready {
+            export: true,
+            import: true,
+            detected_version: Some("0.4.0".to_owned()),
+            evidence: vec!["test".to_owned()],
+        };
+        assert!(snapshot.asif_export_enabled());
+        assert!(snapshot.asif_import_enabled());
+    }
+
+    #[test]
+    fn engine_local_orchestrator_action_needs_the_feature_flag_and_connected_agent() {
+        let mut snapshot = snapshot(GateFeatureFlags {
+            asif_actions: false,
+            local_orchestrator_actions: true,
+        });
+        assert!(snapshot.local_orchestrator_enabled());
+        snapshot.local_agent.state = LocalAgentState::NotInstalled;
+        assert!(!snapshot.local_orchestrator_enabled());
+    }
+
+    #[test]
+    fn engine_gate_details_name_every_phase3_milestone() {
+        assert_eq!(phase3_milestones().len(), 6);
+        assert!(phase3_milestones().contains(&"backfill".to_owned()));
+        assert!(phase3_milestones().contains(&"local cache".to_owned()));
+        assert_eq!(
+            ASIF_MILESTONES.map(str::to_owned).to_vec(),
+            vec!["v4-asif-core".to_owned(), "v4-asif-cli".to_owned()]
+        );
     }
 }

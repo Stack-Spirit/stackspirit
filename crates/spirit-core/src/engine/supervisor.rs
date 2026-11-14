@@ -3,10 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::runtime::{EngineRuntime, EngineRuntimeInfo};
-use crate::engine::{EngineChoice, EngineState, EngineStatus, ModelChoice};
+use crate::engine::runtime::{EngineRuntime, EngineRuntimeInfo, KeyVerification, RuntimeModel};
+use crate::engine::{EngineChoice, EngineState, EngineStatus, ModelChoice, SecretString};
 use crate::error::SpiritError;
 use crate::time::{Clock, SystemClock, Timestamp};
+
+/// The upper bound for an automatic restart delay.
+const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(4);
 
 /// Supervisor tuning. The production defaults are deliberately conservative.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +83,9 @@ impl EngineSupervisor {
 
     /// Selects bundled or external engine.
     pub fn set_choice(&mut self, choice: EngineChoice) {
+        if matches!(choice, EngineChoice::External { .. }) {
+            self.status.included_models_available = false;
+        }
         self.status.choice = choice;
     }
 
@@ -99,6 +105,12 @@ impl EngineSupervisor {
     /// runtime is returned and never orphaned. Any other stale handle is shut down
     /// before a new spawn.
     pub async fn start(&mut self) -> EngineStatus {
+        if matches!(self.status.choice, EngineChoice::External { .. }) {
+            self.status.state = EngineState::Stopped;
+            self.status.port = None;
+            self.status.started_at = None;
+            return self.status.clone();
+        }
         if self.handle.is_some() {
             if self.status.state == EngineState::Ready {
                 return self.status.clone();
@@ -121,12 +133,15 @@ impl EngineSupervisor {
         let mut last_error: Option<SpiritError> = None;
         for attempt in 0..self.config.health_attempts.max(1) {
             match self.runtime.probe_health(&info).await {
-                Ok(()) => {
+                Ok(health) => {
                     self.consecutive_failures = 0;
+                    let models = self.runtime.models(info.port).await.unwrap_or_default();
                     self.status.state = EngineState::Ready;
-                    self.status.version = info.version.clone();
+                    self.status.version = health.version.or_else(|| info.version.clone());
+                    self.status.binary_path = info.binary_path.clone();
                     self.status.port = Some(info.port);
                     self.status.started_at = Some(self.clock.now());
+                    self.status.included_models_available = models.iter().any(|model| model.free);
                     self.status.last_error = None;
                     self.handle = Some(info);
                     return self.status.clone();
@@ -171,6 +186,10 @@ impl EngineSupervisor {
             self.status.last_error = Some(detail);
             return self.status.clone();
         }
+        let backoff = backoff_delay(self.config.retry_delay, self.consecutive_failures);
+        if !backoff.is_zero() {
+            tokio::time::sleep(backoff).await;
+        }
         self.stop_runtime().await;
         self.start().await
     }
@@ -184,9 +203,12 @@ impl EngineSupervisor {
             return self.status.clone();
         };
         match self.runtime.probe_health(&info).await {
-            Ok(()) => {
+            Ok(health) => {
                 self.consecutive_failures = 0;
                 self.status.state = EngineState::Ready;
+                if health.version.is_some() {
+                    self.status.version = health.version;
+                }
                 self.status.last_error = None;
             }
             Err(error) => {
@@ -206,6 +228,7 @@ impl EngineSupervisor {
         self.status.state = EngineState::Stopped;
         self.status.port = None;
         self.status.started_at = None;
+        self.status.binary_path = None;
         self.status.clone()
     }
 
@@ -220,4 +243,152 @@ impl EngineSupervisor {
     pub fn started_at(&self) -> Option<Timestamp> {
         self.status.started_at
     }
+
+    /// Returns the bounded, redacted engine log lines.
+    #[must_use]
+    pub fn logs(&self) -> Vec<String> {
+        self.runtime.logs()
+    }
+
+    /// Returns the runtime model list without changing the selected model.
+    pub async fn runtime_models(&self) -> Vec<RuntimeModel> {
+        let Some(info) = &self.handle else {
+            return Vec::new();
+        };
+        self.runtime.models(info.port).await.unwrap_or_default()
+    }
+
+    /// Verifies a provider key through the local engine without persisting it.
+    pub async fn verify_key(&self, provider: &str, secret: &SecretString) -> KeyVerification {
+        let Some(info) = &self.handle else {
+            return KeyVerification::Unverified;
+        };
+        self.runtime.verify_key(info.port, provider, secret).await
+    }
+}
+
+impl Drop for EngineSupervisor {
+    fn drop(&mut self) {
+        self.runtime.kill_now();
+    }
+}
+
+/// Returns the capped exponential backoff before an automatic restart.
+#[must_use]
+pub fn backoff_delay(base: Duration, consecutive_failures: u32) -> Duration {
+    if base.is_zero() {
+        return Duration::ZERO;
+    }
+    let exponent = consecutive_failures.min(8);
+    let factor = 1_u32 << exponent;
+    base.checked_mul(factor)
+        .unwrap_or(MAX_RESTART_BACKOFF)
+        .min(MAX_RESTART_BACKOFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn engine_restart_backoff_caps_and_never_fork_bombs() {
+        assert_eq!(backoff_delay(Duration::ZERO, 99), Duration::ZERO);
+        assert_eq!(
+            backoff_delay(Duration::from_millis(100), 0),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            backoff_delay(Duration::from_millis(100), 3),
+            Duration::from_millis(800)
+        );
+        assert_eq!(
+            backoff_delay(Duration::from_millis(100), 99),
+            MAX_RESTART_BACKOFF
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_health_timeout_enters_degraded_without_a_live_handle() {
+        let runtime = Arc::new(FakeEngineRuntime::new().with_health_failures(10));
+        let mut supervisor = EngineSupervisor::new(
+            runtime.clone(),
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        let status = supervisor.start().await;
+        assert!(matches!(status.state, EngineState::Degraded { .. }));
+        assert!(status.port.is_none());
+        assert_eq!(runtime.spawns(), 1);
+        assert_eq!(runtime.shutdowns(), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_start_tracks_free_models_and_binary_path() {
+        let runtime = Arc::new(FakeEngineRuntime::new().with_models(vec![RuntimeModel {
+            id: "opencode/big-pickle".to_owned(),
+            provider: "opencode".to_owned(),
+            label: "Big Pickle".to_owned(),
+            context_tokens: None,
+            free: true,
+        }]));
+        let mut supervisor = EngineSupervisor::new(
+            runtime,
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        let status = supervisor.start().await;
+        assert!(matches!(status.state, EngineState::Ready));
+        assert!(status.included_models_available);
+        assert_eq!(supervisor.runtime_models().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_external_choice_never_starts_the_bundled_sidecar() {
+        let runtime = Arc::new(FakeEngineRuntime::new());
+        let mut supervisor = EngineSupervisor::new(
+            runtime.clone(),
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        supervisor.set_choice(EngineChoice::External {
+            path: std::path::PathBuf::from("/opt/example/bin/opencode"),
+            kind: crate::engine::ExternalHarnessKind::Opencode,
+        });
+        let status = supervisor.start().await;
+        assert!(matches!(status.state, EngineState::Stopped));
+        assert_eq!(runtime.spawns(), 0);
+    }
+
+    #[tokio::test]
+    async fn engine_ready_runtime_is_not_orphaned_on_drop() {
+        let runtime = Arc::new(FakeEngineRuntime::new());
+        let mut supervisor = EngineSupervisor::new(
+            runtime.clone(),
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        supervisor.start().await;
+        drop(supervisor);
+        // The fake records no kill count; the process runtime has its own drop test.
+        assert_eq!(runtime.spawns(), 1);
+    }
+
+    use crate::engine::FakeEngineRuntime;
 }

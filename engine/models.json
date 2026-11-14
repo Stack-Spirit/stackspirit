@@ -1,0 +1,106 @@
+{
+  "schema": "stackspirit-engine-models/1",
+  "generated_from": "opencode@1.19.5 console free model list",
+  "generated_at": "2026-11-14T00:00:00.000Z",
+  "notes": "Only models the bundled engine reports as free are listed. The app verifies every entry at runtime and never labels a model Included from this file alone.",
+  "entries": [
+    {
+      "id": "opencode/big-pickle",
+      "label": "Big Pickle",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/iceman-free",
+      "label": "Iceman Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/inkling-2-small-free",
+      "label": "Inkling 2 Small Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time; not available in every region. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/glm-5.3-flash-free",
+      "label": "GLM-5.3-Flash Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/deepseek-v4.1-flash-free",
+      "label": "DeepSeek V4.1 Flash Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/minimax-m3.1-flash-free",
+      "label": "MiniMax M3.1 Flash Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/beam-free",
+      "label": "Beam Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time; not available in every region. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/flint-40b-free",
+      "label": "Flint 40B Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/longcat-2.5-free",
+      "label": "LongCat 2.5 Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model with a daily request limit. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/mimo-v2.6-flash-free",
+      "label": "MiMo-V2.6-Flash Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/nemotron-3-ultra-free",
+      "label": "Nemotron 3 Ultra Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free trial endpoint; do not submit confidential data. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/nemotron-3.5-lightning-free",
+      "label": "Nemotron 3.5 Lightning Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free trial endpoint; do not submit confidential data. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/nemotron-3.5-super-vl-free",
+      "label": "Nemotron 3.5 Super VL Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free trial endpoint; do not submit confidential data. Availability is checked when the engine starts."
+    },
+    {
+      "id": "opencode/jev-1.13-free",
+      "label": "Jev 1.13 Free",
+      "provider": "opencode",
+      "context_tokens": null,
+      "notes": "Free OpenCode model for a limited time. Availability is checked when the engine starts."
+    }
+  ]
+}
