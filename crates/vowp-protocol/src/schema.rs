@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 
+use crate::agent::surface::{
+    SurfaceAttach, SurfaceDetach, SurfaceEvent, SurfaceTurn, SurfaceTurnState, ToolCall, ToolError, ToolResult,
+};
 use crate::agent::{
     AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, LeaseMode, NodeCard, NodeKind, NodePresence,
     NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState, TurnSummary,
@@ -172,6 +175,15 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("LeaseMode", schema_value::<LeaseMode>());
     schemas.insert("TurnSummary", schema_value::<TurnSummary>());
     schemas.insert("AgentFrame", schema_value::<AgentFrame>());
+    // v0.4 local app-surface frames.
+    schemas.insert("SurfaceAttach", schema_value::<SurfaceAttach>());
+    schemas.insert("SurfaceDetach", schema_value::<SurfaceDetach>());
+    schemas.insert("SurfaceEvent", schema_value::<SurfaceEvent>());
+    schemas.insert("SurfaceTurn", schema_value::<SurfaceTurn>());
+    schemas.insert("SurfaceTurnState", schema_value::<SurfaceTurnState>());
+    schemas.insert("ToolCall", schema_value::<ToolCall>());
+    schemas.insert("ToolError", schema_value::<ToolError>());
+    schemas.insert("ToolResult", schema_value::<ToolResult>());
     // v0.4 offload wire documents.
     schemas.insert("Placement", schema_value::<Placement>());
     schemas.insert("NodeFallback", schema_value::<NodeFallback>());

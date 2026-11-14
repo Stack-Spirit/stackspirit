@@ -490,6 +490,21 @@ pub enum AgentFrame {
         /// Human-readable reason.
         reason: String,
     },
+    /// Agent -> home: attach a surface to a session.
+    SurfaceAttach(surface::SurfaceAttach),
+    /// Agent -> home: detach a surface after flushing its pending events.
+    SurfaceDetach(surface::SurfaceDetach),
+    /// Agent -> home: one normalized event carrying the app's native id.
+    ///
+    /// The home assigns the canonical `seq` and deduplicates by
+    /// `(session, harness, native_id)`; the agent never sends a sequence number.
+    SurfaceEvent(surface::SurfaceEvent),
+    /// Agent -> home: the app started or ended a turn.
+    SurfaceTurn(surface::SurfaceTurn),
+    /// Agent -> home: an MCP tool call from a local client.
+    ToolCall(surface::ToolCall),
+    /// Home -> agent: the result of one [`Self::ToolCall`].
+    ToolResult(surface::ToolResult),
     /// Agent -> home: acquire or take over the session lease.
     LeaseAcquire {
         /// Surface asking for the lease.
@@ -761,4 +776,178 @@ pub struct TurnSummary {
     pub stop_reason: StopReason,
     /// Resource usage measured on the agent, when available.
     pub usage: Option<RemoteUsage>,
+}
+
+/// The Phase 3 local app-surface frame payloads carried inside [`AgentFrame`].
+///
+/// Spec: `docs/design/v0.4/local-orchestrator.md` §5.3, §5.4 and §8.3. The home owns the
+/// canonical session sequence: an attached surface sends only its native ids, and the home
+/// assigns `seq` and skips a duplicate native id. A native id is stable across retries and
+/// backfill.
+///
+/// The types live in a nested module because [`crate::event`] already defines the
+/// `tool.call`/`tool.result` payload structs named `ToolCall` and `ToolResult`; re-exporting
+/// both at the crate root would make `vowp_protocol::ToolCall` ambiguous.
+pub mod surface {
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+
+    use crate::event::{EventBody, EventType};
+    use crate::ids::SessionId;
+    use crate::surface::SurfaceId;
+    use crate::time::Timestamp;
+
+    /// Lifecycle state of an attached turn.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SurfaceTurnState {
+        /// The app started a turn.
+        Started,
+        /// The app finished a turn.
+        Ended,
+    }
+
+    /// Agent -> home: attach a surface to a session.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub struct SurfaceAttach {
+        /// Surface being attached.
+        pub surface: SurfaceId,
+        /// Session the surface will mirror.
+        pub session: SessionId,
+    }
+
+    /// Agent -> home: detach a surface after its spool is flushed.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub struct SurfaceDetach {
+        /// Surface being detached.
+        pub surface: SurfaceId,
+        /// Session the surface was mirroring.
+        pub session: SessionId,
+    }
+
+    /// One normalized event mirrored from a local app.
+    ///
+    /// The wire form of `event` is the typed [`EventBody`] as an object with a dotted `type`
+    /// plus its payload fields, for example `{"type":"assistant.message","text":"…"}`.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub struct SurfaceEvent {
+        /// Surface that observed the event.
+        pub surface: SurfaceId,
+        /// Session the event belongs to.
+        pub session: SessionId,
+        /// App-side message or part id; stable across retries and backfill.
+        pub native_id: String,
+        /// Normalized event body; the home assigns its canonical sequence.
+        #[serde(with = "event_body_wire")]
+        #[schemars(with = "EventBodySchema")]
+        pub event: EventBody,
+    }
+
+    /// One turn boundary of an attached surface.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub struct SurfaceTurn {
+        /// Surface whose turn started or ended.
+        pub surface: SurfaceId,
+        /// Session the turn belongs to.
+        pub session: SessionId,
+        /// App-side turn id; stable across retries and backfill.
+        pub native_id: String,
+        /// Whether the turn started or ended.
+        pub state: SurfaceTurnState,
+        /// When the app observed the boundary.
+        pub at: Timestamp,
+    }
+
+    /// Agent -> home: an MCP tool call proxied from a local client.
+    ///
+    /// `arguments` is the normal MCP JSON object. By contract it never carries a local path
+    /// or a secret value; the home checks the surface token scope and the live lease before
+    /// executing the same core path as its own MCP server.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub struct ToolCall {
+        /// Client-chosen request id, echoed by the matching [`ToolResult`].
+        pub request_id: String,
+        /// Surface that made the call.
+        pub surface: SurfaceId,
+        /// Session the call is scoped to.
+        pub session: SessionId,
+        /// MCP tool name.
+        pub tool: String,
+        /// MCP arguments as normal JSON; never a local path or secret value.
+        pub arguments: serde_json::Value,
+    }
+
+    /// Home -> agent: the result of one [`ToolCall`].
+    ///
+    /// Exactly one of `result` and `error` is set. Neither an error nor a result carries a
+    /// home secret value or an absolute local path.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub struct ToolResult {
+        /// Request id from the matching [`ToolCall`].
+        pub request_id: String,
+        /// Tool result as normal MCP JSON, when the call succeeded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub result: Option<serde_json::Value>,
+        /// Typed failure, when the call failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub error: Option<ToolError>,
+    }
+
+    /// A typed tool-call failure.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub struct ToolError {
+        /// Machine-readable code, for example `not_found`, `refused` or `lease_revoked`.
+        pub code: String,
+        /// Human-readable message; never a secret value or an absolute local path.
+        pub message: String,
+        /// Whether retrying the same request may succeed.
+        pub retryable: bool,
+    }
+
+    /// Serialises an [`EventBody`] as the dotted `type` plus its payload fields.
+    mod event_body_wire {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use serde_json::Value;
+
+        use crate::event::{EventBody, EventType};
+
+        /// Serialises one event body as a tagged JSON object.
+        pub fn serialize<S>(body: &EventBody, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut value = body.to_value();
+            // invariant: every EventBody payload serialises as a JSON object.
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| serde::ser::Error::custom("event body is not a JSON object"))?;
+            object.insert("type".to_owned(), Value::String(body.event_type().as_str().to_owned()));
+            value.serialize(serializer)
+        }
+
+        /// Deserialises one event body from its tagged JSON object.
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<EventBody, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let mut value = Value::deserialize(deserializer)?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| serde::de::Error::custom("event body is not a JSON object"))?;
+            let tag = object
+                .remove("type")
+                .ok_or_else(|| serde::de::Error::custom("event body is missing the type tag"))?;
+            let event_type: EventType = serde_json::from_value(tag).map_err(serde::de::Error::custom)?;
+            EventBody::from_parts(event_type, value).map_err(serde::de::Error::custom)
+        }
+    }
+
+    /// Schema-only shape of an [`EventBody`]: the dotted event type plus its payload fields.
+    #[derive(JsonSchema)]
+    #[allow(dead_code)] // schema-only: this type is never constructed
+    struct EventBodySchema {
+        /// Dotted event type, for example `assistant.message`.
+        #[schemars(rename = "type")]
+        event_type: EventType,
+    }
 }

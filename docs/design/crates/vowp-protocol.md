@@ -46,6 +46,9 @@ crates/vowp-protocol/
 `src/agent.rs` holds the v0.4 local-node documents (`PathRef`, `AgentRole`,
 `AgentCapabilities`, `AgentCapacity`, `AgentPathMap`, `NodeCard`, `NodeKind`, `NodeStatus`,
 `NodePresence`, `SurfaceInfo`, `SurfaceScope`, `SurfaceState` and `AgentFrame`); see rule 14.
+Its nested `agent::surface` module holds the Phase 3 app-surface frame payloads
+(`SurfaceAttach`, `SurfaceDetach`, `SurfaceEvent`, `SurfaceTurn`, `SurfaceTurnState`,
+`ToolCall`, `ToolResult` and `ToolError`); see rule 16 and types.md §16.12.
 `src/offload.rs` holds the v0.4 offload wire format (`Placement`, `NodeFallback`,
 `WaitingReason`, `AssignmentPayload`, `RunRejectReason`, `RemoteRunState` and the resume
 records); see rule 15.
@@ -142,6 +145,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     The v0.4 local-node set adds `"AgentCapabilities"`, `"AgentCapacity"`, `"AgentFrame"`,
     `"AgentPathMap"`, `"AgentRole"`, `"NodeCard"`, `"NodeKind"`, `"NodePresence"`, `"NodeStatus"`,
     `"PathRef"`, `"SurfaceInfo"`, `"SurfaceScope"`, `"SurfaceState"`, `"LeaseMode"`, `"TurnSummary"`.
+    The v0.4 app-surface set adds `"SurfaceAttach"`, `"SurfaceDetach"`, `"SurfaceEvent"`,
+    `"SurfaceTurn"`, `"SurfaceTurnState"`, `"ToolCall"`, `"ToolError"`, `"ToolResult"`.
     The v0.4 offload set adds `"AssignmentPayload"`, `"NodeFallback"`, `"Placement"`,
     `"RemoteRunState"`, `"RunRejectReason"`, `"RunResume"`, `"RunResumeResult"`,
     `"SurfaceResume"`, `"SurfaceResumeResult"`, `"WaitingReason"`.
@@ -152,7 +157,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     or empty project/subdirectory, at most `MAX_PATH_REF_LEN` bytes, with repeated `/` and `.`
     components normalised. `AgentFrame` is the tagged union (`type` is `snake_case`):
     `AgentHello`, `HomeChallenge`, `AgentAuth`, `HomeWelcome`, `Enroll`, `Enrolled`, `Heartbeat`,
-    `SurfacePair`, `SurfaceIssued`, `SurfaceRevoked`, `LeaseAcquire`, `LeaseHeartbeat`,
+    `SurfacePair`, `SurfaceIssued`, `SurfaceRevoked`, `SurfaceAttach`, `SurfaceDetach`,
+    `SurfaceEvent`, `SurfaceTurn`, `ToolCall`, `ToolResult`, `LeaseAcquire`, `LeaseHeartbeat`,
     `LeaseRelease`, `LeaseGrant`, `LeaseLost`, `LeaseRevoked`, `TurnBegin`, `TurnGrant`,
     `RemoteLine`, `IngestAck`, `Credit`, `TurnEnd`, `RunLost`, `AssignRun`, `RunAccepted`,
     `RunRejected`, `RunState`, `CancelRun`, `Resume`, `ResumeOk`, `PathMapUpdate`, `Cleanup`,
@@ -181,6 +187,25 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `running|disconnected|finishing`.
     `RunResume`/`SurfaceResume` carry `last_acked`; `RunResumeResult`/`SurfaceResumeResult`
     carry `accepted`, an optional `reason` and the `tail_seq` the holder may continue from.
+
+16. **v0.4 local app-surface frames.** The payload types live in the nested `agent::surface`
+    module: `SurfaceTurnState` (`started|ended`), `SurfaceAttach { surface, session }`,
+    `SurfaceDetach { surface, session }`, `SurfaceEvent { surface, session, native_id, event }`,
+    `SurfaceTurn { surface, session, native_id, state, at }`, `ToolCall { request_id, surface,
+    session, tool, arguments }`, `ToolResult { request_id, result: Option<Value>, error:
+    Option<ToolError> }` and `ToolError { code, message, retryable }`. They sit in a module
+    because `event::ToolCall` and `event::ToolResult` already exist; a root re-export of both
+    pairs would be ambiguous. `SurfaceEvent.event` serialises as the typed `EventBody` with a
+    dotted `type` discriminator and decodes through `EventBody::from_parts`. `AgentFrame` adds
+    the agent → home variants `SurfaceAttach`, `SurfaceDetach`, `SurfaceEvent`, `SurfaceTurn`
+    and `ToolCall`, and the home → agent variant `ToolResult`; `SurfacePair`, `SurfaceIssued`,
+    `SurfaceRevoked`, the lease frames, `RemoteLine`, `IngestAck` and the Phase 2 run frames
+    keep their names and shapes. The home assigns the canonical `seq` and deduplicates by
+    native id; the agent never sends `seq`, and a native id is stable across retries and
+    backfill. `ToolCall.arguments` is normal MCP JSON and by contract never a local path or
+    secret value; the home checks the call against the surface token scope and the live lease
+    before executing it. `ToolResult` never carries a home secret value or an absolute local
+    path, and its failure is the typed `ToolError` rather than a free string.
 
 ## 5. Error enum
 
@@ -262,6 +287,12 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `agent_frame_round_trips_run_assignment_frames` | `assign_run`, `run_accepted`, `run_rejected`, `run_state`, `cancel_run` and `cleanup` round-trip with their type tags |
 | `agent_frame_round_trips_assign_run_with_the_remote_url` | an `assign_run` frame carries `remote_url` next to the remote name and round-trips with it |
 | `unknown_frame_type_is_rejected` | an unknown type and a missing required field both fail and name the offending type/field |
+| `agent_frame_round_trips_surface_attach_and_detach` | `surface_attach` and `surface_detach` round-trip with their `surface`/`session` fields and carry no lease token |
+| `surface_event_round_trips_with_a_native_id` | `surface_event` keeps its `native_id` and typed event body, never carries `seq`, and round-trips |
+| `surface_turn_round_trips_started_and_ended` | `SurfaceTurnState` is `started`/`ended` and both states round-trip inside `surface_turn` |
+| `tool_call_and_result_round_trip` | `tool_call` and `tool_result` round-trip with JSON arguments/results and no absolute local path |
+| `tool_result_error_is_typed` | a failed `tool_result` carries the typed `ToolError` object and rejects a free-string error |
+| `unknown_surface_frame_type_is_rejected` | an unknown surface `type`, a missing field and an unknown turn state all fail |
 
 ## 7. Out of scope / v0.2
 

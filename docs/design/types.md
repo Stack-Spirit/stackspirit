@@ -20,7 +20,7 @@ Module → file map:
 | `snapshot` | v0.2 `snapshot.json` and the project registry view (§16.3) |
 | `catalog` | v0.2 lifecycle classes, catalog rows, GC and backup reports (§16.4) |
 | `vault` | v0.2 secret names, metadata, modes and the one-time request (§16.5) |
-| `agent` | v0.4 local-node path refs, capabilities, capacity, frames and redacted cards (§16.7) |
+| `agent` | v0.4 local-node path refs, capabilities, capacity, frames, redacted cards and app-surface frames (§16.7, §16.12) |
 | `offload` | v0.4 placement, waiting reasons, assignment payload and resume records (§16.8) |
 | `asif` | v0.4 adapter-free ASIF report summaries and import response (§16.11) |
 | `config`, `adapter`, `services`, `schema` | `vowp.toml`, adapter trait, service traits, JSON Schema export |
@@ -1155,7 +1155,8 @@ pub enum ServiceError { #[error("{0}")] Failed(String), #[error("not found: {0}"
 /// Capsule, CapsuleDraft, Job, NewJob, Gate, Evidence, ReportFrontMatter, BriefFrontMatter,
 /// VowpConfig, Schedule, Release, InboxItem, Run, Session, Limit, Cost, ...; plus the v0.2
 /// capacity, surface/lease, snapshot, catalog, vault, fleet, tunnel and migration types in
-/// §16, and the v0.4 local-node and offload types in §16.7–16.8).
+/// §16, the v0.4 local-node and offload types in §16.7–16.8, and the app-surface frames in
+/// §16.12).
 pub fn all_schemas() -> std::collections::BTreeMap<&'static str, serde_json::Value>;
 pub fn schema_for_name(name: &str) -> Option<serde_json::Value>;
 ```
@@ -1711,7 +1712,8 @@ pub struct TurnSummary {
 `NodeCard` is the redacted read model: it has no path-map field and no secret names. The
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
 snapshot or log. `AgentFrame` covers Phase 0, surface pairing, lease control, the Phase 1
-local-chat stream and the Phase 2 offload assignment/resume frames in §16.8.
+local-chat stream, the Phase 2 offload assignment/resume frames in §16.8 and the Phase 3
+app-surface frames in §16.12.
 `TurnBegin.cwd_ref` is a project-relative [`PathRef`]; the home never receives the Mac's
 absolute working directory. `RemoteLine` wraps the existing v0.2 event, heartbeat and summary
 line with a run id and epoch, and `IngestAck` carries the home-assigned sequence or a
@@ -1975,3 +1977,55 @@ route; `session` is the ordinary registered row and `warnings` are the expected 
 
 The four types are exported by `vowp schema` (`AsifCounts`, `AsifLoss`, `AsifReport`,
 `AsifImportResponse`).
+
+### 16.12 v0.4 local app-surface frames (`agent::surface`)
+
+These are the Phase 3 frames an app on the Mac (opencode first) uses to attach to a session,
+mirror normalized events under native ids, mark turn boundaries and proxy MCP tool calls. The
+frames travel inside [`crate::agent::AgentFrame`]; the payload types live in the nested
+`agent::surface` module because [`crate::event`] already names the `tool.call` and `tool.result`
+payload structs `ToolCall` and `ToolResult`.
+
+```rust
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceTurnState { Started, Ended }
+
+pub struct SurfaceAttach { pub surface: SurfaceId, pub session: SessionId }
+pub struct SurfaceDetach { pub surface: SurfaceId, pub session: SessionId }
+
+pub struct SurfaceEvent {
+    pub surface: SurfaceId, pub session: SessionId, pub native_id: String,
+    pub event: EventBody,
+}
+pub struct SurfaceTurn {
+    pub surface: SurfaceId, pub session: SessionId, pub native_id: String,
+    pub state: SurfaceTurnState, pub at: Timestamp,
+}
+
+pub struct ToolCall {
+    pub request_id: String, pub surface: SurfaceId, pub session: SessionId,
+    pub tool: String, pub arguments: serde_json::Value,
+}
+pub struct ToolResult {
+    pub request_id: String, pub result: Option<serde_json::Value>,
+    pub error: Option<ToolError>,
+}
+pub struct ToolError { pub code: String, pub message: String, pub retryable: bool }
+```
+
+`SurfaceAttach`, `SurfaceDetach`, `SurfaceEvent`, `SurfaceTurn` and `ToolCall` are
+agent → home frames; `ToolResult` is the home → agent reply. `SurfaceTurnState` is
+`started|ended`. `SurfaceEvent.event` serialises as the typed `EventBody`: a dotted `type`
+plus the payload fields, for example `{"type":"assistant.message","text":"…"}`, and decodes
+through `EventBody::from_parts`.
+
+The home owns ordering and identity: it assigns the canonical `seq`, writes the event index
+row and the `native_events` dedupe row in one transaction, and skips a duplicate native id.
+The agent never sends `seq`. A native id is stable across retries and backfill, so a replay
+after a disconnect never appends the same app event twice.
+
+`ToolCall.arguments` is the normal MCP JSON object. By contract it never carries a local path
+or a secret value. The home checks the call against the surface token scope and the live
+session lease before executing the same core path as its own MCP server. `ToolResult` carries
+either `result` or a typed `ToolError` (`code`, `message`, `retryable`), never a free-string
+error, a home secret value or an absolute local path.

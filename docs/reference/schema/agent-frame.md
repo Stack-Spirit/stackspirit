@@ -465,6 +465,19 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "EventBodySchema": {
+      "description": "Schema-only shape of an [`EventBody`]: the dotted event type plus its payload fields.",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/EventType",
+          "description": "Dotted event type, for example `assistant.message`."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
     "EventId": {
       "description": "Event id: 26-character ULID.",
       "type": "string"
@@ -1318,6 +1331,70 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         }
       ]
     },
+    "SurfaceAttach": {
+      "description": "Agent -> home: attach a surface to a session.",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the surface will mirror."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface being attached."
+        }
+      },
+      "required": [
+        "surface",
+        "session"
+      ],
+      "type": "object"
+    },
+    "SurfaceDetach": {
+      "description": "Agent -> home: detach a surface after its spool is flushed.",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the surface was mirroring."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface being detached."
+        }
+      },
+      "required": [
+        "surface",
+        "session"
+      ],
+      "type": "object"
+    },
+    "SurfaceEvent": {
+      "description": "One normalized event mirrored from a local app.\n\nThe wire form of `event` is the typed [`EventBody`] as an object with a dotted `type`\nplus its payload fields, for example `{\"type\":\"assistant.message\",\"text\":\"…\"}`.",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/EventBodySchema",
+          "description": "Normalized event body; the home assigns its canonical sequence."
+        },
+        "native_id": {
+          "description": "App-side message or part id; stable across retries and backfill.",
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the event belongs to."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface that observed the event."
+        }
+      },
+      "required": [
+        "surface",
+        "session",
+        "native_id",
+        "event"
+      ],
+      "type": "object"
+    },
     "SurfaceId": {
       "description": "A surface instance id (ULID, 26 characters).",
       "type": "string"
@@ -1378,6 +1455,54 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
       "description": "One capability granted to a surface token.\n\nThe wire form is one short string, for example `session.read:<id>`, `session.write:<id>`,\n`project.read:<name>`, `fleet.read` or `tool:<name>`. The store keeps the list in\n`surface_tokens.scopes_json`; unknown scopes are preserved verbatim so a newer home can\nextend the vocabulary without breaking older readers.",
       "type": "string"
     },
+    "SurfaceTurn": {
+      "description": "One turn boundary of an attached surface.",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the app observed the boundary."
+        },
+        "native_id": {
+          "description": "App-side turn id; stable across retries and backfill.",
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the turn belongs to."
+        },
+        "state": {
+          "$ref": "#/$defs/SurfaceTurnState",
+          "description": "Whether the turn started or ended."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface whose turn started or ended."
+        }
+      },
+      "required": [
+        "surface",
+        "session",
+        "native_id",
+        "state",
+        "at"
+      ],
+      "type": "object"
+    },
+    "SurfaceTurnState": {
+      "description": "Lifecycle state of an attached turn.",
+      "oneOf": [
+        {
+          "const": "started",
+          "description": "The app started a turn.",
+          "type": "string"
+        },
+        {
+          "const": "ended",
+          "description": "The app finished a turn.",
+          "type": "string"
+        }
+      ]
+    },
     "Timestamp": {
       "description": "A UTC instant with millisecond precision.\n\nThe wire/DB form is RFC 3339 with a `Z` suffix and exactly three fractional digits,\nfor example `2026-11-08T19:25:47.123Z`.",
       "type": "string"
@@ -1421,6 +1546,88 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
           "type": "integer"
         }
       },
+      "type": "object"
+    },
+    "ToolCall": {
+      "description": "Agent -> home: an MCP tool call proxied from a local client.\n\n`arguments` is the normal MCP JSON object. By contract it never carries a local path\nor a secret value; the home checks the surface token scope and the live lease before\nexecuting the same core path as its own MCP server.",
+      "properties": {
+        "arguments": {
+          "description": "MCP arguments as normal JSON; never a local path or secret value."
+        },
+        "request_id": {
+          "description": "Client-chosen request id, echoed by the matching [`ToolResult`].",
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the call is scoped to."
+        },
+        "surface": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface that made the call."
+        },
+        "tool": {
+          "description": "MCP tool name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "surface",
+        "session",
+        "tool",
+        "arguments"
+      ],
+      "type": "object"
+    },
+    "ToolError": {
+      "description": "A typed tool-call failure.",
+      "properties": {
+        "code": {
+          "description": "Machine-readable code, for example `not_found`, `refused` or `lease_revoked`.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable message; never a secret value or an absolute local path.",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "Whether retrying the same request may succeed.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "ToolResult": {
+      "description": "Home -> agent: the result of one [`ToolCall`].\n\nExactly one of `result` and `error` is set. Neither an error nor a result carries a\nhome secret value or an absolute local path.",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed failure, when the call failed."
+        },
+        "request_id": {
+          "description": "Request id from the matching [`ToolCall`].",
+          "type": "string"
+        },
+        "result": {
+          "description": "Tool result as normal MCP JSON, when the call succeeded."
+        }
+      },
+      "required": [
+        "request_id"
+      ],
       "type": "object"
     },
     "TurnSummary": {
@@ -1851,6 +2058,90 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "type",
         "surface_id",
         "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/SurfaceAttach",
+      "description": "Agent -> home: attach a surface to a session.",
+      "properties": {
+        "type": {
+          "const": "surface_attach",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/SurfaceDetach",
+      "description": "Agent -> home: detach a surface after flushing its pending events.",
+      "properties": {
+        "type": {
+          "const": "surface_detach",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/SurfaceEvent",
+      "description": "Agent -> home: one normalized event carrying the app's native id.\n\nThe home assigns the canonical `seq` and deduplicates by\n`(session, harness, native_id)`; the agent never sends a sequence number.",
+      "properties": {
+        "type": {
+          "const": "surface_event",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/SurfaceTurn",
+      "description": "Agent -> home: the app started or ended a turn.",
+      "properties": {
+        "type": {
+          "const": "surface_turn",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ToolCall",
+      "description": "Agent -> home: an MCP tool call from a local client.",
+      "properties": {
+        "type": {
+          "const": "tool_call",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ToolResult",
+      "description": "Home -> agent: the result of one [`Self::ToolCall`].",
+      "properties": {
+        "type": {
+          "const": "tool_result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
       ],
       "type": "object"
     },

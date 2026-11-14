@@ -139,6 +139,15 @@ const LISTED_TYPES: &[&str] = &[
     "LeaseMode",
     "AgentFrame",
     "TurnSummary",
+    // v0.4 local app-surface frames.
+    "SurfaceAttach",
+    "SurfaceDetach",
+    "SurfaceEvent",
+    "SurfaceTurn",
+    "SurfaceTurnState",
+    "ToolCall",
+    "ToolError",
+    "ToolResult",
     // v0.4 offload wire documents.
     "Placement",
     "NodeFallback",
