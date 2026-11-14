@@ -132,9 +132,10 @@ The same list carries the v0.4 framework jobs that must land first:
 
 | Job | Live state | Purpose |
 |---|---|---|
-| `v4-c1-live-limits` | fixing | Make the global admission target the only default limit, keep provider caps optional and reload both without a supervisor restart. |
+| `v4-c1-live-limits` | done | Make the global admission target the only default limit, keep provider caps optional and reload both without a supervisor restart. |
 | `v4-c2-merge-local-base` | done | Rebase the merge queue onto the local default branch. |
-| `v4-c4-planner-dispatch` | fixing | Dispatch ready planner and keeper jobs. |
+| `v4-c4-planner-dispatch` | done | Dispatch ready planner and keeper jobs. |
+| `v4-c5-live-upgrade-drain` | pending | Defer store migrations while an older supervisor runs, add `down --drain` and `up --replace` rolling handoff, and allow selective project/daemon restart without stopping the whole node ([`design/v0.4/live-upgrade-and-drain.md`](design/v0.4/live-upgrade-and-drain.md)). |
 
 The protocol job is fixing; the store, agent-client and gateway jobs are pending, so the gateway and
 every later local-orchestrator phase are not started. The `/jobs` page from the 0.3 wave is merged;
