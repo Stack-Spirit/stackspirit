@@ -69,7 +69,7 @@ struct EffectivePolicy {
 }
 
 /// Runs `offload policy`.
-fn policy(ctx: &Ctx, io: &mut dyn IoStreams, _args: &OffloadPolicyArgs) -> Result<i32, CliError> {
+fn policy(ctx: &Ctx, io: &mut dyn IoStreams, args: &OffloadPolicyArgs) -> Result<i32, CliError> {
     let config = ctx.config();
     let offload = &config.offload;
 
@@ -77,7 +77,7 @@ fn policy(ctx: &Ctx, io: &mut dyn IoStreams, _args: &OffloadPolicyArgs) -> Resul
     if ctx.project_selected() {
         project_names.insert(ctx.project().clone());
     }
-    if explicit_project_selection(ctx) {
+    if args.project_explicit {
         project_names.clear();
         project_names.insert(ctx.project().clone());
     }
@@ -135,27 +135,6 @@ fn policy(ctx: &Ctx, io: &mut dyn IoStreams, _args: &OffloadPolicyArgs) -> Resul
         print_policy(io, &document)?;
     }
     Ok(0)
-}
-
-/// Returns whether `--project` selected a checkout other than the cwd's checkout.
-///
-/// The global `--project` flag has no "was it passed" bit in [`Ctx`]. Comparing the
-/// selected root with the nearest `vowp.toml` from the cwd recovers the distinction:
-/// without the flag they are the same checkout, while an explicit selection points
-/// elsewhere (or the cwd is not in a checkout at all).
-fn explicit_project_selection(ctx: &Ctx) -> bool {
-    if !ctx.project_selected() {
-        return false;
-    }
-    let Ok(cwd) = std::env::current_dir() else {
-        return true;
-    };
-    let Some(cwd_root) = crate::ctx::find_project_root(&cwd) else {
-        return true;
-    };
-    let cwd_root = std::fs::canonicalize(&cwd_root).unwrap_or(cwd_root);
-    let selected = std::fs::canonicalize(ctx.project_root()).unwrap_or_else(|_| ctx.project_root().to_path_buf());
-    cwd_root != selected
 }
 
 /// Prints the effective policy as two aligned tables.
@@ -321,16 +300,18 @@ fn status(ctx: &Ctx, io: &mut dyn IoStreams, _args: &OffloadStatusArgs) -> Resul
             ..JobFilter::default()
         })?;
         for job in jobs {
-            let Some(placement) = project_store.job_placement(&job.id)? else {
-                continue;
-            };
+            let job_placement = project_store.job_placement(&job.id)?;
+            let placement = job_placement
+                .clone()
+                .or_else(|| project_policy.placement.clone())
+                .unwrap_or_else(|| config.offload.default.clone());
             if placement == Placement::Home {
                 continue;
             }
             let facts = node_facts(&global, &cards, &entry.name, now)?;
             let request = JobRequest {
                 kind: job.kind,
-                placement: Some(placement.clone()),
+                placement: job_placement,
                 requires: JobRequirements::default(),
             };
             let decision = evaluate(

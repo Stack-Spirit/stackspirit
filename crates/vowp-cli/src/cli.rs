@@ -1158,9 +1158,43 @@ pub enum OffloadCommand {
 /// Arguments for `vowp offload policy`.
 ///
 /// The project selector is the global `--project <name|path>` flag; the selected
-/// `vowp.toml` supplies the policy document.
-#[derive(Debug, Clone, Default, Args)]
-pub struct OffloadPolicyArgs {}
+/// `vowp.toml` supplies the policy document. [`OffloadPolicyArgs::project_explicit`]
+/// records whether that flag was passed, because clap does not expose global-flag
+/// presence through [`crate::Ctx`].
+#[derive(Debug, Clone, Default)]
+pub struct OffloadPolicyArgs {
+    /// Whether the global `--project` flag was passed.
+    pub project_explicit: bool,
+}
+
+/// The clap field set behind [`OffloadPolicyArgs`]; it defines no arguments of its own.
+#[derive(Debug, Clone, Args)]
+struct OffloadPolicyArgsFields {}
+
+impl Args for OffloadPolicyArgs {
+    fn augment_args(command: clap::Command) -> clap::Command {
+        OffloadPolicyArgsFields::augment_args(command)
+    }
+
+    fn augment_args_for_update(command: clap::Command) -> clap::Command {
+        OffloadPolicyArgsFields::augment_args_for_update(command)
+    }
+}
+
+impl FromArgMatches for OffloadPolicyArgs {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        OffloadPolicyArgsFields::from_arg_matches(matches)?;
+        Ok(Self {
+            project_explicit: matches.get_one::<String>("project").is_some(),
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        OffloadPolicyArgsFields::from_arg_matches(matches)?;
+        self.project_explicit = matches.get_one::<String>("project").is_some();
+        Ok(())
+    }
+}
 
 /// Arguments for `vowp offload status`.
 #[derive(Debug, Clone, Default, Args)]

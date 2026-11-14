@@ -8,8 +8,8 @@ mod common;
 
 use serde_json::json;
 use vowp_protocol::{
-    AssignmentPayload, Executor, JobId, JobKind, JobState, Node, NodeName, NodeStatus, PathRef, Placement, RunId,
-    RunPurpose, SecretName, SessionId, VowpConfig,
+    AssignmentPayload, Executor, JobId, JobKind, JobState, Node, NodeName, NodeStatus, PathRef, Placement, ProjectName,
+    RunId, RunPurpose, SecretName, SessionId, VowpConfig,
 };
 use vowp_store::StateChange;
 use vowp_store::repo_offload::{AgentAssignment, AgentAssignmentState};
@@ -198,6 +198,134 @@ fn offload_policy_json_is_the_effective_policy() {
     assert_eq!(code, 0, "{stderr}");
     assert!(human.contains("offload: enabled"), "{human}");
     assert!(human.contains("mac-studio"), "{human}");
+}
+
+#[test]
+fn offload_policy_restricts_rows_for_an_explicit_project_selection() {
+    let env = TestEnv::new();
+    let mut config = env.config.clone();
+    config.offload.projects.insert(
+        config.project.name.clone(),
+        vowp_protocol::OffloadProjectConfig {
+            placement: Some(Placement::Any),
+            ..vowp_protocol::OffloadProjectConfig::default()
+        },
+    );
+    config.offload.projects.insert(
+        ProjectName::parse("beta").expect("project slug"),
+        vowp_protocol::OffloadProjectConfig::default(),
+    );
+    write_config(&env, &config);
+
+    // Run from the selected checkout with `--project <name>`: the explicit selection must
+    // restrict the rows even when the cwd and the selected root are the same directory.
+    let home = env.home_path().display().to_string();
+    let name = env.config.project.name.to_string();
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .current_dir(env.project_path())
+        .args(["--home", &home, "--json", "--project", &name, "offload", "policy"])
+        .output()
+        .expect("run vowp");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("policy json");
+    let projects = value["projects"].as_array().expect("projects array");
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    assert_eq!(projects[0]["project"], name);
+}
+
+#[test]
+fn offload_status_uses_the_effective_placement_without_a_job_row() {
+    let env = TestEnv::new();
+    let config = enabled_config(&env);
+    write_config(&env, &config);
+
+    let (code, added, stderr) = env.run_json(&[
+        "job", "add", "--id", "implicit", "--title", "Implicit", "--kind", "build",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        added.get("placement").is_none(),
+        "the job must not get a placement row: {added}"
+    );
+
+    let store = env.store();
+    let id = JobId::parse("implicit").expect("job slug");
+    assert!(store.job_placement(&id).expect("placement lookup").is_none());
+    store
+        .set_job_state(
+            &id,
+            JobState::Ready,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("ready");
+
+    let (code, value, stderr) = env.run_json(&["offload", "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    let ready = value["ready"].as_array().expect("ready array");
+    assert_eq!(ready.len(), 1, "{ready:?}");
+    assert_eq!(ready[0]["job"], "implicit");
+    assert_eq!(
+        ready[0]["placement"], "any",
+        "the project default must supply the effective placement: {ready:?}"
+    );
+    assert_eq!(ready[0]["waiting_reason"], serde_json::Value::Null);
+    assert_eq!(ready[0]["targets"], json!(["home"]));
+    assert_eq!(ready[0]["detail"], "eligible: home");
+}
+
+#[test]
+fn offload_status_keeps_the_home_target_for_an_explicit_any_in_a_home_only_project() {
+    let env = TestEnv::new();
+    let mut config = env.config.clone();
+    config.offload.enabled = true;
+    config.offload.default = Placement::Home;
+    let name = config.project.name.clone();
+    config.offload.projects.insert(
+        name.clone(),
+        vowp_protocol::OffloadProjectConfig {
+            home_only: true,
+            ..vowp_protocol::OffloadProjectConfig::default()
+        },
+    );
+    write_config(&env, &config);
+
+    let store = env.store();
+    let job = env.insert_job("explicit-any", "Explicit any", JobKind::Build, &[]);
+    store
+        .set_job_state(
+            &job.id,
+            JobState::Ready,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("ready");
+    store
+        .set_job_placement(&job.id, Placement::Any, store.clock().now())
+        .expect("placement");
+
+    let (code, value, stderr) = env.run_json(&["offload", "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    let ready = value["ready"].as_array().expect("ready array");
+    assert_eq!(ready.len(), 1, "{ready:?}");
+    assert_eq!(ready[0]["job"], "explicit-any");
+    assert_eq!(ready[0]["placement"], "any");
+    assert_eq!(
+        ready[0]["waiting_reason"],
+        serde_json::Value::Null,
+        "a home_only project still runs the job at home: {ready:?}"
+    );
+    assert_eq!(ready[0]["targets"], json!(["home"]));
+    assert_eq!(ready[0]["detail"], "eligible: home");
 }
 
 #[test]

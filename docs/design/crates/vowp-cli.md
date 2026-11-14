@@ -169,14 +169,15 @@ worktree or runs an agent.
   for the document itself. It fills defaults through `OffloadConfig::project_policy` and
   `node_policy`, adds the selected project and registered node cards, and prints one
   `ProjectPolicyRow` per project and one `NodePolicyRow` per node. `--project` is the global
-  selector: an explicit selection (detected by comparing the selected root with the cwd checkout)
-  restricts the project rows to that project. The human view is a scalar block followed by two
-  `Table`s; `--json` is one `EffectivePolicy` object.
+  selector: clap records whether that flag was passed, and an explicit selection restricts the
+  project rows to that project, including when the selected root is the cwd. The human view is a
+  scalar block followed by two `Table`s; `--json` is one `EffectivePolicy` object.
 - `offload status [--json]` opens `Ctx::fleet_store`, reads node cards, live assignments
   (`queued|sent|accepted|running|disconnected`) and per-node limits, then opens every registered
-  project read-only in turn. For each ready job with a non-`home` `job_placement` row it builds
-  `vowp_core::offload::NodeFacts` and calls `evaluate` with the project's effective policy. The
-  human view is the `nodes`/`assignments`/`ready` tables; `--json` is `OffloadStatusOutput`.
+  project read-only in turn. For each ready job whose effective placement (job row, else project
+  default, else `offload.default`) is not `home` it builds `vowp_core::offload::NodeFacts` and
+  calls `evaluate` with the project's effective policy. The human view is the
+  `nodes`/`assignments`/`ready` tables; `--json` is `OffloadStatusOutput`.
   `AssignmentRow` deliberately omits `AssignmentPayload` (its prompt is not part of this view), and
   no row carries an absolute local path.
 - `job add --placement` parses `Placement`, refuses `node:<name>` with exit 5 when

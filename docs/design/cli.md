@@ -682,8 +682,9 @@ ready:       PROJECT JOB KIND PLACEMENT REASON DETAIL
 ```
 
 `assignments` lists only live states (`queued`, `sent`, `accepted`, `running`, `disconnected`) and
-never echoes the assignment payload or prompt. `ready` lists ready jobs whose `job_placement` row
-is not `home`, evaluated with the pure policy: `REASON` is the §7.5 `WaitingReason` or `eligible`,
+never echoes the assignment payload or prompt. `ready` lists ready jobs whose effective placement
+is not `home` (the per-job `job_placement` row, else the project default, else `offload.default`),
+evaluated with the pure policy: `REASON` is the §7.5 `WaitingReason` or `eligible`,
 and `DETAIL` is the human explanation. The evaluator uses the facts the home stores; a fact a
 node reports only at dispatch time (origin match, base fetchability, clean base) is `None` and is
 reported as a conservative refusal, never as a pass.
