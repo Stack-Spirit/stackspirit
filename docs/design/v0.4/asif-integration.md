@@ -130,7 +130,7 @@ vowp session import <file>|- [--format bundle|asif] [--node <name>]
 | Input | Existing bundle file or `-` stdin. | A `.asif.zip` package, a standalone `session.json`, or a directory containing `session.json`; `-` stages stdin in a private temporary file first. |
 | `--node` | Current remote import. | Same remote import over SSH (see §3.5). |
 | `--cwd` | Current behaviour. | Working directory written to `session.created`; default is the selected project path. The directory must exist; the allow-list is enforced when a turn starts, exactly as for a bundle import. |
-| `--branch` | Invalid: exit 2. | Select one ASIF branch when the document has more than one. Without it a multi-branch document is exit 2 with a hint to choose one; `vowp-asif validate` lists the branch ids. |
+| `--branch` | Invalid: exit 2. | Select one ASIF branch when the document has more than one. Without it a multi-branch document is exit 2 and the error names the available branch ids. To list them first, extract the document (`unzip -p <id>.asif.zip session.json > asif-session.json`) and run `jq -r '.branches[].id' asif-session.json`; for a standalone document, run the `jq` command on it directly. |
 | `--same-id` | Current behaviour. | Invalid: exit 2. ASIF import always creates a new session. |
 | `--executor` | Current behaviour. | Invalid: exit 2. Executor evidence comes from the document; overriding would invent state. |
 | `--report` | Invalid: exit 2. | Keep the full adapter report at this path. Without it the report is temporary and removed; the summary is still printed. Not supported with `--node` (exit 2) because the full report stays on the node. |
@@ -155,15 +155,18 @@ ASIF import rules:
 4. **Failure leaves nothing.** A bad package, strict loss, reindex failure or rename collision
    removes the staging directory, any temporary upload and any partial report. No row, log,
    blob, capsule or lease is created.
-5. **Idle data.** The imported session is `idle`. Import never starts a turn, writes a capsule,
-   creates a lease or dispatches a job.
+5. **Idle data.** The imported session is `idle`. Import never starts a turn, writes a new
+   capsule, creates a lease or dispatches a job. Restoring capsule-provenance files carried by
+   the package (§5.3) is part of the import and does not write a new capsule.
 6. **Warnings are not losses.** A source project or job that is absent locally leaves the
-   session's `project`/`job_id` null, exactly as `reindex` already does for a bundle import;
-   those warnings go to stderr, not to the ASIF loss list. A source project name that is not
-   a valid VOWP project slug is invalid input (exit 2), not a partial session. A session
-   imported from another project may consequently not appear in the served project's
-   `session ls`; it is still reachable by id. Binding it to the local project instead is an
-   owner decision (§9).
+   session's `project`/`job_id` null. The `project ... left null` / `job ... left null`
+   warnings come from the reindex that runs after the staged directory is renamed, the same
+   path a full-directory pull uses; bundle import does not produce them because it resolves
+   both keys to `None` before it writes the session. Those warnings go to stderr, not to the
+   ASIF loss list. A source project name that is not a valid VOWP project slug is invalid
+   input (exit 2), not a partial session. A session imported from another project may
+   consequently not appear in the served project's `session ls`; it is still reachable by id.
+   Binding it to the local project instead is an owner decision (§9).
 7. **Event identity is global.** ASIF import preserves VOWP-origin event IDs. Importing the
    same package twice into one home therefore conflicts on the unique event id, even though
    the target session id is new: exit 4, the first session is untouched, and the second
@@ -263,8 +266,22 @@ open an SSH path. No daemon, HTTP or network path is added.
 **Export.** The local side runs, on the remote node:
 
 ```text
-vowp --project <project> --json session export <id> --format asif --out - --asif-stream
+vowp --project <project> --json session export <id> --format asif --out - --asif-stream \
+  [--redact <literal>]... [--keep-host-paths] [--strict|--allow-loss]
 ```
+
+The local side reads `--redact-file` itself and forwards each literal as its own
+`--redact <literal>`; the file is never sent. `--keep-host-paths`, `--strict` and
+`--allow-loss` are forwarded unchanged, so the remote core calls the adapter with the same
+`redact`, `keep_host_paths` and `allow_loss` values (and `strict: false`, as §3.4 specifies)
+and applies the same VOWP policy. Because
+the adapter's `LossClass` is not serialized, the local side cannot re-apply the
+`Blocking`/`Integrity` strict filter to the envelope: that filter runs on the remote against
+the in-memory report, after the adapter has produced the package in its private temporary
+file and before the remote writes the envelope or any package byte. A strict refusal is exit
+5 with no stream and no output kept on either side; the local side relays the exit code and
+stderr. `--allow-loss` reaches the remote adapter, so a recoverable integrity problem becomes
+a declared loss there.
 
 `--asif-stream` is a hidden internal flag (like `session dir-export`, not help-listed). On
 success the remote prints exactly one JSON line, then the exact package bytes:
@@ -283,8 +300,9 @@ success the remote prints exactly one JSON line, then the exact package bytes:
 The line is bounded by the adapter JSON limit (16 MiB + 4 KiB) and parsed before any local
 file is touched. The remote stream mode is quiet: the envelope line and the package bytes are
 the only stdout; loss warnings are in the envelope. The local side streams exactly `bytes` to
-a private temporary file (or `<out>.tmp`), verifies the SHA-256, then renames to `--out` or
-copies to stdout for `--out -`; a failed verification never leaves a partial stdout package.
+a private temporary file (or `<out>.tmp`), verifies the byte count and SHA-256, then renames
+to `--out` or copies to stdout for `--out -`; it does not re-check the strict decision, which
+the remote already made. A failed verification never leaves a partial stdout package.
 A missing byte, extra byte, hash mismatch or malformed line is exit 7 and removes the
 temporary file. `--report` with `--node` is refused (exit 2); the summary is still returned.
 Remote stderr is relayed for errors.
@@ -292,14 +310,17 @@ Remote stderr is relayed for errors.
 **Import.** The local side streams the file (or stdin) to the remote's stdin and runs:
 
 ```text
-vowp --project <project> --json session import - --format asif [--branch <id>] [--cwd <dir>]
+vowp --project <project> --json session import - --format asif [--branch <id>] [--cwd <dir>] \
+  [--strict|--allow-loss]
 ```
 
 The remote performs the same validate/stage/rename/reindex flow and returns the
-`AsifImportResponse` JSON. The local side prints that document (or a human summary) and
-relays the exit code. `--report` with `--node` is refused (exit 2). A directory input is
-local-only; `--node` with a directory is exit 2 (use a package file or stdin). No local
-session, temp download, row or index entry is created on failure.
+`AsifImportResponse` JSON. `--strict` and `--allow-loss` are forwarded so the remote core
+applies the same loss policy and exit mapping as a local import (§3.3/§3.4); the local side
+does not re-check the returned report. The local side prints that document (or a human
+summary) and relays the exit code. `--report` with `--node` is refused (exit 2). A directory
+input is local-only; `--node` with a directory is exit 2 (use a package file or stdin). No
+local session, temp download, row or index entry is created on failure.
 
 The hidden stream is an internal CLI-to-CLI protocol, not a public API. It is documented in
 `docs/design/cli.md` only because `session pull --full` already documents its stream.
@@ -463,8 +484,9 @@ enforce ASIF instructions, approvals or policies.
 - **Capsules:** export preserves exact capsule JSON, except the ASIF resource identity; import
   restores only capsule-provenance resources, rewrites `session_id` to the new session,
   clamps `at_seq` into the imported range when needed and reports
-  `capsule-id-regenerated` / `capsule-at-seq-normalized`. A capsule is a summary, not an
-  approval or a replayable instruction.
+  `capsule-id-regenerated` / `capsule-at-seq-normalized`. Restoring a capsule-provenance file
+  is not writing a new capsule; the imported file keeps the package's capsule content. A
+  capsule is a summary, not an approval or a replayable instruction.
 - **Native ids:** known harness providers (`claude-code`, `opencode`, `cli`, `acp`) are
   written to `adapters.json` on import; unknown providers are omitted with a loss. `vowp` is
   the source session identity, not a harness mapping.
@@ -476,8 +498,10 @@ enforce ASIF instructions, approvals or policies.
 - `--redact <literal>` replaces exact literal occurrences in text fields. The matched value
   is never echoed in the report, error or output. Because a secret in argv is visible in
   shell history and `ps`, secrets should use `--redact-file <file>` (one literal per line),
-  which VOWP reads locally and passes to the adapter in-process. Both forms are
-  best-effort, not secret discovery.
+  which VOWP reads locally and passes to the adapter in-process. With `--node` the literals
+  are forwarded to the remote argv (see §3.5), so a secret read from `--redact-file` is
+  visible in the node's process list for the duration of the export; use a local export when
+  that matters. Both forms are best-effort, not secret discovery.
 - Host-path-looking strings are replaced by `<host-path>` by default (`host-path-scrubbed`).
   `--keep-host-paths` is for a trusted local export only. Absolute cwd is never emitted in
   either mode.
@@ -565,18 +589,23 @@ Route: `POST /api/v1/sessions/import/asif?branch=<id>`.
   overwritten or merged.
 - **Ownership and cwd:** the new session is created in the served project's context; `cwd` is
   the registered project path (same allow-list rules as a bundle import). The ASIF source
-  project is kept in the session metadata when it exists locally, otherwise the session gets
-  a null `project` and a warning (the existing bundle-import behaviour). No other project's
-  data is read or written.
-- **No auto-run:** the imported session is idle. The handler never starts a turn, writes a
-  capsule, creates a lease or dispatches a job.
+  project is kept in the session metadata when it exists locally; otherwise the session gets
+  a null `project` and the `project ... left null` reindex warning, the same path a
+  full-directory pull uses (bundle import resolves the key to `None` before writing and
+  produces no such warning). No other project's data is read or written.
+- **No auto-run:** the imported session is idle. The handler never starts a turn, writes a new
+  capsule, creates a lease or dispatches a job. Capsule-provenance files carried by the
+  package are restored by the import (§5.3); no new capsule is written.
 - **Response:** `201 Created`, `Location: /api/v1/sessions/{id}`, body
-  `AsifImportResponse { session, report, warnings }` (same shared type as the CLI). The
-  report is the summary, not the full 16 MiB report; `X-Vowp-Asif-Losses` repeats the count.
+  `AsifImportResponse { session, report, warnings }` (same shared type as the CLI). `session`
+  is the normal registered `Session` row, so it carries the fields every session API returns,
+  including the project `cwd` and the imported `title`. The report is the summary, not the
+  full 16 MiB report; `X-Vowp-Asif-Losses` repeats the count.
 - **Errors:** invalid package/schema/version/branch `400` with a stable code and a safe
   message; too large `413`; existing target, duplicate event id or a missing registered
-  project path `409`; internal failure `500`. The response never echoes uploaded bytes, a
-  filename or a path.
+  project path `409`; internal failure `500`. The response never echoes uploaded bytes, the
+  uploaded filename, a temporary upload/staging path or source text; the only paths in it are
+  the ordinary `Session` fields described above.
 
 Page: `GET /import` serves a static shell with:
 
@@ -616,9 +645,11 @@ would need a real authorization model; this slice does not invent one.
 - Limits: 16 MiB session/report JSON, 64 MiB single resource, 256 MiB total resources,
   272 MiB archive, 1,024 members, 4,096-character portable paths. Exceeding a limit is a
   typed error, never a truncation.
-- No uploaded bytes, source text, secrets, tokens, home paths or filenames are logged or
-  returned. Errors use stable codes and path-free messages. The report's loss explanations
-  are the adapter's path-free text.
+- No uploaded bytes, source text, secrets, tokens, uploaded filenames or temporary
+  upload/staging paths are logged or returned. Errors use stable codes and path-free
+  messages. The report's loss explanations are the adapter's path-free text. The success body
+  is the exception defined in §6.2: the registered `Session` row, whose `cwd` is the project
+  path and whose `title` is the imported session title.
 - The web does not offer `--redact` or `--keep-host-paths`; it uses the safe defaults. A user
   who needs a specific redaction list uses the CLI.
 
@@ -650,7 +681,8 @@ byte); do not hand-maintain a second full document.
 - `asif_export_keeps_inherent_losses_non_fatal` — a normal session with omissions succeeds
   and reports them.
 - `asif_import_creates_one_indexed_session_and_no_turn` — log parses, `session.created` is
-  first, state is idle, `session_events` rows exist, no capsule/lease is created.
+  first, state is idle, `session_events` rows exist, no new capsule or lease is created;
+  capsule-provenance files carried by the fixture are restored, not rewritten.
 - `asif_import_round_trip_preserves_text_blobs_and_event_order`.
 - `asif_import_invalid_package_leaves_no_directory_or_row`.
 - `asif_import_existing_id_is_a_conflict_and_changes_nothing`.
@@ -722,6 +754,17 @@ byte); do not hand-maintain a second full document.
 
 Each job has one owner per path. The dependency order is A → B/C → D → E. `Cargo.lock` is
 the shared exception: let cargo update it, never edit it by hand.
+
+**Audit-gate qualification.** `scripts/audit/scan.sh --worktree` and
+`scripts/audit/public-tree-check.sh --worktree` already exit 1 in this worktree before any
+ASIF change: the scan reports pre-existing findings across the repository, and the
+public-tree check names pre-existing pruned paths (`AGENTS.md`, `docs/maintainers/...`,
+`scripts/acceptance/...`). These two commands are **recording gates**, not pass/fail gates for
+an individual build job. A job runs them, records the exact output in its report, and passes
+this part of its gate only when the output contains no finding in a path the job changed and
+the public-tree check flags no path the job changed. The job does not fix, delete or
+allowlist pre-existing findings outside its owned paths. A new finding or pruned path in the
+job's own diff fails the job.
 
 ### Job A — `v4-asif-core` (adapter dependency, shared report types, core facade)
 
@@ -818,7 +861,7 @@ cargo build -p vowp-cli --bin vowp
 python3 docs/reference/generate.py --check
 python3 docs/reference/check-reference.py
 python3 scripts/release/generate-third-party-licenses.py --check
-scripts/audit/scan.sh --worktree
+scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job B — `v4-asif-cli` (CLI contract and remote paths)
@@ -856,7 +899,7 @@ cargo test -p vowp-cli --test session
 cargo build -p vowp-cli --bin vowp
 python3 docs/reference/generate.py --check
 python3 docs/reference/check-reference.py
-scripts/audit/scan.sh --worktree
+scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job C — `v4-asif-web` (daemon download/upload)
@@ -895,7 +938,7 @@ cargo test -p vowp-daemon --test asif_export_api
 cargo test -p vowp-daemon --test asif_import_api
 cargo test -p vowp-daemon --test session_page
 cargo test -p vowp-daemon --test pwa
-scripts/audit/scan.sh --worktree
+scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job D — `v4-asif-docs` (user and design documentation)
@@ -921,8 +964,8 @@ conformance, lossless, continuation or native-import claims.
 cargo test --workspace
 cargo build -p vowp-cli --bin vowp
 python3 docs/reference/check-reference.py
-scripts/audit/public-tree-check.sh --worktree
-scripts/audit/scan.sh --worktree
+scripts/audit/public-tree-check.sh --worktree  # recording gate, see above
+scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job E — `v4-asif-verify` (independent verification, no code ownership)
@@ -940,8 +983,8 @@ cargo test --workspace
 cargo build -p vowp-cli --bin vowp
 python3 docs/reference/generate.py --check
 python3 docs/reference/check-reference.py
-scripts/audit/scan.sh --worktree
-scripts/audit/public-tree-check.sh --worktree
+scripts/audit/scan.sh --worktree  # recording gate, see above
+scripts/audit/public-tree-check.sh --worktree  # recording gate, see above
 ```
 
 Then run the end-to-end test that owns the temporary home and the fake project:
@@ -977,8 +1020,10 @@ blocker, not a pass. If the owner publishes the adapter crate first, it must pas
    and gives the user something to open. Validate-only is safer but makes the page a preview
    tool, not an import.
 3. **Project binding of an imported session.** Recommended for the first slice: keep the
-   existing bundle-import behaviour (source project if it exists locally, otherwise null and
-   a warning). The download route addresses any session in the home, so the imported session
+   source project when it exists locally; otherwise write a null `project` and let the
+   post-rename reindex emit its `project ... left null` warning (the full-directory pull
+   path, not bundle import, which resolves the key to `None` before writing). The download
+   route addresses any session in the home, so the imported session
    is still downloadable even when it is not in the served project's list. If the owner wants
    every web import to appear under the served project, the core must rewrite
    `session.created.project` and record a `project-rebound` warning; that is extra work and a
