@@ -24,6 +24,7 @@ crates/vowp-cli/
   src/cmd/init.rs  doctor.rs  job.rs  graph.rs
   src/cmd/up.rs  status.rs  board.rs  attach.rs  plan.rs  window.rs   (`up`,`down`, `status`, `board`, `attach`, `plan`, hidden `__window`)
   src/cmd/session.rs  inbox.rs  cost.rs  node.rs  offload.rs  loops.rs  schedule.rs  maint.rs   (`maint` = reindex, backup, schema, version)
+  src/cmd/session_asif.rs  (ASIF export/import facade: flags, temp files, remote stream)
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
@@ -260,6 +261,47 @@ log or takes the home lease. Ctrl-C (through `SignalWatcher`) stops the adapter 
 lease; a takeover or lease loss prints `This surface is read-only: <reason>` and exits 0; a full
 spool exits 7 with the cap in the message. `--follow` and `--takeover` are refused in agent mode.
 
+### ASIF export and import (`cmd/session_asif.rs`)
+
+`vowp session export|import --format asif` keeps the command dispatch in `cmd/session.rs` and
+puts every ASIF rule in `cmd/session_asif.rs`; the bundle handlers are unchanged. The module:
+
+- **Validates the format contract before touching the store.** `--tail` is invalid for ASIF;
+  `--redact`, `--redact-file`, `--keep-host-paths`, `--report`, `--strict`, `--allow-loss` and
+  the hidden `--asif-stream` are invalid for a bundle; `--same-id` and `--executor` are invalid
+  for ASIF; `--report -` is refused; `--strict` and `--allow-loss` conflict through clap. Every
+  refusal is `CliError::Invalid` (exit 2).
+- **Exports through `vowp_core::session::asif::export_asif`.** The default output is
+  `./<resolved-id>.asif.zip`; `--out -` is refused on a TTY and with `--json`, and otherwise
+  streams the exact package from a private `<home>/tmp` file. `--report` keeps the full adapter
+  report; without it no sidecar is written. Human output is the path on stdout and the loss
+  summary on stderr. `--json` prints `AsifExportOutput` (`format`, `path`, `session`, `bytes`,
+  `report_path`, `report`).
+- **Imports through `vowp_core::session::asif::import_asif`.** `-` stdin is staged in a private
+  0600 file under `<home>/tmp` and capped with `MAX_ASIF_ARCHIVE_BYTES`; the default `--cwd` is
+  `Ctx::project_root`; `--branch` is forwarded. The target is always a fresh id. Human output is
+  the new session id; `--json` prints the protocol `AsifImportResponse`; reindex warnings go to
+  stderr and are never added to the loss list.
+- **Applies the VOWP strict policy.** It always calls the core facade with `strict: false`. It
+  sets `allow_loss` from `--allow-loss`; in `--strict` mode it also sets it true so the adapter
+  declares recoverable integrity/ambiguity problems and the core `Blocking`/`Integrity` filter
+  can refuse them. A refusal is exit 5 and leaves existing `--out`/`--report` files untouched.
+  `--allow-loss` keeps those declared losses non-fatal.
+- **Owns the remote half.** Export reads `--redact-file` locally, forwards literals as
+  `--redact`, runs the remote hidden `--asif-stream` command, parses one bounded envelope line,
+  streams exactly `bytes` to `<out>.tmp` (or a private file for stdout), checks for an extra
+  byte, waits for the exit code, verifies SHA-256 and only then renames or copies. A malformed
+  envelope, truncation, extra byte or digest mismatch is `CliError::Remote` (exit 7). Import
+  rejects a directory and `--report` with `--node`, streams the file/stdin, and relays the
+  remote `AsifImportResponse` and exit code. Neither path re-checks the remote strict decision.
+- **Never writes a session on failure.** All staging lives under `<home>/tmp` or `<out>.tmp`
+  and is removed on drop; the core facade removes its own work directory on every error.
+
+The loss summary is one stderr line with the count and unique kinds, or `asif: no declared
+losses`; it also names the unsupported VOWP operations (`vowp.jobs`, `vowp.gates`,
+`vowp.leases`, `vowp.project-db`). The summary and every error stay path-free and never echo a
+redaction value.
+
 ## 4. Rules
 
 1. Every command handler is `fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &XArgs) -> Result<i32, CliError>`; no handler prints directly to `std::io`.
@@ -290,7 +332,9 @@ plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`. 
 offload-policy slice adds `job_add_refuses_node_placement_when_offload_is_disabled`,
 `job_add_persists_any_placement_and_job_show_reads_it`,
 `offload_policy_json_is_the_effective_policy` and
-`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`. The
+`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`. The ASIF
+slice adds the tests listed in `cli.md` §9 under "The ASIF slice"; `tests/asif.rs` owns the
+local flows and `tests/session.rs` the fake-ssh remote flows. The
 assignment-executor slice adds `agent_run_creates_a_worktree_and_streams_adapter_events`,
 `agent_run_pushes_only_the_job_branch_and_reports_the_head`,
 `agent_run_refuses_a_missing_env_name_and_redacts_injected_values`,

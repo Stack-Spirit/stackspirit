@@ -111,14 +111,103 @@ All `session` subcommands accept a session id prefix; `vowp chat <id>` is the v0
 | `chat --agent --session <id> [--executor <exec>] [--node <n>]` | the Phase 1 local surface: the agent holds the lease and runs the adapter on this machine |
 | `session switch <id> --to <executor> [--node <n>] [--reason user\|limit\|…] [--force]` | runs the switch protocol (`sessions.md` §5): prints the capsule path and the new executor; exit 6 if the target provider is limited, 4 if the session is running a turn and `--force` is not given. A remote target is probed with `vowp doctor` first. |
 | `session capsule <id> [--print]` | writes a capsule now (`trigger=manual`), prints its id (or the markdown with `--print`) |
-| `session export <id> [--out <file>\|-o <file>] [--tail <n>]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events) |
-| `session import <file> [--node n] [--executor <exec>] [--cwd <dir>] [--same-id]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached. `--same-id` keeps the bundle id only when no local row or session directory exists, writes no parent and copies the bundle tail into the log; a present id is exit 4 and nothing is changed. |
+| `session export <id> [--out <file>\|-o <file>] [--format bundle\|asif] [--tail <n>] [--redact <literal>]... [--redact-file <file>]... [--keep-host-paths] [--report <file>] [--strict\|--allow-loss]` | writes a `vowp-bundle-v1` JSON bundle (default `./<id>.vowp-bundle.json`, tail 20 events). With `--format asif` it writes one deterministic `.asif.zip` (default `./<id>.asif.zip`) or, with `--out -`, the exact package bytes; see the ASIF subsection below. |
+| `session import <file> [--format bundle\|asif] [--node n] [--executor <exec>] [--cwd <dir>] [--same-id] [--branch <id>] [--report <file>] [--strict\|--allow-loss]` | validates checksum/version, creates a **child** session (`parent_session_id`), prints the new id; the seed capsule is attached. `--same-id` keeps the bundle id only when no local row or session directory exists, writes no parent and copies the bundle tail into the log; a present id is exit 4 and nothing is changed. With `--format asif` it creates a new idle session from an ASIF package, standalone document, directory or stdin; see the ASIF subsection below. |
 | `session pull <node> <session> [--same-id \| --full]` | runs on the local machine: exports the bundle from `node` over ssh, stages it in a private temporary directory, verifies format/protocol/checksum, imports a **child** (`parent_session_id` = source id) and prints both ids. JSON `{"node","source_session","child_session"}`. With `--same-id` it imports under the source id with no parent and JSON `{"node","source_session","same_id_session"}`. With `--full` it streams the whole `sessions/<id>/` directory (full log, blobs, capsules, `adapters.json`) as a `vowp-session-dir-v1` manifest plus file bytes, verifies every digest and size (1 GiB cap) before the final rename, reindexes, and prints JSON `{"node","source_session","full_session","files","bytes"}`; it never creates a child or rewrites a bundle. When `--same-id` or `--full` finds the source id present locally, the pull exits 4 with a divergence report naming both heads (last seq, last event type/time, state and executor where available) and the note `choose which side advances; no merge performed`; `--json` returns `{"error":{"kind":"conflict","code":"session_divergence","message","hint","node","source_session","local","remote","note"}}`. Nothing is overwritten, forced or merged. A failed remote run, malformed/truncated/corrupt snapshot, over-cap directory or checksum mismatch imports nothing and leaves no `sessions/<id>/`. |
 | `session push <node> <session> [--same-id]` | runs on the local machine: resolves the local session by id or prefix, exports one `vowp-bundle-v1` in memory (no temporary file in the project) and streams it to `vowp --project <project> --json session import -` on `node` over ssh. The default creates a **child** on the remote (`parent_session_id` = source id) and prints `pushed session <local> to <node> as child <remote-child>`; JSON `{"node","source_session","child_session"}`. With `--same-id` it first runs the remote read-only `session show --json --events 1 <id>`: remote exit 3 means absent and the push imports under the source id with no parent, printing `pushed session <local> to <node> with same id <id>`; JSON `{"node","source_session","same_id_session"}`. When the id already exists on the remote, the push exits 4 with the same divergence document as `session pull` (`kind: conflict`, `code: session_divergence`, both heads and `choose which side advances; no merge performed`) and exports, imports or mutates nothing. An unknown local session is exit 3 before any ssh; a local node is exit 2 with the export/import hint. Any other remote pre-check failure, local export failure or remote import failure relays its exit code and output and prints no success line. |
 | `session watch [--claude-dir <dir>] [--once] [--follow]` | records interactive Claude Code transcripts (read-only, byte-offset importer) into one canonical session per Claude uuid; prints `watching N transcripts`; `--follow` polls every two seconds until Ctrl-C, and a TTY run without `--once` or `--follow` follows the same way; `--once`, and a non-TTY run without `--follow`, make one incremental pass; exit 1 if the dir is unreadable |
 | `session tail <id> [--follow] [--pretty] [--from <seq>]` | prints events (JSONL, or `--pretty` one line per event); `--follow` polls the file (200 ms) and does not take the lease. This is what job windows run (`vowp __window job <id>`). |
 
 Pretty line format: `HH:MM:SS #seq type  summary` e.g. `19:30:12 #6 tool.call  shell: cargo test`.
+
+### ASIF export and import (`--format asif`)
+
+ASIF 0.4 is a review draft, not a released standard. `--format bundle` remains the default for
+both commands and keeps its exact output, JSON, exit codes and remote paths. ASIF is a second
+format, not a replacement; every ASIF command reports declared losses and the VOWP operations
+that are not captured. It does not emit or interpret a continuation object, does not import a
+native harness transcript and does not claim a lossless round trip.
+
+```text
+vowp session export <id> --format asif [--out <file>|-]
+                     [--redact <literal>]... [--redact-file <file>]...
+                     [--keep-host-paths] [--report <file>]
+                     [--strict|--allow-loss] [--json]
+vowp session import <file>|- --format asif [--node <name>]
+                    [--cwd <dir>] [--branch <id>] [--report <file>]
+                    [--strict|--allow-loss] [--json]
+```
+
+Export writes one deterministic ZIP package (`ZIP_STORED`). The default path is
+`./<resolved-session-id>.asif.zip`; `--out -` writes the exact package bytes to stdout and is
+refused (exit 2) on a TTY. `--json` conflicts with `--out -` (exit 2). `--tail` is invalid for
+ASIF (exit 2). Export is read-only: it writes no export capsule, takes no session lock and moves
+no lease. A torn or corrupt `log.jsonl` is invalid input (exit 2) and leaves no output.
+
+Import accepts a `.asif.zip` package, a standalone `session.json`, a directory containing
+`session.json`, or `-` stdin. It always creates a new idle session with a fresh VOWP ULID.
+`--same-id` and `--executor` are invalid (exit 2). `--cwd` defaults to the selected project
+path and must exist. A multi-branch document is exit 2 without `--branch`; the error names the
+available branch ids when the input is a standalone document or directory, and otherwise tells
+the caller how to list them. `--report` with a remote `--node` is exit 2 (the full report stays
+on the node; a node registered local runs the local command); a directory input with `--node`
+is also exit 2. A failed import leaves no session row, log, blob, capsule, lease or partial
+report.
+
+Losses and strict mode:
+
+- Default: declared omissions and normalizations succeed and are reported. Recoverable
+  integrity/ambiguity problems are still refused by the adapter.
+- `--allow-loss`: passes through to the adapter, so recoverable duplicate/orphan/ambiguity
+  problems become declared losses. It does not make unsupported semantics safe.
+- `--strict`: asks the adapter to declare those recoverable problems, then refuses any
+  `Blocking` or `Integrity` loss with exit 5. No new package/report is kept; an existing
+  `--out` or `--report` file is left untouched. Inherent `Omission`/`Normalization` losses stay
+  non-fatal. `--strict` and `--allow-loss` conflict with each other (exit 2).
+- Human output prints the loss count and the unique loss kinds to stderr; zero losses is stated
+  explicitly. `--json` keeps the summary (`loss_count`, `losses`, `unsupported`); `--report`
+  writes the full `vowp-asif-report-v1` document. Redaction values are never echoed.
+
+`session export --format asif --json` prints:
+
+```json
+{
+  "format": "asif",
+  "path": "/srv/work/vowp/01KA....asif.zip",
+  "session": "01KA...",
+  "bytes": 18342,
+  "report_path": null,
+  "report": {
+    "adapter_version": "0.1.1",
+    "asif_version": "0.4",
+    "asif_pin": "652d9e23ddbe5656b9ceea311df7e09e93c1cd2f",
+    "source_session": "01KA...",
+    "target_session": null,
+    "counts": {"events_in": 42, "events_out": 42, "resources": 3, "capsules": 1},
+    "loss_count": 2,
+    "losses": [
+      {"kind": "cwd-omitted", "stage": "translation", "scope": "environment", "message": "..."},
+      {"kind": "contexts-reconstructed", "stage": "normalization", "scope": "contexts", "message": "..."}
+    ],
+    "unsupported": ["vowp.jobs", "vowp.gates", "vowp.leases", "vowp.project-db"]
+  }
+}
+```
+
+`session import --format asif --json` prints the `AsifImportResponse` document: the new
+`session` row, the same `report` summary with `target_session` set, and non-fatal reindex
+`warnings`. The warnings are not losses: a source project or job that is absent locally leaves
+the session's `project`/`job_id` null and is reported only on stderr.
+
+`--node` uses the existing SSH transport. Export runs the hidden remote
+`session export <id> --format asif --out - --asif-stream`, reads one envelope line, streams
+exactly the announced bytes to a private temporary file (or `<out>.tmp`), verifies the byte
+count and SHA-256, and only then renames the package or writes it to stdout. A truncated stream,
+extra byte, malformed envelope or digest mismatch is exit 7 and leaves no local package. A
+strict refusal is exit 5 with no stream. `--redact-file` is read locally and forwarded as
+individual `--redact` literals; the file is never sent. `--report` with `--node` is exit 2.
+Import streams the file or stdin to the remote and relays its `AsifImportResponse` and exit
+code; nothing is created locally on failure.
 
 ### `vowp chat <id> [--executor <exec>] [--node <n>] [--follow] [--takeover]`
 The guaranteed terminal surface and the reference implementation of the lease rules. It acquires
@@ -165,6 +254,9 @@ vowp session dir-export <session> [--max-bytes <n>]
 
 `dir-export` is the source half of `session pull --full`: it prints one `vowp-session-dir-v1`
 manifest line and then the listed file bytes on stdout. It is read-only and takes no session lock.
+`session export --format asif --out - --asif-stream` is the hidden source half of a remote ASIF
+export: it prints one `vowp-asif-export-stream-v1` envelope line (`format`, `session`, `bytes`,
+`sha256`, `report`) and then exactly the package bytes. It is read-only and is not help-listed.
 
 `turn-begin` reads a request document (lease token, prompt, executor, purpose, node) and prints a
 `TurnGrant`; `__exec` runs the adapter on the executor machine, spools every event before sending
@@ -471,6 +563,32 @@ The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 `job_add_persists_any_placement_and_job_show_reads_it`,
 `offload_policy_json_is_the_effective_policy` and
 `offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`.
+
+The ASIF slice adds, in `tests/asif.rs`: `session_export_asif_uses_default_asif_zip_name`,
+`session_export_asif_stdout_is_binary_and_refuses_json`,
+`session_export_asif_refuses_binary_stdout_on_a_tty`,
+`session_export_asif_rejects_tail_and_bundle_only_flags`,
+`session_export_asif_human_and_json_shapes`, `session_export_asif_then_import_round_trip`,
+`session_export_asif_redact_file_is_read_locally_and_never_echoed`,
+`session_export_asif_keep_host_paths_is_opt_in`,
+`session_export_asif_reports_losses_and_writes_report_only_when_asked`,
+`session_export_asif_strict_exits_five_and_writes_nothing`,
+`session_import_asif_creates_a_new_session_and_prints_its_id`,
+`session_import_asif_json_shape_and_full_report`, `session_import_asif_requires_an_existing_cwd`,
+`session_import_asif_stdin_stages_and_imports`,
+`session_import_asif_invalid_package_exits_two_and_writes_nothing`,
+`session_import_asif_same_package_twice_exits_four_and_keeps_the_first_session`,
+`session_import_asif_multiple_branches_requires_branch`,
+`session_import_asif_same_id_and_executor_are_refused` and
+`session_import_asif_strict_and_allow_loss_map_to_the_documented_exit_codes`. The remote half,
+in `tests/session.rs` with the fake-ssh helpers, adds
+`session_export_asif_remote_stream_verifies_bytes_and_hash`,
+`session_export_asif_remote_failure_writes_no_local_file`,
+`session_export_asif_remote_report_is_refused_with_exit_two`,
+`session_import_asif_remote_streams_and_relays_the_response`,
+`session_import_asif_remote_failure_creates_no_local_session`,
+`session_import_asif_remote_report_is_refused_with_exit_two` and
+`session_import_asif_remote_directory_is_refused`.
 
 ## 12. Mac agent commands (v0.4)
 

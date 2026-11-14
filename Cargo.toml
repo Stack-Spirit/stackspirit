@@ -64,6 +64,10 @@ name = "agent"
 path = "crates/vowp-cli/tests/agent.rs"
 
 [[test]]
+name = "asif"
+path = "crates/vowp-cli/tests/asif.rs"
+
+[[test]]
 name = "board"
 path = "crates/vowp-cli/tests/board.rs"
 
@@ -183,3 +187,4 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+vowp-asif = { git = "https://github.com/syver777/vowp-asif", rev = "466ebb81f58646febb80996874b46c11288d5a97", version = "0.1.1" }

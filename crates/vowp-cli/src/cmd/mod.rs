@@ -35,6 +35,7 @@ pub mod schedule;
 pub mod schema;
 pub mod secret;
 pub mod session;
+pub mod session_asif;
 pub mod setup;
 pub mod status;
 pub mod surface;

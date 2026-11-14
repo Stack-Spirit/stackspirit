@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -416,6 +417,59 @@ fn run_cli(env: &common::TestEnv, remote: &RemoteNode, args: &[&str]) -> std::pr
         .expect("run vowp")
 }
 
+/// Runs the real binary with the local home/project, a remote `VOWP_HOME` and a cwd.
+fn run_cli_in_dir(
+    env: &common::TestEnv,
+    remote: &RemoteNode,
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> std::process::Output {
+    let tmp = env.home_path().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("tmp dir");
+    let path = format!("{}:/usr/bin:/bin", remote.bin.path().display());
+    env.command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", path)
+        .env("VOWP_HOME", remote.home.path())
+        .env("TMPDIR", &tmp)
+        .current_dir(cwd)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(args)
+        .output()
+        .expect("run vowp")
+}
+
+/// Runs the real binary with the local home/project, a remote `VOWP_HOME` and stdin.
+fn run_cli_stdin(env: &common::TestEnv, remote: &RemoteNode, args: &[&str], stdin: &[u8]) -> std::process::Output {
+    let tmp = env.home_path().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("tmp dir");
+    let path = format!("{}:/usr/bin:/bin", remote.bin.path().display());
+    let mut child = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", path)
+        .env("VOWP_HOME", remote.home.path())
+        .env("TMPDIR", &tmp)
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn vowp");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(stdin)
+        .expect("write stdin");
+    child.wait_with_output().expect("run vowp")
+}
+
 /// Returns the text of one stream.
 fn output_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -599,6 +653,384 @@ fn session_cross_node_export_import_switch_via_fake_ssh() {
         }),
         "{remote_switches:?}"
     );
+}
+
+#[test]
+fn session_export_asif_remote_stream_verifies_bytes_and_hash() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    let remote_id = new_session_in(&env, remote.home.path(), "remote asif stream");
+    let out = env.project_path().join("remote-stream.asif.zip");
+    let out_text = out.to_str().expect("path");
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session", "export", &remote_id, "--node", "vps", "--format", "asif", "--out", out_text,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "remote ASIF export failed: {}",
+        output_text(&output.stderr)
+    );
+    let direct = env.project_path().join("remote-direct.asif.zip");
+    let output = run_in_home(
+        &env,
+        remote.home.path(),
+        &[
+            "session",
+            "export",
+            &remote_id,
+            "--format",
+            "asif",
+            "--out",
+            direct.to_str().expect("path"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "direct ASIF export failed: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&out).expect("remote stream bytes"),
+        std::fs::read(&direct).expect("direct bytes"),
+        "the remote stream must carry the exact deterministic package"
+    );
+    vowp_asif::unpack(&out).expect("the received package unpacks");
+
+    let output = run_cli_in_dir(
+        &env,
+        &remote,
+        &["session", "export", &remote_id, "--node", "vps", "--format", "asif"],
+        env.project_path(),
+    );
+    assert!(
+        output.status.success(),
+        "remote default-name export failed: {}",
+        output_text(&output.stderr)
+    );
+    let default_name = format!("{remote_id}.asif.zip");
+    assert_eq!(output_text(&output.stdout).trim(), default_name);
+    assert!(env.project_path().join(&default_name).is_file());
+
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session", "export", &remote_id, "--node", "vps", "--format", "asif", "--out", "-",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "remote stdout export failed: {}",
+        output_text(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        std::fs::read(&direct).expect("direct bytes"),
+        "remote --out - must carry the exact package"
+    );
+    assert!(output_text(&output.stderr).contains("declared losses"));
+
+    let corrupt = env.project_path().join("remote-corrupt.asif.zip");
+    let envelope = serde_json::json!({
+        "format": "vowp-asif-export-stream-v1",
+        "session": remote_id,
+        "bytes": 3,
+        "sha256": "0".repeat(64),
+        "report": {
+            "adapter_version": "0.1.1",
+            "asif_version": "0.4",
+            "asif_pin": "652d9e23ddbe5656b9ceea311df7e09e93c1cd2f",
+            "source_session": remote_id,
+            "target_session": null,
+            "counts": {"events_in": 0, "events_out": 0, "resources": 0, "capsules": 0},
+            "loss_count": 0,
+            "losses": [],
+            "unsupported": []
+        }
+    });
+    let script = format!("#!/bin/sh\nprintf '%s\\n' '{}'\nprintf 'PK!'\n", envelope);
+    install_ssh(&remote, &script);
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "export",
+            &remote_id,
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+            "--out",
+            corrupt.to_str().expect("path"),
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "a digest mismatch must exit 7: {}",
+        output_text(&output.stderr)
+    );
+    assert!(!corrupt.exists(), "a failed verification must leave no package");
+}
+
+#[test]
+fn session_export_asif_remote_failure_writes_no_local_file() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    install_ssh(&remote, "#!/bin/sh\nprintf 'remote export refused\\n' >&2\nexit 9\n");
+    let out = env.project_path().join("remote-failure.asif.zip");
+    let id = vowp_protocol::SessionId::new().to_string();
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "export",
+            &id,
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+            "--out",
+            out.to_str().expect("path"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(9));
+    assert!(!out.exists(), "a failed remote export must write nothing locally");
+    assert!(output_text(&output.stderr).contains("remote export refused"));
+}
+
+#[test]
+fn session_export_asif_remote_report_is_refused_with_exit_two() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    install_ssh(&remote, "#!/bin/sh\nprintf 'ssh should not run\\n' >&2\nexit 9\n");
+    let id = vowp_protocol::SessionId::new().to_string();
+    let out = env.project_path().join("remote-report.asif.zip");
+    let report = env.project_path().join("remote-report.json");
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "export",
+            &id,
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+            "--out",
+            out.to_str().expect("path"),
+            "--report",
+            report.to_str().expect("path"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output_text(&output.stderr).contains("ssh should not run"));
+    assert!(!out.exists());
+    assert!(!report.exists());
+}
+
+#[test]
+fn session_import_asif_remote_streams_and_relays_the_response() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    let local_id = create(&env);
+    let package = env.project_path().join("remote-import.asif.zip");
+    let (code, _, stderr) = env.run(&[
+        "session",
+        "export",
+        &local_id,
+        "--format",
+        "asif",
+        "--out",
+        package.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "import",
+            package.to_str().expect("path"),
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "remote ASIF import failed: {}",
+        output_text(&output.stderr)
+    );
+    let imported_id = output_text(&output.stdout).trim().to_owned();
+    let remote_store = vowp_store::Store::open(&vowp_store::NodePaths::new(remote.home.path())).expect("remote store");
+    remote_store
+        .require_session(&vowp_protocol::SessionId::parse(&imported_id).expect("id"))
+        .expect("remote session");
+    assert!(
+        env.store()
+            .session(&vowp_protocol::SessionId::parse(&imported_id).expect("id"))
+            .expect("local lookup")
+            .is_none(),
+        "a remote import must not create a local session"
+    );
+
+    let second = create(&env);
+    let second_package = env.project_path().join("remote-stdin.asif.zip");
+    let (code, _, stderr) = env.run(&[
+        "session",
+        "export",
+        &second,
+        "--format",
+        "asif",
+        "--out",
+        second_package.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let bytes = std::fs::read(&second_package).expect("package bytes");
+    let output = run_cli_stdin(
+        &env,
+        &remote,
+        &["session", "import", "-", "--node", "vps", "--format", "asif"],
+        &bytes,
+    );
+    assert!(
+        output.status.success(),
+        "remote stdin import failed: {}",
+        output_text(&output.stderr)
+    );
+    let stdin_id = output_text(&output.stdout).trim().to_owned();
+    remote_store
+        .require_session(&vowp_protocol::SessionId::parse(&stdin_id).expect("id"))
+        .expect("remote stdin session");
+}
+
+#[test]
+fn session_import_asif_remote_failure_creates_no_local_session() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    let local_id = create(&env);
+    let package = env.project_path().join("remote-import-failure.asif.zip");
+    let (code, _, stderr) = env.run(&[
+        "session",
+        "export",
+        &local_id,
+        "--format",
+        "asif",
+        "--out",
+        package.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let local_before = env
+        .store()
+        .list_sessions(&vowp_store::SessionFilter::default())
+        .expect("local sessions")
+        .len();
+    let remote_store = vowp_store::Store::open(&vowp_store::NodePaths::new(remote.home.path())).expect("remote store");
+    let remote_before = remote_store
+        .list_sessions(&vowp_store::SessionFilter::default())
+        .expect("remote sessions")
+        .len();
+    install_ssh(&remote, "#!/bin/sh\nprintf 'remote import refused\\n' >&2\nexit 9\n");
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "import",
+            package.to_str().expect("path"),
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(9));
+    assert!(output_text(&output.stderr).contains("remote import refused"));
+    assert_eq!(
+        env.store()
+            .list_sessions(&vowp_store::SessionFilter::default())
+            .expect("local sessions")
+            .len(),
+        local_before
+    );
+    assert_eq!(
+        remote_store
+            .list_sessions(&vowp_store::SessionFilter::default())
+            .expect("remote sessions")
+            .len(),
+        remote_before
+    );
+}
+
+#[test]
+fn session_import_asif_remote_report_is_refused_with_exit_two() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    install_ssh(&remote, "#!/bin/sh\nprintf 'ssh should not run\\n' >&2\nexit 9\n");
+    let local_id = create(&env);
+    let package = env.project_path().join("remote-import-report.asif.zip");
+    let (code, _, stderr) = env.run(&[
+        "session",
+        "export",
+        &local_id,
+        "--format",
+        "asif",
+        "--out",
+        package.to_str().expect("path"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let report = env.project_path().join("remote-import-report.json");
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "import",
+            package.to_str().expect("path"),
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+            "--report",
+            report.to_str().expect("path"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output_text(&output.stderr).contains("ssh should not run"));
+    assert!(!report.exists());
+}
+
+#[test]
+fn session_import_asif_remote_directory_is_refused() {
+    let env = common::TestEnv::new();
+    let remote = remote_node(&env);
+    install_ssh(&remote, "#!/bin/sh\nprintf 'ssh should not run\\n' >&2\nexit 9\n");
+    let output = run_cli(
+        &env,
+        &remote,
+        &[
+            "session",
+            "import",
+            env.project_path().to_str().expect("path"),
+            "--node",
+            "vps",
+            "--format",
+            "asif",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output_text(&output.stderr).contains("directory"));
+    assert!(!output_text(&output.stderr).contains("ssh should not run"));
 }
 
 /// Runs one CLI command against an explicit home and the shared test project.

@@ -51,8 +51,8 @@ python3 docs/reference/check-reference.py
 | [`vowp session chat`](#vowp-session-chat) | Chat with a session |
 | [`vowp session switch`](#vowp-session-switch) | Switch a session to another executor |
 | [`vowp session capsule`](#vowp-session-capsule) | Write a capsule now |
-| [`vowp session export`](#vowp-session-export) | Export a session bundle |
-| [`vowp session import`](#vowp-session-import) | Import a session bundle |
+| [`vowp session export`](#vowp-session-export) | Export a session bundle or ASIF package |
+| [`vowp session import`](#vowp-session-import) | Import a session bundle or ASIF package |
 | [`vowp session pull`](#vowp-session-pull) | Pull a session from another node |
 | [`vowp session push`](#vowp-session-push) | Push a session to another node |
 | [`vowp session watch`](#vowp-session-watch) | Record interactive Claude Code transcripts |
@@ -144,6 +144,10 @@ python3 docs/reference/check-reference.py
 | [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server |
 | [`vowp agent`](#vowp-agent) | Enroll, run or inspect the Mac-side agent |
 | [`vowp agent enroll`](#vowp-agent-enroll) | Enroll this Mac with a one-time code |
+| [`vowp agent paths`](#vowp-agent-paths) | Add, remove or list the local project path map |
+| [`vowp agent paths add`](#vowp-agent-paths-add) | Add or update one project checkout |
+| [`vowp agent paths rm`](#vowp-agent-paths-rm) | Remove one project from the map |
+| [`vowp agent paths ls`](#vowp-agent-paths-ls) | List the local project path map |
 | [`vowp agent pair`](#vowp-agent-pair) | Redeem a home surface pairing code and store the token |
 | [`vowp agent run`](#vowp-agent-run) | Run the agent client until revoked or superseded |
 | [`vowp agent status`](#vowp-agent-status) | Show the last local agent status |
@@ -710,8 +714,8 @@ Commands:
   chat     Chat with a session
   switch   Switch a session to another executor
   capsule  Write a capsule now
-  export   Export a session bundle
-  import   Import a session bundle
+  export   Export a session bundle or ASIF package
+  import   Import a session bundle or ASIF package
   pull     Pull a session from another node
   push     Push a session to another node
   watch    Record interactive Claude Code transcripts
@@ -869,48 +873,138 @@ Options:
 #### `vowp session export`
 
 ```text
-Export a session bundle
+Export a session bundle or ASIF package
 
 Usage: vowp session export [OPTIONS] <ID>
 
 Arguments:
-  <ID>  Session id or unique prefix
+  <ID>
+          Session id or unique prefix
 
 Options:
-      --json                 Print one machine-readable JSON document on stdout
-  -o, --out <FILE>           Output file (default `./<id>.vowp-bundle.json`)
-      --node <NAME>          Run the command on that node over ssh
-      --tail <N>             Number of tail events to include
-      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
-      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
-      --no-color             Disable colour even when stdout is a terminal
-  -q, --quiet                Suppress non-essential human output
-  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
-  -h, --help                 Print help
+      --format <FORMAT>
+          Interchange format
+
+          Possible values:
+          - bundle: Native `vowp-bundle-v1` JSON. The default for both commands
+          - asif:   ASIF 0.4 (review draft) package. Semantic interchange with declared losses
+          
+          [default: bundle]
+
+      --json
+          Print one machine-readable JSON document on stdout
+
+      --node <NAME>
+          Run the command on that node over ssh
+
+  -o, --out <FILE|->
+          Output file (default `./<id>.vowp-bundle.json`, or `./<id>.asif.zip` for ASIF); `-` writes to stdout
+
+      --project <NAME|PATH>
+          Project name or path; defaults to the nearest ancestor with `vowp.toml`
+
+      --tail <N>
+          Number of tail events to include (bundle only)
+
+      --home <DIR>
+          Node home (default `$VOWP_HOME`, else `~/.vowp`)
+
+      --redact <LITERAL>
+          Replace this exact literal with `<redacted>` (ASIF only, repeatable)
+
+      --no-color
+          Disable colour even when stdout is a terminal
+
+      --redact-file <FILE>
+          Read exact redaction literals from a local file, one per line (ASIF only)
+
+      --keep-host-paths
+          Keep host-path-looking strings in a trusted local export (ASIF only)
+
+  -q, --quiet
+          Suppress non-essential human output
+
+      --report <FILE>
+          Keep the full `vowp-asif-report-v1` document at this file (ASIF only)
+
+  -v, --verbose...
+          Increase log verbosity (`-v`, `-vv`)
+
+      --strict
+          Refuse `Blocking` and `Integrity` ASIF losses (ASIF only)
+
+      --allow-loss
+          Let recoverable ASIF integrity/ambiguity problems become declared losses (ASIF only)
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `vowp session import`
 
 ```text
-Import a session bundle
+Import a session bundle or ASIF package
 
 Usage: vowp session import [OPTIONS] <FILE>
 
 Arguments:
-  <FILE>  Bundle file, or `-` for stdin
+  <FILE>
+          Bundle/package file, document, directory, or `-` for stdin
 
 Options:
-      --json                 Print one machine-readable JSON document on stdout
-      --node <NAME>          Node to import on
-      --executor <EXECUTOR>  Executor for the child session
-      --cwd <DIR>            Working directory
-      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
-      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
-      --same-id              Keep the bundle's session id; refuse when it already exists locally
-      --no-color             Disable colour even when stdout is a terminal
-  -q, --quiet                Suppress non-essential human output
-  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
-  -h, --help                 Print help
+      --format <FORMAT>
+          Interchange format
+
+          Possible values:
+          - bundle: Native `vowp-bundle-v1` JSON. The default for both commands
+          - asif:   ASIF 0.4 (review draft) package. Semantic interchange with declared losses
+          
+          [default: bundle]
+
+      --json
+          Print one machine-readable JSON document on stdout
+
+      --node <NAME>
+          Node to import on
+
+      --executor <EXECUTOR>
+          Executor for the child session (bundle only)
+
+      --project <NAME|PATH>
+          Project name or path; defaults to the nearest ancestor with `vowp.toml`
+
+      --cwd <DIR>
+          Working directory
+
+      --home <DIR>
+          Node home (default `$VOWP_HOME`, else `~/.vowp`)
+
+      --no-color
+          Disable colour even when stdout is a terminal
+
+      --same-id
+          Keep the bundle's session id; refuse when it already exists locally (bundle only)
+
+      --branch <ID>
+          Select one ASIF branch when the document has more than one (ASIF only)
+
+  -q, --quiet
+          Suppress non-essential human output
+
+      --report <FILE>
+          Keep the full `vowp-asif-report-v1` document at this file (ASIF only)
+
+  -v, --verbose...
+          Increase log verbosity (`-v`, `-vv`)
+
+      --strict
+          Refuse `Blocking` and `Integrity` ASIF losses (ASIF only)
+
+      --allow-loss
+          Let recoverable ASIF integrity/ambiguity problems become declared losses (ASIF only)
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `vowp session pull`
@@ -2865,6 +2959,7 @@ Usage: vowp agent [OPTIONS] <COMMAND>
 
 Commands:
   enroll  Enroll this Mac with a one-time code
+  paths   Add, remove or list the local project path map
   pair    Redeem a home surface pairing code and store the token
   run     Run the agent client until revoked or superseded
   status  Show the last local agent status
@@ -2888,9 +2983,93 @@ Enroll this Mac with a one-time code
 Usage: vowp agent enroll [OPTIONS] --target <SSH-TARGET> --code-file <PATH|->
 
 Options:
+      --json                  Print one machine-readable JSON document on stdout
+      --target <SSH-TARGET>   ssh destination of the home
+      --code-file <PATH|->    File holding the one-time code, or `-` for stdin
+      --node <NAME>           Run the command on that node over ssh
+      --project <PATH>        Map a local project checkout; repeat for more projects
+      --home <DIR>            Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --worktree-root <PATH>  Worktree root for every --project; defaults to `<checkout>/.vowp/worktrees`
+      --no-color              Disable colour even when stdout is a terminal
+  -q, --quiet                 Suppress non-essential human output
+  -v, --verbose...            Increase log verbosity (`-v`, `-vv`)
+  -h, --help                  Print help
+```
+
+#### `vowp agent paths`
+
+```text
+Add, remove or list the local project path map
+
+Usage: vowp agent paths [OPTIONS] <COMMAND>
+
+Commands:
+  add  Add or update one project checkout
+  rm   Remove one project from the map
+  ls   List the local project path map
+
+Options:
       --json                 Print one machine-readable JSON document on stdout
-      --target <SSH-TARGET>  ssh destination of the home
-      --code-file <PATH|->   File holding the one-time code, or `-` for stdin
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+##### `vowp agent paths add`
+
+```text
+Add or update one project checkout
+
+Usage: vowp agent paths add [OPTIONS] --project <PATH>
+
+Options:
+      --json                  Print one machine-readable JSON document on stdout
+      --project <PATH>        Local project checkout to map
+      --name <NAME>           Project name override; defaults to `[project].name` in its `vowp.toml`
+      --node <NAME>           Run the command on that node over ssh
+      --worktree-root <PATH>  Worktree root; defaults to `<checkout>/.vowp/worktrees`
+      --allow <REL>           Allowed relative path below the checkout; repeat for more
+      --home <DIR>            Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color              Disable colour even when stdout is a terminal
+  -q, --quiet                 Suppress non-essential human output
+  -v, --verbose...            Increase log verbosity (`-v`, `-vv`)
+  -h, --help                  Print help
+```
+
+##### `vowp agent paths rm`
+
+```text
+Remove one project from the map
+
+Usage: vowp agent paths rm [OPTIONS] <PROJECT>
+
+Arguments:
+  <PROJECT>  Project name slug to remove
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+##### `vowp agent paths ls`
+
+```text
+List the local project path map
+
+Usage: vowp agent paths ls [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)

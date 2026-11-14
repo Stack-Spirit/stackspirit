@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 use crate::cmd::capacity::CapacityArgs;
 use crate::cmd::control::ControlArgs;
@@ -642,9 +642,9 @@ pub enum SessionCommand {
     Switch(SessionSwitchArgs),
     /// Write a capsule now.
     Capsule(SessionCapsuleArgs),
-    /// Export a session bundle.
+    /// Export a session bundle or ASIF package.
     Export(SessionExportArgs),
-    /// Import a session bundle.
+    /// Import a session bundle or ASIF package.
     Import(SessionImportArgs),
     /// Pull a session from another node.
     Pull(SessionPullArgs),
@@ -856,36 +856,85 @@ pub struct SessionCapsuleArgs {
     pub print: bool,
 }
 
+/// Session interchange format for `vowp session export` and `vowp session import`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SessionFormat {
+    /// Native `vowp-bundle-v1` JSON. The default for both commands.
+    Bundle,
+    /// ASIF 0.4 (review draft) package. Semantic interchange with declared losses.
+    Asif,
+}
+
 /// Arguments for `vowp session export`.
 #[derive(Debug, Clone, Args)]
 pub struct SessionExportArgs {
     /// Session id or unique prefix.
     pub id: String,
-    /// Output file (default `./<id>.vowp-bundle.json`).
-    #[arg(long, short = 'o', value_name = "FILE")]
+    /// Interchange format.
+    #[arg(long, value_enum, default_value = "bundle", value_name = "FORMAT")]
+    pub format: SessionFormat,
+    /// Output file (default `./<id>.vowp-bundle.json`, or `./<id>.asif.zip` for ASIF);
+    /// `-` writes to stdout.
+    #[arg(long, short = 'o', value_name = "FILE|-")]
     pub out: Option<PathBuf>,
-    /// Number of tail events to include.
+    /// Number of tail events to include (bundle only).
     #[arg(long, value_name = "N")]
     pub tail: Option<usize>,
+    /// Replace this exact literal with `<redacted>` (ASIF only, repeatable).
+    #[arg(long, value_name = "LITERAL")]
+    pub redact: Vec<String>,
+    /// Read exact redaction literals from a local file, one per line (ASIF only).
+    #[arg(long, value_name = "FILE")]
+    pub redact_file: Vec<PathBuf>,
+    /// Keep host-path-looking strings in a trusted local export (ASIF only).
+    #[arg(long)]
+    pub keep_host_paths: bool,
+    /// Keep the full `vowp-asif-report-v1` document at this file (ASIF only).
+    #[arg(long, value_name = "FILE")]
+    pub report: Option<PathBuf>,
+    /// Refuse `Blocking` and `Integrity` ASIF losses (ASIF only).
+    #[arg(long, conflicts_with = "allow_loss")]
+    pub strict: bool,
+    /// Let recoverable ASIF integrity/ambiguity problems become declared losses (ASIF only).
+    #[arg(long)]
+    pub allow_loss: bool,
+    /// Hidden: write one stream envelope line and the package bytes (ASIF only).
+    #[arg(long, hide = true)]
+    pub asif_stream: bool,
 }
 
 /// Arguments for `vowp session import`.
 #[derive(Debug, Clone, Args)]
 pub struct SessionImportArgs {
-    /// Bundle file, or `-` for stdin.
+    /// Bundle/package file, document, directory, or `-` for stdin.
     pub file: String,
+    /// Interchange format.
+    #[arg(long, value_enum, default_value = "bundle", value_name = "FORMAT")]
+    pub format: SessionFormat,
     /// Node to import on.
     #[arg(long, value_name = "NAME")]
     pub node: Option<String>,
-    /// Executor for the child session.
+    /// Executor for the child session (bundle only).
     #[arg(long, value_name = "EXECUTOR")]
     pub executor: Option<String>,
     /// Working directory.
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
-    /// Keep the bundle's session id; refuse when it already exists locally.
+    /// Keep the bundle's session id; refuse when it already exists locally (bundle only).
     #[arg(long)]
     pub same_id: bool,
+    /// Select one ASIF branch when the document has more than one (ASIF only).
+    #[arg(long, value_name = "ID")]
+    pub branch: Option<String>,
+    /// Keep the full `vowp-asif-report-v1` document at this file (ASIF only).
+    #[arg(long, value_name = "FILE")]
+    pub report: Option<PathBuf>,
+    /// Refuse `Blocking` and `Integrity` ASIF losses (ASIF only).
+    #[arg(long, conflicts_with = "allow_loss")]
+    pub strict: bool,
+    /// Let recoverable ASIF integrity/ambiguity problems become declared losses (ASIF only).
+    #[arg(long)]
+    pub allow_loss: bool,
 }
 
 /// Arguments for `vowp session pull`.

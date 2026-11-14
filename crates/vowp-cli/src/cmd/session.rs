@@ -32,9 +32,9 @@ use vowp_store::session_log::{
 use vowp_store::{NodePaths, SessionFilter, Store};
 
 use crate::cli::{
-    ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionDirExportArgs, SessionExportArgs, SessionImportArgs,
-    SessionLsArgs, SessionNewArgs, SessionPullArgs, SessionPushArgs, SessionShowArgs, SessionSwitchArgs,
-    SessionTailArgs, SessionWatchArgs,
+    ChatArgs, Global, SessionCapsuleArgs, SessionCommand, SessionDirExportArgs, SessionExportArgs, SessionFormat,
+    SessionImportArgs, SessionLsArgs, SessionNewArgs, SessionPullArgs, SessionPushArgs, SessionShowArgs,
+    SessionSwitchArgs, SessionTailArgs, SessionWatchArgs,
 };
 use crate::node_ctx::NodeRole;
 use crate::output::{Table, local_time_at, print_json};
@@ -50,8 +50,14 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SessionCommand) -> Resul
         SessionCommand::Chat(args) => chat(ctx, io, args),
         SessionCommand::Switch(args) => switch(ctx, io, args),
         SessionCommand::Capsule(args) => capsule(ctx, io, args),
-        SessionCommand::Export(args) => export(ctx, io, args),
-        SessionCommand::Import(args) => import(ctx, io, args),
+        SessionCommand::Export(args) => match args.format {
+            SessionFormat::Bundle => export(ctx, io, args),
+            SessionFormat::Asif => crate::cmd::session_asif::export(ctx, io, args),
+        },
+        SessionCommand::Import(args) => match args.format {
+            SessionFormat::Bundle => import(ctx, io, args),
+            SessionFormat::Asif => crate::cmd::session_asif::import(ctx, io, args),
+        },
         SessionCommand::Pull(args) => pull(ctx, io, args),
         SessionCommand::Push(args) => push(ctx, io, args),
         SessionCommand::DirExport(args) => dir_export(ctx, io, args),
@@ -146,8 +152,14 @@ pub fn maybe_run_remote(
     let code = match command {
         SessionCommand::New(args) => remote_new(&ctx, io, target, args)?,
         SessionCommand::Switch(args) => remote_switch(&ctx, io, target, &name, args)?,
-        SessionCommand::Export(args) => remote_export(&ctx, io, target, args)?,
-        SessionCommand::Import(args) => remote_import(&ctx, io, target, args)?,
+        SessionCommand::Export(args) => match args.format {
+            SessionFormat::Bundle => remote_export(&ctx, io, target, args)?,
+            SessionFormat::Asif => crate::cmd::session_asif::remote_export(&ctx, io, target, args)?,
+        },
+        SessionCommand::Import(args) => match args.format {
+            SessionFormat::Bundle => remote_import(&ctx, io, target, args)?,
+            SessionFormat::Asif => crate::cmd::session_asif::remote_import(&ctx, io, target, args)?,
+        },
         _ => return Ok(None),
     };
     Ok(Some(code))
@@ -160,8 +172,43 @@ struct RemoteRun {
     stderr: String,
 }
 
-/// Runs `ssh … vowp <args>` with optional stdin and captured output.
+/// One captured remote invocation whose stdout may be binary.
+pub(super) struct RemoteBytesRun {
+    /// Exit code returned by the remote command.
+    pub code: i32,
+    /// Exact remote stdout bytes.
+    pub stdout: Vec<u8>,
+    /// Remote stderr, decoded lossily as UTF-8.
+    pub stderr: String,
+}
+
+/// Runs `ssh … vowp <args>` with optional text stdin and captured output.
 fn run_remote_capture(target: &str, args: &[String], stdin: Option<&str>) -> Result<RemoteRun, CliError> {
+    let run = run_remote_capture_bytes(target, args, stdin.map(str::as_bytes))?;
+    Ok(RemoteRun {
+        code: run.code,
+        stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
+        stderr: run.stderr,
+    })
+}
+
+/// Runs `ssh … vowp <args>` with optional binary stdin and captured binary output.
+pub(super) fn run_remote_capture_bytes(
+    target: &str,
+    args: &[String],
+    stdin: Option<&[u8]>,
+) -> Result<RemoteBytesRun, CliError> {
+    let reader: Option<Box<dyn Read + Send + '_>> =
+        stdin.map(|bytes| Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read + Send + '_>);
+    run_remote_capture_stream(target, args, reader)
+}
+
+/// Runs `ssh … vowp <args>`, streaming an optional reader into the remote stdin.
+pub(super) fn run_remote_capture_stream(
+    target: &str,
+    args: &[String],
+    stdin: Option<Box<dyn Read + Send + '_>>,
+) -> Result<RemoteBytesRun, CliError> {
     let argv = crate::remote::build_ssh_argv(target, args, false);
     let (program, rest) = argv
         .split_first()
@@ -175,16 +222,24 @@ fn run_remote_capture(target: &str, args: &[String], stdin: Option<&str>) -> Res
     let mut child = command
         .spawn()
         .map_err(|error| CliError::Remote(format!("ssh {target}: {error}")))?;
-    if let Some(text) = stdin
+    if let Some(mut reader) = stdin
         && let Some(mut pipe) = child.stdin.take()
     {
         // A remote command that rejects the document before reading all of it closes
         // stdin early. Its exit code and stderr are the real result, so a broken pipe
         // here must not mask them with a local I/O error.
-        match pipe.write_all(text.as_bytes()) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Err(error) => return Err(error.into()),
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => return Err(error.into()),
+            };
+            match pipe.write_all(&buffer[..read]) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     let output = child
@@ -197,15 +252,15 @@ fn run_remote_capture(target: &str, args: &[String], stdin: Option<&str>) -> Res
     if code == 255 {
         return Err(CliError::Remote(format!("ssh {target} failed with exit 255")));
     }
-    Ok(RemoteRun {
+    Ok(RemoteBytesRun {
         code,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
 }
 
 /// Returns the global arguments a remote session command needs to select the project.
-fn remote_prefix(ctx: &Ctx) -> Vec<String> {
+pub(super) fn remote_prefix(ctx: &Ctx) -> Vec<String> {
     vec!["--project".to_owned(), ctx.project().to_string()]
 }
 
@@ -1093,7 +1148,7 @@ fn private_temp_dir() -> Result<PathBuf, CliError> {
 }
 
 /// Creates a fresh 0700 directory named `<prefix>-<pid>-<millis>-<counter>` under `base`.
-fn private_dir_in(base: &Path, prefix: &str) -> Result<PathBuf, CliError> {
+pub(super) fn private_dir_in(base: &Path, prefix: &str) -> Result<PathBuf, CliError> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     for _ in 0..32 {
         let name = format!(
@@ -1854,8 +1909,34 @@ struct ExportOutput {
     events: usize,
 }
 
+/// Rejects ASIF-only flags on a bundle export.
+fn validate_bundle_export_flags(args: &SessionExportArgs) -> Result<(), CliError> {
+    let invalid = if !args.redact.is_empty() {
+        Some("--redact")
+    } else if !args.redact_file.is_empty() {
+        Some("--redact-file")
+    } else if args.keep_host_paths {
+        Some("--keep-host-paths")
+    } else if args.report.is_some() {
+        Some("--report")
+    } else if args.strict {
+        Some("--strict")
+    } else if args.allow_loss {
+        Some("--allow-loss")
+    } else if args.asif_stream {
+        Some("--asif-stream")
+    } else {
+        None
+    };
+    match invalid {
+        Some(flag) => Err(CliError::Invalid(format!("{flag} is only valid with --format asif"))),
+        None => Ok(()),
+    }
+}
+
 /// Exports a session bundle.
 fn export(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionExportArgs) -> Result<i32, CliError> {
+    validate_bundle_export_flags(args)?;
     let store = ctx.store()?;
     let session = resolve_session(&store, &args.id)?;
     let bundle = bundle::export(ctx.deps(), &session.id, args.tail.unwrap_or(0))?;
@@ -1888,8 +1969,28 @@ fn export(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionExportArgs) -> Result
     Ok(0)
 }
 
+/// Rejects ASIF-only flags on a bundle import.
+fn validate_bundle_import_flags(args: &SessionImportArgs) -> Result<(), CliError> {
+    let invalid = if args.branch.is_some() {
+        Some("--branch")
+    } else if args.report.is_some() {
+        Some("--report")
+    } else if args.strict {
+        Some("--strict")
+    } else if args.allow_loss {
+        Some("--allow-loss")
+    } else {
+        None
+    };
+    match invalid {
+        Some(flag) => Err(CliError::Invalid(format!("{flag} is only valid with --format asif"))),
+        None => Ok(()),
+    }
+}
+
 /// Imports a bundle as a child session.
 fn import(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionImportArgs) -> Result<i32, CliError> {
+    validate_bundle_import_flags(args)?;
     if let Some(node) = &args.node {
         let name = vowp_protocol::NodeName::parse(node)?;
         let store = ctx.store()?;
@@ -2405,8 +2506,8 @@ fn capsule_path(ctx: &Ctx, session: &SessionId, capsule_id: &vowp_protocol::Caps
     })
 }
 
-/// Resolves a session id or unique prefix.
-fn resolve_session(store: &Store, input: &str) -> Result<Session, CliError> {
+/// Resolves a session by exact id or unique prefix.
+pub(super) fn resolve_session(store: &Store, input: &str) -> Result<Session, CliError> {
     if let Ok(id) = SessionId::parse(input)
         && let Some(session) = store.session(&id)?
     {
