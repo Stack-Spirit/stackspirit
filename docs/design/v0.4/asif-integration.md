@@ -163,7 +163,7 @@ ASIF import rules:
    a valid VOWP project slug is invalid input (exit 2), not a partial session. A session
    imported from another project may consequently not appear in the served project's
    `session ls`; it is still reachable by id. Binding it to the local project instead is an
-   owner decision (§10).
+   owner decision (§9).
 7. **Event identity is global.** ASIF import preserves VOWP-origin event IDs. Importing the
    same package twice into one home therefore conflicts on the unique event id, even though
    the target session id is new: exit 4, the first session is untouched, and the second
