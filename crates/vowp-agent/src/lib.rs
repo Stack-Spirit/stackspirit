@@ -12,6 +12,7 @@ pub mod chat;
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod executor;
 pub mod key;
 pub mod spool;
 pub mod status;
@@ -31,6 +32,10 @@ pub use config::{
     SURFACE_TOKEN_FILE, SURFACES_DIR, TransportConfig, paired_token_for_session,
 };
 pub use error::AgentError;
+pub use executor::{
+    AcceptedRun, EVENT_WINDOW, HandlerReject, PushStatus, QUARANTINE_FILE, RunHandler, RunSink, RunSinkError,
+    RunSummary,
+};
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
 pub use spool::{ACKED_FILE, DEFAULT_SPOOL_CAP_BYTES, EVENTS_FILE, SPOOL_DIR, Spool, SpoolAppend, spool_dir};
 pub use status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};

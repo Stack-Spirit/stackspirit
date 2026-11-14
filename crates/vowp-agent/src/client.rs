@@ -16,6 +16,7 @@ use vowp_protocol::{
 
 use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surface_binding};
 use crate::error::AgentError;
+use crate::executor::{RunDriver, RunHandler};
 use crate::key::NodeKey;
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 use crate::transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
@@ -573,7 +574,29 @@ impl AgentClient {
     }
 
     /// Runs until the home revokes the node or another connection takes over.
-    pub fn run(&mut self, _options: &RunOptions) -> Result<RunOutcome, AgentError> {
+    ///
+    /// This Phase 0 entry point has no executor behind it: an `AssignRun` frame is refused
+    /// with [`RunRejectReason::Other`](vowp_protocol::RunRejectReason::Other) and never
+    /// starts a handler. Use [`AgentClient::run_with_handler`] to run assignments.
+    pub fn run(&mut self, options: &RunOptions) -> Result<RunOutcome, AgentError> {
+        self.run_with(RunDriver::rejecting(), options)
+    }
+
+    /// Runs the connection loop with an injected [`RunHandler`].
+    ///
+    /// `AssignRun` frames are validated and accepted, the handler runs off the frame loop,
+    /// every line is spooled before it is sent, and a reconnect replays the first
+    /// unacknowledged line. The lease token stays in memory and is never handed to the
+    /// handler.
+    pub fn run_with_handler(
+        &mut self,
+        options: &RunOptions,
+        handler: Arc<dyn RunHandler>,
+    ) -> Result<RunOutcome, AgentError> {
+        self.run_with(RunDriver::new(handler), options)
+    }
+
+    fn run_with(&mut self, mut driver: RunDriver, _options: &RunOptions) -> Result<RunOutcome, AgentError> {
         if self.config.is_none() {
             return Err(AgentError::NotEnrolled("agent.json is missing".to_owned()));
         }
@@ -617,7 +640,11 @@ impl AgentClient {
             };
 
             if let Some(connected_at) = connected_at {
-                match self.serve() {
+                let served = match driver.resume(self) {
+                    Ok(()) => self.serve(&mut driver),
+                    Err(error) => serve_outcome_from_error(error),
+                };
+                match served {
                     ServeOutcome::Stopped(outcome) => return Ok(outcome),
                     ServeOutcome::Failed(error) => {
                         self.status.connection = ConnectionState::Stopped;
@@ -626,6 +653,7 @@ impl AgentClient {
                         return Err(error);
                     }
                     ServeOutcome::Disconnected(message) => {
+                        driver.note_disconnect(self);
                         self.status.connection = ConnectionState::Reconnecting;
                         self.status.last_error = Some(message);
                         self.save_status()?;
@@ -673,25 +701,38 @@ impl AgentClient {
         self.clock.sleep(duration);
     }
 
-    fn serve(&mut self) -> ServeOutcome {
+    /// Returns the injected clock's current instant.
+    pub(crate) fn clock_now(&self) -> Timestamp {
+        self.clock.now()
+    }
+
+    fn serve(&mut self, driver: &mut RunDriver) -> ServeOutcome {
         if let Err(error) = self.heartbeat() {
             return disconnected_or_failed(error);
         }
         loop {
+            if let Err(error) = driver.pump(self) {
+                return serve_outcome_from_error(error);
+            }
             let interval = self
                 .connection
                 .as_ref()
                 .map(|connection| connection.heartbeat_interval)
                 .unwrap_or(Duration::from_secs(HEARTBEAT_SECS));
             let last = self.status.last_heartbeat.unwrap_or_else(|| self.clock.now());
-            let remaining = interval.saturating_sub(self.clock.now().since(last));
+            let mut remaining = interval.saturating_sub(self.clock.now().since(last));
+            if driver.has_open_runs() {
+                remaining = remaining.min(crate::executor::RUN_POLL);
+            }
             let read = match self.recv_frame(Some(remaining)) {
                 Ok(read) => read,
                 Err(error) => return disconnected_or_failed(error),
             };
             match read {
                 FrameRead::Timeout => {
-                    if let Err(error) = self.heartbeat() {
+                    if self.clock.now().since(last) >= interval
+                        && let Err(error) = self.heartbeat()
+                    {
                         return disconnected_or_failed(error);
                     }
                 }
@@ -702,6 +743,29 @@ impl AgentClient {
                             return disconnected_or_failed(error);
                         }
                     }
+                    AgentFrame::AssignRun {
+                        assignment,
+                        lease_token,
+                        lease_expires_at,
+                    } => {
+                        if let Err(error) = driver.handle_assign(self, assignment, lease_token, lease_expires_at) {
+                            return disconnected_or_failed(error);
+                        }
+                    }
+                    AgentFrame::CancelRun { run_id, epoch, reason } => {
+                        driver.handle_cancel(self, &run_id, epoch, &reason)
+                    }
+                    AgentFrame::RunLost { run_id, reason } => driver.handle_run_lost(self, &run_id, &reason),
+                    AgentFrame::Cleanup { run_id, job, .. } => driver.handle_cleanup(self, &run_id, &job),
+                    AgentFrame::Credit { run_id, count } => driver.handle_credit(&run_id, count),
+                    AgentFrame::IngestAck {
+                        run_id,
+                        event_id,
+                        seq,
+                        duplicate,
+                        lease_revoked,
+                        error,
+                    } => driver.handle_ack(&run_id, event_id.as_ref(), seq, duplicate, lease_revoked, error),
                     AgentFrame::Revoked { reason } => {
                         self.status.connection = ConnectionState::Revoked;
                         self.status.last_error = Some(reason.clone());
@@ -836,6 +900,15 @@ fn disconnected_or_failed(error: AgentError) -> ServeOutcome {
         ServeOutcome::Failed(error)
     } else {
         ServeOutcome::Disconnected(error.to_string())
+    }
+}
+
+/// Maps a run-loop error to the connection outcome; a revoke or takeover ends the loop.
+fn serve_outcome_from_error(error: AgentError) -> ServeOutcome {
+    match error {
+        AgentError::Revoked(reason) => ServeOutcome::Stopped(RunOutcome::Revoked { reason }),
+        AgentError::Superseded(connection_id) => ServeOutcome::Stopped(RunOutcome::Superseded { connection_id }),
+        error => disconnected_or_failed(error),
     }
 }
 
