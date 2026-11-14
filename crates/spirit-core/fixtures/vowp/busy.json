@@ -1,0 +1,376 @@
+{
+  "snapshot": {
+    "schema": "vowp-snapshot/1",
+    "version": 1,
+    "sequence": 4412,
+    "generated_at": "2026-11-14T12:00:00.000Z",
+    "home": "vps",
+    "supervisor": {
+      "running": true,
+      "pid": 4812,
+      "started_at": "2026-11-13T21:04:10.000Z",
+      "last_tick": "2026-11-14T11:59:58.000Z",
+      "tick_secs": 60,
+      "paused": false,
+      "fail_streak": 0,
+      "version": "0.4.0"
+    },
+    "projects": [
+      {
+        "name": "vowp",
+        "path": "/srv/vowp",
+        "state": "active",
+        "weight": 50,
+        "paused_reason": "",
+        "jobs_by_state": {
+          "ready": 12,
+          "running": 8,
+          "parked": 3,
+          "done": 5
+        },
+        "running": [
+          {
+            "job": "busy-worker-01",
+            "kind": "build",
+            "role": "worker",
+            "executor": "opencode:deepseek/deepseek-flash#max",
+            "node": "vps",
+            "age_secs": 60,
+            "last_event_age_secs": 0,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AB"
+          },
+          {
+            "job": "busy-worker-02",
+            "kind": "build",
+            "role": "worker",
+            "executor": "claude-code:model-a@medium",
+            "node": "vps",
+            "age_secs": 107,
+            "last_event_age_secs": 9,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "busy-worker-03",
+            "kind": "build",
+            "role": "worker",
+            "executor": "cli:codex",
+            "node": "vps",
+            "age_secs": 154,
+            "last_event_age_secs": 18,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "busy-worker-04",
+            "kind": "build",
+            "role": "worker",
+            "executor": null,
+            "node": "vps",
+            "age_secs": 201,
+            "last_event_age_secs": 27,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "busy-worker-05",
+            "kind": "build",
+            "role": "worker",
+            "executor": "opencode:deepseek/deepseek-flash#max",
+            "node": "vps",
+            "age_secs": 248,
+            "last_event_age_secs": 36,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "busy-worker-06",
+            "kind": "build",
+            "role": "worker",
+            "executor": "claude-code:model-a@medium",
+            "node": "vps",
+            "age_secs": 295,
+            "last_event_age_secs": 45,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "busy-worker-07",
+            "kind": "build",
+            "role": "worker",
+            "executor": "cli:codex",
+            "node": "vps",
+            "age_secs": 342,
+            "last_event_age_secs": 54,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "busy-worker-08",
+            "kind": "build",
+            "role": "worker",
+            "executor": null,
+            "node": "vps",
+            "age_secs": 389,
+            "last_event_age_secs": 63,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          }
+        ],
+        "blocked": [
+          {
+            "job": "busy-blocked-01",
+            "state": "parked",
+            "reason": "provider",
+            "detail": "Provider quota exhausted.",
+            "since": "2026-11-14T11:42:00.000Z"
+          },
+          {
+            "job": "busy-blocked-02",
+            "state": "parked",
+            "reason": "provider",
+            "detail": "Provider quota exhausted.",
+            "since": "2026-11-14T11:42:00.000Z"
+          },
+          {
+            "job": "busy-blocked-03",
+            "state": "parked",
+            "reason": "provider",
+            "detail": "Provider quota exhausted.",
+            "since": "2026-11-14T11:42:00.000Z"
+          }
+        ],
+        "queue": [
+          {
+            "job": "busy-queue-01",
+            "title": "Queued job 1",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 120,
+            "waiting_reason": "provider limit"
+          },
+          {
+            "job": "busy-queue-02",
+            "title": "Queued job 2",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 150,
+            "waiting_reason": "provider limit"
+          },
+          {
+            "job": "busy-queue-03",
+            "title": "Queued job 3",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 180,
+            "waiting_reason": "provider limit"
+          },
+          {
+            "job": "busy-queue-04",
+            "title": "Queued job 4",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 210,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-05",
+            "title": "Queued job 5",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 240,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-06",
+            "title": "Queued job 6",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 270,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-07",
+            "title": "Queued job 7",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 300,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-08",
+            "title": "Queued job 8",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 330,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-09",
+            "title": "Queued job 9",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 360,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-10",
+            "title": "Queued job 10",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 390,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-11",
+            "title": "Queued job 11",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 420,
+            "waiting_reason": null
+          },
+          {
+            "job": "busy-queue-12",
+            "title": "Queued job 12",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 450,
+            "waiting_reason": null
+          }
+        ],
+        "last_merge": null,
+        "gate_failures": [
+          {
+            "job": "busy-worker-01",
+            "gate": "secret_scan",
+            "at": "2026-11-14T11:20:00.000Z",
+            "evidence": "example evidence line, redacted"
+          }
+        ],
+        "cost_today_usd": 1.37
+      }
+    ],
+    "capacity": {
+      "measured": {
+        "at": "2026-11-14T11:59:45.000Z",
+        "interval_secs": 15,
+        "mem_total_bytes": 16777216000,
+        "mem_available_bytes": 4000000000,
+        "swap_used_bytes": 0,
+        "load1": 7.8,
+        "load5": 1.8,
+        "load15": 1.6,
+        "cpu_count": 8,
+        "cpu_quota_cores": null,
+        "disk_free_home_bytes": 45206814720,
+        "disk_free_worktrees_bytes": 41567838208,
+        "pressure_cpu_avg10": 22.0,
+        "pressure_mem_avg10": 1.1,
+        "pressure_io_avg10": 0.8,
+        "source": "proc"
+      },
+      "running": {
+        "runs": 8,
+        "ram_p90_bytes": 1881116006,
+        "cpu_p90_cores": 6.4
+      },
+      "target": {
+        "mode": "fixed",
+        "target_workers": 8,
+        "advised_workers": 8,
+        "is_override": false,
+        "set_by": "owner",
+        "set_at": "2026-11-14T09:30:00.000Z",
+        "reason": "steady state"
+      },
+      "advised_target": 8,
+      "brake": {
+        "active": false,
+        "reasons": [],
+        "since": null
+      },
+      "reserve_ram_bytes": 2147483648,
+      "min_disk_bytes": 5368709120
+    },
+    "limits": [
+      {
+        "provider": "deepseek",
+        "harness": "opencode",
+        "kind": "quota",
+        "resets_at": "2026-11-14T15:00:00.000Z",
+        "detail": "quota resets at 15:00",
+        "since": "2026-11-14T11:10:00.000Z",
+        "last_probe_at": null,
+        "probe_fail_streak": 0,
+        "concurrency_cap": null,
+        "cap_until": null
+      }
+    ],
+    "inbox": [
+      {
+        "id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC",
+        "project": "vowp",
+        "job_id": "ss-8-blocked-review",
+        "kind": "question",
+        "title": "Choose the included model set",
+        "created_at": "2026-11-14T11:42:00.000Z",
+        "age_secs": 1080
+      }
+    ],
+    "sessions": [
+      {
+        "id": "01JCF5WQ8ZK3M2V7N4P6R8T0AB",
+        "project": "vowp",
+        "job_id": "ss-2-desktop-shell",
+        "role": "worker",
+        "title": "Desktop shell and SpiritBridge",
+        "state": "running",
+        "executor": "opencode:deepseek/deepseek-flash#max",
+        "node": "vps",
+        "active_surface": {
+          "surface_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AG",
+          "kind": "opencode",
+          "holder": "vps opencode",
+          "node": "vps",
+          "acquired_at": "2026-11-14T11:30:00.000Z",
+          "heartbeat_at": "2026-11-14T11:59:55.000Z"
+        },
+        "last_event_at": "2026-11-14T11:59:57.000Z"
+      }
+    ],
+    "orchestrators": [
+      {
+        "name": "vowp-main",
+        "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AE",
+        "project": "vowp",
+        "app": "opencode",
+        "state": "running",
+        "join": {
+          "desktop": "vowp orchestrator join vowp-main --surface desktop",
+          "phone": "Open the VOWP board and join vowp-main",
+          "chat": "vowp chat --session 01JCF5WQ8ZK3M2V7N4P6R8T0AE"
+        }
+      }
+    ]
+  },
+  "source": "local",
+  "fetched_at": "2026-11-14T12:00:04.812Z",
+  "stale": false
+}

@@ -1,0 +1,168 @@
+{
+  "snapshot": {
+    "schema": "vowp-snapshot/1",
+    "version": 1,
+    "sequence": 4412,
+    "generated_at": "2026-11-14T12:00:00.000Z",
+    "home": "vps",
+    "supervisor": {
+      "running": true,
+      "pid": 4812,
+      "started_at": "2026-11-13T21:04:10.000Z",
+      "last_tick": "2026-11-14T11:59:58.000Z",
+      "tick_secs": 60,
+      "paused": false,
+      "fail_streak": 0,
+      "version": "0.4.0"
+    },
+    "projects": [
+      {
+        "name": "vowp",
+        "path": "/srv/vowp",
+        "state": "active",
+        "weight": 50,
+        "paused_reason": "",
+        "jobs_by_state": {
+          "ready": 3,
+          "running": 1,
+          "parked": 1,
+          "done": 8
+        },
+        "running": [
+          {
+            "job": "memory-job-01",
+            "kind": "build",
+            "role": "worker",
+            "executor": "opencode:deepseek/deepseek-flash#max",
+            "node": "vps",
+            "age_secs": 220,
+            "last_event_age_secs": 3,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AB"
+          }
+        ],
+        "blocked": [
+          {
+            "job": "memory-blocked-01",
+            "state": "parked",
+            "reason": "memory",
+            "detail": "Waiting for the owner to choose.",
+            "since": "2026-11-14T11:42:00.000Z"
+          }
+        ],
+        "queue": [
+          {
+            "job": "memory-queue-01",
+            "title": "Memory waiting 1",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 300,
+            "waiting_reason": "RAM short"
+          },
+          {
+            "job": "memory-queue-02",
+            "title": "Memory waiting 2",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 301,
+            "waiting_reason": "RAM short"
+          }
+        ],
+        "last_merge": null,
+        "gate_failures": [],
+        "cost_today_usd": 1.37
+      }
+    ],
+    "capacity": {
+      "measured": {
+        "at": "2026-11-14T11:59:45.000Z",
+        "interval_secs": 15,
+        "mem_total_bytes": 16777216000,
+        "mem_available_bytes": 1073741824,
+        "swap_used_bytes": 536870912,
+        "load1": 3.2,
+        "load5": 1.8,
+        "load15": 1.6,
+        "cpu_count": 8,
+        "cpu_quota_cores": null,
+        "disk_free_home_bytes": 45206814720,
+        "disk_free_worktrees_bytes": 41567838208,
+        "pressure_cpu_avg10": 4.2,
+        "pressure_mem_avg10": 38.0,
+        "pressure_io_avg10": 0.8,
+        "source": "proc"
+      },
+      "running": {
+        "runs": 1,
+        "ram_p90_bytes": 1181116006,
+        "cpu_p90_cores": 2.4
+      },
+      "target": {
+        "mode": "fixed",
+        "target_workers": 8,
+        "advised_workers": 4,
+        "is_override": false,
+        "set_by": "owner",
+        "set_at": "2026-11-14T09:30:00.000Z",
+        "reason": "steady state"
+      },
+      "advised_target": 4,
+      "brake": {
+        "active": true,
+        "reasons": [
+          {
+            "code": "memory_pressure",
+            "detail": "Memory pressure stayed above the safe threshold."
+          },
+          {
+            "code": "swap_growth",
+            "detail": "Swap use grew quickly."
+          }
+        ],
+        "since": "2026-11-14T11:50:00.000Z"
+      },
+      "reserve_ram_bytes": 2147483648,
+      "min_disk_bytes": 5368709120
+    },
+    "limits": [],
+    "inbox": [
+      {
+        "id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC",
+        "project": "vowp",
+        "job_id": "ss-8-blocked-review",
+        "kind": "question",
+        "title": "Choose the included model set",
+        "created_at": "2026-11-14T11:42:00.000Z",
+        "age_secs": 1080
+      }
+    ],
+    "sessions": [
+      {
+        "id": "01JCF5WQ8ZK3M2V7N4P6R8T0AB",
+        "project": "vowp",
+        "job_id": "ss-2-desktop-shell",
+        "role": "worker",
+        "title": "Desktop shell and SpiritBridge",
+        "state": "running",
+        "executor": "opencode:deepseek/deepseek-flash#max",
+        "node": "vps",
+        "active_surface": {
+          "surface_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AG",
+          "kind": "opencode",
+          "holder": "vps opencode",
+          "node": "vps",
+          "acquired_at": "2026-11-14T11:30:00.000Z",
+          "heartbeat_at": "2026-11-14T11:59:55.000Z"
+        },
+        "last_event_at": "2026-11-14T11:59:57.000Z"
+      }
+    ],
+    "orchestrators": []
+  },
+  "source": "local",
+  "fetched_at": "2026-11-14T12:00:04.812Z",
+  "stale": false
+}

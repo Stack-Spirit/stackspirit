@@ -1,0 +1,24 @@
+[
+  {
+    "job": "ss-3-fleet-canvas",
+    "title": "Build the visual fleet canvas",
+    "kind": "build",
+    "role": "worker",
+    "priority": 50,
+    "state": "ready",
+    "age_secs": 420,
+    "waiting_reason": "RAM 1.2 GB short",
+    "project": "vowp"
+  },
+  {
+    "job": "ss-4-engine-onboarding",
+    "title": "StackSpirit Engine onboarding",
+    "kind": "build",
+    "role": "worker",
+    "priority": 50,
+    "state": "pending",
+    "age_secs": 60,
+    "waiting_reason": null,
+    "project": "vowp"
+  }
+]

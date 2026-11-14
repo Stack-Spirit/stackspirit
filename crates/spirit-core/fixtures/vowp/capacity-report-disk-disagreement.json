@@ -1,0 +1,110 @@
+{
+  "generated_at": "2026-11-14T12:00:00.000Z",
+  "host": {
+    "at": "2026-11-14T11:59:45.000Z",
+    "interval_secs": 15,
+    "mem_total_bytes": 16777216000,
+    "mem_available_bytes": 13314392064,
+    "swap_used_bytes": 0,
+    "load1": 2.1,
+    "load5": 1.8,
+    "load15": 1.6,
+    "cpu_count": 8,
+    "cpu_quota_cores": null,
+    "disk_free_home_bytes": 32212254720,
+    "disk_free_worktrees_bytes": 41567838208,
+    "pressure_cpu_avg10": 4.2,
+    "pressure_mem_avg10": 1.1,
+    "pressure_io_avg10": 0.8,
+    "source": "proc"
+  },
+  "target": {
+    "mode": "fixed",
+    "target_workers": 4,
+    "advised_workers": 4,
+    "is_override": false,
+    "set_by": "owner",
+    "set_at": "2026-11-14T09:30:00.000Z",
+    "reason": "steady state"
+  },
+  "running": {
+    "runs": 0,
+    "ram_p90_bytes": 0,
+    "cpu_p90_cores": 0.0
+  },
+  "brakes": {
+    "active": false,
+    "reasons": [],
+    "since": null
+  },
+  "reserve_ram_bytes": 2147483648,
+  "min_disk_bytes": 5368709120,
+  "estimates": [
+    {
+      "project": "vowp",
+      "job_kind": "build",
+      "harness": "opencode",
+      "model": "deepseek/deepseek-flash",
+      "build_mode": "warm",
+      "samples": 12,
+      "ram_p50_bytes": 734003200,
+      "ram_p90_bytes": 1288490188,
+      "cpu_p50_cores": 1.1,
+      "cpu_p90_cores": 2.4,
+      "duration_p50_ms": 420000,
+      "duration_p90_ms": 910000,
+      "source": "measured"
+    },
+    {
+      "project": null,
+      "job_kind": "build",
+      "harness": "opencode",
+      "model": null,
+      "build_mode": null,
+      "samples": 40,
+      "ram_p50_bytes": 838860800,
+      "ram_p90_bytes": 1610612736,
+      "cpu_p50_cores": 1.1,
+      "cpu_p90_cores": 2.4,
+      "duration_p50_ms": 420000,
+      "duration_p90_ms": 910000,
+      "source": "pooled"
+    },
+    {
+      "project": null,
+      "job_kind": "build",
+      "harness": "opencode",
+      "model": null,
+      "build_mode": null,
+      "samples": 0,
+      "ram_p50_bytes": 2147483648,
+      "ram_p90_bytes": 2147483648,
+      "cpu_p50_cores": 1.1,
+      "cpu_p90_cores": 2.4,
+      "duration_p50_ms": 420000,
+      "duration_p90_ms": 910000,
+      "source": "default"
+    },
+    {
+      "project": null,
+      "job_kind": null,
+      "harness": null,
+      "model": null,
+      "build_mode": null,
+      "samples": 7,
+      "ram_p50_bytes": 2147483648,
+      "ram_p90_bytes": 2684354560,
+      "cpu_p50_cores": 1.1,
+      "cpu_p90_cores": 2.4,
+      "duration_p50_ms": 420000,
+      "duration_p90_ms": 910000,
+      "source": "pooled"
+    }
+  ],
+  "waiting": [],
+  "limits": [],
+  "provider_caps": {
+    "deepseek": 8
+  },
+  "reload_pending": false
+}

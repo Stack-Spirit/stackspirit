@@ -1,0 +1,34 @@
+{
+  "probed_at": "2026-11-14T12:00:00.000Z",
+  "local_orchestrator": {
+    "state": "waiting_for_vowp_phase3",
+    "missing": [
+      "local cache"
+    ],
+    "detected_version": "0.4.0",
+    "evidence": [
+      "vowp offload status --json: exit 0"
+    ]
+  },
+  "asif": {
+    "state": "ready",
+    "export": true,
+    "import": true,
+    "detected_version": "0.4.0",
+    "evidence": [
+      "session export --format asif: exit 3 (supported)",
+      "session import --format asif: help lists asif"
+    ]
+  },
+  "local_agent": {
+    "state": "not_installed",
+    "node": null,
+    "protocol": null,
+    "last_heartbeat": null,
+    "last_error": null
+  },
+  "features": {
+    "asif_actions": false,
+    "local_orchestrator_actions": false
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "probed_at": "2026-11-14T12:00:00.000Z",
+  "local_orchestrator": {
+    "state": "ready",
+    "agent_protocol": "vowp-agent/1",
+    "node": "mac-studio",
+    "capabilities": [
+      "node_card",
+      "offload_status",
+      "surface_start",
+      "surface_attach",
+      "mcp_agent_socket",
+      "orchestrator_new_node",
+      "orchestrator_read"
+    ],
+    "evidence": [
+      "vowp offload status --json: exit 0"
+    ]
+  },
+  "asif": {
+    "state": "waiting_for_vowp_asif",
+    "missing": [
+      "v4-asif-core",
+      "v4-asif-cli"
+    ],
+    "detected_version": "0.4.0",
+    "evidence": [
+      "session export --format asif: exit 2 (unsupported)"
+    ]
+  },
+  "local_agent": {
+    "state": "connected",
+    "node": "mac-studio",
+    "protocol": "vowp-agent/1",
+    "last_heartbeat": "2026-11-14T12:05:00.000Z",
+    "last_error": null
+  },
+  "features": {
+    "asif_actions": false,
+    "local_orchestrator_actions": false
+  }
+}

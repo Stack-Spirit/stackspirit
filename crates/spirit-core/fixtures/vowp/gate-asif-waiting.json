@@ -1,0 +1,36 @@
+{
+  "probed_at": "2026-11-14T12:00:00.000Z",
+  "local_orchestrator": {
+    "state": "waiting_for_vowp_phase3",
+    "missing": [
+      "local opencode app host",
+      "surface bridge"
+    ],
+    "detected_version": "0.4.0",
+    "evidence": [
+      "vowp offload status --json: exit 2"
+    ]
+  },
+  "asif": {
+    "state": "waiting_for_vowp_asif",
+    "missing": [
+      "v4-asif-core",
+      "v4-asif-cli"
+    ],
+    "detected_version": "0.4.0",
+    "evidence": [
+      "session export --format asif: exit 2 (unsupported)"
+    ]
+  },
+  "local_agent": {
+    "state": "not_installed",
+    "node": null,
+    "protocol": null,
+    "last_heartbeat": null,
+    "last_error": null
+  },
+  "features": {
+    "asif_actions": false,
+    "local_orchestrator_actions": false
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-11-14T12:00:00.000Z",
+  "host": null,
+  "target": {
+    "mode": "fixed",
+    "target_workers": 4,
+    "advised_workers": null,
+    "is_override": false,
+    "set_by": "owner",
+    "set_at": "2026-11-14T09:30:00.000Z",
+    "reason": "steady state"
+  },
+  "running": {
+    "runs": 0,
+    "ram_p90_bytes": 0,
+    "cpu_p90_cores": 0.0
+  },
+  "brakes": {
+    "active": false,
+    "reasons": [],
+    "since": null
+  },
+  "reserve_ram_bytes": 2147483648,
+  "min_disk_bytes": 5368709120,
+  "estimates": [],
+  "waiting": [],
+  "limits": [],
+  "provider_caps": {},
+  "reload_pending": false
+}

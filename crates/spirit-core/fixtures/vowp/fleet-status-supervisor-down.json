@@ -1,0 +1,228 @@
+{
+  "snapshot": {
+    "schema": "vowp-snapshot/1",
+    "version": 1,
+    "sequence": 4413,
+    "generated_at": "2026-11-14T12:00:00.000Z",
+    "home": "vps",
+    "supervisor": {
+      "running": false,
+      "pid": null,
+      "started_at": "2026-11-13T21:04:10.000Z",
+      "last_tick": "2026-11-14T09:00:00.000Z",
+      "tick_secs": 60,
+      "paused": false,
+      "fail_streak": 3,
+      "version": "0.4.0"
+    },
+    "projects": [
+      {
+        "name": "vowp",
+        "path": "/srv/vowp",
+        "state": "active",
+        "weight": 50,
+        "paused_reason": "",
+        "jobs_by_state": {
+          "ready": 3,
+          "running": 3,
+          "reviewing": 1,
+          "parked": 1,
+          "done": 37
+        },
+        "running": [
+          {
+            "job": "ss-2-desktop-shell",
+            "kind": "build",
+            "role": "worker",
+            "executor": "opencode:deepseek/deepseek-flash#max",
+            "node": "vps",
+            "age_secs": 134,
+            "last_event_age_secs": 3,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AB"
+          },
+          {
+            "job": "ss-3-fleet-canvas",
+            "kind": "build",
+            "role": "worker",
+            "executor": "claude-code:model-a@medium",
+            "node": "vps",
+            "age_secs": 420,
+            "last_event_age_secs": 22,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC"
+          },
+          {
+            "job": "ss-4-engine-onboarding",
+            "kind": "build",
+            "role": "worker",
+            "executor": null,
+            "node": "vps",
+            "age_secs": 60,
+            "last_event_age_secs": 4,
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AD"
+          }
+        ],
+        "blocked": [
+          {
+            "job": "ss-8-blocked-review",
+            "state": "parked",
+            "reason": "question",
+            "detail": "Waiting for the owner to choose.",
+            "since": "2026-11-14T11:42:00.000Z"
+          }
+        ],
+        "queue": [
+          {
+            "job": "ss-5-fleet-inbox",
+            "title": "Build the visual fleet canvas",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 420,
+            "waiting_reason": "RAM 1.2 GB short"
+          },
+          {
+            "job": "ss-6-capacity",
+            "title": "Capacity and storage rail",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 300,
+            "waiting_reason": null
+          },
+          {
+            "job": "ss-7-engine-models",
+            "title": "Engine model catalog",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "pending",
+            "age_secs": 120,
+            "waiting_reason": null
+          }
+        ],
+        "last_merge": {
+          "job": "ss-1-core",
+          "at": "2026-11-14T10:15:00.000Z",
+          "commit": "4f2c1a9b8e7d6c5b4a39281706f5e4d3c2b1a090",
+          "branch": "job/ss-1-core"
+        },
+        "gate_failures": [
+          {
+            "job": "ss-9-gate-check",
+            "gate": "secret_scan",
+            "at": "2026-11-14T11:20:00.000Z",
+            "evidence": "example evidence line, redacted"
+          }
+        ],
+        "cost_today_usd": 1.37
+      }
+    ],
+    "capacity": {
+      "measured": {
+        "at": "2026-11-14T11:59:45.000Z",
+        "interval_secs": 15,
+        "mem_total_bytes": 16777216000,
+        "mem_available_bytes": 13314392064,
+        "swap_used_bytes": 0,
+        "load1": 2.1,
+        "load5": 1.8,
+        "load15": 1.6,
+        "cpu_count": 8,
+        "cpu_quota_cores": null,
+        "disk_free_home_bytes": 45206814720,
+        "disk_free_worktrees_bytes": 41567838208,
+        "pressure_cpu_avg10": 4.2,
+        "pressure_mem_avg10": 1.1,
+        "pressure_io_avg10": 0.8,
+        "source": "proc"
+      },
+      "running": {
+        "runs": 3,
+        "ram_p90_bytes": 1181116006,
+        "cpu_p90_cores": 2.4
+      },
+      "target": {
+        "mode": "fixed",
+        "target_workers": 8,
+        "advised_workers": 8,
+        "is_override": false,
+        "set_by": "owner",
+        "set_at": "2026-11-14T09:30:00.000Z",
+        "reason": "steady state"
+      },
+      "advised_target": 8,
+      "brake": {
+        "active": false,
+        "reasons": [],
+        "since": null
+      },
+      "reserve_ram_bytes": 2147483648,
+      "min_disk_bytes": 5368709120
+    },
+    "limits": [
+      {
+        "provider": "anthropic",
+        "harness": "claude-code",
+        "kind": "quota",
+        "resets_at": "2026-11-14T15:00:00.000Z",
+        "detail": "quota resets at 15:00",
+        "since": "2026-11-14T11:10:00.000Z",
+        "last_probe_at": null,
+        "probe_fail_streak": 0,
+        "concurrency_cap": null,
+        "cap_until": null
+      }
+    ],
+    "inbox": [
+      {
+        "id": "01JCF5WQ8ZK3M2V7N4P6R8T0AC",
+        "project": "vowp",
+        "job_id": "ss-8-blocked-review",
+        "kind": "question",
+        "title": "Choose the included model set",
+        "created_at": "2026-11-14T11:42:00.000Z",
+        "age_secs": 1080
+      }
+    ],
+    "sessions": [
+      {
+        "id": "01JCF5WQ8ZK3M2V7N4P6R8T0AB",
+        "project": "vowp",
+        "job_id": "ss-2-desktop-shell",
+        "role": "worker",
+        "title": "Desktop shell and SpiritBridge",
+        "state": "running",
+        "executor": "opencode:deepseek/deepseek-flash#max",
+        "node": "vps",
+        "active_surface": {
+          "surface_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AG",
+          "kind": "opencode",
+          "holder": "vps opencode",
+          "node": "vps",
+          "acquired_at": "2026-11-14T11:30:00.000Z",
+          "heartbeat_at": "2026-11-14T11:59:55.000Z"
+        },
+        "last_event_at": "2026-11-14T11:59:57.000Z"
+      }
+    ],
+    "orchestrators": [
+      {
+        "name": "vowp-main",
+        "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AE",
+        "project": "vowp",
+        "app": "opencode",
+        "state": "running",
+        "join": {
+          "desktop": "vowp orchestrator join vowp-main --surface desktop",
+          "phone": "Open the VOWP board and join vowp-main",
+          "chat": "vowp chat --session 01JCF5WQ8ZK3M2V7N4P6R8T0AE"
+        }
+      }
+    ]
+  },
+  "source": "local",
+  "fetched_at": "2026-11-14T09:10:00.000Z",
+  "stale": true
+}

@@ -1,0 +1,10 @@
+{
+  "harnesses": [
+    {
+      "kind": "opencode",
+      "path": "/opt/example/bin/opencode",
+      "version": "1.2.3",
+      "usable": true
+    }
+  ]
+}

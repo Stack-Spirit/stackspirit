@@ -1,0 +1,98 @@
+{
+  "snapshot": {
+    "schema": "vowp-snapshot/1",
+    "version": 1,
+    "sequence": 4412,
+    "generated_at": "2026-11-14T12:00:00.000Z",
+    "home": "vps",
+    "supervisor": {
+      "running": true,
+      "pid": 4812,
+      "started_at": "2026-11-13T21:04:10.000Z",
+      "last_tick": "2026-11-14T11:59:58.000Z",
+      "tick_secs": 60,
+      "paused": false,
+      "fail_streak": 0,
+      "version": "0.4.0"
+    },
+    "projects": [
+      {
+        "name": "vowp",
+        "path": "/srv/vowp",
+        "state": "active",
+        "weight": 50,
+        "paused_reason": "",
+        "jobs_by_state": {
+          "ready": 1,
+          "done": 2
+        },
+        "running": [],
+        "blocked": [],
+        "queue": [
+          {
+            "job": "no-advice-01",
+            "title": "Waiting for advice",
+            "kind": "build",
+            "role": "worker",
+            "priority": 50,
+            "state": "ready",
+            "age_secs": 60,
+            "waiting_reason": null
+          }
+        ],
+        "last_merge": null,
+        "gate_failures": [],
+        "cost_today_usd": 1.37
+      }
+    ],
+    "capacity": {
+      "measured": {
+        "at": "2026-11-14T11:59:45.000Z",
+        "interval_secs": 15,
+        "mem_total_bytes": 16777216000,
+        "mem_available_bytes": 13314392064,
+        "swap_used_bytes": 0,
+        "load1": 2.1,
+        "load5": 1.8,
+        "load15": 1.6,
+        "cpu_count": 8,
+        "cpu_quota_cores": null,
+        "disk_free_home_bytes": 45206814720,
+        "disk_free_worktrees_bytes": 41567838208,
+        "pressure_cpu_avg10": 4.2,
+        "pressure_mem_avg10": 1.1,
+        "pressure_io_avg10": 0.8,
+        "source": "proc"
+      },
+      "running": {
+        "runs": 3,
+        "ram_p90_bytes": 1181116006,
+        "cpu_p90_cores": 2.4
+      },
+      "target": {
+        "mode": "fixed",
+        "target_workers": 4,
+        "advised_workers": null,
+        "is_override": false,
+        "set_by": "owner",
+        "set_at": "2026-11-14T09:30:00.000Z",
+        "reason": "steady state"
+      },
+      "advised_target": null,
+      "brake": {
+        "active": false,
+        "reasons": [],
+        "since": null
+      },
+      "reserve_ram_bytes": 2147483648,
+      "min_disk_bytes": 5368709120
+    },
+    "limits": [],
+    "inbox": [],
+    "sessions": [],
+    "orchestrators": []
+  },
+  "source": "local",
+  "fetched_at": "2026-11-14T12:00:04.812Z",
+  "stale": false
+}

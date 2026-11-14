@@ -1,0 +1,7 @@
+{
+  "error": {
+    "kind": "not_found",
+    "message": "session 01JCF5WQ8ZK3M2V7N4P6R8T0AB not found",
+    "hint": "vowp session ls"
+  }
+}
