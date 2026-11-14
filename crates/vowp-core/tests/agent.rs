@@ -21,12 +21,14 @@ use vowp_core::agent::{
     EnrollRequest, auth, create_pending, create_pending_surface, hash_code, issue_surface_token, redeem, revoke,
     revoke_surface,
 };
-use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng, SystemRunner};
+use vowp_core::{
+    AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps, FixedRng, SystemGit, SystemRunner,
+};
 use vowp_protocol::{
     Actor, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId,
     EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, MemoryLog, NewJob, NodeName,
-    NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, Role, RunId,
-    RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId,
+    NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, Role,
+    RunId, RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId,
     SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
@@ -281,6 +283,10 @@ impl Gateway {
     fn start_with_config(root: &Path, clock: Arc<FakeClock>, config: VowpConfig) -> Self {
         let log = Arc::new(MemoryLog::new());
         let deps = test_deps_with_config(root, clock.clone(), log.clone(), config);
+        Self::start_with_deps(root, clock, log, deps)
+    }
+
+    fn start_with_deps(root: &Path, clock: Arc<FakeClock>, log: Arc<MemoryLog>, deps: Deps) -> Self {
         let store = deps.open_store().expect("bound store");
         let input = TestReader::new();
         let output = TestWriter::default();
@@ -352,8 +358,13 @@ fn authenticate(gateway: &Gateway, name: &NodeName, key: &SigningKey) {
     gateway.expect(|frame| matches!(frame, AgentFrame::HomeWelcome { .. }));
 }
 
-fn wait_until(mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn wait_until(condition: impl FnMut() -> bool) {
+    wait_until_for(condition, Duration::from_secs(2));
+}
+
+/// Waits up to `timeout` for `condition`, polling every five milliseconds.
+fn wait_until_for(mut condition: impl FnMut() -> bool, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
     while !condition() {
         assert!(Instant::now() < deadline, "condition was not met in time");
         thread::sleep(Duration::from_millis(5));
@@ -2216,4 +2227,222 @@ fn agent_second_connection_supersedes_the_first() {
     let outcome = first.finish().expect("first gateway closes cleanly");
     assert!(matches!(outcome, GatewayOutcome::Closed { node: Some(node) } if node == name));
     second.finish().expect("second gateway");
+}
+
+/// Runs git in `cwd`, asserting success.
+fn git_ok(cwd: &Path, args: &[&str]) -> String {
+    let output = git_run(cwd, args);
+    assert_eq!(output.exit_code, Some(0), "git {args:?} failed: {}", output.text());
+    output.text()
+}
+
+/// Runs git in `cwd` and returns its merged output.
+fn git_run(cwd: &Path, args: &[&str]) -> CommandOutput {
+    let mut argv = vec!["git".to_owned()];
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    SystemRunner
+        .run(&CommandSpec {
+            shell: None,
+            argv,
+            cwd: Some(cwd.to_path_buf()),
+            env: git_env(),
+            timeout: Duration::from_secs(60),
+        })
+        .expect("git")
+}
+
+/// Environment that keeps git hermetic: no user or system config, fixed identity.
+fn git_env() -> Vec<(String, String)> {
+    vec![
+        ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+        ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+        ("GIT_AUTHOR_NAME".to_owned(), "VOWP Test".to_owned()),
+        ("GIT_AUTHOR_EMAIL".to_owned(), "test@example.invalid".to_owned()),
+        ("GIT_COMMITTER_NAME".to_owned(), "VOWP Test".to_owned()),
+        ("GIT_COMMITTER_EMAIL".to_owned(), "test@example.invalid".to_owned()),
+    ]
+}
+
+/// Creates a real repository on `main` with one initial commit.
+fn init_result_repo(repo: &Path) {
+    std::fs::create_dir_all(repo).expect("repo dir");
+    git_ok(repo, &["init", "-b", "main"]);
+    write_result_file(&repo.join("README.md"), "base\n");
+    git_ok(repo, &["add", "-A"]);
+    git_ok(repo, &["commit", "-m", "initial"]);
+}
+
+/// Creates a bare repository to act as `origin`.
+fn init_result_bare(path: &Path) {
+    std::fs::create_dir_all(path).expect("bare dir");
+    git_ok(path, &["init", "--bare", "-b", "main"]);
+}
+
+/// Writes `text` to `path`, creating parent directories.
+fn write_result_file(path: &Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("parent dir");
+    }
+    std::fs::write(path, text).expect("write file");
+}
+
+/// Clones `origin` once, pushes one commit on `job/<id>` and returns the head.
+fn push_result_branch(agent: &Path, origin: &Path, job: &JobId) -> String {
+    let root = agent.parent().expect("agent parent");
+    if !agent.join(".git").is_dir() {
+        std::fs::create_dir_all(root).expect("agent root");
+        git_ok(
+            root,
+            &["clone", &origin.display().to_string(), &agent.display().to_string()],
+        );
+    }
+    let branch = format!("job/{job}");
+    git_ok(agent, &["checkout", "-B", &branch, "origin/main"]);
+    write_result_file(&agent.join("src/lib.rs"), "pub fn result() {}\n");
+    git_ok(agent, &["add", "-A"]);
+    git_ok(agent, &["commit", "-m", "job work"]);
+    git_ok(agent, &["push", "-f", "origin", &branch]);
+    git_ok(agent, &["rev-parse", "HEAD"]).trim().to_owned()
+}
+
+/// Builds one real offload home with a bare origin and a project clone.
+fn offload_result_home(home: &Path, clock: &Arc<FakeClock>) -> (ProjectName, std::path::PathBuf, Store) {
+    let project = ProjectName::parse("vowp").expect("project");
+    let origin = home.join("origin.git");
+    let repo = home.join("project");
+    init_result_bare(&origin);
+    init_result_repo(&repo);
+    git_ok(&repo, &["remote", "add", "origin", &origin.display().to_string()]);
+    git_ok(&repo, &["push", "-u", "origin", "main"]);
+    let store = test_store(home, clock);
+    store
+        .upsert_project(&Project {
+            name: project.clone(),
+            path: repo.display().to_string(),
+            remote_url: Some(origin.display().to_string()),
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: ts(),
+            updated_at: ts(),
+        })
+        .expect("project row");
+    (project, origin, store)
+}
+
+/// Builds the config for the real-git gateway result test.
+fn offload_result_config(project: &ProjectName, repo: &Path) -> VowpConfig {
+    let mut config = VowpConfig::with_defaults_for_tests();
+    config.project.name = project.clone();
+    config.project.path = Some(repo.display().to_string());
+    config.project.remote = "origin".to_owned();
+    config.project.default_branch = "main".to_owned();
+    config.offload.enabled = true;
+    config.offload.default = Placement::Any;
+    config
+}
+
+#[test]
+fn gateway_returns_an_offloaded_result_to_the_gating_path() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let (project, origin, setup) = offload_result_home(home.path(), &clock);
+    activate(home.path(), &clock, &name, &key);
+    setup
+        .upsert_node_path(&NodePath {
+            node: name.clone(),
+            project: project.clone(),
+            local_root: "/srv/vowp".to_owned(),
+            worktree_root: "/srv/vowp-wt".to_owned(),
+            allow: Vec::new(),
+            updated_at: ts(),
+        })
+        .expect("path map");
+    let job_id = insert_ready_offload_job(&setup, &project, "result-job");
+    let config = offload_result_config(&project, &home.path().join("project"));
+    let log = Arc::new(MemoryLog::new());
+    let mut deps = test_deps_with_config(home.path(), clock.clone(), log.clone(), config);
+    deps.git = Arc::new(SystemGit::default());
+    let gateway = Gateway::start_with_deps(home.path(), clock.clone(), log, deps);
+    authenticate(&gateway, &name, &key);
+    gateway.send(&offload_heartbeat(0, 4));
+
+    let AgentFrame::AssignRun {
+        assignment,
+        lease_token,
+        ..
+    } = gateway.expect(|frame| matches!(frame, AgentFrame::AssignRun { .. }))
+    else {
+        panic!("expected AssignRun");
+    };
+    gateway.send(&AgentFrame::RunAccepted {
+        assignment_id: assignment.assignment_id.clone(),
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+    });
+    let head = push_result_branch(&home.path().join("agent"), &origin, &job_id);
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+        line: RemoteLine::Hello {
+            session_id: assignment.session_id.clone(),
+            run_id: assignment.run_id.clone(),
+            executor: assignment.executor.to_string(),
+            node: name.clone(),
+            spool_id: "result-spool".to_owned(),
+            lease: lease_token,
+        },
+    });
+    gateway.send(&AgentFrame::RunState {
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+        state: RemoteRunState::Finishing,
+        spool_bytes: 0,
+        head_commit: Some(head.clone()),
+        detail: "the job branch is pushed".to_owned(),
+    });
+    gateway.send(&turn_end_frame(&assignment.run_id));
+
+    wait_until_for(
+        || {
+            setup
+                .require_job(&job_id)
+                .map(|job| job.state == JobState::Gating)
+                .unwrap_or(false)
+                && setup
+                    .require_run(&assignment.run_id)
+                    .map(|run| run.outcome == Some(RunOutcome::Ok))
+                    .unwrap_or(false)
+        },
+        Duration::from_secs(20),
+    );
+    let job = setup.require_job(&job_id).expect("job");
+    assert_eq!(job.branch.as_deref(), Some(format!("job/{job_id}").as_str()));
+    let worktree = std::path::PathBuf::from(job.worktree.expect("staged worktree"));
+    assert!(worktree.is_dir(), "the home staged the pushed head");
+    assert_eq!(
+        git_ok(&worktree, &["rev-parse", "HEAD"]).trim(),
+        head,
+        "the staged worktree is the pushed head"
+    );
+    let run = setup.require_run(&assignment.run_id).expect("run row");
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+    assert!(run.detail.contains(&head), "run detail: {}", run.detail);
+    let assignment_row = setup
+        .assignments_for_run(&assignment.run_id)
+        .expect("assignments")
+        .pop()
+        .expect("assignment");
+    assert_eq!(
+        assignment_row.state,
+        vowp_store::repo_offload::AgentAssignmentState::Finished
+    );
+    assert!(setup.lease(&assignment.session_id).expect("lease").is_none());
+    assert_eq!(
+        git_ok(&home.path().join("project"), &["status", "--porcelain"]),
+        "",
+        "the main checkout stays clean"
+    );
+    gateway.finish().expect("gateway");
 }

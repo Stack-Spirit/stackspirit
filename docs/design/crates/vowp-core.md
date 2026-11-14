@@ -20,8 +20,9 @@ crates/vowp-core/src/
   loops/          mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
-  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs dispatch.rs
-tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs, agent.rs
+  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs dispatch.rs result.rs
+tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs,
+                  agent.rs, offload_dispatch.rs, offload_result.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
 
@@ -446,8 +447,8 @@ Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp 
 Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.6, §6.3, §7.1–§7.5, §8.2–§8.3, §9
 and §12.1. The gateway runs as a home command with the same store access as `session ingest`;
 Phase 1 adds the surface-token pairing service and the lease backend on the same authenticated
-connection, and Phase 2 adds the offload dispatcher. The separate low-privilege gateway behind
-the supervisor socket is Phase 4.
+connection, and Phase 2 adds the offload dispatcher and result return. The separate
+low-privilege gateway behind the supervisor socket is Phase 4.
 
 ```rust
 pub mod agent {
@@ -710,6 +711,88 @@ Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_en
 `surface_pair_issues_a_scoped_token_and_stores_only_its_hash`,
 `surface_pair_refuses_expired_or_used_code`, `surface_pair_binds_node_and_session` and
 `surface_token_verify_rejects_revoked_and_expired`.
+
+### 9.2 Result return (`agent/result.rs`)
+
+The node pushes `job/<id>` with its own git credentials; the home never receives or stores an
+agent credential. The terminal summary path (`session::remote::IngestSession::finish_summary`)
+calls the result module before it closes the run row, so a rejected result is written as a
+failed run rather than a success followed by a correction.
+
+```rust
+pub mod result {
+    pub const RESULT_KEY_PREFIX: &str;      // "agent-result:"
+
+    pub struct AgentRunResult { pub transport: String, pub base_commit: String,
+                                pub head_commit: Option<String>, pub spool_bytes: u64,
+                                pub status: String, pub detail: String }
+    pub struct Settled { pub outcome: vowp_protocol::RunOutcome, pub detail: String }
+
+    pub fn result_key(run: &RunId) -> String;
+    pub fn load(store: &Store, run: &RunId) -> Result<Option<AgentRunResult>, CoreError>;
+    pub fn settle_terminal(deps: &Deps, store: &Store, run: &Run,
+                           reported_head: Option<&str>, outcome: RunOutcome, detail: String)
+        -> Result<Settled, CoreError>;
+}
+```
+
+- **Fetch.** A `RunState` frame records the reported head and spool size durably in the store's
+  existing `kv` table (`agent-result:<run>`) and sets `jobs.state=running`. The gateway also
+  keeps the head in the live ingest stream. On `TurnEnd` the home reads the head from either
+  source, then `git fetch <project remote>` into the home checkout. It verifies the remote name
+  and both the fetch and push URLs against `projects.remote_url` with userinfo stripped; a
+  fork, a different remote name or a differing push URL is rejected. The agent never supplies
+  the URL or a credential.
+- **Verify.** The fetched `refs/remotes/<remote>/job/<id>` head must equal the reported head,
+  the branch must be the job branch, the assigned base commit must exist on the home, and the
+  base must be an ancestor of the fetched head (`commits_between(head, base)` is empty). A
+  mismatch fails the run and keeps the fetched ref; a remote-tracking ref is left in place even
+  when the staging worktree was never created.
+- **Stage.** The home points a local `job/<id>` branch at the fetched head and adds a worktree
+  under `<node>/agent-results/<run>`, never in the main checkout. `git fetch`, the local branch
+  update and `worktree add` leave the main checkout's working tree and HEAD untouched. The
+  worktree is kept for inspection on every rejection and becomes the job worktree on success.
+  For the two result gates the module pins the gate context's `project.default_branch` to the
+  assigned base commit, so the gate helpers' three-dot diff is exactly `base..head` even if the
+  home's `main` moved while the run was on the node.
+- **Gate.** The normal `GateRunner` evaluates `Gate::OwnsRespected(true)` and
+  `Gate::SecretScan(true)` in the staging worktree with `run_id` set to the offloaded run. Each
+  result is persisted (`gate_results`) and written to the ledger. Any violation fails the run
+  with `result_gate_failed`, leaves the job `ready`, and never enqueues a merge. Gate evidence
+  contains repo-relative paths and rule names only; matched secret text is never stored.
+- **Hand-off.** On success the run detail ends with
+  `result: transport=push base=<sha> head=<sha>`; the same facts live in the `agent-result`
+  record because the run row has no dedicated transport/base/head columns yet. The job gets the
+  staging branch and worktree, moves `running -> gating` through the normal `ReportReady` state
+  event, and the existing supervisor gate runner and merge queue continue from there. Result
+  return never merges, tags, deploys, pushes the default branch or rewrites the merge queue.
+- **Failure.** A failed push (the node reports `git_push_failed`), a missing head, a remote or
+  head mismatch, a non-ancestor head or a gate violation settles the run as `error`, writes a
+  redacted path-free detail, puts a still-running job back to `ready` (attempts and continues
+  unchanged, so its retry policy applies) and clears the dispatcher's `waiting: offload ...`
+  note. A node stderr is replaced by the stable `git_push_failed` sentence, so a credential URL
+  or absolute local path cannot reach the run row, ledger or log.
+- **Terminal cleanup.** Every terminal summary of an offloaded run releases the run lease,
+  moves the assignment to `finished` (or leaves an already `lost`/`cancelled` row alone),
+  appends one `note` ledger row with the transport facts, and lets the normal ingest path write
+  the cost/capacity rows with the settled outcome. A summary for a run without a live
+  assignment (a local chat turn) is untouched.
+
+Tests (`tests/offload_result.rs`, temporary bare remote, project clone, agent clone and fake
+summary through the real ingest state machine, no network or harness):
+`offloaded_run_pushes_the_job_branch_and_the_home_verifies_the_head`,
+`offload_fails_cleanly_when_the_push_fails`,
+`offload_fails_when_no_pushed_head_is_reported`,
+`home_rejects_a_reported_head_that_is_not_the_fetched_head`,
+`home_rejects_a_head_outside_the_base_history`,
+`home_runs_owns_and_secret_scan_on_the_fetched_diff`,
+`home_does_not_merge_a_head_outside_the_job_owns`,
+`result_return_leaves_the_main_checkout_clean`,
+`terminal_result_releases_the_lease_and_clears_the_waiting_note` and
+`a_failed_push_keeps_the_job_retryable`. The gateway adds
+`gateway_returns_an_offloaded_result_to_the_gating_path`, which opens the offload ingest stream
+from the agent-kind run lease, pushes a temporary branch and observes the job reach `gating`
+through the same gateway process.
 
 ## 10. `offload` — pure offload eligibility (v0.4 Phase 2)
 

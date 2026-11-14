@@ -551,6 +551,9 @@ pub fn update_state(
     };
     let assignment = store.advance_assignment(&assignment.id, next, Some(now), &event)?;
     let assignment = store.renew_assignment(&assignment.id, now, now.plus(RUN_LEASE_TTL), &assignment.detail)?;
+    // Keep the full reported head and spool size durable even if this connection drops
+    // before the terminal summary arrives.
+    super::result::record_reported(store, &assignment, head_commit, spool_bytes)?;
     let project_store = project_store(deps, store, &assignment.project)?;
     if next == AgentAssignmentState::Running {
         clear_waiting(&project_store, &assignment.payload.job)?;
@@ -998,7 +1001,7 @@ fn issue_run_lease(
 }
 
 /// Releases the run lease of `session`, when one exists.
-fn release_run_lease(store: &Store, session: &SessionId) -> Result<(), CoreError> {
+pub(crate) fn release_run_lease(store: &Store, session: &SessionId) -> Result<(), CoreError> {
     if let Some(lease) = store.lease(session)? {
         store.release_lease_hash(session, &lease.token)?;
     }
@@ -1324,7 +1327,7 @@ fn record_waiting_note(store: &Store, job: &JobId, detail: &str) -> Result<(), C
 }
 
 /// Clears the note only when it is the dispatcher's own waiting note.
-fn clear_waiting(store: &Store, job: &JobId) -> Result<(), CoreError> {
+pub(crate) fn clear_waiting(store: &Store, job: &JobId) -> Result<(), CoreError> {
     let current = store.require_job(job)?.note;
     if current.starts_with(WAITING_PREFIX) {
         store.set_job_note(job, "")?;

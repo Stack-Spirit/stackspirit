@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Executor, ExecutorRef, IngestAck, Lease, LeaseMode,
-    Level, NodeName, NodeStatus, RemoteLine, RunId, RunPurpose, SessionId, SurfaceId, SurfaceInfo, SurfaceState,
-    Timestamp, TurnSummary,
+    Level, NodeName, NodeStatus, RemoteLine, RunId, RunPurpose, SessionId, SurfaceId, SurfaceInfo, SurfaceKind,
+    SurfaceState, Timestamp, TurnSummary,
 };
 use vowp_store::{NodeCredential, Store};
 
@@ -480,7 +480,11 @@ fn run_connection_inner(
                 &detail,
                 now,
             ) {
-                Ok(_) => {}
+                Ok(_) => {
+                    if let Some(stream) = chats.get_mut(&run_id) {
+                        stream.ingest.set_reported_head(head_commit.as_deref());
+                    }
+                }
                 Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
                     send_error(writer, error.kind(), error.to_string(), false)?;
                 }
@@ -724,7 +728,7 @@ fn run_connection_inner(
                         ..
                     } = &line
                     {
-                        match resume_chat_stream(store, deps, &session.node, &run_id, hello_run, session_id, lease, now)
+                        match resume_run_stream(store, deps, &session.node, &run_id, hello_run, session_id, lease, now)
                         {
                             Ok(stream) => {
                                 chats.insert(run_id.clone(), stream);
@@ -876,6 +880,103 @@ struct StartedTurn<'a> {
     tail_seq: u64,
     /// Ingest state for the run.
     stream: ChatStream<'a>,
+}
+
+/// Resumes the ingest stream of an open run after a reconnect.
+///
+/// A paired-surface lease continues a chat turn; an agent-kind run lease continues an
+/// offload assignment. The `Hello` must prove the run is still the live one in both cases.
+#[allow(clippy::too_many_arguments)]
+fn resume_run_stream<'a>(
+    store: &'a Store,
+    deps: &'a Deps,
+    node: &NodeName,
+    run_id: &RunId,
+    hello_run: &RunId,
+    session: &SessionId,
+    lease: &str,
+    now: Timestamp,
+) -> Result<ChatStream<'a>, CoreError> {
+    let Some(current) = store.lease(session)? else {
+        return Err(CoreError::Refused(format!("session {session} has no live lease")));
+    };
+    if !lease::is_live(now, &current) {
+        return Err(CoreError::Refused(format!(
+            "session {session} lease has expired; the surface is read-only"
+        )));
+    }
+    if current.surface_kind == SurfaceKind::Agent && current.surface_id.is_none() {
+        return resume_offload_stream(store, deps, node, run_id, hello_run, session, lease);
+    }
+    resume_chat_stream(store, deps, node, run_id, hello_run, session, lease, now)
+}
+
+/// Opens the ingest stream of an offloaded run from its agent-kind run lease.
+///
+/// An offload run has no paired surface. The durable assignment is the proof that this
+/// node owns the run; the lease token is still verified against its hash before any event
+/// is appended.
+fn resume_offload_stream<'a>(
+    store: &'a Store,
+    deps: &'a Deps,
+    node: &NodeName,
+    run_id: &RunId,
+    hello_run: &RunId,
+    session: &SessionId,
+    lease: &str,
+) -> Result<ChatStream<'a>, CoreError> {
+    if run_id != hello_run {
+        return Err(CoreError::Invalid(format!(
+            "hello names run {hello_run}, expected {run_id}"
+        )));
+    }
+    let run = store.require_run(run_id)?;
+    if run.session_id.as_ref() != Some(session) {
+        return Err(CoreError::Refused(format!(
+            "run {run_id} does not belong to session {session}"
+        )));
+    }
+    if run.node != *node {
+        return Err(CoreError::Refused(format!(
+            "run {run_id} belongs to node {}, not {node}",
+            run.node
+        )));
+    }
+    if run.ended_at.is_some() {
+        return Err(CoreError::Refused(format!("run {run_id} has already ended")));
+    }
+    let session_row = store.require_session(session)?;
+    if session_row.node != *node {
+        return Err(CoreError::Refused(format!(
+            "session {session} belongs to node {}, not {node}",
+            session_row.node
+        )));
+    }
+    let assigned = store.assignments_for_run(run_id)?.into_iter().any(|assignment| {
+        assignment.node == *node && assignment.session_id == *session && assignment.state.is_active()
+    });
+    if !assigned {
+        return Err(CoreError::Refused(format!(
+            "run {run_id} has no live offload assignment on node {node}"
+        )));
+    }
+    crate::surface::check_lease_with(store, session, Some(lease))?;
+    let ingest = IngestSession::begin(
+        deps,
+        store,
+        &IngestGrant {
+            session: session.clone(),
+            lease: lease.to_owned(),
+            run: run_id.clone(),
+        },
+    )?;
+    Ok(ChatStream {
+        session: session.clone(),
+        epoch: 0,
+        ingest,
+        in_flight: 0,
+        credit_pending: false,
+    })
 }
 
 /// Resumes the ingest stream of an open run after a reconnect.
