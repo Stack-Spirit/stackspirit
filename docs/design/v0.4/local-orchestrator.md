@@ -1,7 +1,7 @@
 # v0.4 — the local orchestrator: a local surface and a local node on the home's terms
 
-Status: **draft; decisions accepted (2026-11-13); Phase 0 and Phase 1 implemented, Phase 2 in
-progress (2026-11-14).** The owner accepted the transport, result-return, phase-order and
+Status: **draft; decisions accepted (2026-11-13); Phase 0–2 implemented, Phase 3 started
+(2026-11-14).** The owner accepted the transport, result-return, phase-order and
 offload/secret proposals; §16.1 records them and the remaining MVP defaults. Where this note
 conflicts with the v0.2 specification, the v0.2 specification still governs the shipped tree and
 this note is a proposal.
@@ -1688,8 +1688,8 @@ longer blocks the first implementation slice.
 ### 16.3 Implementation tracking
 
 Status as of 2026-11-14. The job graph is the source of truth: "done" means the branch merged on
-`main`; "running" and "pending" are the graph states on that date. These lists record the graph,
-not a promise.
+`main`; "running", "pending" and "cancelled" are the graph states on that date. These lists record
+the graph, not a promise.
 
 Phase 0 is four build jobs. Each build has a `review` gate, so the supervisor creates its own
 verifier (`<id>-verify-<attempt>`) and the merge queue; no verify job is added by hand. The graph
@@ -1726,20 +1726,36 @@ checkout without a local home database; it still reads the local checkout's `vow
 graph's follow-up `v4-local-1e-local-chat-mac-entry` was cancelled as a duplicate after the final
 fix commit landed that path.
 
-Phase 2 has started. `v4-local-2a-offload-format` is running; `v4-local-2b-offload-store` needs
-`v4-local-2a-offload-format`, and `v4-local-2c-offload-policy` needs both. The three slices are the
-wire format, the store tables and migrations, and the policy evaluator plus read-only CLI. Nothing
-from Phase 2 is on `main` yet.
+Phase 2 is complete. All eleven slices are merged on `main`; their dependency edges are in the
+table.
 
-| Phase | Job | Depends on | State | Scope |
+| Phase | Job | Depends on | State | Merged on `main` |
 |---|---|---|---|---|
-| 2 | `v4-local-2a-offload-format` | `v4-local-1e-local-chat` | running | `Placement`, assignment/run-state frames, waiting reasons and resume records in `vowp-protocol`; no store, dispatcher, executor or policy. |
-| 2 | `v4-local-2b-offload-store` | `v4-local-2a-offload-format` | pending | `job_placement`, `agent_assignments` and `node_limits` with the global v6 and project v2 migrations. |
-| 2 | `v4-local-2c-offload-policy` | `v4-local-2a-offload-format`, `v4-local-2b-offload-store` | pending | `[offload]` config, the §7.2 eligibility evaluator, `vowp offload policy`/`status` and `vowp job add --placement`. |
+| 2 | `v4-local-2a-offload-format` | `v4-local-1e-local-chat` | done | `a6abeb8` vowp-protocol: add the v0.4 offload wire format — `Placement`, `WaitingReason`, the token-free `AssignmentPayload`, run reject/state/resume records and the assignment, state, resume, path-map and cleanup `AgentFrame`s. |
+| 2 | `v4-local-2b-offload-store` | `v4-local-2a-offload-format` | done | `cdfd2f6` vowp-store: persist offload placement, assignments and node limits — project v2 `job_placement`, global v6 `agent_assignments` and `node_limits`, typed repository methods and migration tests; `9c88840` makes `doctor` compare the current project schema version. |
+| 2 | `v4-local-2c-offload-policy` | `v4-local-2a-offload-format`, `v4-local-2b-offload-store` | done | `1f45983`, `b9cffe4`, `7d7c285`: `[offload]` config, the pure §7.2 eligibility evaluator, `vowp offload policy`/`status` and `vowp job add --placement`; fix rounds covered implicit placement rows, sibling-project leakage and `any` + `home_only`. |
+| 2 | `v4-local-2d-agent-worktree` | `v4-local-2a-offload-format` | done | `45b9431`/`804bb4e`: confined `PathRef` resolution, one worktree per job with safe cleanup, push only `job/<id>`, check every push URL and strip credentials from remote errors. |
+| 2 | `v4-local-2e1b-assignment-remote-url` | `v4-local-2c-offload-policy` | done | `857505a`: `AssignmentPayload` carries the credential-stripped expected remote URL so the Mac can refuse a fork; replaced the cancelled `v4-local-2e1-assignment-remote-url`. |
+| 2 | `v4-local-2e-offload-dispatch` | `v4-local-2c-offload-policy`, `v4-local-2e1b-assignment-remote-url` | done | `e3b5066`/`3b2e24f`: durable assignment rows, `AssignRun` on the live gateway, accept/reject/state/lost/resume handling, hashed run leases, and the fleet-wide `offload.max_remote_runs` cap. |
+| 2 | `v4-local-2f-agent-run-loop` | `v4-local-2a-offload-format`, `v4-local-2d-agent-worktree`, `v4-local-2e1b-assignment-remote-url` | done | `909835b`/`59f8555`: the `AssignRun` loop with spool-before-send, replay from the first unacked line, the 64-event credit window, `RunState`/`TurnEnd` and cancel/lost/resume/cleanup; the fix queues events spooled during resume. |
+| 2 | `v4-local-2g-agent-path-map` | `v4-local-2f-agent-run-loop` | done | `883334e`: persist the Mac project path map in `agent.json` (0600), validate roots and allow lists, send it at enrollment, refresh it over `PathMapUpdate`, and add the `vowp agent paths` `add`, `rm` and `ls` subcommands. |
+| 2 | `v4-local-2h-agent-harness` | `v4-local-2g-agent-path-map` | done | `9b23294`/`8302926`: the real `CoreRunHandler` resolves the path map, creates or reuses `job/<id>`, runs the adapter, streams redacted events, reports the head, pushes only the job branch and cleans up; eight named tests. |
+| 2 | `v4-local-2i-result-return` | `v4-local-2h-agent-harness` | done | `5b35893`/`edb55a9`: home fetch, head/base verification, a staging worktree outside the main checkout, authoritative `owns_respected` and `secret_scan` on `base..head`, then the normal merge path; failed pushes, head/base mismatches and gate violations settle the run, release the lease and keep the job retryable. |
+| 2 | `v4-local-2j-offload-e2e` | `v4-local-2i-result-return` | done | `6b8ceec`: `crates/vowp-core/tests/offload_e2e.rs` proves the whole loop with a fake gateway and adapter; `b2d38ac` makes a reconnect re-accept a disconnected assignment. |
 
-The rest of the accepted Phase 2 scope is planned by the phase table in §14.1, not done, and has no
-job in the graph yet: the home dispatcher, the agent executor (worktree, harness, events and push),
-the home result return, and node capacity plus waiting reasons.
+The Phase 2 exit test is `crates/vowp-core/tests/offload_e2e.rs`. Its named §14.3 test,
+`fake_gateway_full_turn_and_job_end_to_end`, covers dispatch, acceptance, a real worktree, ordered
+events, push, home fetch/verify, the `owns_respected` and `secret_scan` gates and gating; the file
+also covers a home-only refusal, a denied kind, a pinned offline node, a mid-run disconnect with a
+gapless replay, a failed push and a head outside the job's `owns`.
+
+Phase 2 is complete; Phase 3 has started. The current protocol slice is `v4-local-3a-app-frames`
+(running): attach/detach, native event, turn and MCP tool frames for the local app surface, format
+only. The next slices in §14.1 — the opencode bridge, the MCP proxy and orchestrator
+materialization — are planned work and not yet queued; no job id exists for them. The framework job
+`v4-c5-live-upgrade-drain` is separate from the v0.4 phase order: it is the current continuity work
+and is running, not done. A future agent should start from `vowp job ls --all` and
+`vowp graph --json`, not from this table alone.
 
 The supervisor owns dispatch, gates, verify, fix and merge. Track with:
 
@@ -1753,11 +1769,6 @@ vowp fleet queue
 The main checkout stays clean because the design note is committed. GitHub pushes remain parked:
 `origin` is a local bare repository used by the merge queue, and the `github` remote keeps the real
 upstream. Restore the GitHub push URL when the owner is ready to publish.
-
-Phase 2 is in progress: the three current jobs are `v4-local-2a-offload-format`,
-`v4-local-2b-offload-store` and `v4-local-2c-offload-policy`; the next slices are the home
-dispatcher, the agent executor, home result return and node capacity/waiting reasons. A future
-agent should start from `vowp job ls --all` and `vowp graph --json`, not from this table alone.
 
 ### 16.4 Framework notes: live provider caps and fix-job owns (2026-11-13; updated 2026-11-14)
 
@@ -1788,6 +1799,13 @@ the orchestrator files, the planner widened the original job's `owns`, and the n
 inherited the widened list and landed the change. The follow-up for a future job is the same
 planner widening; no job in the graph tracks a code change to the handoff, and this note does not
 promise one.
+
+**Live upgrade and drain (in progress).** The current framework work is
+`v4-c5-live-upgrade-drain` (running on 2026-11-14), which implements the accepted plan in
+[`live-upgrade-and-drain.md`](live-upgrade-and-drain.md): defer store migrations while a live
+supervisor holds the lock, add `vowp down --drain`, hand off with `vowp up --replace`, and restart
+the web window or reload one project without stopping the others. It is not done: the
+drain/replace/deferred-migration code is not on `main`, and nothing here claims otherwise.
 
 ## 17. Alternatives considered
 
