@@ -4,8 +4,11 @@
 
 use pretty_assertions::assert_eq;
 
-use vowp_protocol::config::{Approval, CapsuleConfig, MergeConfig, NodeConfig, NodeFile, ProjectConfig, VowpConfig};
-use vowp_protocol::{CmdGate, Executor, Gate, ProtocolError};
+use vowp_protocol::config::{
+    Approval, CapsuleConfig, MergeConfig, NodeConfig, NodeFile, OffloadConfig, ProjectConfig, ResultTransport,
+    VowpConfig,
+};
+use vowp_protocol::{CmdGate, Executor, Gate, JobKind, Placement, ProtocolError};
 
 /// A minimal valid project configuration; tests append tables to it.
 const BASE: &str = r#"
@@ -512,4 +515,113 @@ fn with_defaults_for_tests_is_valid() {
     config.validate().expect("the test defaults must validate");
     assert_eq!(config.project.name.as_str(), "test");
     assert_eq!(config.profiles.len(), 4);
+}
+
+#[test]
+fn offload_defaults_disable_offload_and_force_every_job_home() {
+    let config = parse(BASE);
+    assert_eq!(config.offload, OffloadConfig::default());
+    assert!(!config.offload.enabled);
+    assert_eq!(config.offload.default, Placement::Home);
+    assert_eq!(config.offload.max_remote_runs, 2);
+    assert_eq!(config.offload.grace_secs, 600);
+    assert_eq!(config.offload.result_transport, ResultTransport::Push);
+    assert!(!config.offload.pause_on_home_brake);
+    assert!(config.offload.require_clean_base);
+    assert_eq!(config.offload.min_disk_bytes, 5_368_709_120);
+    assert!(config.offload.projects.is_empty());
+    assert!(config.offload.nodes.is_empty());
+
+    let project = config.offload.project_policy(&config.project.name);
+    assert_eq!(project.placement, None);
+    assert!(!project.home_only);
+    assert_eq!(
+        project.allow_kinds,
+        [
+            JobKind::Build,
+            JobKind::Test,
+            JobKind::Docs,
+            JobKind::Fix,
+            JobKind::Verify
+        ]
+    );
+    assert_eq!(project.deny_kinds, [JobKind::Merge, JobKind::Promote, JobKind::Release]);
+    assert!(project.allow_secrets.is_empty());
+
+    let node = config
+        .offload
+        .node_policy(&vowp_protocol::NodeName::parse("mac-studio").expect("node slug"));
+    assert_eq!(node.max_workers, None);
+    assert!(!node.allow_battery);
+    assert!(node.labels.is_empty());
+}
+
+#[test]
+fn offload_policy_parses_projects_nodes_and_rejects_bad_values() {
+    let config = parse(&format!(
+        "{BASE}\n[offload]\nenabled = true\ndefault = \"home\"\nmax_remote_runs = 3\ngrace_secs = 120\nresult_transport = \"push\"\npause_on_home_brake = true\nrequire_clean_base = false\nmin_disk_bytes = 1024\n\n[offload.projects.vowp]\nplacement = \"any\"\nallow_kinds = [\"build\", \"test\"]\ndeny_kinds = [\"merge\"]\nallow_secrets = [\"CARGO_REGISTRY_TOKEN\"]\n\n[offload.projects.secret-app]\nhome_only = true\n\n[offload.nodes.mac-studio]\nmax_workers = 2\nallow_battery = true\nlabels = [\"darwin-arm64\", \"xcode\"]\n"
+    ));
+    assert!(config.offload.enabled);
+    assert_eq!(config.offload.default, Placement::Home);
+    assert_eq!(config.offload.max_remote_runs, 3);
+    assert_eq!(config.offload.grace_secs, 120);
+    assert!(config.offload.pause_on_home_brake);
+    assert!(!config.offload.require_clean_base);
+    assert_eq!(config.offload.min_disk_bytes, 1024);
+
+    let project = &config.offload.projects[&config.project.name];
+    assert_eq!(project.placement, Some(Placement::Any));
+    assert_eq!(project.allow_kinds, [JobKind::Build, JobKind::Test]);
+    assert_eq!(project.deny_kinds, [JobKind::Merge]);
+    assert_eq!(project.allow_secrets.len(), 1);
+    assert_eq!(project.allow_secrets[0].as_str(), "CARGO_REGISTRY_TOKEN");
+
+    let secret_app = config
+        .offload
+        .project_policy(&vowp_protocol::ProjectName::parse("secret-app").expect("project slug"));
+    assert!(secret_app.home_only);
+    assert_eq!(secret_app.placement, None);
+
+    let node = config
+        .offload
+        .node_policy(&vowp_protocol::NodeName::parse("mac-studio").expect("node slug"));
+    assert_eq!(node.max_workers, Some(2));
+    assert!(node.allow_battery);
+    assert_eq!(node.labels, ["darwin-arm64", "xcode"]);
+
+    // The documented validation refusals.
+    reject(&format!("{BASE}\n[offload]\nmax_remote_runs = 0\n"));
+    reject(&format!("{BASE}\n[offload]\nmin_disk_bytes = 0\n"));
+    reject(&format!("{BASE}\n[offload]\ndefault = \"\"\n"));
+    reject(&format!("{BASE}\n[offload]\ndefault = \"node:mac-studio\"\n"));
+    reject(&format!(
+        "{BASE}\n[offload.projects.vowp]\nhome_only = true\nplacement = \"any\"\n"
+    ));
+    reject(&format!("{BASE}\n[offload]\nnot_a_key = true\n"));
+    reject(&format!("{BASE}\n[offload.projects.vowp]\nnot_a_key = true\n"));
+    reject(&format!("{BASE}\n[offload.nodes.mac-studio]\nnot_a_key = true\n"));
+
+    // A home_only project with no placement is valid, as is `default = "any"`.
+    let config = parse(&format!(
+        "{BASE}\n[offload]\ndefault = \"any\"\n[offload.projects.vowp]\nhome_only = true\n"
+    ));
+    assert_eq!(config.offload.default, Placement::Any);
+}
+
+#[test]
+fn offload_bundle_transport_is_refused_with_a_phase_4_message() {
+    match VowpConfig::from_toml(&format!("{BASE}\n[offload]\nresult_transport = \"bundle\"\n")) {
+        Err(ProtocolError::Config(message)) => {
+            assert!(message.contains("Phase 4"), "message must name Phase 4: {message}");
+            assert!(message.contains("bundle"), "message must name the value: {message}");
+            assert!(
+                message.contains("push"),
+                "message must name the supported value: {message}"
+            );
+        }
+        other => panic!("bundle transport must be a Config error, got {other:?}"),
+    }
+
+    let config = parse(&format!("{BASE}\n[offload]\nresult_transport = \"push\"\n"));
+    assert_eq!(config.offload.result_transport, ResultTransport::Push);
 }

@@ -16,7 +16,10 @@ use crate::error::ProtocolError;
 use crate::executor::{Executor, HarnessKind, Profile};
 use crate::gate::Gate;
 use crate::ids::{NodeName, ProjectName};
+use crate::job::JobKind;
 use crate::loops::{ActiveState, LoopBounds, MissedPolicy, ScheduleAction};
+use crate::offload::Placement;
+use crate::vault::SecretName;
 
 /// The keys a `[loops.<name>]` table may contain.
 const LOOP_KEYS: [&str; 11] = [
@@ -118,6 +121,37 @@ fn default_tail_turns() -> u32 {
 /// Returns the default merge-queue timeout.
 fn default_merge_timeout_secs() -> u64 {
     2700
+}
+
+/// Returns the default fleet-wide remote-run cap.
+fn default_max_remote_runs() -> u32 {
+    2
+}
+
+/// Returns the default disconnect grace in seconds.
+fn default_grace_secs() -> u64 {
+    600
+}
+
+/// Returns the default free-disk reserve in bytes (5 GiB).
+fn default_min_disk_bytes() -> u64 {
+    5 * 1024 * 1024 * 1024
+}
+
+/// Returns the default job kinds the offload policy allows.
+fn default_offload_allow_kinds() -> Vec<JobKind> {
+    vec![
+        JobKind::Build,
+        JobKind::Test,
+        JobKind::Docs,
+        JobKind::Fix,
+        JobKind::Verify,
+    ]
+}
+
+/// Returns the default job kinds the offload policy denies.
+fn default_offload_deny_kinds() -> Vec<JobKind> {
+    vec![JobKind::Merge, JobKind::Promote, JobKind::Release]
 }
 
 /// Node-wide settings from `[node]`.
@@ -408,6 +442,134 @@ impl Default for MergeConfig {
     }
 }
 
+/// How a remote run returns its result.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultTransport {
+    /// Push the job branch from the node; the home fetches and verifies it.
+    #[default]
+    Push,
+    /// Return a bundle over the agent connection. Phase 4; refused by validation.
+    Bundle,
+}
+
+/// Per-project offload policy from `[offload.projects.<name>]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OffloadProjectConfig {
+    /// Project placement default; `None` falls back to [`OffloadConfig::default`].
+    #[serde(default)]
+    pub placement: Option<Placement>,
+    /// The project never leaves the home, even with a per-job placement.
+    #[serde(default)]
+    pub home_only: bool,
+    /// Job kinds allowed to leave the home.
+    #[serde(default = "default_offload_allow_kinds")]
+    pub allow_kinds: Vec<JobKind>,
+    /// Job kinds refused for offload.
+    #[serde(default = "default_offload_deny_kinds")]
+    pub deny_kinds: Vec<JobKind>,
+    /// Secret names the project allows a node to resolve locally.
+    #[serde(default)]
+    pub allow_secrets: Vec<SecretName>,
+}
+
+impl Default for OffloadProjectConfig {
+    fn default() -> Self {
+        Self {
+            placement: None,
+            home_only: false,
+            allow_kinds: default_offload_allow_kinds(),
+            deny_kinds: default_offload_deny_kinds(),
+            allow_secrets: Vec::new(),
+        }
+    }
+}
+
+/// Per-node offload overrides from `[offload.nodes.<name>]`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OffloadNodeConfig {
+    /// Worker cap for this node; `None` uses the node's reported `max_slots`.
+    #[serde(default)]
+    pub max_workers: Option<u32>,
+    /// Whether the node may receive new runs while on battery or thermally limited.
+    #[serde(default)]
+    pub allow_battery: bool,
+    /// Labels the node must have enrolled.
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+/// Offload settings from `[offload]`.
+///
+/// Defaults disabled: every job stays on the home until the owner enables offload and a
+/// project opts in with a placement. Validation rejects a zero fleet or disk cap, a
+/// `node:<name>` fleet default and the Phase 4 `bundle` transport.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OffloadConfig {
+    /// Whether any job may leave the home.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Fleet default placement; `home` or `any`.
+    #[serde(default)]
+    pub default: Placement,
+    /// Fleet-wide cap on simultaneous remote runs.
+    #[serde(default = "default_max_remote_runs")]
+    pub max_remote_runs: u32,
+    /// Disconnect grace period in seconds.
+    #[serde(default = "default_grace_secs")]
+    pub grace_secs: u64,
+    /// How a remote run returns its result.
+    #[serde(default)]
+    pub result_transport: ResultTransport,
+    /// Whether an active home brake also stops remote dispatch.
+    #[serde(default)]
+    pub pause_on_home_brake: bool,
+    /// Refuse a node whose base checkout is not clean.
+    #[serde(default = "default_true")]
+    pub require_clean_base: bool,
+    /// Free-disk reserve a node must keep, in bytes.
+    #[serde(default = "default_min_disk_bytes")]
+    pub min_disk_bytes: u64,
+    /// Per-project policy overrides.
+    #[serde(default)]
+    pub projects: BTreeMap<ProjectName, OffloadProjectConfig>,
+    /// Per-node policy overrides.
+    #[serde(default)]
+    pub nodes: BTreeMap<NodeName, OffloadNodeConfig>,
+}
+
+impl Default for OffloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default: Placement::Home,
+            max_remote_runs: default_max_remote_runs(),
+            grace_secs: default_grace_secs(),
+            result_transport: ResultTransport::Push,
+            pause_on_home_brake: false,
+            require_clean_base: true,
+            min_disk_bytes: default_min_disk_bytes(),
+            projects: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+        }
+    }
+}
+
+impl OffloadConfig {
+    /// Returns the effective policy for `project`, filling the documented defaults.
+    pub fn project_policy(&self, project: &ProjectName) -> OffloadProjectConfig {
+        self.projects.get(project).cloned().unwrap_or_default()
+    }
+
+    /// Returns the effective policy for `node`, filling the documented defaults.
+    pub fn node_policy(&self, node: &NodeName) -> OffloadNodeConfig {
+        self.nodes.get(node).cloned().unwrap_or_default()
+    }
+}
+
 /// The project configuration file, `vowp.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -444,6 +606,9 @@ pub struct VowpConfig {
     /// Merge-queue settings.
     #[serde(default)]
     pub merge: MergeConfig,
+    /// Offload policy.
+    #[serde(default)]
+    pub offload: OffloadConfig,
 }
 
 impl VowpConfig {
@@ -482,6 +647,7 @@ impl VowpConfig {
         self.validate_gate_sets()?;
         self.validate_loops()?;
         self.validate_globs()?;
+        self.validate_offload()?;
         Ok(())
     }
 
@@ -526,6 +692,7 @@ impl VowpConfig {
             schedules: Vec::new(),
             capsule: CapsuleConfig::default(),
             merge: MergeConfig::default(),
+            offload: OffloadConfig::default(),
         }
     }
 
@@ -722,6 +889,39 @@ impl VowpConfig {
         for pattern in &self.project.always_allowed {
             globset::Glob::new(pattern)
                 .map_err(|err| ProtocolError::Config(format!("project.always_allowed {pattern:?}: {err}")))?;
+        }
+        Ok(())
+    }
+
+    /// Validates the `[offload]` table.
+    fn validate_offload(&self) -> Result<(), ProtocolError> {
+        let offload = &self.offload;
+        if offload.max_remote_runs == 0 {
+            return Err(ProtocolError::Config(
+                "offload.max_remote_runs must be at least 1".to_owned(),
+            ));
+        }
+        if offload.min_disk_bytes == 0 {
+            return Err(ProtocolError::Config(
+                "offload.min_disk_bytes must be at least 1".to_owned(),
+            ));
+        }
+        if matches!(&offload.default, Placement::Node { .. }) {
+            return Err(ProtocolError::Config(
+                "offload.default must be \"home\" or \"any\"; a node:<name> default is not allowed".to_owned(),
+            ));
+        }
+        if offload.result_transport == ResultTransport::Bundle {
+            return Err(ProtocolError::Config(
+                "offload.result_transport = \"bundle\" is Phase 4, not supported; use \"push\"".to_owned(),
+            ));
+        }
+        for (name, project) in &offload.projects {
+            if project.home_only && matches!(&project.placement, Some(Placement::Any | Placement::Node { .. })) {
+                return Err(ProtocolError::Config(format!(
+                    "offload.projects.{name}: home_only = true cannot be combined with an offload placement"
+                )));
+            }
         }
         Ok(())
     }
