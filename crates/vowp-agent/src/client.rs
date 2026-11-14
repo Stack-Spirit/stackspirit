@@ -16,6 +16,7 @@ use vowp_protocol::{
     SessionId, SurfaceId, SurfaceScope, Timestamp,
 };
 
+use crate::bridge::{BridgeState, OpencodeBridge};
 use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surface_binding};
 use crate::error::AgentError;
 use crate::executor::{RunDriver, RunHandler};
@@ -231,11 +232,17 @@ pub struct AgentClient {
     socket: Option<AgentSocket>,
     pending_tool_calls: HashMap<String, PendingToolCall>,
     tool_call_timeout: Duration,
+    bridge: Option<BridgeLink>,
 }
 
 struct PendingToolCall {
     reply: mpsc::Sender<SocketResponse>,
     deadline: Instant,
+}
+
+struct BridgeLink {
+    bridge: OpencodeBridge,
+    attached: bool,
 }
 
 struct Connection {
@@ -280,6 +287,7 @@ impl AgentClient {
             socket: None,
             pending_tool_calls: HashMap::new(),
             tool_call_timeout: TOOL_CALL_TIMEOUT,
+            bridge: None,
         }
     }
 
@@ -308,6 +316,7 @@ impl AgentClient {
             socket: None,
             pending_tool_calls: HashMap::new(),
             tool_call_timeout: TOOL_CALL_TIMEOUT,
+            bridge: None,
         }
     }
 
@@ -338,6 +347,29 @@ impl AgentClient {
     pub fn with_tool_call_timeout(mut self, timeout: Duration) -> Self {
         self.tool_call_timeout = timeout;
         self
+    }
+
+    /// Attaches one opencode bridge to this client.
+    ///
+    /// The bridge uses the same outbound connection as tool calls; its frames are spooled
+    /// before they are sent, and a lost lease stops it read-only without deleting the
+    /// spool. The caller loads and configures the bridge with [`OpencodeBridge::load`].
+    pub fn with_bridge(mut self, bridge: OpencodeBridge) -> Self {
+        self.bridge = Some(BridgeLink {
+            bridge,
+            attached: false,
+        });
+        self
+    }
+
+    /// Returns the attached bridge, when this client hosts one.
+    pub fn bridge(&self) -> Option<&OpencodeBridge> {
+        self.bridge.as_ref().map(|link| &link.bridge)
+    }
+
+    /// Returns the attached bridge's observable state.
+    pub fn bridge_state(&self) -> Option<BridgeState> {
+        self.bridge.as_ref().map(|link| link.bridge.state())
     }
 
     /// Sets the project path map sent by the next [`AgentClient::enroll`].
@@ -714,6 +746,12 @@ impl AgentClient {
             return Err(error);
         }
         let outcome = self.run_loop(driver, options);
+        let _ = self.detach_bridge();
+        if let Some(link) = self.bridge.as_mut() {
+            // Injected values live only for one run. The spool and cursor stay private on
+            // disk for inspection and a later backfill.
+            link.bridge.finish();
+        }
         self.stop_socket();
         outcome
     }
@@ -807,6 +845,125 @@ impl AgentClient {
         Ok(())
     }
 
+    /// Attaches the bridge surface and replays anything its spool still holds.
+    fn attach_bridge(&mut self) -> Result<(), AgentError> {
+        let Some(link) = self.bridge.as_ref() else {
+            return Ok(());
+        };
+        if link.attached || link.bridge.state().read_only.is_some() {
+            return Ok(());
+        }
+        let surface = link.bridge.surface().clone();
+        let session = link.bridge.session().clone();
+        self.send_frame(&AgentFrame::SurfaceAttach(SurfaceAttach { surface, session }))?;
+        if let Some(link) = self.bridge.as_mut() {
+            link.attached = true;
+        }
+        self.flush_bridge()?;
+        if let Some(link) = self.bridge.as_mut()
+            && let Err(error) = link.bridge.attach()
+            && error.is_fatal()
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Sends every spooled bridge frame the home has not seen, in spool order.
+    fn flush_bridge(&mut self) -> Result<(), AgentError> {
+        let pending = match self.bridge.as_ref() {
+            Some(link) => link.bridge.pending_frames()?,
+            None => return Ok(()),
+        };
+        for frame in pending {
+            if self.connection.is_none() {
+                break;
+            }
+            if self
+                .bridge
+                .as_ref()
+                .is_some_and(|link| link.bridge.state().read_only.is_some())
+            {
+                break;
+            }
+            self.send_frame(&frame.as_agent_frame())?;
+            if let Some(link) = self.bridge.as_mut() {
+                link.bridge.mark_sent(frame.native_id())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads one short local SSE window and sends the frames it produced.
+    ///
+    /// A local stream failure is not a home-connection failure: the bridge reconnects
+    /// from its cursor on the next loop turn. A frame write failure is a connection
+    /// failure, and the frame stays in the spool for replay.
+    fn pump_bridge(&mut self) -> Result<(), AgentError> {
+        if self.connection.is_none() {
+            return Ok(());
+        }
+        let sync = {
+            let Some(link) = self.bridge.as_mut() else {
+                return Ok(());
+            };
+            if !link.attached || link.bridge.state().read_only.is_some() {
+                return Ok(());
+            }
+            match link.bridge.poll() {
+                Ok(sync) => sync,
+                Err(error) if error.is_fatal() => return Err(error),
+                Err(_) => return Ok(()),
+            }
+        };
+        for frame in sync.frames {
+            if self.connection.is_none() {
+                break;
+            }
+            self.send_frame(&frame.as_agent_frame())?;
+            if let Some(link) = self.bridge.as_mut() {
+                link.bridge.mark_sent(frame.native_id())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes, sends `SurfaceDetach` and stops reading the local app.
+    fn detach_bridge(&mut self) -> Result<(), AgentError> {
+        let Some(link) = self.bridge.as_ref() else {
+            return Ok(());
+        };
+        if !link.attached {
+            if let Some(link) = self.bridge.as_mut() {
+                link.bridge.close_stream();
+            }
+            return Ok(());
+        }
+        let surface = link.bridge.surface().clone();
+        let session = link.bridge.session().clone();
+        let read_only = link.bridge.state().read_only.is_some();
+        if !read_only {
+            self.flush_bridge()?;
+        }
+        if self.connection.is_some() {
+            self.send_frame(&AgentFrame::SurfaceDetach(SurfaceDetach { surface, session }))?;
+        }
+        if let Some(link) = self.bridge.as_mut() {
+            link.attached = false;
+            link.bridge.close_stream();
+        }
+        Ok(())
+    }
+
+    /// Stops the bridge read-only and keeps its spool for inspection.
+    fn surface_read_only(&mut self, reason: String) {
+        if let Some(link) = self.bridge.as_mut() {
+            // The surface frame was already sent. Keep `attached` true so the final
+            // detach is sent without flushing the pending spool.
+            link.bridge.note_lease_lost(reason);
+        }
+    }
+
     fn stop_socket(&mut self) {
         self.set_socket_connected(false);
         self.fail_pending_tool_calls("home_offline", "the agent stopped listening for local tool calls");
@@ -824,6 +981,10 @@ impl AgentClient {
         self.set_socket_connected(false);
         self.connection = None;
         self.fail_pending_tool_calls("home_offline", "the home connection is not available");
+        if let Some(link) = self.bridge.as_mut() {
+            link.attached = false;
+            link.bridge.close_stream();
+        }
         let _ = self.service_socket();
     }
 
@@ -1017,6 +1178,9 @@ impl AgentClient {
         if let Err(error) = self.heartbeat() {
             return disconnected_or_failed(error);
         }
+        if let Err(error) = self.attach_bridge() {
+            return serve_outcome_from_error(error);
+        }
         loop {
             if let Err(error) = driver.pump(self) {
                 return serve_outcome_from_error(error);
@@ -1077,9 +1241,21 @@ impl AgentClient {
                             lease_revoked,
                             error,
                         } => driver.handle_ack(&run_id, event_id.as_ref(), seq, duplicate, lease_revoked, error),
+                        AgentFrame::LeaseLost { reason } => self.surface_read_only(reason),
+                        AgentFrame::LeaseRevoked { reason, .. } => self.surface_read_only(reason),
+                        AgentFrame::SurfaceRevoked { surface_id, reason } => {
+                            if self
+                                .bridge
+                                .as_ref()
+                                .is_some_and(|link| link.bridge.surface() == &surface_id)
+                            {
+                                self.surface_read_only(reason);
+                            }
+                        }
                         AgentFrame::Revoked { reason } => {
                             self.status.connection = ConnectionState::Revoked;
                             self.status.last_error = Some(reason.clone());
+                            let _ = self.detach_bridge();
                             if let Err(error) = self.save_status() {
                                 return ServeOutcome::Failed(error);
                             }
@@ -1088,6 +1264,7 @@ impl AgentClient {
                         AgentFrame::Superseded { connection_id } => {
                             self.status.connection = ConnectionState::Superseded;
                             self.status.last_error = Some(format!("superseded by {connection_id}"));
+                            let _ = self.detach_bridge();
                             if let Err(error) = self.save_status() {
                                 return ServeOutcome::Failed(error);
                             }
@@ -1135,6 +1312,7 @@ impl AgentClient {
         let started = Instant::now();
         loop {
             self.service_socket()?;
+            self.pump_bridge()?;
             let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
             // Wake at least every millisecond so an elapsed fake-clock deadline still makes
             // progress instead of spinning on a zero-length read. With a local socket bound
@@ -1144,6 +1322,21 @@ impl AgentClient {
                 (true, None) => Some(SOCKET_POLL),
                 (false, Some(limit)) => Some(limit.max(Duration::from_millis(1))),
                 (false, None) => None,
+            };
+            // An attached bridge must be polled while the frame loop waits. The read is
+            // bounded by the bridge's own short timeout, so a heartbeat or a pending tool
+            // call is never blocked behind a quiet local app.
+            let bridge_active = self
+                .bridge
+                .as_ref()
+                .is_some_and(|link| link.attached && link.bridge.state().read_only.is_none());
+            let wait = if bridge_active {
+                Some(
+                    wait.unwrap_or(crate::bridge::SSE_READ_TIMEOUT)
+                        .min(crate::bridge::SSE_READ_TIMEOUT),
+                )
+            } else {
+                wait
             };
             let read = self
                 .connection

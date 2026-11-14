@@ -1,13 +1,14 @@
 //! The Mac-side v0.4 agent client.
 //!
-//! Spec: `docs/design/v0.4/local-orchestrator.md` §4, §8 and §12.2 and
+//! Spec: `docs/design/v0.4/local-orchestrator.md` §4, §5.3, §8 and §12.2 and
 //! `docs/design/crates/vowp-agent.md`. The crate owns local config and the node key, speaks the
-//! `vowp-protocol` agent frames over an injected transport, and never depends on a store or on
-//! `vowp-core`.
+//! `vowp-protocol` agent frames over an injected transport, follows the local opencode event
+//! stream, and never depends on a store or on `vowp-core`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod bridge;
 pub mod chat;
 pub mod client;
 pub mod config;
@@ -20,6 +21,11 @@ pub mod status;
 pub mod transport;
 pub mod worktree;
 
+pub use bridge::{
+    BRIDGE_BLOBS_DIR, BRIDGE_DIR, BRIDGE_EVENTS_FILE, BRIDGE_SENT_FILE, BRIDGE_SPOOL_DIR, BridgeAttachment,
+    BridgeFrame, BridgeNotice, BridgeState, BridgeSync, DEFAULT_MAX_ATTACHMENT_BYTES, DRAIN_TIMEOUT, MIRROR_FILE,
+    MirrorCursor, OpencodeBridge, PathRoot, Redaction, SSE_PATH, SSE_READ_TIMEOUT,
+};
 pub use chat::{
     CHAT_EPOCH, ChatClient, ChatTurnRequest, ChatTurnStatus, EVENT_POLL, LEASE_HEARTBEAT_EVERY, MAX_RECONNECTS,
 };

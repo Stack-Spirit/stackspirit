@@ -1,10 +1,11 @@
 # crate `vowp-agent` — Mac-side v0.4 agent client
 
-Phase 0/1 client for a local node: local config, the ed25519 node key, the SSH stdio transport,
-surface pairing, the mode-0600 local agent socket, the `vowp-protocol` frame client and the
-run-assignment transport loop. It depends on `vowp-protocol` only; it never opens a store, a
-database or `vowp-core`, and it never dials a home except through the injected transport.
-Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §6.3–§6.5,
+Phase 0/1/3 client for a local node: local config, the ed25519 node key, the SSH stdio
+transport, surface pairing, the mode-0600 local agent socket, the opencode SSE bridge, the
+`vowp-protocol` frame client and the run-assignment transport loop. It depends on
+`vowp-protocol` only; it never opens a store, a database or `vowp-core`, and it never dials a
+home except through the injected transport.
+Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §5.3, §6.3–§6.5,
 §8.2–§8.5, §9 and §12.2.
 
 ## 1. Module layout
@@ -19,12 +20,14 @@ crates/vowp-agent/
   src/client.rs     AgentClient, AgentClock, Backoff, RunOptions, RunOutcome, SurfacePairRequest
   src/executor.rs   RunHandler, RunSink, AcceptedRun, HandlerReject, RunSummary, spool/ack/replay loop
   src/chat.rs       ChatClient, ChatTurnRequest, ChatTurnStatus, lease/turn/replay loop
+  src/bridge.rs     OpencodeBridge, SSE mapping, mirror cursor, path/redaction, attachment bytes
   src/socket.rs     AgentSocket, the local request/response protocol and the 0600 listener
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
   src/worktree.rs   PathMap, WorktreeManager, Worktree, push/cleanup and the disk guard
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
   tests/config.rs   path-map persistence, validation, enrollment and update frames
+  tests/bridge.rs   fake SSE server on 127.0.0.1:0, recorded events and a fake home
   tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
   tests/executor.rs fake home and fake handler for assignments, acks, replay and fencing
   tests/socket.rs   real Unix socket plus in-memory home for attach/detach and tool calls
@@ -44,6 +47,10 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `status.json` | 0600 | the last `AgentStatus` document |
 | `agent.sock` | 0600 | the local agent socket bound by `vowp agent run`; removed on clean exit |
 | `spool/` | — | pending bytes counted by `status`, never opened as a database |
+| `bridge/<surface>/mirror.json` | 0600 | last raw event, durable sequence and native id applied by the opencode bridge |
+| `bridge/<surface>/spool/events.jsonl` | 0600 | mirrored `SurfaceEvent`/`SurfaceTurn` frames, fsynced before send |
+| `bridge/<surface>/spool/sent.json` | 0600 | native ids already written to the one outbound connection |
+| `bridge/<surface>/blobs/<sha256>` | 0600 | pending attachment bytes, content-addressed; no path is stored |
 | `surfaces/` | 0700 | one directory per paired surface |
 | `surfaces/<id>/token` | 0600 | the `vowp_surf_` token returned by `SurfaceIssued`; never printed |
 | `surfaces/<id>/session` | 0600 | the session id the surface was paired for |
@@ -136,6 +143,86 @@ impl AgentClient {
     pub fn run_with_handler(&mut self, options: &RunOptions, handler: Arc<dyn RunHandler>)
         -> Result<RunOutcome, AgentError>;
     pub fn status(&self) -> AgentStatus;
+    pub fn with_bridge(self, bridge: OpencodeBridge) -> Self;
+    pub fn bridge(&self) -> Option<&OpencodeBridge>;
+    pub fn bridge_state(&self) -> Option<BridgeState>;
+}
+
+pub const BRIDGE_DIR: &str;                     // "bridge"
+pub const MIRROR_FILE: &str;                    // "mirror.json"
+pub const BRIDGE_EVENTS_FILE: &str;             // "events.jsonl"
+pub const BRIDGE_SENT_FILE: &str;               // "sent.json"
+pub const BRIDGE_SPOOL_DIR: &str;               // "spool"
+pub const BRIDGE_BLOBS_DIR: &str;               // "blobs"
+pub const DEFAULT_MAX_ATTACHMENT_BYTES: u64;    // 8 MiB
+pub const SSE_PATH: &str;                       // "/api/event"
+pub const SSE_READ_TIMEOUT: Duration;           // 50 ms
+pub const DRAIN_TIMEOUT: Duration;              // 2 s, finite recorded streams only
+pub struct MirrorCursor { pub last_event_id: Option<String>, pub last_seq: Option<u64>,
+                          pub last_native_id: Option<String> }
+pub struct PathRoot { /* absolute root + PathRef */ }
+impl PathRoot {
+    pub fn new(root: impl Into<PathBuf>, path_ref: PathRef) -> Result<Self, AgentError>;
+    pub fn project(root: impl Into<PathBuf>, project: &ProjectName) -> Result<Self, AgentError>;
+    pub fn worktree(root: impl Into<PathBuf>, project: &ProjectName, job: &JobId)
+        -> Result<Self, AgentError>;
+    pub fn root(&self) -> &Path;
+    pub fn path_ref(&self) -> &PathRef;
+}
+pub struct Redaction { /* secret name + value; Debug redacts the value */ }
+impl Redaction {
+    pub fn new(name: &str, value: impl Into<String>) -> Result<Self, AgentError>;
+    pub fn name(&self) -> &SecretName;
+    pub fn marker(&self) -> String;             // "[REDACTED:<NAME>]"
+}
+pub struct BridgeAttachment { /* sha256, bytes, preview, exact data */ }
+impl BridgeAttachment {
+    pub fn sha256(&self) -> &str;
+    pub fn bytes(&self) -> u64;
+    pub fn preview(&self) -> &str;
+    pub fn data(&self) -> &[u8];
+    pub fn blob_ref(&self) -> BlobRef;
+}
+pub enum BridgeFrame { Event { event: Box<SurfaceEvent> }, Turn { turn: SurfaceTurn } }
+impl BridgeFrame {
+    pub fn native_id(&self) -> &str;
+    pub fn surface(&self) -> &SurfaceId;
+    pub fn session(&self) -> &SessionId;
+    pub fn as_agent_frame(&self) -> AgentFrame;
+}
+pub enum BridgeNotice { Gap { after: u64, next: u64 } }
+pub struct BridgeSync { pub frames: Vec<BridgeFrame>, pub notices: Vec<BridgeNotice> }
+pub struct BridgeState { pub attached: bool, pub read_only: Option<String>,
+                         pub pending: usize, pub last_gap: Option<(u64, u64)> }
+pub struct OpencodeBridge { /* service config, surface, session, cursor, spool */ }
+impl OpencodeBridge {
+    pub fn load(service_json: &Path, state_dir: &Path, surface: SurfaceId, session: SessionId)
+        -> Result<Self, AgentError>;
+    pub fn with_native_session(self, native_session: impl Into<String>) -> Self;
+    pub fn with_path_roots(self, roots: Vec<PathRoot>) -> Self;
+    pub fn with_path_maps(self, maps: &[AgentPathMap]) -> Result<Self, AgentError>;
+    pub fn with_path_root(self, root: PathRoot) -> Self;
+    pub fn with_redactions(self, redactions: Vec<Redaction>) -> Self;
+    pub fn with_attachment_cap(self, cap: u64) -> Self;
+    pub fn surface(&self) -> &SurfaceId;
+    pub fn session(&self) -> &SessionId;
+    pub fn mirror_path(&self) -> &Path;
+    pub fn bridge_dir(&self) -> &Path;
+    pub fn spool_dir(&self) -> &Path;
+    pub fn cursor(&self) -> &MirrorCursor;
+    pub fn redactions_loaded(&self) -> bool;
+    pub fn state(&self) -> BridgeState;
+    pub fn attach(&mut self) -> Result<(), AgentError>;
+    pub fn close_stream(&mut self);
+    pub fn note_lease_lost(&mut self, reason: impl Into<String>);
+    pub fn poll(&mut self) -> Result<BridgeSync, AgentError>;
+    pub fn drain(&mut self) -> Result<BridgeSync, AgentError>;
+    pub fn pending_frames(&self) -> Result<Vec<BridgeFrame>, AgentError>;
+    pub fn mark_sent(&mut self, native_id: &str) -> Result<(), AgentError>;
+    pub fn blob_path(&self, sha256: &str) -> PathBuf;
+    pub fn attachment(&mut self, source: &Path) -> Result<BridgeAttachment, AgentError>;
+    pub fn queue_attachment(&mut self, text: &str, sources: &[PathBuf]) -> Result<BridgeFrame, AgentError>;
+    pub fn finish(&mut self);
 }
 
 pub const AGENT_SOCKET_FILE: &str;              // "agent.sock"
@@ -354,7 +441,7 @@ retried with [`Backoff`]: 1, 2, 4 … 60 seconds with up to 25 % jitter. A conne
 for 60 seconds resets the backoff. Fatal authentication, config, key, protocol and non-retryable
 home errors end the loop.
 
-The CLI loads `status.json` through `AgentStatus::load`, fills missing node/home/protocol/
+The CLI loads `status.json` through `AgentStatus::load`, fills missing node, home and protocol/
 fingerprint fields from `agent.json` and `node.pub`, and recounts `spool/` so the displayed byte
 count is current even when the agent is stopped. A missing enrollment is exit 3 with the
 enrollment hint.
@@ -425,8 +512,88 @@ reading frames and servicing the socket between reads.
 The home remains authoritative: a surface that is not attached, a revoked surface or a
 lost lease produces the home's `ToolError`, which the server returns unchanged. The agent
 never tracks token scopes or leases for the socket and never decides that a tool call is
-allowed. The socket is the local transport only; `vowp mcp` and the opencode bridge remain
-separate jobs.
+allowed. The socket is the local transport only; `vowp mcp` remains a separate job, and the
+opencode bridge is the separate module documented next.
+
+### opencode bridge
+
+`OpencodeBridge::load(service_json, state_dir, surface, session)` reads the app's own
+`service.json` (0600) from the opencode state tree. The file must be owner-only, name a
+loopback `http://127.0.0.1` or `http://localhost` URL (or a port), and carry a non-empty
+service password. The bridge never binds a port, never uses a pair link and never prints the
+port or password: `Debug`, every `AgentError` it can return, `status.json` and the spool hold
+none of them. A missing, wider-than-0600 or invalid file is `AgentError::Config`.
+
+Mapping runs on the Mac and produces only the existing `vowp-protocol` frames:
+
+| App event | Mirrored frame | Native id |
+|---|---|---|
+| `session.inbox.enqueued` with a user item | `surface_event` with `user.message` | `user:<inboxID or item id or marker>` |
+| `session.text.ended` | one `surface_event` with `assistant.message` per completed app message; all parts with the same `assistantMessageID` are ordered by `ordinal` and joined with `\n` | `assistant:<assistantMessageID>` |
+| `session.tool.called` | `surface_event` with `tool.call` | `tool-call:<call id or marker>` |
+| `session.tool.success` / `session.tool.failed` | `surface_event` with `tool.result` (`ok` true/false) | `tool-result:<call id or marker>` |
+| `session.usage.updated` | `surface_event` with `cost`, carrying the delta from the previous cumulative usage snapshot | `cost:<assistantMessageID>` or `cost:usage:<marker>` |
+| `session.execution.started` | `SurfaceTurn { state: started }` | `turn-start:<marker>` |
+| `session.execution.succeeded` / `interrupted` | `SurfaceTurn { state: ended }` | `turn-end:<marker>` |
+| `session.execution.failed` | `surface_event` with `error`, then `SurfaceTurn { state: ended }` | `error:<marker>`, `turn-end:<marker>` |
+| `session.model.selected` | `surface_event` with `note` (the bridge has no executor switch to perform) | `model:<marker>` |
+| `session.text.started`, `session.text.delta`, `session.step.*`, `session.tool.input.*`, `server.connected`, `project.updated`, `mcp.*`, unknown | dropped | — |
+
+A marker is the app's durable sequence when present, otherwise the raw event id, otherwise
+its timestamp. A completed assistant message is held until `session.step.ended` (or an
+execution end) so a live delta window never emits a partial message; a stream that closes
+mid-message flushes what it has. Duplicate raw events are skipped and a repeated native id is
+never spooled twice. The home remains the authority on `(session, harness, native_id)`.
+
+`mirror.json` records `last_event_id` (the raw event marker), `last_seq` (the durable
+sequence, when the app has one), `last_native_id` (the last mirrored frame) and a bounded
+`recent_native` list for duplicate suppression after a restart. A reconnect or
+backfill sends `?since=<last_seq>` and `Last-Event-ID: <last_event_id>` to `/api/event`,
+skips everything at or before the cursor, and reports a hole in the durable sequence as
+`BridgeNotice::Gap { after, next }` plus `BridgeState::last_gap`; it never treats a gap as
+contiguous. A pending assistant message holds the cursor until it is flushed, so a crash
+before the flush replays its text parts rather than losing them. The home's native-id
+deduplication covers the case where a write reached the home but the local cursor did not.
+
+**Paths.** `PathRoot`s are matched longest first. The exact project root becomes
+`project:<name>`; a path below it becomes `subdir:<name>/<relative>` when `PathRef::parse`
+accepts the result; the exact worktree root becomes `worktree:<name>/<job>`. Any other
+absolute path, including a path below a worktree root (the current `PathRef` vocabulary has no
+worktree-relative variant), becomes `<external>`. The rule applies to message text, tool input,
+tool output and error text before spooling, so no `/Users/<name>` home path reaches a frame, the
+bridge spool or the outbound connection. `PathRoot::project`/`worktree` validate that a root is
+absolute and has no parent traversal; `with_path_maps` adds the agent's validated project
+roots, and the caller adds a worktree root explicitly.
+
+**Redaction.** `Redaction::new(NAME, value)` validates the uppercase secret name and stores the
+exact injected value only in memory; its `Debug` prints `[REDACTED]`. Every exact occurrence in
+text, tool JSON, tool output or an error message is replaced with `[REDACTED:<NAME>]` before
+the frame is spooled. `finish` clears the values (the client calls it when `vowp agent run`
+returns), while the already-redacted spool and cursor stay for inspection. A value the harness
+prints that VOWP never injected is outside this exact-value rule; the home's redaction and
+`secret_scan` remain the backstop.
+
+**Attachments.** `attachment(path)` reads the file only through the local path, enforces
+`DEFAULT_MAX_ATTACHMENT_BYTES` (8 MiB, replaceable with `with_attachment_cap`), computes the
+lowercase SHA-256, makes a redacted 512-character preview, and writes the exact bytes to
+`bridge/<surface>/blobs/<sha256>` (0600). `queue_attachment(text, paths)` spools one
+`user.message` whose `attachments` are `BlobRef { sha256, bytes, preview }` values; neither the
+spool nor the frame contains the local path. The bytes stay content-addressed in the bridge
+spool: the surface frame vocabulary carries a `BlobRef`, not raw bytes, so the home-side
+attachment transfer is a **planned** protocol step that reads the spooled blob by sha256. The
+bridge never sends the path. A file over the cap is `AgentError::Config` and is not stored or
+queued.
+
+**Client integration.** `AgentClient::with_bridge` attaches the surface once its connection is
+up, replays every spool frame not in `sent.json`, then opens the SSE stream. A frame is
+fsynced before `send_frame` writes it on the one outbound connection; `mark_sent` records the
+native id only after the write succeeds, so a failed write replays. `SurfaceDetach` is sent
+after the spool is flushed when the run stops or takes over. The frame loop polls the local
+stream for at most [`SSE_READ_TIMEOUT`] (50 ms) per turn, so a quiet app cannot delay a
+heartbeat or a pending local tool call; the socket's own 50 ms poll bounds the same loop. A
+`LeaseLost`, `LeaseRevoked` or matching `SurfaceRevoked` closes the stream and marks the
+bridge read-only: no further event is read, mapped or sent, and the spool is kept. The final
+detach still goes out without flushing that read-only spool.
 
 ### Run assignment loop
 
