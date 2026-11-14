@@ -145,6 +145,8 @@ pub enum Request {
     RetryJob { job: JobId }, ParkJob { job: JobId, reason: String }, CancelJob { job: JobId },
     NudgeJob { job: JobId }, RestartJob { job: JobId }, ReplanJob { job: JobId }, FailJob { job: JobId, reason: String },   // keeper commands (loops.md §7)
     AnswerInbox { id: InboxId }, PauseLoop { name: String }, ResumeLoop { name: String },
+    RestartWebWindow,                                // restart the optional vowp-daemon child without touching runs
+    ReloadProject { project: ProjectName },          // re-open one drained project's supervisor and store
     Wake,
 }
 /// Stored as kv `req:<ULID>` = `serde_json::to_string(req)`; the store's `push_request(kind, payload)` receives `kind`/`payload` split from that JSON (so store and core agree byte-for-byte).
@@ -380,6 +382,28 @@ impl Supervisor {
     /// startup() then tick() every `tick_secs` or on wake, until `cancel`; on exit interrupts runner threads and marks runs `stalled`.
     pub fn run(&mut self, cancel: &CancelToken) -> Result<(), CoreError>;
     pub fn wake_handle(&self) -> WakeHandle;     // Sender<()> clone for runner threads
+}
+
+/// One supervisor for every active project on the node. It owns the node-level hooks, the
+/// registry reload, the drain marker and the optional web-window restart request.
+pub struct NodeSupervisor { /* Deps, Store, projects, rotation, wake */ }
+impl NodeSupervisor {
+    pub fn new(deps: Deps) -> Result<Self, CoreError>;
+    pub fn startup(&mut self) -> Result<NodeReconcileReport, CoreError>;
+    /// One node pass. While `<home>/drain` exists every active project is forced into
+    /// `ProjectTickMode::Maintenance`: harvest/gates/merge/inbox/snapshot/heartbeat run,
+    /// dispatch/triggers/probes/schedules do not.
+    pub fn tick(&mut self) -> Result<NodeTickReport, CoreError>;
+    pub fn run(&mut self, cancel: &CancelToken) -> Result<(), CoreError>;
+    /// Run the loop and call `after_tick` after each pass (the CLI restarts the web window here).
+    pub fn run_with<F>(&mut self, cancel: &CancelToken, after_tick: F) -> Result<(), CoreError> where F: FnMut(&mut Self);
+    pub fn drain_requested(&self) -> bool;       // <home>/drain exists
+    pub fn active_children(&self) -> usize;      // runner threads + gate/merge tasks across projects
+    pub fn drain_complete(&self) -> bool;        // drain requested, zero children, no run awaiting harvest
+    pub fn drained(&self) -> bool;               // run_with exited because the drain completed
+    pub fn take_web_window_restart(&mut self) -> bool;
+    pub fn shutdown(&mut self) -> Result<(), CoreError>;
+    pub fn project(&self, name: &ProjectName) -> Option<&ProjectSupervisor>;
 }
 pub struct TickReport { pub at: Timestamp, pub steps: Vec<StepReport>, pub dispatched: Vec<JobId>, pub transitions: Vec<(JobId, JobState, JobState)>, pub merged: Vec<JobId> }
 /// Cloneable wake-up handle for L1: `wake()` sends `()` on an `mpsc::Sender<()>`; the loop `recv_timeout(tick)`s on the receiver. Never blocks.

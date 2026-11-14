@@ -1,6 +1,6 @@
 # v0.4 — Live Upgrade, Drain Mode and Selective Subsystem Restart
 
-- **Status:** Accepted design & queued build (`v4-c5-live-upgrade-drain`)
+- **Status:** Accepted design, implemented by `v4-c5-live-upgrade-drain`
 - **Date:** 2026-11-14
 - **Scope:** `vowp-store`, `vowp-core`, `vowp-cli`
 
@@ -58,37 +58,47 @@ newer schema or binary:
   - If a *different* live supervisor PID holds `supervisor.lock` and the on-disk schema is a valid
     split-home version (`2 <= user_version < GLOBAL_SCHEMA_VERSION`, or `1 <= project_version <
     PROJECT_SCHEMA_VERSION`), **defer the migration**: open the connection in backward-compatible
-    mode without mutating the schema.
-  - Queries on core tables (`projects`, `jobs`, `runs`, `sessions`, `inbox`, `kv`, `capacity`) use
-    schema-aware column fallbacks or `PRAGMA table_info` checks where newer columns were added, and
-    only operations that strictly require an unmigrated table return a descriptive
-    `StoreError::MigrationDeferred { running_pid, found, target }` error explaining that
-    `vowp up --replace` will apply the schema upgrade once drained.
+    mode without mutating the schema. The live PID is read from `supervisor.lock` and must still
+    name a running process; the migrating supervisor's own PID (written before `NodeSupervisor`
+    opens the store) is not treated as another supervisor.
+  - Read-only handles (`Store::open_read_only`) accept every split-home version because they
+    never migrate. On the write path, the core tables (`projects`, `jobs`, `runs`, `sessions`,
+    `inbox`, `kv`, `capacity`) keep their columns across v2–v6. A project v1 file lacks only the
+    v2 `job_placement` table, so ordinary job/run/session reads work; operations that strictly
+    need `job_placement` return an SQLite error until the handover migrates the file.
+  - [`StoreError::MigrationDeferred`] names the running PID, the found version and the target
+    version for callers that need a descriptive deferral error.
 
 ### 3.2 Node drain state & rolling handoff (`vowp-core` & `vowp-cli`)
 
-- **Drain state (`<home>/drain` or `kv` `supervisor_mode = draining`):**
-  - `vowp down --drain` writes `<home>/drain` (with optional `replace=true` when invoked via
-    `vowp up --replace`) and wakes the supervisor.
+- **Drain state (`<home>/drain`):**
+  - `vowp down --drain` writes `<home>/drain`, enqueues a `wake` request and waits for the
+    supervisor to release the lock. `vowp up --replace` writes the same marker, wakes the
+    supervisor and waits for the old process to exit before running the normal `up` path.
   - When `<home>/drain` is present, `NodeSupervisor::tick` forces every active project into
     `ProjectTickMode::Maintenance` (harvest, gates, merge queue, inbox, snapshot, heartbeat — no
-    new worker/verifier/planner/keeper dispatch and no schedule triggers).
+    new worker/verifier/planner/keeper dispatch and no schedule triggers). A drain that appears
+    mid-tick is also observed by the dispatch gate, so one slow pass cannot admit a job.
   - At the end of each tick in drain mode, `NodeSupervisor` checks whether total active runner
-    threads and gate tasks across all projects equal zero.
+    threads and gate/merge tasks across all projects equal zero and whether any finished run is
+    still awaiting harvest. It exits only when both are true.
   - When active count reaches zero:
-    - For `vowp down --drain`: the supervisor exits cleanly (`0` active children killed), removes
-      `<home>/drain` and `<home>/supervisor.lock`, and records `stopped`.
-    - For `vowp up --replace`: the supervisor stops its optional `web_window` child, removes
-      `<home>/drain` and `<home>/supervisor.lock`, and spawns/re-execs the current on-disk `vowp`
-      binary (`up --foreground`), which runs `Store::open_global` (applying any pending schema
-      migration while zero runs are active) and resumes normal `ProjectTickMode::Active` ticking.
+    - For `vowp down --drain`: the supervisor exits cleanly (`0` active children killed). The CLI
+      wrapper stops the optional `web_window` child, records the stopped marker and removes the
+      lock; the drain marker is removed on the exit path.
+    - For `vowp up --replace`: the old supervisor stops the same way. The waiting `up --replace`
+      process then runs `Store::open_global`/`Store::open` with no active children, applying any
+      pending schema migration, and starts the current on-disk `vowp` binary (`up --foreground` when
+      `--foreground` was given, otherwise the normal detached child). The new supervisor resumes
+      `ProjectTickMode::Active` dispatch.
 - **Selective subsystem restart (`Request` variants):**
-  - `Request::RestartWebWindow`: instructs the foreground supervisor wrapper to restart the
-    `vowp-daemon` child process and refresh `<home>/web-window` without touching any runner pool or
-    project supervisor.
-  - `Request::ReloadProject { project }`: closes and re-opens one project's `ProjectSupervisor` and
-    store connection (applying any per-project schema migration once that project has zero active
-    runs) without interrupting other projects on the node.
+  - `Request::RestartWebWindow`: the node supervisor records the request; the foreground CLI loop
+    sees it through `NodeSupervisor::take_web_window_restart`, stops and restarts the `vowp-daemon`
+    child, refreshes `<home>/web-window`, and never touches a runner pool or project supervisor.
+  - `Request::ReloadProject { project }`: the node supervisor queues the project and re-opens its
+    `ProjectSupervisor` and store connection once that project's active work is zero. The reload
+    runs the same startup reconciliation and cross-db repair as a supervisor restart, without
+    interrupting other projects.
 
 ## 4. Job breakdown (`v4-c5-live-upgrade-drain`)
 
@@ -108,12 +118,17 @@ To avoid ownership conflicts with the in-flight `v4-asif-*` and `v4-local-2*` wa
 ### Required hermetic tests
 
 1. `cli_opens_older_schema_while_live_supervisor_holds_lock` — proves a newer `Store::open` /
-   `open_global` does not fail with `refuse_live_supervisor` when a live supervisor PID holds the
-   lock on an older split-home schema, and migrates automatically once the lock is released.
-2. `down_drain_finishes_in_flight_run_without_admitting_ready_jobs` — proves `down --drain` ticks
-   in maintenance mode until the active run finishes and harvests, never dispatches a waiting
-   `ready` job, and exits cleanly without killing the child.
-3. `up_replace_drains_migrates_and_restarts_supervisor` — proves `up --replace` drains active work,
-   applies a pending schema bump on the handover boundary, and resumes dispatching.
-4. `selective_project_reload_and_daemon_restart_keep_other_projects_running` — proves restarting the
-   web window or reloading one drained project does not interrupt an active run in another project.
+   `open_global` / `open_with_project` does not fail with `refuse_live_supervisor` when a live
+   supervisor PID holds the lock on an older split-home schema, and migrates automatically once
+   the lock is released.
+2. `drain_mode_finishes_in_flight_run_without_admitting_ready_jobs` — proves a `<home>/drain`
+   tick runs in maintenance mode until the active run finishes and harvests, never dispatches a
+   waiting `ready` job, and exits cleanly without killing the child.
+3. `down_drain_and_up_replace_handoff` — proves `down --drain` lets an in-flight run finish and
+   `up --replace` drains, releases the lock and resumes dispatch from a new supervisor process.
+4. `selective_project_reload_keeps_other_projects_running` — proves reloading one project re-opens
+   only that supervisor and leaves another project's state and generation untouched, and that a
+   `restart_web_window` request reaches the CLI wrapper without recreating a project.
+5. `restart_web_window_request_replaces_only_the_daemon_child` — proves the foreground CLI stops
+   and starts the `vowp-daemon` child for a `restart_web_window` request while the node supervisor
+   keeps running.

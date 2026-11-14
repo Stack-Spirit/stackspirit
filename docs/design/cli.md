@@ -60,7 +60,7 @@ Checks (each `ok|warn|fail` with detail): `home` writable; `db` opens + `integri
 `systemd --user` unit and cron watchdog installed (warn only); supervisor running; disk space ≥ 1 GB.
 Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status":"ok","detail":"tmux 3.4"}]}`.
 
-### `vowp up [--foreground|--detach] [--no-tmux] [--no-migrate] [--once]` · `vowp down [--force] [--kill-windows]` · `vowp status [--check]` · `vowp board [--once] [--interval <secs>]`
+### `vowp up [--foreground|--detach] [--no-tmux] [--no-migrate] [--once] [--replace]` · `vowp down [--drain] [--force] [--kill-windows]` · `vowp status [--check]` · `vowp board [--once] [--interval <secs>]`
 - `up`: runs **one node supervisor for every active project**. It registers the current checkout
   when it has a `vowp.toml`, migrates a v0.1 home first unless `--no-migrate` is given, ensures the
   tmux sessions (`vowp-home` with `board` and `capacity`; `vowp-<project>` with
@@ -68,9 +68,12 @@ Exit 0 if no `fail`, else 1. JSON: `{"ok":true,"checks":[{"name":"tmux","status"
   Default (= `--detach`, also accepted explicitly; used by the watchdog): detaches (re-executes
   itself with `--foreground` under `setsid`/nohup-style, writes `supervisor.lock`); `--foreground`
   runs the loop in this process (what systemd runs); `--once` runs startup plus exactly one node
-  tick then exits (used by tests and cron). Exit 4 if a supervisor is already running; exit 5 on a
-  control machine.
-- `down`: writes `~/.vowp/stop`, waits ≤ 30 s for the lock to disappear; `--force` additionally sends SIGTERM to the pid. Running runs are interrupted and re-queued (`stalled`, not failed). Windows are left for inspection unless `--kill-windows`.
+  tick then exits (used by tests and cron). `--replace` drains a running supervisor first: it
+  writes `<home>/drain`, wakes the supervisor, waits for its runner threads and gate tasks to
+  reach zero, and only then continues with the normal `up` path, so pending store migrations run
+  with no active children before the updated binary resumes dispatch. Exit 4 if a supervisor is
+  already running without `--replace`; exit 5 on a control machine.
+- `down`: writes `~/.vowp/stop`, waits ≤ 30 s for the lock to disappear; `--force` additionally sends SIGTERM to the pid. Running runs are interrupted and re-queued (`stalled`, not failed). `--drain` instead writes `<home>/drain` and wakes the supervisor: every project ticks in maintenance mode (harvest, gates, merge, inbox, snapshot, heartbeat) and admits no new work, and the process exits cleanly once active runner threads and gate tasks reach zero. The drain wait is much longer than a plain stop so in-flight runs can finish; `--force` still escalates. Windows are left for inspection unless `--kill-windows`.
 - `status`: one screen — supervisor (pid, uptime, last tick age), every project with jobs by state, slots busy/total, planner/keeper executors, limits with reset times, cost today, inbox open count. JSON keeps the v0.1 keys and adds `home` and `projects`. Exit 0 whether or not a supervisor runs (use `--json` `running` field; `vowp status --check` exits 1 if the heartbeat is older than 3 min — the watchdog uses this).
 - `board`: refreshing dashboard (clear+redraw every `--interval`, default 2 s; `--once` prints once). With one project selected it prints the v0.1 single-project frame: jobs by state, the running jobs (job, executor, age, last event age), slots, limits, cost, inbox and the last checkpoint. With several projects, or no project selected, it prints the fleet frame: every project's state, jobs by state, running/queued/blocked jobs, last merge, gate failures and cost today, then provider limits and the open inbox count; the fleet frame prints no slots and no last checkpoint. It always recomputes from the databases; `board.json` is only a convenience copy written by the supervisor.
 
