@@ -1,8 +1,37 @@
 # VOWP — Virtual Open Work-to-Production
 
-**VOWP is an open-source (MIT) supervisor for AI coding agents.** It runs the harnesses you already
-use as a small engineering team on a home machine you own: one supervisor for every project, an
-append-only session log, measured capacity and a single merge queue.
+**VOWP is a VPS framework for AI agents to work on projects.** It turns one Linux VPS into the
+always-on **home** for a fleet of agents: a global database, one database per project, append-only
+session logs, a deterministic supervisor, job graphs, loops, cron schedules, measured capacity and a
+single merge queue. You talk to it from the apps you already use; the VPS owns the truth.
+
+VOWP is not another agent harness and not a model. It drives the harnesses you already run — Claude
+Code, opencode, Codex and other CLI agents — through their documented headless interfaces, keeps
+their logins out of the loop, and gives them a shared home, history and delivery process. It is MIT
+licensed.
+
+## What you get
+
+| Capability | What it means |
+|---|---|
+| **One home on a VPS** | The VPS owns the global DB, one DB per project, every session log, the supervisor and the snapshot. |
+| **Interchangeable sessions** | A session is a harness-neutral append-only log. Switch model, harness, machine or surface with a capsule; the history stays. |
+| **A built-in session database** | SQLite is the truth for decisions: jobs, gates, runs, costs, leases, capacity, schedules and inbox. Content stays in plain files. |
+| **Fleet and worker tracking** | Register executor machines, track workers and see the whole fleet in one snapshot. |
+| **Systematic execution** | Jobs form a DAG; deterministic L1–L9 loops keep it moving; cron and interval schedules make the work orderly. |
+| **Harness and provider freedom** | Claude Code, opencode, Codex/generic CLI; profile ladders, provider limits and failover. Stock harnesses, no forks. |
+| **Any surface** | opencode desktop, Claude app, `vowp chat` or MCP; SSH tunnels and no public port. |
+| **Guarded delivery** | Evidence gates, an independent verifier, one merge queue and reversible Work → Production. |
+
+A laptop sleeps, changes networks and carries your local context. A VPS stays on, has one address and
+one database. VOWP puts the fleet there, so sessions, jobs, workers, schedules and history survive a
+closed laptop, and any surface can reconnect to the same session. Your Mac, desktop or phone is the
+control surface; it holds no truth.
+
+**Vocabulary:** a **machine** is a registered execution host — the VPS home, your Mac, a laptop. A
+**job** is one unit of work; when talking about the graph, it is a **job node**. A **slot** is a
+concurrency place, and a **window** is a tmux view. The CLI command `vowp node` still manages machines
+until the v0.4 rename.
 
 ## Set up VOWP 0.3.0
 
@@ -37,8 +66,9 @@ What you need before you paste it:
   yet. Setup registers repositories; it does not clone or rewrite them.
 
 > **Status: current — VOWP 0.3.0.** The v0.3 command surface, including the setup commands and the
-> loopback window, is implemented. The release process owns the 0.3.0 tag and published binaries. The
-> [roadmap](docs/roadmap.md) lists what is deliberately deferred.
+> loopback window, is implemented. The unreleased v0.4 tree adds the first ASIF interchange slice
+> (review draft, below) and local-agent work. The release process owns the 0.3.0 tag and published
+> binaries. The [roadmap](docs/roadmap.md) lists what is deliberately deferred.
 
 ## How it fits together
 
@@ -139,6 +169,22 @@ secrets, never the main checkout, and never deletes a session row. A nightly sch
 `gc --apply`. Backups include the global database, every project database and the session content,
 never secrets. See [Data lifecycle](docs/concepts/data-lifecycle.md).
 
+## ASIF interchange (v0.4, review draft)
+
+The current tree adds a second session interchange format beside the native bundle:
+`vowp session export <id> --format asif` writes a deterministic `.asif.zip`, and
+`vowp session import <file> --format asif` creates a new idle session from that package, a
+standalone `session.json`, a directory or stdin. The daemon window links the same download, serves
+a loss preview and has an `/import` page whose upload is token-gated. `--format bundle` remains the
+default and is unchanged.
+
+ASIF 0.4 is a review draft. Every command reports its declared losses and the VOWP operations that
+are not captured; `--strict` refuses blocking or integrity losses, and `--allow-loss` accepts the
+recoverable ones as declared losses. The interchange does not claim ASIF conformance, an exact or
+lossless round trip, portable continuation or native-harness import. Jobs, gates, leases and
+project rows are not in the package. See the
+[ASIF integration design](docs/design/v0.4/asif-integration.md).
+
 ## Secrets, honestly
 
 VOWP refers to a secret by **name** only. `secret set NAME` reads the value from a hidden prompt;
@@ -150,10 +196,10 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
   mode does not separate the value from the agent's user; the harness runs as that same user.
 - Injection is by name through a harness's `env_pass` list. The promoter does not add a secret
   environment to deploy commands in this build.
-- Exact-value redaction covers every session event path (the session service, remote ingest, a switch
-  turn and the `session watch` importer), the snapshot, capsules, the supervisor log, command-gate
-  evidence, ledger rows and the finished report and run mirror. It matches only the exact stored
-  value, so a transformed or encoded copy is not caught.
+- Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules and
+  the finished report and run mirror. It does **not** cover the supervisor log, gate command evidence,
+  ledger rows, the switch turn path or the `session watch` importer in this build, so a command that
+  prints a secret can still persist it there.
 - **The honest limit:** any agent that can run arbitrary code inside a process that holds a secret can
   print it. Vault mode keeps the files out of the runtime user's direct readable tree, but the helper
   that reads them is a broad trust boundary. Neither mode encrypts the store at rest. Harness logins
@@ -162,8 +208,10 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
 
 The [security model](docs/security.md) states the full coverage and the remaining gaps.
 
-## Why VOWP
+## Why a VPS framework
 
+- **One VPS, not one laptop.** The home stays on; sessions, jobs, workers, schedules and history
+  survive a closed lid, and any surface can reconnect to the same session.
 - **Stock harnesses, no forks.** Claude Code and opencode are driven through their documented
   headless modes. VOWP never scrapes a TUI, sends keystrokes to answer a dialog, or reads and forwards
   login tokens.
@@ -185,6 +233,7 @@ The [security model](docs/security.md) states the full coverage and the remainin
 
 | Start here | What it covers |
 |---|---|
+| [What is VOWP](docs/concepts/what-is-vowp.md) | The VPS framework in one page: home, sessions, database, fleet, graphs, schedules and harnesses. |
 | [Setup contract](docs/setup/agent-setup.md) | The exact prompt contract: ask once, show the plan once, run it, stop at hand-offs, verify, report. |
 | [Concepts overview](docs/concepts/overview.md) | The vocabulary, the moving parts and where state lives. |
 | [Home and surfaces](docs/concepts/home-and-surfaces.md) | One supervisor for many projects, leases, takeover, remote execution, app hosts, MCP and chat. |
@@ -199,8 +248,9 @@ The [security model](docs/security.md) states the full coverage and the remainin
 | [Writing jobs](docs/guides/jobs.md) | Briefs, reports, gates, ownership and the verify/fix loop. |
 | [Operating a home](docs/guides/operating.md) | `up`/`down`, fleet views, capacity, logs, backup, `gc` and migration. |
 | [Sessions](docs/guides/sessions.md) | Chat, takeover, switch, capsule, export/import and `session watch`. |
+| [ASIF interchange (review draft)](docs/design/v0.4/asif-integration.md) | The `--format asif` CLI, declared losses, strict mode and the daemon download/import routes. |
 | [Running a home on a VPS](docs/guides/vps.md) | The server account, harnesses, systemd, SSH and firewalls. |
-| [Control machines and extra nodes](docs/guides/multi-node.md) | Routing, snapshot cache, tunnels, executor nodes and cross-node sessions. |
+| [Control machines and extra machines](docs/guides/multi-node.md) | Routing, snapshot cache, tunnels, executor machines and cross-machine sessions. |
 | [Schedules](docs/guides/schedules.md) | Cron and interval schedules, missed runs, pause and resume. |
 
 Also: [security model](docs/security.md), [troubleshooting](docs/troubleshooting.md),
@@ -210,6 +260,9 @@ the [CLI reference](docs/reference/cli.md) and the [roadmap](docs/roadmap.md).
 ## Limits of v0.3
 
 - **One home.** There is no replication, leader election or multi-home scheduling.
+- **Local execution is remote.** A control machine is a surface, not the home. A registered executor
+  machine can run a turn where local files are needed, but the VPS remains the only writer. The
+  local-surface/local-machine design is 0.4 work.
 - **Loopback window, separate daemon.** The web window and HTTP/SSE API are served by `vowp-daemon`
   on `127.0.0.1` only. The archives and npm package install `vowp` only, so install the daemon
   separately for the window; without it the supervisor runs without a window.
