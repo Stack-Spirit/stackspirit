@@ -173,6 +173,48 @@ async fn ssh_read_command_uses_the_expected_vowp_json_forms() {
 }
 
 #[tokio::test]
+async fn live_client_keeps_parse_warnings_until_the_caller_drains_them() {
+    let mut status: serde_json::Value = serde_json::from_str(FRESH).unwrap();
+    status["snapshot"]["supervisor"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pid");
+    let status_body = serde_json::to_vec(&status).unwrap();
+
+    let mut capacity: serde_json::Value = serde_json::from_str(CAPACITY).unwrap();
+    capacity.as_object_mut().unwrap().remove("reload_pending");
+    let capacity_body = serde_json::to_vec(&capacity).unwrap();
+
+    let fake = Arc::new(FakeCommandRunner::new(vec![
+        CommandOutput::ok(status_body),
+        CommandOutput::ok(capacity_body),
+    ]));
+    let client = SshVowpClient::new(fake, target(), options(false), None);
+
+    let _ = client.fleet_status().await.unwrap();
+    let warnings = client.take_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.path == "snapshot.supervisor.pid"),
+        "fleet status warnings must not be dropped: {warnings:?}"
+    );
+    assert!(
+        client.take_warnings().is_empty(),
+        "draining clears the list"
+    );
+
+    let _ = client.capacity_report().await.unwrap();
+    let warnings = client.take_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.path == "reload_pending"),
+        "capacity report warnings must not be dropped: {warnings:?}"
+    );
+}
+
+#[tokio::test]
 async fn ssh_write_commands_quote_user_text_and_validate_input() {
     let fake = Arc::new(FakeCommandRunner::new(vec![
         CommandOutput::ok("{}"),

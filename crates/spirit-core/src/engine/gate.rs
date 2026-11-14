@@ -807,7 +807,7 @@ pub async fn probe_local_orchestrator(
         }
         Ok(output) => {
             evidence.push(evidence_exit("vowp orchestrator ls --json", &output));
-            missing.push("backfill".to_owned());
+            missing.push("orchestrator read model".to_owned());
         }
         Err(error) => {
             return (

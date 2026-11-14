@@ -295,6 +295,31 @@ fn nullable_patch_fields_distinguish_absent_from_null() {
     assert_eq!(profile.vowp_home, None);
 }
 
+#[test]
+fn patch_serialization_omits_unchanged_nullable_fields() {
+    let patch = HostProfilePatch {
+        label: Some("new-label".to_owned()),
+        ..HostProfilePatch::default()
+    };
+    let value = serde_json::to_value(&patch).unwrap();
+    assert_eq!(value["label"], "new-label");
+    assert!(
+        value.get("default_project").is_none(),
+        "an unchanged nullable field must be omitted, not sent as null: {value}"
+    );
+    let round_tripped: HostProfilePatch = serde_json::from_value(value).unwrap();
+    assert_eq!(round_tripped, patch);
+
+    let cleared = HostProfilePatch {
+        default_project: Some(None),
+        ..HostProfilePatch::default()
+    };
+    let value = serde_json::to_value(&cleared).unwrap();
+    assert!(value["default_project"].is_null());
+    let round_tripped: HostProfilePatch = serde_json::from_value(value).unwrap();
+    assert_eq!(round_tripped.default_project, Some(None));
+}
+
 #[tokio::test]
 async fn host_key_scan_prefers_ed25519_and_fingerprints_every_key() {
     use spirit_core::ssh::command::CommandOutput;

@@ -60,6 +60,7 @@ pub struct SetTargetInput {
     /// Target mode.
     pub mode: TargetMode,
     /// Whether the caller confirmed raising above VOWP's advice.
+    #[serde(rename = "override")]
     pub override_: bool,
     /// Trimmed reason, at most 200 characters.
     pub reason: String,

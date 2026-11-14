@@ -17,7 +17,7 @@ use crate::host::profile::HostId;
 use crate::time::Timestamp;
 use crate::view::FleetView;
 use crate::vowp::VowpClient;
-use crate::wire::{CapacityReportDoc, FleetStatus};
+use crate::wire::{CapacityReportDoc, FleetStatus, WireWarning};
 
 /// An event emitted to the UI. Revisions increase monotonically across all kinds.
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +81,8 @@ struct ConnectionInner {
     latency: LatencyStats,
     last_status: Option<FleetStatus>,
     last_report: Option<CapacityReportDoc>,
+    last_status_warnings: Vec<WireWarning>,
+    last_capacity_warnings: Vec<WireWarning>,
     last_view: Option<FleetView>,
     last_ok_at: Option<Timestamp>,
     last_failed_stage: Option<ConnectStage>,
@@ -121,6 +123,8 @@ impl ConnectionManager {
                 latency: LatencyStats::default(),
                 last_status: None,
                 last_report: None,
+                last_status_warnings: Vec::new(),
+                last_capacity_warnings: Vec::new(),
                 last_view: None,
                 last_ok_at: None,
                 last_failed_stage: None,
@@ -174,6 +178,20 @@ impl ConnectionManager {
     #[must_use]
     pub fn last_capacity_report(&self) -> Option<CapacityReportDoc> {
         self.guard().last_report.clone()
+    }
+
+    /// Returns the non-fatal warnings from the most recent `fleet status` parse.
+    ///
+    /// The raw-document drawer shows these next to the parsed fields.
+    #[must_use]
+    pub fn last_status_warnings(&self) -> Vec<WireWarning> {
+        self.guard().last_status_warnings.clone()
+    }
+
+    /// Returns the non-fatal warnings from the most recent capacity report parse.
+    #[must_use]
+    pub fn last_capacity_warnings(&self) -> Vec<WireWarning> {
+        self.guard().last_capacity_warnings.clone()
     }
 
     /// Returns the stage that failed during the last connect attempt.
@@ -320,6 +338,7 @@ impl ConnectionManager {
                 return Err(self.fail(&host_id, ConnectStage::ReadingSnapshot, error));
             }
         };
+        let status_warnings = client.take_warnings();
         let round_trip_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let now = Timestamp::now();
         let (snapshot, fleet_event, connection_event) = {
@@ -327,6 +346,7 @@ impl ConnectionManager {
             inner.latency.record(round_trip_ms);
             inner.scheduler.record_success();
             inner.last_status = Some(status.clone());
+            inner.last_status_warnings = status_warnings;
             inner.last_ok_at = Some(now);
             inner.last_report = None;
             inner.state = ConnectionState::Connected {
@@ -391,34 +411,52 @@ impl ConnectionManager {
         }
 
         let started = Instant::now();
-        match client.fleet_status().await {
+        let mut token = self.guard().cancel.clone();
+        let result = tokio::select! {
+            result = client.fleet_status() => result,
+            () = token.cancelled() => {
+                return Err(SpiritError::new(
+                    SpiritErrorCode::RemoteTimeout,
+                    "poll cancelled",
+                ));
+            }
+        };
+        match result {
             Ok(status) => {
+                let status_warnings = client.take_warnings();
                 let round_trip_ms =
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let now = Timestamp::now();
-                let (revision, view, connection) = {
-                    let mut inner = self.guard();
-                    inner.latency.record(round_trip_ms);
-                    inner.scheduler.record_success();
-                    inner.last_status = Some(status.clone());
-                    inner.last_ok_at = Some(now);
-                    inner.state = ConnectionState::Connected {
-                        host_id: host_id.clone(),
-                        since: since.unwrap_or(now),
-                        latency: inner.latency.clone(),
-                    };
-                    let revision = inner.revision.advance();
-                    let view = FleetView::from_status(
-                        host_id,
-                        &status,
-                        inner.last_report.as_ref(),
-                        inner.latency.clone(),
-                        revision,
-                        now,
-                    );
-                    inner.last_view = Some(view.clone());
-                    (revision, view, inner.state.snapshot())
+                let mut inner = self.guard();
+                if inner.cancel.is_cancelled() {
+                    return Err(SpiritError::new(
+                        SpiritErrorCode::RemoteTimeout,
+                        "poll cancelled",
+                    ));
+                }
+                inner.latency.record(round_trip_ms);
+                inner.scheduler.record_success();
+                inner.last_status = Some(status.clone());
+                inner.last_status_warnings = status_warnings;
+                inner.last_ok_at = Some(now);
+                inner.state = ConnectionState::Connected {
+                    host_id: host_id.clone(),
+                    since: since.unwrap_or(now),
+                    latency: inner.latency.clone(),
                 };
+                let revision = inner.revision.advance();
+                let view = FleetView::from_status(
+                    host_id,
+                    &status,
+                    inner.last_report.as_ref(),
+                    inner.latency.clone(),
+                    revision,
+                    now,
+                );
+                inner.last_view = Some(view.clone());
+                let connection = inner.state.snapshot();
+                // Emit while the lock is held so a concurrent `disconnect` cannot
+                // interleave its event before this connected snapshot.
                 self.emit(SpiritEvent::Fleet {
                     revision,
                     fleet: Box::new(view.clone()),
@@ -430,24 +468,28 @@ impl ConnectionManager {
                 Ok(Some(view))
             }
             Err(error) => {
-                let (failures, revision, snapshot, error_revision) = {
-                    let mut inner = self.guard();
-                    let failures = inner.scheduler.record_failure();
-                    if failures >= inner.scheduler.phase_threshold() {
-                        let last_ok_at = inner.last_ok_at.unwrap_or_else(Timestamp::now);
-                        inner.state = ConnectionState::Stale {
-                            host_id: host_id.clone(),
-                            last_ok_at,
-                            error: error.message.clone(),
-                        };
-                        if let Some(view) = &mut inner.last_view {
-                            view.stale = true;
-                        }
+                let mut inner = self.guard();
+                if inner.cancel.is_cancelled() {
+                    return Err(SpiritError::new(
+                        SpiritErrorCode::RemoteTimeout,
+                        "poll cancelled",
+                    ));
+                }
+                let failures = inner.scheduler.record_failure();
+                if failures >= inner.scheduler.phase_threshold() {
+                    let last_ok_at = inner.last_ok_at.unwrap_or_else(Timestamp::now);
+                    inner.state = ConnectionState::Stale {
+                        host_id: host_id.clone(),
+                        last_ok_at,
+                        error: error.message.clone(),
+                    };
+                    if let Some(view) = &mut inner.last_view {
+                        view.stale = true;
                     }
-                    let revision = inner.revision.advance();
-                    let snapshot = inner.state.snapshot();
-                    (failures, revision, snapshot, inner.revision.advance())
-                };
+                }
+                let revision = inner.revision.advance();
+                let snapshot = inner.state.snapshot();
+                let error_revision = inner.revision.advance();
                 self.emit(SpiritEvent::Connection {
                     revision,
                     connection: snapshot,
@@ -456,6 +498,7 @@ impl ConnectionManager {
                     revision: error_revision,
                     error: error.clone(),
                 });
+                drop(inner);
                 tracing::debug!(failures, code = %error.code, "fleet poll failed");
                 Err(error)
             }
@@ -478,9 +521,11 @@ impl ConnectionManager {
                 return Err(error);
             }
         };
+        let capacity_warnings = client.take_warnings();
         let (revision, view) = {
             let mut inner = self.guard();
             inner.last_report = Some(report.clone());
+            inner.last_capacity_warnings = capacity_warnings;
             let Some(status) = inner.last_status.clone() else {
                 return Ok(None);
             };

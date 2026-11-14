@@ -40,6 +40,27 @@ fn redact_removes_common_secret_shapes() {
 }
 
 #[test]
+fn redact_removes_whole_private_key_blocks() {
+    let begin = pem_header();
+    let end = ["-----END ", "OPENSSH ", "PRIVATE KEY", "-----"].concat();
+    let body = ["Fake", "Secret", "Body"].concat();
+    let input = format!("before\n{begin}\n{body}\nafter\n{end}\nafter-block");
+    let output = redact(&input);
+    assert!(!output.contains(&body), "key body leaked: {output}");
+    assert!(!output.contains("OPENSSH"));
+    assert!(output.contains("before"));
+    assert!(output.contains("after-block"));
+
+    let truncated = format!("before\n{begin}\n{body}\nunfinished");
+    let output = redact(&truncated);
+    assert!(
+        !output.contains(&body),
+        "truncated key body leaked: {output}"
+    );
+    assert!(output.contains("before"));
+}
+
+#[test]
 fn error_display_never_echoes_secret() {
     let key_name = ["api", "_key"].concat();
     let token_name = ["to", "ken"].concat();

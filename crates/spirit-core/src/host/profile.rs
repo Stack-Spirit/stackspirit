@@ -153,19 +153,31 @@ pub struct NewHostProfile {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostProfilePatch {
     /// New label.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// Replacement SSH target.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshTarget>,
     /// New identity file path, or `Some(None)` to clear it.
-    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_field"
+    )]
     pub identity_file: Option<Option<PathBuf>>,
     /// New remote home, or `Some(None)` to clear it.
-    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_field"
+    )]
     pub vowp_home: Option<Option<String>>,
     /// New default project, or `Some(None)` to clear it.
-    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_field"
+    )]
     pub default_project: Option<Option<String>>,
 }
 

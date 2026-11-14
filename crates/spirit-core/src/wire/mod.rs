@@ -131,6 +131,30 @@ fn push_missing_optional(raw: &Value, paths: &[&str], warnings: &mut Vec<WireWar
     }
 }
 
+/// Checks the schema/version markers on a raw snapshot object *before* full
+/// deserialization, so a changed marker always wins over a missing required field
+/// (`VOWP-CONTRACT.md` §12.3). Absent markers are left to serde, which reports the
+/// field as missing.
+fn ensure_raw_compatible(value: &Value) -> Result<(), SpiritError> {
+    if let Some(schema) = value.get("schema").and_then(Value::as_str) {
+        if schema != SNAPSHOT_FORMAT {
+            return Err(SpiritError::vowp_incompatible(
+                "snapshot.schema",
+                format!("expected {SNAPSHOT_FORMAT}, got {schema:?}"),
+            ));
+        }
+    }
+    if let Some(version) = value.get("version").and_then(Value::as_u64) {
+        if version != u64::from(SNAPSHOT_VERSION) {
+            return Err(SpiritError::vowp_incompatible(
+                "snapshot.version",
+                format!("expected {SNAPSHOT_VERSION}, got {version}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parses `vowp --json fleet status` and enforces the schema guard.
 pub fn parse_fleet_status(bytes: &[u8]) -> Result<Parsed<FleetStatus>, SpiritError> {
     parse_fleet_status_named(bytes, "fleet status")
@@ -142,6 +166,9 @@ pub fn parse_fleet_status_named(
     document: DocumentName,
 ) -> Result<Parsed<FleetStatus>, SpiritError> {
     let raw = parse_json(bytes, document)?;
+    if let Some(snapshot) = raw.get("snapshot") {
+        ensure_raw_compatible(snapshot)?;
+    }
     let mut warnings = Vec::new();
     push_missing_optional(
         &raw,
@@ -165,6 +192,7 @@ pub fn parse_fleet_status_named(
 /// Parses a bare `snapshot.json` document and enforces the schema guard.
 pub fn parse_snapshot(bytes: &[u8]) -> Result<Parsed<Snapshot>, SpiritError> {
     let raw = parse_json(bytes, "snapshot")?;
+    ensure_raw_compatible(&raw)?;
     let mut warnings = Vec::new();
     push_missing_optional(
         &raw,

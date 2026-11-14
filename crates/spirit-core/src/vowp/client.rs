@@ -16,7 +16,7 @@ use crate::wire::ids::{InboxId, JobId, ProjectName};
 use crate::wire::parse_error_document;
 use crate::wire::{
     CapacityReportDoc, CapacityTarget, FleetQueueRow, FleetStatus, InboxItem, JobAction,
-    SetTargetInput, parse_capacity_report, parse_fleet_inbox, parse_fleet_queue,
+    SetTargetInput, WireWarning, parse_capacity_report, parse_fleet_inbox, parse_fleet_queue,
     parse_fleet_status,
 };
 
@@ -67,6 +67,15 @@ pub trait VowpClient: Send + Sync {
         override_: bool,
         reason: &str,
     ) -> Result<CapacityTarget, SpiritError>;
+
+    /// Returns the non-fatal [`WireWarning`]s collected since the last drain.
+    ///
+    /// The live client records them so the raw-document drawer can show parse
+    /// warnings even when tracing is off. Clients that do not parse wire documents
+    /// return an empty list.
+    fn take_warnings(&self) -> Vec<WireWarning> {
+        Vec::new()
+    }
 }
 
 /// The live client: system SSH running `vowp ... --json`.
@@ -74,6 +83,7 @@ pub trait VowpClient: Send + Sync {
 pub struct SshVowpClient {
     remote: SshRemote,
     home: Option<String>,
+    warnings: Arc<Mutex<Vec<WireWarning>>>,
 }
 
 impl SshVowpClient {
@@ -88,6 +98,7 @@ impl SshVowpClient {
         Self {
             remote: SshRemote::new(runner, target, options),
             home,
+            warnings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -108,6 +119,14 @@ impl SshVowpClient {
 
     async fn run(&self, argv: &[String], timeout: Duration) -> Result<CommandOutput, SpiritError> {
         self.remote.run_with_timeout(argv, timeout).await
+    }
+
+    fn record_warnings(&self, warnings: Vec<WireWarning>) {
+        let mut sink = self
+            .warnings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sink.extend(warnings);
     }
 
     fn check_output(&self, output: CommandOutput) -> Result<CommandOutput, SpiritError> {
@@ -208,9 +227,7 @@ impl VowpClient for SshVowpClient {
         let output = self.run(&argv, INITIAL_TIMEOUT).await?;
         let output = self.check_output(output)?;
         let parsed = parse_fleet_status(&output.stdout)?;
-        for warning in &parsed.warnings {
-            tracing::debug!(path = %warning.path, detail = %warning.detail, "fleet status wire warning");
-        }
+        self.record_warnings(parsed.warnings);
         Ok(parsed.value)
     }
 
@@ -221,9 +238,7 @@ impl VowpClient for SshVowpClient {
         let output = self.run(&argv, READ_TIMEOUT).await?;
         let output = self.check_output(output)?;
         let parsed = parse_capacity_report(&output.stdout)?;
-        for warning in &parsed.warnings {
-            tracing::debug!(path = %warning.path, detail = %warning.detail, "capacity wire warning");
-        }
+        self.record_warnings(parsed.warnings);
         Ok(parsed.value)
     }
 
@@ -340,6 +355,14 @@ impl VowpClient for SshVowpClient {
         serde_json::from_slice(&output.stdout)
             .map_err(|err| SpiritError::parse("capacity target", err))
     }
+
+    fn take_warnings(&self) -> Vec<WireWarning> {
+        let mut sink = self
+            .warnings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *sink)
+    }
 }
 
 #[derive(Debug)]
@@ -354,6 +377,7 @@ struct MockState {
     status_calls: u32,
     actions: Vec<(String, String, JobAction)>,
     targets: Vec<SetTargetInput>,
+    warnings: Vec<WireWarning>,
 }
 
 /// A programmable in-memory client for tests and previews.
@@ -382,8 +406,19 @@ impl MockVowpClient {
                 status_calls: 0,
                 actions: Vec::new(),
                 targets: Vec::new(),
+                warnings: Vec::new(),
             })),
         }
+    }
+
+    /// Sets the warnings the next `take_warnings` calls return.
+    #[must_use]
+    pub fn with_warnings(self, warnings: Vec<WireWarning>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .warnings = warnings;
+        self
     }
 
     /// Replaces the probe result.
@@ -585,5 +620,15 @@ impl VowpClient for MockVowpClient {
         updated.set_at = crate::time::Timestamp::now();
         updated.reason = reason.to_owned();
         Ok(updated)
+    }
+
+    fn take_warnings(&self) -> Vec<WireWarning> {
+        std::mem::take(
+            &mut self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .warnings,
+        )
     }
 }

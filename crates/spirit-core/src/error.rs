@@ -226,20 +226,13 @@ impl From<std::io::Error> for SpiritError {
 
 /// Returns a bounded, redacted copy of untrusted text.
 ///
-/// The output is safe to show in a details pane: provider-looking tokens and
-/// `key=value` secrets are replaced, and the result is capped at 2048 characters.
+/// The output is safe to show in a details pane: PEM private-key blocks,
+/// provider-looking tokens and `key=value` secrets are replaced, and the result is
+/// capped at 2048 characters.
 #[must_use]
 pub fn redact(input: &str) -> String {
     const LIMIT: usize = 2048;
-    let mut sanitized = input.to_owned();
-    if let Some(start) = sanitized.find("-----BEGIN") {
-        if let Some(key) = sanitized.find("PRIVATE KEY-----") {
-            let end = key + "PRIVATE KEY-----".len();
-            if start < end {
-                sanitized.replace_range(start..end, "[redacted]");
-            }
-        }
-    }
+    let sanitized = redact_pem_blocks(input);
     let mut out = String::with_capacity(sanitized.len().min(LIMIT));
     let mut redact_next = false;
     for token in sanitized.split_inclusive(char::is_whitespace) {
@@ -260,6 +253,46 @@ pub fn redact(input: &str) -> String {
         }
         out.push_str(rendered);
     }
+    out
+}
+
+/// Replaces complete `-----BEGIN ... -----END ...-----` blocks, including their bodies.
+///
+/// A truncated block (a header followed by more lines and no end marker) is redacted
+/// through the end of the text so its body cannot leak.
+fn redact_pem_blocks(input: &str) -> String {
+    const BEGIN: &str = "-----BEGIN";
+    const END: &str = "-----END";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(begin) = rest.find(BEGIN) {
+        let (before, block) = rest.split_at(begin);
+        out.push_str(before);
+        let header_end = block[BEGIN.len()..]
+            .find("-----")
+            .map_or(block.len(), |offset| BEGIN.len() + offset + 5);
+        let end = block[header_end..].find(END).and_then(|offset| {
+            let end_start = header_end + offset + END.len();
+            block[end_start..]
+                .find("-----")
+                .map(|close| end_start + close + 5)
+        });
+        match end {
+            Some(end) => {
+                out.push_str("[redacted]");
+                rest = &block[end..];
+            }
+            None if block[header_end..].contains('\n') => {
+                out.push_str("[redacted]");
+                rest = "";
+            }
+            None => {
+                out.push_str("[redacted]");
+                rest = &block[header_end..];
+            }
+        }
+    }
+    out.push_str(rest);
     out
 }
 

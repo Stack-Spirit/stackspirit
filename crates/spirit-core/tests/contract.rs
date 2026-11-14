@@ -9,7 +9,7 @@ use spirit_core::error::SpiritErrorCode;
 use spirit_core::time::Timestamp;
 use spirit_core::view::{JobCardView, build_lanes};
 use spirit_core::wire::{
-    FleetStatus, JobState, Snapshot, parse_capacity_report, parse_error_document,
+    FleetStatus, JobState, SetTargetInput, Snapshot, parse_capacity_report, parse_error_document,
     parse_fleet_inbox, parse_fleet_queue, parse_fleet_status, parse_snapshot,
 };
 
@@ -74,6 +74,26 @@ fn fleet_status_fixture_round_trips_documented_fields() {
 }
 
 #[test]
+fn set_target_input_accepts_the_frozen_bridge_payload() {
+    let input: SetTargetInput = serde_json::from_value(json!({
+        "target": 9,
+        "mode": "fixed",
+        "override": true,
+        "reason": "owner raised the target"
+    }))
+    .expect("the frozen SpiritBridge setTarget payload must deserialize");
+    assert_eq!(input.target, 9);
+    assert_eq!(input.mode.as_str(), "fixed");
+    assert!(input.override_);
+    let value = serde_json::to_value(&input).unwrap();
+    assert_eq!(value.get("override"), Some(&json!(true)));
+    assert!(
+        value.get("override_").is_none(),
+        "the wire key is `override`, not the Rust field name: {value}"
+    );
+}
+
+#[test]
 fn snapshot_schema_and_version_are_exact() {
     let snapshot = fresh().snapshot;
     snapshot.ensure_compatible().unwrap();
@@ -96,6 +116,28 @@ fn snapshot_schema_and_version_are_exact() {
     snapshot.ensure_compatible().unwrap();
     let parsed = parse_snapshot(serde_json::to_vec(&snapshot).unwrap().as_slice()).unwrap();
     assert_eq!(parsed.value.version, 1);
+}
+
+#[test]
+fn changed_schema_wins_over_missing_required_fields() {
+    let mut value: Value = serde_json::from_str(FRESH).unwrap();
+    value["snapshot"]["schema"] = json!("vowp-snapshot/2");
+    value["snapshot"].as_object_mut().unwrap().remove("home");
+    let error = parse_fleet_status(value.to_string().as_bytes()).unwrap_err();
+    assert_eq!(
+        error.code,
+        SpiritErrorCode::VowpIncompatible,
+        "VOWP-CONTRACT.md §12.3: a changed schema must report incompatible, not parse"
+    );
+    assert!(error.message.contains("snapshot.schema"));
+
+    let mut value: Value = serde_json::from_str(FRESH).unwrap();
+    value["snapshot"]["version"] = json!(2);
+    value["snapshot"].as_object_mut().unwrap().remove("home");
+    let snapshot = value["snapshot"].to_string();
+    let error = parse_snapshot(snapshot.as_bytes()).unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::VowpIncompatible);
+    assert!(error.message.contains("snapshot.version"));
 }
 
 #[test]

@@ -1,15 +1,19 @@
 //! Connection state machine, three-failure staleness, cancellation and revisions.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use spirit_core::connection::{
     ConnectionManager, ConnectionState, PollPolicy, Revision, SpiritEvent,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::host::HostId;
 use spirit_core::time::Timestamp;
-use spirit_core::vowp::MockVowpClient;
-use spirit_core::wire::{parse_capacity_report, parse_fleet_status};
+use spirit_core::vowp::{MockVowpClient, VowpClient};
+use spirit_core::wire::{WireWarning, WireWarningCode, parse_capacity_report, parse_fleet_status};
+use tokio::sync::Notify;
 
 const FRESH: &str = include_str!("../fixtures/vowp/fleet-status-fresh.json");
 const CAPACITY: &str = include_str!("../fixtures/vowp/capacity-report-full.json");
@@ -22,6 +26,73 @@ fn mock() -> MockVowpClient {
 
 fn host() -> HostId {
     HostId("01JCF5WQ8ZK3M2V7N4P6R8T0AB".to_owned())
+}
+
+/// A client whose `fleet_status` blocks until the future is dropped, so a test can
+/// disconnect while a poll is genuinely in flight.
+struct BlockingClient {
+    inner: MockVowpClient,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    block: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl VowpClient for BlockingClient {
+    async fn probe(&self) -> Result<spirit_core::vowp::VowpProbe, SpiritError> {
+        self.inner.probe().await
+    }
+
+    async fn fleet_status(&self) -> Result<spirit_core::wire::FleetStatus, SpiritError> {
+        if self.block.load(Ordering::SeqCst) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.fleet_status().await
+    }
+
+    async fn capacity_report(&self) -> Result<spirit_core::wire::CapacityReportDoc, SpiritError> {
+        self.inner.capacity_report().await
+    }
+
+    async fn fleet_queue(&self) -> Result<Vec<spirit_core::wire::FleetQueueRow>, SpiritError> {
+        self.inner.fleet_queue().await
+    }
+
+    async fn fleet_inbox(
+        &self,
+        all: bool,
+    ) -> Result<Vec<spirit_core::wire::InboxItem>, SpiritError> {
+        self.inner.fleet_inbox(all).await
+    }
+
+    async fn job_action(
+        &self,
+        project: &str,
+        job: &str,
+        action: spirit_core::wire::JobAction,
+    ) -> Result<(), SpiritError> {
+        self.inner.job_action(project, job, action).await
+    }
+
+    async fn answer_inbox(
+        &self,
+        project: Option<&str>,
+        id: &str,
+        answer: &str,
+    ) -> Result<spirit_core::wire::InboxItem, SpiritError> {
+        self.inner.answer_inbox(project, id, answer).await
+    }
+
+    async fn set_target(
+        &self,
+        target: u32,
+        mode: spirit_core::wire::TargetMode,
+        override_: bool,
+        reason: &str,
+    ) -> Result<spirit_core::wire::CapacityTarget, SpiritError> {
+        self.inner.set_target(target, mode, override_, reason).await
+    }
 }
 
 #[tokio::test]
@@ -95,6 +166,60 @@ async fn disconnect_cancels_in_flight_polls() {
     );
     let after = manager.poll_once(&client).await.unwrap_err();
     assert_eq!(after.code, SpiritErrorCode::Internal);
+}
+
+#[tokio::test]
+async fn disconnect_aborts_a_poll_that_is_already_in_flight() {
+    let manager = ConnectionManager::default();
+    let client = Arc::new(BlockingClient {
+        inner: mock(),
+        started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        block: Arc::new(AtomicBool::new(false)),
+    });
+    manager.connect(client.as_ref(), host()).await.unwrap();
+    client.block.store(true, Ordering::SeqCst);
+    let mut receiver = manager.subscribe();
+    let poll = tokio::spawn({
+        let manager = manager.clone();
+        let client = client.clone();
+        async move { manager.poll_once(client.as_ref()).await }
+    });
+    client.started.notified().await;
+    let snapshot = manager.disconnect();
+    assert_eq!(snapshot.state, "disconnected");
+    let result = tokio::time::timeout(Duration::from_secs(2), poll)
+        .await
+        .expect("an in-flight poll must stop when the connection is cancelled")
+        .unwrap();
+    assert!(result.is_err());
+    assert!(matches!(manager.state(), ConnectionState::Disconnected));
+    assert!(manager.fleet_view().is_some());
+    while let Ok(event) = receiver.try_recv() {
+        assert!(
+            !matches!(event, SpiritEvent::Fleet { .. }),
+            "a poll completing after disconnect must not publish a fleet event"
+        );
+    }
+}
+
+#[tokio::test]
+async fn parse_warnings_reach_the_manager_for_the_raw_document_drawer() {
+    let status = parse_fleet_status(FRESH.as_bytes()).unwrap().value;
+    let report = parse_capacity_report(CAPACITY.as_bytes()).unwrap().value;
+    let warning = WireWarning {
+        path: "snapshot.limits".to_owned(),
+        code: WireWarningCode::UnknownEnum,
+        detail: "unknown value \"quota\"; shown as Unknown".to_owned(),
+    };
+    let client = MockVowpClient::new(status, report).with_warnings(vec![warning.clone()]);
+    let manager = ConnectionManager::default();
+    manager.connect(&client, host()).await.unwrap();
+    assert_eq!(manager.last_status_warnings(), vec![warning.clone()]);
+    assert!(
+        client.take_warnings().is_empty(),
+        "the manager drains warnings instead of leaving them to debug logging"
+    );
 }
 
 #[tokio::test]

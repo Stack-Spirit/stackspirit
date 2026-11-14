@@ -376,6 +376,28 @@ async fn phase3_probe_requires_orchestrator_new_node() {
 }
 
 #[tokio::test]
+async fn phase3_probe_reports_the_orchestrator_read_model_label() {
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles == ["orchestrator", "ls"] {
+            route.output = failed(1, "unknown command");
+        }
+    }
+    let runner = RouteRunner::new(routes, failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 { missing, .. } => {
+            assert!(
+                missing.contains(&"orchestrator read model".to_owned()),
+                "VOWP-CONTRACT.md §11.3.4 step 8 names this capability: {missing:?}"
+            );
+            assert!(!missing.contains(&"backfill".to_owned()));
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn phase3_probe_separates_home_capability_from_local_agent_status() {
     let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
     let (gate, local) = probe_local_orchestrator(&runner, None, &options()).await;
