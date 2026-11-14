@@ -181,6 +181,36 @@ CREATE TABLE limits (                   -- per provider, node-wide (all projects
   updated_at        TEXT NOT NULL
 ) STRICT;
 
+-- ---------------------------------------------------------------- offload state (§6.3, §7.1, §11.1)
+CREATE TABLE agent_assignments (        -- the durable dispatch queue and reconnect record
+  id           TEXT PRIMARY KEY,
+  run_id       TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  project      TEXT NOT NULL,
+  node         TEXT NOT NULL,
+  epoch        INTEGER NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN
+                 ('queued','sent','accepted','running','disconnected',
+                  'finished','lost','cancelled','rejected')),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at   TEXT NOT NULL,
+  claimed_at   TEXT,
+  expires_at   TEXT,
+  detail       TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE INDEX agent_assignments_node ON agent_assignments(node, state);
+
+CREATE TABLE node_limits (              -- a provider limit as seen from one executor node
+  provider    TEXT NOT NULL,
+  node        TEXT NOT NULL REFERENCES nodes(name) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('quota','credits','rate','context','auth','unavailable')),
+  resets_at   TEXT,
+  detail      TEXT NOT NULL DEFAULT '',
+  since       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (provider, node)
+) STRICT;
+
 -- ---------------------------------------------------------------- node-level inbox / ledger (renamed)
 CREATE TABLE node_inbox (               -- node-wide questions/notices; project inboxes live per project
   id           TEXT PRIMARY KEY,
@@ -403,4 +433,4 @@ CREATE TABLE secret_index (
   updated_at TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;

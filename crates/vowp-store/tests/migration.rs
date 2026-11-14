@@ -183,7 +183,7 @@ fn v01_database_migrates_with_matching_row_counts() {
     assert_eq!(report.tables["global:node_ledger"].after, 1);
 
     let global = Store::open_global(&paths).expect("global");
-    assert_eq!(global.global_schema_version().expect("version"), 5);
+    assert_eq!(global.global_schema_version().expect("version"), 6);
     assert_eq!(
         global.list_projects().expect("projects").len(),
         3,
@@ -192,7 +192,7 @@ fn v01_database_migrates_with_matching_row_counts() {
     drop(global);
 
     let alpha = Store::open_with_project(&paths, &project("alpha")).expect("alpha");
-    assert_eq!(alpha.project_schema_version().expect("version"), 1);
+    assert_eq!(alpha.project_schema_version().expect("version"), 2);
     assert!(alpha.require_job(&JobId::parse("alpha-a").expect("job")).is_ok());
     assert!(alpha.require_run(&alpha_run).is_ok());
     assert!(alpha.require_session(&alpha_session).is_ok());
@@ -396,7 +396,7 @@ fn migration_resume_finishes_a_swap() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert!(paths.project_db_path(&project("alpha")).is_file());
     assert!(paths.project_db_path(&project("_node")).is_file());
 }

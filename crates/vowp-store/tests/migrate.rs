@@ -48,10 +48,10 @@ fn schema_file_is_identical_to_design() {
 }
 
 #[test]
-fn open_creates_schema_version_1() {
+fn open_creates_current_schema_versions() {
     let (_tmp, paths, store) = file_store();
     assert_eq!(store.schema_version().expect("compat version"), 1);
-    assert_eq!(store.global_schema_version().expect("global version"), 5);
+    assert_eq!(store.global_schema_version().expect("global version"), 6);
     assert!(store.bound_project().is_none(), "a fresh home binds no project");
     assert!(matches!(store.project_schema_version(), Err(StoreError::NoProject)));
 
@@ -68,7 +68,7 @@ fn open_creates_schema_version_1() {
         assert_eq!(found, 1, "missing global table {table}");
     }
     let project_tables = schema_table_names(PROJECT_SCHEMA);
-    assert_eq!(project_tables.len(), 10, "the project schema declares ten tables");
+    assert_eq!(project_tables.len(), 11, "the project schema declares eleven tables");
 
     let project = ProjectName::parse("proj").expect("project");
     store
@@ -83,12 +83,12 @@ fn open_creates_schema_version_1() {
         })
         .expect("create project");
     assert_eq!(store.bound_project(), Some(&project));
-    assert_eq!(store.project_schema_version().expect("project version"), 1);
+    assert_eq!(store.project_schema_version().expect("project version"), 2);
     let project_conn = Connection::open(paths.project_db_path(&project)).expect("project db");
     let version: i64 = project_conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("project user_version");
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
 
     let mode: String = connection
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -120,7 +120,7 @@ fn open_refuses_newer_schema() {
     match error {
         StoreError::SchemaTooNew { found, supported } => {
             assert_eq!(found, 99);
-            assert_eq!(supported, 5);
+            assert_eq!(supported, 6);
         }
         other => panic!("expected SchemaTooNew, got {other:?}"),
     }

@@ -27,6 +27,7 @@ pub mod repo_ledger;
 pub mod repo_loops;
 pub mod repo_misc;
 pub mod repo_nodes;
+pub mod repo_offload;
 pub mod repo_projects;
 pub mod repo_runs;
 pub mod repo_secrets;
@@ -43,7 +44,7 @@ pub use db::{
 pub use error::StoreError;
 pub use migrate::{
     MigrationCount, MigrationReport, migrate_rollback, migrate_v01, migrate_v01_dry_run, migrate_v02, migrate_v03,
-    migrate_v04, resume_migration,
+    migrate_v04, migrate_v05, resume_migration,
 };
 pub use paths::NodePaths;
 pub use reconcile::{CrossDbReconcile, ReconcileCounts};

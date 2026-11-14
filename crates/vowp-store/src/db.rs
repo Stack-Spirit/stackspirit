@@ -22,21 +22,22 @@ use crate::error::StoreError;
 use crate::paths::NodePaths;
 
 /// Schema version of the global database written by this build.
-pub const GLOBAL_SCHEMA_VERSION: i64 = 5;
+pub const GLOBAL_SCHEMA_VERSION: i64 = 6;
 
 /// Schema version of every project database written by this build.
-pub const PROJECT_SCHEMA_VERSION: i64 = 1;
+pub const PROJECT_SCHEMA_VERSION: i64 = 2;
 
 /// Compatibility alias for the v0.1 schema version.
 ///
-/// New code that means the global file uses [`GLOBAL_SCHEMA_VERSION`]; this constant keeps its
-/// historical value 1 so external users of the v0.1 API are not surprised.
-pub const SCHEMA_VERSION: i64 = PROJECT_SCHEMA_VERSION;
+/// New code that means the global file uses [`GLOBAL_SCHEMA_VERSION`] and code that means a
+/// project file uses [`PROJECT_SCHEMA_VERSION`]; this alias keeps its historical value 1 for
+/// callers of the pre-split `schema_version()` API.
+pub const SCHEMA_VERSION: i64 = 1;
 
-/// Embedded global schema (user_version 5).
+/// Embedded global schema (user_version 6).
 pub(crate) const GLOBAL_SCHEMA_SQL: &str = include_str!("schema/global.sql");
 
-/// Embedded project schema (user_version 1).
+/// Embedded project schema (user_version 2).
 pub(crate) const PROJECT_SCHEMA: &str = include_str!("schema/project.sql");
 
 /// Filter for [`Store::list_jobs`].
@@ -223,13 +224,22 @@ impl Store {
         if !store.project_row_exists(project)? {
             return Err(StoreError::not_found("project", project.as_str()));
         }
+        let path = paths.project_db_path(project);
+        if !path.is_file() {
+            return Err(StoreError::not_found("project database", path.display().to_string()));
+        }
+        // `create_project_db` is the one place that upgrades an existing v1 file to v2; it
+        // leaves a current file untouched.
+        Self::create_project_db(paths, project)?;
         store.attach_file(paths, project)?;
         Ok(store)
     }
 
     /// Creates `projects/<name>/project.db` with the project schema.
     ///
-    /// Idempotent: an existing database with the right version is left untouched.
+    /// Idempotent: an existing database with the right version is left untouched. An existing
+    /// v1 project database is backed up and migrated to v2 in place before this returns, so
+    /// every caller of this constructor sees the current project schema.
     pub fn create_project_db(paths: &NodePaths, project: &ProjectName) -> Result<(), StoreError> {
         let dir = paths.project_dir(project);
         let path = paths.project_db_path(project);
@@ -255,10 +265,15 @@ impl Store {
                     supported: PROJECT_SCHEMA_VERSION,
                 });
             }
+            if version == 1 && tables > 0 {
+                configure_connection(&conn, Path::new(&path), true)?;
+                crate::migrate::migrate_project_v1_to_v2(paths, project, &conn)?;
+                return Ok(());
+            }
             return Err(StoreError::Corrupt {
                 path: path.display().to_string(),
                 line: None,
-                reason: format!("project database has schema version {version}, expected 1"),
+                reason: format!("project database has schema version {version}, expected {PROJECT_SCHEMA_VERSION}"),
             });
         }
 
@@ -395,17 +410,18 @@ impl Store {
 
     /// Compatibility accessor: 1 for every handle, matching v0.1's "schema 1".
     ///
-    /// New code that means the global file uses [`Store::global_schema_version`].
+    /// New code that means the global file uses [`Store::global_schema_version`]; project
+    /// callers use [`Store::project_schema_version`].
     pub fn schema_version(&self) -> Result<i64, StoreError> {
-        Ok(PROJECT_SCHEMA_VERSION)
+        Ok(SCHEMA_VERSION)
     }
 
-    /// Returns the global file's real `PRAGMA user_version` (4).
+    /// Returns the global file's real `PRAGMA user_version` (6).
     pub fn global_schema_version(&self) -> Result<i64, StoreError> {
         Ok(self.conn.query_row("PRAGMA main.user_version", [], |row| row.get(0))?)
     }
 
-    /// Returns the bound project's real `PRAGMA user_version` (1).
+    /// Returns the bound project's real `PRAGMA user_version` (2).
     pub fn project_schema_version(&self) -> Result<i64, StoreError> {
         self.require_bound()?;
         Ok(self
@@ -598,6 +614,7 @@ impl Store {
         crate::migrate::migrate_v02_if_needed(paths)?;
         crate::migrate::migrate_v03_if_needed(paths)?;
         crate::migrate::migrate_v04_if_needed(paths)?;
+        crate::migrate::migrate_v05_if_needed(paths)?;
         let path = paths.db_path();
         let conn = Connection::open(&path)?;
         let store =
@@ -668,11 +685,7 @@ impl Store {
                     supported: PROJECT_SCHEMA_VERSION,
                 });
             }
-            return Err(StoreError::Corrupt {
-                path: path.display().to_string(),
-                line: None,
-                reason: format!("project database has schema version {version}, expected 1"),
-            });
+            return Err(StoreError::MigrationRequired);
         }
         self.set_bound(Some(name.clone()));
         Ok(())
@@ -692,11 +705,13 @@ impl Store {
             .query_row("PRAGMA project.user_version", [], |row| row.get(0))?;
         if version != PROJECT_SCHEMA_VERSION {
             let _ = self.conn.execute_batch("DETACH DATABASE project");
-            return Err(StoreError::Corrupt {
-                path: path.display().to_string(),
-                line: None,
-                reason: format!("project database has schema version {version}, expected 1"),
-            });
+            if version > PROJECT_SCHEMA_VERSION {
+                return Err(StoreError::SchemaTooNew {
+                    found: version,
+                    supported: PROJECT_SCHEMA_VERSION,
+                });
+            }
+            return Err(StoreError::MigrationRequired);
         }
         self.set_bound(Some(name.clone()));
         Ok(())
@@ -839,12 +854,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_versions_are_global_5_project_1() {
-        assert_eq!(GLOBAL_SCHEMA_VERSION, 5);
-        assert_eq!(PROJECT_SCHEMA_VERSION, 1);
+    fn schema_versions_are_global_6_project_2_compat_1() {
+        assert_eq!(GLOBAL_SCHEMA_VERSION, 6);
+        assert_eq!(PROJECT_SCHEMA_VERSION, 2);
         assert_eq!(SCHEMA_VERSION, 1);
-        assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 5;"));
-        assert!(PROJECT_SCHEMA.contains("PRAGMA user_version = 1;"));
+        assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 6;"));
+        assert!(PROJECT_SCHEMA.contains("PRAGMA user_version = 2;"));
     }
 
     #[test]

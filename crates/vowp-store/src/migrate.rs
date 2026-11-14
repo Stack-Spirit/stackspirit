@@ -10,11 +10,11 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{ProjectName, Timestamp};
 
-use crate::db::{GLOBAL_SCHEMA_SQL, GLOBAL_SCHEMA_VERSION, PROJECT_SCHEMA};
+use crate::db::{GLOBAL_SCHEMA_SQL, GLOBAL_SCHEMA_VERSION, PROJECT_SCHEMA, PROJECT_SCHEMA_VERSION};
 use crate::error::StoreError;
 use crate::paths::NodePaths;
 use crate::session_log::{pid_alive, valid_pid};
@@ -107,11 +107,44 @@ const V04_GLOBAL_TABLES: [&str; 25] = [
     "secret_index",
 ];
 
+/// Every table in the v5 global schema, in copy and count order.
+const V05_GLOBAL_TABLES: [&str; 25] = V04_GLOBAL_TABLES;
+
+/// The tables added by the v6 global schema; a migrated v5 home starts with none.
+const V06_NEW_TABLES: [&str; 2] = ["agent_assignments", "node_limits"];
+
 /// Schema version written by the v2 → v3 migration.
 const V03_SCHEMA_VERSION: i64 = 3;
 
 /// Schema version written by the v3 → v4 migration.
 const V04_SCHEMA_VERSION: i64 = 4;
+
+/// Schema version written by the v4 → v5 migration.
+const V05_SCHEMA_VERSION: i64 = 5;
+
+/// Schema version written by the v5 → v6 migration.
+const V06_SCHEMA_VERSION: i64 = 6;
+
+/// Every table in the project v1 schema; all must exist before the v2 upgrade.
+const PROJECT_V1_TABLES: [&str; 10] = [
+    "jobs",
+    "edges",
+    "runs",
+    "gate_results",
+    "workers",
+    "loops",
+    "schedules",
+    "inbox",
+    "ledger",
+    "releases",
+];
+
+/// The one table added by the project v1 → v2 migration.
+const PROJECT_V2_DDL: &str = "CREATE TABLE job_placement (
+  job        TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  placement  TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;";
 
 /// Old and new row counts for one table or table family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,13 +439,13 @@ pub fn migrate_v03(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
             });
         }
         Some(V03_SCHEMA_VERSION) => {}
-        Some(2) | Some(1) => return Err(StoreError::MigrationRequired),
-        Some(found) => {
+        Some(found) if found > GLOBAL_SCHEMA_VERSION => {
             return Err(StoreError::SchemaTooNew {
                 found,
                 supported: GLOBAL_SCHEMA_VERSION,
             });
         }
+        Some(_) => return Err(StoreError::MigrationRequired),
         None => {
             return Err(StoreError::not_found(
                 "v0.3 database",
@@ -525,13 +558,13 @@ pub fn migrate_v04(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
             });
         }
         Some(V04_SCHEMA_VERSION) => {}
-        Some(3) | Some(2) | Some(1) => return Err(StoreError::MigrationRequired),
-        Some(found) => {
+        Some(found) if found > GLOBAL_SCHEMA_VERSION => {
             return Err(StoreError::SchemaTooNew {
                 found,
                 supported: GLOBAL_SCHEMA_VERSION,
             });
         }
+        Some(_) => return Err(StoreError::MigrationRequired),
         None => {
             return Err(StoreError::not_found(
                 "v0.4 database",
@@ -621,6 +654,185 @@ pub(crate) fn migrate_v04_if_needed(paths: &NodePaths) -> Result<(), StoreError>
     Ok(())
 }
 
+/// Migrates an existing v5 global database to the v6 offload schema.
+///
+/// The upgrade is additive: `agent_assignments`, its node index and `node_limits` are created
+/// in one transaction, after the original file is copied to `backups/pre-0.6-<ms>.db`. Every
+/// existing table's rows are counted before and after, and integrity and foreign keys are
+/// checked before `user_version = 6` commits; a failure rolls the whole transaction back and
+/// leaves the v5 file readable.
+pub fn migrate_v05(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
+    resume_migration(paths)?;
+    let version = db_version(&paths.db_path())?;
+    match version {
+        Some(V06_SCHEMA_VERSION) => {
+            return Ok(MigrationReport {
+                from_version: V06_SCHEMA_VERSION,
+                to_version: V06_SCHEMA_VERSION,
+                backup: String::new(),
+                projects: Vec::new(),
+                tables: BTreeMap::new(),
+                verified: true,
+                dry_run: false,
+                dropped_workers: 0,
+                dropped_worker_rows: Vec::new(),
+                primary_runs: Vec::new(),
+                node_wide_loops: Vec::new(),
+                node_wide_schedules: Vec::new(),
+                warnings: vec![format!(
+                    "the global database is already at schema version {V06_SCHEMA_VERSION}"
+                )],
+            });
+        }
+        Some(V05_SCHEMA_VERSION) => {}
+        Some(1..=4) => return Err(StoreError::MigrationRequired),
+        Some(found) => {
+            return Err(StoreError::SchemaTooNew {
+                found,
+                supported: V06_SCHEMA_VERSION,
+            });
+        }
+        None => {
+            return Err(StoreError::not_found(
+                "v0.5 database",
+                paths.db_path().display().to_string(),
+            ));
+        }
+    }
+    refuse_live_supervisor(paths)?;
+    validate_v05_source(paths)?;
+    let backup = paths
+        .backups_dir()
+        .join(format!("pre-0.6-{}.db", Timestamp::now().unix_millis()));
+    backup_global(paths, &backup)?;
+
+    let conn = Connection::open(paths.db_path())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    let tx = rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+    let before = table_counts(&tx, "main")?;
+    tx.execute_batch(
+        "CREATE TABLE agent_assignments (
+           id           TEXT PRIMARY KEY,
+           run_id       TEXT NOT NULL,
+           session_id   TEXT NOT NULL,
+           project      TEXT NOT NULL,
+           node         TEXT NOT NULL,
+           epoch        INTEGER NOT NULL,
+           state        TEXT NOT NULL CHECK (state IN
+                          ('queued','sent','accepted','running','disconnected',
+                           'finished','lost','cancelled','rejected')),
+           payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+           created_at   TEXT NOT NULL,
+           claimed_at   TEXT,
+           expires_at   TEXT,
+           detail       TEXT NOT NULL DEFAULT ''
+         ) STRICT;
+         CREATE INDEX agent_assignments_node ON agent_assignments(node, state);
+         CREATE TABLE node_limits (
+           provider    TEXT NOT NULL,
+           node        TEXT NOT NULL REFERENCES nodes(name) ON DELETE CASCADE,
+           kind        TEXT NOT NULL CHECK (kind IN ('quota','credits','rate','context','auth','unavailable')),
+           resets_at   TEXT,
+           detail      TEXT NOT NULL DEFAULT '',
+           since       TEXT NOT NULL,
+           updated_at  TEXT NOT NULL,
+           PRIMARY KEY (provider, node)
+         ) STRICT;",
+    )?;
+    tx.pragma_update(None, "user_version", V06_SCHEMA_VERSION)?;
+
+    let after = table_counts(&tx, "main")?;
+    let mut tables = BTreeMap::new();
+    for (table, before_rows) in &before {
+        let after_rows = after.get(table).copied().ok_or_else(|| StoreError::Corrupt {
+            path: format!("stage/global.db:{table}"),
+            line: None,
+            reason: "existing table disappeared during the v6 migration".to_owned(),
+        })?;
+        if after_rows != *before_rows {
+            return Err(StoreError::Corrupt {
+                path: format!("stage/global.db:{table}"),
+                line: None,
+                reason: format!("row count changed: before {before_rows}, after {after_rows}"),
+            });
+        }
+        tables.insert(
+            format!("global:{table}"),
+            MigrationCount {
+                before: *before_rows,
+                after: after_rows,
+            },
+        );
+    }
+    for table in V06_NEW_TABLES {
+        let after_rows = after.get(table).copied().ok_or_else(|| StoreError::Corrupt {
+            path: format!("stage/global.db:{table}"),
+            line: None,
+            reason: "new table is missing after the v6 migration".to_owned(),
+        })?;
+        if after_rows != 0 {
+            return Err(StoreError::Corrupt {
+                path: format!("stage/global.db:{table}"),
+                line: None,
+                reason: format!("new table is not empty: {after_rows} rows"),
+            });
+        }
+        tables.insert(
+            format!("global:{table}"),
+            MigrationCount {
+                before: 0,
+                after: after_rows,
+            },
+        );
+    }
+    let integrity: String = tx.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(StoreError::Corrupt {
+            path: "global.db:integrity_check".to_owned(),
+            line: None,
+            reason: integrity,
+        });
+    }
+    {
+        let mut statement = tx.prepare("PRAGMA foreign_key_check")?;
+        if statement.query([])?.next()?.is_some() {
+            return Err(StoreError::Corrupt {
+                path: "global.db:foreign_key_check".to_owned(),
+                line: None,
+                reason: "foreign key violations".to_owned(),
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(MigrationReport {
+        from_version: 5,
+        to_version: 6,
+        backup: backup.display().to_string(),
+        projects: Vec::new(),
+        tables,
+        verified: true,
+        dry_run: false,
+        dropped_workers: 0,
+        dropped_worker_rows: Vec::new(),
+        primary_runs: Vec::new(),
+        node_wide_loops: Vec::new(),
+        node_wide_schedules: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
+/// Runs [`migrate_v05`] when an existing home still has the v5 global schema.
+///
+/// Earlier versions are handled by the previous migrations before this check. A future
+/// version is left for the normal open path to refuse with [`StoreError::SchemaTooNew`].
+pub(crate) fn migrate_v05_if_needed(paths: &NodePaths) -> Result<(), StoreError> {
+    if db_version(&paths.db_path())? == Some(V05_SCHEMA_VERSION) {
+        migrate_v05(paths)?;
+    }
+    Ok(())
+}
+
 /// Checks that the source really is a healthy v2 global database.
 fn validate_v02_source(paths: &NodePaths) -> Result<(), StoreError> {
     validate_global_source(paths, 2, &V02_GLOBAL_TABLES, "v2")
@@ -634,6 +846,128 @@ fn validate_v03_source(paths: &NodePaths) -> Result<(), StoreError> {
 /// Checks that the source really is a healthy v4 global database.
 fn validate_v04_source(paths: &NodePaths) -> Result<(), StoreError> {
     validate_global_source(paths, V04_SCHEMA_VERSION, &V04_GLOBAL_TABLES, "v4")
+}
+
+/// Checks that the source really is a healthy v5 global database.
+fn validate_v05_source(paths: &NodePaths) -> Result<(), StoreError> {
+    validate_global_source(paths, V05_SCHEMA_VERSION, &V05_GLOBAL_TABLES, "v5")
+}
+
+/// Migrates one project database from v1 to v2 in place.
+///
+/// The caller holds an open read-write connection to the project file. The file is copied to
+/// `backups/project-<name>-pre-0.6-<ms>.db` first; `job_placement` is then created and
+/// `user_version = 2` set in one transaction. Every existing table's row count is verified
+/// before the commit, so a failure rolls back and leaves the v1 file readable.
+pub(crate) fn migrate_project_v1_to_v2(
+    paths: &NodePaths,
+    project: &ProjectName,
+    conn: &Connection,
+) -> Result<(), StoreError> {
+    let db_path = paths.project_db_path(project);
+    validate_project_v1_source(conn, &db_path)?;
+    let backup = paths.backups_dir().join(format!(
+        "project-{}-pre-0.6-{}.db",
+        project.as_str(),
+        Timestamp::now().unix_millis()
+    ));
+    std::fs::create_dir_all(paths.backups_dir()).map_err(|err| StoreError::io(paths.backups_dir().display(), err))?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    conn.backup(rusqlite::MAIN_DB, &backup, None)?;
+    sync_dir(&paths.backups_dir())?;
+
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let before = table_counts(&tx, "main")?;
+    tx.execute_batch(PROJECT_V2_DDL)?;
+    tx.pragma_update(None, "user_version", PROJECT_SCHEMA_VERSION)?;
+    let after = table_counts(&tx, "main")?;
+    for (table, before_rows) in &before {
+        let after_rows = after.get(table).copied().ok_or_else(|| StoreError::Corrupt {
+            path: db_path.display().to_string(),
+            line: None,
+            reason: format!("existing table {table} disappeared during the v2 migration"),
+        })?;
+        if after_rows != *before_rows {
+            return Err(StoreError::Corrupt {
+                path: db_path.display().to_string(),
+                line: None,
+                reason: format!("{table} row count changed: before {before_rows}, after {after_rows}"),
+            });
+        }
+    }
+    let placement_rows = after.get("job_placement").copied().ok_or_else(|| StoreError::Corrupt {
+        path: db_path.display().to_string(),
+        line: None,
+        reason: "job_placement is missing after the v2 migration".to_owned(),
+    })?;
+    if placement_rows != 0 {
+        return Err(StoreError::Corrupt {
+            path: db_path.display().to_string(),
+            line: None,
+            reason: format!("new job_placement table is not empty: {placement_rows} rows"),
+        });
+    }
+    let integrity: String = tx.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(StoreError::Corrupt {
+            path: db_path.display().to_string(),
+            line: None,
+            reason: format!("integrity_check: {integrity}"),
+        });
+    }
+    {
+        let mut statement = tx.prepare("PRAGMA foreign_key_check")?;
+        if statement.query([])?.next()?.is_some() {
+            return Err(StoreError::Corrupt {
+                path: db_path.display().to_string(),
+                line: None,
+                reason: "foreign key violations".to_owned(),
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Checks that a project file really is a healthy v1 database.
+fn validate_project_v1_source(conn: &Connection, path: &Path) -> Result<(), StoreError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != 1 {
+        return Err(StoreError::InvalidInput(format!(
+            "project migration source has schema version {version}, expected 1"
+        )));
+    }
+    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(StoreError::Corrupt {
+            path: path.display().to_string(),
+            line: None,
+            reason: format!("integrity_check: {integrity}"),
+        });
+    }
+    for table in PROJECT_V1_TABLES {
+        let found: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )?;
+        if found == 0 {
+            return Err(StoreError::Corrupt {
+                path: path.display().to_string(),
+                line: None,
+                reason: format!("v1 project schema is missing table {table}"),
+            });
+        }
+    }
+    let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+    if statement.query([])?.next()?.is_some() {
+        return Err(StoreError::Corrupt {
+            path: path.display().to_string(),
+            line: None,
+            reason: "foreign key violations in the v1 project database".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Checks a global file's version, integrity, WAL mode, tables and foreign keys.
@@ -711,7 +1045,9 @@ fn create_v02_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, 
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(GLOBAL_SCHEMA_SQL)?;
     conn.execute_batch(
-        "DROP TABLE surface_tokens;
+        "DROP TABLE agent_assignments;
+         DROP TABLE node_limits;
+         DROP TABLE surface_tokens;
          CREATE TABLE surfaces_v3 (
            id            TEXT PRIMARY KEY,
            kind          TEXT NOT NULL CHECK (kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
@@ -812,7 +1148,9 @@ fn create_v03_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, 
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(GLOBAL_SCHEMA_SQL)?;
     conn.execute_batch(
-        "DROP TABLE leases;
+        "DROP TABLE agent_assignments;
+         DROP TABLE node_limits;
+         DROP TABLE leases;
          CREATE TABLE leases (
            session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
            surface_id   TEXT REFERENCES surfaces(id) ON DELETE SET NULL,
@@ -899,9 +1237,9 @@ fn copy_v03_global(conn: &Connection) -> Result<BTreeMap<String, MigrationCount>
 
 /// Builds the staged v5 database and returns per-table counts.
 ///
-/// The embedded schema is already v5, so the stage needs no reshaping. Every v4 row is
-/// copied except `leases`: a v4 lease token is plaintext and leases are ephemeral, so the
-/// upgrade clears them and lets surfaces re-acquire.
+/// The embedded schema is v6, so the stage first drops the two v6-only tables and sets
+/// `user_version = 5`. Every v4 row is copied except `leases`: a v4 lease token is plaintext
+/// and leases are ephemeral, so the upgrade clears them and lets surfaces re-acquire.
 fn create_v04_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, MigrationCount>, StoreError> {
     std::fs::create_dir_all(stage).map_err(|err| StoreError::io(stage.display(), err))?;
     let stage_db = stage.join("global.db");
@@ -909,6 +1247,8 @@ fn create_v04_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, 
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(GLOBAL_SCHEMA_SQL)?;
+    conn.execute_batch("DROP TABLE agent_assignments; DROP TABLE node_limits;")?;
+    conn.pragma_update(None, "user_version", V05_SCHEMA_VERSION)?;
     conn.execute(
         "ATTACH DATABASE ?1 AS old",
         [paths.db_path().to_string_lossy().as_ref()],
@@ -1953,6 +2293,29 @@ fn string_column(conn: &Connection, sql: &str) -> Result<Vec<String>, StoreError
 fn count_sql(conn: &Connection, sql: &str) -> Result<u64, StoreError> {
     let value: i64 = conn.query_row(sql, [], |row| row.get(0))?;
     Ok(u64::try_from(value).unwrap_or(0))
+}
+
+/// Counts every application table in one attached schema, keyed by table name.
+fn table_counts(conn: &Connection, schema: &str) -> Result<BTreeMap<String, u64>, StoreError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT name FROM {schema}.sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut names = Vec::new();
+    for row in rows {
+        names.push(row?);
+    }
+    drop(statement);
+    let mut counts = BTreeMap::new();
+    for name in names {
+        let quoted = name.replace('"', "\"\"");
+        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {schema}.\"{quoted}\""), [], |row| {
+            row.get(0)
+        })?;
+        counts.insert(name, u64::try_from(count).unwrap_or(0));
+    }
+    Ok(counts)
 }
 
 /// Reads `PRAGMA user_version` from a file, returning `None` when the file is absent.

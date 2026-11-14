@@ -21,6 +21,7 @@ Module → file map:
 | `catalog` | v0.2 lifecycle classes, catalog rows, GC and backup reports (§16.4) |
 | `vault` | v0.2 secret names, metadata, modes and the one-time request (§16.5) |
 | `agent` | v0.4 local-node path refs, capabilities, capacity, frames and redacted cards (§16.7) |
+| `offload` | v0.4 placement, waiting reasons, assignment payload and resume records (§16.8) |
 | `config`, `adapter`, `services`, `schema` | `vowp.toml`, adapter trait, service traits, JSON Schema export |
 
 `lib.rs` re-exports everything at the crate root (`vowp_protocol::Job`), plus `vowp_protocol::prelude::*`.
@@ -1759,3 +1760,54 @@ run and surface with `last_acked`, and the home answers `accepted`, an optional 
 the `tail_seq` the holder may continue from. `PathMapUpdate` carries one owner-only
 [`AgentPathMap`] whose absolute roots never appear in a card, snapshot or log. `Cleanup` names
 the run, job and project-relative worktree to remove; the agent resolves the worktree locally.
+
+### 16.9 Offload store records (`vowp-store::repo_offload`)
+
+These records are store read models, not protocol wire types. They live in `vowp-store` because
+they describe rows; the protocol owns `Placement`, `AssignmentPayload`, `LimitKind` and the
+`PathRef`/`SecretName` values they contain.
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAssignmentState {
+    Queued, Sent, Accepted, Running, Disconnected, Finished, Lost, Cancelled, Rejected,
+}
+
+pub struct AgentAssignment {
+    pub id: String, pub run_id: RunId, pub session_id: SessionId, pub project: ProjectName,
+    pub node: NodeName, pub epoch: u64, pub state: AgentAssignmentState,
+    pub payload: AssignmentPayload, pub created_at: Timestamp,
+    pub claimed_at: Option<Timestamp>, pub expires_at: Option<Timestamp>, pub detail: String,
+}
+
+pub struct NodeLimit {
+    pub provider: String, pub node: NodeName, pub kind: LimitKind,
+    pub resets_at: Option<Timestamp>, pub detail: String,
+    pub since: Timestamp, pub updated_at: Timestamp,
+}
+
+pub struct JobPlacement { pub job: JobId, pub placement: Placement, pub updated_at: Timestamp }
+
+pub struct AssignmentFilter {
+    pub node: Option<NodeName>, pub run_id: Option<RunId>, pub project: Option<ProjectName>,
+    pub states: Vec<AgentAssignmentState>, pub limit: Option<u32>,
+}
+```
+
+`job_placement` is a **side table** (`job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE
+CASCADE, placement TEXT NOT NULL, updated_at TEXT NOT NULL`), not a column on `jobs`. The store
+persists `placement.to_string()` and parses it back with `Placement::parse`; a job with no row
+uses the protocol default, `Placement::Home`. Keeping placement off the `jobs` row is what lets
+every existing v0.3 `Job`, `NewJob` and `JobPatch` struct literal, YAML/JSON job import and wire
+client stay source-compatible.
+
+`AgentAssignment.payload` is the parsed `AssignmentPayload` from
+`agent_assignments.payload_json`. The row and payload must agree on assignment, run, session,
+project and epoch. The payload carries secret **names** only and never a lease token, a secret
+value or an absolute local path; the home stores only the lease token's SHA-256 hash in the
+lease row and re-issues a token on resume.
+
+`NodeLimit` is keyed by `(provider, node)`. `NodeLimit.kind` is the protocol `LimitKind`
+(`quota`, `credits`, `rate`, `context`, `auth`); the schema additionally reserves
+`unavailable` for a future home-side writer, so no store method produces that value yet.

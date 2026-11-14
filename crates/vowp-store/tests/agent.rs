@@ -42,7 +42,9 @@ fn v2_home() -> (TempDir, NodePaths) {
     conn.execute_batch(include_str!("../src/schema/global.sql"))
         .expect("v3 base schema");
     conn.execute_batch(
-        "DROP TABLE node_credentials;
+        "DROP TABLE agent_assignments;
+         DROP TABLE node_limits;
+         DROP TABLE node_credentials;
          DROP TABLE enrollment_codes;
          DROP TABLE node_paths;
          DROP TABLE surface_tokens;
@@ -175,7 +177,7 @@ fn migration_v2_to_v3_preserves_nodes_projects_and_sessions() {
     drop(backup);
 
     let store = Store::open(&paths).expect("open migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 5);
+    assert_eq!(store.global_schema_version().expect("version"), 6);
     assert_eq!(store.list_nodes().expect("nodes").len(), 2);
     assert_eq!(store.kv_get("node_id").expect("kv"), Some("preserved-id".to_owned()));
     let projects = store.list_projects().expect("projects");
@@ -678,7 +680,9 @@ fn v3_home() -> (TempDir, NodePaths, SurfaceId, SessionId) {
     conn.execute_batch(include_str!("../src/schema/global.sql"))
         .expect("v4 base schema");
     conn.execute_batch(
-        "DROP TABLE surface_tokens;
+        "DROP TABLE agent_assignments;
+         DROP TABLE node_limits;
+         DROP TABLE surface_tokens;
          CREATE TABLE surfaces_v3 (
            id            TEXT PRIMARY KEY,
            kind          TEXT NOT NULL CHECK (kind IN ('chat','opencode','claude-code','mcp','mirror','api')),
@@ -835,7 +839,7 @@ fn migration_v3_to_v4_preserves_surfaces_and_rows() {
     drop(backup);
 
     let store = Store::open(&paths).expect("open migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 5);
+    assert_eq!(store.global_schema_version().expect("version"), 6);
     assert_eq!(store.kv_get("node_id").expect("kv"), Some("preserved-id".to_owned()));
     assert_eq!(store.require_session(&session_id).expect("session").title, "kept");
     let stored_surface = store
@@ -873,7 +877,9 @@ fn v4_home() -> (TempDir, NodePaths, SurfaceId, SessionId) {
     conn.execute_batch(include_str!("../src/schema/global.sql"))
         .expect("v5 base schema");
     conn.execute_batch(
-        "DROP TABLE leases;
+        "DROP TABLE agent_assignments;
+         DROP TABLE node_limits;
+         DROP TABLE leases;
          CREATE TABLE leases (
            session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
            surface_id   TEXT REFERENCES surfaces(id) ON DELETE SET NULL,
@@ -1005,7 +1011,7 @@ fn migration_v4_to_v5_clears_leases_and_preserves_surfaces() {
     drop(backup);
 
     let store = Store::open(&paths).expect("open migrated home");
-    assert_eq!(store.global_schema_version().expect("version"), 5);
+    assert_eq!(store.global_schema_version().expect("version"), 6);
     assert_eq!(store.kv_get("node_id").expect("kv"), Some("preserved-id".to_owned()));
     assert_eq!(store.require_session(&session_id).expect("session").title, "kept");
     let stored_surface = store

@@ -35,6 +35,12 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_project_state ON jobs(project, state);
 CREATE INDEX jobs_dispatch      ON jobs(state, priority DESC, created_at);
 
+CREATE TABLE job_placement (            -- per-job offload placement; kept off the jobs row (§7.1)
+  job        TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  placement  TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE edges (
   src        TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   dst        TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -218,4 +224,4 @@ CREATE TABLE releases (
 ) STRICT;
 CREATE INDEX releases_project ON releases(project, env, created_at DESC);
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;

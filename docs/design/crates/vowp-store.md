@@ -32,6 +32,7 @@ crates/vowp-store/
   src/repo_loops.rs     // loops, schedules
   src/repo_ledger.rs    // ledger, cost_totals
   src/repo_misc.rs      // inbox, limits, releases, kv, requests
+  src/repo_offload.rs   // job placement, agent assignments, per-node limits
   src/blobs.rs          // BlobStore
   src/session_log.rs    // SessionLog, NewEvent, VerifyReport, lockfile, full-pull manifest/verification
   src/session_files.rs  // capsule files, adapters.json
@@ -39,7 +40,7 @@ crates/vowp-store/
   tests/*.rs
 ```
 
-The module split follows the four concerns: connection/schema and the node/job/run repositories; the session, loop, ledger and misc repositories; the v0.4 local-node enrollment records; and the blob store, session log, session files and reindex.
+The module split follows the four concerns: connection/schema and the node/job/run repositories; the session, loop, ledger and misc repositories; the v0.4 local-node enrollment and offload records; and the blob store, session log, session files and reindex.
 
 ## 3. Public API
 
@@ -78,7 +79,9 @@ impl NodePaths {
 
 ```rust
 pub struct Store { /* rusqlite::Connection, Arc<dyn Clock> */ }
-pub const SCHEMA_VERSION: i64 = 1;
+pub const GLOBAL_SCHEMA_VERSION: i64 = 6;
+pub const PROJECT_SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 1;   // compatibility alias for the pre-split/v0.1 API
 
 impl Store {
     /// `paths.ensure()`, open `paths.db_path()`, apply pragmas, migrate. Uses `SystemClock`.
@@ -102,7 +105,7 @@ impl Store {
 Migration/pragma rules (all in `Store::open*`):
 
 1. Pragmas per connection, in order: `journal_mode=WAL` (skipped for `:memory:`), `synchronous=NORMAL`, `foreign_keys=ON`, `busy_timeout=5000`.
-2. Read `user_version` *v*. If `v > SCHEMA_VERSION` → `StoreError::SchemaTooNew{found,supported}` (never touch the file).
+2. Read `user_version` *v*. If `v > GLOBAL_SCHEMA_VERSION` → `StoreError::SchemaTooNew{found,supported}` (never touch the file).
 3. If `v == 0` and the DB has no tables: run migration list `[001_init.sql]` from index *v* upward, each inside one transaction; the last statement of
    each migration file sets `PRAGMA user_version = N`. If `v == 0` but tables exist → `StoreError::Corrupt("unversioned database")`.
 4. Migrations are `const MIGRATIONS: &[&str] = &[include_str!("schema/001_init.sql")]`. `001_init.sql` is **byte-identical** to
@@ -110,16 +113,17 @@ Migration/pragma rules (all in `Store::open*`):
 5. Insert `kv('schema_created_at')` and `kv('node_id')` (a fresh ULID) on first creation.
 6. `open_writable(paths, project)` is the daemon's narrow write constructor. It requires the
    existing `vowp.db` (missing → `NotFound`), uses read-write flags without create, sets the busy
-   timeout and foreign keys, checks `user_version = 5` (newer → `SchemaTooNew`, older →
+   timeout and foreign keys, checks `user_version = 6` (newer → `SchemaTooNew`, older →
    `MigrationRequired`), and attaches an existing registered project with the same schema check.
    It never calls `paths.ensure`, `resume_migration` or a schema file, so opening it cannot create
    or migrate a home. It is not a general write-open: `Store::open` remains the CLI/supervisor
    constructor.
 7. `Store::open` and `Store::open_global` migrate an existing v2 global file to v3, an
-   existing v3 file to v4 and an existing v4 file to v5 before opening it. `migrate_v02` follows the v0.1 migration's
+   existing v3 file to v4, an existing v4 file to v5 and an existing v5 file to v6 before opening
+   it. `migrate_v02` follows the v0.1 migration's
    staged-swap recipe: it copies the original file to `backups/pre-0.3-<ms>.db`, writes a fresh
-   v3 file in `tmp/` (the embedded v5 schema shaped back to the v3 `surfaces` and
-   plaintext-`leases` tables), copies all
+   v3 file in `tmp/` (the embedded v6 schema shaped back to the v3 `surfaces` and
+   plaintext-`leases` tables, without the v6-only tables), copies all
    21 v2 global tables (including `native_events`), verifies per-table counts, integrity and
    foreign keys, and then renames the staged file into place. `nodes` is copied with an explicit
    column list and a `CASE` that maps `is_local` to `kind`; the other tables keep their v2
@@ -132,7 +136,7 @@ Migration/pragma rules (all in `Store::open*`):
    foreign keys, and swaps the staged file into place. `migration.json` makes the swap
    restartable; projects, session logs and the project schema are untouched. The existing
    v0.1 → v2 `migrate_v01` path is not renumbered: it writes the current embedded schema and
-   therefore leaves the home at v5.
+   therefore leaves the home at v6.
 9. `migrate_v04` copies the original file to `backups/pre-0.5-<ms>.db`, builds a fresh v5 file in
    `tmp/`, copies every v4 table except `leases`, verifies per-table counts, integrity and
    foreign keys, and swaps the staged file into place. The v5 `leases` table replaces the
@@ -141,6 +145,20 @@ Migration/pragma rules (all in `Store::open*`):
    plaintext and every lease is stale within 60 seconds, so surfaces re-acquire after the
    upgrade. Surfaces, `surface_tokens` and every other row are preserved; the migration report
    records the cleared lease count under `tables["global:leases"]` and in `warnings`.
+10. `migrate_v05` is the additive v5 → v6 upgrade. It copies the original file to
+    `backups/pre-0.6-<ms>.db`, then creates `agent_assignments`, its `(node, state)` index and
+    `node_limits` in one `BEGIN IMMEDIATE` transaction. Before the transaction commits it counts
+    every existing table before and after, requires both new tables to be empty, and runs
+    `integrity_check` and `foreign_key_check`; the report carries `from_version = 5`,
+    `to_version = 6` and every `global:<table>` count. A failure rolls the whole transaction back
+    and leaves the v5 file readable.
+11. Project databases migrate v1 → v2 on the next create/open constructor (`Store::open`,
+    `Store::open_with_project` and every explicit `Store::create_project_db` caller). The
+    project file is copied to `backups/project-<name>-pre-0.6-<ms>.db` first, then
+    `job_placement` is created and `user_version = 2` set in one transaction. Existing rows are
+    counted before and after; a failure rolls back and keeps the v1 file readable. A fresh
+    project database is created directly at v2. `open_writable` never migrates: a v1 project
+    attached there returns `MigrationRequired`.
 
 ### 3.3 Filters and small structs
 
@@ -189,7 +207,36 @@ pub struct SurfaceToken { pub id: String, pub surface_id: SurfaceId, pub token_h
                           pub prefix: String, pub scopes: Vec<SurfaceScope>,
                           pub created_at: Timestamp, pub expires_at: Option<Timestamp>,
                           pub revoked_at: Option<Timestamp>, pub last_used_at: Option<Timestamp> }
+
+// v0.4 offload records (repo_offload.rs)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AgentAssignmentState { Queued, Sent, Accepted, Running, Disconnected, Finished, Lost, Cancelled, Rejected }
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentAssignment { pub id: String, pub run_id: RunId, pub session_id: SessionId,
+                             pub project: ProjectName, pub node: NodeName, pub epoch: u64,
+                             pub state: AgentAssignmentState, pub payload: AssignmentPayload,
+                             pub created_at: Timestamp, pub claimed_at: Option<Timestamp>,
+                             pub expires_at: Option<Timestamp>, pub detail: String }
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeLimit { pub provider: String, pub node: NodeName, pub kind: LimitKind,
+                       pub resets_at: Option<Timestamp>, pub detail: String,
+                       pub since: Timestamp, pub updated_at: Timestamp }
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobPlacement { pub job: JobId, pub placement: Placement, pub updated_at: Timestamp }
+#[derive(Debug, Clone, Default)]
+pub struct AssignmentFilter { pub node: Option<NodeName>, pub run_id: Option<RunId>,
+                              pub project: Option<ProjectName>, pub states: Vec<AgentAssignmentState>,
+                              pub limit: Option<u32> }
 ```
+
+`AgentAssignment.payload` is the protocol `AssignmentPayload` parsed back from `payload_json`;
+the record never carries a lease token, a secret value or an absolute path. `NodeLimit.kind`
+uses the protocol `LimitKind`; the table's `unavailable` value is reserved for a future
+home-side writer and no store method produces it.
+
+`job_placement` is a **side table**, not a `jobs` column: `Job`, `NewJob`, `JobPatch`, the YAML/JSON
+job import and every v0.3 wire client stay byte-compatible because the row itself is unchanged.
+`JobPlacement` is the read model returned by `list_job_placements`.
 
 `SurfaceToken` is the durable half of a surface credential: `token_hash` is the lowercase hex
 SHA-256 of the token, `prefix` is the short display prefix, and the plaintext token is never
@@ -378,6 +425,28 @@ pub fn kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreErro
 pub fn push_request(&self, kind: &str, payload: &serde_json::Value) -> Result<RequestId, StoreError>;
 /// Atomically (one transaction) reads all `req:*` rows in id order and deletes them.
 pub fn take_requests(&self) -> Result<Vec<Request>, StoreError>;
+
+// ---- offload state (repo_offload.rs)
+/// Rejects a payload whose assignment/run/session/project/epoch does not match the row
+/// (`InvalidInput`) and a duplicate id or a `(run_id, epoch)` that is not higher than the run's
+/// newest epoch (`Conflict`). A higher epoch is a new row, never an overwrite.
+pub fn insert_assignment(&self, assignment: &AgentAssignment) -> Result<(), StoreError>;
+pub fn assignment(&self, id: &str) -> Result<Option<AgentAssignment>, StoreError>;
+pub fn assignments_for_node(&self, node: &NodeName) -> Result<Vec<AgentAssignment>, StoreError>;   // oldest first
+pub fn assignments_for_run(&self, run: &RunId) -> Result<Vec<AgentAssignment>, StoreError>;        // epoch, id
+pub fn list_assignments(&self, filter: &AssignmentFilter) -> Result<Vec<AgentAssignment>, StoreError>;
+/// Writes state/claimed_at/detail and returns the updated row; payload and epoch are untouched.
+pub fn set_assignment_state(&self, id: &str, state: AgentAssignmentState, claimed_at: Option<Timestamp>, detail: &str)
+    -> Result<AgentAssignment, StoreError>;
+pub fn upsert_node_limit(&self, limit: &NodeLimit) -> Result<(), StoreError>;   // keeps `since` for the same kind
+pub fn node_limits(&self, node: &NodeName) -> Result<Vec<NodeLimit>, StoreError>;                    // by provider
+pub fn clear_node_limit(&self, provider: &str, node: &NodeName) -> Result<bool, StoreError>;
+/// Persists `placement.to_string()` in the bound project's `project.job_placement` side table.
+/// A missing job is `NotFound`; an unknown stored selector reads back as `Corrupt`.
+pub fn set_job_placement(&self, job: &JobId, placement: Placement, at: Timestamp) -> Result<(), StoreError>;
+pub fn job_placement(&self, job: &JobId) -> Result<Option<Placement>, StoreError>;
+pub fn list_job_placements(&self) -> Result<Vec<JobPlacement>, StoreError>;                          // by job id
+pub fn clear_job_placement(&self, job: &JobId) -> Result<bool, StoreError>;
 ```
 
 ### 3.5 BlobStore (`blobs.rs`)
@@ -595,8 +664,8 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | Test | Asserts |
 |---|---|
 | `schema_file_is_identical_to_design` | `include_str!("../src/schema/001_init.sql") == include_str!("../../../docs/design/schema.sql")` (paths relative to `crates/vowp-store/tests/`); the file must exist in the repo layout — **no skip, no fallback**: a missing file is a compile error, a difference is a test failure |
-| `open_creates_schema_version_1` | fresh temp DB: `schema_version()==1`, tables listed in schema.sql all exist, WAL mode (`PRAGMA journal_mode` = `wal`), `foreign_keys` = 1 |
-| `open_refuses_newer_schema` | set `PRAGMA user_version = 99` on a temp DB file, `Store::open_path` → `SchemaTooNew{found:99,supported:1}`, file bytes unchanged |
+| `open_creates_current_schema_versions` | fresh temp DB: `global_schema_version()==6`, a bound project reports `project_schema_version()==2`, the pre-split `schema_version()` compat accessor stays 1, tables listed in each schema.sql exist, WAL mode (`PRAGMA journal_mode` = `wal`), `foreign_keys` = 1 |
+| `open_refuses_newer_schema` | set `PRAGMA user_version = 99` on a temp DB file, `Store::open_path` → `SchemaTooNew{found:99,supported:6}`, file bytes unchanged |
 | `open_is_idempotent` | open twice on the same file: no error, `node_id` kv unchanged |
 | `open_writable_answers_and_never_creates_or_migrates` | `open_writable` opens an existing home, answers an inbox item and reads it back; a missing `vowp.db` is `NotFound` and its directory is not created; an empty zero-byte file is `MigrationRequired` and stays untouched |
 | `migration_v2_to_v3_preserves_nodes_projects_and_sessions` | a v2 fixture with nodes, a project and a session migrates to v3; counts, `kv('node_id')`, project and session rows survive; the backup still reports v2 |
@@ -664,12 +733,24 @@ impl From<rusqlite::Error> for StoreError { /* maps SQLITE_BUSY → Busy, UNIQUE
 | `session_dir_manifest_verifies_and_detects_corruption` | a log+blob manifest verifies, `manifest.json` round-trips, a same-size changed blob is `Corrupt` (`sha256 mismatch`) and an extra blob file is `Corrupt` (`not listed`) |
 | `session_dir_manifest_refuses_a_directory_over_the_size_cap` | `session_dir_manifest(..., max_bytes=1)` refuses a larger session with `InvalidInput` naming the limit |
 | `session_dir_manifest_rejects_traversal_and_reserved_paths` | `..`, absolute paths, `manifest.json`, `.lock`, `import.json`, non-digest blob names, non-JSON capsule names and `summary.md` are refused |
+| `migration_v5_to_v6_adds_agent_assignments_and_node_limits_preserving_rows` | a v5 fixture with nodes, a project, a session and kv rows migrates additively; every existing count is unchanged, both new tables start empty, the index exists, the backup stays v5, and the migrated home opens at v6 |
+| `migration_v5_to_v6_failure_leaves_the_v5_file_intact` | a conflicting pre-existing `node_limits` makes the migration fail; the version stays 5, no partial `agent_assignments` row/table remains and existing rows stay readable |
+| `migration_v1_to_v2_adds_job_placement_and_preserves_jobs` | a v1 project fixture with two jobs gets `job_placement` and `user_version = 2` on the next `open_with_project`; both jobs survive and the backup is the v1 file |
+| `job_placement_round_trips_home_any_and_node` | `home`, `any`, `node:<name>` and `node:<name>+home` round-trip through the side table, list returns the newest value and clear removes it |
+| `job_placement_cascades_with_its_job` | deleting a pending job removes its `job_placement` row through the foreign key |
+| `assignment_round_trips_payload_and_state` | insert/read preserves the parsed payload; `set_assignment_state` writes state/claimed_at/detail; node, run and filtered lists find the row |
+| `assignment_rejects_a_mismatched_payload_and_duplicate_run_epoch` | each mismatched run/session/project/epoch is `InvalidInput` with no row written; a duplicate or lower epoch is `Conflict`; a higher epoch is a separate row |
+| `assignment_payload_json_contains_no_lease_token_or_absolute_path` | the stored JSON has no lease token/secret value field and every string is project-relative |
+| `node_limit_upserts_per_provider_and_node` | `(provider, node)` is the key; two nodes stay separate, a kind change resets `since`, a same-kind update keeps it, and clear removes one row |
+| `node_limit_clears_and_cascades_with_the_node` | an explicit clear removes one provider and deleting the node cascades its remaining limits |
 
 ## 7. Out of scope / v0.2
 
 HTTP/daemon access, replication/libSQL, FTS search over events, sidecar tail index for huge logs, log signing/hash chain, automatic backup scheduling (that is a `vowp schedule` command item in core), blob garbage collection.
 
-The v0.4 Phase 0 store stops at enrollment, the surface-token/state layer and the v5 lease
-hash: `agent_assignments`, `node_limits`, the project `runs` columns and the agent gateway are
-later phases. Token generation and constant-time verification are core/gateway work; this crate
-only persists the hash, prefix and scopes (for surface tokens) or the hash (for leases).
+The v0.4 store covers enrollment, the surface-token/state layer, the v5 lease hash and the
+Phase 2 offload state (`agent_assignments`, `node_limits`, `job_placement`). The project `runs`
+transport/epoch/commit/spool columns and the agent gateway are later phases; this slice stores
+and reads the state but does not dispatch, evaluate policy or run an agent. Token generation and
+constant-time verification are core/gateway work; this crate only persists the hash, prefix and
+scopes (for surface tokens) or the hash (for leases).
