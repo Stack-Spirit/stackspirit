@@ -2,7 +2,8 @@
 //!
 //! The state directory is `~/.vowp-agent` by default. `VOWP_AGENT_HOME` overrides it for tests
 //! and portable installs. `agent.json` and `status.json` are created 0600; the directory is
-//! created 0700.
+//! created 0700. Paired surface tokens live below `surfaces/<id>/token`, also 0600, in a
+//! 0700 directory.
 
 use std::fs;
 use std::io::Write;
@@ -10,7 +11,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use vowp_protocol::NodeName;
+use vowp_protocol::{NodeName, SurfaceId};
 
 use crate::error::AgentError;
 
@@ -20,6 +21,12 @@ pub const AGENT_DIR_NAME: &str = ".vowp-agent";
 pub const CONFIG_FILE: &str = "agent.json";
 /// Last reported status file name.
 pub const STATUS_FILE: &str = "status.json";
+/// Directory holding one subdirectory per paired surface.
+pub const SURFACES_DIR: &str = "surfaces";
+/// Secret surface token file name inside a surface directory.
+pub const SURFACE_TOKEN_FILE: &str = "token";
+/// RFC 3339 surface-token expiry file name inside a surface directory.
+pub const SURFACE_EXPIRY_FILE: &str = "expires_at";
 
 /// The persisted enrollment and transport settings of this agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +78,26 @@ impl AgentConfig {
         state_dir.join(CONFIG_FILE)
     }
 
+    /// Returns `state_dir/surfaces`.
+    pub fn surfaces_dir(state_dir: &Path) -> PathBuf {
+        state_dir.join(SURFACES_DIR)
+    }
+
+    /// Returns `state_dir/surfaces/<id>`.
+    pub fn surface_dir(state_dir: &Path, surface: &SurfaceId) -> PathBuf {
+        Self::surfaces_dir(state_dir).join(&surface.0)
+    }
+
+    /// Returns `state_dir/surfaces/<id>/token`.
+    pub fn surface_token_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf {
+        Self::surface_dir(state_dir, surface).join(SURFACE_TOKEN_FILE)
+    }
+
+    /// Returns `state_dir/surfaces/<id>/expires_at`.
+    pub fn surface_expiry_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf {
+        Self::surface_dir(state_dir, surface).join(SURFACE_EXPIRY_FILE)
+    }
+
     /// Loads `agent.json` from `state_dir`.
     pub fn load(state_dir: &Path) -> Result<Self, AgentError> {
         let path = Self::file_path(state_dir);
@@ -113,6 +140,13 @@ impl AgentConfig {
         self.ssh_target()?;
         Ok(())
     }
+}
+
+/// Creates `path` and every missing parent, then makes `path` mode 0700.
+pub(crate) fn ensure_private_dir(path: &Path) -> Result<(), AgentError> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 /// Writes a private file (0600) below a 0700 directory.

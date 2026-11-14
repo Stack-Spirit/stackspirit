@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 use vowp_agent::{
     AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, NodeKey, RunOptions, RunOutcome, SshTransport,
-    SystemAgentClock, fingerprint_of, load_public, pending_spool_bytes, surface_token_expiry, validate_enrollment_code,
+    SurfacePairRequest, SystemAgentClock, fingerprint_of, load_public, pending_spool_bytes, surface_token_expiry,
+    validate_enrollment_code,
 };
 use vowp_core::agent::gateway;
-use vowp_protocol::{AGENT_PROTOCOL, AgentRole};
+use vowp_protocol::{AGENT_PROTOCOL, AgentRole, ErrorKind, SessionId, SurfaceId};
 
-use crate::cli::{AgentCommand, AgentEnrollArgs, AgentGatewayArgs, AgentRunArgs, AgentStatusArgs};
+use crate::cli::{AgentCommand, AgentEnrollArgs, AgentGatewayArgs, AgentPairArgs, AgentRunArgs, AgentStatusArgs};
 use crate::node_ctx::NodeRole;
 use crate::output::print_json;
 use crate::{CliError, Ctx, Global, IoStreams};
@@ -25,6 +26,7 @@ use crate::{CliError, Ctx, Global, IoStreams};
 pub fn run(global: &Global, io: &mut dyn IoStreams, command: &AgentCommand) -> Result<i32, CliError> {
     match command {
         AgentCommand::Enroll(args) => enroll(global, io, args),
+        AgentCommand::Pair(args) => pair(global, io, args),
         AgentCommand::Run(args) => run_agent(global, io, args),
         AgentCommand::Status(args) => status(global, io, args),
         AgentCommand::Gateway(args) => gateway(global, io, args),
@@ -66,6 +68,31 @@ fn enroll(global: &Global, io: &mut dyn IoStreams, args: &AgentEnrollArgs) -> Re
             enrollment.node,
             enrollment.home,
             enrollment.protocol
+        )?;
+    }
+    Ok(0)
+}
+
+fn pair(global: &Global, io: &mut dyn IoStreams, args: &AgentPairArgs) -> Result<i32, CliError> {
+    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let code = read_code(io, &args.code_file)?;
+    let session = SessionId::parse(&args.session)
+        .map_err(|_| CliError::Invalid(format!("invalid session id {:?}", args.session)))?;
+    let surface_id = SurfaceId(args.surface.clone());
+    let app = args.app.clone().unwrap_or_else(|| "agent".to_owned());
+    let request = SurfacePairRequest::new(code, surface_id, session, app);
+
+    let mut client = AgentClient::from_state_dir(state_dir, Arc::new(SystemAgentClock)).map_err(map_agent_error)?;
+    let paired = client.pair(&request).map_err(map_agent_error)?;
+    if global.json {
+        print_json(io, &paired)?;
+    } else {
+        writeln!(
+            io.out(),
+            "paired surface {}; token stored at {}; expires {}",
+            paired.surface_id,
+            paired.token_path.display(),
+            paired.expires_at.as_rfc3339()
         )?;
     }
     Ok(0)
@@ -219,7 +246,15 @@ fn map_agent_error(error: AgentError) -> CliError {
         AgentError::Revoked(reason) => CliError::Guard(format!("agent revoked: {reason}")),
         AgentError::Superseded(connection_id) => CliError::Conflict(format!("agent superseded by {connection_id}")),
         AgentError::Auth(message) => CliError::Remote(format!("authentication rejected: {message}")),
-        AgentError::Remote { message, .. } | AgentError::Transport(message) => CliError::Remote(message),
+        AgentError::Remote { kind, message, .. } => match kind {
+            ErrorKind::Refused => CliError::Guard(message),
+            ErrorKind::InvalidInput => CliError::Invalid(message),
+            ErrorKind::Conflict => CliError::Conflict(message),
+            ErrorKind::NotFound => CliError::NotFound(message),
+            ErrorKind::Limit => CliError::Limited(message),
+            other => CliError::Remote(format!("home error ({other:?}): {message}")),
+        },
+        AgentError::Transport(message) => CliError::Remote(message),
         AgentError::Io(error) => CliError::Io(error),
         AgentError::ReplayNonce => CliError::Guard("the home replayed a handshake nonce".to_owned()),
         AgentError::FrameTooLarge { .. } | AgentError::Protocol(_) | AgentError::Json(_) => {

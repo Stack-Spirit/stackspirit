@@ -144,8 +144,13 @@ python3 docs/reference/check-reference.py
 | [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server |
 | [`vowp agent`](#vowp-agent) | Enroll, run or inspect the Mac-side agent |
 | [`vowp agent enroll`](#vowp-agent-enroll) | Enroll this Mac with a one-time code |
+| [`vowp agent pair`](#vowp-agent-pair) | Redeem a home surface pairing code and store the token |
 | [`vowp agent run`](#vowp-agent-run) | Run the agent client until revoked or superseded |
 | [`vowp agent status`](#vowp-agent-status) | Show the last local agent status |
+| [`vowp surface`](#vowp-surface) | Create, list or revoke a paired local surface; `--node` names the surface's node |
+| [`vowp surface pair`](#vowp-surface-pair) | Create a pending surface and print its one-time pairing code |
+| [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
+| [`vowp surface revoke`](#vowp-surface-revoke) | Revoke a surface and every token it holds |
 | [`vowp __exec`](#vowp-__exec) | Hidden: remote executor client |
 | [`vowp __vault-exec`](#vowp-__vault-exec) | Hidden: vault read/inject helper |
 | [`vowp __vault-admin`](#vowp-__vault-admin) | Hidden: vault write helper |
@@ -196,6 +201,7 @@ Commands:
   migrate       Migrate a v0.1 home to the v0.2 layout
   mcp           Run the stdio MCP server
   agent         Enroll, run or inspect the Mac-side agent
+  surface       Create, list or revoke a paired local surface; `--node` names the surface's node
   version       Print the binary version
 
 Options:
@@ -2850,6 +2856,7 @@ Usage: vowp agent [OPTIONS] <COMMAND>
 
 Commands:
   enroll  Enroll this Mac with a one-time code
+  pair    Redeem a home surface pairing code and store the token
   run     Run the agent client until revoked or superseded
   status  Show the last local agent status
 
@@ -2877,6 +2884,28 @@ Options:
       --code-file <PATH|->   File holding the one-time code, or `-` for stdin
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp agent pair`
+
+```text
+Redeem a home surface pairing code and store the token
+
+Usage: vowp agent pair [OPTIONS] --code-file <PATH|-> --surface <ID> --session <ID>
+
+Options:
+      --code-file <PATH|->   File holding the one-time pairing code, or `-` for stdin
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --surface <ID>         Surface id printed by `vowp surface pair`
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --session <ID>         Session id printed by `vowp surface pair`
+      --app <APP>            Application name; defaults to `agent` when the home did not bind one
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
@@ -2913,6 +2942,96 @@ Usage: vowp agent status [OPTIONS]
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+### `vowp surface`
+
+```text
+Create, list or revoke a paired local surface; `--node` names the surface's node
+
+Usage: vowp surface [OPTIONS] <COMMAND>
+
+Commands:
+  pair    Create a pending surface and print its one-time pairing code
+  ls      List surfaces, their scopes and token expiry
+  revoke  Revoke a surface and every token it holds
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+For `surface`, --node <name> names the node the surface runs on, not an SSH redirect.
+```
+
+#### `vowp surface pair`
+
+```text
+Create a pending surface and print its one-time pairing code
+
+Usage: vowp surface pair [OPTIONS] --session <ID> --kind <KIND>
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --session <ID>         Session the surface will mirror
+      --kind <KIND>          Surface kind: `opencode` or `chat`
+      --node <NAME>          Run the command on that node over ssh
+      --app <APP>            Application name carried into the token scopes
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+For this command --node <name> names the node the surface runs on, not an SSH redirect.
+```
+
+#### `vowp surface ls`
+
+```text
+List surfaces, their scopes and token expiry
+
+Usage: vowp surface ls [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+For this command --node <name> filters by the surface's node, not an SSH redirect.
+```
+
+#### `vowp surface revoke`
+
+```text
+Revoke a surface and every token it holds
+
+Usage: vowp surface revoke [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Surface id
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --yes                  Revoke without asking for confirmation
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)

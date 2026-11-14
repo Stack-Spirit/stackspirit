@@ -10,10 +10,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{
-    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentRole, ErrorKind, NodeName, Timestamp,
+    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentRole, ErrorKind, NodeName, SessionId, SurfaceId,
+    SurfaceScope, Timestamp,
 };
 
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, ensure_private_dir, write_private};
 use crate::error::AgentError;
 use crate::key::NodeKey;
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
@@ -27,6 +28,8 @@ pub const HEARTBEAT_SECS: u64 = 10;
 pub const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 /// Longest reconnect delay.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// How long `pair` waits for the home's answer after the handshake.
+pub const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The clock and sleeper the client uses. Tests inject a fake clock.
 pub trait AgentClock: Send + Sync {
@@ -139,6 +142,58 @@ pub enum RunOutcome {
         /// Connection that replaced this one.
         connection_id: String,
     },
+}
+
+/// The surface metadata a Mac needs to redeem a home pairing code.
+///
+/// The code is a secret. `Debug` redacts it; callers must never print the struct with its
+/// fields expanded by hand.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SurfacePairRequest {
+    /// One-time pairing code read from the code file; never logged or echoed.
+    pub code: String,
+    /// Surface the owner created on the home.
+    pub surface_id: SurfaceId,
+    /// Session the surface will mirror.
+    pub session: SessionId,
+    /// Application name, for example `opencode`.
+    pub app: String,
+}
+
+impl SurfacePairRequest {
+    /// Builds one pairing request.
+    pub fn new(code: impl Into<String>, surface_id: SurfaceId, session: SessionId, app: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            surface_id,
+            session,
+            app: app.into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SurfacePairRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SurfacePairRequest")
+            .field("code", &"[REDACTED]")
+            .field("surface_id", &self.surface_id)
+            .field("session", &self.session)
+            .field("app", &self.app)
+            .finish()
+    }
+}
+
+/// A surface token stored by the agent. The token itself is never carried in this value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedSurface {
+    /// Surface the token belongs to.
+    pub surface_id: SurfaceId,
+    /// Scopes granted to the token.
+    pub scopes: Vec<SurfaceScope>,
+    /// When the token expires.
+    pub expires_at: Timestamp,
+    /// Mode-0600 file that holds the token, for display only.
+    pub token_path: PathBuf,
 }
 
 /// The result of a successful enrollment.
@@ -303,6 +358,96 @@ impl AgentClient {
         self.status.connection = ConnectionState::Stopped;
         self.save_status()?;
         Ok(enrolled)
+    }
+
+    /// Redeems one surface pairing code over the agent connection.
+    ///
+    /// The client performs the normal handshake, sends one `SurfacePair` frame with the
+    /// request's surface, session and app, and writes the returned token to
+    /// `surfaces/<surface_id>/token` mode 0600. The token is never printed, logged or
+    /// returned; the [`PairedSurface`] result names only its path, scopes and expiry.
+    pub fn pair(&mut self, request: &SurfacePairRequest) -> Result<PairedSurface, AgentError> {
+        if self.config.is_none() {
+            return Err(AgentError::NotEnrolled("agent.json is missing".to_owned()));
+        }
+        validate_pairing_code(&request.code)?;
+        validate_surface_id(&request.surface_id)?;
+        if request.app.is_empty() || request.app.chars().count() > 64 || request.app.chars().any(char::is_control) {
+            return Err(AgentError::Config(
+                "app must be a printable name of at most 64 characters".to_owned(),
+            ));
+        }
+
+        self.connect()?;
+        let result = self.redeem_surface(request);
+        // Pairing is a one-shot command; close the SSH child instead of leaving it idle.
+        self.connection = None;
+        result
+    }
+
+    fn redeem_surface(&mut self, request: &SurfacePairRequest) -> Result<PairedSurface, AgentError> {
+        self.send_frame(&AgentFrame::SurfacePair {
+            code: request.code.clone(),
+            surface_id: request.surface_id.clone(),
+            session: request.session.clone(),
+            app: request.app.clone(),
+        })?;
+        let (token, scopes, expires_at) = match self.recv_frame(Some(PAIR_TIMEOUT))? {
+            FrameRead::Frame(AgentFrame::SurfaceIssued {
+                surface_id,
+                token,
+                scopes,
+                expires_at,
+            }) => {
+                if surface_id != request.surface_id {
+                    return Err(AgentError::Protocol(
+                        "the home issued a token for another surface".to_owned(),
+                    ));
+                }
+                if token.is_empty() {
+                    return Err(AgentError::Protocol(
+                        "the home returned an empty surface token".to_owned(),
+                    ));
+                }
+                (token, scopes, expires_at)
+            }
+            FrameRead::Frame(AgentFrame::SurfaceRevoked { reason, .. }) => {
+                return Err(AgentError::Remote {
+                    kind: ErrorKind::Refused,
+                    message: format!("surface {} was revoked: {reason}", request.surface_id),
+                    retryable: false,
+                });
+            }
+            FrameRead::Frame(AgentFrame::Revoked { reason }) => return Err(AgentError::Revoked(reason)),
+            FrameRead::Frame(AgentFrame::Superseded { connection_id }) => {
+                return Err(AgentError::Superseded(connection_id));
+            }
+            FrameRead::Frame(AgentFrame::Error {
+                kind,
+                message,
+                retryable,
+            }) => return Err(remote_error(kind, message, retryable)),
+            FrameRead::Frame(_) => {
+                return Err(AgentError::Protocol("expected SurfaceIssued from the home".to_owned()));
+            }
+            FrameRead::Timeout => {
+                return Err(AgentError::Transport(
+                    "the home did not answer the surface pairing request".to_owned(),
+                ));
+            }
+            FrameRead::Closed => {
+                return Err(AgentError::Transport(
+                    "the home closed the connection during surface pairing".to_owned(),
+                ));
+            }
+        };
+        let token_path = write_surface_token(&self.state_dir, &request.surface_id, &token, expires_at)?;
+        Ok(PairedSurface {
+            surface_id: request.surface_id.clone(),
+            scopes,
+            expires_at,
+            token_path,
+        })
     }
 
     /// Opens a transport and performs `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`.
@@ -595,11 +740,48 @@ impl AgentClient {
 
 /// Validates the one-time enrollment code shape without retaining or printing it.
 pub fn validate_enrollment_code(code: &str) -> Result<(), AgentError> {
+    validate_code_shape(code, "enrollment")
+}
+
+/// Validates the one-time surface pairing code shape without retaining or printing it.
+pub fn validate_pairing_code(code: &str) -> Result<(), AgentError> {
+    validate_code_shape(code, "pairing")
+}
+
+/// Validates the 26-character ULID shape of a surface id before it is used as a path segment.
+pub fn validate_surface_id(surface: &SurfaceId) -> Result<(), AgentError> {
+    if surface.0.len() == 26 && surface.0.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        Ok(())
+    } else {
+        Err(AgentError::Config("surface id must be a 26-character ULID".to_owned()))
+    }
+}
+
+fn validate_code_shape(code: &str, kind: &str) -> Result<(), AgentError> {
     if code.len() == 52 && code.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         Ok(())
     } else {
-        Err(AgentError::Config("enrollment code must be 52 characters".to_owned()))
+        Err(AgentError::Config(format!("{kind} code must be 52 characters")))
     }
+}
+
+/// Writes the token and its expiry below `state_dir/surfaces/<id>` with private modes.
+fn write_surface_token(
+    state_dir: &Path,
+    surface: &SurfaceId,
+    token: &str,
+    expires_at: Timestamp,
+) -> Result<PathBuf, AgentError> {
+    ensure_private_dir(state_dir)?;
+    ensure_private_dir(&AgentConfig::surfaces_dir(state_dir))?;
+    ensure_private_dir(&AgentConfig::surface_dir(state_dir, surface))?;
+    let token_path = AgentConfig::surface_token_path(state_dir, surface);
+    write_private(&token_path, format!("{token}\n").as_bytes())?;
+    write_private(
+        &AgentConfig::surface_expiry_path(state_dir, surface),
+        expires_at.as_rfc3339().as_bytes(),
+    )?;
+    Ok(token_path)
 }
 
 fn base_status(state_dir: &Path, config: Option<&AgentConfig>, key: &NodeKey) -> AgentStatus {

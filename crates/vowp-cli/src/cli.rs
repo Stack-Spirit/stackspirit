@@ -46,6 +46,7 @@ pub const V0_2_COMMANDS: &[&str] = &[
     "migrate",
     "mcp",
     "agent",
+    "surface",
     "__exec",
     "__vault-exec",
     "__vault-admin",
@@ -186,6 +187,13 @@ pub enum Command {
         /// The agent subcommand.
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    /// Create, list or revoke a paired local surface; `--node` names the surface's node.
+    #[command(after_help = "For `surface`, --node <name> names the node the surface runs on, not an SSH redirect.")]
+    Surface {
+        /// The surface subcommand.
+        #[command(subcommand)]
+        command: SurfaceCommand,
     },
     /// Print the binary version.
     Version,
@@ -905,6 +913,8 @@ pub struct NodeShowArgs {
 pub enum AgentCommand {
     /// Enroll this Mac with a one-time code.
     Enroll(AgentEnrollArgs),
+    /// Redeem a home surface pairing code and store the token.
+    Pair(AgentPairArgs),
     /// Run the agent client until revoked or superseded.
     Run(AgentRunArgs),
     /// Show the last local agent status.
@@ -923,6 +933,23 @@ pub struct AgentEnrollArgs {
     /// File holding the one-time code, or `-` for stdin.
     #[arg(long, value_name = "PATH|-")]
     pub code_file: String,
+}
+
+/// Arguments for `vowp agent pair`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentPairArgs {
+    /// File holding the one-time pairing code, or `-` for stdin.
+    #[arg(long, value_name = "PATH|-")]
+    pub code_file: String,
+    /// Surface id printed by `vowp surface pair`.
+    #[arg(long, value_name = "ID")]
+    pub surface: String,
+    /// Session id printed by `vowp surface pair`.
+    #[arg(long, value_name = "ID")]
+    pub session: String,
+    /// Application name; defaults to `agent` when the home did not bind one.
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
 }
 
 /// Arguments for `vowp agent run`.
@@ -946,6 +973,52 @@ pub struct AgentGatewayArgs {
     /// Serve one JSON frame per line on stdin/stdout.
     #[arg(long)]
     pub stdio: bool,
+}
+
+/// `vowp surface` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum SurfaceCommand {
+    /// Create a pending surface and print its one-time pairing code.
+    Pair(SurfacePairArgs),
+    /// List surfaces, their scopes and token expiry.
+    Ls(SurfaceLsArgs),
+    /// Revoke a surface and every token it holds.
+    Revoke(SurfaceRevokeArgs),
+}
+
+/// Arguments for `vowp surface pair`.
+///
+/// The target node comes from the global `--node <name>` flag: for this command it names
+/// the node the surface runs on, not an SSH redirect.
+#[derive(Debug, Clone, Args)]
+#[command(after_help = "For this command --node <name> names the node the surface runs on, not an SSH redirect.")]
+pub struct SurfacePairArgs {
+    /// Session the surface will mirror.
+    #[arg(long, value_name = "ID")]
+    pub session: String,
+    /// Surface kind: `opencode` or `chat`.
+    #[arg(long, value_name = "KIND")]
+    pub kind: String,
+    /// Application name carried into the token scopes.
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+}
+
+/// Arguments for `vowp surface ls`.
+///
+/// The optional node filter comes from the global `--node <name>` flag.
+#[derive(Debug, Clone, Default, Args)]
+#[command(after_help = "For this command --node <name> filters by the surface's node, not an SSH redirect.")]
+pub struct SurfaceLsArgs {}
+
+/// Arguments for `vowp surface revoke`.
+#[derive(Debug, Clone, Args)]
+pub struct SurfaceRevokeArgs {
+    /// Surface id.
+    pub id: String,
+    /// Revoke without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Arguments for `vowp loops`.

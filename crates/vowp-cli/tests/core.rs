@@ -3,7 +3,7 @@
 mod common;
 
 use clap::{CommandFactory, Parser};
-use vowp_cli::cli::{Cli, Command, JobCommand, ScheduleArgs, V0_1_COMMANDS, V0_2_COMMANDS};
+use vowp_cli::cli::{Cli, Command, JobCommand, ScheduleArgs, SurfaceCommand, V0_1_COMMANDS, V0_2_COMMANDS};
 use vowp_cli::output::kind_name;
 use vowp_cli::{BufferIo, CliError, Ctx, Global, IoStreams};
 use vowp_protocol::ErrorKind;
@@ -149,6 +149,63 @@ fn help_lists_every_v0_1_command() {
         .filter(|name| !name.starts_with("__"))
     {
         assert!(help.contains(command), "help does not mention {command}:\n{help}");
+    }
+}
+
+#[test]
+fn surface_commands_are_registered_and_node_is_a_filter() {
+    assert!(
+        V0_2_COMMANDS.contains(&"surface"),
+        "surface must be in the v0.2 command constant"
+    );
+    assert!(
+        Cli::command().render_help().to_string().contains("surface"),
+        "help must mention surface"
+    );
+
+    let cli = Cli::try_parse_from([
+        "vowp",
+        "surface",
+        "pair",
+        "--node",
+        "mac-studio",
+        "--session",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--kind",
+        "opencode",
+    ])
+    .expect("surface pair parses");
+    assert_eq!(cli.global.node.as_deref(), Some("mac-studio"));
+    match cli.command {
+        Command::Surface {
+            command: SurfaceCommand::Pair(args),
+        } => {
+            assert_eq!(args.session, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+            assert_eq!(args.kind, "opencode");
+            assert!(args.app.is_none());
+        }
+        other => panic!("expected surface pair, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(["vowp", "surface", "ls", "--node", "mac-studio"]).expect("surface ls parses");
+    assert_eq!(cli.global.node.as_deref(), Some("mac-studio"));
+    match cli.command {
+        Command::Surface {
+            command: SurfaceCommand::Ls(_),
+        } => {}
+        other => panic!("expected surface ls, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(["vowp", "surface", "revoke", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "--yes"])
+        .expect("surface revoke parses");
+    match cli.command {
+        Command::Surface {
+            command: SurfaceCommand::Revoke(args),
+        } => {
+            assert_eq!(args.id, "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+            assert!(args.yes);
+        }
+        other => panic!("expected surface revoke, got {other:?}"),
     }
 }
 

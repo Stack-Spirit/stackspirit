@@ -12,11 +12,12 @@ Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §
 crates/vowp-agent/
   Cargo.toml
   src/lib.rs        re-exports; #![forbid(unsafe_code)], #![warn(missing_docs)]
-  src/config.rs     AgentConfig, TransportConfig, default state dir, 0600/0644 file helpers
+  src/config.rs     AgentConfig, TransportConfig, default state dir, surface paths, 0600/0644 file helpers
   src/key.rs        NodeKey, handshake_payload, fingerprints
   src/transport.rs  Transport + FrameStream traits, SshTransport, 1 MiB JSON-line framing
-  src/client.rs     AgentClient, AgentClock, Backoff, RunOptions, RunOutcome
+  src/client.rs     AgentClient, AgentClock, Backoff, RunOptions, RunOutcome, SurfacePairRequest
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
+  tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
 ```
 
 `~/.vowp-agent` is the default state directory. `VOWP_AGENT_HOME` overrides it; tests always set
@@ -31,7 +32,9 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `node.pub` | 0644 | the 32-byte public key as lowercase hex |
 | `status.json` | 0600 | the last `AgentStatus` document |
 | `spool/` | — | pending bytes counted by `status`, never opened as a database |
-| `surfaces/<id>/expires_at` | 0600 | optional RFC 3339 surface-token expiry, when pairing exists |
+| `surfaces/` | 0700 | one directory per paired surface |
+| `surfaces/<id>/token` | 0600 | the `vowp_surf_` token returned by `SurfaceIssued`; never printed |
+| `surfaces/<id>/expires_at` | 0600 | RFC 3339 surface-token expiry, read by `agent status` |
 
 The state directory is created 0700. Private files are created with `OpenOptionsExt::mode(0o600)`
 and their mode is set again after writing, so an existing wider file is tightened. The private key
@@ -48,6 +51,10 @@ impl AgentConfig {
     pub fn new(home: impl Into<String>, node: NodeName, state_dir: PathBuf, target: impl Into<String>) -> Self;
     pub fn default_state_dir() -> Result<PathBuf, AgentError>;          // $VOWP_AGENT_HOME, else $HOME/.vowp-agent
     pub fn file_path(state_dir: &Path) -> PathBuf;
+    pub fn surfaces_dir(state_dir: &Path) -> PathBuf;                   // state_dir/surfaces
+    pub fn surface_dir(state_dir: &Path, surface: &SurfaceId) -> PathBuf;
+    pub fn surface_token_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf;
+    pub fn surface_expiry_path(state_dir: &Path, surface: &SurfaceId) -> PathBuf;
     pub fn load(state_dir: &Path) -> Result<Self, AgentError>;          // NotEnrolled when missing
     pub fn write(&self) -> Result<(), AgentError>;                      // agent.json, 0600
     pub fn ssh_target(&self) -> Result<&str, AgentError>;
@@ -93,11 +100,17 @@ impl AgentClient {
     pub fn from_state_dir(state_dir: PathBuf, clock: Arc<dyn AgentClock>) -> Result<Self, AgentError>;
     pub fn with_backoff(self, backoff: Backoff) -> Self;
     pub fn enroll(&mut self, target: &str, code: &str) -> Result<Enrollment, AgentError>;
+    pub fn pair(&mut self, request: &SurfacePairRequest) -> Result<PairedSurface, AgentError>;
     pub fn connect(&mut self) -> Result<(), AgentError>;
     pub fn heartbeat(&mut self) -> Result<Timestamp, AgentError>;
     pub fn run(&mut self, options: &RunOptions) -> Result<RunOutcome, AgentError>;
     pub fn status(&self) -> AgentStatus;
 }
+
+pub struct SurfacePairRequest { pub code: String, pub surface_id: SurfaceId, pub session: SessionId, pub app: String }
+pub struct PairedSurface { pub surface_id: SurfaceId, pub scopes: Vec<SurfaceScope>, pub expires_at: Timestamp, pub token_path: PathBuf }
+pub fn validate_pairing_code(code: &str) -> Result<(), AgentError>;
+pub fn validate_surface_id(surface: &SurfaceId) -> Result<(), AgentError>;
 
 pub struct Enrollment { pub node: NodeName, pub home: String, pub protocol: String, pub heartbeat_secs: u64 }
 pub enum RunOutcome { Revoked { reason: String }, Superseded { connection_id: String } }
@@ -122,6 +135,20 @@ hex), agent version, OS, arch, empty labels/capabilities/path maps. `Enrolled` s
 `node`, `protocol` and `heartbeat_secs`. The client closes that stream, reconnects and performs the
 handshake; only after the handshake succeeds does it write `agent.json`. The code is consumed by
 the home and is never written locally.
+
+### Surface pairing
+
+`AgentClient::pair` requires an enrolled `agent.json`. It validates the 52-character code and
+the 26-character surface id, performs the normal handshake, and sends one
+`SurfacePair { code, surface_id, session, app }` frame. The home answers `SurfaceIssued` with
+the token, scopes and expiry. The client writes `<token>\n` to
+`surfaces/<surface_id>/token` (0600) and the RFC 3339 expiry to `surfaces/<surface_id>/expires_at`
+(0600), after creating the state, `surfaces/` and surface directories 0700. The token is never printed,
+logged or returned: [`PairedSurface`] names only the token path, scopes and expiry, and
+`SurfacePairRequest`'s `Debug` redacts the code. A malformed request is `Config`; a
+`SurfaceRevoked` frame, a bad code or a replay is a non-retryable `Remote { kind: Refused }`;
+a `Revoked`/`Superseded` node credential keeps its existing meaning. The client waits at most
+[`PAIR_TIMEOUT`] (30 seconds) for the answer and closes the transport after pairing.
 
 ### Handshake
 
@@ -183,11 +210,14 @@ memory and never spawn ssh, a socket or the network.
 `agent_reconnects_with_backoff_after_a_drop`, `agent_heartbeats_on_the_interval`,
 `agent_stops_on_revoked`, `agent_stops_on_superseded`. The transport tests
 `ssh_argv_matches_the_documented_command` and `read_line_limited_rejects_an_oversized_frame` cover
-the exact SSH argv and the frame cap.
+the exact SSH argv and the frame cap. The surface-pairing slice adds the in-memory home tests
+`agent_pair_writes_0600_token_and_prints_no_secret`, `agent_pair_refuses_a_replayed_code` and
+`agent_pair_surfaces_path_is_private` in `tests/surface_pair.rs`.
 
 ## 8. Out of scope
 
-The home-side gateway, store methods, node enrollment codes, node commands, runs, surfaces,
-leases, offload, path-map mutation, surface pairing, launchd and WSS ingress are separate jobs.
-Phase 0 `vowp agent run` stays in the foreground; `--role` is accepted and carried in
-`RunOptions`, but assignment handling arrives with the executor job.
+The home-side gateway, store methods, node enrollment codes, node commands, runs, leases,
+offload, path-map mutation, launchd and WSS ingress are separate jobs. Phase 0 `vowp agent run`
+stays in the foreground; `--role` is accepted and carried in `RunOptions`, but assignment
+handling arrives with the executor job. `vowp agent surface start|attach|detach`, local chat,
+the MCP proxy and token rotation are later v0.4 slices.

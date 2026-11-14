@@ -445,9 +445,14 @@ The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 `agent_enroll_accepts_code_file_stdin`; the home-side node slice adds
 `node_enroll_creates_a_pending_node_and_prints_the_code_once`, `node_enroll_refuses_a_duplicate_node`,
 `node_revoke_marks_the_node_and_revokes_credentials`, `node_show_returns_the_redacted_card` and
-`node_enroll_is_home_only`.
+`node_enroll_is_home_only`. The surface-pairing slice adds
+`surface_pair_cli_prints_code_once_and_lists_pending`, `surface_revoke_marks_the_token_revoked`,
+`surface_command_requires_a_node_and_session`, `surface_ls_never_prints_a_token`,
+`surface_commands_are_home_only`, `surface_commands_are_registered_and_node_is_a_filter`,
+`agent_pair_writes_0600_token_and_prints_no_secret`, `agent_pair_refuses_a_replayed_code` and
+`agent_pair_surfaces_path_is_private`.
 
-## 12. Mac agent commands (v0.4 Phase 0)
+## 12. Mac agent commands (v0.4)
 
 These commands are the Mac side of the local orchestrator. They use `~/.vowp-agent` (override
 with `VOWP_AGENT_HOME`), never open a project store or `vowp-core`, and never put the node private
@@ -471,6 +476,19 @@ vowp agent enroll --target home.example --code-file -
 Human output is `enrolled node mac-studio in home home-1 (vowp-agent/1)`; `--json` prints
 `{"node":"mac-studio","home":"home-1","protocol":"vowp-agent/1","heartbeat_secs":10}`. The
 private key, public key and code are never printed.
+
+### `vowp agent pair --code-file <path|-> --surface <id> --session <id> [--app <app>]`
+
+Loads `agent.json` and `node.key`, performs the normal agent handshake and sends
+`SurfacePair { code, surface_id, session, app }` over the existing transport. The home returns
+`SurfaceIssued { surface_id, token, scopes, expires_at }`; the agent writes the token to
+`~/.vowp-agent/surfaces/<surface_id>/token` (0600, with `surfaces/` and the surface directory
+0700) and the expiry to `surfaces/<surface_id>/expires_at` (0600). The token is never printed,
+logged or passed in argv. `--code-file -` reads the 52-character code from stdin. `--app`
+defaults to `agent`; the home accepts that only when `surface pair` did not bind an app. Human
+output is `paired surface <id>; token stored at <path>; expires <rfc3339>`; `--json` prints the
+`PairedSurface` fields (`surface_id`, `scopes`, `expires_at`, `token_path`) and no token. A bad,
+expired or replayed code is a non-retryable refusal (exit 5); a missing enrollment is exit 3.
 
 ### `vowp agent run [--foreground] [--role <role>]`
 Loads `agent.json` and `node.key`, connects, and sends a heartbeat every 10 seconds (the interval
@@ -515,3 +533,77 @@ capacity, `Ping` is answered with `Pong`, and a revoked or unknown node gets `Re
 `Error` before the connection closes. Frames are capped at 1 MiB and the handshake times out after
 10 seconds. Phase 0 has no `--socket`; the supervisor-socket gateway is Phase 4. It never logs the
 code, the signature, the public-key value or a path map.
+
+## 13. Home surface pairing (v0.4 Phase 1)
+
+These commands create and manage the home half of a paired local surface. They are home-only:
+a control machine exits 5, an uninitialised home exits 3, and no command opens a project
+database. They use the global store (`surfaces`, `surface_tokens`, `enrollment_codes`,
+`sessions`, `nodes`). The pairing code and the surface token are secrets: the code is printed
+once by `surface pair`, the token is written only by `agent pair` to its 0600 agent file, and
+neither appears in another command's output, a log or a JSON document.
+
+### `vowp surface pair --session <id> --node <name> --kind opencode|chat [--app <app>]`
+
+Creates a `pending` surface bound to the session and a ten-minute one-time code, then prints the
+code once and the exact Mac command. `--node` is the node the surface runs on; it is not an SSH
+redirect for this command. `--kind` accepts `opencode` or `chat`; `--app` is an optional
+printable name of at most 64 characters. Human output is:
+
+```text
+created pending surface 01ARZ3NDEKTSV4RRFFQ69G5FAW on mac-studio (opencode)
+session: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+code: <52-character code>
+expires: 2026-11-14T10:10:00.000Z
+run on the Mac:
+  vowp agent pair --code-file - --surface 01ARZ3NDEKTSV4RRFFQ69G5FAW --session 01ARZ3NDEKTSV4RRFFQ69G5FAV --app opencode
+```
+
+`--json` prints:
+
+```json
+{
+  "surface": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+  "node": "mac-studio",
+  "session": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "kind": "opencode",
+  "app": "opencode",
+  "code": "…",
+  "expires_at": "2026-11-14T10:10:00.000Z",
+  "command": "vowp agent pair --code-file - --surface … --session … --app opencode"
+}
+```
+
+A missing `--node`/`--session`, an invalid id or an unknown kind is exit 2. An unknown node or
+session is exit 3. A revoked node is exit 5. A second pending surface for the same node, session,
+kind and app is a conflict (exit 4); revoke it before pairing again. The plaintext code is never
+written to the home database, a file or the log; only its SHA-256 hash is stored.
+
+### `vowp surface ls [--node <name>] [--json]`
+
+Lists the surfaces this CLI created. Each row re-reads the surface's current node, kind and
+state from the store and the scopes and expiry of its token rows from `surface_tokens`:
+
+```text
+ID                        NODE        KIND      STATE     SCOPES                          EXPIRES
+01ARZ…FAW                 mac-studio  opencode  pending   -                               -
+```
+
+`--node <name>` filters by the surface's node. `--json` prints an array of
+`{"id","node","kind","state","scopes","expires_at"}`. A pending surface has no token, so its
+scopes are `[]` and its `expires_at` is `null`. A revoked surface stays listed with state
+`revoked`. No token, token hash or display prefix is ever printed. The id index is
+`<home>/surfaces.json` (0600) because the v4 store read model returns one surface by id; the
+ids are not secrets and the state/scopes/expiry always come from the store.
+
+### `vowp surface revoke <id> [--yes]`
+
+Revokes every active token of the surface and marks the surface `revoked` through
+`vowp_core::agent::pair::revoke_surface`. The next frame carrying that token is refused. Without
+`--yes` it refuses with exit 5; an unknown surface is exit 3 and an already-revoked surface
+succeeds with zero tokens revoked. Human output is
+`revoked surface <id>; N token(s) revoked`; `--json` prints
+`{"surface":"…","status":"revoked","tokens_revoked":N}`. No token is printed.
+
+The reverse flow (the Mac asks and the home opens an approval inbox item), `surface rotate`, the
+live `SurfaceRevoked` push, leases, local chat and the MCP proxy are later v0.4 slices.

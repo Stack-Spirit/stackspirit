@@ -36,6 +36,7 @@ pub mod secret;
 pub mod session;
 pub mod setup;
 pub mod status;
+pub mod surface;
 pub mod tunnel;
 pub mod up;
 pub mod window;
@@ -96,6 +97,7 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Agent { .. } => Err(CliError::Invalid(
             "agent commands run without a project context".to_owned(),
         )),
+        Command::Surface { command } => surface::run(ctx, io, &command, None),
         Command::Version => maint::run(ctx, io, &MaintCommand::Version),
         Command::Window(args) => window::run(ctx, io, &args),
         Command::Exec(args) => exec::run(ctx, io, &args),

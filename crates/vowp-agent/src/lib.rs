@@ -16,10 +16,14 @@ pub mod status;
 pub mod transport;
 
 pub use client::{
-    AGENT_VERSION, AgentClient, AgentClock, Backoff, Enrollment, HEARTBEAT_SECS, MAX_BACKOFF, RunOptions, RunOutcome,
-    STABLE_CONNECTION, SystemAgentClock, validate_enrollment_code,
+    AGENT_VERSION, AgentClient, AgentClock, Backoff, Enrollment, HEARTBEAT_SECS, MAX_BACKOFF, PAIR_TIMEOUT,
+    PairedSurface, RunOptions, RunOutcome, STABLE_CONNECTION, SurfacePairRequest, SystemAgentClock,
+    validate_enrollment_code, validate_pairing_code, validate_surface_id,
 };
-pub use config::{AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, STATUS_FILE, TransportConfig};
+pub use config::{
+    AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, STATUS_FILE, SURFACE_EXPIRY_FILE, SURFACE_TOKEN_FILE, SURFACES_DIR,
+    TransportConfig,
+};
 pub use error::AgentError;
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
 pub use status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};

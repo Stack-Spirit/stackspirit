@@ -27,7 +27,8 @@ crates/vowp-cli/
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
-  src/cmd/agent.rs    (`agent enroll|run|status` plus hidden `agent gateway`; no store, project or `vowp-core` for the Mac commands)
+  src/cmd/agent.rs    (`agent enroll|pair|run|status` plus hidden `agent gateway`; no store, project or `vowp-core` for the Mac commands)
+  src/cmd/surface.rs  (`surface pair|ls|revoke`; home-only global-store surface pairing)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
 ```
@@ -78,6 +79,11 @@ it builds a `Ctx`, requires the home role and opens `Ctx::store()`.
   `AgentClient::enroll`. The code never appears in argv, `ps`, output or a log. Success writes
   `agent.json` 0600 and prints the node, home and protocol; `--json` prints
   `{"node","home","protocol","heartbeat_secs"}`.
+- `agent pair --code-file <path|-> --surface <id> --session <id> [--app <app>]` reads the code
+  from the `IoStreams` stdin, calls `AgentClient::pair` and prints the surface id, scopes, expiry
+  and token path. `--json` prints `{"surface_id","scopes","expires_at","token_path"}`. The token
+  is written only to `~/.vowp-agent/surfaces/<id>/token` (0600) and is never printed. A bad or
+  replayed code is a non-retryable refusal (exit 5).
 - `agent run [--foreground] [--role surface|executor|both]` loads `agent.json` and `node.key`,
   builds the SSH transport, and calls `AgentClient::run`. `status.json` is rewritten on every
   heartbeat. Phase 0 always runs in the foreground; `--foreground` is accepted for the documented
@@ -107,6 +113,34 @@ and serialises as:
   "surface_token_expires_at": null
 }
 ```
+
+### Surface commands (`cmd/surface.rs`)
+
+`vowp surface` is handled before the generic `--node` redirect and the normal command dispatch,
+because its `--node` flag names the surface's node rather than an SSH target. The
+commands are home-only (a control machine exits 5) and open the global store through
+`Ctx::fleet_store()`, so no project selection is required.
+
+- `surface pair --session <id> --node <name> --kind opencode|chat [--app <app>]` calls
+  `vowp_core::agent::pair::create_pending_surface`: it validates the node, session and app,
+  inserts a `pending` surface bound to the session, and inserts a ten-minute `surface`
+  enrollment code whose plaintext is shown once. The command prints the code, the expiry and
+  the exact Mac command `vowp agent pair --code-file - --surface <id> --session <id>
+  [--app <app>]`; the code is never written to a file, the database or stderr. `--json` prints
+  `{"surface","node","session","kind","app","code","expires_at","command"}`. A missing
+  `--node`/`--session`, an unknown kind or an invalid id is exit 2; an unknown node or session
+  is exit 3; a duplicate pending surface for the same node/session/kind/app is exit 4; a
+  revoked node is exit 5 through `CoreError`.
+- `surface ls [--node <name>]` lists the surface ids this CLI created, reading each surface's
+  current state from the store and each token's scopes/expiry from `surface_tokens`. Human
+  output is `ID NODE KIND STATE SCOPES EXPIRES`; `--json` prints an array of
+  `{"id","node","kind","state","scopes","expires_at"}`. It never prints a token or a token
+  hash. The id index is `<home>/surfaces.json` (0600): surface ids are not secrets, and the
+  v4 store read model has no list-all query, so the CLI records the ids it created.
+- `surface revoke <id> [--yes]` calls `vowp_core::agent::pair::revoke_surface`, which revokes
+  every active token and marks the surface `revoked`. Without `--yes` it refuses with exit 5;
+  an unknown surface is exit 3. `--json` prints
+  `{"surface","status":"revoked","tokens_revoked":N}`. No token is printed.
 
 ### Node enrollment commands (`cmd/node.rs`)
 
@@ -145,7 +179,14 @@ the agent slice adds `agent_status_without_enrollment_exits_three`, `agent_statu
 `agent_enroll_help_names_code_file` and `agent_enroll_accepts_code_file_stdin`; the node
 enrollment slice adds `node_enroll_creates_a_pending_node_and_prints_the_code_once`,
 `node_enroll_refuses_a_duplicate_node`, `node_revoke_marks_the_node_and_revokes_credentials`,
-`node_show_returns_the_redacted_card` and `node_enroll_is_home_only` in `tests/agent.rs`.
+`node_show_returns_the_redacted_card` and `node_enroll_is_home_only` in `tests/agent.rs`. The
+surface-pairing slice adds `agent_pair_help_names_code_surface_and_session`,
+`agent_pair_accepts_code_file_stdin`,
+`agent_pair_without_enrollment_exits_three_and_prints_no_code`,
+`surface_pair_cli_prints_code_once_and_lists_pending`,
+`surface_revoke_marks_the_token_revoked`, `surface_command_requires_a_node_and_session`,
+`surface_ls_never_prints_a_token` and `surface_commands_are_home_only` in `tests/agent.rs`,
+plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

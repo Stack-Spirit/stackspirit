@@ -198,6 +198,12 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     if let Command::Agent { command } = &command {
         return cmd::agent::run(&global, io, command);
     }
+    // `surface` is home-only and its `--node` flag names the node the surface runs on, not an
+    // SSH redirect. Handle it before the generic `--node` routing.
+    if let Command::Surface { command } = &command {
+        let ctx = Ctx::build(&global, io)?;
+        return cmd::surface::run(&ctx, io, command, global.node.as_deref());
+    }
     // Refuse a command that still needs a v0.2 handler before the generic `--node` redirect,
     // which would otherwise silently run the v0.1 chat loop.
     if cmd::command_needs_v0_2_handler(&command) {
