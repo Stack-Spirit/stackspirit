@@ -1,241 +1,167 @@
-# StackSpirit — first draft product and execution plan
+# StackSpirit — Detailed Product, Architecture & Desktop-First Execution Plan
 
-Status: first draft, 2026-11-14. Execution is gated on VOWP Phase 3 (local opencode and
-local orchestrator). This document is the product plan, not an implementation job.
+Status: updated 2026-11-14. Project started at `/home/dev/stackspirit` (`stackspirit` VOWP project).
+All roles (`planner`, `worker`, `verifier`, `keeper`) run on
+`opencode:deepseek/deepseek-flash#max` (**DeepSeek V4.1 Flash 1017** via the `deepseek` provider
+with `max` reasoning).
 
-## 1. Product
+---
 
-StackSpirit is the visual local control surface for VOWP.
+## 1. Product Vision & Surface Order (Desktop First)
 
-It lets a user add a VPS once, connect or disconnect with one action, and see and control
-the work running there: workers, jobs, sessions, storage, capacity, providers and harnesses.
-The VOWP home remains the source of truth on the VPS. StackSpirit runs on the user’s local
-machine and can also host local orchestrator sessions and local harnesses.
+StackSpirit is the visual local control plane and desktop cockpit for VOWP.
 
-One sentence:
+**Surface build order (explicit owner decision):**
 
-> StackSpirit is the desktop cockpit for VOWP: add a machine once, connect, see the whole
-> fleet, and run local or remote orchestration without learning the internals.
+1. **Desktop App FIRST (`spirit-desktop` + `spirit-core` + `spirit-ui`)**
+   - Native **Tauri 2** desktop application (Rust backend + React/TypeScript UI).
+   - Focuses on the core UX first: add a VPS once, click Connect or Disconnect, and immediately
+     visualize the VPS fleet, active workers, job lanes, VPS disk/storage limits, capacity
+     advisor recommendations, active harnesses/providers, and sessions.
+   - Bundles/manages `opencode` under the hood as the **StackSpirit Engine** so users do not need
+     to install or know about a separate harness, while offering opencode's free/included models
+     and Bring-Your-Own-Key (BYOK) via the OS keychain.
+2. **Web App SECOND (`spirit-web`, after Desktop MVP)**
+   - Reuses the exact same `spirit-ui` React/TypeScript components by swapping the `TauriTransport`
+     bridge for an `HttpSseTransport` talking to `vowp-daemon`.
+3. **CLI THIRD (`spirit-cli`, after Desktop MVP)**
+   - Thin Rust CLI (`spirit`) built on top of the exact same `spirit-core` Rust crate created for
+     the Tauri desktop backend.
 
-## 2. Non-goals for v1
+Why this works cleanly without rework:
+- The Tauri 2 desktop backend (`src-tauri`) delegates all non-UI logic to ` crates/spirit-core`
+  (Rust). When it is time to build the CLI later, `spirit-cli` wraps `spirit-core`.
+- The Tauri 2 frontend (`ui/`) talks to the backend strictly through a typed `SpiritBridge`
+  interface. In Desktop, `TauriBridge` implements `SpiritBridge` over Tauri IPC. When it is time
+  to build the Web App later, `WebBridge` implements `SpiritBridge` over HTTP/SSE.
 
-- Do not build a second VOWP scheduler or database.
-- Do not fork a full agent harness.
-- Do not require inbound ports, a VPN or a relay.
-- Do not store provider keys in the VOWP home or copy them from the local machine to the VPS.
-- Do not build a remote desktop in the first version.
-- Do not claim exact continuation, lossless ASIF import or native harness import.
+---
 
-## 3. Architecture
+## 2. How StackSpirit & VOWP Rely on Each Other (Cross-Project Dependency Matrix)
+
+Although `stackspirit` (`/home/dev/stackspirit`) and `vowp` (`/home/dev/vowp`) are separate VOWP
+projects and repositories, **StackSpirit relies on VOWP wire contracts and milestones**:
+
+| StackSpirit Phase / Feature | Can start now? | VOWP Prerequisite in `/home/dev/vowp` | How StackSpirit handles the dependency |
+|---|---|---|---|
+| **D0: Detailed repo architecture & wire contract map** | **YES (Now)** | Existing VOWP v0.3/v0.4 `snapshot.json`, `vowp fleet status --json`, `vowp capacity report --json`, `vowp job`, `vowp session` | Reads `/home/dev/vowp/crates/vowp-protocol` and `docs/design/v0.4/local-orchestrator.md` read-only to mirror exact JSON schemas. |
+| **D1: `spirit-core` Rust backend (Host store, SSH runner, VOWP snapshot client, mock fixtures)** | **YES (Now)** | Existing VOWP CLI JSON outputs over SSH (`vowp fleet status --json`, `vowp capacity report --json`, `vowp fleet queue --json`, `vowp fleet inbox --json`) | Uses outbound SSH + deterministic offline fixtures from real VOWP JSON schemas so UI work is 100% testable offline and against a live VPS. |
+| **D2: `spirit-desktop` Tauri 2 shell, design system & "Add VPS / Connect / Disconnect" Host Manager** | **YES (Now)** | Existing SSH access + VOWP Phase 0/1 node enrollment (`v4-local-0-*` and `v4-local-1-*`, **already DONE** in `vowp`) | Connects to a VPS in one click, verifies host status, pins host metadata locally, and shows live connection state. |
+| **D3: Visual Fleet Canvas, Worker Slots, Capacity & VPS Storage Dashboard** | **YES (Now)** | Existing VOWP `CapacityReport`, `HostSample` (disk free, RAM, CPU pressure, load), `Target` (fixed vs advised recommended workers), active sessions/providers | Renders the visual node graph, worker slot rings, running/waiting/blocked job lanes, VPS storage/disk gauges, recommended worker count, and active harness/provider badges. |
+| **D4: StackSpirit Engine (`opencode` sidecar) & Provider/Model Onboarding UI** | **YES (Now — local engine & UI)** | Local `opencode` binary + OS keychain | Manages the local `opencode` binary as "StackSpirit Engine", configures included/free models or BYOK keys in the local OS keychain, and detects optional local `opencode` / `claude-code` installs. |
+| **D5: Portable Session `.asif.zip` Download & Import in Desktop UI** | **GATED on VOWP ASIF jobs** | Requires VOWP `v4-asif-core`, `v4-asif-cli`, `v4-asif-web` (currently queued/ready in `vowp`) | Desktop UI builds the session drawer now; live one-click `.asif.zip` export/import wiring waits until `v4-asif-cli` / `v4-asif-web` merge in `/home/dev/vowp`. |
+| **D6: Running Global & Project Orchestrators Locally on the Mac/Desktop** | **GATED on VOWP Phase 2 & 3** | Requires VOWP Phase 2 (`v4-local-2e/2f/2g`, currently finishing) **AND** VOWP Phase 3 (`v4-local-3*`: local opencode app host, bridge, MCP proxy, orchestrator materialize/backfill) | **Hard gate:** Do not claim or enable live local-orchestrator execution in StackSpirit until VOWP Phase 3 merges in `/home/dev/vowp`. Until then, orchestrator sessions attach to the VPS host or run in preview/mock mode with a clear gate badge. |
+| **W1 / C1: Standalone Web App (`spirit-web`) & CLI (`spirit-cli`)** | **After D1–D4** | Reuses `spirit-ui` and `spirit-core` after the Desktop MVP is complete | Built after the desktop app UX and core crates are proven. |
+
+---
+
+## 3. Language & Technical Stack
+
+- **Systems / Desktop Backend / Future CLI:** **Rust** (2024 edition)
+  - Shares exact mental model and serde JSON contracts with VOWP (`/home/dev/vowp/crates/vowp-protocol`).
+  - Powers `crates/spirit-core` and `apps/spirit-desktop/src-tauri`.
+- **Desktop Shell:** **Tauri 2**
+  - Native lightweight windowing, small binary, low idle memory, native Rust command bridge for
+    SSH, OS keychain, and supervising the bundled `opencode` sidecar process.
+- **Desktop UI (and later Web UI):** **React 19 + TypeScript + Vite**
+  - **Fleet & Worker Graph:** interactive node/lane canvas showing the VPS root node, worker slots
+    (idle/busy/verifier), job cards by state, and provider/model badges.
+  - **Capacity & Storage Telemetry:** visual gauges for VPS disk free (`disk_free_home_bytes`),
+    minimum reserve floor (`min_disk_bytes`), RAM available/p90, CPU load/pressure, current worker
+    target vs VOWP's **advised (recommended) workers**, and brake status.
+  - **Terminal / Session Stream:** structured event/turn viewer plus terminal view for live session
+    inspection.
+
+---
+
+## 4. Workspace Layout (`/home/dev/stackspirit`)
 
 ```text
-StackSpirit desktop / CLI
-  ├─ Host manager: add once, connect/disconnect, host-key pinning
-  ├─ VOWP local node agent: outbound SSH only
-  ├─ StackSpirit Engine: bundled opencode sidecar (default)
-  ├─ Optional external harnesses: installed opencode, Claude Code, Codex/ACP later
-  ├─ Provider onboarding: included opencode models or BYOK, OS keychain only
-  ├─ Visual fleet: workers, jobs, sessions, storage, capacity, providers
-  └─ Local web UI served on 127.0.0.1 for optional phone/LAN use
-
-VOWP home on the VPS
-  ├─ database, jobs, workers, leases and sessions
-  ├─ global and project orchestrators
-  ├─ capacity, storage, provider names and merge queue
-  └─ source of truth; never a desktop DB copy
+stackspirit/
+├── Cargo.toml                  # Rust workspace (spirit-core, src-tauri, later spirit-cli)
+├── crates/
+│   └── spirit-core/            # Rust core: VOWP snapshot/capacity/job types, SSH client,
+│                               # host profile store, OS keychain trait, opencode sidecar manager,
+│                               # and deterministic mock VOWP fixtures
+├── apps/
+│   └── spirit-desktop/         # Desktop-first application
+│       ├── package.json        # React + TypeScript + Vite frontend (spirit-ui)
+│       ├── src/                # UI components, SpiritBridge abstraction, views & tests
+│       └── src-tauri/          # Tauri 2 Rust host wrapping spirit-core
+└── docs/
+    ├── PLAN.md                 # Detailed execution plan & VOWP cross-project gates
+    └── VOWP-CONTRACT.md        # Exact mapping to /home/dev/vowp JSON outputs & Phase 3 gates
 ```
 
-### Desktop
+---
 
-- Tauri 2 + React/TypeScript is the recommended starting point.
-- Electron is an acceptable fallback if terminal/PTY speed is more important than app size.
-- Use React Flow for the fleet/job graph, Recharts for capacity, and xterm.js only for
-  session terminals.
-- The app should feel like a control room, not an IDE.
+## 5. Desktop-First Phased Job Graph (`stackspirit` project)
 
-### CLI
+Every worker in `stackspirit` runs on `opencode:deepseek/deepseek-flash#max` (DeepSeek V4.1 Flash
+1017 on the `deepseek` provider with `max` reasoning).
 
-A `spirit` command with the same core API:
+### Phase D0 — `ss-0-plan` (Architecture, VOWP Contract Map & Desktop-First Spec)
+- Reads `/home/dev/vowp/docs/design/stackspirit.md`, `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md`,
+  `/home/dev/vowp/docs/design/v0.4/asif-integration.md`, and `/home/dev/vowp/crates/vowp-protocol/src/`.
+- Writes `docs/PLAN.md` and `docs/VOWP-CONTRACT.md` inside `/home/dev/stackspirit`.
+- Freezes the exact Rust and TypeScript types for VOWP snapshots, capacity/storage metrics,
+  recommended worker counts, host connection profiles, StackSpirit Engine (`opencode` sidecar)
+  states, and the explicit VOWP Phase 3 / ASIF dependency gates.
 
-```text
-spirit host add user@vps
-spirit host connect <name>
-spirit host disconnect <name>
-spirit status
-spirit dashboard
-spirit session attach <id>
-spirit job pause|retry <id>
-spirit capacity set <n>
-```
+### Phase D1 — `ss-1-core` (`crates/spirit-core`: VOWP Client, SSH Bridge, Host Store & Engine Manager)
+- Implements `crates/spirit-core` in Rust:
+  - Typed models matching VOWP's `fleet status --json`, `capacity report --json`, `fleet queue --json`,
+    and `fleet inbox --json`.
+  - Host connection store (`HostProfile`: label, SSH target, port, home path, last connected,
+    pinned host key fingerprint—never storing secrets in plaintext files).
+  - Outbound SSH command/tunnel runner (`ssh -o BatchMode=yes ... vowp fleet status --json`) plus a
+    `MockVowpBackend` with realistic multi-project fixtures (`vowp`, `northnoir`, `vowp-asif`).
+  - `EngineSupervisor` spec for discovering/launching the bundled `opencode` sidecar ("StackSpirit
+    Engine") or an existing user `opencode` / `claude-code` binary, plus VOWP Phase 3 readiness
+    probing (`LocalOrchestratorGate::Ready | WaitingForVowpPhase3`).
+- Full `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`.
 
-The CLI is the test harness for the desktop; both use the same API client.
+### Phase D2 — `ss-2-desktop-shell` (Tauri 2 Desktop App Shell, SpiritBridge & Host Manager UI)
+- Scaffolds `apps/spirit-desktop` (React + TypeScript + Vite frontend + `src-tauri` Rust backend
+  wired to `spirit-core`).
+- Implements the `SpiritBridge` TypeScript interface with both `TauriBridge` (desktop IPC) and
+  `MockBridge` (for hermetic UI tests and preview).
+- Builds the **One-Click Host Manager**:
+  - Add VPS modal (SSH host, user, port, VOWP home path, one-click test & save).
+  - Topbar **Connect / Disconnect** toggle with live connection state, latency, supervisor PID, and
+    last-tick age.
+  - Project switcher (`All Projects`, `vowp`, `northnoir`, `vowp-asif`).
 
-### VOWP API
+### Phase D3 — `ss-3-fleet-canvas` (Visual Worker Graph, Job Lanes, VPS Storage & Capacity Cockpit)
+- Builds the signature visual views in `apps/spirit-desktop`:
+  - **Visual Worker & Fleet Canvas:** VPS node card at center, live worker slot rings (showing busy
+    vs idle slots up to the target, e.g. `3 / 8` active), running worker cards with live harness +
+    provider/model badge (e.g., `DeepSeek V4.1 Flash 1017 #max`), and job lanes (`Running`, `Ready`,
+    `Reviewing/Fixing`, `Parked/Blocked`, `Done`).
+  - **Capacity & Storage Advisor Rail:**
+    - Worker Target vs **Recommended Workers** (`advised_workers` from VOWP's capacity advisor) with
+      one-click target adjustment (`capacity set`).
+    - **VPS Storage & Memory Gauges:** free disk (`disk_free_home_bytes`) vs minimum safe floor
+      (`min_disk_bytes`), RAM available vs reserve floor and p90 per-worker estimate, CPU load and
+      pressure, and brake status.
+  - **Interactive Job & Inbox Actions:** pause, retry, inspect gate failures, and answer inbox items.
 
-Extend the VOWP daemon with a small, authenticated JSON/SSE API:
+### Phase D4 — `ss-4-engine-onboarding` (StackSpirit Engine / `opencode` Sidecar, Free Models, BYOK & VOWP Phase 3 Gate UI)
+- Builds the **StackSpirit Engine & Local Orchestrator** view in `apps/spirit-desktop`:
+  - Default **Zero-Harness UX**: presents the bundled `opencode` sidecar as **StackSpirit Engine**
+    with one-click selection of included/free models or **Bring Your Own Key (BYOK)** stored in the
+    local OS keychain (never sent to the VPS).
+  - Advanced **External Harness Picker**: optional toggle to use an existing local `opencode`
+    desktop/CLI install or `claude-code`.
+  - **Cross-Project VOWP Gate Indicator**: checks whether the connected VOWP home supports Phase 3
+    local orchestrators and `.asif.zip` session export/import; enables local orchestrator launch
+    when VOWP Phase 3 is present, and shows the exact VOWP milestone gate status when connected to
+    a pre-Phase-3 home.
 
-- host/fleet snapshot
-- workers and slots
-- jobs and transitions
-- sessions and last activity
-- capacity target, advised target and recommendations
-- disk/storage usage
-- provider and harness inventory, with names only
-- action endpoints for pause, retry, capacity set and session attach
-
-No desktop process opens the VOWP SQLite database. The VPS remains the only writer.
-
-### Connection
-
-- One-time host enrollment over SSH.
-- Pin the host key.
-- Store only host metadata in StackSpirit; use the OS keychain for local secrets.
-- No inbound SSH from VPS to desktop.
-- Reconnect automatically; disconnected local sessions are marked paused/degraded, not
-  silently completed.
-- This builds on VOWP’s local-node Phase 0/1 primitives rather than inventing a second transport.
-
-## 4. StackSpirit Engine and providers
-
-### Default
-
-Bundle a pinned opencode binary as the **StackSpirit Engine**.
-
-- Users install only StackSpirit.
-- StackSpirit starts, supervises, updates and stops the engine.
-- VOWP’s local node points its opencode adapter at the bundled binary.
-- The UI calls it “StackSpirit Engine”; opencode is named in About/third-party licenses.
-- Users can optionally point StackSpirit at their own opencode installation.
-
-### Models
-
-- Offer opencode’s included/free models where available, subject to opencode’s terms,
-  quotas and rate limits.
-- Never promise “free forever.”
-- Always offer “Bring your own provider key.”
-- Provider keys stay in the local OS keychain or the local engine’s auth store.
-- The VPS sees provider names and usage, never key values.
-- Claude Code and Codex are optional external harnesses where installed/authenticated;
-  they are not bundled and are not required for the default experience.
-
-## 5. Visual model
-
-- A VPS node at the centre.
-- Worker slots around it, with busy/idle state.
-- Jobs in running, waiting, blocked and done lanes.
-- Capacity rail: target, advised target, CPU, RAM, disk, pressure.
-- Storage panel: sessions, worktrees, free disk, retention.
-- Provider/harness lanes: which executor/model is running where.
-- A recommended-worker number derived from VOWP’s capacity advisor.
-- A clear connection state and last-seen time.
-- Download/upload actions for `.asif.zip` once ASIF integration is available.
-
-## 6. Execution gate
-
-Do not start UI/build execution until the VOWP local orchestrator path is usable.
-
-Required gate:
-
-1. VOWP Phase 2 offload/agent work is done.
-2. VOWP Phase 3 local opencode path is done:
-   - local app host
-   - bridge
-   - MCP proxy
-   - orchestrator materialize/backfill
-   - local cache
-   - takeover and path normalization
-3. A local `vowp chat`/opencode orchestrator can write the same session locally.
-4. The local node can be selected as the placement for global and project orchestrators.
-
-Current status at 2026-11-14 13:21 UTC:
-
-- Phase 0: done (protocol, store, agent client, gateway).
-- Phase 1: done (surface pair, lease core, local chat).
-- Phase 2: in progress.
-  - `v4-local-2e-offload-dispatch` is fixing.
-  - `v4-local-2f-agent-run-loop` is reviewing.
-  - `v4-local-2g-agent-path-map` is pending.
-- Phase 3: not started. The local orchestrator/opencode app host is the next product goal.
-- ASIF integration is being built separately; it does not unblock local orchestrator.
-
-## 7. Execution plan after the gate
-
-### S0 — contract and API
-
-- Define the StackSpirit API and host/connection model.
-- Add read-only VOWP endpoints.
-- No UI yet.
-
-### S1 — CLI host and read-only dashboard
-
-- `spirit host add/connect/disconnect`.
-- SSH host-key pinning.
-- Fetch one snapshot.
-- Local web dashboard with workers, jobs, capacity, storage and providers.
-
-### S2 — Tauri desktop
-
-- Host manager.
-- Fleet canvas.
-- Capacity/storage panels.
-- Reconnect and disconnected state.
-- Package for macOS first.
-
-### S3 — engine and provider onboarding
-
-- Bundle/pin opencode as StackSpirit Engine.
-- Included/free-model selection with quota display.
-- BYOK fallback and keychain storage.
-- Detect external opencode/Claude Code; Codex later.
-- No secret values on the VPS.
-
-### S4 — local orchestrators
-
-- Start global/project orchestrators on the local machine.
-- Local surface, lease and session sync.
-- Local file/shell access only through the local node.
-- Disconnect/reconnect semantics.
-- Same session data remains on VOWP home.
-
-### S5 — actions and automation
-
-- Capacity set.
-- Pause/retry jobs.
-- Session attach.
-- Download/upload `.asif.zip`.
-- Audit and confirmations for destructive actions.
-
-### S6 — team/fleet
-
-- Multiple VPS hosts.
-- Optional read-only hosted web view.
-- AgentDock/AgentVPS-style live takeover later.
-
-## 8. Security and privacy
-
-- Host-key pinning; no credentials copied from local to VPS.
-- Provider keys local only; VOWP sees names, not values.
-- Scoped action tokens and an audit trail.
-- No direct DB access from the desktop.
-- No inbound ports.
-- No custom cryptography; use SSH and existing VOWP leases.
-- Explicit confirmation for publish, deploy and destructive actions.
-
-## 9. Success measures
-
-- Add a VPS and reach the dashboard in under two minutes.
-- Connect/disconnect in one click.
-- A disconnected local run never reports as completed.
-- A user can use the bundled engine without knowing opencode exists.
-- A user can choose BYOK or an included/free model.
-- The dashboard always shows the real VOWP target and recommended workers.
-- No provider key or VOWP secret is ever present in the desktop’s logs or the VPS.
-
-## 10. Open decisions
-
-- macOS-only first, or macOS + Linux?
-- Is StackSpirit open source, source-available or proprietary?
-- Bundle opencode by default or require an optional download on first run?
-- Which included/free models are acceptable under their terms?
-- Should the local web UI be desktop-only or LAN-accessible by default?
-- Do we expose Claude Code/Codex as supported external harnesses in v1 or v2?
+### Phase D5 & Beyond (Gated on VOWP Phase 3 & ASIF completion, then Web & CLI)
+- **D5 (after VOWP `v4-asif-*` merges):** wire live `.asif.zip` session download & import buttons in
+  the Desktop Sessions drawer.
+- **D6 (after VOWP Phase 3 `v4-local-3*` merges):** wire live local global/project orchestrator
+  sessions running on the user's machine through the bundled StackSpirit Engine (`opencode`).
+- **W1 (Web App):** package `spirit-ui` with `HttpSseBridge` for browser access.
+- **C1 (CLI):** add `crates/spirit-cli` (`spirit`) wrapping `spirit-core`.
