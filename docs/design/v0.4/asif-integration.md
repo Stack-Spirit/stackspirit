@@ -581,8 +581,9 @@ Page: `GET /import` serves a static shell with:
 - a file input accepting `.asif.zip,application/zip`;
 - an optional branch text field (shown always; the API error says a branch is required when
   the package has more than one, and the field lets the user name it);
-- a submit button that checks the client-side size, posts the raw file and shows the new
-  session link, event/loss counts and a "not continued automatically" note;
+- a submit button that checks the client-side size, posts the raw file with an explicit
+  `Content-Type: application/zip` and shows the new session link, event/loss counts and a
+  "not continued automatically" note;
 - `401` clears the token, `413` names the limit, `400` shows the API hint. No external
   scripts, fonts or images; no filename is sent to the server.
 
