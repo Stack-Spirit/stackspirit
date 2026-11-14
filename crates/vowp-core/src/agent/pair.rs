@@ -197,11 +197,11 @@ pub fn new_surface_code(
 
 /// Redeems one pairing code and issues a scoped surface token.
 ///
-/// The code, surface, node, session and app are validated in one immediate transaction:
-/// the code is consumed once, the token row is inserted and the surface becomes
-/// `attached`. A refusal rolls the whole transaction back, so a code presented with the
-/// wrong node, session or app stays redeemable. The plaintext token is returned exactly
-/// once; only its hash, prefix and scopes are stored.
+/// The code, surface, session, app and active node are validated in one immediate
+/// transaction: the code is consumed once, the token row is inserted and the surface
+/// becomes `attached`. A refusal rolls the whole transaction back, so a code presented
+/// with the wrong node, session or app stays redeemable. The plaintext token is returned
+/// exactly once; only its hash, prefix and scopes are stored.
 pub fn issue_surface_token(
     store: &Store,
     node: &NodeName,
@@ -238,6 +238,15 @@ pub fn issue_surface_token(
             }
             if stored.node != *node {
                 return Err(StoreError::Conflict("pairing code is for another node".to_owned()));
+            }
+            let Some(card) = tx.node_card(node, now)? else {
+                return Err(StoreError::NotFound {
+                    what: "node",
+                    id: node.as_str().to_owned(),
+                });
+            };
+            if card.status != NodeStatus::Active {
+                return Err(StoreError::Conflict("node is not active".to_owned()));
             }
 
             let Some(surface) = tx.surface_by_id(surface_id)? else {
@@ -797,6 +806,30 @@ mod tests {
         )
         .expect_err("wrong app");
         assert!(matches!(error, CoreError::Refused(_)));
+
+        // A pending node cannot redeem a code until enrollment activates it.
+        let pending_node = node("pending-node");
+        store
+            .insert_pending_node(&pending_node, &[], now)
+            .expect("pending node");
+        let pending_surface = seed_pending(&store, &pending_node, &session, "opencode", now);
+        let error = issue_surface_token(
+            &store,
+            &pending_node,
+            &pending_surface.surface.id,
+            &session,
+            "opencode",
+            &pending_surface.code,
+            now,
+        )
+        .expect_err("inactive node");
+        assert!(matches!(error, CoreError::Refused(_)));
+        assert!(
+            store
+                .list_surface_tokens(&pending_surface.surface.id)
+                .expect("tokens")
+                .is_empty()
+        );
 
         assert!(
             store

@@ -471,10 +471,10 @@ Behaviour:
   id. A surface-kind code is a 52-character token with a ten-minute TTL; only its SHA-256
   hash is stored and the plaintext is returned once.
 - `issue_surface_token` runs one immediate transaction: it consumes the code, checks
-  `kind=surface`, the code's surface and node, the surface row's node, the `pending` state and
-  the session/app binding, inserts the token row and sets the surface `attached`. A refusal
-  rolls the transaction back, so a code presented for the wrong node, session or app is not
-  burned. Default scopes are `session.read:<id>`, `session.write:<id>`,
+  `kind=surface`, the code's surface and node, the surface row's node, an active node, the
+  `pending` state and the session/app binding, inserts the token row and sets the surface
+  `attached`. A refusal rolls the transaction back, so a code presented for the wrong node,
+  session or app is not burned. Default scopes are `session.read:<id>`, `session.write:<id>`,
   `project.read:<name>` when the session names a project, and `fleet.read`; there is no node,
   policy, secret or tool scope in this slice.
 - The token is `vowp_surf_` plus 32 `/dev/urandom` bytes in unpadded base64url (43 characters).
