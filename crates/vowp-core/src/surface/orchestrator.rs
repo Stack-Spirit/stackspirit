@@ -25,7 +25,7 @@ use vowp_protocol::{
     ExecutorRef, JoinInstructions, Lease, Level, NewSession, OrchestratorApp, OrchestratorCard, Project, ProjectName,
     SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp,
 };
-use vowp_store::{Store, StoreError, hash_lease_token};
+use vowp_store::{Store, StoreError};
 
 use super::claude_remote::ClaudeRemoteHost;
 use super::lease::{AcquireLease, LeaseGuard};
@@ -500,10 +500,9 @@ impl Orchestrator {
         }
         let scoped = self.scoped_deps(state.project.as_ref())?;
         let store = scoped.open_store()?;
-        let token_hash = hash_lease_token(&token);
         Ok(store
             .lease(&state.session_id)?
-            .is_some_and(|lease| lease.token == token_hash))
+            .is_some_and(|lease| lease.token == token))
     }
 
     /// Keeps one orchestrator's lease alive until its pid file changes or it is revoked.
@@ -531,7 +530,7 @@ impl Orchestrator {
                 CoreError::Refused(format!("orchestrator {name} has no lease token file; the keeper stops"))
             })?;
         match store.lease(&state.session_id)? {
-            Some(lease) if lease.token != hash_lease_token(&token) => {
+            Some(lease) if lease.token != token => {
                 return Err(CoreError::Refused(format!(
                     "orchestrator {name} moved to another surface; the keeper stops"
                 )));
@@ -866,18 +865,12 @@ impl Orchestrator {
             return Ok(());
         };
         let token = fs::read_to_string(dir.join(LEASE_FILE)).ok();
-        match token.as_deref() {
-            Some(token) => {
-                let token = token.trim();
-                if hash_lease_token(token) == lease.token {
-                    store.release_lease(session, token)?;
-                }
-            }
-            None => {
-                if lease.holder == holder {
-                    store.release_lease_hash(session, &lease.token)?;
-                }
-            }
+        let owns_lease = match token.as_deref() {
+            Some(token) => token.trim() == lease.token,
+            None => lease.holder == holder,
+        };
+        if owns_lease {
+            store.release_lease(session, &lease.token)?;
         }
         Ok(())
     }
