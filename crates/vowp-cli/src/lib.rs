@@ -210,6 +210,14 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     {
         return chat::agent::run_local(&global, io, args);
     }
+    // `mcp --agent-socket` is the Mac proxy: it answers MCP locally and forwards tool calls
+    // over the agent socket. A Mac has no local home database, so it must run before the
+    // generic `--node` redirect and `Ctx::build`.
+    if let Command::Mcp(args) = &command
+        && args.agent_socket.is_some()
+    {
+        return cmd::mcp::run_proxy(io, args);
+    }
     // `surface` is home-only and its `--node` flag names the node the surface runs on, not an
     // SSH redirect. Handle it before the generic `--node` routing.
     if let Command::Surface { command } = &command {

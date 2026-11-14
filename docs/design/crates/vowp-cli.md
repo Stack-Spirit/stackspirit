@@ -31,6 +31,7 @@ crates/vowp-cli/
   src/cmd/agent.rs    (`agent enroll|pair|run|status` plus hidden `agent gateway`; no store or project context for the Mac commands)
   src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`)
   src/cmd/surface.rs  (`surface pair|ls|revoke`; home-only global-store surface pairing)
+  src/mcp/{mod,jsonrpc,tools,backend,proxy}.rs  (home stdio MCP server and Mac-side local proxy)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
 ```
@@ -261,6 +262,38 @@ log or takes the home lease. Ctrl-C (through `SignalWatcher`) stops the adapter 
 lease; a takeover or lease loss prints `This surface is read-only: <reason>` and exits 0; a full
 spool exits 7 with the cap in the message. `--follow` and `--takeover` are refused in agent mode.
 
+### MCP server and local proxy (`mcp/`)
+
+`vowp mcp` has two modes. Both speak newline-delimited JSON-RPC 2.0 on stdin/stdout and share the
+framing and local-method code in `src/mcp/jsonrpc.rs` and `src/mcp/mod.rs`, the tool catalogue in
+`src/mcp/tools.rs` and the home execution path in `src/mcp/backend.rs`.
+
+- `vowp mcp --session <id> --surface <id> --token-file <file>` is the home server. It builds
+  `Ctx`, opens the home store and executes every tool through `mcp/backend.rs`. Writes re-read the
+  lease token on every call; a takeover makes the surface read-only. `tunnel_open`/`tunnel_close`
+  are control-machine tools and `secret_request` returns the paste URL, never the value.
+- `vowp mcp --agent-socket <path> --surface <id>` is the Mac proxy (`src/mcp/proxy.rs`). `lib.rs`
+  dispatches it before the generic `--node` redirect and before `Ctx::build`, so it opens no home
+  store, project database or adapter. `--session` and `--token-file` are rejected with it; the
+  session comes from the pairing binding `<state_dir>/surfaces/<surface>/session` next to the
+  socket, and `--surface` must be a 26-character ULID.
+  - `initialize`, `server/discover`, `ping` and `tools/list` are answered locally, so an app can
+    connect while the home is unreachable. The list omits the tools a local surface always
+    refuses.
+  - `tools/call` checks that the socket is a private (0600) Unix socket, connects once, sends one
+    typed `ToolCall` with a per-process request id and returns the home's `result` unchanged. A
+    typed home `ToolError` is preserved as an MCP `isError` result with its `code` and
+    `retryable` members; a `lease_revoked` or `refused` result is never retried.
+  - A missing or unusable socket, a home that is not connected and a closed exchange return a
+    typed `home_offline` (retryable) rather than a store error; the agent's own `error` frame is
+    passed through. No error, log line or response includes the socket path, a token or an
+    argument value.
+  - `tunnel_open`, `tunnel_close`, `secret_request`, `node_enroll`, `node_revoke`, `surface_pair`
+    and `offload_policy_set` are refused locally with code `refused` and never touch the socket.
+    Lease and token-scope checks stay on the home: the proxy checks neither its own view nor the
+    agent's.
+  - The offline snapshot cache is a later slice; this build has no local read path.
+
 ### ASIF export and import (`cmd/session_asif.rs`)
 
 `vowp session export|import --format asif` keeps the command dispatch in `cmd/session.rs` and
@@ -342,7 +375,14 @@ assignment-executor slice adds `agent_run_creates_a_worktree_and_streams_adapter
 `agent_run_cleans_up_after_a_terminal_summary`, `agent_run_cancel_stops_the_adapter`,
 `agent_run_does_not_touch_the_main_checkout` and `agent_run_rejects_an_unmapped_project` in
 `tests/agent.rs`. They use a fake adapter script, a fake in-process gateway, real git in
-temporary repositories and a temporary `VOWP_AGENT_HOME`.
+temporary repositories and a temporary `VOWP_AGENT_HOME`. The local MCP proxy slice adds
+`mcp_proxy_serves_initialize_list_and_ping_without_a_home`,
+`mcp_proxy_forwards_a_tool_call_and_returns_the_result`,
+`mcp_proxy_passes_a_lease_revoked_error_through`,
+`mcp_proxy_refuses_tunnel_and_secret_tools_without_touching_the_socket`,
+`mcp_proxy_returns_home_offline_when_the_socket_is_absent` and
+`mcp_proxy_never_prints_arguments_or_the_socket_path` in `tests/mcp.rs`. They use a temporary
+home with no database and a fake mode-0600 Unix socket.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

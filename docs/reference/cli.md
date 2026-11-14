@@ -141,7 +141,7 @@ python3 docs/reference/check-reference.py
 | [`vowp orchestrator resume`](#vowp-orchestrator-resume) | Start an orchestrator's host again |
 | [`vowp orchestrator __keepalive`](#vowp-orchestrator-__keepalive) | Hidden: keep one orchestrator's lease alive after the CLI exits |
 | [`vowp migrate`](#vowp-migrate) | Migrate a v0.1 home to the v0.2 layout |
-| [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server |
+| [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server or the Mac-side proxy |
 | [`vowp agent`](#vowp-agent) | Enroll, run or inspect the Mac-side agent |
 | [`vowp agent enroll`](#vowp-agent-enroll) | Enroll this Mac with a one-time code |
 | [`vowp agent paths`](#vowp-agent-paths) | Add, remove or list the local project path map |
@@ -207,7 +207,7 @@ Commands:
   control       Configure this machine as the control machine
   orchestrator  Create and manage orchestrator sessions
   migrate       Migrate a v0.1 home to the v0.2 layout
-  mcp           Run the stdio MCP server
+  mcp           Run the stdio MCP server or the Mac-side proxy
   agent         Enroll, run or inspect the Mac-side agent
   surface       Create, list or revoke a paired local surface; `--node` names the surface's node
   version       Print the binary version
@@ -282,6 +282,7 @@ Options:
       --no-color             Disable colour even when stdout is a terminal
       --once                 Run exactly one supervisor tick and exit
   -q, --quiet                Suppress non-essential human output
+      --replace              Drain a running supervisor, apply pending migrations and start this binary
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
 ```
@@ -294,10 +295,11 @@ Stop the supervisor
 Usage: vowp down [OPTIONS]
 
 Options:
-      --force                Send SIGTERM if the supervisor does not stop by itself
+      --drain                Let active runs and gate tasks finish; admit no new work
       --json                 Print one machine-readable JSON document on stdout
-      --kill-windows         Kill the tmux windows too
+      --force                Send SIGTERM if the supervisor does not stop by itself
       --node <NAME>          Run the command on that node over ssh
+      --kill-windows         Kill the tmux windows too
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal
@@ -2932,17 +2934,18 @@ Options:
 ### `vowp mcp`
 
 ```text
-Run the stdio MCP server
+Run the stdio MCP server or the Mac-side proxy
 
-Usage: vowp mcp [OPTIONS] --session <ID> --surface <ID> --token-file <FILE>
+Usage: vowp mcp [OPTIONS] --surface <ID>
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
-      --session <ID>         Session the server writes to
+      --session <ID>         Session the server writes to (home mode; not with --agent-socket)
       --node <NAME>          Run the command on that node over ssh
       --surface <ID>         Surface id this server represents
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
-      --token-file <FILE>    File that holds the lease token (read on every write)
+      --token-file <FILE>    File that holds the lease token (home mode; not with --agent-socket)
+      --agent-socket <PATH>  Unix socket served by `vowp agent run`; selects the local MCP proxy
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output

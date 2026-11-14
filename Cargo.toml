@@ -112,6 +112,10 @@ name = "loops"
 path = "crates/vowp-cli/tests/loops.rs"
 
 [[test]]
+name = "mcp"
+path = "crates/vowp-cli/tests/mcp.rs"
+
+[[test]]
 name = "offload"
 path = "crates/vowp-cli/tests/offload.rs"
 

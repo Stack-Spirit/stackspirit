@@ -320,7 +320,7 @@ pub enum Command {
     Orchestrator(OrchestratorArgs),
     /// Migrate a v0.1 home to the v0.2 layout.
     Migrate(MigrateArgs),
-    /// Run the stdio MCP server.
+    /// Run the stdio MCP server or the Mac-side proxy.
     Mcp(McpArgs),
     /// Enroll, run or inspect the Mac-side agent.
     Agent {
