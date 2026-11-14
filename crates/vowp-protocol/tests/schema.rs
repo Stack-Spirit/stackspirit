@@ -150,6 +150,11 @@ const LISTED_TYPES: &[&str] = &[
     "SurfaceResume",
     "RunResumeResult",
     "SurfaceResumeResult",
+    // v0.4 ASIF report documents.
+    "AsifCounts",
+    "AsifLoss",
+    "AsifReport",
+    "AsifImportResponse",
 ];
 
 /// Decodes one JSON value into a concrete type.
