@@ -2106,6 +2106,7 @@ name = "vowp-core"
 version = "0.3.0"
 dependencies = [
  "cron",
+ "ed25519-dalek",
  "globset",
  "proptest",
  "regex",

@@ -9,6 +9,7 @@
 
 mod adapters;
 
+pub mod agent;
 pub mod capacity;
 pub mod deps;
 pub mod error;
