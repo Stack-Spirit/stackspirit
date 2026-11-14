@@ -20,7 +20,7 @@ use vowp_protocol::{
     JoinInstructions, Lease, Node, NodeName, OrchestratorApp, Project, ProjectName, SessionRole, Surface, SurfaceId,
     SurfaceKind, Timestamp, VowpConfig,
 };
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePaths, Store, hash_lease_token};
 
 use vowp_core::deps::Deps;
 use vowp_core::surface::mirror::MirrorCursor;
@@ -566,7 +566,7 @@ fn orchestrator_stop_leaves_a_taken_over_lease_alone() {
         .expect("lease lookup")
         .expect("stop deleted another surface's lease");
     assert_eq!(lease.holder, "phone");
-    assert_eq!(lease.token, other_token);
+    assert_eq!(lease.token, hash_lease_token(&other_token));
 }
 
 #[test]
@@ -693,7 +693,7 @@ fn node_supervisor_startup_leaves_a_live_orchestrator_alone() {
         .expect("create left no lease");
     let token_path = info.dir.join("lease.token");
     let token = std::fs::read_to_string(&token_path).expect("lease token file");
-    assert_eq!(before.token, token.trim());
+    assert_eq!(before.token, hash_lease_token(token.trim()));
 
     let (restarted, restarted_starts, _, _, _) = manager(deps(&env));
     let mut node =
@@ -774,7 +774,11 @@ fn node_supervisor_startup_does_not_steal_a_taken_over_lease() {
         .expect("lease lookup")
         .expect("startup dropped the new holder's lease");
     assert_eq!(lease.holder, "phone");
-    assert_eq!(lease.token, other_token, "startup stole the taken-over lease");
+    assert_eq!(
+        lease.token,
+        hash_lease_token(&other_token),
+        "startup stole the taken-over lease"
+    );
 }
 
 #[test]

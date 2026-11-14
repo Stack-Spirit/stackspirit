@@ -399,7 +399,15 @@ impl Store {
     /// Deletes the lease when the plaintext `token` still holds it; returns whether it was
     /// deleted.
     pub fn release_lease(&self, session: &SessionId, token: &str) -> Result<bool, StoreError> {
-        let token_hash = hash_lease_token(token);
+        self.release_lease_hash(session, &hash_lease_token(token))
+    }
+
+    /// Deletes the lease when its stored hash still matches; returns whether it was deleted.
+    ///
+    /// `token_hash` is the stored value read from [`Store::lease`], not a plaintext token.
+    /// Callers that hold only the stored row (for example a token file that is already
+    /// gone) use this method rather than `release_lease`, which hashes a plaintext token.
+    pub fn release_lease_hash(&self, session: &SessionId, token_hash: &str) -> Result<bool, StoreError> {
         let changed = self.conn.execute(
             "DELETE FROM main.leases WHERE session_id = ?1 AND token_hash = ?2",
             params![session.as_str(), token_hash],
