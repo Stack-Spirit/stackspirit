@@ -19,7 +19,7 @@ crates/vowp-core/src/
   loops/          mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
-  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs
+  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs, agent.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
@@ -390,11 +390,12 @@ pub mod bank { pub fn bank_serving(deps: &Deps, env: &EnvConfig, target: &str, t
 Rules: (1) a failing guard ⇒ `Release.state = Refused`, ledger `promote`, exit 5 at the CLI; **no retry, no workaround** (design summary §9). (2) the diff between candidate and the banked serving copy must equal the files of the intended change; otherwise `Refused` ("live is not always git"). (3) the `upload_set` guard runs the project's upload-set check (e.g. `.vercelignore` listing) via `env.probe`-style custom guard: it exists to catch "a local build is not the deploy build". (4) approval `human` ⇒ inbox `approval` item, state `Banked` until answered; the supervisor calls `promote` again on answer. (5) `releases.log` line appended on every terminal state: `<ts> <env> <release id> <state> <from>-><to> rollback: <cmd>`.
 Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp files): `guards_clean_tree_dirty_fails`, `guards_head_equals_remote_behind_fails`, `guard_failure_marks_refused_and_never_deploys`, `serving_bank_runs_before_deploy_order_asserted_via_script_log`, `diff_unexpected_files_refused`, `human_approval_creates_inbox_and_waits`, `answer_approve_then_promote_goes_live_and_records_rollback_cmd`, `policy_approval_with_yes_deploys`, `yes_flag_never_bypasses_human_approval`, `probe_mismatch_marks_failed_with_rollback_available`, `rollback_runs_banked_command_and_links_releases`, `releases_log_lines_appended`, `dry_run_runs_guards_only`.
 
-## 9. `agent` — v0.4 Phase 0 home side
+## 9. `agent` — v0.4 home side: enrollment, auth and surface pairing
 
-Spec: `docs/design/v0.4/local-orchestrator.md` §4.1, §4.2, §4.6, §8.2–§8.3 and §12.1. Phase 0 runs
-the gateway as a home command with the same store access as `session ingest`; the separate
-low-privilege gateway behind the supervisor socket is Phase 4.
+Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.3, §4.6, §8.2–§8.3 and §12.1. Phase 0 runs
+the gateway as a home command with the same store access as `session ingest`; Phase 1 adds the
+surface-token pairing service on the same authenticated connection. The separate low-privilege
+gateway behind the supervisor socket is Phase 4.
 
 ```rust
 pub mod agent {
@@ -420,6 +421,20 @@ pub mod agent {
         pub fn verify(public_key_hex: &str, signature_hex: &str, nonce: &str, home_id: &str, connection_id: &str) -> bool;
         pub fn is_public_key_hex(value: &str) -> bool;               // 32 bytes, lowercase hex
         pub fn is_signature_hex(value: &str) -> bool;                // 64 bytes, lowercase hex
+    }
+    pub mod pair {
+        pub const SURFACE_CODE_TTL: Duration;                       // 10 minutes
+        pub const SURFACE_TOKEN_TTL: Duration;                      // 30 days
+        pub struct NewSurfaceCode { pub code: String, pub code_hash: String, pub expires_at: Timestamp }
+        pub struct PendingSurface { pub surface: SurfaceInfo, pub code: String, pub code_hash: String, pub expires_at: Timestamp }
+        pub struct IssuedSurface { pub surface_id: SurfaceId, pub token: String, pub scopes: Vec<SurfaceScope>, pub expires_at: Timestamp }
+        pub struct VerifiedSurface { pub surface: SurfaceInfo, pub token: SurfaceToken }
+        pub fn create_pending_surface(store: &Store, node: &NodeName, session: &SessionId, kind: SurfaceKind, app: Option<&str>, now: Timestamp) -> Result<PendingSurface, CoreError>;
+        pub fn new_surface_code(store: &Store, node: &NodeName, surface_id: &SurfaceId, now: Timestamp) -> Result<NewSurfaceCode, CoreError>;
+        pub fn issue_surface_token(store: &Store, node: &NodeName, surface_id: &SurfaceId, session: &SessionId, app: &str, code: &str, now: Timestamp) -> Result<IssuedSurface, CoreError>;
+        pub fn verify_surface_token(store: &Store, token: &str, now: Timestamp) -> Result<VerifiedSurface, CoreError>;
+        pub fn revoke_surface_token(store: &Store, id: &str, now: Timestamp) -> Result<(), CoreError>;
+        pub fn revoke_surface(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError>;
     }
     pub mod gateway {
         pub const MAX_FRAME_BYTES: usize;                            // 1 MiB
@@ -451,13 +466,45 @@ Behaviour:
   (capacity under `capabilities.capacity`), and `Ping` is answered with `Pong`. A revoked or unknown
   node gets `Revoked` or a typed `Error` and the connection closes. Frames are bounded at 1 MiB and
   the handshake has a 10-second deadline.
-- Phase 0 has no runs, surfaces, leases, offload or job dispatch, and no live connection registry:
-  a revoked node is refused on its next frame.
+- Surface pairing starts with `create_pending_surface`: the node must exist and not be revoked,
+  and the session must exist. The new surface is `pending` and its metadata records the session
+  id. A surface-kind code is a 52-character token with a ten-minute TTL; only its SHA-256
+  hash is stored and the plaintext is returned once.
+- `issue_surface_token` runs one immediate transaction: it consumes the code, checks
+  `kind=surface`, the code's surface and node, the surface row's node, the `pending` state and
+  the session/app binding, inserts the token row and sets the surface `attached`. A refusal
+  rolls the transaction back, so a code presented for the wrong node, session or app is not
+  burned. Default scopes are `session.read:<id>`, `session.write:<id>`,
+  `project.read:<name>` when the session names a project, and `fleet.read`; there is no node,
+  policy, secret or tool scope in this slice.
+- The token is `vowp_surf_` plus 32 `/dev/urandom` bytes in unpadded base64url (43 characters).
+  The home stores only the SHA-256 hash, a 12-character prefix of the random part and the
+  scopes; the plaintext is returned once and never logged. Tokens expire after 30 days.
+  `verify_surface_token` compares the hash in constant time, refuses a revoked or expired token
+  and a non-attached or revoked surface, records `last_used_at` and returns the surface row so
+  callers can compare its node with the connection node. `revoke_surface_token` revokes one
+  token row; `revoke_surface` revokes every active token and marks the surface revoked.
+- After authentication, `SurfacePair { code, surface_id, session, app }` is redeemed against the
+  connection node and answered with `SurfaceIssued { surface_id, token, scopes, expires_at }`.
+  `Refused`, `Invalid` and `NotFound` become a non-retryable typed `Error`; when the surface row
+  is already revoked the answer is `SurfaceRevoked`. Those refusals keep the authenticated
+  connection open so the agent can retry with a fresh code; an internal store failure closes it.
+  The success log line carries only the surface id and session id, never the code or token.
+  There is no live connection registry, so a revoked surface is refused on its next surface
+  frame rather than pushed.
+- Phase 0 has no runs, leases, local chat, offload or job dispatch, and no live connection
+  registry: a revoked node is refused on its next frame.
 
 Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_enrolls_a_node_with_a_valid_code`,
 `gateway_refuses_an_expired_or_used_code`, `gateway_auth_rejects_a_bad_signature_and_a_replayed_nonce`,
-`gateway_heartbeat_updates_presence_and_capacity`, `gateway_revoke_marks_and_closes` and
-`gateway_unknown_or_revoked_node_is_refused`.
+`gateway_heartbeat_updates_presence_and_capacity`, `gateway_revoke_marks_and_closes`,
+`gateway_unknown_or_revoked_node_is_refused`, `gateway_surface_pair_issues_and_persists_hash`,
+`gateway_surface_pair_refuses_a_bad_or_replayed_code`, `gateway_surface_pair_binds_the_connection_node`,
+`gateway_surface_pair_refuses_a_revoked_surface` and `surface_token_never_appears_in_logs`. The
+service tests in `src/agent/pair.rs` are
+`surface_pair_issues_a_scoped_token_and_stores_only_its_hash`,
+`surface_pair_refuses_expired_or_used_code`, `surface_pair_binds_node_and_session` and
+`surface_token_verify_rejects_revoked_and_expired`.
 
 ## 10. Out of scope (v0.2)
 HTTP+SSE daemon, ACP, cross-node live sync, IANA timezone schedules, notification hooks (ntfy), automatic price-table download.

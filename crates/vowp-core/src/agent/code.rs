@@ -36,7 +36,15 @@ pub fn new_enrollment_code(now: Timestamp) -> NewEnrollmentCode {
 
 /// Returns the lowercase hex SHA-256 digest of `code`.
 pub fn hash_code(code: &str) -> String {
-    let digest = Sha256::digest(code.as_bytes());
+    hash_secret(code)
+}
+
+/// Returns the lowercase hex SHA-256 digest of any secret string.
+///
+/// Pairing codes and surface tokens use this helper so the home stores one digest shape
+/// for every one-time or long-lived secret.
+pub(crate) fn hash_secret(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

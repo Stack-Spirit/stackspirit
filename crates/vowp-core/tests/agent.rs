@@ -14,11 +14,15 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::{Signer, SigningKey};
 use tempfile::TempDir;
 use vowp_core::agent::gateway::{self, GatewayOptions, GatewayOutcome};
-use vowp_core::agent::{EnrollRequest, auth, create_pending, hash_code, redeem, revoke};
+use vowp_core::agent::{
+    EnrollRequest, auth, create_pending, create_pending_surface, hash_code, issue_surface_token, redeem, revoke,
+    revoke_surface,
+};
 use vowp_core::{AdapterRegistry, CoreError, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
     AgentCapabilities, AgentFrame, AgentPathMap, Clock, ErrorKind, FakeClock, MemoryLog, NodeName, NodePresence,
-    NodeStatus, ProjectName, Timestamp,
+    NodeStatus, ProjectName, Session, SessionId, SessionRole, SessionState, SurfaceKind, SurfaceScope, SurfaceState,
+    Timestamp,
 };
 use vowp_store::{NodePaths, Store};
 
@@ -59,13 +63,13 @@ fn capabilities() -> AgentCapabilities {
     }
 }
 
-fn test_deps(root: &Path, clock: Arc<FakeClock>) -> Deps {
+fn test_deps(root: &Path, clock: Arc<FakeClock>, log: Arc<MemoryLog>) -> Deps {
     Deps {
         paths: NodePaths::new(root),
         config: Arc::new(vowp_protocol::VowpConfig::with_defaults_for_tests()),
         node: NodeName::parse("home-1").expect("home node"),
         clock,
-        log: Arc::new(MemoryLog::new()),
+        log,
         adapters: Arc::new(AdapterRegistry::new()),
         windows: Arc::new(vowp_tmux::fake::FakeWindows::new()),
         git: Arc::new(SystemGit::default()),
@@ -82,6 +86,30 @@ fn test_store(root: &Path, clock: &Arc<FakeClock>) -> Store {
 
 fn node_name(name: &str) -> NodeName {
     NodeName::parse(name).expect("node slug")
+}
+
+fn seed_session(store: &Store, node: &NodeName, project: &str, id: &str, now: Timestamp) -> SessionId {
+    let id = SessionId::parse(id).expect("session id");
+    store
+        .upsert_session(&Session {
+            id: id.clone(),
+            project: Some(ProjectName::parse(project).expect("project")),
+            job_id: None,
+            role: Some(SessionRole::User),
+            title: "surface pairing".to_owned(),
+            parent_session_id: None,
+            node: node.clone(),
+            cwd: "/tmp/vowp".to_owned(),
+            state: SessionState::Idle,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("session");
+    id
 }
 
 fn hello(name: &NodeName, key: &SigningKey) -> AgentFrame {
@@ -193,9 +221,13 @@ impl TestWriter {
     }
 
     fn wait_frame(&self, predicate: impl Fn(&AgentFrame) -> bool, timeout: Duration) -> AgentFrame {
+        self.wait_frame_after(0, predicate, timeout)
+    }
+
+    fn wait_frame_after(&self, start: usize, predicate: impl Fn(&AgentFrame) -> bool, timeout: Duration) -> AgentFrame {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(frame) = self.frames().into_iter().find(|frame| predicate(frame)) {
+            if let Some(frame) = self.frames().into_iter().skip(start).find(|frame| predicate(frame)) {
                 return frame;
             }
             assert!(
@@ -223,6 +255,7 @@ impl Write for TestWriter {
 struct Gateway {
     input: TestReader,
     output: TestWriter,
+    log: Arc<MemoryLog>,
     clock: Arc<FakeClock>,
     root: std::path::PathBuf,
     handle: Option<JoinHandle<Result<GatewayOutcome, CoreError>>>,
@@ -231,7 +264,8 @@ struct Gateway {
 impl Gateway {
     fn start(root: &Path, clock: Arc<FakeClock>) -> Self {
         let store = test_store(root, &clock);
-        let deps = test_deps(root, clock.clone());
+        let log = Arc::new(MemoryLog::new());
+        let deps = test_deps(root, clock.clone(), log.clone());
         let input = TestReader::new();
         let output = TestWriter::default();
         let reader = BufReader::new(input.clone());
@@ -246,6 +280,7 @@ impl Gateway {
         Self {
             input,
             output,
+            log,
             clock,
             root: root.to_path_buf(),
             handle: Some(handle),
@@ -262,6 +297,14 @@ impl Gateway {
 
     fn expect(&self, predicate: impl Fn(&AgentFrame) -> bool) -> AgentFrame {
         self.output.wait_frame(predicate, Duration::from_secs(2))
+    }
+
+    fn frame_count(&self) -> usize {
+        self.output.frames().len()
+    }
+
+    fn expect_after(&self, start: usize, predicate: impl Fn(&AgentFrame) -> bool) -> AgentFrame {
+        self.output.wait_frame_after(start, predicate, Duration::from_secs(2))
     }
 
     fn finish(mut self) -> Result<GatewayOutcome, CoreError> {
@@ -598,4 +641,381 @@ fn gateway_unknown_or_revoked_node_is_refused() {
         gateway.finish().expect("gateway"),
         GatewayOutcome::Closed { node: None }
     );
+}
+
+const SESSION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+#[test]
+fn gateway_surface_pair_issues_and_persists_hash() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let pending = create_pending_surface(
+        &store,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("pending surface");
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&AgentFrame::SurfacePair {
+        code: pending.code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::SurfaceIssued {
+        surface_id,
+        token,
+        scopes,
+        expires_at,
+    } = gateway.expect(|frame| matches!(frame, AgentFrame::SurfaceIssued { .. }))
+    else {
+        panic!("expected SurfaceIssued");
+    };
+    assert_eq!(surface_id, pending.surface.id);
+    assert!(token.starts_with("vowp_surf_"));
+    assert_eq!(
+        scopes,
+        vec![
+            SurfaceScope::new(format!("session.read:{SESSION}")),
+            SurfaceScope::new(format!("session.write:{SESSION}")),
+            SurfaceScope::new("project.read:vowp"),
+            SurfaceScope::new("fleet.read"),
+        ]
+    );
+    assert_eq!(expires_at, clock.now().plus(vowp_core::agent::SURFACE_TOKEN_TTL));
+
+    let token_hash = hash_code(&token);
+    let stored = store
+        .surface_token_by_hash(&token_hash)
+        .expect("hash lookup")
+        .expect("token row");
+    assert_eq!(stored.token_hash, token_hash);
+    assert_ne!(stored.token_hash, token);
+    assert_eq!(stored.surface_id, pending.surface.id);
+    assert_eq!(stored.scopes, scopes);
+    assert_eq!(stored.expires_at, Some(expires_at));
+    assert!(store.surface_token_by_hash(&token).expect("plaintext lookup").is_none());
+    assert_eq!(store.list_surface_tokens(&pending.surface.id).expect("tokens").len(), 1);
+    let surface = store
+        .surface_by_id(&pending.surface.id)
+        .expect("surface lookup")
+        .expect("surface row");
+    assert_eq!(surface.state, SurfaceState::Attached);
+    assert_eq!(
+        gateway.finish().expect("gateway"),
+        GatewayOutcome::Closed { node: Some(name) }
+    );
+}
+
+#[test]
+fn gateway_surface_pair_refuses_a_bad_or_replayed_code() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let pending = create_pending_surface(
+        &store,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("pending surface");
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+
+    // Malformed code.
+    gateway.send(&AgentFrame::SurfacePair {
+        code: "not-a-code".to_owned(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::Error { kind, retryable, .. } = gateway.expect(|frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::InvalidInput);
+    assert!(!retryable);
+
+    // Well-shaped but unknown code.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::SurfacePair {
+        code: "a".repeat(52),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::Error { kind, retryable, .. } =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+    assert!(!retryable);
+
+    // A refusal keeps the authenticated connection open.
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect(|frame| matches!(frame, AgentFrame::Pong));
+
+    // First use succeeds.
+    gateway.send(&AgentFrame::SurfacePair {
+        code: pending.code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    gateway.expect(|frame| matches!(frame, AgentFrame::SurfaceIssued { .. }));
+
+    // A replay of the same code is refused and does not mint a second token.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::SurfacePair {
+        code: pending.code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::Error {
+        kind,
+        message,
+        retryable,
+    } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+    assert!(!retryable);
+    assert!(!message.contains(&pending.code));
+    assert_eq!(store.list_surface_tokens(&pending.surface.id).expect("tokens").len(), 1);
+
+    // An expired code is refused too.
+    let expired = create_pending_surface(
+        &store,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("expired surface");
+    clock.advance(Duration::from_secs(601));
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::SurfacePair {
+        code: expired.code.clone(),
+        surface_id: expired.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::Error { kind, .. } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+    else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+    assert!(
+        store
+            .list_surface_tokens(&expired.surface.id)
+            .expect("tokens")
+            .is_empty()
+    );
+
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn gateway_surface_pair_binds_the_connection_node() {
+    let key = signing_key();
+    let other_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let mac_studio = node_name("mac-studio");
+    let mac_mini = node_name("mac-mini");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &mac_studio, &key);
+    activate(home.path(), &clock, &mac_mini, &other_key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &mac_studio, "vowp", SESSION, clock.now());
+    let pending = create_pending_surface(
+        &store,
+        &mac_mini,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("pending surface");
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &mac_studio, &key);
+    gateway.send(&AgentFrame::SurfacePair {
+        code: pending.code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::Error { kind, .. } = gateway.expect(|frame| matches!(frame, AgentFrame::Error { .. })) else {
+        panic!("expected Error");
+    };
+    assert_eq!(kind, ErrorKind::Refused);
+    assert!(
+        store
+            .list_surface_tokens(&pending.surface.id)
+            .expect("tokens")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .surface_by_id(&pending.surface.id)
+            .expect("surface lookup")
+            .expect("surface row")
+            .state,
+        SurfaceState::Pending
+    );
+    gateway.finish().expect("gateway");
+
+    // The refusal rolled the code back: the surface's own node can still redeem it.
+    let issued = issue_surface_token(
+        &store,
+        &mac_mini,
+        &pending.surface.id,
+        &session,
+        "opencode",
+        &pending.code,
+        clock.now(),
+    )
+    .expect("code survives a wrong-node refusal");
+    assert_eq!(issued.surface_id, pending.surface.id);
+}
+
+#[test]
+fn gateway_surface_pair_refuses_a_revoked_surface() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let pending = create_pending_surface(
+        &store,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("pending surface");
+    revoke_surface(&store, &pending.surface.id, clock.now()).expect("revoke surface");
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&AgentFrame::SurfacePair {
+        code: pending.code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::SurfaceRevoked { surface_id, reason } =
+        gateway.expect(|frame| matches!(frame, AgentFrame::SurfaceRevoked { .. }))
+    else {
+        panic!("expected SurfaceRevoked");
+    };
+    assert_eq!(surface_id, pending.surface.id);
+    assert!(reason.contains("revoked"));
+    assert!(
+        store
+            .list_surface_tokens(&pending.surface.id)
+            .expect("tokens")
+            .is_empty()
+    );
+
+    // The surface refusal keeps the connection open.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn surface_token_never_appears_in_logs() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let pending = create_pending_surface(
+        &store,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("pending surface");
+    let code = pending.code.clone();
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    let log = gateway.log.clone();
+    authenticate(&gateway, &name, &key);
+    gateway.send(&AgentFrame::SurfacePair {
+        code: code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    let AgentFrame::SurfaceIssued { token, .. } =
+        gateway.expect(|frame| matches!(frame, AgentFrame::SurfaceIssued { .. }))
+    else {
+        panic!("expected SurfaceIssued");
+    };
+
+    // A refused replay must not log the code or the live token either.
+    gateway.send(&AgentFrame::SurfacePair {
+        code: code.clone(),
+        surface_id: pending.surface.id.clone(),
+        session: session.clone(),
+        app: "opencode".to_owned(),
+    });
+    gateway.expect(|frame| matches!(frame, AgentFrame::Error { .. }));
+    gateway.finish().expect("gateway");
+
+    let lines = log.lines();
+    assert!(
+        lines.iter().any(|(_, _, message)| message.contains("paired")),
+        "the pairing itself is logged: {lines:?}"
+    );
+    for (_, target, message) in &lines {
+        assert!(!target.contains(&code), "the code must not appear in a log target");
+        assert!(!message.contains(&code), "the code must not appear in a log message");
+        assert!(!target.contains(&token), "the token must not appear in a log target");
+        assert!(!message.contains(&token), "the token must not appear in a log message");
+    }
+
+    assert!(
+        store.surface_token_by_hash(&token).expect("plaintext lookup").is_none(),
+        "the plaintext token is not a stored hash"
+    );
+    let stored = store
+        .surface_token_by_hash(&hash_code(&token))
+        .expect("hash lookup")
+        .expect("token row");
+    assert_ne!(stored.token_hash, token);
 }

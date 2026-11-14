@@ -1,23 +1,28 @@
-//! The Phase 0 stdio gateway: enroll, authenticate, heartbeat, ping and revocation.
+//! The Phase 0 stdio gateway: enroll, authenticate, heartbeat, ping, revocation and surface
+//! pairing.
 //!
-//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2, §8.2–§8.3, §12.1 and §12.3.
+//! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2–§4.3, §8.2–§8.3, §12.1 and §12.3.
 //! [`serve`] reads one JSON [`AgentFrame`] per line from stdin and writes one JSON frame per
-//! line to stdout. Standard error is the caller's; this module never logs a code, signature,
-//! public-key value or path map.
+//! line to stdout. Standard error is the caller's; this module never logs a code, surface
+//! token, signature, public-key value or path map.
 //!
 //! Phase 0 runs the gateway as a home command with the same store access as `session ingest`.
 //! The low-privilege gateway behind the supervisor socket is Phase 4. There are no runs,
-//! surfaces, leases, offload or job dispatch here.
+//! leases, local chat, offload or job dispatch here. Surface pairing is answered on the
+//! authenticated connection; a refused `SurfacePair` keeps the connection open so the agent
+//! can retry with a fresh code, while an internal store failure closes it.
 
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use vowp_protocol::{AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, NodeName, NodeStatus};
+use vowp_protocol::{
+    AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Level, NodeName, NodeStatus, SurfaceState,
+};
 use vowp_store::{NodeCredential, Store};
 
-use super::{auth, enroll};
+use super::{auth, enroll, pair};
 use crate::deps::Deps;
 use crate::error::CoreError;
 
@@ -342,6 +347,46 @@ fn run_connection(
                     &capabilities,
                 )?;
             }
+            AgentFrame::SurfacePair {
+                code,
+                surface_id,
+                session: session_id,
+                app,
+            } => match pair::issue_surface_token(store, &session.node, &surface_id, &session_id, &app, &code, now) {
+                Ok(issued) => {
+                    deps.log.log(
+                        Level::Info,
+                        &format!("agent {}", session.node),
+                        &format!("surface {} paired for session {}", issued.surface_id, session_id),
+                    );
+                    send_frame(
+                        writer,
+                        &AgentFrame::SurfaceIssued {
+                            surface_id: issued.surface_id,
+                            token: issued.token,
+                            scopes: issued.scopes,
+                            expires_at: issued.expires_at,
+                        },
+                    )?;
+                }
+                Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                    let revoked = store
+                        .surface_by_id(&surface_id)?
+                        .is_some_and(|surface| surface.state == SurfaceState::Revoked);
+                    if revoked {
+                        send_frame(
+                            writer,
+                            &AgentFrame::SurfaceRevoked {
+                                surface_id: surface_id.clone(),
+                                reason: "surface was revoked".to_owned(),
+                            },
+                        )?;
+                    } else {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                }
+                Err(error) => return Err(error),
+            },
             AgentFrame::Ping => send_frame(writer, &AgentFrame::Pong)?,
             AgentFrame::Pong => {}
             _ => {
