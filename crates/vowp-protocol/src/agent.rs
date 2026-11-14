@@ -12,7 +12,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorKind, ProtocolError};
-use crate::ids::{JobId, NodeName, ProjectName};
+use crate::ids::{JobId, NodeName, ProjectName, SessionId};
+use crate::surface::{SurfaceId, SurfaceKind};
 use crate::time::Timestamp;
 use crate::vault::SecretName;
 
@@ -280,6 +281,82 @@ pub struct NodeCard {
     pub last_error: Option<String>,
 }
 
+/// Lifecycle state of a surface row.
+///
+/// The global schema stores this as `surfaces.state`. `pending` is a surface created for a
+/// pairing code, `attached` is a live surface (and the default for pre-v0.4 rows), and
+/// `revoked` is a surface whose tokens no longer work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceState {
+    /// Created for a pairing code and not attached yet.
+    Pending,
+    /// Attached and usable.
+    Attached,
+    /// Revoked; no token of the surface is accepted.
+    Revoked,
+}
+
+/// One capability granted to a surface token.
+///
+/// The wire form is one short string, for example `session.read:<id>`, `session.write:<id>`,
+/// `project.read:<name>`, `fleet.read` or `tool:<name>`. The store keeps the list in
+/// `surface_tokens.scopes_json`; unknown scopes are preserved verbatim so a newer home can
+/// extend the vocabulary without breaking older readers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+#[schemars(with = "String")]
+pub struct SurfaceScope(pub String);
+
+impl SurfaceScope {
+    /// Builds a scope from its wire string.
+    pub fn new(scope: impl Into<String>) -> Self {
+        Self(scope.into())
+    }
+
+    /// Returns the scope wire string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SurfaceScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A registered surface with its lifecycle state.
+///
+/// This is the redacted read model used by the surface repository: it carries no token or
+/// token hash. The v0.2 [`crate::surface::Surface`] keeps the original field set, so rows
+/// created before v0.4 remain source-compatible.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SurfaceInfo {
+    /// Surface instance id.
+    pub id: SurfaceId,
+    /// Kind of client.
+    pub kind: SurfaceKind,
+    /// Node the surface runs on.
+    pub node: NodeName,
+    /// Human-visible holder name.
+    pub holder: String,
+    /// Application name, when known.
+    pub app: Option<String>,
+    /// Working directory, when known.
+    pub cwd: Option<String>,
+    /// Free-form client metadata.
+    pub metadata: serde_json::Value,
+    /// Lifecycle state.
+    pub state: SurfaceState,
+    /// When the surface first registered.
+    pub created_at: Timestamp,
+    /// Last heartbeat.
+    pub last_seen_at: Timestamp,
+    /// When the surface was revoked; `None` while it is not revoked.
+    pub revoked_at: Option<Timestamp>,
+}
+
 /// One Phase 0 agent protocol frame, tagged by `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -363,6 +440,35 @@ pub enum AgentFrame {
         server_time: Timestamp,
         /// Heartbeat interval in seconds.
         heartbeat_secs: u64,
+    },
+    /// Agent -> home: redeem a one-time pairing code for a local surface.
+    SurfacePair {
+        /// One-time pairing code; never logged or echoed.
+        code: String,
+        /// Surface the owner created on the home.
+        surface_id: SurfaceId,
+        /// Session the surface will mirror.
+        session: SessionId,
+        /// Application name, for example `opencode`.
+        app: String,
+    },
+    /// Home -> agent: the pairing succeeded and issued a token.
+    SurfaceIssued {
+        /// Surface the token belongs to.
+        surface_id: SurfaceId,
+        /// Secret token; write it 0600, never log or echo it.
+        token: String,
+        /// Scopes granted to the token.
+        scopes: Vec<SurfaceScope>,
+        /// When the token expires.
+        expires_at: Timestamp,
+    },
+    /// Home -> agent: the surface token was revoked; detach and delete it.
+    SurfaceRevoked {
+        /// Surface whose token was revoked.
+        surface_id: SurfaceId,
+        /// Human-readable reason.
+        reason: String,
     },
     /// Agent -> home: capacity and spool state.
     Heartbeat {

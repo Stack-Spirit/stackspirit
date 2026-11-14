@@ -133,6 +133,9 @@ const LISTED_TYPES: &[&str] = &[
     "NodeKind",
     "NodeStatus",
     "NodePresence",
+    "SurfaceInfo",
+    "SurfaceScope",
+    "SurfaceState",
     "AgentFrame",
 ];
 

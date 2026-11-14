@@ -8,12 +8,12 @@ use serde_json::{Value, json};
 
 use vowp_protocol::agent::{
     AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, MAX_PATH_REF_LEN, NodeCard,
-    NodeKind, NodePresence, NodeStatus, PathRef,
+    NodeKind, NodePresence, NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState,
 };
 use vowp_protocol::error::ErrorKind;
-use vowp_protocol::ids::{JobId, NodeName, ProjectName};
+use vowp_protocol::ids::{JobId, NodeName, ProjectName, SessionId};
 use vowp_protocol::schema::{all_schemas, schema_for_name};
-use vowp_protocol::surface::SurfaceKind;
+use vowp_protocol::surface::{SurfaceId, SurfaceKind};
 use vowp_protocol::time::Timestamp;
 use vowp_protocol::vault::SecretName;
 
@@ -254,14 +254,110 @@ fn agent_frame_round_trips_every_phase_zero_variant() {
 }
 
 #[test]
+fn agent_frame_round_trips_surface_pair_frames() {
+    let surface_id = SurfaceId::new();
+    let frames = vec![
+        (
+            "surface_pair",
+            AgentFrame::SurfacePair {
+                code: "one-time-pairing-code".to_owned(),
+                surface_id: surface_id.clone(),
+                session: SessionId::new(),
+                app: "opencode".to_owned(),
+            },
+        ),
+        (
+            "surface_issued",
+            AgentFrame::SurfaceIssued {
+                surface_id: surface_id.clone(),
+                token: "vowp_surf_abcdef".to_owned(),
+                scopes: vec![
+                    SurfaceScope::new("session.read:01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                    SurfaceScope::new("fleet.read"),
+                ],
+                expires_at: at(),
+            },
+        ),
+        (
+            "surface_revoked",
+            AgentFrame::SurfaceRevoked {
+                surface_id: surface_id.clone(),
+                reason: "owner revoked the surface".to_owned(),
+            },
+        ),
+    ];
+
+    for (wire, frame) in frames {
+        let value = serde_json::to_value(&frame).expect("surface frame JSON");
+        assert_eq!(value["type"], wire, "wire name for {wire}");
+        let decoded: AgentFrame = serde_json::from_value(value).expect("surface frame back");
+        assert_eq!(decoded, frame);
+    }
+}
+
+#[test]
+fn surface_types_round_trip_and_have_stable_wire_names() {
+    for (state, wire) in [
+        (SurfaceState::Pending, "pending"),
+        (SurfaceState::Attached, "attached"),
+        (SurfaceState::Revoked, "revoked"),
+    ] {
+        assert_eq!(serde_json::to_value(state).expect("state JSON"), json!(wire));
+        let decoded: SurfaceState = serde_json::from_value(json!(wire)).expect("state back");
+        assert_eq!(decoded, state);
+    }
+
+    let scope = SurfaceScope::new("project.read:vowp");
+    assert_eq!(
+        serde_json::to_value(&scope).expect("scope JSON"),
+        json!("project.read:vowp")
+    );
+    assert_eq!(scope.to_string(), "project.read:vowp");
+    let decoded: SurfaceScope = serde_json::from_value(json!("project.read:vowp")).expect("scope back");
+    assert_eq!(decoded, scope);
+
+    let info = SurfaceInfo {
+        id: SurfaceId::new(),
+        kind: SurfaceKind::Agent,
+        node: NodeName::parse("mac-studio").expect("node"),
+        holder: "mac opencode".to_owned(),
+        app: Some("opencode".to_owned()),
+        cwd: Some("/Users/dev/vowp".to_owned()),
+        metadata: json!({}),
+        state: SurfaceState::Attached,
+        created_at: at(),
+        last_seen_at: at(),
+        revoked_at: None,
+    };
+    let value = serde_json::to_value(&info).expect("surface info JSON");
+    assert_eq!(value["state"], "attached");
+    let decoded: SurfaceInfo = serde_json::from_value(value).expect("surface info back");
+    assert_eq!(decoded, info);
+}
+
+#[test]
 fn agent_frame_rejects_unknown_type() {
     let err = serde_json::from_value::<AgentFrame>(json!({"type": "teleport"})).expect_err("unknown frame type");
     assert!(err.to_string().contains("teleport"), "error names the type: {err}");
+
+    let unknown_surface =
+        serde_json::from_value::<AgentFrame>(json!({"type": "surface_teleport"})).expect_err("unknown surface frame");
+    assert!(
+        unknown_surface.to_string().contains("surface_teleport"),
+        "error names the type: {unknown_surface}"
+    );
 
     let missing = serde_json::from_value::<AgentFrame>(json!({"type": "heartbeat"})).expect_err("missing fields");
     assert!(
         missing.to_string().contains("missing field"),
         "error names the field: {missing}"
+    );
+
+    let missing_pair =
+        serde_json::from_value::<AgentFrame>(json!({"type": "surface_pair"})).expect_err("missing pair fields");
+    assert!(
+        missing_pair.to_string().contains("missing field"),
+        "error names the field: {missing_pair}"
     );
 }
 
@@ -318,6 +414,9 @@ fn all_schemas_includes_agent_types() {
         "NodeKind",
         "NodeStatus",
         "NodePresence",
+        "SurfaceInfo",
+        "SurfaceScope",
+        "SurfaceState",
         "AgentFrame",
     ] {
         assert!(schemas.contains_key(name), "all_schemas is missing {name}");

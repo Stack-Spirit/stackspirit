@@ -44,7 +44,7 @@ crates/vowp-protocol/
 
 `src/agent.rs` holds the v0.4 local-node documents (`PathRef`, `AgentRole`,
 `AgentCapabilities`, `AgentCapacity`, `AgentPathMap`, `NodeCard`, `NodeKind`, `NodeStatus`,
-`NodePresence` and `AgentFrame`); see rule 14.
+`NodePresence`, `SurfaceInfo`, `SurfaceScope`, `SurfaceState` and `AgentFrame`); see rule 14.
 
 `lib.rs` declares **all** modules and re-exports with `pub use <module>::*;` for every module.
 
@@ -137,15 +137,19 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"Tunnel"`, `"TurnGrant"`, `"UsageEstimate"`, `"VowpConfig"`, `"WaitReason"`, `"WaitingJob"`, `"Worker"`.
     The v0.4 local-node set adds `"AgentCapabilities"`, `"AgentCapacity"`, `"AgentFrame"`,
     `"AgentPathMap"`, `"AgentRole"`, `"NodeCard"`, `"NodeKind"`, `"NodePresence"`, `"NodeStatus"`,
-    `"PathRef"`.
+    `"PathRef"`, `"SurfaceInfo"`, `"SurfaceScope"`, `"SurfaceState"`.
     Output is deterministic (BTreeMap, stable ordering).
 13. **No panics**: all constructors/parsers return `Result`; regex literals inside use `// invariant:` comments.
 14. **v0.4 agent protocol.** `PathRef` serialises as one string (`project:vowp`,
     `worktree:vowp/<job>`, `subdir:vowp/src`) and parses strictly: no `..`, leading `/`, `\`, NUL
     or empty project/subdirectory, at most `MAX_PATH_REF_LEN` bytes, with repeated `/` and `.`
-    components normalised. `AgentFrame` is the Phase 0 tagged union (`type` is `snake_case`):
+    components normalised. `AgentFrame` is the tagged union (`type` is `snake_case`):
     `AgentHello`, `HomeChallenge`, `AgentAuth`, `HomeWelcome`, `Enroll`, `Enrolled`, `Heartbeat`,
-    `Ping`, `Pong`, `Revoked`, `Superseded` and `Error`. `NodeCard` carries no path map and no
+    `SurfacePair`, `SurfaceIssued`, `SurfaceRevoked`, `Ping`, `Pong`, `Revoked`, `Superseded` and
+    `Error`. `SurfacePair.code` and `SurfaceIssued.token` are secret frame values: never logged,
+    echoed or put in a URL. `SurfaceScope` is a transparent string (`session.read:<id>`,
+    `fleet.read`, `tool:<name>`); `SurfaceState` is `pending|attached|revoked`; `SurfaceInfo` is
+    the state-bearing read model and carries no token. `NodeCard` carries no path map and no
     secret name; `NodeStatus`/`NodePresence` are separate so a revoked node is always `revoked`.
 
 ## 5. Error enum
@@ -207,7 +211,9 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `path_ref_rejects_traversal_absolute_backslash_and_nul` | `..`, leading `/`, `\`, NUL, empty project/subdirectory, unknown kind and over-length input all return `InvalidInput` |
 | `path_ref_round_trips_through_json` | each form serialises as its Display string and deserialises back; a traversal string fails |
 | `agent_frame_round_trips_every_phase_zero_variant` | all 12 Phase 0 variants have their `snake_case` `type` and round-trip through JSON |
-| `agent_frame_rejects_unknown_type` | an unknown `type` and a missing required field both fail |
+| `agent_frame_round_trips_surface_pair_frames` | `surface_pair`, `surface_issued` and `surface_revoked` round-trip with their `snake_case` type tags |
+| `agent_frame_rejects_unknown_type` | an unknown `type`, an unknown surface variant and a missing required field all fail |
+| `surface_types_round_trip_and_have_stable_wire_names` | `SurfaceState` is `pending`/`attached`/`revoked`, `SurfaceScope` is a string and `SurfaceInfo` round-trips |
 | `node_card_serializes_without_absolute_paths_or_secret_names` | no absolute string, path-map field or secret name appears in the card JSON |
 | `all_schemas_includes_agent_types` | every v0.4 agent type is in `all_schemas()` and `schema_for_name` |
 | `surface_kind_agent_wire_name_is_agent` | `SurfaceKind::Agent` serialises as `"agent"` and back |

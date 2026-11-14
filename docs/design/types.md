@@ -1322,12 +1322,26 @@ pub struct CapacityReport {
 pub fn new_lease_token() -> String;                       // two ULIDs, 160 random bits
 
 #[serde(rename_all = "snake_case")]
-pub enum SurfaceKind { Chat, Opencode, ClaudeCode, Mcp, Mirror, Api }
+pub enum SurfaceKind { Chat, Opencode, ClaudeCode, Mcp, Mirror, Api, Agent }
 
 pub struct Surface {
     pub id: SurfaceId, pub kind: SurfaceKind, pub node: NodeName, pub holder: String,
     pub app: Option<String>, pub cwd: Option<String>, pub metadata: serde_json::Value,
     pub created_at: Timestamp, pub last_seen_at: Timestamp,
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceState { Pending, Attached, Revoked }
+
+#[serde(transparent)] pub struct SurfaceScope(pub String);
+// Wire strings: `session.read:<id>`, `session.write:<id>`, `project.read:<name>`,
+// `fleet.read`, `tool:<name>`; unknown scopes are preserved.
+
+pub struct SurfaceInfo {
+    pub id: SurfaceId, pub kind: SurfaceKind, pub node: NodeName, pub holder: String,
+    pub app: Option<String>, pub cwd: Option<String>, pub metadata: serde_json::Value,
+    pub state: SurfaceState, pub created_at: Timestamp, pub last_seen_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
 }
 
 pub struct Lease {
@@ -1592,6 +1606,10 @@ pub enum AgentFrame {
     Enrolled { home_id: String, node: NodeName, protocol: String,
                server_time: Timestamp, heartbeat_secs: u64 },
     Heartbeat { at: Timestamp, capacity: AgentCapacity, pending_spool_bytes: u64 },
+    SurfacePair { code: String, surface_id: SurfaceId, session: SessionId, app: String },
+    SurfaceIssued { surface_id: SurfaceId, token: String,
+                    scopes: Vec<SurfaceScope>, expires_at: Timestamp },
+    SurfaceRevoked { surface_id: SurfaceId, reason: String },
     Ping,
     Pong,
     Revoked { reason: String },
@@ -1602,6 +1620,8 @@ pub enum AgentFrame {
 
 `NodeCard` is the redacted read model: it has no path-map field and no secret names. The
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
-snapshot or log. `AgentFrame` covers Phase 0 only; assignment, surface-token, lease and
-`AssignRun`/`RemoteLine` frames are later phases. `SurfaceKind` gains the `agent` wire
-variant in the same phase, but the store `CHECK` is updated by a later migration.
+snapshot or log. `AgentFrame` covers Phase 0 plus the surface pairing frames; assignment,
+lease and `AssignRun`/`RemoteLine` frames are later phases. `SurfaceKind` includes the `agent`
+wire variant, and the v4 store schema accepts it. `SurfaceIssued.token` (like `SurfacePair.code`)
+is a secret frame value: it is written 0600 on the agent and never logged; the home stores only
+its SHA-256 hash, a short prefix and the scopes in `surface_tokens`.

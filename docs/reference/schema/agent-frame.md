@@ -272,6 +272,18 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
       "description": "A validated secret name: `^[A-Z][A-Z0-9_]{0,63}$`.",
       "type": "string"
     },
+    "SessionId": {
+      "description": "Session id: 26-character ULID.",
+      "type": "string"
+    },
+    "SurfaceId": {
+      "description": "A surface instance id (ULID, 26 characters).",
+      "type": "string"
+    },
+    "SurfaceScope": {
+      "description": "One capability granted to a surface token.\n\nThe wire form is one short string, for example `session.read:<id>`, `session.write:<id>`,\n`project.read:<name>`, `fleet.read` or `tool:<name>`. The store keeps the list in\n`surface_tokens.scopes_json`; unknown scopes are preserved verbatim so a newer home can\nextend the vocabulary without breaking older readers.",
+      "type": "string"
+    },
     "Timestamp": {
       "description": "A UTC instant with millisecond precision.\n\nThe wire/DB form is RFC 3339 with a `Z` suffix and exactly three fractional digits,\nfor example `2026-11-08T19:25:47.123Z`.",
       "type": "string"
@@ -525,6 +537,98 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "protocol",
         "server_time",
         "heartbeat_secs"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: redeem a one-time pairing code for a local surface.",
+      "properties": {
+        "app": {
+          "description": "Application name, for example `opencode`.",
+          "type": "string"
+        },
+        "code": {
+          "description": "One-time pairing code; never logged or echoed.",
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId",
+          "description": "Session the surface will mirror."
+        },
+        "surface_id": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface the owner created on the home."
+        },
+        "type": {
+          "const": "surface_pair",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "code",
+        "surface_id",
+        "session",
+        "app"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the pairing succeeded and issued a token.",
+      "properties": {
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the token expires."
+        },
+        "scopes": {
+          "description": "Scopes granted to the token.",
+          "items": {
+            "$ref": "#/$defs/SurfaceScope"
+          },
+          "type": "array"
+        },
+        "surface_id": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface the token belongs to."
+        },
+        "token": {
+          "description": "Secret token; write it 0600, never log or echo it.",
+          "type": "string"
+        },
+        "type": {
+          "const": "surface_issued",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "surface_id",
+        "token",
+        "scopes",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the surface token was revoked; detach and delete it.",
+      "properties": {
+        "reason": {
+          "description": "Human-readable reason.",
+          "type": "string"
+        },
+        "surface_id": {
+          "$ref": "#/$defs/SurfaceId",
+          "description": "Surface whose token was revoked."
+        },
+        "type": {
+          "const": "surface_revoked",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "surface_id",
+        "reason"
       ],
       "type": "object"
     },

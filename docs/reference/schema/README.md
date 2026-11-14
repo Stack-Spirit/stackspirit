@@ -110,7 +110,10 @@ python3 docs/reference/check-reference.py
 | `Snapshot` | [snapshot.md](snapshot.md) |
 | `SupervisorSnapshot` | [supervisor-snapshot.md](supervisor-snapshot.md) |
 | `Surface` | [surface.md](surface.md) |
+| `SurfaceInfo` | [surface-info.md](surface-info.md) |
 | `SurfaceRef` | [surface-ref.md](surface-ref.md) |
+| `SurfaceScope` | [surface-scope.md](surface-scope.md) |
+| `SurfaceState` | [surface-state.md](surface-state.md) |
 | `Switch` | [switch.md](switch.md) |
 | `TakeoverReport` | [takeover-report.md](takeover-report.md) |
 | `Tunnel` | [tunnel.md](tunnel.md) |
