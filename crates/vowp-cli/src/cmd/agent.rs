@@ -18,6 +18,7 @@ use vowp_agent::{
 use vowp_core::agent::gateway;
 use vowp_protocol::{AGENT_PROTOCOL, AgentPathMap, AgentRole, ErrorKind, ProjectName, SessionId, SurfaceId};
 
+use crate::agent_exec::CoreRunHandler;
 use crate::cli::{
     AgentCommand, AgentEnrollArgs, AgentGatewayArgs, AgentPairArgs, AgentPathsAddArgs, AgentPathsArgs,
     AgentPathsCommand, AgentPathsRmArgs, AgentRunArgs, AgentStatusArgs,
@@ -295,6 +296,7 @@ fn run_agent(global: &Global, io: &mut dyn IoStreams, args: &AgentRunArgs) -> Re
     let config = AgentConfig::load(&state_dir).map_err(map_agent_error)?;
     let key = NodeKey::load(&state_dir).map_err(map_agent_error)?;
     let target = config.ssh_target().map_err(map_agent_error)?.to_owned();
+    let handler = Arc::new(CoreRunHandler::new(config.clone()));
     let transport = Box::new(SshTransport::new(target));
     let mut client = AgentClient::new(state_dir, key, config, transport, Arc::new(SystemAgentClock));
     let (role, role_name) = parse_role(args.role.as_deref())?;
@@ -308,10 +310,13 @@ fn run_agent(global: &Global, io: &mut dyn IoStreams, args: &AgentRunArgs) -> Re
         }
     }
     match client
-        .run(&RunOptions {
-            role,
-            foreground: args.foreground,
-        })
+        .run_with_handler(
+            &RunOptions {
+                role,
+                foreground: args.foreground,
+            },
+            handler,
+        )
         .map_err(map_agent_error)?
     {
         RunOutcome::Revoked { reason } => Err(CliError::Guard(format!("agent revoked: {reason}"))),

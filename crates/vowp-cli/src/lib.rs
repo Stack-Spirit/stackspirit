@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Cursor, IsTerminal, Write};
 
 use clap::Parser;
 
+pub mod agent_exec;
 pub mod chat;
 pub mod cli;
 pub mod cmd;

@@ -15,7 +15,8 @@ use std::sync::Arc;
 use vowp_agent::{AgentConfig, AgentError, ChatClient, ChatTurnRequest, ChatTurnStatus, SystemAgentClock};
 use vowp_core::AdapterRegistry;
 use vowp_protocol::{
-    EventBody, Executor, ExecutorRef, HarnessEvent, NodeName, PathRef, ProjectName, RunPurpose, SessionId, VowpConfig,
+    Adapter, EventBody, Executor, ExecutorRef, HarnessEvent, NodeName, PathRef, ProjectName, RunPurpose, SessionId,
+    VowpConfig,
 };
 use vowp_store::NodePaths;
 
@@ -157,10 +158,7 @@ fn run_bridge(io: &mut dyn IoStreams, opts: &ChatOptions, local: &LocalProject) 
     };
     let cwd = local_working_dir(local)?;
     let cwd_ref = path_ref_for(&local.config.project.name, &local.root, &cwd);
-    let adapters = AdapterRegistry::from_config(&local.config)?;
-    let adapter = adapters
-        .get(&executor)
-        .ok_or_else(|| CliError::Invalid(format!("harness for {executor} is not installed on this machine")))?;
+    let adapter = adapter_for(&local.config, &executor)?;
     let mut chat = ChatClient::from_state_dir(state_dir.clone(), session.clone(), Arc::new(SystemAgentClock))
         .map_err(map_agent_error)?;
     let watcher = if io.is_tty() {
@@ -240,6 +238,17 @@ fn run_bridge(io: &mut dyn IoStreams, opts: &ChatOptions, local: &LocalProject) 
     }
     let _ = chat.release();
     Ok(0)
+}
+
+/// Builds the project's adapter registry and returns the adapter for one executor.
+///
+/// Both the local chat surface and the assignment executor start adapters through this
+/// helper, so the `vowp.toml` harness configuration is read in exactly one place.
+pub(crate) fn adapter_for(config: &VowpConfig, executor: &Executor) -> Result<Arc<dyn Adapter>, CliError> {
+    let adapters = AdapterRegistry::from_config(config)?;
+    adapters
+        .get(executor)
+        .ok_or_else(|| CliError::Invalid(format!("harness for {executor} is not installed on this machine")))
 }
 
 /// Returns the directory the adapter starts in: the current directory when it is below
