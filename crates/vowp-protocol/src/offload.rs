@@ -158,9 +158,10 @@ pub enum WaitingReason {
 /// The durable, token-free payload the home stores and sends with `AssignRun`.
 ///
 /// It carries environment and secret **names** only, a project-relative [`PathRef`],
-/// the base commit, the remote name, the epoch, an optional deadline and the per-run
-/// spool cap. It **never** contains a lease token, a secret value or an absolute local
-/// path. The lease token travels only in [`crate::agent::AgentFrame::AssignRun`].
+/// the base commit, the remote name, the project's expected remote URL, the epoch, an
+/// optional deadline and the per-run spool cap. It **never** contains a lease token, a
+/// secret value or an absolute local path. The lease token travels only in
+/// [`crate::agent::AgentFrame::AssignRun`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AssignmentPayload {
     /// Durable assignment id.
@@ -185,6 +186,12 @@ pub struct AssignmentPayload {
     pub base_commit: String,
     /// Git remote name on the node.
     pub remote: String,
+    /// The home project's remote URL, compared with credentials stripped.
+    ///
+    /// The agent compares its push URL (not the fetch URL) with this value and refuses a
+    /// mismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the
+    /// agent never logs the raw value.
+    pub remote_url: String,
     /// Environment variable names to resolve on the node; never values.
     pub env_names: Vec<String>,
     /// Secret names to resolve on the node; never values.

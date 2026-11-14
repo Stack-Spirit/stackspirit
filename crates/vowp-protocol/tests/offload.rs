@@ -54,6 +54,7 @@ fn assignment() -> AssignmentPayload {
         },
         base_commit: "abc1234".to_owned(),
         remote: "origin".to_owned(),
+        remote_url: "https://example.invalid/owner/repo.git".to_owned(),
         env_names: vec!["CI".to_owned()],
         secret_names: vec![SecretName::parse("HOME_GITHUB_TOKEN").expect("secret name")],
         epoch: 1,
@@ -189,6 +190,28 @@ fn assignment_payload_round_trips_without_a_lease_token() {
 
     let decoded: AssignmentPayload = serde_json::from_value(value).expect("payload back");
     assert_eq!(decoded, payload);
+}
+
+#[test]
+fn assignment_payload_carries_the_expected_remote_url() {
+    let payload = assignment();
+    assert_eq!(payload.remote, "origin", "remote stays the git remote name");
+    assert_eq!(
+        payload.remote_url, "https://example.invalid/owner/repo.git",
+        "the payload carries the home project's remote URL"
+    );
+    assert!(
+        !payload.remote_url.contains('@'),
+        "the fixture URL carries no userinfo: {}",
+        payload.remote_url
+    );
+
+    let value = serde_json::to_value(&payload).expect("payload JSON");
+    assert_eq!(value["remote"], json!("origin"));
+    assert_eq!(value["remote_url"], json!("https://example.invalid/owner/repo.git"));
+
+    let decoded: AssignmentPayload = serde_json::from_value(value).expect("payload back");
+    assert_eq!(decoded.remote_url, payload.remote_url);
 }
 
 #[test]

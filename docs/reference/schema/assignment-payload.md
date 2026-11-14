@@ -99,7 +99,7 @@ Exported by `vowp schema AssignmentPayload` and generated from the protocol type
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "The durable, token-free payload the home stores and sends with `AssignRun`.\n\nIt carries environment and secret **names** only, a project-relative [`PathRef`],\nthe base commit, the remote name, the epoch, an optional deadline and the per-run\nspool cap. It **never** contains a lease token, a secret value or an absolute local\npath. The lease token travels only in [`crate::agent::AgentFrame::AssignRun`].",
+  "description": "The durable, token-free payload the home stores and sends with `AssignRun`.\n\nIt carries environment and secret **names** only, a project-relative [`PathRef`],\nthe base commit, the remote name, the project's expected remote URL, the epoch, an\noptional deadline and the per-run spool cap. It **never** contains a lease token, a\nsecret value or an absolute local path. The lease token travels only in\n[`crate::agent::AgentFrame::AssignRun`].",
   "properties": {
     "assignment_id": {
       "description": "Durable assignment id.",
@@ -161,6 +161,10 @@ Exported by `vowp schema AssignmentPayload` and generated from the protocol type
       "description": "Git remote name on the node.",
       "type": "string"
     },
+    "remote_url": {
+      "description": "The home project's remote URL, compared with credentials stripped.\n\nThe agent compares its push URL (not the fetch URL) with this value and refuses a\nmismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the\nagent never logs the raw value.",
+      "type": "string"
+    },
     "run_id": {
       "$ref": "#/$defs/RunId",
       "description": "Run id assigned by the home."
@@ -195,6 +199,7 @@ Exported by `vowp schema AssignmentPayload` and generated from the protocol type
     "cwd_ref",
     "base_commit",
     "remote",
+    "remote_url",
     "env_names",
     "secret_names",
     "epoch",

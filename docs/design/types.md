@@ -1754,8 +1754,8 @@ pub struct AssignmentPayload {
     pub assignment_id: String, pub run_id: RunId, pub session_id: SessionId,
     pub project: ProjectName, pub job: JobId, pub executor: Executor,
     pub purpose: RunPurpose, pub prompt: String, pub cwd_ref: PathRef,
-    pub base_commit: String, pub remote: String, pub env_names: Vec<String>,
-    pub secret_names: Vec<SecretName>, pub epoch: u64,
+    pub base_commit: String, pub remote: String, pub remote_url: String,
+    pub env_names: Vec<String>, pub secret_names: Vec<SecretName>, pub epoch: u64,
     pub deadline: Option<Timestamp>, pub spool_cap_bytes: u64,
 }
 
@@ -1816,11 +1816,17 @@ waiting reason for a pinned node, because `any` still has the home.
 
 [`AssignmentPayload`] is the durable payload the home stores in its assignment row and sends
 inside [`crate::agent::AgentFrame::AssignRun`]. It carries environment and secret **names**
-only, a project-relative `PathRef`, the base commit, the remote name, the epoch, an optional
-deadline and the per-run spool cap. It never contains a lease token, a secret value or an
-absolute local path. The `AssignRun` frame adds `lease_token` and `lease_expires_at` next to
-the payload: the token is frame-only, written to the lease row only as a SHA-256 hash and
-re-issued on resume.
+only, a project-relative `PathRef`, the base commit, the remote name, the project's expected
+remote URL, the epoch, an optional deadline and the per-run spool cap. It never contains a
+lease token, a secret value or an absolute local path. The `AssignRun` frame adds `lease_token`
+and `lease_expires_at` next to the payload: the token is frame-only, written to the lease row
+only as a SHA-256 hash and re-issued on resume.
+
+`AssignmentPayload.remote` is the git remote *name*; `remote_url` is the home project's remote
+URL. The home strips URL userinfo before storing `remote_url`, so the durable row never holds a
+credential. The agent compares its push URL (not the fetch URL) with `remote_url`, with
+credentials stripped on both sides, and refuses a mismatch as `remote_mismatch`; it never logs
+the raw URL.
 
 [`RunRejectReason`] is the machine-readable class of a pre-start refusal; the matching
 `RunRejected.detail` carries the human-readable text and never a secret value.

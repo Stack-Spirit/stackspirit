@@ -389,6 +389,7 @@ fn offload_status_lists_nodes_assignments_and_waiting_reasons() {
         },
         base_commit: "0".repeat(40),
         remote: "origin".to_owned(),
+        remote_url: "https://example.invalid/owner/repo.git".to_owned(),
         env_names: Vec::new(),
         secret_names: Vec::new(),
         epoch: 1,

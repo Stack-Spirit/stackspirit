@@ -138,6 +138,7 @@ fn payload(
         },
         base_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         remote: "origin".to_owned(),
+        remote_url: "https://example.invalid/owner/repo.git".to_owned(),
         env_names: vec!["CARGO_HOME".to_owned()],
         secret_names: vec![SecretName::parse("CARGO_REGISTRY_TOKEN").expect("secret name")],
         epoch,
@@ -486,6 +487,21 @@ fn assignment_round_trips_payload_and_state() {
         ..Default::default()
     };
     assert!(fixture.store.list_assignments(&empty).expect("empty").is_empty());
+}
+
+#[test]
+fn assignment_remote_url_round_trips_through_the_store() {
+    let fixture = fixture();
+    let item = assignment(&fixture, "assign-remote", 1);
+    fixture.store.insert_assignment(&item).expect("insert");
+
+    let stored = fixture.store.assignment("assign-remote").expect("read").expect("row");
+    assert_eq!(stored.payload.remote, "origin");
+    assert_eq!(stored.payload.remote_url, item.payload.remote_url);
+    assert_eq!(
+        stored.payload.remote_url, "https://example.invalid/owner/repo.git",
+        "the temp-home round-trip keeps the expected remote URL"
+    );
 }
 
 #[test]

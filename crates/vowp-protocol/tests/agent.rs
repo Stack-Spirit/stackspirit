@@ -95,6 +95,7 @@ fn assignment() -> AssignmentPayload {
         },
         base_commit: "abc1234".to_owned(),
         remote: "origin".to_owned(),
+        remote_url: "https://example.invalid/owner/repo.git".to_owned(),
         env_names: vec!["CI".to_owned()],
         secret_names: vec![SecretName::parse("HOME_GITHUB_TOKEN").expect("secret name")],
         epoch: 1,
@@ -743,6 +744,32 @@ fn agent_frame_round_trips_run_assignment_frames() {
         let decoded: AgentFrame = serde_json::from_value(value).expect("run assignment frame back");
         assert_eq!(decoded, frame);
     }
+}
+
+#[test]
+fn agent_frame_round_trips_assign_run_with_the_remote_url() {
+    let payload = assignment();
+    assert_eq!(payload.remote_url, "https://example.invalid/owner/repo.git");
+    let frame = AgentFrame::AssignRun {
+        assignment: payload.clone(),
+        lease_token: "FAKE-LEASE-TOKEN-NOT-A-REAL-SECRET".to_owned(),
+        lease_expires_at: at(),
+    };
+
+    let value = serde_json::to_value(&frame).expect("assign frame JSON");
+    assert_eq!(value["type"], "assign_run");
+    assert_eq!(value["assignment"]["remote"], json!("origin"));
+    assert_eq!(
+        value["assignment"]["remote_url"],
+        json!("https://example.invalid/owner/repo.git")
+    );
+
+    let decoded: AgentFrame = serde_json::from_value(value).expect("assign frame back");
+    assert_eq!(decoded, frame);
+    let AgentFrame::AssignRun { assignment, .. } = decoded else {
+        panic!("expected an AssignRun frame");
+    };
+    assert_eq!(assignment.remote_url, payload.remote_url);
 }
 
 #[test]

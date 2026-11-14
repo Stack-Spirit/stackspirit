@@ -172,9 +172,13 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     explicit fallback (there is no silent one). `WaitingReason` is the §7.5 vocabulary and
     `RunRejectReason` the pre-start refusal vocabulary, both `snake_case`. `AssignmentPayload`
     is the durable, token-free payload carried by `AssignRun`; it contains environment and
-    secret names only, a project-relative `PathRef`, and never a lease token, a secret value or
-    an absolute local path. `AssignRun.lease_token` is frame-only: the home stores only its hash
-    and re-issues a token on resume. `RemoteRunState` is `running|disconnected|finishing`.
+    secret names only, a project-relative `PathRef`, the git remote name, the home project's
+    expected remote URL (userinfo stripped before storage), and never a lease token, a secret
+    value or an absolute local path. The agent compares its push URL (not the fetch URL) with
+    `remote_url`, with credentials stripped on both sides, and refuses a mismatch as
+    `remote_mismatch`; it never logs the raw URL. `AssignRun.lease_token` is frame-only: the
+    home stores only its hash and re-issues a token on resume. `RemoteRunState` is
+    `running|disconnected|finishing`.
     `RunResume`/`SurfaceResume` carry `last_acked`; `RunResumeResult`/`SurfaceResumeResult`
     carry `accepted`, an optional `reason` and the `tail_seq` the holder may continue from.
 
@@ -249,12 +253,14 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `placement_rejects_an_unknown_or_malformed_selector` | unknown selectors, empty/uppercase/whitespace/slashed/colonned nodes and unknown fallbacks return `InvalidInput` |
 | `waiting_reason_matches_the_documented_wire_values` | all 14 §7.5 values round-trip and an unknown value fails |
 | `assignment_payload_round_trips_without_a_lease_token` | the payload round-trips, has no `lease_token` and no absolute local path, and keeps `cwd_ref` a `PathRef` string |
+| `assignment_payload_carries_the_expected_remote_url` | `remote` stays the git remote name, `remote_url` carries the expected URL with no userinfo, and both round-trip through JSON |
 | `assign_run_frame_carries_the_lease_token_but_the_payload_does_not` | `AssignRun.lease_token` is frame-only; the nested payload never contains it |
 | `run_reject_reason_covers_the_documented_values` | all 11 refusal values round-trip and an unknown value fails |
 | `resume_frame_round_trips_runs_and_surfaces` | `Resume` and `ResumeOk` carry run/surface records and results through JSON with their type tags |
 | `path_map_update_round_trips_an_agent_path_map` | `PathMapUpdate` round-trips its owner-only `AgentPathMap` |
 | `run_state_reports_the_remote_state_and_head_commit` | every `RemoteRunState` value serialises as its wire name and `RunState` round-trips |
 | `agent_frame_round_trips_run_assignment_frames` | `assign_run`, `run_accepted`, `run_rejected`, `run_state`, `cancel_run` and `cleanup` round-trip with their type tags |
+| `agent_frame_round_trips_assign_run_with_the_remote_url` | an `assign_run` frame carries `remote_url` next to the remote name and round-trips with it |
 | `unknown_frame_type_is_rejected` | an unknown type and a missing required field both fail and name the offending type/field |
 
 ## 7. Out of scope / v0.2
