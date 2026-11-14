@@ -83,10 +83,10 @@ Starts a planner turn (session role `planner`, executor = first available rung o
 
 | Command | Behaviour |
 |---|---|
-| `job add --id <slug> --title <text> --kind <k> [--role <r>] [--profile <p>] [--needs a,b] [--owns glob,…] [--reads glob,…] [--gates <set\|short,…>] [--priority n] [--max-attempts n] [--brief-file <path>\|--brief -]` | validates (`NewJob`), inserts job + edges, writes the brief (generated front-matter + body from file/stdin; with neither, a template brief), state `pending` (→ `ready` on the next tick when deps are done). Exit 4 if the id exists; 2 if a need is unknown or a cycle would form. `--role` default by kind (`build→worker`, `verify→verifier`, `plan→planner`, `decision→keeper`). |
+| `job add --id <slug> --title <text> --kind <k> [--role <r>] [--profile <p>] [--needs a,b] [--owns glob,…] [--reads glob,…] [--gates <set\|short,…>] [--priority n] [--max-attempts n] [--brief-file <path>\|--brief -] [--placement home\|any\|node:<name>]` | validates (`NewJob`), inserts job + edges, writes the brief (generated front-matter + body from file/stdin; with neither, a template brief), state `pending` (→ `ready` on the next tick when deps are done). `--placement` is parsed by `Placement::parse` and stored in the `job_placement` side table in the same success path; `node:<name>` (and `node:<name>+home`) is refused with exit 5 **before anything is written** when `offload.enabled = false`. Exit 4 if the id exists; 2 if a need is unknown, a cycle would form or the placement grammar is invalid. `--role` default by kind (`build→worker`, `verify→verifier`, `plan→planner`, `decision→keeper`). |
 | `job update <id> [--title] [--priority] [--profile] [--owns] [--reads] [--gates] [--add-needs a,b] [--remove-needs a] [--note text]` | `JobPatch`. Only jobs not in `running/gating/reviewing/merging` may change `owns`/`gates` (exit 4). |
 | `job ls [--state s,…] [--kind k] [--role r] [--all]` | table: `ID STATE KIND ROLE PRIO NEEDS ATTEMPTS UPDATED NOTE`; default hides `done/cancelled/replanned` unless `--all`. JSON: `[Job,…]`. |
-| `job show <id> [--brief] [--report] [--runs] [--gates]` | the job, its edges, last runs (executor, outcome, cost), last gate results with evidence tails; `--brief/--report` print the files. |
+| `job show <id> [--brief] [--report] [--runs] [--gates]` | the job, its edges, last runs (executor, outcome, cost), last gate results with evidence tails; `--brief/--report` print the files. When the job has a `job_placement` row, human output adds `placement: <value>` and `--json` adds a `placement` key; `job ls` keeps its table and JSON `Job` array unchanged. |
 | `job retry <id>` | by state: `failed` → `ready` (event `Retry`, T32 resets `attempts`, `continues` and `hang_restarts`), `parked` → `ready` (`Resolved`), `stalled` → `running` (`KeeperRestart`). Exit 4 from any other state. |
 | `job park <id> [--reason text]` | any non-terminal → `parked` (`parked_reason=manual`); stops its run (`interrupt` then `stop`). To resume use `job retry`. |
 | `job nudge <id>` · `job restart <id>` · `job replan <id>` · `job fail <id> --reason t` | keeper commands (loops.md §7): enqueue a request row applying the corresponding `JobEvent` (`KeeperNudge|KeeperRestart|KeeperReplan|KeeperFail`); exit 4 if the job's state does not allow it. |
@@ -466,7 +466,11 @@ The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 `surface_command_requires_a_node_and_session`, `surface_ls_never_prints_a_token`,
 `surface_commands_are_home_only`, `surface_commands_are_registered_and_node_is_a_filter`,
 `agent_pair_writes_0600_token_and_prints_no_secret`, `agent_pair_refuses_a_replayed_code` and
-`agent_pair_surfaces_path_is_private`.
+`agent_pair_surfaces_path_is_private`. The offload-policy slice adds
+`job_add_refuses_node_placement_when_offload_is_disabled`,
+`job_add_persists_any_placement_and_job_show_reads_it`,
+`offload_policy_json_is_the_effective_policy` and
+`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`.
 
 ## 12. Mac agent commands (v0.4)
 
@@ -624,3 +628,73 @@ succeeds with zero tokens revoked. Human output is
 The reverse flow (the Mac asks and the home opens an approval inbox item), `surface rotate`, the
 live `SurfaceRevoked` push and the MCP proxy are later v0.4 slices. Leases and the Phase 1 local
 chat are implemented.
+
+## 14. Offload policy and status (v0.4 Phase 2)
+
+The read-only home slice for §7 of `v0.4/local-orchestrator.md`. It decides and explains; it does
+not send `AssignRun`, create a worktree or start an agent.
+
+### Policy file and placement grammar
+
+`[offload]` is part of `vowp.toml` and is documented with its defaults in
+[`types.md`](types.md) §11. The defaults keep offload disabled: `enabled = false`,
+`default = "home"`, `max_remote_runs = 2`, `grace_secs = 600`, `result_transport = "push"`,
+`pause_on_home_brake = false`, `require_clean_base = true`, `min_disk_bytes = 5368709120`.
+`[offload.projects.<name>]` carries `placement`, `home_only`, `allow_kinds`, `deny_kinds` and
+`allow_secrets`; `[offload.nodes.<name>]` carries `max_workers`, `allow_battery` and the required
+`labels`. Unknown keys are rejected and `result_transport = "bundle"` is refused with a message
+naming it as Phase 4.
+
+A job's `--placement` is one of:
+
+| Value | Meaning |
+|---|---|
+| `home` | the job never leaves the home (the default when no placement row exists) |
+| `node:<name>` | only that node; if it is offline or ineligible the job waits, with no silent fallback |
+| `node:<name>+home` | the named node, with the home as the explicit fallback |
+| `any` | the home and every eligible node |
+
+A per-job placement wins over the project default, but it cannot override `home_only`, a denied
+kind or a home-only secret. `node:<name>` is refused at `job add` time when offload is disabled.
+
+### `vowp offload policy [--project <p>] [--json]`
+
+Prints the effective policy with every default filled in: enabled, default placement,
+`max_remote_runs`, grace, transport, brake and clean-base flags, the disk reserve, one row per
+`[offload.projects.*]` entry and one row per configured node (plus the registered node cards).
+The global `--project <name|path>` selects the `vowp.toml`; an explicit selection restricts the
+project rows to that project. Human output is a scalar block (`offload`, `default`,
+`max_remote_runs`, `grace_secs`, `result_transport`, `pause_on_home_brake`,
+`require_clean_base`, `min_disk_bytes`) followed by two tables (`PROJECT PLACEMENT HOME_ONLY
+ALLOW_KINDS DENY_KINDS ALLOW_SECRETS` and `NODE MAX_WORKERS ALLOW_BATTERY LABELS`). `--json`
+prints one object with `enabled`, `default`, `max_remote_runs`, `grace_secs`,
+`result_transport`, `pause_on_home_brake`, `require_clean_base`, `min_disk_bytes`, and the
+`projects` and `nodes` arrays. No path is printed.
+
+### `vowp offload status [--json]`
+
+Reads the global store and each registered project read-only. Human output is three tables:
+
+```text
+nodes:       NAME STATUS PRESENCE MAPPED SLOTS DISK BATTERY LAST_ERROR
+assignments: ID PROJECT RUN NODE STATE CREATED DETAIL
+ready:       PROJECT JOB KIND PLACEMENT REASON DETAIL
+```
+
+`assignments` lists only live states (`queued`, `sent`, `accepted`, `running`, `disconnected`) and
+never echoes the assignment payload or prompt. `ready` lists ready jobs whose `job_placement` row
+is not `home`, evaluated with the pure policy: `REASON` is the §7.5 `WaitingReason` or `eligible`,
+and `DETAIL` is the human explanation. The evaluator uses the facts the home stores; a fact a
+node reports only at dispatch time (origin match, base fetchability, clean base) is `None` and is
+reported as a conservative refusal, never as a pass.
+
+Neither command prints an absolute local path. The JSON document is
+`{"generated_at","nodes":[…],"assignments":[…],"ready":[…]}`; each node has
+`{"name","status","presence","mapped","slots_busy","slots_max","disk_free_bytes","on_battery",
+"thermal_state","last_error"}`, each assignment has the token-free row fields, and each ready row
+has `{"project","job","kind","placement","waiting_reason","detail","targets"}`.
+
+Named tests (`tests/offload.rs`): `job_add_refuses_node_placement_when_offload_is_disabled`,
+`job_add_persists_any_placement_and_job_show_reads_it`,
+`offload_policy_json_is_the_effective_policy` and
+`offload_status_lists_nodes_assignments_and_waiting_reasons`.

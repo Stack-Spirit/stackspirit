@@ -549,5 +549,69 @@ Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_en
 `surface_pair_refuses_expired_or_used_code`, `surface_pair_binds_node_and_session` and
 `surface_token_verify_rejects_revoked_and_expired`.
 
-## 10. Out of scope (v0.2)
+## 10. `offload` — pure offload eligibility (v0.4 Phase 2)
+
+Spec: `docs/design/v0.4/local-orchestrator.md` §6.6, §6.7 and §7.1–§7.5. This module decides only:
+it opens no store, starts no process, reads no clock and touches no filesystem. The home passes
+the effective policy and one fact set per candidate; the dispatcher slice will act on the answer,
+but the answer itself is already complete and testable.
+
+```rust
+pub mod offload {
+    pub mod policy {
+        pub struct HomeFacts { pub brake_active: bool, pub active_remote_runs: u32 }
+        pub struct NodeCapabilities { pub harnesses: Vec<String>, pub secrets: Vec<SecretName>, pub projects: Vec<ProjectName> }
+        pub struct PathFacts { pub map_present: bool, pub local_root_present: bool, pub worktree_root_present: bool, pub writable: bool }
+        pub struct LimitFact { pub provider: String, pub kind: LimitKind, pub detail: String }
+        pub enum ThermalState { Nominal, Fair, Serious, Critical }
+        pub struct NodePower { pub on_battery: bool, pub thermal_state: ThermalState }
+        pub struct NodeFacts {
+            pub name: NodeName, pub status: NodeStatus, pub presence: NodePresence,
+            pub labels: Vec<String>, pub capabilities: NodeCapabilities,
+            pub capacity: Option<AgentCapacity>, pub power: Option<NodePower>,
+            pub limits: Vec<LimitFact>, pub path: Option<PathFacts>,
+            pub origin_matches: Option<bool>, pub base_fetchable: Option<bool>,
+            pub clean_base: Option<bool>, pub owns_conflict: Option<bool>,
+        }
+        pub struct JobRequirements { pub labels: Vec<String>, pub harnesses: Vec<String>, pub secrets: Vec<SecretName>, pub provider: Option<String> }
+        pub struct JobRequest { pub kind: JobKind, pub placement: Option<Placement>, pub requires: JobRequirements }
+        pub enum Target { Home, Node(NodeName) }
+        pub enum Decision {
+            Eligible { targets: Vec<Target> },
+            Waiting { reason: WaitingReason, detail: String, node: Option<NodeName> },
+        }
+        pub fn evaluate(fleet: &OffloadConfig, project: &ProjectName, project_policy: &OffloadProjectConfig,
+                        job: &JobRequest, home: &HomeFacts, nodes: &[NodeFacts]) -> Decision;
+    }
+}
+```
+
+The effective placement is the per-job `job_placement` value, else the project default, else
+`offload.default`. `evaluate` then applies §7.2 order: (1) enabled, active, not revoked, online;
+(2) placement match; (3) project opted in and not `home_only`; (4) kind allow/deny; (5) required
+labels and harness capabilities; (6) no home-only secret and every required secret declared by
+the node; (7) path map present, roots present and writable, disk above `min_disk_bytes`; (8) free
+node slot, fleet `max_remote_runs` and battery/thermal (`allow_battery`); (9) no blocking provider
+limit for the job's executor provider; (10) no `owns` conflict; (11) origin match, base
+fetchability and `require_clean_base`.
+
+`home` is a target for `home`, `any` and the explicit `node:<name>+home` fallback. `any` returns
+the home plus every eligible node, so a transient node fact is not a waiting reason there. The
+job-level `project_home_only`, `kind_not_allowed` and `home_only_secret` reasons cannot be
+overridden by a per-job placement and are returned even for `any`. A node at its `max_workers` or
+the fleet at `max_remote_runs` reports `node_busy`, never `no_eligible_node`. Every optional
+`NodeFacts` field is a refusal when `None`; the evaluator never assumes a missing fact is good.
+`Decision::Waiting` leaves the job `ready`; no variant is an error.
+
+Tests (`tests/offload.rs`, values only, no store, tmux or network):
+`placement_home_node_and_any_choose_the_documented_targets`,
+`home_only_project_and_denied_kind_are_refused`,
+`home_only_secret_is_refused_and_a_node_secret_that_is_declared_is_allowed`,
+`missing_label_capability_or_harness_reports_the_documented_reason`,
+`offline_revoked_busy_battery_disk_low_and_limit_report_the_documented_reason`,
+`node_at_its_worker_cap_reports_node_busy`,
+`no_eligible_node_is_a_waiting_reason_not_a_failure` and
+`missing_origin_or_base_facts_are_refusals`.
+
+## 11. Out of scope (v0.2)
 HTTP+SSE daemon, ACP, cross-node live sync, IANA timezone schedules, notification hooks (ntfy), automatic price-table download.

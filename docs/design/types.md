@@ -927,6 +927,7 @@ pub struct VowpConfig {
     #[serde(default)] pub schedules: Vec<ScheduleConfig>,                 // [[schedules]]
     #[serde(default)] pub capsule: CapsuleConfig,
     #[serde(default)] pub merge: MergeConfig,
+    #[serde(default)] pub offload: OffloadConfig,
 }
 impl VowpConfig {
     pub fn from_toml(s: &str) -> Result<Self, ProtocolError>;            // + validate()
@@ -962,11 +963,57 @@ pub struct CapsuleConfig { pub executor: Option<Executor> /* cheapest capable; d
                            pub min_interval_secs: u64 /* 120 */, pub max_input_chars: u64 /* 200000 */, pub tail_turns: u32 /* 2 */ }
 pub struct MergeConfig { pub rebase: bool /* true */, pub check_cmds: Vec<String> /* repo-wide; falls back to project.check_cmds */,
                          pub timeout_secs: u64 /* 2700 */, pub secret_scan: bool /* true */ }
+pub struct OffloadConfig {
+    #[serde(default)] pub enabled: bool /* false */,
+    #[serde(default)] pub default: Placement /* home; validation refuses node:<name> */,
+    #[serde(default = "two")] pub max_remote_runs: u32 /* 2 */,
+    #[serde(default = "600")] pub grace_secs: u64 /* 600 */,
+    #[serde(default)] pub result_transport: ResultTransport /* push */,
+    #[serde(default)] pub pause_on_home_brake: bool /* false */,
+    #[serde(default = "true")] pub require_clean_base: bool /* true */,
+    #[serde(default = "5 GiB")] pub min_disk_bytes: u64 /* 5368709120 */,
+    #[serde(default)] pub projects: BTreeMap<ProjectName, OffloadProjectConfig>,
+    #[serde(default)] pub nodes: BTreeMap<NodeName, OffloadNodeConfig>,
+}
+#[serde(rename_all = "snake_case")]
+pub enum ResultTransport { #[default] Push, Bundle }   // Bundle is Phase 4 and validation refuses it
+pub struct OffloadProjectConfig {
+    #[serde(default)] pub placement: Option<Placement> /* None -> offload.default */,
+    #[serde(default)] pub home_only: bool /* false */,
+    #[serde(default = "default_offload_allow_kinds")] pub allow_kinds: Vec<JobKind>
+        /* [build, test, docs, fix, verify] */,
+    #[serde(default = "default_offload_deny_kinds")] pub deny_kinds: Vec<JobKind>
+        /* [merge, promote, release] */,
+    #[serde(default)] pub allow_secrets: Vec<SecretName> /* [] */,
+}
+pub struct OffloadNodeConfig {
+    #[serde(default)] pub max_workers: Option<u32> /* None -> the node's max_slots */,
+    #[serde(default)] pub allow_battery: bool /* false */,
+    #[serde(default)] pub labels: Vec<String> /* [] */,
+}
+impl OffloadConfig {
+    pub fn project_policy(&self, project: &ProjectName) -> OffloadProjectConfig;   // map entry or Default
+    pub fn node_policy(&self, node: &NodeName) -> OffloadNodeConfig;               // map entry or Default
+}
 ```
 All structs except `LoopConfig` use `#[serde(deny_unknown_fields)]`. **Every field that is not marked `required` carries `#[serde(default)]` (or a named
 default fn) giving exactly the value in its comment**; `Default` impls match. Config enums (`OnCreditsExhausted`, `Approval`, `MissedPolicy`, `OnQuota`, `ActiveState`)
 use `#[serde(rename_all = "snake_case")]`. `JobLoop` (§7) likewise: `#[serde(default = "...")]` on `until` (`gates`), `max_attempts` (3), `on_exhausted` (`escalate`).
 The only required keys in the whole file are `[project] name`, each profile's `ladder`, each `[env.*] checkout`, and each `[[schedules]] name` + `action`.
+
+`[offload]` is the §7.4 policy file embedded in `vowp.toml`. Offload is disabled by default, so
+every job stays on the home until the owner enables it and a project opts in. Validation refuses:
+
+- `max_remote_runs = 0` and `min_disk_bytes = 0`;
+- an empty `default`, and a `default` of `node:<name>` (only `home` or `any` may be a fleet
+  default; a node is named by a per-job placement);
+- `result_transport = "bundle"` with a message naming it as Phase 4 and `"push"` as the supported
+  value, never a silent fallback;
+- a project with `home_only = true` and an offload placement (`any` or `node:<name>`).
+
+Unknown keys inside any `[offload]` table are rejected by the same TOML path as every other config
+table. `OffloadConfig::project_policy` and `node_policy` fill the documented defaults for a name
+that has no table, which is what `vowp offload policy` prints.
 
 ### Node-level file (`~/.vowp/config.toml`)
 
@@ -1743,6 +1790,30 @@ whitespace, `/`, `:` or `+`.
 [`WaitingReason`] is the §7.5 vocabulary a ready job records instead of running, in the
 documented order. It is a first-class read-model value, not a log line.
 
+| Reason | Meaning |
+|---|---|
+| `node_offline` | the pinned or chosen node is not active, or its heartbeat is degraded/offline |
+| `node_revoked` | the node's credentials were revoked |
+| `node_busy` | the node or the fleet is at its worker/remote-run cap |
+| `node_battery` | the node is on battery or thermally limited and `allow_battery = false` |
+| `node_disk_low` | free space is below `offload.min_disk_bytes` |
+| `node_limit` | a provider limit blocks the run's executor on that node |
+| `path_unmapped` | the project has no path-map row on the node |
+| `path_missing` | a mapped local/worktree root is missing or not writable |
+| `missing_secret` | the node does not declare a required secret name |
+| `home_only_secret` | the job needs a secret the project does not allow a node to resolve |
+| `kind_not_allowed` | the project policy denies the job kind for offload |
+| `project_home_only` | the project is marked `home_only` |
+| `remote_mismatch` | the node's origin does not match, or is not known to match, the project remote |
+| `no_eligible_node` | no node satisfies the placement and eligibility checks |
+
+The evaluator applies the checks in §7.2 order: enabled/active/online, placement match, project
+opt-in and `home_only`, kind allow/deny, labels and harness capabilities, secrets, path map and
+disk, slots/battery/thermal, provider limit, `owns` conflict, then origin/base/cleanliness. The
+first failure is the reason. `project_home_only`, `kind_not_allowed` and `home_only_secret` are
+job-level refusals that a per-job placement cannot override; a transient node fact is only a
+waiting reason for a pinned node, because `any` still has the home.
+
 [`AssignmentPayload`] is the durable payload the home stores in its assignment row and sends
 inside [`crate::agent::AgentFrame::AssignRun`]. It carries environment and secret **names**
 only, a project-relative `PathRef`, the base commit, the remote name, the epoch, an optional
@@ -1811,3 +1882,55 @@ lease row and re-issues a token on resume.
 `NodeLimit` is keyed by `(provider, node)`. `NodeLimit.kind` is the protocol `LimitKind`
 (`quota`, `credits`, `rate`, `context`, `auth`); the schema additionally reserves
 `unavailable` for a future home-side writer, so no store method produces that value yet.
+
+### 16.10 Offload policy evaluation (`vowp-core::offload`)
+
+These are pure core values, not wire types. Callers build one `NodeFacts` per candidate and pass
+the home facts once; the evaluator never opens a store, reads a clock or touches the filesystem.
+
+```rust
+pub struct HomeFacts { pub brake_active: bool, pub active_remote_runs: u32 }
+
+pub struct NodeCapabilities {
+    pub harnesses: Vec<String>, pub secrets: Vec<SecretName>, pub projects: Vec<ProjectName>,
+}
+pub struct PathFacts {
+    pub map_present: bool, pub local_root_present: bool,
+    pub worktree_root_present: bool, pub writable: bool,
+}
+pub struct LimitFact { pub provider: String, pub kind: LimitKind, pub detail: String }
+pub enum ThermalState { Nominal, Fair, Serious, Critical }
+pub struct NodePower { pub on_battery: bool, pub thermal_state: ThermalState }
+pub struct NodeFacts {
+    pub name: NodeName, pub status: NodeStatus, pub presence: NodePresence,
+    pub labels: Vec<String>, pub capabilities: NodeCapabilities,
+    pub capacity: Option<AgentCapacity>, pub power: Option<NodePower>,
+    pub limits: Vec<LimitFact>, pub path: Option<PathFacts>,
+    pub origin_matches: Option<bool>, pub base_fetchable: Option<bool>,
+    pub clean_base: Option<bool>, pub owns_conflict: Option<bool>,
+}
+
+pub struct JobRequirements {
+    pub labels: Vec<String>, pub harnesses: Vec<String>,
+    pub secrets: Vec<SecretName>, pub provider: Option<String>,
+}
+pub struct JobRequest { pub kind: JobKind, pub placement: Option<Placement>, pub requires: JobRequirements }
+
+pub enum Target { Home, Node(NodeName) }
+pub enum Decision {
+    Eligible { targets: Vec<Target> },
+    Waiting { reason: WaitingReason, detail: String, node: Option<NodeName> },
+}
+
+pub fn evaluate(
+    fleet: &OffloadConfig, project: &ProjectName, project_policy: &OffloadProjectConfig,
+    job: &JobRequest, home: &HomeFacts, nodes: &[NodeFacts],
+) -> Decision;
+```
+
+`JobRequest.placement` is the `job_placement` side-table value; `None` falls back to the project
+default and then `offload.default`. `NodeFacts` optional fields are deliberate: `None` means the
+home does not know the fact and the evaluator refuses (`remote_mismatch`, `no_eligible_node`, or
+`node_disk_low` for an unreported disk) instead of assuming the best case. `Decision::Waiting`
+leaves the job `ready`; only the job-level `project_home_only`, `kind_not_allowed` and
+`home_only_secret` are absolute offload refusals.

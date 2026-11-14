@@ -23,7 +23,7 @@ crates/vowp-cli/
   src/cmd/mod.rs      `pub mod` for all of the below and `pub fn dispatch(ctx, Command) -> Result<i32, CliError>`
   src/cmd/init.rs  doctor.rs  job.rs  graph.rs
   src/cmd/up.rs  status.rs  board.rs  attach.rs  plan.rs  window.rs   (`up`,`down`, `status`, `board`, `attach`, `plan`, hidden `__window`)
-  src/cmd/session.rs  inbox.rs  cost.rs  node.rs  loops.rs  schedule.rs  maint.rs   (`maint` = reindex, backup, schema, version)
+  src/cmd/session.rs  inbox.rs  cost.rs  node.rs  offload.rs  loops.rs  schedule.rs  maint.rs   (`maint` = reindex, backup, schema, version)
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
@@ -160,6 +160,30 @@ These are home-only (exit 5 on a control machine) and require the home store:
   labels, capacity, mapped projects, agent version, protocol, last seen and last error. `node ls`
   and its JSON `Node` shape are unchanged.
 
+### Offload commands (`cmd/offload.rs`)
+
+The read-only v0.4 Phase 2 commands from `cli.md` §14. Neither sends `AssignRun`, creates a
+worktree or runs an agent.
+
+- `offload policy [--project <p>] [--json]` uses `ctx.config().offload`; it does not open a store
+  for the document itself. It fills defaults through `OffloadConfig::project_policy` and
+  `node_policy`, adds the selected project and registered node cards, and prints one
+  `ProjectPolicyRow` per project and one `NodePolicyRow` per node. `--project` is the global
+  selector: an explicit selection (detected by comparing the selected root with the cwd checkout)
+  restricts the project rows to that project. The human view is a scalar block followed by two
+  `Table`s; `--json` is one `EffectivePolicy` object.
+- `offload status [--json]` opens `Ctx::fleet_store`, reads node cards, live assignments
+  (`queued|sent|accepted|running|disconnected`) and per-node limits, then opens every registered
+  project read-only in turn. For each ready job with a non-`home` `job_placement` row it builds
+  `vowp_core::offload::NodeFacts` and calls `evaluate` with the project's effective policy. The
+  human view is the `nodes`/`assignments`/`ready` tables; `--json` is `OffloadStatusOutput`.
+  `AssignmentRow` deliberately omits `AssignmentPayload` (its prompt is not part of this view), and
+  no row carries an absolute local path.
+- `job add --placement` parses `Placement`, refuses `node:<name>` with exit 5 when
+  `offload.enabled = false` before inserting anything, writes the `job_placement` row immediately
+  after the job row, and deletes the job if either the placement or brief write fails. `job show`
+  adds the placement to human output and to its JSON object; `job ls` is unchanged.
+
 ### Local chat (`chat --agent`)
 
 `vowp chat --agent --session <id> [--executor <exec>] [--node <name>]` runs the Phase 1 local
@@ -208,7 +232,11 @@ surface-pairing slice adds `agent_pair_help_names_code_surface_and_session`,
 `surface_pair_cli_prints_code_once_and_lists_pending`,
 `surface_revoke_marks_the_token_revoked`, `surface_command_requires_a_node_and_session`,
 `surface_ls_never_prints_a_token` and `surface_commands_are_home_only` in `tests/agent.rs`,
-plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`.
+plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`. The
+offload-policy slice adds `job_add_refuses_node_placement_when_offload_is_disabled`,
+`job_add_persists_any_placement_and_job_show_reads_it`,
+`offload_policy_json_is_the_effective_policy` and
+`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

@@ -151,6 +151,9 @@ python3 docs/reference/check-reference.py
 | [`vowp surface pair`](#vowp-surface-pair) | Create a pending surface and print its one-time pairing code |
 | [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
 | [`vowp surface revoke`](#vowp-surface-revoke) | Revoke a surface and every token it holds |
+| [`vowp offload`](#vowp-offload) | Show the effective offload policy or the offload read model |
+| [`vowp offload policy`](#vowp-offload-policy) | Show the effective offload policy |
+| [`vowp offload status`](#vowp-offload-status) | Show nodes, live assignments and waiting jobs |
 | [`vowp __exec`](#vowp-__exec) | Hidden: remote executor client |
 | [`vowp __vault-exec`](#vowp-__vault-exec) | Hidden: vault read/inject helper |
 | [`vowp __vault-admin`](#vowp-__vault-admin) | Hidden: vault write helper |
@@ -181,6 +184,7 @@ Commands:
   inbox         List and answer inbox items
   cost          Show cost totals
   node          Add, list or remove nodes
+  offload       Show the effective offload policy or the offload read model
   loops         List or pause supervisor loops
   schedule      Manage scheduled actions
   promote       Promote a change to an environment
@@ -419,6 +423,7 @@ Options:
       --max-attempts <N>       Maximum fix rounds
       --brief-file <PATH>      Read the brief body from this file
       --brief <PATH|->         Read the brief body from stdin (`-`)
+      --placement <PLACEMENT>  Offload placement: `home`, `any`, `node:<name>` or `node:<name>+home`
   -h, --help                   Print help
 ```
 
@@ -3036,6 +3041,64 @@ Arguments:
 Options:
       --json                 Print one machine-readable JSON document on stdout
       --yes                  Revoke without asking for confirmation
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+### `vowp offload`
+
+```text
+Show the effective offload policy or the offload read model
+
+Usage: vowp offload [OPTIONS] <COMMAND>
+
+Commands:
+  policy  Show the effective offload policy
+  status  Show nodes, live assignments and waiting jobs
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp offload policy`
+
+```text
+Show the effective offload policy
+
+Usage: vowp offload policy [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp offload status`
+
+```text
+Show nodes, live assignments and waiting jobs
+
+Usage: vowp offload status [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)

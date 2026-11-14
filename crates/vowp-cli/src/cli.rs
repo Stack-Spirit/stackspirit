@@ -49,6 +49,7 @@ pub const V0_2_COMMANDS: &[&str] = &[
     "mcp",
     "agent",
     "surface",
+    "offload",
     "__exec",
     "__vault-exec",
     "__vault-admin",
@@ -281,6 +282,8 @@ pub enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    /// Show the effective offload policy or the offload read model.
+    Offload(OffloadArgs),
     /// List or pause supervisor loops.
     Loops(LoopsArgs),
     /// Manage scheduled actions.
@@ -498,6 +501,9 @@ pub struct JobAddArgs {
     /// Read the brief body from stdin (`-`).
     #[arg(long, value_name = "PATH|-", conflicts_with = "brief_file")]
     pub brief: Option<String>,
+    /// Offload placement: `home`, `any`, `node:<name>` or `node:<name>+home`.
+    #[arg(long, value_name = "PLACEMENT")]
+    pub placement: Option<String>,
 }
 
 /// Arguments for `vowp job update`.
@@ -1131,6 +1137,34 @@ pub struct NodeShowArgs {
     /// Node name.
     pub name: String,
 }
+
+/// Arguments for `vowp offload`.
+#[derive(Debug, Clone, Args)]
+pub struct OffloadArgs {
+    /// The offload subcommand.
+    #[command(subcommand)]
+    pub command: OffloadCommand,
+}
+
+/// The `vowp offload` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum OffloadCommand {
+    /// Show the effective offload policy.
+    Policy(OffloadPolicyArgs),
+    /// Show nodes, live assignments and waiting jobs.
+    Status(OffloadStatusArgs),
+}
+
+/// Arguments for `vowp offload policy`.
+///
+/// The project selector is the global `--project <name|path>` flag; the selected
+/// `vowp.toml` supplies the policy document.
+#[derive(Debug, Clone, Default, Args)]
+pub struct OffloadPolicyArgs {}
+
+/// Arguments for `vowp offload status`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct OffloadStatusArgs {}
 
 /// `vowp agent` subcommands.
 #[derive(Debug, Clone, Subcommand)]

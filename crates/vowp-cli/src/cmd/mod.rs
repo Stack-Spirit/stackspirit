@@ -26,6 +26,7 @@ pub mod maint;
 pub mod mcp;
 pub mod migrate;
 pub mod node;
+pub mod offload;
 pub mod orchestrator;
 pub mod plan;
 pub mod project;
@@ -75,6 +76,7 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Inbox { command } => inbox::run(ctx, io, &command),
         Command::Cost(args) => cost::run(ctx, io, &args),
         Command::Node { command } => node::run(ctx, io, &command),
+        Command::Offload(args) => offload::run(ctx, io, &args.command),
         Command::Loops(args) => loops::run(ctx, io, &args),
         Command::Schedule(args) => schedule::run(ctx, io, &args),
         Command::Promote(args) => promote::run(ctx, io, &PromoteCommand::Promote(args)),

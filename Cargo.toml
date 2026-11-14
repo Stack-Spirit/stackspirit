@@ -108,6 +108,10 @@ name = "loops"
 path = "crates/vowp-cli/tests/loops.rs"
 
 [[test]]
+name = "offload"
+path = "crates/vowp-cli/tests/offload.rs"
+
+[[test]]
 name = "maint"
 path = "scripts/release/cargo-tests/maint.rs"
 
