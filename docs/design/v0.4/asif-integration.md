@@ -149,8 +149,9 @@ ASIF import rules:
 3. **The adapter owns the translation.** VOWP does not re-map events. It pre-checks the
    staged log with the same rules the indexer applies (parse, `session.created` first, clean
    tail, no duplicate event ids), then renames the directory to `sessions/<id>/` and runs the
-   existing indexer. The indexer must produce exactly one session row; any problem removes
-   the new directory and leaves no partial index.
+   existing indexer. The indexer must produce exactly one session row. Only the expected
+   `project ... left null` / `job ... left null` foreign-key warnings are returned as
+   warnings; any other reindex problem removes the new directory and leaves no partial index.
 4. **Failure leaves nothing.** A bad package, strict loss, reindex failure or rename collision
    removes the staging directory, any temporary upload and any partial report. No row, log,
    blob, capsule or lease is created.
