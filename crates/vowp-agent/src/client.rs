@@ -3,12 +3,14 @@
 //! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2, §4.6, §8.2–§8.5 and §12.2. All I/O goes
 //! through a [`Transport`]; tests inject an in-memory home instead of opening SSH.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use vowp_protocol::agent::surface::{SurfaceAttach, SurfaceDetach, ToolCall, ToolResult};
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, ErrorKind, NodeName,
     SessionId, SurfaceId, SurfaceScope, Timestamp,
@@ -18,6 +20,7 @@ use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surfac
 use crate::error::AgentError;
 use crate::executor::{RunDriver, RunHandler};
 use crate::key::NodeKey;
+use crate::socket::{AgentSocket, SOCKET_POLL, SocketEvent, SocketResponse, TOOL_CALL_TIMEOUT};
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 use crate::transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
 
@@ -225,6 +228,14 @@ pub struct AgentClient {
     sent_path_maps: Vec<AgentPathMap>,
     path_map_updates: bool,
     awaiting_path_map_reply: bool,
+    socket: Option<AgentSocket>,
+    pending_tool_calls: HashMap<String, PendingToolCall>,
+    tool_call_timeout: Duration,
+}
+
+struct PendingToolCall {
+    reply: mpsc::Sender<SocketResponse>,
+    deadline: Instant,
 }
 
 struct Connection {
@@ -266,6 +277,9 @@ impl AgentClient {
             sent_path_maps: Vec::new(),
             path_map_updates: true,
             awaiting_path_map_reply: false,
+            socket: None,
+            pending_tool_calls: HashMap::new(),
+            tool_call_timeout: TOOL_CALL_TIMEOUT,
         }
     }
 
@@ -291,6 +305,9 @@ impl AgentClient {
             sent_path_maps: Vec::new(),
             path_map_updates: true,
             awaiting_path_map_reply: false,
+            socket: None,
+            pending_tool_calls: HashMap::new(),
+            tool_call_timeout: TOOL_CALL_TIMEOUT,
         }
     }
 
@@ -311,6 +328,15 @@ impl AgentClient {
     /// Replaces the reconnect backoff (tests use [`Backoff::seeded`]).
     pub fn with_backoff(mut self, backoff: Backoff) -> Self {
         self.backoff = backoff;
+        self
+    }
+
+    /// Replaces how long a local tool call waits for the home's `ToolResult`.
+    ///
+    /// The default is [`TOOL_CALL_TIMEOUT`]. A result that arrives after the deadline is
+    /// ignored and the requesting client receives a typed `tool_timeout` error.
+    pub fn with_tool_call_timeout(mut self, timeout: Duration) -> Self {
+        self.tool_call_timeout = timeout;
         self
     }
 
@@ -677,42 +703,60 @@ impl AgentClient {
         self.run_with(RunDriver::new(handler), options)
     }
 
-    fn run_with(&mut self, mut driver: RunDriver, _options: &RunOptions) -> Result<RunOutcome, AgentError> {
+    fn run_with(&mut self, driver: RunDriver, options: &RunOptions) -> Result<RunOutcome, AgentError> {
         if self.config.is_none() {
             return Err(AgentError::NotEnrolled("agent.json is missing".to_owned()));
         }
+        if let Err(error) = self.start_socket() {
+            self.status.connection = ConnectionState::Stopped;
+            self.status.last_error = Some(error.to_string());
+            self.save_status()?;
+            return Err(error);
+        }
+        let outcome = self.run_loop(driver, options);
+        self.stop_socket();
+        outcome
+    }
+
+    fn run_loop(&mut self, mut driver: RunDriver, _options: &RunOptions) -> Result<RunOutcome, AgentError> {
         let mut backoff = self.backoff.clone();
         self.status = base_status(&self.state_dir, self.config.as_ref(), &self.key);
         self.status.connection = ConnectionState::Connecting;
         self.save_status()?;
 
         loop {
+            self.set_socket_connected(false);
             let connected_at = match self.connect() {
                 Ok(()) => {
+                    self.set_socket_connected(true);
                     self.status.connection = ConnectionState::Connected;
                     self.status.last_error = None;
                     self.save_status()?;
                     Some(self.clock.now())
                 }
                 Err(AgentError::Revoked(reason)) => {
+                    self.handle_connection_lost();
                     self.status.connection = ConnectionState::Revoked;
                     self.status.last_error = Some(reason.clone());
                     self.save_status()?;
                     return Ok(RunOutcome::Revoked { reason });
                 }
                 Err(AgentError::Superseded(connection_id)) => {
+                    self.handle_connection_lost();
                     self.status.connection = ConnectionState::Superseded;
                     self.status.last_error = Some(format!("superseded by {connection_id}"));
                     self.save_status()?;
                     return Ok(RunOutcome::Superseded { connection_id });
                 }
                 Err(error) if error.is_fatal() => {
+                    self.handle_connection_lost();
                     self.status.connection = ConnectionState::Stopped;
                     self.status.last_error = Some(error.to_string());
                     self.save_status()?;
                     return Err(error);
                 }
                 Err(error) => {
+                    self.handle_connection_lost();
                     self.status.connection = ConnectionState::Reconnecting;
                     self.status.last_error = Some(error.to_string());
                     self.save_status()?;
@@ -725,6 +769,11 @@ impl AgentClient {
                     Ok(()) => self.serve(&mut driver),
                     Err(error) => serve_outcome_from_error(error),
                 };
+                let disconnected = matches!(served, ServeOutcome::Disconnected(_));
+                if disconnected {
+                    driver.note_disconnect(self);
+                }
+                self.handle_connection_lost();
                 match served {
                     ServeOutcome::Stopped(outcome) => return Ok(outcome),
                     ServeOutcome::Failed(error) => {
@@ -734,7 +783,6 @@ impl AgentClient {
                         return Err(error);
                     }
                     ServeOutcome::Disconnected(message) => {
-                        driver.note_disconnect(self);
                         self.status.connection = ConnectionState::Reconnecting;
                         self.status.last_error = Some(message);
                         self.save_status()?;
@@ -749,6 +797,184 @@ impl AgentClient {
             self.status.connection = ConnectionState::Reconnecting;
             self.save_status()?;
             self.clock.sleep(delay);
+        }
+    }
+
+    fn start_socket(&mut self) -> Result<(), AgentError> {
+        if self.socket.is_none() {
+            self.socket = Some(AgentSocket::bind(&self.state_dir)?);
+        }
+        Ok(())
+    }
+
+    fn stop_socket(&mut self) {
+        self.set_socket_connected(false);
+        self.fail_pending_tool_calls("home_offline", "the agent stopped listening for local tool calls");
+        self.socket = None;
+    }
+
+    fn set_socket_connected(&self, connected: bool) {
+        if let Some(socket) = &self.socket {
+            socket.set_connected(connected);
+        }
+    }
+
+    /// Marks the home connection unusable and answers every queued local request offline.
+    fn handle_connection_lost(&mut self) {
+        self.set_socket_connected(false);
+        self.connection = None;
+        self.fail_pending_tool_calls("home_offline", "the home connection is not available");
+        let _ = self.service_socket();
+    }
+
+    fn service_socket(&mut self) -> Result<(), AgentError> {
+        let events = match &self.socket {
+            Some(socket) => socket.drain_events(),
+            None => return Ok(()),
+        };
+        for event in events {
+            self.handle_socket_event(event)?;
+        }
+        self.expire_pending_tool_calls();
+        Ok(())
+    }
+
+    fn handle_socket_event(&mut self, event: SocketEvent) -> Result<(), AgentError> {
+        match event {
+            SocketEvent::Attach {
+                surface,
+                session,
+                reply,
+            } => self.forward_surface_frame(AgentFrame::SurfaceAttach(SurfaceAttach { surface, session }), reply),
+            SocketEvent::Detach {
+                surface,
+                session,
+                reply,
+            } => self.forward_surface_frame(AgentFrame::SurfaceDetach(SurfaceDetach { surface, session }), reply),
+            SocketEvent::ToolCall { call, reply } => self.forward_tool_call(call, reply),
+        }
+    }
+
+    fn forward_surface_frame(
+        &mut self,
+        frame: AgentFrame,
+        reply: mpsc::Sender<SocketResponse>,
+    ) -> Result<(), AgentError> {
+        if self.connection.is_none() {
+            let _ = reply.send(socket_offline_error());
+            return Ok(());
+        }
+        match self.send_frame(&frame) {
+            Ok(()) => {
+                let _ = reply.send(SocketResponse::Ok);
+                Ok(())
+            }
+            Err(error) => {
+                let response = match &error {
+                    AgentError::FrameTooLarge { .. } => SocketResponse::Error {
+                        code: "frame_too_large".to_owned(),
+                        message: "the request does not fit the home frame limit".to_owned(),
+                    },
+                    AgentError::Json(_) => SocketResponse::Error {
+                        code: "invalid_request".to_owned(),
+                        message: "the request could not be encoded".to_owned(),
+                    },
+                    _ => socket_offline_error(),
+                };
+                let _ = reply.send(response);
+                socket_forward_failure(error)
+            }
+        }
+    }
+
+    fn forward_tool_call(&mut self, call: ToolCall, reply: mpsc::Sender<SocketResponse>) -> Result<(), AgentError> {
+        let request_id = call.request_id.clone();
+        if self.connection.is_none() {
+            let _ = reply.send(socket_offline_tool_result(&request_id));
+            return Ok(());
+        }
+        if self.pending_tool_calls.contains_key(&request_id) {
+            let _ = reply.send(SocketResponse::tool_error(
+                &request_id,
+                "duplicate_request_id",
+                "another tool call is already using this request id",
+                false,
+            ));
+            return Ok(());
+        }
+        match self.send_frame(&AgentFrame::ToolCall(call)) {
+            Ok(()) => {
+                self.pending_tool_calls.insert(
+                    request_id,
+                    PendingToolCall {
+                        reply,
+                        deadline: Instant::now() + self.tool_call_timeout,
+                    },
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let response = match &error {
+                    AgentError::FrameTooLarge { .. } => SocketResponse::tool_error(
+                        &request_id,
+                        "frame_too_large",
+                        "the request does not fit the home frame limit",
+                        false,
+                    ),
+                    AgentError::Json(_) => SocketResponse::tool_error(
+                        &request_id,
+                        "invalid_request",
+                        "the request could not be encoded",
+                        false,
+                    ),
+                    _ => socket_offline_tool_result(&request_id),
+                };
+                let _ = reply.send(response);
+                socket_forward_failure(error)
+            }
+        }
+    }
+
+    fn complete_tool_call(&mut self, result: ToolResult) {
+        let Some(pending) = self.pending_tool_calls.remove(&result.request_id) else {
+            return;
+        };
+        let _ = pending.reply.send(SocketResponse::ToolResult {
+            request_id: result.request_id,
+            result: result.result,
+            error: result.error,
+        });
+    }
+
+    fn expire_pending_tool_calls(&mut self) {
+        if self.pending_tool_calls.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let expired: Vec<String> = self
+            .pending_tool_calls
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        for request_id in expired {
+            if let Some(pending) = self.pending_tool_calls.remove(&request_id) {
+                let _ = pending.reply.send(SocketResponse::tool_error(
+                    &request_id,
+                    "tool_timeout",
+                    "the home did not answer the tool call before the timeout",
+                    true,
+                ));
+            }
+        }
+    }
+
+    fn fail_pending_tool_calls(&mut self, code: &str, message: &str) {
+        let pending: Vec<(String, PendingToolCall)> = self.pending_tool_calls.drain().collect();
+        for (request_id, call) in pending {
+            let _ = call
+                .reply
+                .send(SocketResponse::tool_error(&request_id, code, message, true));
         }
     }
 
@@ -906,15 +1132,60 @@ impl AgentClient {
     }
 
     pub(crate) fn recv_frame(&mut self, timeout: Option<Duration>) -> Result<FrameRead, AgentError> {
-        self.connection
-            .as_mut()
-            .ok_or_else(|| AgentError::Transport("not connected".to_owned()))?
-            .stream
-            .recv(timeout)
+        let started = Instant::now();
+        loop {
+            self.service_socket()?;
+            let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
+            // Wake at least every millisecond so an elapsed fake-clock deadline still makes
+            // progress instead of spinning on a zero-length read. With a local socket bound
+            // the frame loop also wakes often enough to answer a new client promptly.
+            let wait = match (self.socket.is_some(), remaining) {
+                (true, Some(limit)) => Some(limit.max(Duration::from_millis(1)).min(SOCKET_POLL)),
+                (true, None) => Some(SOCKET_POLL),
+                (false, Some(limit)) => Some(limit.max(Duration::from_millis(1))),
+                (false, None) => None,
+            };
+            let read = self
+                .connection
+                .as_mut()
+                .ok_or_else(|| AgentError::Transport("not connected".to_owned()))?
+                .stream
+                .recv(wait)?;
+            match read {
+                // A tool result is answered locally and never reaches the run driver.
+                FrameRead::Frame(AgentFrame::ToolResult(result)) => self.complete_tool_call(result),
+                other => return Ok(other),
+            }
+        }
     }
 
     fn save_status(&self) -> Result<(), AgentError> {
         self.status.write(&self.state_dir)
+    }
+}
+
+fn socket_offline_error() -> SocketResponse {
+    SocketResponse::Error {
+        code: "home_offline".to_owned(),
+        message: "the agent is not connected to the home; start `vowp agent run`".to_owned(),
+    }
+}
+
+fn socket_offline_tool_result(request_id: &str) -> SocketResponse {
+    SocketResponse::tool_error(
+        request_id,
+        "home_offline",
+        "the agent is not connected to the home; start `vowp agent run`",
+        true,
+    )
+}
+
+/// A frame that cannot be encoded or does not fit is a local rejection; any other send
+/// failure means the home connection is no longer usable.
+fn socket_forward_failure(error: AgentError) -> Result<(), AgentError> {
+    match error {
+        AgentError::FrameTooLarge { .. } | AgentError::Json(_) => Ok(()),
+        error => Err(error),
     }
 }
 

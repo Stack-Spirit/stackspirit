@@ -1,9 +1,9 @@
 # crate `vowp-agent` — Mac-side v0.4 agent client
 
 Phase 0/1 client for a local node: local config, the ed25519 node key, the SSH stdio transport,
-surface pairing, the `vowp-protocol` frame client and the run-assignment transport loop. It depends on
-`vowp-protocol` only; it never opens a store, a database or `vowp-core`, and it never dials a home except
-through the injected transport.
+surface pairing, the mode-0600 local agent socket, the `vowp-protocol` frame client and the
+run-assignment transport loop. It depends on `vowp-protocol` only; it never opens a store, a
+database or `vowp-core`, and it never dials a home except through the injected transport.
 Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §6.3–§6.5,
 §8.2–§8.5, §9 and §12.2.
 
@@ -19,6 +19,7 @@ crates/vowp-agent/
   src/client.rs     AgentClient, AgentClock, Backoff, RunOptions, RunOutcome, SurfacePairRequest
   src/executor.rs   RunHandler, RunSink, AcceptedRun, HandlerReject, RunSummary, spool/ack/replay loop
   src/chat.rs       ChatClient, ChatTurnRequest, ChatTurnStatus, lease/turn/replay loop
+  src/socket.rs     AgentSocket, the local request/response protocol and the 0600 listener
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
   src/worktree.rs   PathMap, WorktreeManager, Worktree, push/cleanup and the disk guard
@@ -26,6 +27,7 @@ crates/vowp-agent/
   tests/config.rs   path-map persistence, validation, enrollment and update frames
   tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
   tests/executor.rs fake home and fake handler for assignments, acks, replay and fencing
+  tests/socket.rs   real Unix socket plus in-memory home for attach/detach and tool calls
   tests/worktree.rs temporary origin/clone plus real git for create/reuse/cleanup/push
 ```
 
@@ -40,6 +42,7 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `node.key` | 0600 | the 32-byte ed25519 secret as lowercase hex |
 | `node.pub` | 0644 | the 32-byte public key as lowercase hex |
 | `status.json` | 0600 | the last `AgentStatus` document |
+| `agent.sock` | 0600 | the local agent socket bound by `vowp agent run`; removed on clean exit |
 | `spool/` | — | pending bytes counted by `status`, never opened as a database |
 | `surfaces/` | 0700 | one directory per paired surface |
 | `surfaces/<id>/token` | 0600 | the `vowp_surf_` token returned by `SurfaceIssued`; never printed |
@@ -121,6 +124,7 @@ impl AgentClient {
     pub fn unenrolled(state_dir: PathBuf, key: NodeKey, transport: Box<dyn Transport>, clock: Arc<dyn AgentClock>) -> Self;
     pub fn from_state_dir(state_dir: PathBuf, clock: Arc<dyn AgentClock>) -> Result<Self, AgentError>;
     pub fn with_backoff(self, backoff: Backoff) -> Self;
+    pub fn with_tool_call_timeout(self, timeout: Duration) -> Self;
     pub fn with_path_maps(self, path_maps: Vec<AgentPathMap>) -> Self;
     pub fn path_maps(&self) -> &[AgentPathMap];
     pub fn enroll(&mut self, target: &str, code: &str) -> Result<Enrollment, AgentError>;
@@ -132,6 +136,28 @@ impl AgentClient {
     pub fn run_with_handler(&mut self, options: &RunOptions, handler: Arc<dyn RunHandler>)
         -> Result<RunOutcome, AgentError>;
     pub fn status(&self) -> AgentStatus;
+}
+
+pub const AGENT_SOCKET_FILE: &str;              // "agent.sock"
+pub const MAX_SOCKET_REQUEST_BYTES: usize;     // 1 MiB including the newline
+pub const TOOL_CALL_TIMEOUT: Duration;         // 60 s
+pub struct AgentSocket { /* path, listener, accept thread, request channel */ }
+impl AgentSocket {
+    pub fn bind(state_dir: &Path) -> Result<Self, AgentError>;          // 0600, live-server guard
+    pub fn path(&self) -> &Path;
+}
+pub enum SocketRequest {
+    Ping,
+    Attach { surface: SurfaceId, session: SessionId },
+    Detach { surface: SurfaceId, session: SessionId },
+    ToolCall { request_id: String, surface: SurfaceId, session: SessionId,
+               tool: String, arguments: serde_json::Value },
+}
+pub enum SocketResponse {
+    Ok,
+    Pong,
+    ToolResult { request_id: String, result: Option<serde_json::Value>, error: Option<ToolError> },
+    Error { code: String, message: String },
 }
 
 pub struct SurfacePairRequest { pub code: String, pub surface_id: SurfaceId, pub session: SessionId, pub app: String }
@@ -360,6 +386,48 @@ returns [`ChatTurnStatus::ReadOnly`] and keeps the spool; that includes a loss r
 reconnect after the first `Hello` send fails. A frame that would push `events.jsonl` past 2 GiB
 returns [`ChatTurnStatus::SpoolFull`]; it is never sent. Unacknowledged events are never deleted.
 
+### Local agent socket
+
+`AgentClient::run` and `AgentClient::run_with_handler` bind `<state_dir>/agent.sock` before
+the first connection attempt and stop the listener when the loop ends. The socket file is
+mode 0600 inside the 0700 state directory. `AgentSocket::bind` refuses a live server by
+probing the existing path, removes a stale file left by a crashed process and binds once
+more, so a second `vowp agent run` cannot silently take over the socket. The bound file is
+removed on drop only when it is still the inode this server created.
+
+The protocol is one UTF-8 JSON object per line, request and response, capped at
+[`MAX_SOCKET_REQUEST_BYTES`] (1 MiB including the newline):
+
+| Request | Response | Effect |
+|---|---|---|
+| `{"kind":"ping"}` | `{"kind":"pong"}` | local liveness; never touches the home |
+| `{"kind":"attach","surface":…,"session":…}` | `{"kind":"ok"}` | one `SurfaceAttach` frame on the outbound connection |
+| `{"kind":"detach","surface":…,"session":…}` | `{"kind":"ok"}` | one `SurfaceDetach` frame |
+| `{"kind":"tool_call","request_id":…,"surface":…,"session":…,"tool":…,"arguments":{…}}` | `{"kind":"tool_result","request_id":…,"result"|"error":…}` | one `ToolCall` frame; the matching `ToolResult` is returned |
+| malformed or unknown `kind` | `{"kind":"error","code":…,"message":…}` | `unknown_kind`, `invalid_request` or `frame_too_large` |
+
+The surface and session ids are shape-checked locally; the request id and tool name are
+printable strings of at most 128 bytes and `arguments` must be a JSON object. The server
+does not open the store, read a home secret or log a request, response, argument or token.
+Several local clients may connect at once; each accepted connection has a thread, and the
+frame loop serializes every frame write on the one outbound connection.
+
+A local request is queued only while the frame loop reports a live home connection. A
+disconnected home, a request that raced a drop, or a closed listener answers a tool call
+with the typed `home_offline` `ToolError` (`retryable: true`) and an attach/detach with
+`{"kind":"error","code":"home_offline"}`; neither panics. A tool call whose `ToolResult`
+does not arrive within [`TOOL_CALL_TIMEOUT`] (60 seconds, replaceable with
+`AgentClient::with_tool_call_timeout`) is removed from the pending map and answered with
+a typed `tool_timeout` error. A late result with an unknown request id is ignored. Attach,
+detach and tool calls never block the event stream or the heartbeat: the frame loop keeps
+reading frames and servicing the socket between reads.
+
+The home remains authoritative: a surface that is not attached, a revoked surface or a
+lost lease produces the home's `ToolError`, which the server returns unchanged. The agent
+never tracks token scopes or leases for the socket and never decides that a tool call is
+allowed. The socket is the local transport only; `vowp mcp` and the opencode bridge remain
+separate jobs.
+
 ### Run assignment loop
 
 `AgentClient::run` keeps the Phase 0 behaviour: it has no executor, so an `AssignRun` is refused
@@ -512,6 +580,17 @@ The run-assignment slice adds, in `tests/executor.rs`, with a fake home and fake
 `AgentClient::run_with_handler`; the fake home implements `Transport`/`FrameStream` in memory and
 the fake handler implements `RunHandler`/`RunSink`.
 
+The local-socket slice adds, in `tests/socket.rs`, with a real Unix socket below a temporary
+state directory and an in-memory fake home:
+`agent_socket_is_0600_and_refuses_a_second_live_server`,
+`socket_attach_and_detach_forward_the_surface_frames`,
+`socket_tool_call_round_trips_and_matches_by_request_id`,
+`socket_tool_call_returns_home_offline_when_the_connection_drops`,
+`socket_tool_call_times_out_without_a_home_result`,
+`socket_pending_tool_call_does_not_block_heartbeats`,
+`socket_rejects_an_unknown_kind_and_an_oversized_frame` and
+`socket_never_logs_arguments_or_a_secret`.
+
 ## 8. Worktrees, path maps and result return
 
 `src/worktree.rs` is the §6.4–§6.5 foundation the executor calls after `AssignRun`. It adds no
@@ -621,8 +700,10 @@ offload, home-side path-map storage and `vowp node paths`, launchd and WSS ingre
 jobs. Phase 0 `vowp agent run`
 stays in the foreground; `--role` is accepted and carried in `RunOptions`, and the run-assignment
 frame loop is `run_with_handler` with an injected handler. `vowp agent surface
-start|attach|detach`, the MCP proxy and token rotation are later v0.4 slices. The local chat
-bridge is this slice; the opencode app bridge and MCP proxy remain later. The real harness runner
+start|attach|detach`, the MCP proxy command and token rotation are later v0.4 slices. This crate
+now serves the local agent socket that a later `vowp mcp --agent-socket … --surface …` will use;
+the CLI command, the opencode app bridge and the CLI-side socket client remain later jobs. The
+real harness runner
 (adapter selection, worktree creation, environment resolution and result push) that implements
 `RunHandler` is the next executor job; this slice supplies the transport, spool and replay half
 and tests it with a fake handler.

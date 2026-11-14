@@ -14,6 +14,7 @@ pub mod config;
 pub mod error;
 pub mod executor;
 pub mod key;
+pub mod socket;
 pub mod spool;
 pub mod status;
 pub mod transport;
@@ -37,6 +38,9 @@ pub use executor::{
     RunSummary,
 };
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
+pub use socket::{
+    AGENT_SOCKET_FILE, AgentSocket, MAX_SOCKET_REQUEST_BYTES, SocketRequest, SocketResponse, TOOL_CALL_TIMEOUT,
+};
 pub use spool::{ACKED_FILE, DEFAULT_SPOOL_CAP_BYTES, EVENTS_FILE, SPOOL_DIR, Spool, SpoolAppend, spool_dir};
 pub use status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 pub use transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
