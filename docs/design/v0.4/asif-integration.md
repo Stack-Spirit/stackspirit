@@ -605,9 +605,9 @@ would need a real authorization model; this slice does not invent one.
 ### 6.4 Temp files, limits and secret exposure
 
 - Private directories use a fresh ULID, mode `0700`; uploaded files and packages use `0600`.
-- Temp directories are removed on success, error, timeout and client disconnect. A crash may
-  leave an `asif-*` directory under `<home>/tmp`; it contains only the caller's upload or
-  export, never a token or a log line.
+- Temp directories are removed on success, error, a five-minute upload/export timeout and
+  client disconnect. A crash may leave an `asif-*` directory under `<home>/tmp`; it contains
+  only the caller's upload or export, never a token or a log line.
 - Limits: 16 MiB session/report JSON, 64 MiB single resource, 256 MiB total resources,
   272 MiB archive, 1,024 members, 4,096-character portable paths. Exceeding a limit is a
   typed error, never a truncation.
