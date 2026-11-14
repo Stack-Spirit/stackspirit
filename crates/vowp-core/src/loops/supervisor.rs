@@ -1850,7 +1850,12 @@ impl Supervisor {
             Effect::CreateFixJob { kind } => {
                 let job = self.store.require_job(job_id)?;
                 let child = dispatch::create_child_job(&self.deps, &self.store, &job, *kind, findings)?;
-                self.apply_with(&child.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
+                // A recovered parent can rediscover a live fix child. Starting it again would
+                // send NeedsSatisfied to Ready/Running and wedge the parent. Only a brand-new
+                // pending child needs the readiness event.
+                if child.state == JobState::Pending {
+                    self.apply_with(&child.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
+                }
             }
             Effect::CreateDecisionJob => {
                 let job = self.store.require_job(job_id)?;

@@ -69,7 +69,7 @@ Loop rows created on first `vowp up` (`name`, `kind`, `interval_secs`): `l1-supe
 
 ## 2. The job state machine (`vowp_graph::transition` implements this table exactly)
 
-Defaults: `MAX_CONTINUES=2` (per attempt), `MAX_HANG_RESTARTS=3`, `max_attempts = job.loop.max_attempts` (3). L1 reads the first two from
+Defaults: `MAX_CONTINUES=2` (per attempt), `MAX_HANG_RESTARTS=3`, `max_attempts = job.loop.max_attempts` (2). L1 reads the first two from
 `LoopBounds.max_continues` / `max_hang_restarts` (these defaults when unset); `attempts` counts **fix rounds started**;
 `continues` is reset to 0 whenever a new attempt or a retry begins. "Counter effects" are applied by the caller when the effect is listed; guards read the **current** job row.
 Every transition also writes one ledger row (`kind=state`, summary `"<job>: <from> -> <to> (<event>)"`) — not listed as an effect.
@@ -151,7 +151,7 @@ Their `gates` = `[report, cmd gates of the original]` (no `review`, no `owns_res
    {findings as a numbered list: gate name, command, exit code, last 40 lines of output / verifier findings}
    Fix exactly these problems in the same worktree, re-run the failing commands, commit, and update {report_path}. Do not widen scope.
    ```
-4. **Bounds.** Continues ≤ 2 per attempt (`jobs.continues`); then the job is `stalled` and the keeper (L5) is woken. Hung-before-first-output restarts ≤ 3 (`hang_restarts`). Fix rounds ≤ `loop.max_attempts` (3).
+4. **Bounds.** Continues ≤ 2 per attempt (`jobs.continues`); then the job is `stalled` and the keeper (L5) is woken. Hung-before-first-output restarts ≤ 3 (`hang_restarts`). Fix rounds ≤ `loop.max_attempts` (2).
 5. **After a worker run ends** (step 2 of the tick): if `report_path` exists in the worktree and parses (`Report::parse`) with `status ∈ {done, partial, blocked}`: `status=blocked` → `Blocked{Question}` (questions_for_owner → inbox body) else `ReportReady`. Report missing or unparsable → `RunEndedNoReport`.
 6. A **report that predates the current attempt** (mtime < run start of this attempt) is ignored; fix attempts require the report be rewritten.
 
@@ -198,8 +198,8 @@ A hit stores `{path, line, rule}` only. `vowp_core::gates::secret_scan::rules()`
 
 ### 5.2 Result
 4. Verify job reaches `done` (T14), then its report is parsed: `verdict: pass` → `VerifyPassed` for the original. `verdict: fail` (≥1 finding required; a fail without findings is treated as `partial` → the verify job is retried once, then `Blocked{Question}`) → `VerifyFailed`.
-5. Fix creation (T20): job `<id>-fix-<attempt>` (`kind=fix`, role/profile/owns copied, `needs=[]`, edge `fix fixes original`, brief = fix prompt + findings). Fix job `done` ⇒ `FixDone{Fix}` to the original (T22).
-6. Bound: `attempts` ≤ `loop.max_attempts` (3). Exhausted → `on_exhausted` (§2): **escalate** creates `<id>-decision` (`kind=decision`, edge `decision escalates original`, `decision blocks <dependents>` for every job that `needs` the original) and an inbox item (kind `decision`, options `["retry","replan","cancel"]`).
+5. Fix creation (T20): job `<id>-fix-<attempt>` (`kind=fix`, role/profile/owns copied, `needs=[]`, edge `fix fixes original`, brief = fix prompt + findings). Fix job `done` ⇒ `FixDone{Fix}` to the original (T22). If recovery finds a terminal child from an earlier round at that id, it allocates a fresh `<id>-fix-<attempt>-rN` child and starts that, rather than sending `NeedsSatisfied` to the finished one.
+6. Bound: `attempts` ≤ `loop.max_attempts` (2). Exhausted → `on_exhausted` (§2): **escalate** creates `<id>-decision` (`kind=decision`, edge `decision escalates original`, `decision blocks <dependents>` for every job that `needs` the original) and an inbox item (kind `decision`, options `["retry","replan","cancel"]`).
 7. A verify job that itself ends `stalled` is handled by the same L2/keeper rules (T4–T13); when it ends `failed` the original gets `VerifierFailed` (T37); a verifier provider limit goes through L6.
 
 ## 6. Merge queue (step 7)
@@ -312,7 +312,7 @@ the table or are fixed v0.1 constants.
 | Hung before first output (0 bytes) | 8 min (`silent_minutes`) | `LoopBounds.silent_minutes` (D7) |
 | Automatic continues per attempt | 2 (`max_continues`) | `LoopBounds.max_continues` (L2) |
 | Hang restarts | 3 (`max_hang_restarts`) | `LoopBounds.max_hang_restarts` (D6) |
-| Fix rounds (`attempts`) | 3 = `job.loop.max_attempts` | per job (`JobLoop`, not `LoopBounds`); L3 |
+| Fix rounds (`attempts`) | 2 = `job.loop.max_attempts` | per job (`JobLoop`, not `LoopBounds`); L3 |
 | Same action repeated without new evidence | 3 (`RepeatGuard`) → stop the loop, escalate (`NotifyInbox(Decision)`) | `LoopBounds.same_action_max` |
 | Planner heartbeat / keeper heartbeat | 30 min / 20 min | `[loops.l4-planner].interval_secs` / `[loops.l5-keeper].interval_secs`; L4/L5 |
 | Min gap between planner/keeper turns | 5 min | `LoopBounds.planner_min_gap_minutes` |

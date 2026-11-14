@@ -50,6 +50,13 @@ conformance, an exact or lossless round trip, portable continuation or native-ha
 The adapter is pinned as a git dependency for now; that is the release blocker recorded in
 [`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md) §4.3, not a pass.
 
+### Changed
+
+- The default fix loop is now two rounds (`max_attempts = 2`). The verifier's findings are
+  copied into each fix brief. A recovery retry that finds a terminal fix child allocates a fresh
+  child (`<id>-fix-<attempt>-rN`) instead of sending `NeedsSatisfied` to the finished job, which
+  closes the `NeedsSatisfied in state Done` wedge.
+
 ## [0.3.0] - 2026-11-12
 
 The v0.3 feature set: a loopback HTTP/SSE API and `vowp-daemon`, a web/PWA

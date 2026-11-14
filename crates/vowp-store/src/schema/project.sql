@@ -17,7 +17,7 @@ CREATE TABLE jobs (
   brief_path       TEXT NOT NULL,
   report_path      TEXT NOT NULL,
   gates_json       TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(gates_json)),
-  loop_json        TEXT NOT NULL DEFAULT '{"until":"gates","max_attempts":3,"on_exhausted":"escalate"}'
+  loop_json        TEXT NOT NULL DEFAULT '{"until":"gates","max_attempts":2,"on_exhausted":"escalate"}'
                      CHECK (json_valid(loop_json)),
   branch           TEXT,
   worktree         TEXT,

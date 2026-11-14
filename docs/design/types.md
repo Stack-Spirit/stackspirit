@@ -534,7 +534,7 @@ pub enum LoopUntil { Gates }                                   // v0.1: only "un
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)] #[serde(rename_all = "snake_case")]
 pub enum OnExhausted { Escalate, Park, Fail }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct JobLoop { pub until: LoopUntil, pub max_attempts: u32 /* default 3 */, pub on_exhausted: OnExhausted /* default Escalate */ }
+pub struct JobLoop { pub until: LoopUntil, pub max_attempts: u32 /* default 2 */, pub on_exhausted: OnExhausted /* default Escalate */ }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Job {
@@ -596,7 +596,7 @@ JSON (`vowp job show graph-engine --json`):
  "needs":["protocol"],"owns":["crates/vowp-graph/**"],"reads":["docs/design/**"],
  "brief":".vowp/jobs/graph-engine/brief.md","report":".vowp/jobs/graph-engine/report.md",
  "gates":[{"report":{"fields":["status","branch","commits","tests"]}},{"cmd":{"run":"cargo test -p vowp-graph","expect_exit":0}},{"owns_respected":true},{"review":{"by":"verifier"}}],
- "loop":{"until":"gates","max_attempts":3,"on_exhausted":"escalate"},
+ "loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},
  "branch":"job/graph-engine","worktree":"/home/user/project","attempts":0,"continues":0,"hang_restarts":0,
  "parked_reason":null,"note":"","created_by":"planner","last_progress_at":"2026-11-08T20:10:00.000Z",
  "state_changed_at":"2026-11-08T20:01:00.000Z","created_at":"2026-11-08T19:50:00.000Z","updated_at":"2026-11-08T20:10:00.000Z"}
