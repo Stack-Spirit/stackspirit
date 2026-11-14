@@ -751,7 +751,11 @@ pub mod result {
 - **Stage.** The home points a local `job/<id>` branch at the fetched head and adds a worktree
   under `<node>/agent-results/<run>`, never in the main checkout. `git fetch`, the local branch
   update and `worktree add` leave the main checkout's working tree and HEAD untouched. The
-  worktree is kept for inspection on every rejection and becomes the job worktree on success.
+  branch update and `worktree add` run only after verification passes, so a run rejected during
+  fetch leaves no new ref and a run rejected during verification keeps the fetched
+  remote-tracking ref and no local branch or worktree. A gate violation removes the staging
+  worktree but keeps the local `job/<id>` branch for inspection, so a retry can move that
+  branch to the next pushed head; on success the worktree becomes the job worktree.
   For the two result gates the module pins the gate context's `project.default_branch` to the
   assigned base commit, so the gate helpers' three-dot diff is exactly `base..head` even if the
   home's `main` moved while the run was on the node.
