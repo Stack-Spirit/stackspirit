@@ -32,9 +32,48 @@ function disconnected(): ConnectionSnapshot {
   };
 }
 
+function stale(hostId: string): ConnectionSnapshot {
+  return {
+    state: "stale",
+    host_id: hostId,
+    since: NOW,
+    latency: { last_ms: 900, ewma_ms: 900, p50_ms: 900, p95_ms: 900, samples: 1 },
+    last_ok_at: NOW,
+    error: {
+      code: "stale",
+      message: "last poll timed out",
+      hint: null,
+      retryable: true,
+    },
+  };
+}
+
 describe("gate state lifecycle", () => {
   beforeEach(() => {
     resetFleetStore();
+  });
+
+  it("manual_reprobe_is_disabled_while_the_connection_is_stale", async () => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge({ scenario: "engine-ready" });
+    const probe = vi.spyOn(bridge.gates, "probe");
+    renderEngine(engineWith(), { bridge, gates: readyLocalGates() });
+
+    await act(async () => {
+      useFleetStore.getState().setConnection(stale(HOST_B));
+    });
+
+    const reprobe = screen.getByRole("button", { name: "Re-probe" });
+    const probeGates = screen.getByRole("button", { name: "Probe gates" });
+    expect(reprobe).toBeDisabled();
+    expect(probeGates).toBeDisabled();
+    expect(
+      screen.getByText(
+        "The VOWP connection is stale. Reconnect before probing capability gates.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(reprobe);
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("gates_are_dropped_when_the_connection_closes", async () => {

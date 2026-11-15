@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use crate::engine::runtime::{
     EngineHealth, EngineRuntime, EngineRuntimeInfo, KeyVerification, RuntimeModel,
 };
-use crate::engine::{Keychain, SecretString};
+use crate::engine::{EngineProvider, Keychain, SecretString};
 use crate::error::{SpiritError, SpiritErrorCode, redact};
 
 /// The only host a bundled engine may listen on.
@@ -30,7 +30,10 @@ pub const LOOPBACK_HOST: &str = "127.0.0.1";
 /// How many engine log lines are retained.
 pub const MAX_LOG_LINES: usize = 200;
 
-const MAX_HTTP_BODY: usize = 2 * 1024 * 1024;
+// The pinned 1.19.5 `/provider` document is ~8 MiB even without a key (it carries the
+// full supported-provider catalog). The cap still bounds local loopback responses, but
+// must be large enough for that one document. Smaller documents use `/config/providers`.
+const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
 
 /// Returns the loopback host used for every bundled engine launch.
 #[must_use]
@@ -435,7 +438,8 @@ impl ProcessEngineRuntime {
     fn fetch_models(&self, port: u16) -> Result<Vec<RuntimeModel>, SpiritError> {
         let mut last_error = None;
         for path in ["/provider", "/config/providers"] {
-            match self.http_get(port, path) {
+            let timeout = provider_document_timeout(path);
+            match http_request(port, "GET", path, None, timeout) {
                 Ok(response) if (200..300).contains(&response.status) => {
                     return Ok(parse_models(&response.body));
                 }
@@ -453,23 +457,36 @@ impl ProcessEngineRuntime {
         }))
     }
 
-    fn provider_ids(&self, port: u16) -> Result<Vec<String>, SpiritError> {
-        let response = self.http_get(port, "/provider")?;
-        if !(200..300).contains(&response.status) {
-            return Err(SpiritError::new(
-                SpiritErrorCode::Engine,
-                format!("engine provider list returned HTTP {}", response.status),
-            ));
+    fn fetch_providers(&self, port: u16) -> Result<Vec<EngineProvider>, SpiritError> {
+        let mut last_error = None;
+        for path in ["/provider", "/config/providers"] {
+            let timeout = provider_document_timeout(path);
+            match http_request(port, "GET", path, None, timeout) {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    let providers = parse_providers(&response.body);
+                    if !providers.is_empty() {
+                        return Ok(providers);
+                    }
+                    last_error = Some(SpiritError::new(
+                        SpiritErrorCode::Engine,
+                        "engine provider list reported no providers",
+                    ));
+                }
+                Ok(response) => {
+                    last_error = Some(SpiritError::new(
+                        SpiritErrorCode::Engine,
+                        format!("engine provider list returned HTTP {}", response.status),
+                    ));
+                }
+                Err(error) => last_error = Some(error),
+            }
         }
-        let document: Value = serde_json::from_slice(&response.body).map_err(|error| {
+        Err(last_error.unwrap_or_else(|| {
             SpiritError::new(
                 SpiritErrorCode::Engine,
-                format!("engine provider list is not valid JSON: {error}"),
+                "engine provider list is unavailable",
             )
-        })?;
-        let mut ids = Vec::new();
-        collect_provider_ids(&document, &mut ids);
-        Ok(ids)
+        }))
     }
 
     fn provider_model(&self, port: u16, provider: &str) -> Option<String> {
@@ -522,9 +539,14 @@ impl ProcessEngineRuntime {
             Some(body.as_bytes()),
             Duration::from_secs(20),
         ) {
-            Ok(response) if (200..300).contains(&response.status) => KeyVerification::Verified,
-            Ok(response) if (400..500).contains(&response.status) => KeyVerification::Invalid,
-            _ => KeyVerification::Unverified,
+            // The engine often returns HTTP 200 for a failed provider call and puts the
+            // provider error in the response body. Never report Verified from the status
+            // line alone.
+            Ok(response) if (200..300).contains(&response.status) => {
+                classify_message_response(&response.body)
+            }
+            Ok(response) if matches!(response.status, 401 | 403) => KeyVerification::Invalid,
+            Ok(_) | Err(_) => KeyVerification::Unverified,
         };
         let delete_path = format!("/session/{session_id}");
         let _ = http_request(port, "DELETE", &delete_path, None, Duration::from_secs(3));
@@ -540,7 +562,9 @@ impl ProcessEngineRuntime {
             Err(_) => return KeyVerification::Unverified,
         };
         let mut healthy = false;
-        for _ in 0..20 {
+        // A second sidecar may take as long as the supervised cold start, especially
+        // while the main engine is running. Use the same 10 s budget before giving up.
+        for _ in 0..100 {
             if self.probe_health(&info).await.is_ok() {
                 healthy = true;
                 break;
@@ -621,20 +645,22 @@ impl EngineRuntime for ProcessEngineRuntime {
         self.fetch_models(port)
     }
 
+    async fn providers(&self, port: u16) -> Result<Vec<EngineProvider>, SpiritError> {
+        self.fetch_providers(port)
+    }
+
     async fn verify_key(
         &self,
-        port: u16,
+        _port: u16,
         provider: &str,
         secret: &SecretString,
     ) -> KeyVerification {
-        // A provider inventory read without a key cannot prove access. Exercise the
-        // supplied key on an isolated loopback engine instead: the child receives only
-        // this key through its ephemeral auth environment, makes one minimal model call,
-        // and is terminated. `port` belongs to the supervised engine; verification never
-        // writes the key into that engine's auth store.
-        if self.provider_ids(port).is_err() {
-            return KeyVerification::Unverified;
-        }
+        // A provider inventory read without a key cannot prove access, and a large or
+        // temporarily busy `/provider` document must not short-circuit verification.
+        // Exercise the supplied key on an isolated loopback engine instead: the child
+        // receives only this key through its ephemeral auth environment, makes one
+        // minimal model call, and is terminated. The supervised engine's port is not
+        // used; verification never writes the key into that engine's auth store.
         self.verify_with_secret(provider, secret).await
     }
 
@@ -706,6 +732,16 @@ struct HttpResponse {
 
 fn http_get(port: u16, path: &str) -> Result<HttpResponse, SpiritError> {
     http_request(port, "GET", path, None, Duration::from_secs(3))
+}
+
+fn provider_document_timeout(path: &str) -> Duration {
+    if path == "/provider" {
+        // The full supported-provider document is several MiB and can take longer to
+        // materialize on a cold engine. The smaller configured list stays on 3 s.
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(3)
+    }
 }
 
 fn http_request(
@@ -834,16 +870,115 @@ fn decode_chunked(input: &[u8]) -> Result<Vec<u8>, SpiritError> {
     Ok(output)
 }
 
-fn collect_provider_ids(document: &Value, ids: &mut Vec<String>) {
-    let arrays = ["all", "providers"]
-        .iter()
-        .filter_map(|key| document.get(*key).and_then(Value::as_array));
-    for providers in arrays {
-        for provider in providers {
-            if let Some(id) = provider.get("id").and_then(Value::as_str) {
-                ids.push(id.to_owned());
+/// Parses the engine's supported-provider document.
+///
+/// `/provider` returns `{ "all": [ { "id", "name", ... } ] }`; `/config/providers`
+/// returns `{ "providers": [ ... ] }`. Both shapes are accepted. Only ids and display
+/// labels are retained; provider configuration, environment names and models are not
+/// exposed to the UI.
+#[must_use]
+pub fn parse_providers(body: &[u8]) -> Vec<EngineProvider> {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut providers = Vec::new();
+    for key in ["all", "providers"] {
+        match document.get(key) {
+            Some(Value::Array(entries)) => {
+                for entry in entries {
+                    if let Some(provider) = provider_from_value(entry, None) {
+                        providers.push(provider);
+                    }
+                }
             }
+            Some(Value::Object(entries)) => {
+                for (id, entry) in entries {
+                    if let Some(provider) = provider_from_value(entry, Some(id)) {
+                        providers.push(provider);
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+    providers.sort_by(|left, right| left.id.cmp(&right.id));
+    providers.dedup_by(|left, right| left.id == right.id);
+    providers
+}
+
+fn provider_from_value(entry: &Value, id_hint: Option<&String>) -> Option<EngineProvider> {
+    let id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .or(id_hint.map(String::as_str))?
+        .trim();
+    if id.is_empty() {
+        return None;
+    }
+    let label = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("label").and_then(Value::as_str))
+        .unwrap_or(id)
+        .trim()
+        .to_owned();
+    Some(EngineProvider {
+        id: id.to_owned(),
+        label: if label.is_empty() {
+            id.to_owned()
+        } else {
+            label
+        },
+    })
+}
+
+/// Classifies an engine message response body that may carry a provider error under
+/// HTTP 200. The pinned engine returns `info.error.statusCode: 401` for a rejected key.
+#[must_use]
+pub fn classify_message_response(body: &[u8]) -> KeyVerification {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return KeyVerification::Unverified;
+    };
+    let Some(error) = find_error(&document) else {
+        return KeyVerification::Verified;
+    };
+    if error.is_null() {
+        return KeyVerification::Verified;
+    }
+    match error_status(error) {
+        Some(401 | 403) => KeyVerification::Invalid,
+        // A quota, rate limit or provider outage does not prove the key is wrong.
+        Some(_) | None => KeyVerification::Unverified,
+    }
+}
+
+fn find_error(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if let Some(error) = map.get("error") {
+                return Some(error);
+            }
+            map.values().find_map(find_error)
+        }
+        Value::Array(items) => items.iter().find_map(find_error),
+        _ => None,
+    }
+}
+
+fn error_status(value: &Value) -> Option<u16> {
+    match value {
+        Value::Object(map) => {
+            for key in ["statusCode", "status_code", "status", "code"] {
+                if let Some(code) = map.get(key).and_then(Value::as_u64)
+                    && (100..=599).contains(&code)
+                {
+                    return u16::try_from(code).ok();
+                }
+            }
+            map.values().find_map(error_status)
+        }
+        Value::Array(items) => items.iter().find_map(error_status),
+        _ => None,
     }
 }
 
@@ -1003,6 +1138,79 @@ mod tests {
     }
 
     #[test]
+    fn engine_provider_parser_reads_the_full_supported_catalog() {
+        let body = br#"{
+          "all": [
+            {"id": "opencode", "name": "OpenCode"},
+            {"id": "groq", "name": "Groq"},
+            {"id": "mistral", "name": "Mistral"},
+            {"id": "no-name"}
+          ],
+          "default": {}
+        }"#;
+        let providers = parse_providers(body);
+        assert_eq!(providers.len(), 4);
+        assert!(
+            providers
+                .iter()
+                .any(|provider| provider.id == "groq" && provider.label == "Groq")
+        );
+        assert!(
+            providers
+                .iter()
+                .any(|provider| provider.id == "mistral" && provider.label == "Mistral")
+        );
+        assert!(
+            providers
+                .iter()
+                .any(|provider| provider.id == "no-name" && provider.label == "no-name")
+        );
+    }
+
+    #[test]
+    fn engine_provider_parser_accepts_the_config_providers_shape() {
+        let body = br#"{"providers":[{"id":"deepseek","name":"DeepSeek"},{"id":"opencode","name":"OpenCode"}]}"#;
+        let providers = parse_providers(body);
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].id, "deepseek");
+    }
+
+    #[test]
+    fn engine_message_body_auth_error_is_invalid_even_with_http_200() {
+        let invalid = br#"{"info":{"error":{"statusCode":401,"message":"Invalid API key"}}}"#;
+        assert_eq!(classify_message_response(invalid), KeyVerification::Invalid);
+        let forbidden = br#"{"error":{"status":403}}"#;
+        assert_eq!(
+            classify_message_response(forbidden),
+            KeyVerification::Invalid
+        );
+    }
+
+    #[test]
+    fn engine_message_body_success_and_quota_errors_are_not_auth_success() {
+        let success = br#"{"info":{"role":"assistant"},"parts":[{"type":"text","text":"OK"}]}"#;
+        assert_eq!(
+            classify_message_response(success),
+            KeyVerification::Verified
+        );
+        let null_error = br#"{"info":{"error":null},"parts":[]}"#;
+        assert_eq!(
+            classify_message_response(null_error),
+            KeyVerification::Verified
+        );
+        let quota = br#"{"info":{"error":{"statusCode":429}}}"#;
+        assert_eq!(
+            classify_message_response(quota),
+            KeyVerification::Unverified
+        );
+        let not_json = b"<html>bad gateway</html>";
+        assert_eq!(
+            classify_message_response(not_json),
+            KeyVerification::Unverified
+        );
+    }
+
+    #[test]
     fn engine_http_parser_reads_chunked_responses() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         let response = parse_http_response(raw).unwrap();
@@ -1055,7 +1263,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/global/health":
             self.send_json({"healthy": True, "version": "1.19.5"})
         elif self.path == "/provider":
-            self.send_json({"all": self.providers(), "default": {}, "connected": list(auth)})
+            # The real /provider document can exceed a small body cap. The adapter must
+            # fall back to /config/providers instead of failing key verification.
+            self.send_error(500)
+        elif self.path == "/config/providers":
+            self.send_json({"providers": self.providers(), "default": {}, "connected": list(auth)})
         else:
             self.send_error(404)
     def do_POST(self):
@@ -1067,9 +1279,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.endswith("/message"):
             key = (auth.get("deepseek") or {}).get("key")
             if key == "valid-test-key":
-                self.send_json({"ok": True})
+                self.send_json({"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "OK"}]})
             else:
-                self.send_error(401)
+                # The pinned engine returns HTTP 200 and carries the provider error in
+                # the body. The adapter must inspect the body, not just the status line.
+                self.send_json({"info": {"error": {"statusCode": 401, "message": "Invalid API key"}}})
         else:
             self.send_error(404)
     def do_DELETE(self):

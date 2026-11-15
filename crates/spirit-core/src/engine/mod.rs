@@ -128,6 +128,9 @@ pub struct EngineStatus {
     /// Bounded, redacted engine log tail for the View logs action.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<String>,
+    /// Providers the running engine reports as supported. Ids and labels only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<EngineProvider>,
 }
 
 impl Default for EngineStatus {
@@ -144,8 +147,21 @@ impl Default for EngineStatus {
             last_error: None,
             onboarding_complete: false,
             logs: Vec::new(),
+            providers: Vec::new(),
         }
     }
+}
+
+/// One provider the bundled engine reports as supported for BYOK.
+///
+/// Only the provider id and a display label cross the local engine boundary. No key,
+/// environment variable value or provider configuration is included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineProvider {
+    /// Engine-native provider id.
+    pub id: String,
+    /// Display label reported by the engine, or the id when it has no name.
+    pub label: String,
 }
 
 /// Whether a model is included or needs a user key.

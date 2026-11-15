@@ -2,11 +2,7 @@ import { Badge, Drawer } from "../../components";
 import type { GateSnapshot } from "../../bridge/wire";
 import { gateStateLabel, gateTone } from "../../domain/connection";
 import { formatDateTime } from "../../domain/format";
-import {
-  ASIF_MILESTONES,
-  PHASE3_MILESTONES,
-  localAgentLabel,
-} from "../../domain/engine";
+import { gateMissingMilestones, localAgentLabel } from "../../domain/engine";
 
 export interface GateDrawerProps {
   kind: "local" | "asif";
@@ -24,19 +20,6 @@ function evidenceFor(gates: GateSnapshot, kind: "local" | "asif"): string[] {
   return "evidence" in gate ? gate.evidence : [];
 }
 
-function missingFor(gates: GateSnapshot, kind: "local" | "asif"): string[] {
-  const required = kind === "local" ? [...PHASE3_MILESTONES] : [...ASIF_MILESTONES];
-  const probed =
-    kind === "local"
-      ? gates.local_orchestrator.state === "waiting_for_vowp_phase3"
-        ? gates.local_orchestrator.missing
-        : []
-      : gates.asif.state === "waiting_for_vowp_asif"
-        ? gates.asif.missing
-        : [];
-  return [...new Set([...probed, ...required])];
-}
-
 export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
   const title = kind === "local" ? "Local orchestrator" : "ASIF sessions";
   const gate = gates
@@ -46,7 +29,7 @@ export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
     : null;
   const state = gate?.state ?? "unknown";
   const evidence = gates ? evidenceFor(gates, kind) : [];
-  const missing = gates ? missingFor(gates, kind) : [];
+  const missing = gates ? gateMissingMilestones(gates)[kind] : [];
   const detected =
     gate && "detected_version" in gate ? gate.detected_version : null;
 
@@ -62,12 +45,18 @@ export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
         </div>
 
         <div>
-          <h3 className="panel__title">Missing or required milestones</h3>
-          <ul className="gate-required" aria-label="Required VOWP milestones">
-            {missing.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
+          <h3 className="panel__title">Missing VOWP milestones</h3>
+          {missing.length > 0 ? (
+            <ul className="gate-required" aria-label="Missing VOWP milestones">
+              {missing.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted small">
+              The probe did not report a missing milestone for this capability.
+            </p>
+          )}
         </div>
 
         <div>

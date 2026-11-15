@@ -60,7 +60,11 @@ export function ByokForm({
   onDelete,
 }: ByokFormProps) {
   const keyRef = useRef<HTMLInputElement>(null);
-  const [provider, setProvider] = useState(providers[0]?.id ?? "deepseek");
+  const [provider, setProvider] = useState(
+    providers.find((option) => option.id === "deepseek")?.id ??
+      providers[0]?.id ??
+      "deepseek",
+  );
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -6,9 +6,11 @@ import {
   GATE_NOT_IMPLEMENTED_LOCAL,
   PHASE3_MILESTONES,
   engineLogs,
+  engineProviders,
   engineSetupComplete,
   gateActionEnabled,
   gateActionReason,
+  gateMissingMilestones,
   gatesProbed,
   includedModels,
   localAgentLabel,
@@ -29,6 +31,48 @@ describe("engine domain helpers", () => {
     expect(
       providerOptions([], []).map((option) => option.label),
     ).toContain("OpenAI");
+  });
+
+  it("byok providers come from the engine and exclude its included-model provider", () => {
+    const status = {
+      ...engineWith(),
+      providers: [
+        { id: "groq", label: "Groq" },
+        { id: "mistral", label: "Mistral" },
+        { id: "opencode", label: "OpenCode" },
+      ],
+    } as EngineStatus;
+
+    expect(engineProviders(status).map((provider) => provider.id)).toEqual([
+      "groq",
+      "mistral",
+      "opencode",
+    ]);
+    const options = providerOptions([], [], engineProviders(status));
+    expect(options.map((option) => option.id)).toContain("groq");
+    expect(options.map((option) => option.id)).toContain("mistral");
+    expect(options.map((option) => option.id)).not.toContain("opencode");
+  });
+
+  it("gate missing milestones never adds capabilities the probe did not report", () => {
+    const gates: GateSnapshot = readyAsifGates();
+    gates.local_orchestrator = {
+      state: "waiting_for_vowp_phase3",
+      missing: ["local cache"],
+      detected_version: "0.4.0",
+      evidence: ["vowp agent surface start --help: exit 2"],
+    };
+    gates.asif = {
+      state: "waiting_for_vowp_asif",
+      missing: ["v4-asif-cli"],
+      detected_version: "0.4.0",
+      evidence: ["session export --format asif: exit 2"],
+    };
+
+    expect(gateMissingMilestones(gates)).toEqual({
+      local: ["local cache"],
+      asif: ["v4-asif-cli"],
+    });
   });
 
   it("included models keep engine implementation branding out of the main path", () => {

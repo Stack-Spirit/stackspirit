@@ -98,6 +98,82 @@ describe("StackSpirit Engine first-run flow", () => {
     expect(screen.getByTestId("engine-status-card")).toBeInTheDocument();
   });
 
+  it("first_run_never_offers_a_byok_only_model_as_included", async () => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge({ scenario: "engine-ready" });
+    const [included, paid] = bundledModels();
+    if (!included || !paid) throw new Error("the bundled catalog needs two models");
+    vi.spyOn(bridge.engine, "models").mockResolvedValue([
+      included,
+      { ...paid, access: "byok" },
+    ]);
+    renderEngine(engineWithoutModel(), { bridge });
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => {
+      expect(screen.getAllByText("Included · no key")).toHaveLength(1);
+    });
+    expect(screen.queryByText("Uses your provider key")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: new RegExp(included.label) }),
+    ).toHaveAttribute("aria-label", `${included.label}, StackSpirit Engine`);
+    expect(
+      screen.queryByRole("radio", { name: new RegExp(paid.label) }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a_paid_only_catalog_shows_the_byok_empty_state", async () => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge({ scenario: "engine-ready" });
+    const paid = bundledModels()[0];
+    if (!paid) throw new Error("the bundled catalog needs a model");
+    vi.spyOn(bridge.engine, "models").mockResolvedValue([
+      { ...paid, access: "byok" },
+    ]);
+    renderEngine(engineWithoutModel(), { bridge });
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      await screen.findByText(/no included models available/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Included · no key")).not.toBeInTheDocument();
+  });
+
+  it("failure_screen_exposes_the_bounded_redacted_log_tail", async () => {
+    const user = userEvent.setup();
+    const status = {
+      ...engineWithoutModel(),
+      state: { state: "failed", detail: "StackSpirit Engine could not start." },
+      logs: ["engine line 1", "engine line 2"],
+    } as EngineStatus;
+    renderEngine(status);
+
+    await user.click(screen.getByRole("button", { name: "View logs" }));
+    const logs = await screen.findByTestId("onboarding-engine-logs");
+    expect(within(logs).getByText("engine line 1")).toBeInTheDocument();
+    expect(within(logs).getByText("engine line 2")).toBeInTheDocument();
+  });
+
+  it("byok_provider_picker_uses_the_engine_reported_providers", async () => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge({ scenario: "engine-ready" });
+    const status = {
+      ...engineWithoutModel(),
+      providers: [
+        { id: "groq", label: "Groq" },
+        { id: "mistral", label: "Mistral" },
+        { id: "opencode", label: "OpenCode" },
+      ],
+    } as EngineStatus;
+    renderEngine(status, { bridge });
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("radio", { name: /Use my own provider key/ }));
+    expect(await screen.findByRole("option", { name: "Groq" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Mistral" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "OpenCode" })).not.toBeInTheDocument();
+  });
+
   it("first_run_selects_an_included_model_and_finishes", async () => {
     const user = userEvent.setup();
     const { bridge } = renderEngine(engineWithoutModel());

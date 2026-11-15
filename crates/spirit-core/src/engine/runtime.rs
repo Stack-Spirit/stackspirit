@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::engine::SecretString;
+use crate::engine::{EngineProvider, SecretString};
 use crate::error::{SpiritError, SpiritErrorCode};
 
 /// What a successful engine spawn returned.
@@ -66,6 +66,10 @@ pub trait EngineRuntime: Send + Sync {
     async fn models(&self, _port: u16) -> Result<Vec<RuntimeModel>, SpiritError> {
         Ok(Vec::new())
     }
+    /// Lists the providers the running engine reports as supported.
+    async fn providers(&self, _port: u16) -> Result<Vec<EngineProvider>, SpiritError> {
+        Ok(Vec::new())
+    }
     /// Verifies a provider key through a local engine call.
     async fn verify_key(
         &self,
@@ -91,6 +95,7 @@ struct FakeRuntimeState {
     shutdowns: usize,
     port: u16,
     models: Vec<RuntimeModel>,
+    providers: Vec<EngineProvider>,
     key_verification: Option<KeyVerification>,
 }
 
@@ -140,6 +145,21 @@ impl FakeEngineRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .models = models;
+    }
+
+    /// Makes every provider request return these providers.
+    #[must_use]
+    pub fn with_providers(self, providers: Vec<EngineProvider>) -> Self {
+        self.set_providers(providers);
+        self
+    }
+
+    /// Replaces the provider list reported by the fake engine.
+    pub fn set_providers(&self, providers: Vec<EngineProvider>) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .providers = providers;
     }
 
     /// Makes the next key verification return `result`; the default is `Unverified`.
@@ -236,6 +256,15 @@ impl EngineRuntime for FakeEngineRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .models
+            .clone())
+    }
+
+    async fn providers(&self, _port: u16) -> Result<Vec<EngineProvider>, SpiritError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .providers
             .clone())
     }
 

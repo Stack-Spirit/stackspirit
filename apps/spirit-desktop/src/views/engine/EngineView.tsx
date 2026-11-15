@@ -12,6 +12,7 @@ import type {
 import { toSpiritError } from "../../bridge/errors";
 import {
   engineLogs,
+  engineProviders,
   gatesProbed,
   includedModels,
   needsEngineOnboarding,
@@ -62,8 +63,9 @@ export function EngineView() {
   const [gateDetails, setGateDetails] = useState<GateDetails>(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const autoProbedHost = useRef<string | null>(null);
-  const liveConnection =
-    connection.state === "connected" || connection.state === "stale";
+  // Gate probes require a live VOWP command path. A stale snapshot can still be read
+  // elsewhere, but probe_gates refuses to run on it, so the controls must match.
+  const liveConnection = connection.state === "connected";
   // A gate snapshot belongs to the connection that requested it (VOWP-CONTRACT
   // §11.5). The scope records the host and connection generation so a snapshot from
   // an earlier connection is never displayed for a new one.
@@ -117,18 +119,14 @@ export function EngineView() {
 
   const scopeProbe = useCallback(async () => {
     const current = useFleetStore.getState().connection;
-    if (current.state !== "connected" && current.state !== "stale") return;
+    if (current.state !== "connected") return;
     if (!current.host_id) return;
     const hostId = current.host_id;
     const since = current.since;
     const before = useFleetStore.getState().gates;
     await probeGates();
     const next = useFleetStore.getState().connection;
-    if (
-      (next.state !== "connected" && next.state !== "stale") ||
-      next.host_id !== hostId ||
-      next.since !== since
-    ) {
+    if (next.state !== "connected" || next.host_id !== hostId || next.since !== since) {
       return;
     }
     const latest = useFleetStore.getState().gates;
@@ -309,7 +307,9 @@ export function EngineView() {
   const probeDisabledReason =
     liveConnection && connection.host_id
       ? null
-      : "Connect to a VOWP home before probing capability gates.";
+      : connection.state === "stale"
+        ? "The VOWP connection is stale. Reconnect before probing capability gates."
+        : "Connect to a VOWP home before probing capability gates.";
 
   return (
     <div className="view-stack engine-view" data-testid="engine-view">
@@ -318,7 +318,8 @@ export function EngineView() {
       {showSetup ? (
         <EngineOnboarding
           status={status}
-          models={models}
+          models={available}
+          providers={providerOptions(available, keyStatuses, engineProviders(status))}
           keyStatuses={keyStatuses}
           harnesses={harnesses}
           scanning={scanning}
@@ -395,7 +396,11 @@ export function EngineView() {
                 </p>
               ) : (
                 <ByokForm
-                  providers={providerOptions(available, keyStatuses)}
+                  providers={providerOptions(
+                    available,
+                    keyStatuses,
+                    engineProviders(status),
+                  )}
                   statuses={keyStatuses}
                   onSave={handleSaveKey}
                   onVerify={handleVerifyKey}

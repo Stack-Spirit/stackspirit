@@ -59,7 +59,11 @@ export function ModelPicker({
               <span className="engine-model__meta">
                 <span>{modelProviderLabel(model.provider)}</span>
                 <span>{modelContextLabel(model.context_tokens)}</span>
-                <Badge tone="ok">Included · no key</Badge>
+                {model.access === "included" ? (
+                  <Badge tone="ok">Included · no key</Badge>
+                ) : (
+                  <Badge tone="warn">Uses your provider key</Badge>
+                )}
                 <span>
                   {model.verified_at
                     ? `verified ${formatDateTime(model.verified_at)}`

@@ -110,8 +110,9 @@ impl EngineSupervisor {
         if matches!(choice, EngineChoice::External { .. }) {
             self.status.included_models_available = false;
             // The external harness owns its model access; never show a stale bundled
-            // model as the selected model while it is active.
+            // model or provider list while it is active.
             self.status.selected_model = None;
+            self.status.providers.clear();
         }
         self.status.choice = choice;
     }
@@ -157,6 +158,7 @@ impl EngineSupervisor {
                     detail: error.message.clone(),
                 };
                 self.status.last_error = Some(error.message);
+                self.status.providers.clear();
                 return self.snapshot();
             }
         };
@@ -173,6 +175,8 @@ impl EngineSupervisor {
                         }
                         Err(_) => self.status.included_models_available = false,
                     }
+                    self.status.providers =
+                        self.runtime.providers(info.port).await.unwrap_or_default();
                     self.status.state = EngineState::Ready;
                     self.status.version = health.version.or_else(|| info.version.clone());
                     self.status.binary_path = info.binary_path.clone();
@@ -205,6 +209,7 @@ impl EngineSupervisor {
         self.status.last_error = Some(detail);
         self.status.port = None;
         self.status.started_at = None;
+        self.status.providers.clear();
         self.snapshot()
     }
 
@@ -267,6 +272,7 @@ impl EngineSupervisor {
         self.status.port = None;
         self.status.started_at = None;
         self.status.binary_path = None;
+        self.status.providers.clear();
         self.snapshot()
     }
 
@@ -439,6 +445,33 @@ mod tests {
             "the explicit action must spawn again after the budget: {retried:?}"
         );
         assert_eq!(runtime.spawns(), 3);
+    }
+
+    #[tokio::test]
+    async fn engine_start_exposes_the_runtime_provider_list_for_byok() {
+        let runtime = Arc::new(FakeEngineRuntime::new().with_providers(vec![
+            crate::engine::EngineProvider {
+                id: "deepseek".to_owned(),
+                label: "DeepSeek".to_owned(),
+            },
+            crate::engine::EngineProvider {
+                id: "groq".to_owned(),
+                label: "Groq".to_owned(),
+            },
+        ]));
+        let mut supervisor = EngineSupervisor::new(
+            runtime,
+            EngineSupervisorConfig {
+                restart_budget: 3,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        let status = supervisor.start().await;
+        assert!(matches!(status.state, EngineState::Ready));
+        assert_eq!(status.providers.len(), 2);
+        assert_eq!(status.providers[1].id, "groq");
     }
 
     #[tokio::test]

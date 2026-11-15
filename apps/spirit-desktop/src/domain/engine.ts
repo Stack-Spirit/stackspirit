@@ -71,29 +71,79 @@ export function modelNotes(provider: string, notes: string): string {
   return notes.replace(/\bopencode\b/gi, "StackSpirit Engine");
 }
 
-/** A small provider catalog for BYOK. Unknown providers fall back to their id. */
+/** One provider entry reported by the bundled engine, structurally typed. */
+export interface EngineProvider {
+  id: string;
+  label: string;
+}
+
+const FALLBACK_PROVIDER_IDS = [
+  "deepseek",
+  "openai",
+  "anthropic",
+  "google",
+  "openrouter",
+  "xai",
+  "ollama",
+  "groq",
+  "mistral",
+] as const;
+
+/**
+ * Providers the running engine reports. The bridge's D2 `EngineStatus` type does not
+ * carry this newer field, so it is read structurally and validated at the UI boundary.
+ */
+export function engineProviders(status: EngineStatus | null): EngineProvider[] {
+  if (!status) return [];
+  const raw = (status as { providers?: unknown }).providers;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const { id, label } = entry as { id?: unknown; label?: unknown };
+    if (typeof id !== "string" || !id.trim()) return [];
+    return [
+      {
+        id: id.trim(),
+        label: typeof label === "string" && label.trim() ? label.trim() : providerLabel(id),
+      },
+    ];
+  });
+}
+
+/**
+ * BYOK provider options. The running engine's supported-provider list is authoritative;
+ * the small fallback catalog is used only before the engine is ready or when it reports
+ * no usable providers. Engine-internal providers (the included-model provider) are not
+ * offered as BYOK choices.
+ */
 export function providerOptions(
   models: ModelChoice[],
   keyStatuses: KeyStatus[] = [],
+  runtimeProviders: EngineProvider[] = [],
 ): Array<{ id: string; label: string }> {
-  const ids = new Set<string>([
-    "deepseek",
-    "openai",
-    "anthropic",
-    "google",
-    "openrouter",
-    "xai",
-    "ollama",
-  ]);
+  const external = (id: string) =>
+    id.trim() !== "" && !ENGINE_INTERNAL_PROVIDERS.has(id.trim().toLowerCase());
+  const runtime = runtimeProviders.filter((provider) => external(provider.id));
+  const providers = new Map<string, string>();
+  if (runtime.length === 0) {
+    for (const id of FALLBACK_PROVIDER_IDS) providers.set(id, providerLabel(id));
+  }
+  for (const provider of runtime) {
+    providers.set(provider.id.trim(), provider.label || providerLabel(provider.id));
+  }
   for (const model of models) {
-    if (model.provider !== "opencode" && model.provider !== "opencode-go") {
-      ids.add(model.provider);
+    if (external(model.provider)) {
+      providers.set(model.provider, providerLabel(model.provider));
     }
   }
   for (const status of keyStatuses) {
-    if (status.state !== "missing") ids.add(status.provider);
+    if (status.state !== "missing" && external(status.provider)) {
+      providers.set(status.provider, providerLabel(status.provider));
+    }
   }
-  return [...ids].map((id) => ({ id, label: providerLabel(id) }));
+  return [...providers]
+    .map(([id, label]) => ({ id, label }))
+    .sort((left, right) => left.label.localeCompare(right.label));
 }
 
 export function selectedModelLabel(status: EngineStatus | null): string {
@@ -261,18 +311,21 @@ export function gateActionReason(
   return "";
 }
 
+/**
+ * The probe's exact missing capabilities. The static milestone constants describe what
+ * a complete Phase 3/ASIF home must provide, but they must never be added to a probe
+ * result: a missing array is evidence about this host, not a checklist of everything.
+ */
 export function gateMissingMilestones(gates: GateSnapshot | null): {
   local: readonly string[];
   asif: readonly string[];
 } {
-  const probedLocal =
-    gates?.local_orchestrator.state === "waiting_for_vowp_phase3"
-      ? gates.local_orchestrator.missing
-      : [];
-  const probedAsif =
-    gates?.asif.state === "waiting_for_vowp_asif" ? gates.asif.missing : [];
   return {
-    local: [...new Set([...PHASE3_MILESTONES, ...probedLocal])],
-    asif: [...new Set([...ASIF_MILESTONES, ...probedAsif])],
+    local:
+      gates?.local_orchestrator.state === "waiting_for_vowp_phase3"
+        ? gates.local_orchestrator.missing
+        : [],
+    asif:
+      gates?.asif.state === "waiting_for_vowp_asif" ? gates.asif.missing : [],
   };
 }

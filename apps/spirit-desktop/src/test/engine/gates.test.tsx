@@ -32,8 +32,10 @@ describe("VOWP capability gate cards", () => {
     expect(
       within(local).getAllByText(/local opencode app host/).length,
     ).toBeGreaterThan(0);
-    expect(within(local).getAllByText(/backfill/).length).toBeGreaterThan(0);
-    expect(within(local).getAllByText(/local cache/).length).toBeGreaterThan(0);
+    expect(within(local).getAllByText(/surface bridge/).length).toBeGreaterThan(0);
+    expect(within(local).getAllByText(/MCP proxy/).length).toBeGreaterThan(0);
+    expect(within(local).queryByText(/backfill/)).not.toBeInTheDocument();
+    expect(within(local).queryByText(/local cache/)).not.toBeInTheDocument();
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();
     expect(
       within(local).getAllByText(/Waiting for VOWP Phase 2\/3/).length,
@@ -52,14 +54,48 @@ describe("VOWP capability gate cards", () => {
     const local = screen.getByTestId("gate-card-local");
     await user.click(within(local).getByRole("button", { name: "Details" }));
     const drawer = screen.getByTestId("gate-drawer");
-    expect(within(drawer).getByText("backfill")).toBeInTheDocument();
-    expect(within(drawer).getByText("local cache")).toBeInTheDocument();
+    expect(within(drawer).getByText("local opencode app host")).toBeInTheDocument();
+    expect(within(drawer).getByText("surface bridge")).toBeInTheDocument();
+    expect(within(drawer).getByText("MCP proxy")).toBeInTheDocument();
+    expect(within(drawer).queryByText("backfill")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("local cache")).not.toBeInTheDocument();
     expect(
       within(drawer).getByText("vowp agent surface start --help: exit 2"),
     ).toBeInTheDocument();
     expect(
       within(drawer).getByText(/never contains a provider key/),
     ).toBeInTheDocument();
+  });
+
+  it("gate_cards_and_details_never_add_unprobed_milestones", async () => {
+    const user = userEvent.setup();
+    const gates = waitingGates();
+    gates.local_orchestrator = {
+      state: "waiting_for_vowp_phase3",
+      missing: ["local cache"],
+      detected_version: "0.4.0",
+      evidence: ["vowp agent surface start --help: exit 2"],
+    };
+    gates.asif = {
+      state: "waiting_for_vowp_asif",
+      missing: ["v4-asif-cli"],
+      detected_version: "0.4.0",
+      evidence: ["session export --format asif: exit 2"],
+    };
+    renderEngine(engineWith(), { gates });
+
+    const local = screen.getByTestId("gate-card-local");
+    const asif = screen.getByTestId("gate-card-asif");
+    expect(within(local).getByText("local cache")).toBeInTheDocument();
+    expect(within(local).queryByText("backfill")).not.toBeInTheDocument();
+    expect(within(asif).getByText("v4-asif-cli")).toBeInTheDocument();
+    expect(within(asif).queryByText("v4-asif-core")).not.toBeInTheDocument();
+
+    await user.click(within(local).getByRole("button", { name: "Details" }));
+    const drawer = screen.getByTestId("gate-drawer");
+    expect(within(drawer).getByText("local cache")).toBeInTheDocument();
+    expect(within(drawer).queryByText("backfill")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("surface bridge")).not.toBeInTheDocument();
   });
 
   it("gate_ready_fixture_still_disables_unimplemented_action", () => {

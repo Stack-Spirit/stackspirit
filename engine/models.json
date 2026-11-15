@@ -1,7 +1,7 @@
 {
   "schema": "stackspirit-engine-models/1",
-  "generated_from": "opencode@1.19.5 console free model list",
-  "generated_at": "2026-11-14T00:00:00.000Z",
+  "generated_from": "opencode@1.19.5 /provider free opencode models",
+  "generated_at": "2026-11-15T00:00:00.000Z",
   "notes": "Only models the bundled engine reports as free are listed. The app verifies every entry at runtime and never labels a model Included from this file alone.",
   "entries": [
     {
@@ -75,13 +75,6 @@
       "notes": "Free model for a limited time. Availability is checked when the engine starts."
     },
     {
-      "id": "opencode/nemotron-3-ultra-free",
-      "label": "Nemotron 3 Ultra Free",
-      "provider": "opencode",
-      "context_tokens": null,
-      "notes": "Free trial endpoint; do not submit confidential data. Availability is checked when the engine starts."
-    },
-    {
       "id": "opencode/nemotron-3.5-lightning-free",
       "label": "Nemotron 3.5 Lightning Free",
       "provider": "opencode",
@@ -94,13 +87,6 @@
       "provider": "opencode",
       "context_tokens": null,
       "notes": "Free trial endpoint; do not submit confidential data. Availability is checked when the engine starts."
-    },
-    {
-      "id": "opencode/jev-1.13-free",
-      "label": "Jev 1.13 Free",
-      "provider": "opencode",
-      "context_tokens": null,
-      "notes": "Free model for a limited time. Availability is checked when the engine starts."
     }
   ]
 }

@@ -10,7 +10,7 @@ import type {
   ModelChoice,
 } from "../../bridge/wire";
 import { engineLabel, engineTone } from "../../domain/connection";
-import { selectedModelLabel } from "../../domain/engine";
+import { engineLogs, selectedModelLabel } from "../../domain/engine";
 import { ByokForm } from "./ByokForm";
 import { ExternalHarnessPicker } from "./ExternalHarnessPicker";
 import { ModelPicker } from "./ModelPicker";
@@ -18,6 +18,7 @@ import { ModelPicker } from "./ModelPicker";
 export interface EngineOnboardingProps {
   status: EngineStatus | null;
   models: ModelChoice[];
+  providers: Array<{ id: string; label: string }>;
   keyStatuses: KeyStatus[];
   harnesses: ExternalHarness[];
   scanning: boolean;
@@ -42,6 +43,7 @@ type Choice = "included" | "byok" | "external";
 export function EngineOnboarding({
   status,
   models,
+  providers,
   keyStatuses,
   harnesses,
   scanning,
@@ -67,14 +69,19 @@ export function EngineOnboarding({
   );
   const [continuing, setContinuing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  const effectiveSelectedId = selectedId || models[0]?.id || "";
+  const [logsOpen, setLogsOpen] = useState(false);
+  const effectiveSelectedId = models.some((model) => model.id === selectedId)
+    ? selectedId
+    : (models[0]?.id ?? "");
+  const logs = engineLogs(status);
 
   const ready = status?.state.state === "ready";
   const externalSelected = status?.choice.type === "external";
   const savedKeys = keyStatuses.filter((key) => key.state !== "missing");
+  const selectedModel = models.find((model) => model.id === effectiveSelectedId);
   const canContinue =
     choice === "included"
-      ? Boolean(effectiveSelectedId) && ready
+      ? Boolean(selectedModel && selectedModel.access === "included") && ready
       : choice === "byok"
         ? savedKeys.length > 0
         : externalSelected;
@@ -161,6 +168,33 @@ export function EngineOnboarding({
               <p className="muted small">Checking the bundled engine and waiting for health…</p>
             )}
             {error ? <p className="engine-error">{error}</p> : null}
+            {!ready ? (
+              <div className="engine-section" data-testid="engine-onboarding-logs">
+                <div className="engine-actions">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setLogsOpen((open) => !open)}
+                  >
+                    {logsOpen ? "Hide logs" : "View logs"}
+                  </Button>
+                </div>
+                {logsOpen ? (
+                  logs.length > 0 ? (
+                    <div className="gate-evidence engine-logs" data-testid="onboarding-engine-logs">
+                      {logs.map((line, index) => (
+                        <span key={`${index}:${line}`}>{line}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted small" data-testid="onboarding-engine-logs-empty">
+                      No engine log lines have been captured yet. The engine may not have
+                      started; retry the engine check.
+                    </p>
+                  )
+                ) : null}
+              </div>
+            ) : null}
             <div className="engine-actions">
               <Button variant="secondary" size="sm" onClick={onRetry} loading={busy}>
                 Retry engine check
@@ -251,15 +285,7 @@ export function EngineOnboarding({
               </label>
               {choice === "byok" ? (
                 <ByokForm
-                  providers={[
-                    { id: "deepseek", label: "DeepSeek" },
-                    { id: "openai", label: "OpenAI" },
-                    { id: "anthropic", label: "Anthropic" },
-                    { id: "google", label: "Google" },
-                    { id: "openrouter", label: "OpenRouter" },
-                    { id: "xai", label: "xAI" },
-                    { id: "ollama", label: "Ollama" },
-                  ]}
+                  providers={providers}
                   statuses={keyStatuses}
                   onSave={onSaveKey}
                   onVerify={onVerifyKey}
