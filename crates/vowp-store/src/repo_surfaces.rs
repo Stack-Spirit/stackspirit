@@ -599,10 +599,13 @@ impl Store {
     }
 
     /// Lists one surface's tokens, oldest first.
+    ///
+    /// Tokens created in the same clock tick are ordered by insertion, so a rotation's
+    /// replacement is always the newest row even when its random ULID sorts lower.
     pub fn list_surface_tokens(&self, surface: &SurfaceId) -> Result<Vec<SurfaceToken>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
             "SELECT {SURFACE_TOKEN_COLUMNS} FROM main.surface_tokens
-             WHERE surface_id = ?1 ORDER BY created_at, id"
+             WHERE surface_id = ?1 ORDER BY created_at, rowid"
         ))?;
         let rows = statement.query_map([surface.0.as_str()], read_surface_token_row)?;
         let mut tokens = Vec::new();
