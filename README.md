@@ -54,6 +54,10 @@ and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web
 
 - [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md) — Desktop MVP release and
   closeout note: scope, evidence, limitations, and owner sign-off status.
+- [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) — D5 ASIF release and closeout note:
+  shipped core/bridge/Sessions UI, capability-probe evidence, the local CLI round trip, the
+  pending owner-run live smoke, and the `ss-13-asif-core`, `ss-14-asif-bridge`, and
+  `ss-15-asif-ui` evidence status.
 - [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) — non-root Linux Docker build container for the Tauri
   host and desktop UI gates.
 - [`docs/OWNER-VERIFICATION.md`](docs/OWNER-VERIFICATION.md) — owner-run macOS/Linux/Windows
@@ -111,26 +115,51 @@ The Engine view ends with two honest VOWP gate cards:
 - **Local orchestrator** — gated on VOWP Phase 2 (`v4-local-2e/2f/2g`) and Phase 3
   (`v4-local-3*`: local app host, bridge, MCP proxy, orchestrator materialization, backfill,
   local cache).
-- **.asif.zip sessions** — gated on `v4-asif-core` and `v4-asif-cli`.
+- **.asif.zip sessions** — shipped in D5 for the desktop. The read-only probe must prove
+  export and import independently; a partial Ready gate enables only the proven direction.
 
 The probes read VOWP command surfaces and exit codes; a version string alone never makes a gate
-Ready. D4 keeps `features.asif_actions` and `features.local_orchestrator_actions` false, so even a
-Ready gate shows **not implemented in this build** with the evidence and exact missing milestones
-in a Details drawer.
+Ready. The D5 desktop build enables `features.asif_actions` (the `d5` Cargo feature is on by
+default), while `features.local_orchestrator_actions` stays false until D6. A Ready
+local-orchestrator gate therefore still shows **not implemented in this build** with the evidence
+and exact missing milestones in a Details drawer.
+
+## Sessions and ASIF (Phase D5)
+
+The desktop ships a read-only **Sessions** drawer from the last VOWP snapshot and two actions
+enabled per direction only when the live `AsifGate` proves them:
+
+- **Export .asif.zip** writes a private package on the VOWP host, copies it over SSH after a
+  size and byte-count check, removes the remote temp directory, and shows the declared losses,
+  unsupported operations, and local file name. The remote path never reaches the renderer.
+- **Import .asif.zip** streams a local package to
+  `vowp --project <project> --json session import - --format asif` and shows the new session
+  id, `idle` state, losses, reindex warnings, and unsupported operations. The imported session
+  is never run automatically; there is no force switch or `--allow-unsupported`.
+
+Strict and allow-declared-loss are advanced, mutually exclusive choices; allow-loss is the
+default and no result is called lossless. Packages may contain secrets, so an export is not
+secret-free by default. See [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) for the
+capability-probe evidence, the local disposable CLI round trip, the D5 report status, and the
+owner-run live smoke that is still pending.
 
 ## Cross-Project Relationship with VOWP (`/home/dev/vowp`)
 
 StackSpirit is a separate repository and VOWP project (`stackspirit`), but relies on VOWP wire
 contracts and milestones in `/home/dev/vowp`:
 
-- **Available now (Phases D0–D4):** Outbound SSH connection, VOWP snapshot & capacity/storage
+- **Available now (Phases D0–D5):** Outbound SSH connection, VOWP snapshot & capacity/storage
   telemetry (`vowp fleet status --json`, `vowp capacity report --json`), visual worker/job lanes,
-  recommended worker advisor, job/capacity actions, and local StackSpirit Engine (`opencode`)
-  configuration.
-- **Gated on VOWP ASIF integration (`v4-asif-*` in `/home/dev/vowp`):** Live `.asif.zip` session
-  download and import actions (Phase D5).
-- **Gated on VOWP Phase 3 (`v4-local-3*` in `/home/dev/vowp`):** Running global and project
-  orchestrators locally on the user's machine with live VOWP session lease/backfill (Phase D6).
+  recommended worker advisor, job/capacity actions, local StackSpirit Engine (`opencode`)
+  configuration, and desktop `.asif.zip` session export/import behind the live ASIF capability
+  probe.
+- **Shipped in D5 but not owner-smoke-tested:** ASIF 0.4 remains a review draft. Export and
+  import are enabled independently only after the read-only probe proves them; see
+  [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md). No live host/desktop smoke has been
+  recorded by the owner.
+- **Gated on VOWP Phase 2 (`v4-local-2e/2f/2g`) and Phase 3 (`v4-local-3*` in
+  `/home/dev/vowp`):** Running global and project orchestrators locally on the user's machine
+  with live VOWP session lease/backfill (Phase D6).
 
 ## Development gates
 
