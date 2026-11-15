@@ -29,7 +29,7 @@ use vowp_protocol::{
 };
 use vowp_store::{NodeCredential, Store};
 
-use super::{auth, dispatch, enroll, pair};
+use super::{auth, dispatch, enroll, pair, spool::AgentFrameSpool};
 use crate::deps::Deps;
 use crate::error::CoreError;
 use crate::session::remote::{BeginTurn, IngestGrant, IngestSession};
@@ -347,10 +347,12 @@ fn run_connection_inner(
     // writes the durable spool; this connection drains it and publishes the result back.
     let orchestrator = Orchestrator::new_queued(deps.clone());
     let spool = CommandSpool::new(deps.paths.root());
+    let frame_spool = AgentFrameSpool::new(deps.paths.root());
     let mut sent_commands: BTreeSet<String> = BTreeSet::new();
     loop {
         if connection_is_current(store, &session.node, &session.connection_id) {
             drain_orchestrator_commands(writer, &session.node, &spool, &mut sent_commands)?;
+            drain_agent_frames(writer, &session.node, &frame_spool)?;
         }
         let frame = match poll_frame(incoming, writer, options.max_frame_bytes)? {
             Polled::Frame(frame) => frame,
@@ -913,6 +915,20 @@ fn drain_orchestrator_commands(
             sent.remove(&request_id);
             return Err(error);
         }
+    }
+    Ok(())
+}
+
+/// Sends queued system-initiated frames for this node and retires each after the write.
+///
+/// The spool is the cross-process queue between a home command (`vowp surface rotate`) and
+/// the node's live gateway. A frame stays on disk until the write succeeds, so a dropped
+/// connection delivers it on the next authenticated connection. Only the directory of this
+/// connection's node is read, so a frame for another node is never sent.
+fn drain_agent_frames(writer: &mut dyn Write, node: &NodeName, spool: &AgentFrameSpool) -> Result<(), CoreError> {
+    for queued in spool.pending(node)? {
+        send_frame(writer, &queued.frame)?;
+        spool.remove(node, &queued.request_id)?;
     }
     Ok(())
 }

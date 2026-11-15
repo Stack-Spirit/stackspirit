@@ -587,4 +587,19 @@ impl Store {
         )?;
         Ok(changed > 0)
     }
+
+    /// Shortens one active token's expiry to `expires_at` without ever extending it.
+    ///
+    /// Returns false when the id is unknown, the token is revoked, or its current expiry is
+    /// already at or before `expires_at`. The predicate is part of the same `UPDATE`, so a
+    /// concurrent rotation can neither extend a token nor shorten a revoked one.
+    pub fn shorten_surface_token_expiry(&self, id: &str, expires_at: Timestamp) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE main.surface_tokens SET expires_at = ?1
+             WHERE id = ?2 AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?1)",
+            params![ts_to_text(expires_at), id],
+        )?;
+        Ok(changed > 0)
+    }
 }

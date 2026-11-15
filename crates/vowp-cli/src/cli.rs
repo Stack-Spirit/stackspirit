@@ -1398,6 +1398,8 @@ pub enum SurfaceCommand {
     Ls(SurfaceLsArgs),
     /// Revoke a surface and every token it holds.
     Revoke(SurfaceRevokeArgs),
+    /// Rotate a surface token, keeping the old token for a ten-minute overlap.
+    Rotate(SurfaceRotateArgs),
 }
 
 /// Arguments for `vowp surface pair`.
@@ -1433,6 +1435,17 @@ pub struct SurfaceRevokeArgs {
     /// Revoke without asking for confirmation.
     #[arg(long)]
     pub yes: bool,
+}
+
+/// Arguments for `vowp surface rotate`.
+///
+/// The optional node check comes from the global `--node <name>` flag: for this command it
+/// names the node the surface runs on, not an SSH redirect.
+#[derive(Debug, Clone, Args)]
+#[command(after_help = "For this command --node <name> names the node the surface runs on, not an SSH redirect.")]
+pub struct SurfaceRotateArgs {
+    /// Surface id printed by `vowp surface pair`.
+    pub id: String,
 }
 
 /// Arguments for `vowp loops`.

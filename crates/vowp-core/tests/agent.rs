@@ -18,8 +18,8 @@ use support::fake_git::FakeGit;
 use tempfile::TempDir;
 use vowp_core::agent::gateway::{self, GatewayOptions, GatewayOutcome};
 use vowp_core::agent::{
-    EnrollRequest, auth, create_pending, create_pending_surface, hash_code, issue_surface_token, redeem, revoke,
-    revoke_surface,
+    AgentFrameSpool, EnrollRequest, SURFACE_TOKEN_OVERLAP, auth, create_pending, create_pending_surface, hash_code,
+    issue_surface_token, redeem, revoke, revoke_surface, rotate_surface_token,
 };
 use vowp_core::{
     AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps, FixedRng, SystemGit, SystemRunner,
@@ -149,7 +149,7 @@ fn enroll_frame(code: &str, key: &SigningKey) -> AgentFrame {
         capabilities: capabilities(),
         paths: vec![AgentPathMap {
             project: ProjectName::parse("vowp").expect("project"),
-            local_root: "/home/dev/vowp".to_owned(),
+            local_root: "/srv/vowp".to_owned(),
             worktree_root: None,
             allow: Vec::new(),
         }],
@@ -1141,6 +1141,109 @@ fn gateway_surface_pair_refuses_a_revoked_surface() {
     gateway.send(&AgentFrame::Ping);
     gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
     gateway.finish().expect("gateway");
+}
+
+#[test]
+fn surface_rotate_sends_surface_issued_on_the_live_connection() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let other = node_name("mac-mini");
+    let other_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    activate(home.path(), &clock, &other, &other_key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, old_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+
+    let rotated = rotate_surface_token(&store, &surface, clock.now()).expect("rotated token");
+    let spool = AgentFrameSpool::new(home.path());
+    spool
+        .queue(
+            &name,
+            surface.0.as_str(),
+            &AgentFrame::SurfaceIssued {
+                surface_id: surface.clone(),
+                token: rotated.token.clone(),
+                scopes: rotated.scopes.clone(),
+                expires_at: rotated.expires_at,
+            },
+        )
+        .expect("queued frame");
+    let other_surface = SurfaceId::new();
+    spool
+        .queue(
+            &other,
+            other_surface.0.as_str(),
+            &AgentFrame::SurfaceIssued {
+                surface_id: other_surface.clone(),
+                token: "vowp_surf_other-node".to_owned(),
+                scopes: Vec::new(),
+                expires_at: clock.now().plus(SURFACE_TOKEN_OVERLAP),
+            },
+        )
+        .expect("other node's frame");
+
+    let frame_path = home
+        .path()
+        .join("agent-frames")
+        .join(name.as_str())
+        .join(format!("{}.json", surface.0));
+    assert!(frame_path.is_file(), "the frame waits for the live connection");
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let AgentFrame::SurfaceIssued {
+        surface_id,
+        token,
+        scopes,
+        expires_at,
+    } = gateway.expect(|frame| matches!(frame, AgentFrame::SurfaceIssued { .. }))
+    else {
+        panic!("expected SurfaceIssued");
+    };
+    assert_eq!(surface_id, surface);
+    assert_eq!(token, rotated.token);
+    assert_eq!(scopes, rotated.scopes);
+    assert_eq!(expires_at, clock.now().plus(vowp_core::agent::SURFACE_TOKEN_TTL));
+    assert!(!frame_path.exists(), "a sent frame is removed from the spool");
+
+    let tokens = store.list_surface_tokens(&surface).expect("tokens");
+    let old = tokens
+        .iter()
+        .find(|row| row.token_hash == hash_code(&old_token))
+        .expect("old token row");
+    assert_eq!(old.expires_at, Some(clock.now().plus(SURFACE_TOKEN_OVERLAP)));
+    let new = tokens
+        .iter()
+        .find(|row| row.token_hash == hash_code(&rotated.token))
+        .expect("new token row");
+    assert_eq!(
+        new.expires_at,
+        Some(clock.now().plus(vowp_core::agent::SURFACE_TOKEN_TTL))
+    );
+
+    let overlap = clock.now().plus(Duration::from_secs(9 * 60));
+    assert!(vowp_core::agent::verify_surface_token(&store, &old_token, overlap).is_ok());
+    assert!(vowp_core::agent::verify_surface_token(&store, &token, overlap).is_ok());
+    let after = clock.now().plus(Duration::from_secs(11 * 60));
+    assert!(vowp_core::agent::verify_surface_token(&store, &old_token, after).is_err());
+    assert!(vowp_core::agent::verify_surface_token(&store, &token, after).is_ok());
+
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    gateway.finish().expect("gateway");
+
+    assert!(
+        home.path()
+            .join("agent-frames")
+            .join(other.as_str())
+            .join(format!("{}.json", other_surface.0))
+            .is_file(),
+        "a frame for another node is never sent or removed"
+    );
 }
 
 #[test]

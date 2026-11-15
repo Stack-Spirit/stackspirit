@@ -10,9 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use vowp_agent::{
-    AgentClient, AgentClock, AgentConfig, AgentError, FrameRead, FrameStream, NodeKey, SurfacePairRequest, Transport,
+    AgentClient, AgentClock, AgentConfig, AgentError, FrameRead, FrameStream, NodeKey, RunOptions, RunOutcome,
+    SurfacePairRequest, Transport,
 };
-use vowp_protocol::{AGENT_PROTOCOL, AgentFrame, ErrorKind, NodeName, SessionId, SurfaceId, SurfaceScope, Timestamp};
+use vowp_protocol::{
+    AGENT_PROTOCOL, AgentFrame, AgentRole, ErrorKind, NodeName, SessionId, SurfaceId, SurfaceScope, Timestamp,
+};
 
 const CODE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const SURFACE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -43,6 +46,7 @@ struct FakeState {
     connections: usize,
     used_codes: HashSet<String>,
     received: Vec<AgentFrame>,
+    live_frames_sent: bool,
 }
 
 #[derive(Clone)]
@@ -53,6 +57,8 @@ struct FakeHome {
     token: String,
     scopes: Vec<SurfaceScope>,
     expires_at: Timestamp,
+    live_frames: Vec<AgentFrame>,
+    pair_frames: Vec<AgentFrame>,
 }
 
 impl FakeHome {
@@ -68,7 +74,21 @@ impl FakeHome {
                 SurfaceScope::new("fleet.read"),
             ],
             expires_at: ts().plus(Duration::from_secs(30 * 24 * 60 * 60)),
+            live_frames: Vec::new(),
+            pair_frames: Vec::new(),
         }
+    }
+
+    /// Queues frames the home pushes before the surface-pairing answer.
+    fn with_pair_frames(mut self, frames: Vec<AgentFrame>) -> Self {
+        self.pair_frames = frames;
+        self
+    }
+
+    /// Queues frames the home pushes right after the next authenticated heartbeat.
+    fn with_live_frames(mut self, frames: Vec<AgentFrame>) -> Self {
+        self.live_frames = frames;
+        self
     }
 
     fn frames(&self) -> Vec<AgentFrame> {
@@ -109,6 +129,8 @@ impl Transport for FakeHome {
             token: self.token.clone(),
             scopes: self.scopes.clone(),
             expires_at: self.expires_at,
+            live_frames: self.live_frames.clone(),
+            pair_frames: self.pair_frames.clone(),
             connection,
             outbound: VecDeque::new(),
         }))
@@ -122,6 +144,8 @@ struct FakeStream {
     token: String,
     scopes: Vec<SurfaceScope>,
     expires_at: Timestamp,
+    live_frames: Vec<AgentFrame>,
+    pair_frames: Vec<AgentFrame>,
     connection: usize,
     outbound: VecDeque<AgentFrame>,
 }
@@ -160,6 +184,7 @@ impl FrameStream for FakeStream {
                 });
             }
             AgentFrame::SurfacePair { code, .. } => {
+                self.outbound.extend(self.pair_frames.iter().cloned());
                 let fresh = self
                     .shared
                     .lock()
@@ -179,6 +204,20 @@ impl FrameStream for FakeStream {
                         message: "pairing code is invalid, expired or already used".to_owned(),
                         retryable: false,
                     });
+                }
+            }
+            AgentFrame::Heartbeat { .. } => {
+                let send_live = {
+                    let mut state = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state.live_frames_sent || self.live_frames.is_empty() {
+                        false
+                    } else {
+                        state.live_frames_sent = true;
+                        true
+                    }
+                };
+                if send_live {
+                    self.outbound.extend(self.live_frames.iter().cloned());
                 }
             }
             _ => {}
@@ -301,6 +340,40 @@ fn agent_pair_refuses_a_replayed_code() {
 }
 
 #[test]
+fn agent_pair_applies_a_queued_rotation_for_another_surface() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let other = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned());
+    let other_token = rotated_token();
+    let other_expiry = ts().plus(Duration::from_secs(31 * 24 * 60 * 60));
+    let home = FakeHome::new().with_pair_frames(vec![AgentFrame::SurfaceIssued {
+        surface_id: other.clone(),
+        token: other_token.clone(),
+        scopes: vec![SurfaceScope::new("fleet.read")],
+        expires_at: other_expiry,
+    }]);
+    let mut client = client(dir.path(), home);
+    let request = request();
+
+    let paired = client.pair(&request).expect("the pair answer still arrives");
+    assert_eq!(
+        std::fs::read_to_string(&paired.token_path).expect("paired token"),
+        format!("{}\n", token())
+    );
+    let other_path = AgentConfig::surface_token_path(dir.path(), &other);
+    assert_eq!(
+        std::fs::read_to_string(&other_path).expect("rotated token"),
+        format!("{other_token}\n"),
+        "a queued rotation is applied before the pair answer"
+    );
+    let mode = std::fs::metadata(&other_path)
+        .expect("token metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
 fn agent_pair_surfaces_path_is_private() {
     let dir = tempfile::tempdir().expect("temp dir");
     let home = FakeHome::new();
@@ -327,4 +400,143 @@ fn agent_pair_surfaces_path_is_private() {
         let mode = std::fs::metadata(&path).expect("surface file").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{} must be private", path.display());
     }
+}
+
+/// Builds a replacement token at runtime so no secret-shaped literal is committed.
+fn rotated_token() -> String {
+    format!("vowp_surf_{}", "B".repeat(43))
+}
+
+/// Lists every file below `root`, following directories only.
+fn files_below(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn agent_applies_a_rotated_token_from_the_live_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let rotated = rotated_token();
+    let rotated_expiry = ts().plus(Duration::from_secs(31 * 24 * 60 * 60));
+    let home = FakeHome::new().with_live_frames(vec![
+        AgentFrame::SurfaceIssued {
+            surface_id: SurfaceId(SURFACE.to_owned()),
+            token: rotated.clone(),
+            scopes: vec![
+                SurfaceScope::new(format!("session.read:{SESSION}")),
+                SurfaceScope::new(format!("session.write:{SESSION}")),
+                SurfaceScope::new("fleet.read"),
+            ],
+            expires_at: rotated_expiry,
+        },
+        AgentFrame::Superseded {
+            connection_id: "test-done".to_owned(),
+        },
+    ]);
+    let mut client = client(dir.path(), home);
+    let request = request();
+    let paired = client.pair(&request).expect("pair");
+    let old = std::fs::read_to_string(&paired.token_path).expect("old token");
+    assert_eq!(old.trim(), token());
+
+    let outcome = client
+        .run(&RunOptions::new(AgentRole::Both))
+        .expect("the live connection ends cleanly");
+    assert_eq!(
+        outcome,
+        RunOutcome::Superseded {
+            connection_id: "test-done".to_owned()
+        }
+    );
+
+    let stored = std::fs::read_to_string(&paired.token_path).expect("rotated token file");
+    assert_eq!(stored.trim(), rotated.as_str(), "the live frame replaces the token");
+    let mode = std::fs::metadata(&paired.token_path)
+        .expect("token metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the rotated token must stay 0600");
+    let expiry = std::fs::read_to_string(AgentConfig::surface_expiry_path(dir.path(), &request.surface_id))
+        .expect("expiry file");
+    assert_eq!(expiry.trim(), rotated_expiry.as_rfc3339());
+
+    let session = std::fs::read_to_string(AgentConfig::surface_session_path(dir.path(), &request.surface_id))
+        .expect("session binding");
+    assert_eq!(session, SESSION, "the existing binding is left in place");
+
+    let status_text = std::fs::read_to_string(dir.path().join("status.json")).expect("status");
+    let status: serde_json::Value = serde_json::from_str(&status_text).expect("status JSON");
+    assert_eq!(
+        status["surface_token_expires_at"],
+        rotated_expiry.as_rfc3339(),
+        "status reports the new expiry"
+    );
+
+    for path in files_below(dir.path()) {
+        if path == paired.token_path {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("state file");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(&rotated),
+            "{} must not contain the rotated token",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn agent_revoked_surface_deletes_its_token() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let surface = SurfaceId(SURFACE.to_owned());
+    let home = FakeHome::new().with_live_frames(vec![
+        AgentFrame::SurfaceRevoked {
+            surface_id: surface.clone(),
+            reason: "surface was revoked".to_owned(),
+        },
+        AgentFrame::Superseded {
+            connection_id: "test-done".to_owned(),
+        },
+    ]);
+    let mut client = client(dir.path(), home);
+    let paired = client.pair(&request()).expect("pair");
+    assert!(paired.token_path.is_file());
+
+    let outcome = client
+        .run(&RunOptions::new(AgentRole::Both))
+        .expect("the live connection ends cleanly");
+    assert_eq!(
+        outcome,
+        RunOutcome::Superseded {
+            connection_id: "test-done".to_owned()
+        }
+    );
+
+    assert!(!paired.token_path.exists(), "a revoked surface deletes its token file");
+    assert!(
+        !AgentConfig::surface_expiry_path(dir.path(), &surface).exists(),
+        "a revoked surface deletes its expiry file"
+    );
+    let status_text = std::fs::read_to_string(dir.path().join("status.json")).expect("status");
+    let status: serde_json::Value = serde_json::from_str(&status_text).expect("status JSON");
+    assert!(
+        status["surface_token_expires_at"].is_null(),
+        "status no longer reports the revoked token's expiry"
+    );
 }

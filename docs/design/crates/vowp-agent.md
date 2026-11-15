@@ -490,7 +490,19 @@ logged or returned: [`PairedSurface`] names only the token path, scopes and expi
 `SurfacePairRequest`'s `Debug` redacts the code. A malformed request is `Config`; a
 `SurfaceRevoked` frame, a bad code or a replay is a non-retryable `Remote { kind: Refused }`;
 a `Revoked`/`Superseded` node credential keeps its existing meaning. The client waits at most
-[`PAIR_TIMEOUT`] (30 seconds) for the answer and closes the transport after pairing.
+[`PAIR_TIMEOUT`] (30 seconds) for the answer and closes the transport after pairing. Because the
+gateway drains system-initiated frames before it reads the pairing frame, a queued `SurfaceIssued`
+or `SurfaceRevoked` for another surface can arrive first; the client applies it and keeps waiting
+for its own answer.
+
+A live connection also accepts a pushed `SurfaceIssued` after `vowp surface rotate`. The client
+validates the 26-character surface id and a non-empty token, replaces
+`surfaces/<surface_id>/token` (0600) through a private temporary file and a rename, rewrites the
+`expires_at` file and refreshes an existing `surfaces/<surface_id>/session` binding. It clears the
+surface's read cache, updates `surface_token_expires_at` in `status.json` from the files on disk
+and never logs, prints or returns the token. A malformed id or an empty token is a fatal protocol
+error. A `SurfaceRevoked` frame still stops a matching bridge or orchestrator host, and now deletes
+the surface's token and expiry files; `status.json` no longer reports an expiry for it.
 
 ### Handshake
 
@@ -896,7 +908,10 @@ name a local path, a port or a secret value.
 `ssh_argv_matches_the_documented_command` and `read_line_limited_rejects_an_oversized_frame` cover
 the exact SSH argv and the frame cap. The surface-pairing slice adds the in-memory home tests
 `agent_pair_writes_0600_token_and_prints_no_secret`, `agent_pair_refuses_a_replayed_code` and
-`agent_pair_surfaces_path_is_private` in `tests/surface_pair.rs`. The local-chat slice adds
+`agent_pair_surfaces_path_is_private` in `tests/surface_pair.rs`; the token-rotation slice adds
+`agent_applies_a_rotated_token_from_the_live_connection`,
+`agent_revoked_surface_deletes_its_token` and
+`agent_pair_applies_a_queued_rotation_for_another_surface` there. The local-chat slice adds
 `agent_chat_spools_before_sending`, `agent_chat_replays_from_the_first_unacked`,
 `agent_chat_stops_on_lease_revoked` and `agent_chat_stops_on_spool_full` in `tests/chat.rs`, plus
 `chat_requires_a_paired_surface_for_the_session` and `spool_keeps_unacked_events_and_records_acks`.
@@ -1076,8 +1091,8 @@ offload, home-side path-map storage and `vowp node paths`, launchd and WSS ingre
 jobs. Phase 0 `vowp agent run`
 stays in the foreground; `--role` is accepted and carried in `RunOptions`, and the run-assignment
 frame loop is `run_with_handler` with an injected handler. `vowp agent surface
-start|attach|detach` and token rotation are later v0.4 slices; this crate supplies the
-orchestrator host they can call. This crate
+start|attach|detach` is a later v0.4 slice; this crate supplies the orchestrator host it can call.
+This crate
 serves the local agent socket that a later `vowp mcp --agent-socket … --surface …` will use;
 the CLI command and the CLI-side socket client remain later jobs. The
 real harness runner

@@ -20,7 +20,7 @@ crates/vowp-core/src/
   loops/          mod.rs supervisor.rs reconcile.rs l2_worker.rs l3_verify.rs merge_queue.rs dispatch.rs runner.rs
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
-  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs dispatch.rs result.rs
+  agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs spool.rs dispatch.rs result.rs
   surface/        mod.rs lease.rs native.rs orchestrator.rs mirror.rs opencode_host.rs claude_remote.rs
                   takeover.rs follow.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs,
@@ -504,16 +504,27 @@ pub mod agent {
     pub mod pair {
         pub const SURFACE_CODE_TTL: Duration;                       // 10 minutes
         pub const SURFACE_TOKEN_TTL: Duration;                      // 30 days
+        pub const SURFACE_TOKEN_OVERLAP: Duration;                  // 10 minutes
         pub struct NewSurfaceCode { pub code: String, pub code_hash: String, pub expires_at: Timestamp }
         pub struct PendingSurface { pub surface: SurfaceInfo, pub code: String, pub code_hash: String, pub expires_at: Timestamp }
         pub struct IssuedSurface { pub surface_id: SurfaceId, pub token: String, pub scopes: Vec<SurfaceScope>, pub expires_at: Timestamp }
+        pub struct RotatedSurface { pub surface: SurfaceInfo, pub token: String, pub prefix: String, pub scopes: Vec<SurfaceScope>, pub expires_at: Timestamp, pub old_expires_at: Timestamp, pub node: NodeName }
         pub struct VerifiedSurface { pub surface: SurfaceInfo, pub token: SurfaceToken }
         pub fn create_pending_surface(store: &Store, node: &NodeName, session: &SessionId, kind: SurfaceKind, app: Option<&str>, now: Timestamp) -> Result<PendingSurface, CoreError>;
         pub fn new_surface_code(store: &Store, node: &NodeName, surface_id: &SurfaceId, now: Timestamp) -> Result<NewSurfaceCode, CoreError>;
         pub fn issue_surface_token(store: &Store, node: &NodeName, surface_id: &SurfaceId, session: &SessionId, app: &str, code: &str, now: Timestamp) -> Result<IssuedSurface, CoreError>;
+        pub fn rotate_surface_token(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<RotatedSurface, CoreError>;
         pub fn verify_surface_token(store: &Store, token: &str, now: Timestamp) -> Result<VerifiedSurface, CoreError>;
         pub fn revoke_surface_token(store: &Store, id: &str, now: Timestamp) -> Result<(), CoreError>;
         pub fn revoke_surface(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError>;
+    }
+    pub mod spool {
+        pub struct QueuedAgentFrame { pub request_id: String, pub frame: AgentFrame }
+        pub struct AgentFrameSpool { /* home root */ }
+        pub fn new(root: impl Into<PathBuf>) -> AgentFrameSpool;
+        pub fn queue(&self, node: &NodeName, request_id: &str, frame: &AgentFrame) -> Result<(), CoreError>;
+        pub fn pending(&self, node: &NodeName) -> Result<Vec<QueuedAgentFrame>, CoreError>;
+        pub fn remove(&self, node: &NodeName, request_id: &str) -> Result<(), CoreError>;
     }
     pub mod lease_control {                                         // crate::surface::lease
         pub const HEARTBEAT_INTERVAL: Duration;                     // 5 seconds
@@ -583,8 +594,22 @@ Behaviour:
   is already revoked the answer is `SurfaceRevoked`. Those refusals keep the authenticated
   connection open so the agent can retry with a fresh code; an internal store failure closes it.
   The success log line carries only the surface id and session id, never the code or token.
-  There is no live connection registry, so a revoked surface is refused on its next surface
-  frame rather than pushed.
+- `rotate_surface_token` runs one immediate transaction over an `attached` surface. It copies
+  the scopes of the surface's most recent token, mints a fresh 30-day token with the same
+  `vowp_surf_` format and inserts only its hash and 12-character prefix. Every other active
+  token is shortened to `now + SURFACE_TOKEN_OVERLAP` (ten minutes) through a conditional
+  `UPDATE` that never extends an expiry; a token that already expires sooner keeps its earlier
+  time. `old_expires_at` is the earliest resulting expiry, or the end of the overlap window when
+  the surface has no other active token. A pending or revoked surface is refused; an unknown id
+  is not found. After the overlap `verify_surface_token` refuses the old token by its ordinary
+  expiry check and accepts the new one.
+- The gateway also drains `agent-frames/<node>/<request>.json` at the top of the same connection
+  loop that drains orchestrator commands. The `AgentFrameSpool` writes one `AgentFrame` per file
+  through a 0600 temporary file and a rename in a 0700 directory, sends only its authenticated
+  node's directory and removes each file after the write succeeds. A failed or absent connection
+  leaves the frame for the next authenticated connection; a frame for another node is never read.
+  `vowp surface rotate` queues `SurfaceIssued` under the surface id, so a second rotation before
+  delivery replaces the older token rather than leaving two plaintext tokens on disk.
 - `LeaseAcquire { surface, session, surface_token, mode }` first verifies the surface token
   against `surface_tokens`, requires the surface row to be `attached`, on the connection node,
   paired for this session and scoped `session.write:<id>`. It then runs one immediate
@@ -730,13 +755,17 @@ Tests (`tests/agent.rs`, in-memory duplex, temp home, no real keys): `gateway_en
 `gateway_unknown_or_revoked_node_is_refused`, `gateway_surface_pair_issues_and_persists_hash`,
 `gateway_surface_pair_refuses_a_bad_or_replayed_code`, `gateway_surface_pair_binds_the_connection_node`,
 `gateway_surface_pair_refuses_a_revoked_surface`, `surface_token_never_appears_in_logs`,
+`surface_rotate_sends_surface_issued_on_the_live_connection`,
 `lease_acquire_grants_and_heartbeats`, `lease_conflict_without_takeover`,
 `lease_takeover_pushes_lease_revoked`, `lease_release_removes_the_row`,
 `surface_token_must_match_the_paired_surface`, `lease_token_is_stored_only_as_a_hash` and
 `lease_stale_after_sixty_seconds`. The service tests in `src/agent/pair.rs` are
 `surface_pair_issues_a_scoped_token_and_stores_only_its_hash`,
-`surface_pair_refuses_expired_or_used_code`, `surface_pair_binds_node_and_session` and
-`surface_token_verify_rejects_revoked_and_expired`.
+`surface_pair_refuses_expired_or_used_code`, `surface_pair_binds_node_and_session`,
+`surface_token_verify_rejects_revoked_and_expired`,
+`surface_token_rotation_keeps_the_old_token_for_the_overlap`,
+`surface_rotate_refuses_pending_and_revoked` and
+`surface_rotation_never_extends_a_shorter_expiry`.
 
 ### 9.2 Result return (`agent/result.rs`)
 

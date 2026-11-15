@@ -28,6 +28,9 @@ pub const SURFACE_CODE_TTL: Duration = code::ENROLLMENT_CODE_TTL;
 /// Default lifetime of an issued surface token (30 days).
 pub const SURFACE_TOKEN_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// How long an old surface token keeps working after a rotation (10 minutes).
+pub const SURFACE_TOKEN_OVERLAP: Duration = Duration::from_secs(10 * 60);
+
 /// Scheme carried by every surface token.
 const TOKEN_SCHEME: &str = "vowp_surf_";
 
@@ -116,6 +119,42 @@ pub struct VerifiedSurface {
     pub surface: SurfaceInfo,
     /// Stored token row, with `last_used_at` updated.
     pub token: SurfaceToken,
+}
+
+/// The result of rotating one surface token.
+#[derive(Clone)]
+pub struct RotatedSurface {
+    /// Surface row at rotation time.
+    pub surface: SurfaceInfo,
+    /// Plaintext replacement token, returned once and never stored.
+    pub token: String,
+    /// Display prefix of [`Self::token`]; safe to print.
+    pub prefix: String,
+    /// Scopes copied from the surface's previous token.
+    pub scopes: Vec<SurfaceScope>,
+    /// When the replacement token expires.
+    pub expires_at: Timestamp,
+    /// Earliest expiry among the surface's previous active tokens.
+    ///
+    /// This is the end of the overlap window: after it an agent that has not received the
+    /// replacement token must re-pair.
+    pub old_expires_at: Timestamp,
+    /// Node the surface is bound to.
+    pub node: NodeName,
+}
+
+impl fmt::Debug for RotatedSurface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RotatedSurface")
+            .field("surface", &self.surface)
+            .field("token", &"[REDACTED]")
+            .field("prefix", &self.prefix)
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .field("old_expires_at", &self.old_expires_at)
+            .field("node", &self.node)
+            .finish()
+    }
 }
 
 /// Creates a `pending` surface and its one-time pairing code.
@@ -298,6 +337,94 @@ pub fn issue_surface_token(
         .map_err(map_pair_error)
 }
 
+/// Rotates one attached surface's token, keeping the old tokens for the overlap window.
+///
+/// The replacement token has the same scopes as the surface's most recent token and the
+/// normal 30-day TTL. Every other active token is shortened to `now + 10 minutes`, never
+/// extended; an older token that already expires sooner keeps its earlier expiry. The
+/// plaintext replacement token is returned once; only its hash, prefix and scopes are
+/// stored. A missing surface is [`CoreError::NotFound`]; a pending or revoked surface is a
+/// typed refusal.
+pub fn rotate_surface_token(
+    store: &Store,
+    surface_id: &SurfaceId,
+    now: Timestamp,
+) -> Result<RotatedSurface, CoreError> {
+    let (token, token_hash, prefix) = new_token()?;
+    let token_id = ulid::Ulid::generate().to_string();
+    let expires_at = now.plus(SURFACE_TOKEN_TTL);
+    let overlap_expires_at = now.plus(SURFACE_TOKEN_OVERLAP);
+
+    store
+        .transaction(|tx| {
+            let Some(surface) = tx.surface_by_id(surface_id)? else {
+                return Err(StoreError::NotFound {
+                    what: "surface",
+                    id: surface_id.0.clone(),
+                });
+            };
+            match surface.state {
+                SurfaceState::Attached => {}
+                SurfaceState::Pending => {
+                    return Err(StoreError::Conflict(
+                        "surface is pending; pair it before rotating its token".to_owned(),
+                    ));
+                }
+                SurfaceState::Revoked => return Err(StoreError::Conflict("surface was revoked".to_owned())),
+            }
+
+            let tokens = tx.list_surface_tokens(surface_id)?;
+            let scopes = match tokens
+                .iter()
+                .rev()
+                .find(|token| token.revoked_at.is_none())
+                .or_else(|| tokens.last())
+            {
+                Some(token) => token.scopes.clone(),
+                None => scopes_from_surface(tx, &surface)?,
+            };
+            let mut old_expires_at = overlap_expires_at;
+            for old in &tokens {
+                if old.revoked_at.is_some() {
+                    continue;
+                }
+                let Some(old_expiry) = old.expires_at else {
+                    tx.shorten_surface_token_expiry(&old.id, overlap_expires_at)?;
+                    continue;
+                };
+                if old_expiry <= now {
+                    continue;
+                }
+                old_expires_at = old_expires_at.min(old_expiry);
+                tx.shorten_surface_token_expiry(&old.id, overlap_expires_at)?;
+            }
+
+            tx.insert_surface_token(&SurfaceToken {
+                id: token_id.clone(),
+                surface_id: surface_id.clone(),
+                token_hash: token_hash.clone(),
+                prefix: prefix.clone(),
+                scopes: scopes.clone(),
+                created_at: now,
+                expires_at: Some(expires_at),
+                revoked_at: None,
+                last_used_at: None,
+            })?;
+
+            let node = surface.node.clone();
+            Ok(RotatedSurface {
+                surface,
+                token: token.clone(),
+                prefix,
+                scopes,
+                expires_at,
+                old_expires_at,
+                node,
+            })
+        })
+        .map_err(map_pair_error)
+}
+
 /// Verifies a presented surface token at `now` and records its use.
 ///
 /// The comparison against the stored hash is constant-time. A malformed, unknown,
@@ -384,6 +511,20 @@ fn default_scopes(session: &SessionId, project: Option<&ProjectName>) -> Vec<Sur
     }
     scopes.push(SurfaceScope::new("fleet.read"));
     scopes
+}
+
+/// Rebuilds the default scopes of a surface that has no token left to copy.
+///
+/// A surface is created with its session in metadata and pairing attaches it with the
+/// default scopes, so this covers an attached surface whose tokens were all revoked or
+/// pruned.
+fn scopes_from_surface(store: &Store, surface: &SurfaceInfo) -> Result<Vec<SurfaceScope>, StoreError> {
+    let Some(serde_json::Value::String(bound)) = surface.metadata.get(SESSION_METADATA_KEY) else {
+        return Err(StoreError::Conflict("surface is not bound to a session".to_owned()));
+    };
+    let session = SessionId::parse(bound)?;
+    let row = store.require_session(&session)?;
+    Ok(default_scopes(&session, row.project.as_ref()))
 }
 
 /// Inserts one surface-kind code for a pending surface.
@@ -939,5 +1080,182 @@ mod tests {
             verify_surface_token(&store, &unknown, now).expect_err("unknown token"),
             CoreError::Refused(_)
         ));
+    }
+
+    #[test]
+    fn surface_token_rotation_keeps_the_old_token_for_the_overlap() {
+        let store = store();
+        let now = ts();
+        let node = node("mac-studio");
+        seed_node(&store, &node, now);
+        let session = seed_session(&store, &node, SESSION, "vowp", now);
+        let pending = seed_pending(&store, &node, &session, "opencode", now);
+        let old = issue_surface_token(
+            &store,
+            &node,
+            &pending.surface.id,
+            &session,
+            "opencode",
+            &pending.code,
+            now,
+        )
+        .expect("issued token");
+
+        let rotated = rotate_surface_token(&store, &pending.surface.id, now).expect("rotated token");
+        assert_eq!(rotated.surface.id, pending.surface.id);
+        assert_eq!(rotated.node, node);
+        assert_eq!(rotated.scopes, old.scopes);
+        assert_eq!(rotated.expires_at, now.plus(SURFACE_TOKEN_TTL));
+        assert_eq!(rotated.old_expires_at, now.plus(SURFACE_TOKEN_OVERLAP));
+        assert_ne!(rotated.token, old.token);
+        assert!(rotated.token.starts_with(TOKEN_SCHEME));
+        let random_part = rotated.token.strip_prefix(TOKEN_SCHEME).expect("scheme");
+        assert_eq!(
+            rotated.prefix,
+            random_part.chars().take(PREFIX_CHARS).collect::<String>()
+        );
+
+        let tokens = store.list_surface_tokens(&pending.surface.id).expect("tokens");
+        assert_eq!(tokens.len(), 2);
+        for token in &tokens {
+            assert_ne!(token.token_hash, rotated.token);
+            assert_ne!(token.token_hash, old.token);
+        }
+        let old_row = tokens
+            .iter()
+            .find(|token| token.token_hash == hash_code(&old.token))
+            .expect("old token row");
+        assert_eq!(old_row.expires_at, Some(now.plus(SURFACE_TOKEN_OVERLAP)));
+        let new_row = tokens
+            .iter()
+            .find(|token| token.token_hash == hash_code(&rotated.token))
+            .expect("new token row");
+        assert_eq!(new_row.expires_at, Some(now.plus(SURFACE_TOKEN_TTL)));
+        assert_eq!(new_row.scopes, old.scopes);
+        assert_eq!(new_row.prefix, rotated.prefix);
+
+        let overlap = now.plus(Duration::from_secs(9 * 60));
+        assert!(
+            verify_surface_token(&store, &old.token, overlap).is_ok(),
+            "the old token still verifies inside the overlap"
+        );
+        assert!(
+            verify_surface_token(&store, &rotated.token, overlap).is_ok(),
+            "the new token verifies inside the overlap"
+        );
+
+        let after = now.plus(Duration::from_secs(11 * 60));
+        let error = verify_surface_token(&store, &old.token, after).expect_err("old token expires");
+        assert!(matches!(error, CoreError::Refused(_)));
+        assert!(
+            verify_surface_token(&store, &rotated.token, after).is_ok(),
+            "the new token still verifies after the overlap"
+        );
+
+        let debug = format!("{rotated:?}");
+        assert!(!debug.contains(&rotated.token), "Debug must not carry the token");
+        assert!(
+            !error.to_string().contains(&old.token),
+            "the refusal must not echo a token"
+        );
+    }
+
+    #[test]
+    fn surface_rotate_refuses_pending_and_revoked() {
+        let store = store();
+        let now = ts();
+        let node = node("mac-studio");
+        seed_node(&store, &node, now);
+        let session = seed_session(&store, &node, SESSION, "vowp", now);
+
+        let pending = seed_pending(&store, &node, &session, "opencode", now);
+        let error = rotate_surface_token(&store, &pending.surface.id, now).expect_err("pending surface");
+        assert!(matches!(error, CoreError::Refused(_)));
+        assert!(
+            store
+                .list_surface_tokens(&pending.surface.id)
+                .expect("tokens")
+                .is_empty()
+        );
+
+        let attached = seed_pending(&store, &node, &session, "opencode", now);
+        let issued = issue_surface_token(
+            &store,
+            &node,
+            &attached.surface.id,
+            &session,
+            "opencode",
+            &attached.code,
+            now,
+        )
+        .expect("issued token");
+        revoke_surface(&store, &attached.surface.id, now).expect("revoke surface");
+        let error = rotate_surface_token(&store, &attached.surface.id, now).expect_err("revoked surface");
+        assert!(matches!(error, CoreError::Refused(_)));
+        let tokens = store.list_surface_tokens(&attached.surface.id).expect("tokens");
+        assert_eq!(tokens.len(), 1, "a refused rotation mints no token");
+        assert!(tokens[0].revoked_at.is_some());
+        assert!(
+            verify_surface_token(&store, &issued.token, now).is_err(),
+            "the old token still refuses after a revoked rotation"
+        );
+
+        let unknown = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAZ".to_owned());
+        assert!(matches!(
+            rotate_surface_token(&store, &unknown, now).expect_err("unknown surface"),
+            CoreError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn surface_rotation_never_extends_a_shorter_expiry() {
+        let store = store();
+        let now = ts();
+        let node = node("mac-studio");
+        seed_node(&store, &node, now);
+        let session = seed_session(&store, &node, SESSION, "vowp", now);
+        let pending = seed_pending(&store, &node, &session, "opencode", now);
+        let issued = issue_surface_token(
+            &store,
+            &node,
+            &pending.surface.id,
+            &session,
+            "opencode",
+            &pending.code,
+            now,
+        )
+        .expect("issued token");
+
+        let near_expiry = now.plus(Duration::from_secs(2 * 60));
+        store
+            .insert_surface_token(&SurfaceToken {
+                id: "01ARZ3NDEKTSV4RRFFQ69G5FAY".to_owned(),
+                surface_id: pending.surface.id.clone(),
+                token_hash: hash_code("short-lived-token"),
+                prefix: "shortlived01".to_owned(),
+                scopes: issued.scopes.clone(),
+                created_at: now,
+                expires_at: Some(near_expiry),
+                revoked_at: None,
+                last_used_at: None,
+            })
+            .expect("short-lived token");
+
+        let rotated = rotate_surface_token(&store, &pending.surface.id, now).expect("rotated token");
+        assert_eq!(rotated.old_expires_at, near_expiry);
+        let short = store
+            .list_surface_tokens(&pending.surface.id)
+            .expect("tokens")
+            .into_iter()
+            .find(|token| token.id == "01ARZ3NDEKTSV4RRFFQ69G5FAY")
+            .expect("short-lived row");
+        assert_eq!(short.expires_at, Some(near_expiry), "a rotation never extends a token");
+        let old = store
+            .list_surface_tokens(&pending.surface.id)
+            .expect("tokens")
+            .into_iter()
+            .find(|token| token.token_hash == hash_code(&issued.token))
+            .expect("old token row");
+        assert_eq!(old.expires_at, Some(now.plus(SURFACE_TOKEN_OVERLAP)));
     }
 }

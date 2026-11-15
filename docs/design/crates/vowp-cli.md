@@ -30,7 +30,7 @@ crates/vowp-cli/
                        caps and reload pending, and `reload` asks the supervisor or checks locally)
   src/cmd/agent.rs    (`agent enroll|pair|run|status` plus hidden `agent gateway`; no store or project context for the Mac commands)
   src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`)
-  src/cmd/surface.rs  (`surface pair|ls|revoke`; home-only global-store surface pairing)
+  src/cmd/surface.rs  (`surface pair|ls|rotate|revoke`; home-only global-store surface pairing)
   src/mcp/{mod,jsonrpc,tools,backend,proxy}.rs  (home stdio MCP server and Mac-side local proxy)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
@@ -196,6 +196,18 @@ commands are home-only (a control machine exits 5) and open the global store thr
   every active token and marks the surface `revoked`. Without `--yes` it refuses with exit 5;
   an unknown surface is exit 3. `--json` prints
   `{"surface","status":"revoked","tokens_revoked":N}`. No token is printed.
+- `surface rotate <id> [--node <name>]` calls
+  `vowp_core::agent::pair::rotate_surface_token`, which mints a 30-day replacement token with
+  the surface's current scopes and shortens every other active token to `now + 10 minutes`
+  without extending a sooner expiry. The command queues one `AgentFrame::SurfaceIssued` in
+  `<home>/agent-frames/<node>/<surface>.json` for the gateway to drain; the token is never
+  printed. Human output is `rotated surface <id> on <node>`, `prefix`, `expires` and
+  `old token expires`; `--json` prints
+  `{"surface","node","prefix","expires_at","old_expires_at"}`. `--node` names the surface's node,
+  not an SSH target; a different node is exit 4. A pending surface is exit 4; an unknown surface
+  is exit 3; a revoked surface is exit 5. When the node is not online the rotation still succeeds
+  (exit 0), the frame stays queued for the next authenticated connection and the command writes
+  `warning: node <n> is offline; the agent must re-pair before <old expiry>` to stderr.
 
 ### Node enrollment commands (`cmd/node.rs`)
 
@@ -381,7 +393,10 @@ surface-pairing slice adds `agent_pair_help_names_code_surface_and_session`,
 `surface_pair_cli_prints_code_once_and_lists_pending`,
 `surface_revoke_marks_the_token_revoked`, `surface_command_requires_a_node_and_session`,
 `surface_ls_never_prints_a_token` and `surface_commands_are_home_only` in `tests/agent.rs`,
-plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`. The
+plus `surface_commands_are_registered_and_node_is_a_filter` in `tests/core.rs`. The token-rotation
+slice adds `surface_rotate_queues_for_an_offline_node_and_warns`,
+`surface_rotate_never_prints_the_token` and `surface_rotate_uses_the_existing_exit_codes` in the
+`src/cmd/surface.rs` unit tests. The
 offload-policy slice adds `job_add_refuses_node_placement_when_offload_is_disabled`,
 `job_add_persists_any_placement_and_job_show_reads_it`,
 `offload_policy_json_is_the_effective_policy` and

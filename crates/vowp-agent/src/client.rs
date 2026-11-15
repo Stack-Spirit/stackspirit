@@ -4,6 +4,7 @@
 //! through a [`Transport`]; tests inject an in-memory home instead of opening SSH.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -526,53 +527,70 @@ impl AgentClient {
             session: request.session.clone(),
             app: request.app.clone(),
         })?;
-        let (token, scopes, expires_at) = match self.recv_frame(Some(PAIR_TIMEOUT))? {
-            FrameRead::Frame(AgentFrame::SurfaceIssued {
-                surface_id,
-                token,
-                scopes,
-                expires_at,
-            }) => {
-                if surface_id != request.surface_id {
-                    return Err(AgentError::Protocol(
-                        "the home issued a token for another surface".to_owned(),
-                    ));
-                }
-                if token.is_empty() {
-                    return Err(AgentError::Protocol(
-                        "the home returned an empty surface token".to_owned(),
-                    ));
-                }
-                (token, scopes, expires_at)
-            }
-            FrameRead::Frame(AgentFrame::SurfaceRevoked { reason, .. }) => {
-                return Err(AgentError::Remote {
-                    kind: ErrorKind::Refused,
-                    message: format!("surface {} was revoked: {reason}", request.surface_id),
-                    retryable: false,
-                });
-            }
-            FrameRead::Frame(AgentFrame::Revoked { reason }) => return Err(AgentError::Revoked(reason)),
-            FrameRead::Frame(AgentFrame::Superseded { connection_id }) => {
-                return Err(AgentError::Superseded(connection_id));
-            }
-            FrameRead::Frame(AgentFrame::Error {
-                kind,
-                message,
-                retryable,
-            }) => return Err(remote_error(kind, message, retryable)),
-            FrameRead::Frame(_) => {
-                return Err(AgentError::Protocol("expected SurfaceIssued from the home".to_owned()));
-            }
-            FrameRead::Timeout => {
+        // The gateway drains system-initiated frames before it reads the pairing frame, so a
+        // queued `SurfaceIssued` from a rotation can arrive ahead of this request's answer.
+        // Apply those frames and keep waiting for the matching answer instead of failing.
+        let deadline = Instant::now() + PAIR_TIMEOUT;
+        let (token, scopes, expires_at) = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err(AgentError::Transport(
                     "the home did not answer the surface pairing request".to_owned(),
                 ));
             }
-            FrameRead::Closed => {
-                return Err(AgentError::Transport(
-                    "the home closed the connection during surface pairing".to_owned(),
-                ));
+            match self.recv_frame(Some(remaining))? {
+                FrameRead::Frame(AgentFrame::SurfaceIssued {
+                    surface_id,
+                    token,
+                    scopes,
+                    expires_at,
+                }) => {
+                    if surface_id == request.surface_id {
+                        if token.is_empty() {
+                            return Err(AgentError::Protocol(
+                                "the home returned an empty surface token".to_owned(),
+                            ));
+                        }
+                        break (token, scopes, expires_at);
+                    }
+                    self.apply_surface_issued(surface_id, token, expires_at)?;
+                }
+                FrameRead::Frame(AgentFrame::SurfaceRevoked { surface_id, reason }) => {
+                    if surface_id == request.surface_id {
+                        return Err(AgentError::Remote {
+                            kind: ErrorKind::Refused,
+                            message: format!("surface {} was revoked: {reason}", request.surface_id),
+                            retryable: false,
+                        });
+                    }
+                    self.forget_surface_token(&surface_id);
+                    if let Err(error) = self.cache.clear_surface(&surface_id) {
+                        debug_failure("cache clear after surface revocation failed", &error);
+                    }
+                    self.orchestrator.stop_surface(&surface_id);
+                }
+                FrameRead::Frame(AgentFrame::Revoked { reason }) => return Err(AgentError::Revoked(reason)),
+                FrameRead::Frame(AgentFrame::Superseded { connection_id }) => {
+                    return Err(AgentError::Superseded(connection_id));
+                }
+                FrameRead::Frame(AgentFrame::Error {
+                    kind,
+                    message,
+                    retryable,
+                }) => return Err(remote_error(kind, message, retryable)),
+                FrameRead::Frame(_) => {
+                    return Err(AgentError::Protocol("expected SurfaceIssued from the home".to_owned()));
+                }
+                FrameRead::Timeout => {
+                    return Err(AgentError::Transport(
+                        "the home did not answer the surface pairing request".to_owned(),
+                    ));
+                }
+                FrameRead::Closed => {
+                    return Err(AgentError::Transport(
+                        "the home closed the connection during surface pairing".to_owned(),
+                    ));
+                }
             }
         };
         let token_path = write_surface_token(&self.state_dir, &request.surface_id, &token, expires_at)?;
@@ -588,6 +606,71 @@ impl AgentClient {
             expires_at,
             token_path,
         })
+    }
+
+    /// Applies a `SurfaceIssued` frame pushed by the home after a rotation.
+    ///
+    /// The replacement token is written 0600 with an atomic rename, an existing session
+    /// binding is refreshed, the cached read data of the old token is dropped and
+    /// `status.json` reports the new expiry. The token is never logged, printed or stored in
+    /// a status field.
+    fn apply_surface_issued(
+        &mut self,
+        surface_id: SurfaceId,
+        token: String,
+        expires_at: Timestamp,
+    ) -> Result<(), AgentError> {
+        validate_surface_id(&surface_id)?;
+        if token.is_empty() {
+            return Err(AgentError::Protocol(
+                "the home pushed an empty surface token".to_owned(),
+            ));
+        }
+        write_surface_token(&self.state_dir, &surface_id, &token, expires_at)?;
+        self.refresh_surface_binding(&surface_id)?;
+        if let Err(error) = self.cache.clear_surface(&surface_id) {
+            debug_failure("cache clear after surface rotation failed", &error);
+        }
+        self.status.surface_token_expires_at = surface_token_expiry(&self.state_dir);
+        self.save_status()
+    }
+
+    /// Rewrites an existing `surfaces/<id>/session` binding with private modes.
+    ///
+    /// A rotation carries no session, so the binding is only refreshed when one is already
+    /// present. A missing or unreadable binding is left alone rather than invented.
+    fn refresh_surface_binding(&self, surface: &SurfaceId) -> Result<(), AgentError> {
+        let path = AgentConfig::surface_session_path(&self.state_dir, surface);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(AgentError::Io(error)),
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok(());
+        };
+        let Ok(session) = SessionId::parse(text.trim()) else {
+            return Ok(());
+        };
+        write_surface_binding(&self.state_dir, surface, &session)
+    }
+
+    /// Deletes the token and expiry of a revoked surface and refreshes `status.json`.
+    fn forget_surface_token(&mut self, surface: &SurfaceId) {
+        for path in [
+            AgentConfig::surface_token_path(&self.state_dir, surface),
+            AgentConfig::surface_expiry_path(&self.state_dir, surface),
+        ] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => debug_failure("surface token delete failed", &AgentError::Io(error)),
+            }
+        }
+        self.status.surface_token_expires_at = surface_token_expiry(&self.state_dir);
+        if let Err(error) = self.save_status() {
+            debug_failure("status write after surface revocation failed", &error);
+        }
     }
 
     /// Opens a transport and performs `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`.
@@ -1464,7 +1547,18 @@ impl AgentClient {
                             let _ = self.orchestrator.mark_lease_lost();
                             self.surface_read_only(reason);
                         }
+                        AgentFrame::SurfaceIssued {
+                            surface_id,
+                            token,
+                            scopes: _,
+                            expires_at,
+                        } => {
+                            if let Err(error) = self.apply_surface_issued(surface_id, token, expires_at) {
+                                return serve_outcome_from_error(error);
+                            }
+                        }
                         AgentFrame::SurfaceRevoked { surface_id, reason } => {
+                            self.forget_surface_token(&surface_id);
                             if let Err(error) = self.cache.clear_surface(&surface_id) {
                                 debug_failure("cache clear after surface revocation failed", &error);
                             }
@@ -1688,6 +1782,9 @@ fn validate_code_shape(code: &str, kind: &str) -> Result<(), AgentError> {
 }
 
 /// Writes the token and its expiry below `state_dir/surfaces/<id>` with private modes.
+///
+/// The files are written through a private temporary file and renamed, so a crash or a
+/// concurrent reader never sees a truncated token. The token file contains a secret.
 fn write_surface_token(
     state_dir: &Path,
     surface: &SurfaceId,
@@ -1698,12 +1795,23 @@ fn write_surface_token(
     ensure_private_dir(&AgentConfig::surfaces_dir(state_dir))?;
     ensure_private_dir(&AgentConfig::surface_dir(state_dir, surface))?;
     let token_path = AgentConfig::surface_token_path(state_dir, surface);
-    write_private(&token_path, format!("{token}\n").as_bytes())?;
-    write_private(
+    write_private_atomic(&token_path, format!("{token}\n").as_bytes())?;
+    write_private_atomic(
         &AgentConfig::surface_expiry_path(state_dir, surface),
         expires_at.as_rfc3339().as_bytes(),
     )?;
     Ok(token_path)
+}
+
+/// Writes one private file through a temporary file and a rename.
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    write_private(&temp, bytes)?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(AgentError::Io(error));
+    }
+    Ok(())
 }
 
 fn base_status(state_dir: &Path, config: Option<&AgentConfig>, key: &NodeKey) -> AgentStatus {

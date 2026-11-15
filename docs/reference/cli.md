@@ -155,6 +155,7 @@ python3 docs/reference/check-reference.py
 | [`vowp surface pair`](#vowp-surface-pair) | Create a pending surface and print its one-time pairing code |
 | [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
 | [`vowp surface revoke`](#vowp-surface-revoke) | Revoke a surface and every token it holds |
+| [`vowp surface rotate`](#vowp-surface-rotate) | Rotate a surface token, keeping the old token for a ten-minute overlap |
 | [`vowp offload`](#vowp-offload) | Show the effective offload policy or the offload read model |
 | [`vowp offload policy`](#vowp-offload-policy) | Show the effective offload policy |
 | [`vowp offload status`](#vowp-offload-status) | Show nodes, live assignments and waiting jobs |
@@ -3155,6 +3156,7 @@ Commands:
   pair    Create a pending surface and print its one-time pairing code
   ls      List surfaces, their scopes and token expiry
   revoke  Revoke a surface and every token it holds
+  rotate  Rotate a surface token, keeping the old token for a ten-minute overlap
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -3232,6 +3234,29 @@ Options:
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
+```
+
+#### `vowp surface rotate`
+
+```text
+Rotate a surface token, keeping the old token for a ten-minute overlap
+
+Usage: vowp surface rotate [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Surface id printed by `vowp surface pair`
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+For this command --node <name> names the node the surface runs on, not an SSH redirect.
 ```
 
 ### `vowp offload`

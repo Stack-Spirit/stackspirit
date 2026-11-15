@@ -1,9 +1,11 @@
-//! `surface`: create, list and revoke the home side of a paired local surface.
+//! `surface`: create, list, rotate and revoke the home side of a paired local surface.
 //!
 //! Spec: `docs/design/v0.4/local-orchestrator.md` §4.3, §4.6 and §12.1. The commands are
 //! home-only and use the global store. `surface pair` creates a `pending` surface and prints
 //! a ten-minute one-time code exactly once; `surface ls` reports state, scopes and expiry but
-//! never a token; `surface revoke` revokes every token and marks the surface revoked.
+//! never a token; `surface rotate` issues a replacement token, keeps the old token for a
+//! ten-minute overlap and queues `SurfaceIssued` for the surface's node; `surface revoke`
+//! revokes every token and marks the surface revoked.
 //!
 //! The v4 store read model returns one surface by id. This module keeps the ids it has
 //! created in `<home>/surfaces.json` (surface ids are not secrets) and re-reads the surface,
@@ -15,11 +17,15 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use serde::Serialize;
-use vowp_core::agent::pair::{create_pending_surface, revoke_surface};
-use vowp_protocol::{NodeName, SessionId, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState, Timestamp};
+use vowp_core::agent::pair::{create_pending_surface, revoke_surface, rotate_surface_token};
+use vowp_core::agent::spool::AgentFrameSpool;
+use vowp_protocol::{
+    AgentFrame, NodeName, NodePresence, SessionId, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState,
+    Timestamp,
+};
 use vowp_store::{Store, SurfaceToken};
 
-use crate::cli::{SurfaceCommand, SurfaceLsArgs, SurfacePairArgs, SurfaceRevokeArgs};
+use crate::cli::{SurfaceCommand, SurfaceLsArgs, SurfacePairArgs, SurfaceRevokeArgs, SurfaceRotateArgs};
 use crate::node_ctx::NodeRole;
 use crate::output::{Table, local_time_at, print_json};
 use crate::{CliError, Ctx, IoStreams};
@@ -34,6 +40,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, command: &SurfaceCommand, node: Op
         SurfaceCommand::Pair(args) => pair(ctx, io, args, node),
         SurfaceCommand::Ls(args) => list(ctx, io, args, node),
         SurfaceCommand::Revoke(args) => revoke(ctx, io, args),
+        SurfaceCommand::Rotate(args) => rotate(ctx, io, args, node),
     }
 }
 
@@ -153,6 +160,89 @@ fn revoke(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRevokeArgs) -> Result
         writeln!(io.out(), "revoked surface {id}; {revoked} token(s) revoked")?;
     }
     Ok(0)
+}
+
+/// Rotates one surface token and queues its replacement for the surface's node.
+///
+/// The command never prints the token. A node that is not online receives the queued frame
+/// on its next authenticated connection; the command still succeeds and warns on stderr.
+fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Option<&str>) -> Result<i32, CliError> {
+    require_home(ctx)?;
+    let id = parse_surface_id(&args.id)?;
+    let filter = match node {
+        Some(value) => {
+            Some(NodeName::parse(value).map_err(|_| CliError::Invalid(format!("invalid node name {value:?}")))?)
+        }
+        None => None,
+    };
+    let store = ctx.fleet_store()?;
+    let existing = store.surface_by_id(&id)?;
+    if let Some(surface) = &existing {
+        if let Some(filter) = &filter
+            && surface.node != *filter
+        {
+            return Err(CliError::Conflict(format!(
+                "surface {id} belongs to node {}, not {filter}",
+                surface.node
+            )));
+        }
+        if surface.state == SurfaceState::Pending {
+            return Err(CliError::Conflict(format!(
+                "surface {id} is pending; pair it before rotating its token"
+            )));
+        }
+    }
+
+    let now = ctx.clock().now();
+    let rotated = rotate_surface_token(&store, &id, now)?;
+    let spool = AgentFrameSpool::new(ctx.paths().root());
+    spool.queue(
+        &rotated.node,
+        id.0.as_str(),
+        &AgentFrame::SurfaceIssued {
+            surface_id: id.clone(),
+            token: rotated.token.clone(),
+            scopes: rotated.scopes.clone(),
+            expires_at: rotated.expires_at,
+        },
+    )?;
+    append_index(ctx, &id)?;
+
+    let offline = node_is_offline(&store, &rotated.node, now)?;
+    let output = SurfaceRotateOutput {
+        surface: rotated.surface.id.clone(),
+        node: rotated.node.clone(),
+        prefix: rotated.prefix.clone(),
+        expires_at: rotated.expires_at,
+        old_expires_at: rotated.old_expires_at,
+    };
+    if ctx.json() {
+        print_json(io, &output)?;
+    } else {
+        writeln!(io.out(), "rotated surface {} on {}", output.surface, output.node)?;
+        writeln!(io.out(), "prefix: {}", output.prefix)?;
+        writeln!(io.out(), "expires: {}", output.expires_at.as_rfc3339())?;
+        writeln!(io.out(), "old token expires: {}", output.old_expires_at.as_rfc3339())?;
+    }
+    if offline {
+        writeln!(
+            io.err(),
+            "warning: node {} is offline; the agent must re-pair before {}",
+            rotated.node,
+            rotated.old_expires_at.as_rfc3339()
+        )?;
+    }
+    Ok(0)
+}
+
+/// Returns whether a surface's node is not currently online.
+///
+/// A missing card is treated as offline: the queued frame still waits for the next
+/// authenticated connection, but the owner should hear that delivery may be delayed.
+fn node_is_offline(store: &Store, node: &NodeName, now: Timestamp) -> Result<bool, CliError> {
+    Ok(store
+        .node_card(node, now)?
+        .is_none_or(|card| card.presence != NodePresence::Online))
 }
 
 /// Returns the exact Mac command for one pending surface. The code is never part of it.
@@ -336,9 +426,308 @@ struct SurfaceRevokeOutput {
     tokens_revoked: u64,
 }
 
+/// JSON shape of `vowp surface rotate`.
+///
+/// The token itself is deliberately absent: only its display prefix and the two expiries
+/// are public.
+#[derive(Debug, Serialize)]
+struct SurfaceRotateOutput {
+    surface: SurfaceId,
+    node: NodeName,
+    prefix: String,
+    expires_at: Timestamp,
+    old_expires_at: Timestamp,
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use vowp_protocol::{NodeStatus, ProjectName, Session, SessionRole, SessionState};
+    use vowp_store::NodePaths;
+
     use super::*;
+    use crate::BufferIo;
+
+    /// One isolated home with an active node, one session and one attached surface.
+    struct RotateEnv {
+        home: PathBuf,
+        project: PathBuf,
+        node: NodeName,
+        session: SessionId,
+        surface: SurfaceId,
+        old_token: String,
+        _home_dir: tempfile::TempDir,
+        _project_dir: tempfile::TempDir,
+    }
+
+    fn rotate_env() -> RotateEnv {
+        let home = tempfile::tempdir().expect("temp home");
+        let project = tempfile::tempdir().expect("temp project");
+        let config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+        std::fs::write(
+            project.path().join("vowp.toml"),
+            toml::to_string_pretty(&config).expect("config toml"),
+        )
+        .expect("vowp.toml");
+        let paths = NodePaths::new(home.path());
+        let store = Store::open(&paths).expect("store");
+        let now = Timestamp::now();
+        let node = NodeName::parse("mac-studio").expect("node");
+        store.insert_pending_node(&node, &[], now).expect("node");
+        store
+            .set_node_status(&node, NodeStatus::Active, "", now.minus(Duration::from_secs(120)))
+            .expect("active node");
+        let session = SessionId::new();
+        store
+            .upsert_session(&Session {
+                id: session.clone(),
+                project: Some(ProjectName::parse("vowp").expect("project")),
+                job_id: None,
+                role: Some(SessionRole::User),
+                title: "surface rotation".to_owned(),
+                parent_session_id: None,
+                node: node.clone(),
+                cwd: "/tmp/vowp".to_owned(),
+                state: SessionState::Idle,
+                executor: None,
+                last_seq: 0,
+                last_capsule_id: None,
+                log_bytes: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .expect("session");
+        let pending = create_pending_surface(&store, &node, &session, SurfaceKind::Opencode, Some("opencode"), now)
+            .expect("pending surface");
+        let issued = vowp_core::agent::pair::issue_surface_token(
+            &store,
+            &node,
+            &pending.surface.id,
+            &session,
+            "opencode",
+            &pending.code,
+            now,
+        )
+        .expect("issued token");
+        RotateEnv {
+            home: home.path().to_path_buf(),
+            project: project.path().to_path_buf(),
+            node,
+            session,
+            surface: pending.surface.id,
+            old_token: issued.token,
+            _home_dir: home,
+            _project_dir: project,
+        }
+    }
+
+    fn run_rotate(env: &RotateEnv, json: bool) -> (i32, String, String) {
+        let mut args = vec!["vowp".to_owned()];
+        if json {
+            args.push("--json".to_owned());
+        }
+        args.extend([
+            "--home".to_owned(),
+            env.home.display().to_string(),
+            "--project".to_owned(),
+            env.project.display().to_string(),
+            "surface".to_owned(),
+            "rotate".to_owned(),
+            env.surface.0.clone(),
+        ]);
+        let mut io = BufferIo::new("");
+        let code = crate::run(args, &mut io);
+        (code, io.stdout(), io.stderr())
+    }
+
+    fn queued_surface_issued(env: &RotateEnv) -> (String, Timestamp) {
+        let path = env
+            .home
+            .join("agent-frames")
+            .join(env.node.as_str())
+            .join(format!("{}.json", env.surface.0));
+        let file_mode = fs::metadata(&path).expect("queued frame").permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "the queued frame contains a token and must be private"
+        );
+        let dir_mode = fs::metadata(path.parent().expect("frame dir"))
+            .expect("frame dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "the frame directory must be private");
+        let bytes = fs::read(&path).expect("queued frame bytes");
+        let frame: AgentFrame = serde_json::from_slice(&bytes).expect("queued agent frame");
+        match frame {
+            AgentFrame::SurfaceIssued {
+                surface_id,
+                token,
+                scopes,
+                expires_at,
+            } => {
+                assert_eq!(surface_id, env.surface);
+                let read_scope = format!("session.read:{}", env.session);
+                assert!(scopes.iter().any(|scope| scope.as_str() == read_scope));
+                assert!(
+                    token.starts_with("vowp_surf_"),
+                    "the queued frame carries the new token"
+                );
+                (token, expires_at)
+            }
+            other => panic!("expected SurfaceIssued, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn surface_rotate_queues_for_an_offline_node_and_warns() {
+        let env = rotate_env();
+        let before = Timestamp::now();
+        let (code, stdout, stderr) = run_rotate(&env, false);
+        let after = Timestamp::now();
+        assert_eq!(code, 0, "an offline node still rotates: {stderr}");
+        assert!(stdout.contains("rotated surface"), "{stdout}");
+        let warning = format!("warning: node {} is offline; the agent must re-pair before", env.node);
+        assert!(stderr.contains(&warning), "the warning is required: {stderr}");
+
+        let (token, new_expiry) = queued_surface_issued(&env);
+        assert!(!stdout.contains(&token), "the new token is never printed: {stdout}");
+        assert!(!stderr.contains(&token), "the new token is never printed: {stderr}");
+        assert!(!stdout.contains("vowp_surf_"), "{stdout}");
+
+        let store = Store::open(&NodePaths::new(&env.home)).expect("store");
+        let new_hash = vowp_core::agent::hash_code(&token);
+        let new_row = store
+            .surface_token_by_hash(&new_hash)
+            .expect("hash lookup")
+            .expect("new token row");
+        assert_eq!(new_row.expires_at, Some(new_expiry));
+        assert_eq!(new_row.surface_id, env.surface);
+
+        let tokens = store.list_surface_tokens(&env.surface).expect("tokens");
+        let old = tokens
+            .iter()
+            .find(|row| row.token_hash == vowp_core::agent::hash_code(&env.old_token))
+            .expect("old token row");
+        let old_expiry = old.expires_at.expect("old token keeps an expiry");
+        assert!(
+            old_expiry.since(before) <= Duration::from_secs(10 * 60) + Duration::from_secs(2)
+                && old_expiry.since(after) >= Duration::from_secs(9 * 60),
+            "the old token expires after a ten-minute overlap: {}",
+            old_expiry.as_rfc3339()
+        );
+        assert!(
+            stderr.contains(&old_expiry.as_rfc3339()),
+            "the warning names the old-token expiry: {stderr}"
+        );
+
+        // The frame is still queued: no gateway connection drained it.
+        let path = env
+            .home
+            .join("agent-frames")
+            .join(env.node.as_str())
+            .join(format!("{}.json", env.surface.0));
+        assert!(path.is_file(), "a rotation for an offline node stays queued");
+    }
+
+    #[test]
+    fn surface_rotate_never_prints_the_token() {
+        let env = rotate_env();
+        let (code, stdout, stderr) = run_rotate(&env, false);
+        assert_eq!(code, 0, "surface rotate failed: {stderr}");
+        let (first_token, _) = queued_surface_issued(&env);
+        for (label, text) in [("stdout", &stdout), ("stderr", &stderr)] {
+            assert!(!text.contains(&first_token), "{label} must not carry the token: {text}");
+            assert!(!text.contains("vowp_surf_"), "{label} must not carry a token: {text}");
+            assert!(
+                !text.contains(&env.old_token),
+                "{label} must not carry the old token: {text}"
+            );
+        }
+        assert!(stdout.contains("prefix:"), "{stdout}");
+        assert!(stdout.contains("old token expires:"), "{stdout}");
+
+        let (code, stdout, stderr) = run_rotate(&env, true);
+        assert_eq!(code, 0, "surface rotate --json failed: {stderr}");
+        let (second_token, new_expiry) = queued_surface_issued(&env);
+        let value: serde_json::Value = serde_json::from_str(&stdout).expect("rotate JSON");
+        assert_eq!(value["surface"], env.surface.0);
+        assert_eq!(value["node"], env.node.as_str());
+        assert_eq!(value["expires_at"], new_expiry.as_rfc3339());
+        assert!(value["prefix"].is_string());
+        assert!(value.get("token").is_none(), "JSON has no token field: {stdout}");
+        for (label, text) in [("stdout", &stdout), ("stderr", &stderr)] {
+            assert!(
+                !text.contains(&second_token),
+                "{label} must not carry the token: {text}"
+            );
+            assert!(!text.contains("vowp_surf_"), "{label} must not carry a token: {text}");
+        }
+    }
+
+    #[test]
+    fn surface_rotate_uses_the_existing_exit_codes() {
+        let env = rotate_env();
+        let store = Store::open(&NodePaths::new(&env.home)).expect("store");
+        let now = Timestamp::now();
+
+        let pending = create_pending_surface(
+            &store,
+            &env.node,
+            &env.session,
+            SurfaceKind::Opencode,
+            Some("opencode"),
+            now,
+        )
+        .expect("pending surface");
+        let mut args = vec![
+            "vowp".to_owned(),
+            "--home".to_owned(),
+            env.home.display().to_string(),
+            "--project".to_owned(),
+            env.project.display().to_string(),
+            "surface".to_owned(),
+            "rotate".to_owned(),
+            pending.surface.id.0.clone(),
+        ];
+        let mut io = BufferIo::new("");
+        assert_eq!(
+            crate::run(args.clone(), &mut io),
+            4,
+            "a pending surface is a conflict: {}",
+            io.stderr()
+        );
+        assert!(io.stderr().contains("pending"), "{}", io.stderr());
+
+        args[7] = "01ARZ3NDEKTSV4RRFFQ69G5FAZ".to_owned();
+        let mut io = BufferIo::new("");
+        assert_eq!(
+            crate::run(args, &mut io),
+            3,
+            "an unknown surface is not found: {}",
+            io.stderr()
+        );
+
+        revoke_surface(&store, &env.surface, now).expect("revoke surface");
+        let args = vec![
+            "vowp".to_owned(),
+            "--home".to_owned(),
+            env.home.display().to_string(),
+            "--project".to_owned(),
+            env.project.display().to_string(),
+            "surface".to_owned(),
+            "rotate".to_owned(),
+            env.surface.0.clone(),
+        ];
+        let mut io = BufferIo::new("");
+        assert_eq!(
+            crate::run(args, &mut io),
+            5,
+            "a revoked surface is refused: {}",
+            io.stderr()
+        );
+    }
 
     #[test]
     fn agent_pair_command_carries_surface_session_and_app_but_never_a_code() {
