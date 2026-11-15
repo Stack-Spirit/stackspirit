@@ -70,6 +70,7 @@ ambiguous or wrong, open an issue rather than inventing a different design.
 | File | Status | What it covers |
 |---|---|---|
 | [`v0.4/asif-integration.md`](v0.4/asif-integration.md) | **implemented for the ASIF slice** | ASIF 0.4 (review draft) interchange: the pinned adapter, core facade, `session export/import --format asif`, declared losses and strict mode, remote streams, the daemon download/report/import routes and the `/import` page. |
+| [`v0.4/hardening.md`](v0.4/hardening.md) | design; build not started | Phase-4 hardening: optional WSS ingress behind a loopback listener, launchd/systemd-user service install, rotation UX, bundle result, separate user, bounded metrics history and the phase-exit review, soak and rollback gates. |
 | [`v0.4/live-upgrade-and-drain.md`](v0.4/live-upgrade-and-drain.md) | accepted design, queued | Live binary/schema upgrade, cooperative drain and selective subsystem restart. |
 | [`v0.4/local-orchestrator.md`](v0.4/local-orchestrator.md) | draft; Phase 0/1 implemented | The Mac-side local surface and outbound local agent (offload, path map, result return). |
 | [`v0.4/public-positioning-review.md`](v0.4/public-positioning-review.md) | private review note | Public-claim qualifications and the wording not applied to the public tree. |
@@ -102,6 +103,7 @@ and shipped in 0.3.0; the post-tag tree adds the jobs page and its three token-g
 v0.4 ASIF interchange slice is implemented in the tree and documented in
 [`v0.4/asif-integration.md`](v0.4/asif-integration.md). ASIF 0.4 is a review draft, so that slice
 does not claim conformance, a lossless exchange, portable continuation or native-harness import.
-The v0.4 local agent is in progress and the live-upgrade/drain slice is queued. Multi-user
-accounts, multi-home sync and the remaining roadmap items are still planned, as marked in
+The v0.4 local agent is in progress and the live-upgrade/drain slice is queued; the phase-4
+hardening design is written and its build has not started. Multi-user accounts, multi-home sync and
+the remaining roadmap items are still planned, as marked in
 [`../roadmap.md`](../roadmap.md).

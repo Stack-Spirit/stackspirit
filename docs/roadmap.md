@@ -9,8 +9,8 @@ file or test, or the code itself.
 
 The v0.1 public release is **v0.1.0**, v0.2 is **v0.2.0** and v0.3 is **v0.3.0**, shipped on
 2026-11-12. The v0.4 local-orchestrator design is accepted; Phase 0, Phase 1 and Phase 2 are shipped,
-Phase 3 is in progress and Phase 4 is not started. No 0.4 release or date is promised. The slices that
-merged after the 0.3.0 tag are recorded separately below.
+Phase 3 is in progress, and Phase 4 has a design note but its build has not started. No 0.4 release
+or date is promised. The slices that merged after the 0.3.0 tag are recorded separately below.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the normative v0.2 specification is
@@ -130,7 +130,7 @@ The accepted phases and their state in this tree:
 | 1 | Local `vowp chat`: surface pairing, leases, turn ingest, spool replay and takeover | shipped |
 | 2 | Offload executor: placement policy, path map, isolated worktree, events, result push and home verification | shipped; offload is opt-in and off by default |
 | 3 | Local opencode surface: app frames, agent socket, opencode bridge, MCP proxy, orchestrator materialization and local cache | in progress |
-| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | not started |
+| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | design; build not started |
 
 Phase 0 is proved by the wire types in
 [`crates/vowp-protocol/src/agent.rs`](../crates/vowp-protocol/src/agent.rs), the enrollment, key
@@ -170,8 +170,14 @@ Phase 3 is in progress. These slices are merged in this tree:
 
 Phase 3 remains in progress; no 0.4 release or date is promised.
 
-Phase 4 has not started: WSS ingress, launchd, token rotation UX, bundle result, separate user,
-metrics and docs.
+Phase 4 has a design note and no build. [`design/v0.4/hardening.md`](design/v0.4/hardening.md)
+turns the phase scope — optional WSS ingress behind a loopback listener, launchd/systemd-user
+service install, rotation UX, bundle result, separate user, bounded metrics history and the
+security-review, soak and rollback gates — into one contract per item, with the named hermetic
+tests and an ordered slice list. None of that build is in this tree: WSS, the agent service, the
+bundle transport, the metrics rollups and the new commands are planned, and the accepted
+[`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md) remains the binding design
+for the phases that are shipped.
 
 ## Open follow-ups
 
@@ -189,7 +195,7 @@ design note is linked only where one exists.
 | A browser chat turn (needs a run queue and cancellation) | design | [`design/v0.3/web-window.md`](design/v0.3/web-window.md) |
 | A full-directory push (the `--full` form of `session push`) and a bidirectional `session sync` | design | [`design/v0.2/cross-node-sync.md`](design/v0.2/cross-node-sync.md) |
 | Multi-user accounts, quotas, roles and audit | open | — |
-| VPS metrics history and alerts | open | — |
+| VPS metrics history and alerts | design (history; alerts open) | [`design/v0.4/hardening.md`](design/v0.4/hardening.md) §7 |
 | Parallel fan-out with a bounded budget | open | — |
 | A hosted relay without SSH | open | — |
 | Shell completions for `vowp` | candidate | — |
