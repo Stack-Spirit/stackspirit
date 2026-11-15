@@ -14,8 +14,28 @@ supporting existing `opencode` or `claude-code` installations for power users.
 
 1. **Desktop App First (`apps/spirit-desktop` + `crates/spirit-core`)**: Tauri 2 (Rust backend) +
    React/TypeScript visual cockpit.
-2. **Web App Second (`apps/spirit-web`)**: Reuses the `spirit-ui` frontend over an HTTP/SSE bridge.
+2. **Web App Second (`apps/spirit-web`)**: A read-only Web cockpit over the VOWP daemon HTTP/SSE
+   API. It reuses `@stackspirit/ui` and shows unavailable capacity, host, and engine data
+   explicitly instead of inventing it.
 3. **CLI Third (`crates/spirit-cli`)**: Thin Rust `spirit` CLI over `crates/spirit-core`.
+
+## Quick start
+
+Node 22 and Rust 1.90 are the supported toolchains. The desktop needs the pinned engine sidecar
+before `tauri dev` or a Tauri bundle; see [Fetching the sidecar](#fetching-the-sidecar).
+
+```sh
+npm ci
+node scripts/fetch-engine.mjs               # pinned, checksum-verified sidecar
+(cd apps/spirit-desktop && npx tauri dev)   # desktop app
+cargo run -p spirit-cli -- --help           # spirit CLI
+npm run dev:web                             # read-only Web shell
+```
+
+The Web shell is read-only and has no browser token. Set `VITE_SPIRIT_MOCK=1` for the shared
+`MockBridge` preview, or set the loopback proxy target and browser origin for a live daemon; see
+[`docs/WEB.md`](docs/WEB.md). The CLI quickstart, fixture mode, and exit codes are in
+[`crates/spirit-cli/README.md`](crates/spirit-cli/README.md).
 
 ## Repository layout
 
@@ -24,10 +44,23 @@ supporting existing `opencode` or `claude-code` installations for power users.
 | `crates/spirit-core` | Rust core: host profiles, outbound SSH, VOWP JSON parsing, view models, and engine supervision. |
 | `apps/spirit-desktop` | Tauri 2 shell. `src/main.tsx` creates a `SpiritBridge` and mounts the shared shell; `src/bridge/TauriBridge.ts` is the only renderer file allowed to import `@tauri-apps/api`. |
 | `packages/spirit-ui` | `@stackspirit/ui`: the reusable React cockpit (design-system primitives, views, store), the `SpiritBridge` contract, and `MockBridge`. It is exported from TypeScript source, so Vite and Vitest consume it without a separate build step. |
-| `apps/spirit-web` | Planned Web app reusing `@stackspirit/ui` over an HTTP/SSE bridge. |
+| `apps/spirit-web` | `@stackspirit/web`: read-only Web cockpit over the VOWP daemon HTTP/SSE API. It reuses `@stackspirit/ui`, sends no browser token, and shows unavailable daemon data explicitly. |
+| `crates/spirit-cli` | `spirit` CLI over `spirit-core`: host profiles, fleet, capacity, gates, engine status, JSON output, and fixture mode. |
 
 The root `npm` workspaces cover `apps/*` and `packages/*`. `npm test` runs the shared UI suite
-and then the desktop import-boundary suite; `npm run test:e2e` runs the desktop Playwright flows.
+and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web Playwright flows.
+
+## Documentation
+
+- [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md) — Desktop MVP release and
+  closeout note: scope, evidence, limitations, and owner sign-off status.
+- [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) — non-root Linux Docker build container for the Tauri
+  host and desktop UI gates.
+- [`docs/OWNER-VERIFICATION.md`](docs/OWNER-VERIFICATION.md) — owner-run macOS/Linux/Windows
+  checklist, evidence template, and sign-off rule.
+- [`docs/WEB.md`](docs/WEB.md) — W1 Web contract, implementation status, and daemon route gaps.
+- [`crates/spirit-cli/README.md`](crates/spirit-cli/README.md) — CLI commands, storage, fixture
+  mode, and exit codes.
 
 ## StackSpirit Engine (Phase D4)
 
@@ -105,6 +138,7 @@ contracts and milestones in `/home/dev/vowp`:
 cargo fmt --all -- --check
 cargo test -p spirit-core --features fixtures
 cargo clippy -p spirit-core --all-targets -- -D warnings
+cargo test -p spirit-cli
 npm ci
 npm run typecheck
 npm run lint
@@ -114,9 +148,9 @@ npm run test:e2e
 bash scripts/verify-engine-checksum.sh --self-test
 ```
 
-The macOS desktop build (`npx tauri build --debug`) and the real OS keychain round trip remain
-owner verification. The Linux CI worker has no `libgtk-3-dev`, `libglib2.0-dev` or
-`libwebkit2gtk-4.1-dev`, so it cannot compile the Tauri host; it still runs every core and
-renderer gate.
+The macOS desktop build (`npx tauri build --debug`), a signed/notarized bundle, and the real OS
+keychain round trip remain owner verification. On Linux, `scripts/desktop-build-container.sh
+check` compiles and tests the Tauri host in the pinned container without host packages; add
+`tauri-build` for a `--no-bundle` host build. See [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md).
 
 See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the bundled engine license.
