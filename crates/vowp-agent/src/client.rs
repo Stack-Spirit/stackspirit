@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use vowp_protocol::agent::surface::{SurfaceAttach, SurfaceDetach, ToolCall, ToolResult};
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, ErrorKind, NodeName,
-    SessionId, SurfaceId, SurfaceScope, Timestamp,
+    OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, ProjectName, SessionId,
+    SurfaceId, SurfaceScope, Timestamp,
 };
 
 use crate::bridge::{BridgeState, OpencodeBridge};
@@ -21,6 +22,7 @@ use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surfac
 use crate::error::AgentError;
 use crate::executor::{RunDriver, RunHandler};
 use crate::key::NodeKey;
+use crate::orchestrator::{ORCHESTRATOR_POLL, OrchestratorHost, PrepareOutcome, SurfaceAttachment, SurfaceBinding};
 use crate::socket::{AgentSocket, SOCKET_POLL, SocketEvent, SocketResponse, TOOL_CALL_TIMEOUT};
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 use crate::transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
@@ -233,6 +235,13 @@ pub struct AgentClient {
     pending_tool_calls: HashMap<String, PendingToolCall>,
     tool_call_timeout: Duration,
     bridge: Option<BridgeLink>,
+    orchestrator: OrchestratorHost,
+    pending_orchestrator: Option<PendingOrchestrator>,
+}
+
+struct PendingOrchestrator {
+    command: OrchestratorCommand,
+    receiver: mpsc::Receiver<PrepareOutcome>,
 }
 
 struct PendingToolCall {
@@ -268,6 +277,7 @@ impl AgentClient {
     ) -> Self {
         let status = base_status(&state_dir, Some(&config), &key);
         let pending_path_maps = config.path_maps.clone();
+        let orchestrator = OrchestratorHost::new(state_dir.clone());
         Self {
             state_dir,
             key,
@@ -288,6 +298,8 @@ impl AgentClient {
             pending_tool_calls: HashMap::new(),
             tool_call_timeout: TOOL_CALL_TIMEOUT,
             bridge: None,
+            orchestrator,
+            pending_orchestrator: None,
         }
     }
 
@@ -299,6 +311,7 @@ impl AgentClient {
         clock: Arc<dyn AgentClock>,
     ) -> Self {
         let status = base_status(&state_dir, None, &key);
+        let orchestrator = OrchestratorHost::new(state_dir.clone());
         Self {
             state_dir,
             key,
@@ -317,6 +330,8 @@ impl AgentClient {
             pending_tool_calls: HashMap::new(),
             tool_call_timeout: TOOL_CALL_TIMEOUT,
             bridge: None,
+            orchestrator,
+            pending_orchestrator: None,
         }
     }
 
@@ -743,6 +758,7 @@ impl AgentClient {
             self.status.connection = ConnectionState::Stopped;
             self.status.last_error = Some(error.to_string());
             self.save_status()?;
+            self.orchestrator.stop_all(false);
             return Err(error);
         }
         let outcome = self.run_loop(driver, options);
@@ -751,6 +767,15 @@ impl AgentClient {
             // Injected values live only for one run. The spool and cursor stay private on
             // disk for inspection and a later backfill.
             link.bridge.finish();
+        }
+        self.settle_pending_orchestrator();
+        match &outcome {
+            Ok(RunOutcome::Revoked { .. }) => self.orchestrator.revoke(),
+            // A takeover leaves the app hosts to the new connection; they are marked
+            // degraded by `handle_connection_lost` and re-attached on reconnect.
+            Ok(RunOutcome::Superseded { .. }) => {}
+            // A normal exit or a lost transport is a node stop: no app host outlives it.
+            _ => self.orchestrator.stop_all(false),
         }
         self.stop_socket();
         outcome
@@ -985,7 +1010,136 @@ impl AgentClient {
             link.attached = false;
             link.bridge.close_stream();
         }
+        // A prepared start whose worker is still running is reconciled on the next
+        // connection; its process is not stopped just because the home went away.
+        self.pending_orchestrator = None;
+        let _ = self.orchestrator.mark_degraded();
         let _ = self.service_socket();
+    }
+
+    /// Handles one home orchestrator command without stalling heartbeats or tool calls.
+    ///
+    /// A start or resume runs on a worker thread; the frame loop pumps its receiver and
+    /// sends the correlated result once the app process and service are ready. A stop is
+    /// bounded by the host's stop grace and sends its result immediately.
+    fn handle_orchestrator_command(&mut self, command: OrchestratorCommand) -> Result<(), AgentError> {
+        match &command {
+            OrchestratorCommand::Stop { .. } => {
+                let result = self.orchestrator.stop(
+                    &command,
+                    &mut ConnectionSurface {
+                        connection: &mut self.connection,
+                    },
+                );
+                self.send_frame(&AgentFrame::OrchestratorResult(result))
+            }
+            OrchestratorCommand::Start { project, .. } => {
+                let project_root = self.orchestrator_project_root(project.as_ref());
+                self.begin_orchestrator_start(command, project_root)
+            }
+            OrchestratorCommand::Resume { .. } => self.begin_orchestrator_start(command, None),
+        }
+    }
+
+    /// Returns the local checkout for a project bound to an orchestrator command.
+    fn orchestrator_project_root(&self, project: Option<&ProjectName>) -> Option<PathBuf> {
+        let project = project?;
+        self.config
+            .as_ref()?
+            .path_map(project)
+            .map(|map| PathBuf::from(&map.local_root))
+    }
+
+    fn begin_orchestrator_start(
+        &mut self,
+        command: OrchestratorCommand,
+        project_root: Option<PathBuf>,
+    ) -> Result<(), AgentError> {
+        if self.pending_orchestrator.is_some() {
+            let result = OrchestratorResult::failed(
+                command.request_id(),
+                OrchestratorNodeState::Failed,
+                OrchestratorError::new("busy", "another orchestrator start is still in progress", true),
+            );
+            return self.send_frame(&AgentFrame::OrchestratorResult(result));
+        }
+        let host = self.orchestrator.clone();
+        let request_id = command.request_id().to_owned();
+        let worker_command = command.clone();
+        let (sender, receiver) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name(format!("vowp-orchestrator-{}", command.name()))
+            .spawn(move || {
+                let outcome = host.prepare_start(&worker_command, project_root.as_deref());
+                let _ = sender.send(outcome);
+            });
+        if spawned.is_err() {
+            let result = OrchestratorResult::failed(
+                &request_id,
+                OrchestratorNodeState::Failed,
+                OrchestratorError::new("spawn_failed", "the orchestrator worker could not start", true),
+            );
+            return self.send_frame(&AgentFrame::OrchestratorResult(result));
+        }
+        self.pending_orchestrator = Some(PendingOrchestrator { command, receiver });
+        Ok(())
+    }
+
+    /// Completes a prepared start on the frame loop and sends its result.
+    fn pump_orchestrator(&mut self) -> Result<(), AgentError> {
+        let Some(pending) = self.pending_orchestrator.take() else {
+            return Ok(());
+        };
+        let outcome = match pending.receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => {
+                self.pending_orchestrator = Some(pending);
+                return Ok(());
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let result = OrchestratorResult::failed(
+                    pending.command.request_id(),
+                    OrchestratorNodeState::Failed,
+                    OrchestratorError::new("start_failed", "the orchestrator start worker stopped", true),
+                );
+                return self.send_frame(&AgentFrame::OrchestratorResult(result));
+            }
+        };
+        let result = self.orchestrator.finish_start(
+            outcome,
+            &mut ConnectionSurface {
+                connection: &mut self.connection,
+            },
+        );
+        self.send_frame(&AgentFrame::OrchestratorResult(result))
+    }
+
+    /// Waits briefly for an in-flight start worker so a shutdown cannot leave its app behind.
+    fn settle_pending_orchestrator(&mut self) {
+        let Some(pending) = self.pending_orchestrator.take() else {
+            return;
+        };
+        let _ = pending
+            .receiver
+            .recv_timeout(crate::orchestrator::ORCHESTRATOR_START_TIMEOUT + Duration::from_secs(5));
+    }
+
+    /// Re-attaches every app host that survived a lost connection.
+    fn reattach_orchestrators(&mut self) -> Result<(), AgentError> {
+        let live = self
+            .orchestrator
+            .reconcile()
+            .map_err(|error| AgentError::Config(error.message))?;
+        for host in live {
+            self.send_frame(&AgentFrame::SurfaceAttach(SurfaceAttach {
+                surface: host.binding.surface.clone(),
+                session: host.binding.session.clone(),
+            }))?;
+            self.orchestrator
+                .mark_running(&host.name)
+                .map_err(|error| AgentError::Config(error.message))?;
+        }
+        Ok(())
     }
 
     fn service_socket(&mut self) -> Result<(), AgentError> {
@@ -1178,6 +1332,9 @@ impl AgentClient {
         if let Err(error) = self.heartbeat() {
             return disconnected_or_failed(error);
         }
+        if let Err(error) = self.reattach_orchestrators() {
+            return disconnected_or_failed(error);
+        }
         if let Err(error) = self.attach_bridge() {
             return serve_outcome_from_error(error);
         }
@@ -1241,8 +1398,14 @@ impl AgentClient {
                             lease_revoked,
                             error,
                         } => driver.handle_ack(&run_id, event_id.as_ref(), seq, duplicate, lease_revoked, error),
-                        AgentFrame::LeaseLost { reason } => self.surface_read_only(reason),
-                        AgentFrame::LeaseRevoked { reason, .. } => self.surface_read_only(reason),
+                        AgentFrame::LeaseLost { reason } => {
+                            let _ = self.orchestrator.mark_lease_lost();
+                            self.surface_read_only(reason);
+                        }
+                        AgentFrame::LeaseRevoked { reason, .. } => {
+                            let _ = self.orchestrator.mark_lease_lost();
+                            self.surface_read_only(reason);
+                        }
                         AgentFrame::SurfaceRevoked { surface_id, reason } => {
                             if self
                                 .bridge
@@ -1251,6 +1414,7 @@ impl AgentClient {
                             {
                                 self.surface_read_only(reason);
                             }
+                            self.orchestrator.stop_surface(&surface_id);
                         }
                         AgentFrame::Revoked { reason } => {
                             self.status.connection = ConnectionState::Revoked;
@@ -1287,6 +1451,11 @@ impl AgentClient {
                             let error = remote_error(kind, message, retryable);
                             return disconnected_or_failed(error);
                         }
+                        AgentFrame::OrchestratorCommand(command) => {
+                            if let Err(error) = self.handle_orchestrator_command(command) {
+                                return disconnected_or_failed(error);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1295,17 +1464,7 @@ impl AgentClient {
     }
 
     pub(crate) fn send_frame(&mut self, frame: &AgentFrame) -> Result<(), AgentError> {
-        let connection = self
-            .connection
-            .as_mut()
-            .ok_or_else(|| AgentError::Transport("not connected".to_owned()))?;
-        if serde_json::to_vec(frame)?.len() + 1 > connection.max_frame_bytes {
-            return Err(AgentError::FrameTooLarge {
-                size: serde_json::to_vec(frame)?.len() + 1,
-                max: connection.max_frame_bytes,
-            });
-        }
-        connection.stream.send(frame)
+        send_connection_frame(&mut self.connection, frame)
     }
 
     pub(crate) fn recv_frame(&mut self, timeout: Option<Duration>) -> Result<FrameRead, AgentError> {
@@ -1313,6 +1472,7 @@ impl AgentClient {
         loop {
             self.service_socket()?;
             self.pump_bridge()?;
+            self.pump_orchestrator()?;
             let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
             // Wake at least every millisecond so an elapsed fake-clock deadline still makes
             // progress instead of spinning on a zero-length read. With a local socket bound
@@ -1322,6 +1482,13 @@ impl AgentClient {
                 (true, None) => Some(SOCKET_POLL),
                 (false, Some(limit)) => Some(limit.max(Duration::from_millis(1))),
                 (false, None) => None,
+            };
+            // A start worker may finish while the connection is quiet; pump it at the
+            // orchestrator poll interval so its result is not delayed to the next heartbeat.
+            let wait = if self.pending_orchestrator.is_some() {
+                Some(wait.unwrap_or(ORCHESTRATOR_POLL).min(ORCHESTRATOR_POLL))
+            } else {
+                wait
             };
             // An attached bridge must be polled while the frame loop waits. The read is
             // bounded by the bridge's own short timeout, so a heartbeat or a pending tool
@@ -1354,6 +1521,56 @@ impl AgentClient {
 
     fn save_status(&self) -> Result<(), AgentError> {
         self.status.write(&self.state_dir)
+    }
+}
+
+/// Sends one frame on the existing agent connection, enforcing its frame limit.
+fn send_connection_frame(connection: &mut Option<Connection>, frame: &AgentFrame) -> Result<(), AgentError> {
+    let connection = connection
+        .as_mut()
+        .ok_or_else(|| AgentError::Transport("not connected".to_owned()))?;
+    let size = serde_json::to_vec(frame)?.len() + 1;
+    if size > connection.max_frame_bytes {
+        return Err(AgentError::FrameTooLarge {
+            size,
+            max: connection.max_frame_bytes,
+        });
+    }
+    connection.stream.send(frame)
+}
+
+/// The surface attach/detach side effects for one orchestrator host.
+struct ConnectionSurface<'a> {
+    connection: &'a mut Option<Connection>,
+}
+
+impl SurfaceAttachment for ConnectionSurface<'_> {
+    fn attach(&mut self, binding: &SurfaceBinding) -> Result<(), OrchestratorError> {
+        let frame = AgentFrame::SurfaceAttach(SurfaceAttach {
+            surface: binding.surface.clone(),
+            session: binding.session.clone(),
+        });
+        send_connection_frame(self.connection, &frame).map_err(|_| {
+            OrchestratorError::new(
+                "attach_failed",
+                "the surface attach frame could not be sent to the home",
+                true,
+            )
+        })
+    }
+
+    fn detach(&mut self, binding: &SurfaceBinding) -> Result<(), OrchestratorError> {
+        let frame = AgentFrame::SurfaceDetach(SurfaceDetach {
+            surface: binding.surface.clone(),
+            session: binding.session.clone(),
+        });
+        send_connection_frame(self.connection, &frame).map_err(|_| {
+            OrchestratorError::new(
+                "detach_failed",
+                "the surface detach frame could not be sent to the home",
+                true,
+            )
+        })
     }
 }
 

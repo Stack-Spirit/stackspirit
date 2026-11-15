@@ -15,6 +15,7 @@ pub mod config;
 pub mod error;
 pub mod executor;
 pub mod key;
+pub mod orchestrator;
 pub mod socket;
 pub mod spool;
 pub mod status;
@@ -44,6 +45,12 @@ pub use executor::{
     RunSummary,
 };
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
+pub use orchestrator::{
+    AppCommand, LiveHost, ORCHESTRATOR_CONFIG_FILE, ORCHESTRATOR_HOST_FILE, ORCHESTRATOR_POLL,
+    ORCHESTRATOR_START_TIMEOUT, ORCHESTRATOR_STOP_GRACE, ORCHESTRATOR_XDG_DIR, ORCHESTRATORS_DIR, OrchestratorConfig,
+    OrchestratorHost, OrchestratorHostState, PrepareOutcome, PreparedHost, SurfaceAttachment, SurfaceBinding, app_name,
+    redact_detail, validate_name,
+};
 pub use socket::{
     AGENT_SOCKET_FILE, AgentSocket, MAX_SOCKET_REQUEST_BYTES, SocketRequest, SocketResponse, TOOL_CALL_TIMEOUT,
 };

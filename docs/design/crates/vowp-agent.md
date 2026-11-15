@@ -2,11 +2,11 @@
 
 Phase 0/1/3 client for a local node: local config, the ed25519 node key, the SSH stdio
 transport, surface pairing, the mode-0600 local agent socket, the opencode SSE bridge, the
-`vowp-protocol` frame client and the run-assignment transport loop. It depends on
-`vowp-protocol` only; it never opens a store, a database or `vowp-core`, and it never dials a
-home except through the injected transport.
-Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §5.3, §6.3–§6.5,
-§8.2–§8.5, §9 and §12.2.
+local orchestrator host, the `vowp-protocol` frame client and the run-assignment transport
+loop. It depends on `vowp-protocol` only; it never opens a store, a database or
+`vowp-core`, and it never dials a home except through the injected transport.
+Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §5.3,
+§5.6–§5.7, §6.3–§6.5, §8.2–§8.5, §9 and §12.2.
 
 ## 1. Module layout
 
@@ -21,6 +21,7 @@ crates/vowp-agent/
   src/executor.rs   RunHandler, RunSink, AcceptedRun, HandlerReject, RunSummary, spool/ack/replay loop
   src/chat.rs       ChatClient, ChatTurnRequest, ChatTurnStatus, lease/turn/replay loop
   src/bridge.rs     OpencodeBridge, SSE mapping, mirror cursor, path/redaction, attachment bytes
+  src/orchestrator.rs OrchestratorHost, local config, app process group, pid/state and attach seam
   src/socket.rs     AgentSocket, the local request/response protocol and the 0600 listener
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
@@ -28,6 +29,7 @@ crates/vowp-agent/
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
   tests/config.rs   path-map persistence, validation, enrollment and update frames
   tests/bridge.rs   fake SSE server on 127.0.0.1:0, recorded events and a fake home
+  tests/orchestrator.rs fake app script, temp agent home and a fake transport for the host
   tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
   tests/executor.rs fake home and fake handler for assignments, acks, replay and fencing
   tests/socket.rs   real Unix socket plus in-memory home for attach/detach and tool calls
@@ -55,6 +57,10 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `surfaces/<id>/token` | 0600 | the `vowp_surf_` token returned by `SurfaceIssued`; never printed |
 | `surfaces/<id>/session` | 0600 | the session id the surface was paired for |
 | `surfaces/<id>/expires_at` | 0600 | RFC 3339 surface-token expiry, read by `agent status` |
+| `orchestrators/<name>/config.json` | 0600 | local app, project, surface binding, command, working directory and `service.json` path |
+| `orchestrators/<name>/host.json` | 0600 | pid, lifecycle state (`starting`/`running`/`degraded`/`failed`/`stopped`) and a redacted detail |
+| `orchestrators/<name>/.opencode/{config,data,state,cache}/` | 0700 | private XDG roots for a managed opencode app |
+| `orchestrators/<name>/.opencode/state/opencode/service.json` | 0600 | the app's own service state; read for a port/password, never copied or logged |
 | `spool/<session>/<run>/events.jsonl` | 0600 | every sent event and the terminal summary, fsynced before send |
 | `spool/<session>/<run>/acked.json` | 0600 | event id to home sequence, plus `summary` after the terminal ack |
 | `spool/<session>/<run>/quarantine.json` | 0600 | reason a conflicting event id stopped the run's stream |
@@ -258,6 +264,46 @@ pub struct RunOptions { pub role: AgentRole, pub foreground: bool }
 
 pub struct PairedToken { pub surface_id: SurfaceId, pub token: String }   // Debug redacts token
 pub fn paired_token_for_session(state_dir: &Path, session: &SessionId) -> Result<Option<PairedToken>, AgentError>;
+
+pub struct OrchestratorHost { /* state dir, start/stop timings, optional app command */ }
+impl OrchestratorHost {
+    pub fn new(state_dir: impl Into<PathBuf>) -> Self;
+    pub fn with_startup(self, startup: Duration) -> Self;
+    pub fn with_stop_grace(self, grace: Duration) -> Self;
+    pub fn with_app_command(self, app: OrchestratorApp, program: impl Into<String>, args: Vec<String>) -> Self;
+    pub fn root(state_dir: &Path) -> PathBuf;
+    pub fn dir(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError>;
+    pub fn config_path(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError>;
+    pub fn host_path(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError>;
+    pub fn config(&self, name: &str) -> Result<Option<OrchestratorConfig>, OrchestratorError>;
+    pub fn state(&self, name: &str) -> Result<Option<OrchestratorHostState>, OrchestratorError>;
+    pub fn prepare_start(&self, command: &OrchestratorCommand, project_root: Option<&Path>)
+        -> PrepareOutcome;
+    pub fn finish_start(&self, outcome: PrepareOutcome, link: &mut dyn SurfaceAttachment)
+        -> OrchestratorResult;
+    pub fn start(&self, command: &OrchestratorCommand, project_root: Option<&Path>,
+                 link: &mut dyn SurfaceAttachment) -> OrchestratorResult;
+    pub fn stop(&self, command: &OrchestratorCommand, link: &mut dyn SurfaceAttachment)
+        -> OrchestratorResult;
+    pub fn mark_degraded(&self) -> Result<(), OrchestratorError>;
+    pub fn mark_lease_lost(&self) -> Result<(), OrchestratorError>;
+    pub fn stop_surface(&self, surface: &SurfaceId);
+    pub fn reconcile(&self) -> Result<Vec<LiveHost>, OrchestratorError>;
+    pub fn mark_running(&self, name: &str) -> Result<(), OrchestratorError>;
+    pub fn stop_all(&self, clean: bool);
+    pub fn revoke(&self);
+}
+pub trait SurfaceAttachment {
+    fn attach(&mut self, binding: &SurfaceBinding) -> Result<(), OrchestratorError>;
+    fn detach(&mut self, binding: &SurfaceBinding) -> Result<(), OrchestratorError>;
+}
+pub struct OrchestratorConfig { /* name, app, project, session, surface, command, args,
+                                   working_dir, service_json */ }
+pub struct OrchestratorHostState { /* name, app, project, surface, session, pid, state,
+                                      started_at, detail */ }
+pub struct SurfaceBinding { pub surface: SurfaceId, pub session: SessionId }
+pub enum PrepareOutcome { Ready(PreparedHost), Failed(OrchestratorResult) }
+pub fn validate_name(name: &str) -> Result<(), OrchestratorError>;
 
 pub struct ChatClient { /* client, surface, session, lease, spool cap */ }
 impl ChatClient {
@@ -595,6 +641,56 @@ heartbeat or a pending local tool call; the socket's own 50 ms poll bounds the s
 bridge read-only: no further event is read, mapped or sent, and the spool is kept. The final
 detach still goes out without flushing that read-only spool.
 
+### Local orchestrator host
+
+`AgentFrame::OrchestratorCommand` is handled on the one existing home connection. `Start`
+carries a name, an app and an optional project; `Resume` carries only the name; `Stop` detaches
+and stops that one host. The agent answers with `AgentFrame::OrchestratorResult` whose
+`request_id` is the command's id. The result is `accepted` with `running` or `stopped`, or it
+is refused with a typed `OrchestratorError { code, message, retryable }`.
+
+The host materializes `<state_dir>/orchestrators/<name>/config.json` with a private atomic
+write (0600, directory 0700). It carries the home-provided app and project plus the local
+settings the home never sees: the app program and argv, the working directory and the
+`service.json` path. A name is one safe path segment (letters, digits, `.`, `_`, `-`, at most
+64 bytes); an empty, absolute, traversal, backslash or control-character name is
+`invalid_name` before any path is built. An existing local config is updated in place, so a
+stop and resume keep the command and surface binding. A new config uses `opencode serve`,
+`claude` or `vowp chat --agent` for the three apps; `OrchestratorHost::with_app_command`
+replaces that default for a test or an owner whose binary lives outside `PATH`.
+
+A start or resume runs on a worker thread, not in the frame loop, so heartbeats, runs and local
+tool calls keep flowing while the app starts. The worker writes `host.json` with the process
+group leader's pid and `starting`, then waits up to `ORCHESTRATOR_START_TIMEOUT` (20 seconds)
+for an opencode app's `service.json`. The file must be owner-only (no group or other bits), a
+regular file, valid JSON with a non-empty password and a loopback URL or a usable port. The
+port and password are read only for validation; they are never copied into the config, host
+state, result, error or a log, and the child's stdout/stderr go to `/dev/null`. A missing
+binary is `spawn_failed`; a malformed or too-wide file is `config_invalid`; a process that
+exits first is `app_exited`; a start that times out is `service_timeout`.
+
+The app runs in its own process group with private `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_STATE_HOME` and `XDG_CACHE_HOME` below `<orchestrator>/.opencode/`. The surface binding
+comes from the local config, or from the one paired surface under `surfaces/<id>/session`; no
+pairing is `surface_missing`, and more than one without an explicit choice is
+`surface_ambiguous`. The frame loop sends `SurfaceAttach` and only then writes `running`; a
+failed attach stops a fresh process and removes `host.json`, so no partial host remains. A
+duplicate `Start` or `Resume` finds the live pid and reports the existing state instead of
+spawning a second process; an already-running host is not attached twice.
+
+`Stop` sends `SurfaceDetach`, signals only that host's process group with SIGTERM, waits
+`ORCHESTRATOR_STOP_GRACE` (2 seconds), then sends SIGKILL and waits briefly. The pid/state file
+is removed and the config stays for a later `Resume`. The agent and every other orchestrator
+are untouched.
+
+A lost home connection keeps the app process and marks `host.json` `degraded`; a reconnect
+re-attaches every live host and marks it `running` without spawning a duplicate. A lost or
+revoked surface lease marks the host degraded; a matching `SurfaceRevoked` stops that host. A
+node `Revoked` stops every host and removes the private orchestrator directories; a normal
+agent exit stops every host and removes only the pid/state files. `host.json`, result details
+and errors carry no port, password, pair link or absolute path; the public
+`OrchestratorConfig` `Debug` prints `<command>` and `<path>` for the private fields.
+
 ### Run assignment loop
 
 `AgentClient::run` keeps the Phase 0 behaviour: it has no executor, so an `AssignRun` is refused
@@ -697,7 +793,11 @@ memory and never spawn ssh, a socket or the network.
 `Transport`, `Auth`, `ReplayNonce`, `FrameTooLarge`, `NotEnrolled`, `Key`,
 `Remote { kind, message, retryable }`, `Revoked`, `Superseded` and `Json`. `is_fatal` names the
 errors that must not be retried. The worktree primitives use their own `WorktreeError`, mapped
-to the protocol's refusal vocabulary by `reject_reason`; §8 lists its variants.
+to the protocol's refusal vocabulary by `reject_reason`; §8 lists its variants. The
+orchestrator host uses the protocol's `OrchestratorError` (codes such as `invalid_name`,
+`spawn_failed`, `config_invalid`, `service_timeout`, `surface_missing`, `surface_ambiguous`,
+`attach_failed`, `stop_failed`, `not_found` and `busy`); its messages never name a local path,
+a port or a secret value.
 
 ## 7. Named tests
 
@@ -757,6 +857,21 @@ state directory and an in-memory fake home:
 `socket_pending_tool_call_does_not_block_heartbeats`,
 `socket_rejects_an_unknown_kind_and_an_oversized_frame` and
 `socket_never_logs_arguments_or_a_secret`.
+
+The local-orchestrator slice adds, in `tests/orchestrator.rs`, with a fake app script, a
+temporary agent home and a fake transport:
+`orchestrator_start_materializes_0600_config_and_starts_one_host`,
+`orchestrator_duplicate_start_is_idempotent`,
+`orchestrator_stop_kills_only_its_own_host_and_detaches`,
+`orchestrator_resume_starts_again_after_stop`,
+`orchestrator_missing_binary_returns_a_typed_error_and_leaves_no_state`,
+`orchestrator_failed_attach_returns_a_typed_error_and_leaves_no_host`,
+`orchestrator_bad_service_json_is_typed_and_leaves_no_host`,
+`orchestrator_never_logs_the_port_password_or_absolute_path`,
+`orchestrator_disconnect_reports_degraded_and_reconnect_does_not_spawn_a_second_host` and
+`orchestrator_connection_result_is_correlated_and_revoke_cleans_the_host`. The connection test
+also proves a `Ping` is answered while a start is in flight and that a node revoke removes the
+private directory and stops the fake app.
 
 ## 8. Worktrees, path maps and result return
 
@@ -867,9 +982,10 @@ offload, home-side path-map storage and `vowp node paths`, launchd and WSS ingre
 jobs. Phase 0 `vowp agent run`
 stays in the foreground; `--role` is accepted and carried in `RunOptions`, and the run-assignment
 frame loop is `run_with_handler` with an injected handler. `vowp agent surface
-start|attach|detach`, the MCP proxy command and token rotation are later v0.4 slices. This crate
-now serves the local agent socket that a later `vowp mcp --agent-socket … --surface …` will use;
-the CLI command, the opencode app bridge and the CLI-side socket client remain later jobs. The
+start|attach|detach` and token rotation are later v0.4 slices; this crate supplies the
+orchestrator host they can call. This crate
+serves the local agent socket that a later `vowp mcp --agent-socket … --surface …` will use;
+the CLI command and the CLI-side socket client remain later jobs. The
 real harness runner
 (adapter selection, worktree creation, environment resolution and result push) that implements
 `RunHandler` is the next executor job; this slice supplies the transport, spool and replay half
