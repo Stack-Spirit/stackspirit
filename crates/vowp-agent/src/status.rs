@@ -12,6 +12,7 @@ use vowp_protocol::{NodeName, Timestamp};
 use crate::cache::Cache;
 use crate::config::{STATUS_FILE, write_private};
 use crate::error::AgentError;
+use crate::surface_state::{SurfaceStatus, state_of_dir, surface_statuses};
 
 /// The connection state shown by `vowp agent status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -104,9 +105,22 @@ impl AgentStatus {
     }
 
     /// Writes `status.json` mode 0600.
+    ///
+    /// The document also carries the local `surfaces` array, computed from the state
+    /// directory at write time. The array has ids, prefixes, expiries and states, never a
+    /// token; a caller reading [`AgentStatus`] back gets the same fields without it.
     pub fn write(&self, state_dir: &Path) -> Result<(), AgentError> {
-        let bytes = serde_json::to_vec_pretty(self)?;
+        let document = StatusDocument {
+            status: self,
+            surfaces: surface_statuses(state_dir),
+        };
+        let bytes = serde_json::to_vec_pretty(&document)?;
         write_private(&Self::file_path(state_dir), &bytes)
+    }
+
+    /// Returns the local surface array for the status document.
+    pub fn surfaces(&self, state_dir: &Path) -> Vec<SurfaceStatus> {
+        surface_statuses(state_dir)
     }
 
     /// Fills the cache fields from a directory walk below `state_dir`.
@@ -119,6 +133,15 @@ impl AgentStatus {
         self.cache_bytes = stats.bytes;
         self.cache_oldest_at = stats.oldest_stored_at;
     }
+}
+
+/// The `status.json` document: the [`AgentStatus`] fields plus the local surface array.
+#[derive(Serialize)]
+struct StatusDocument<'a> {
+    #[serde(flatten)]
+    status: &'a AgentStatus,
+    /// Local surface id, prefix, expiry and state; never a token.
+    surfaces: Vec<SurfaceStatus>,
 }
 
 /// Returns the number of bytes below `state_dir/spool`.
@@ -146,14 +169,19 @@ fn walk_bytes(dir: &Path, total: &mut u64) {
     }
 }
 
-/// Returns the earliest `surfaces/<id>/expires_at` value, when one exists.
+/// Returns the earliest active `surfaces/<id>/expires_at` value, when one exists.
 ///
 /// Phase 0 never pairs a surface, so this is normally `None`. The surface-pairing job writes an
-/// RFC 3339 expiry next to each token; `status` reports the earliest one.
+/// RFC 3339 expiry next to each token; `status` reports the earliest one. A surface marked
+/// `needs_pair` or `revoked` is not in the active set even though its dead expiry file is kept
+/// for inspection.
 pub fn surface_token_expiry(state_dir: &Path) -> Option<Timestamp> {
     let entries = fs::read_dir(state_dir.join("surfaces")).ok()?;
     let mut earliest: Option<Timestamp> = None;
     for entry in entries.flatten() {
+        if !state_of_dir(&entry.path()).is_active() {
+            continue;
+        }
         let Ok(text) = fs::read_to_string(entry.path().join("expires_at")) else {
             continue;
         };

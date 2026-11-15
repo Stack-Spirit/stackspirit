@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use vowp_protocol::AgentFrame;
 
+use crate::config::TransportConfig;
 use crate::error::AgentError;
 
 /// Largest accepted frame, including its trailing newline.
@@ -43,6 +44,23 @@ pub trait FrameStream: Send {
 pub trait Transport: Send {
     /// Opens one new stream. Each call is one SSH process or one fake connection.
     fn open(&mut self) -> Result<Box<dyn FrameStream>, AgentError>;
+
+    /// Returns the certificate fingerprint observed by the last [`Transport::open`], when the
+    /// transport records one. The SSH and in-memory transports return `None`.
+    fn recorded_fingerprint(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Builds the transport named by an `agent.json` transport section.
+///
+/// An SSH transport runs the documented forced command; a WSS transport connects through the
+/// owner's reverse proxy with the stored TLS policy. There is no fallback between the two.
+pub fn transport_for_config(config: &TransportConfig) -> Result<Box<dyn Transport>, AgentError> {
+    match config {
+        TransportConfig::Ssh { target } => Ok(Box::new(SshTransport::new(target))),
+        TransportConfig::Wss { .. } => Ok(Box::new(crate::wss::WssTransport::from_transport_config(config)?)),
+    }
 }
 
 /// The real Phase 0 SSH stdio transport.

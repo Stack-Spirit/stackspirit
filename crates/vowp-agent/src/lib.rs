@@ -15,13 +15,17 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod executor;
+pub mod isolation;
 pub mod key;
 pub mod orchestrator;
+pub mod service;
 pub mod socket;
 pub mod spool;
 pub mod status;
+pub mod surface_state;
 pub mod transport;
 pub mod worktree;
+pub mod wss;
 
 pub use bridge::{
     BRIDGE_BLOBS_DIR, BRIDGE_DIR, BRIDGE_EVENTS_FILE, BRIDGE_SENT_FILE, BRIDGE_SPOOL_DIR, BridgeAttachment,
@@ -42,12 +46,16 @@ pub use client::{
 };
 pub use config::{
     AGENT_DIR_NAME, AgentConfig, CONFIG_FILE, DEFAULT_WORKTREE_DIR, PairedToken, STATUS_FILE, SURFACE_EXPIRY_FILE,
-    SURFACE_SESSION_FILE, SURFACE_TOKEN_FILE, SURFACES_DIR, TransportConfig, paired_token_for_session,
+    SURFACE_SESSION_FILE, SURFACE_TOKEN_FILE, SURFACES_DIR, TransportConfig, WssTlsMode, paired_token_for_session,
 };
 pub use error::AgentError;
 pub use executor::{
     AcceptedRun, EVENT_WINDOW, HandlerReject, PushStatus, QUARANTINE_FILE, RunHandler, RunSink, RunSinkError,
     RunSummary,
+};
+pub use isolation::{
+    IsolationError, PRIVATE_FILE_MODE, STATE_DIR_MODE, check_private_file, check_state_dir, current_uid,
+    ensure_log_dir, ensure_not_root, ensure_state_dir,
 };
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
 pub use orchestrator::{
@@ -56,13 +64,28 @@ pub use orchestrator::{
     OrchestratorHost, OrchestratorHostState, PrepareOutcome, PreparedHost, SurfaceAttachment, SurfaceBinding, app_name,
     redact_detail, validate_name,
 };
+pub use service::{
+    CommandRecord, InstallOptions, InstallReport, LAUNCHD_LABEL, LAUNCHD_PLIST, LOG_DIR, LOG_FILE, RUN_MARKER,
+    SERVICE_MARKER, SYSTEMD_UNIT, ServiceError, ServiceManager, ServicePlatform, ServiceRunOutcome, ServiceSpec,
+    ServiceStatus, SystemManager, UninstallReport, check_run_environment, install, prepare_service_run,
+    remove_run_marker, run_marker_path, status, uninstall, write_run_marker,
+};
 pub use socket::{
     AGENT_SOCKET_FILE, AgentSocket, MAX_SOCKET_REQUEST_BYTES, SocketRequest, SocketResponse, TOOL_CALL_TIMEOUT,
 };
 pub use spool::{ACKED_FILE, DEFAULT_SPOOL_CAP_BYTES, EVENTS_FILE, SPOOL_DIR, Spool, SpoolAppend, spool_dir};
 pub use status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
-pub use transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
+pub use surface_state::{
+    SURFACE_PREFIX_CHARS, SURFACE_STATE_FILE, SurfaceRefusal, SurfaceState, SurfaceStatus, bound_session,
+    mark_needs_pair, mark_paired, mark_revoked, recovery_commands, state_of, surface_statuses, token_prefix,
+};
+pub use transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport, transport_for_config};
 pub use worktree::{
     DEFAULT_DISK_RESERVE_BYTES, GitOutput, GitRunner, JOB_BRANCH_PREFIX, PathMap, PushResult, STDERR_TAIL_BYTES,
     SystemGit, Worktree, WorktreeError, WorktreeManager, WorktreeSpec, strip_remote_credentials,
+};
+pub use wss::{
+    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, WSS_PATH, WSS_SUBPROTOCOL, WssConnection, WssFrameStream,
+    WssIngress, WssLineReader, WssLineWriter, WssListener, WssTls, WssTransport, WssUrl, certificate_fingerprint,
+    is_fingerprint,
 };

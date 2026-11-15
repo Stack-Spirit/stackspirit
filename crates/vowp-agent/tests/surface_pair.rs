@@ -99,6 +99,13 @@ impl FakeHome {
             .clone()
     }
 
+    fn connections(&self) -> usize {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connections
+    }
+
     fn surface_pairs(&self) -> Vec<(String, SurfaceId, SessionId, String)> {
         self.frames()
             .into_iter()
@@ -539,4 +546,150 @@ fn agent_revoked_surface_deletes_its_token() {
         status["surface_token_expires_at"].is_null(),
         "status no longer reports the revoked token's expiry"
     );
+}
+
+#[test]
+fn agent_marks_a_refused_surface_needs_pair_and_stops_retrying() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let surface = SurfaceId(SURFACE.to_owned());
+    let home = FakeHome::new().with_live_frames(vec![
+        AgentFrame::Error {
+            kind: ErrorKind::Refused,
+            message: "surface token has expired".to_owned(),
+            retryable: false,
+        },
+        AgentFrame::Superseded {
+            connection_id: "test-done".to_owned(),
+        },
+    ]);
+    let mut client = client(dir.path(), home.clone());
+    let paired = client.pair(&request()).expect("pair");
+    let stored = std::fs::read_to_string(&paired.token_path).expect("token file");
+
+    // The refusal path names the surface, the reason and the recovery commands, and never
+    // repeats the token. This is the same message the live `Error` frame produces.
+    let refusal = client
+        .mark_surface_needs_pair(&paired.surface_id, "surface token has expired")
+        .expect("mark needs_pair");
+    assert!(refusal.message.contains("needs pairing"), "{}", refusal.message);
+    assert!(refusal.message.contains("vowp surface revoke"), "{}", refusal.message);
+    assert!(refusal.message.contains("vowp surface pair"), "{}", refusal.message);
+    assert!(refusal.message.contains("vowp agent pair"), "{}", refusal.message);
+    assert!(
+        !refusal.message.contains("vowp_surf_"),
+        "the message never carries a token: {}",
+        refusal.message
+    );
+    let status = vowp_agent::AgentStatus::load(dir.path())
+        .expect("status")
+        .expect("status written");
+    assert_eq!(status.last_error.as_deref(), Some(refusal.message.as_str()));
+
+    // Re-pair the same surface with a fresh one-time code so the live run exercises the
+    // frame path, not only the direct marker call.
+    let fresh = SurfacePairRequest::new(
+        "B".repeat(52),
+        SurfaceId(SURFACE.to_owned()),
+        SessionId::parse(SESSION).expect("session id"),
+        "opencode",
+    );
+    let paired = client.pair(&fresh).expect("re-pair for the live run");
+    assert_eq!(
+        vowp_agent::surface_statuses(dir.path())[0].state,
+        vowp_agent::SurfaceState::Paired
+    );
+    let connections_before_run = home.connections();
+
+    let outcome = client
+        .run(&RunOptions::new(AgentRole::Both))
+        .expect("a dead surface token does not end the node connection");
+    assert_eq!(
+        outcome,
+        RunOutcome::Superseded {
+            connection_id: "test-done".to_owned()
+        },
+        "the refusal marks the surface, then the normal terminal frame ends the run"
+    );
+    assert_eq!(
+        home.connections(),
+        connections_before_run + 1,
+        "a dead token never triggers a reconnect loop"
+    );
+
+    // The dead token stays on disk for inspection, but is no longer presented.
+    assert_eq!(
+        std::fs::read_to_string(&paired.token_path).expect("token file"),
+        stored,
+        "the dead token file is kept"
+    );
+    assert!(
+        !vowp_agent::paired_token_for_session(dir.path(), &SessionId::parse(SESSION).expect("session id"))
+            .expect("read pairing")
+            .is_some(),
+        "a needs_pair surface is not returned as an active pairing"
+    );
+
+    let status = vowp_agent::AgentStatus::load(dir.path())
+        .expect("status")
+        .expect("status written");
+    assert_eq!(status.connection, vowp_agent::ConnectionState::Superseded);
+    assert!(
+        status.surface_token_expires_at.is_none(),
+        "a needs_pair surface leaves the active expiry set"
+    );
+
+    let statuses = vowp_agent::surface_statuses(dir.path());
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].surface, surface);
+    assert_eq!(statuses[0].state, vowp_agent::SurfaceState::NeedsPair);
+    assert!(statuses[0].expires_at.is_none());
+
+    let text = std::fs::read_to_string(dir.path().join("status.json")).expect("status JSON");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("status document");
+    assert_eq!(document["surfaces"][0]["state"], "needs_pair");
+    assert_eq!(document["surfaces"][0]["surface"], SURFACE);
+    assert!(
+        document["surfaces"][0]["expires_at"].is_null(),
+        "needs_pair has no active expiry: {}",
+        document["surfaces"][0]
+    );
+    assert!(!text.contains(&token()), "status.json never carries the token");
+}
+
+#[test]
+fn agent_status_shows_the_surface_prefix_and_expiry_without_the_token() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let home = FakeHome::new().with_live_frames(vec![AgentFrame::Superseded {
+        connection_id: "test-done".to_owned(),
+    }]);
+    let mut client = client(dir.path(), home);
+    let paired = client.pair(&request()).expect("pair");
+    let outcome = client.run(&RunOptions::new(AgentRole::Both)).expect("run");
+    assert_eq!(
+        outcome,
+        RunOutcome::Superseded {
+            connection_id: "test-done".to_owned()
+        }
+    );
+
+    let statuses = vowp_agent::surface_statuses(dir.path());
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].surface, paired.surface_id);
+    assert_eq!(statuses[0].state, vowp_agent::SurfaceState::Paired);
+    let prefix = token()
+        .strip_prefix("vowp_surf_")
+        .expect("scheme")
+        .chars()
+        .take(12)
+        .collect::<String>();
+    assert_eq!(statuses[0].prefix.as_deref(), Some(prefix.as_str()));
+    assert_eq!(statuses[0].expires_at, Some(paired.expires_at));
+
+    let text = std::fs::read_to_string(dir.path().join("status.json")).expect("status JSON");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("status document");
+    assert_eq!(document["surfaces"][0]["state"], "paired");
+    assert_eq!(document["surfaces"][0]["prefix"], prefix);
+    assert_eq!(document["surfaces"][0]["expires_at"], paired.expires_at.as_rfc3339());
+    assert_eq!(document["surface_token_expires_at"], paired.expires_at.as_rfc3339());
+    assert!(!text.contains(&token()), "status.json never carries the token");
 }

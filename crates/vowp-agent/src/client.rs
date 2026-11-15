@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,14 +21,16 @@ use vowp_protocol::{
 
 use crate::bridge::{BridgeState, OpencodeBridge};
 use crate::cache::{Cache, debug_failure, is_cacheable_tool};
-use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surface_binding};
+use crate::config::{AgentConfig, TransportConfig, ensure_private_dir, write_private, write_surface_binding};
 use crate::error::AgentError;
 use crate::executor::{RunDriver, RunHandler};
 use crate::key::NodeKey;
 use crate::orchestrator::{ORCHESTRATOR_POLL, OrchestratorHost, PrepareOutcome, SurfaceAttachment, SurfaceBinding};
+use crate::service::ServiceRunOutcome;
 use crate::socket::{AgentSocket, SOCKET_POLL, SocketEvent, SocketResponse, TOOL_CALL_TIMEOUT};
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
-use crate::transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, SshTransport, Transport};
+use crate::surface_state::{SurfaceRefusal, mark_needs_pair, mark_paired, mark_revoked, surface_statuses};
+use crate::transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, Transport, transport_for_config};
 
 /// Agent crate version sent in `AgentHello` and `Enroll`.
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -243,6 +246,7 @@ pub struct AgentClient {
     bridge: Option<BridgeLink>,
     orchestrator: OrchestratorHost,
     pending_orchestrator: Option<PendingOrchestrator>,
+    enroll_transport: Option<TransportConfig>,
 }
 
 struct PendingOrchestrator {
@@ -276,8 +280,14 @@ struct Connection {
 
 enum ServeOutcome {
     Stopped(RunOutcome),
+    Drained,
     Disconnected(String),
     Failed(AgentError),
+}
+
+/// Returns whether the service stop flag has been set.
+fn stop_requested(stop: Option<&Arc<AtomicBool>>) -> bool {
+    stop.is_some_and(|flag| flag.load(Ordering::SeqCst))
 }
 
 impl AgentClient {
@@ -317,6 +327,7 @@ impl AgentClient {
             bridge: None,
             orchestrator,
             pending_orchestrator: None,
+            enroll_transport: None,
         }
     }
 
@@ -352,21 +363,28 @@ impl AgentClient {
             bridge: None,
             orchestrator,
             pending_orchestrator: None,
+            enroll_transport: None,
         }
     }
 
-    /// Loads `agent.json` and `node.key` and builds the real SSH transport.
+    /// Loads `agent.json` and `node.key` and builds the transport the config names.
+    ///
+    /// An SSH config runs the documented forced command; a WSS config connects through the
+    /// owner's reverse proxy. The transport is chosen once and never falls back to the other.
     pub fn from_state_dir(state_dir: PathBuf, clock: Arc<dyn AgentClock>) -> Result<Self, AgentError> {
         let config = AgentConfig::load(&state_dir)?;
         let key = NodeKey::load(&state_dir)?;
-        let target = config.ssh_target()?.to_owned();
-        Ok(Self::new(
-            state_dir,
-            key,
-            config,
-            Box::new(SshTransport::new(target)),
-            clock,
-        ))
+        let transport = transport_for_config(&config.transport)?;
+        Ok(Self::new(state_dir, key, config, transport, clock))
+    }
+
+    /// Sets the transport an [`AgentClient::enroll`] call writes into `agent.json`.
+    ///
+    /// `vowp agent enroll --wss` builds an unenrolled client whose transport is WSS and sets
+    /// the same transport here; without it enrollment records an SSH target.
+    pub fn with_enroll_transport(mut self, transport: TransportConfig) -> Self {
+        self.enroll_transport = Some(transport);
+        self
     }
 
     /// Replaces the reconnect backoff (tests use [`Backoff::seeded`]).
@@ -429,9 +447,12 @@ impl AgentClient {
     }
 
     /// Redeems a one-time code, reconnects and performs the handshake.
+    ///
+    /// `target` is the SSH destination. When [`AgentClient::with_enroll_transport`] named a
+    /// WSS transport, `target` must be empty and the WSS transport is stored instead.
     pub fn enroll(&mut self, target: &str, code: &str) -> Result<Enrollment, AgentError> {
         validate_enrollment_code(code)?;
-        if target.trim().is_empty() {
+        if self.enroll_transport.is_none() && target.trim().is_empty() {
             return Err(AgentError::Config("ssh target must not be empty".to_owned()));
         }
         let public_key = self.key.public_key_hex();
@@ -474,18 +495,24 @@ impl AgentClient {
         };
         drop(stream);
 
-        let config = AgentConfig::new(
+        let mut config = AgentConfig::new(
             enrolled.home.clone(),
             enrolled.node.clone(),
             self.state_dir.clone(),
             target,
         )
         .with_path_maps(path_maps);
+        if let Some(transport) = self.enroll_transport.clone() {
+            config.transport = transport;
+        }
         self.config = Some(config.clone());
         if let Err(error) = self.connect() {
             self.config = None;
             return Err(error);
         }
+        // A system-mode WSS handshake records the leaf fingerprint in the in-memory config;
+        // persist that config rather than the pre-connection copy.
+        let config = self.config.clone().unwrap_or(config);
         config.write()?;
         self.pending_path_maps = config.path_maps.clone();
         self.sent_path_maps = config.path_maps.clone();
@@ -594,6 +621,7 @@ impl AgentClient {
             }
         };
         let token_path = write_surface_token(&self.state_dir, &request.surface_id, &token, expires_at)?;
+        mark_paired(&self.state_dir, &request.surface_id)?;
         write_surface_binding(&self.state_dir, &request.surface_id, &request.session)?;
         // A fresh pairing replaces every read cached before it, so a re-paired surface
         // can never read data fetched under the previous token.
@@ -627,6 +655,7 @@ impl AgentClient {
             ));
         }
         write_surface_token(&self.state_dir, &surface_id, &token, expires_at)?;
+        mark_paired(&self.state_dir, &surface_id)?;
         self.refresh_surface_binding(&surface_id)?;
         if let Err(error) = self.cache.clear_surface(&surface_id) {
             debug_failure("cache clear after surface rotation failed", &error);
@@ -667,10 +696,59 @@ impl AgentClient {
                 Err(error) => debug_failure("surface token delete failed", &AgentError::Io(error)),
             }
         }
+        if let Err(error) = mark_revoked(&self.state_dir, surface) {
+            debug_failure("surface state write after revocation failed", &error);
+        }
         self.status.surface_token_expires_at = surface_token_expiry(&self.state_dir);
         if let Err(error) = self.save_status() {
             debug_failure("status write after surface revocation failed", &error);
         }
+    }
+
+    /// Marks one surface `needs_pair` after the home refused its token.
+    ///
+    /// The surface leaves the active expiry set, its cached reads are dropped, an attached app
+    /// host is stopped and the dead token stays on disk for inspection. The one agent
+    /// connection is unaffected: a dead surface token is not a dead node key.
+    pub fn mark_surface_needs_pair(&mut self, surface: &SurfaceId, reason: &str) -> Result<SurfaceRefusal, AgentError> {
+        let refusal = mark_needs_pair(&self.state_dir, surface, reason)?;
+        if let Err(error) = self.cache.clear_surface(surface) {
+            debug_failure("cache clear after a refused surface token failed", &error);
+        }
+        if self
+            .bridge
+            .as_ref()
+            .is_some_and(|link| link.bridge.surface() == surface)
+        {
+            self.surface_read_only(refusal.message.clone());
+        }
+        self.orchestrator.stop_surface(surface);
+        self.status.surface_token_expires_at = surface_token_expiry(&self.state_dir);
+        self.status.last_error = Some(refusal.message.clone());
+        self.save_status()?;
+        Ok(refusal)
+    }
+
+    /// Returns the surface a `Refused` surface-token error belongs to, when it is unambiguous.
+    ///
+    /// The wire `Error` frame carries no surface id (the protocol is unchanged), so the agent
+    /// prefers the surface of the one pending tool call and otherwise the one local surface.
+    fn refused_surface(&self) -> Option<SurfaceId> {
+        let pending: Vec<SurfaceId> = self
+            .pending_tool_calls
+            .values()
+            .filter_map(|call| call.cache_key.as_ref().map(|key| key.surface.clone()))
+            .collect();
+        if pending.len() == 1
+            && let Some(surface) = pending.first()
+        {
+            return Some(surface.clone());
+        }
+        let statuses = surface_statuses(&self.state_dir);
+        if statuses.len() == 1 {
+            return statuses.first().map(|status| status.surface.clone());
+        }
+        None
     }
 
     /// Opens a transport and performs `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`.
@@ -772,6 +850,33 @@ impl AgentClient {
             heartbeat_interval: Duration::from_secs(heartbeat_secs),
             max_frame_bytes: usize::try_from(max_frame_bytes).unwrap_or(MAX_FRAME_BYTES),
         });
+        self.record_transport_fingerprint()?;
+        Ok(())
+    }
+
+    /// Records the first system-mode WSS leaf fingerprint in `agent.json`.
+    ///
+    /// The pin mode stores no observation: its fingerprint is already the configured hard
+    /// pin. A changed system-mode fingerprint is refused by the transport before this runs.
+    fn record_transport_fingerprint(&mut self) -> Result<(), AgentError> {
+        let Some(fingerprint) = self.transport.recorded_fingerprint() else {
+            return Ok(());
+        };
+        let Some(config) = self.config.as_mut() else {
+            return Ok(());
+        };
+        if let TransportConfig::Wss {
+            tls: crate::config::WssTlsMode::System,
+            fingerprint: stored,
+            ..
+        } = &mut config.transport
+        {
+            if stored.as_deref() == Some(fingerprint.as_str()) {
+                return Ok(());
+            }
+            *stored = Some(fingerprint);
+            config.write()?;
+        }
         Ok(())
     }
 
@@ -865,10 +970,52 @@ impl AgentClient {
         self.run_with(RunDriver::new(handler), options)
     }
 
+    /// Runs the `--service` mode: writes the launchd restart marker, drains on `stop` and
+    /// removes the marker after a terminal `Revoked` or `Superseded`.
+    ///
+    /// The caller installs the SIGTERM handler that sets `stop`; this library never installs
+    /// one. A drain flushes the spool, sends `SurfaceDetach` for every attached surface (the
+    /// home releases the surface lease on that frame), stops any app host it started, writes
+    /// `connection = stopped`, and exits 0.
+    pub fn run_as_service(
+        &mut self,
+        options: &RunOptions,
+        handler: Arc<dyn RunHandler>,
+        stop: Arc<AtomicBool>,
+    ) -> Result<ServiceRunOutcome, AgentError> {
+        crate::service::prepare_service_run(&self.state_dir)?;
+        let outcome = self.run_with_stop(RunDriver::new(handler), options, Some(Arc::clone(&stop)))?;
+        if matches!(
+            outcome,
+            Some(RunOutcome::Revoked { .. }) | Some(RunOutcome::Superseded { .. })
+        ) && let Err(error) = crate::service::remove_run_marker(&self.state_dir)
+        {
+            debug_failure(
+                "the launchd run marker could not be removed",
+                &AgentError::Config(error.to_string()),
+            );
+        }
+        Ok(match outcome {
+            Some(outcome) => ServiceRunOutcome::Terminal(outcome),
+            None => ServiceRunOutcome::Drained,
+        })
+    }
+
     fn run_with(&mut self, driver: RunDriver, options: &RunOptions) -> Result<RunOutcome, AgentError> {
+        self.run_with_stop(driver, options, None)?
+            .ok_or_else(|| AgentError::Config("the run loop stopped without a terminal outcome".to_owned()))
+    }
+
+    fn run_with_stop(
+        &mut self,
+        driver: RunDriver,
+        options: &RunOptions,
+        stop: Option<Arc<AtomicBool>>,
+    ) -> Result<Option<RunOutcome>, AgentError> {
         if self.config.is_none() {
             return Err(AgentError::NotEnrolled("agent.json is missing".to_owned()));
         }
+        crate::service::check_run_environment(&self.state_dir)?;
         if let Err(error) = self.start_socket() {
             self.status.connection = ConnectionState::Stopped;
             self.status.last_error = Some(error.to_string());
@@ -876,7 +1023,7 @@ impl AgentClient {
             self.orchestrator.stop_all(false);
             return Err(error);
         }
-        let outcome = self.run_loop(driver, options);
+        let outcome = self.run_loop(driver, options, stop.as_ref());
         let _ = self.detach_bridge();
         if let Some(link) = self.bridge.as_mut() {
             // Injected values live only for one run. The spool and cursor stay private on
@@ -885,24 +1032,33 @@ impl AgentClient {
         }
         self.settle_pending_orchestrator();
         match &outcome {
-            Ok(RunOutcome::Revoked { .. }) => self.orchestrator.revoke(),
+            Ok(Some(RunOutcome::Revoked { .. })) => self.orchestrator.revoke(),
             // A takeover leaves the app hosts to the new connection; they are marked
             // degraded by `handle_connection_lost` and re-attached on reconnect.
-            Ok(RunOutcome::Superseded { .. }) => {}
-            // A normal exit or a lost transport is a node stop: no app host outlives it.
+            Ok(Some(RunOutcome::Superseded { .. })) => {}
+            // A normal exit, a drain or a lost transport is a node stop: no app host outlives it.
             _ => self.orchestrator.stop_all(false),
         }
         self.stop_socket();
         outcome
     }
 
-    fn run_loop(&mut self, mut driver: RunDriver, _options: &RunOptions) -> Result<RunOutcome, AgentError> {
+    fn run_loop(
+        &mut self,
+        mut driver: RunDriver,
+        _options: &RunOptions,
+        stop: Option<&Arc<AtomicBool>>,
+    ) -> Result<Option<RunOutcome>, AgentError> {
         let mut backoff = self.backoff.clone();
         self.status = base_status(&self.state_dir, self.config.as_ref(), &self.key);
         self.status.connection = ConnectionState::Connecting;
         self.save_status()?;
 
         loop {
+            if stop_requested(stop) {
+                self.drain()?;
+                return Ok(None);
+            }
             self.set_socket_connected(false);
             let connected_at = match self.connect() {
                 Ok(()) => {
@@ -917,14 +1073,14 @@ impl AgentClient {
                     self.status.connection = ConnectionState::Revoked;
                     self.status.last_error = Some(reason.clone());
                     self.save_status()?;
-                    return Ok(RunOutcome::Revoked { reason });
+                    return Ok(Some(RunOutcome::Revoked { reason }));
                 }
                 Err(AgentError::Superseded(connection_id)) => {
                     self.handle_connection_lost();
                     self.status.connection = ConnectionState::Superseded;
                     self.status.last_error = Some(format!("superseded by {connection_id}"));
                     self.save_status()?;
-                    return Ok(RunOutcome::Superseded { connection_id });
+                    return Ok(Some(RunOutcome::Superseded { connection_id }));
                 }
                 Err(error) if error.is_fatal() => {
                     self.handle_connection_lost();
@@ -944,16 +1100,22 @@ impl AgentClient {
 
             if let Some(connected_at) = connected_at {
                 let served = match driver.resume(self) {
-                    Ok(()) => self.serve(&mut driver),
+                    Ok(()) => self.serve(&mut driver, stop),
                     Err(error) => serve_outcome_from_error(error),
                 };
+                if matches!(served, ServeOutcome::Drained) {
+                    // The connection is still up: exactly one SurfaceDetach is sent before
+                    // the socket is closed, so the home can release the surface lease.
+                    self.drain()?;
+                    return Ok(None);
+                }
                 let disconnected = matches!(served, ServeOutcome::Disconnected(_));
                 if disconnected {
                     driver.note_disconnect(self);
                 }
                 self.handle_connection_lost();
                 match served {
-                    ServeOutcome::Stopped(outcome) => return Ok(outcome),
+                    ServeOutcome::Stopped(outcome) => return Ok(Some(outcome)),
                     ServeOutcome::Failed(error) => {
                         self.status.connection = ConnectionState::Stopped;
                         self.status.last_error = Some(error.to_string());
@@ -968,14 +1130,51 @@ impl AgentClient {
                             backoff.reset();
                         }
                     }
+                    ServeOutcome::Drained => {}
                 }
             }
 
             let delay = backoff.next_delay();
             self.status.connection = ConnectionState::Reconnecting;
             self.save_status()?;
-            self.clock.sleep(delay);
+            self.sleep_unless_stopped(delay, stop);
         }
+    }
+
+    /// Sleeps in short slices so a SIGTERM during a long backoff still drains promptly.
+    ///
+    /// A run without a stop flag sleeps the whole delay at once, exactly as before; the
+    /// existing backoff tests inspect one sleep per drop.
+    fn sleep_unless_stopped(&self, delay: Duration, stop: Option<&Arc<AtomicBool>>) {
+        if stop.is_none() {
+            self.clock.sleep(delay);
+            return;
+        }
+        let slice = Duration::from_millis(200);
+        let mut remaining = delay;
+        while !remaining.is_zero() {
+            if stop_requested(stop) {
+                return;
+            }
+            let step = remaining.min(slice);
+            self.clock.sleep(step);
+            remaining = remaining.saturating_sub(step);
+        }
+    }
+
+    /// Flushes what can be flushed, detaches every attached surface and writes `stopped`.
+    ///
+    /// The run spool is append-only and fsynced, so a drain never discards it. Sending
+    /// `SurfaceDetach` is the agent's release signal: the home releases the surface lease
+    /// when it processes the frame.
+    pub fn drain(&mut self) -> Result<(), AgentError> {
+        let _ = self.flush_bridge();
+        let _ = self.detach_bridge();
+        self.orchestrator.stop_all(false);
+        self.status.connection = ConnectionState::Stopped;
+        self.save_status()?;
+        self.stop_socket();
+        Ok(())
     }
 
     fn start_socket(&mut self) -> Result<(), AgentError> {
@@ -1377,6 +1576,16 @@ impl AgentClient {
         let Some(pending) = self.pending_tool_calls.remove(&result.request_id) else {
             return;
         };
+        let refused = result
+            .error
+            .as_ref()
+            .filter(|error| is_surface_token_refusal(&error.message))
+            .map(|error| error.message.clone());
+        let refused_surface = pending
+            .cache_key
+            .as_ref()
+            .map(|key| key.surface.clone())
+            .or_else(|| self.refused_surface());
         let stored = match (
             result.error.is_none(),
             pending.cache_key.as_ref(),
@@ -1391,6 +1600,11 @@ impl AgentClient {
             error: result.error,
         };
         let _ = pending.reply.send(response);
+        if let (Some(message), Some(surface)) = (refused, refused_surface)
+            && let Err(error) = self.mark_surface_needs_pair(&surface, &message)
+        {
+            debug_failure("surface needs_pair write after a tool refusal failed", &error);
+        }
         // The reply is already on its way; a cache failure must never fail the tool call.
         if let Some((key, payload)) = stored
             && let Err(error) = self
@@ -1469,7 +1683,7 @@ impl AgentClient {
         self.clock.now()
     }
 
-    fn serve(&mut self, driver: &mut RunDriver) -> ServeOutcome {
+    fn serve(&mut self, driver: &mut RunDriver, stop: Option<&Arc<AtomicBool>>) -> ServeOutcome {
         if let Err(error) = self.heartbeat() {
             return disconnected_or_failed(error);
         }
@@ -1480,6 +1694,9 @@ impl AgentClient {
             return serve_outcome_from_error(error);
         }
         loop {
+            if stop_requested(stop) {
+                return ServeOutcome::Drained;
+            }
             if let Err(error) = driver.pump(self) {
                 return serve_outcome_from_error(error);
             }
@@ -1602,6 +1819,21 @@ impl AgentClient {
                                 self.path_map_updates = false;
                                 self.sent_path_maps = self.path_maps().to_vec();
                                 continue;
+                            }
+                            if kind == ErrorKind::Refused
+                                && is_surface_token_refusal(&message)
+                                && let Some(surface) = self.refused_surface()
+                            {
+                                // A refused surface token is not a refused node key: the
+                                // connection stays up, the surface is marked `needs_pair`,
+                                // and the dead token is never retried.
+                                match self.mark_surface_needs_pair(&surface, &message) {
+                                    Ok(refusal) => {
+                                        self.fail_pending_tool_calls("surface_needs_pair", &refusal.message);
+                                        continue;
+                                    }
+                                    Err(error) => return ServeOutcome::Failed(error),
+                                }
                             }
                             let error = remote_error(kind, message, retryable);
                             return disconnected_or_failed(error);
@@ -1880,6 +2112,14 @@ fn remote_error(kind: ErrorKind, message: String, retryable: bool) -> AgentError
             retryable,
         }
     }
+}
+
+/// Returns whether a home refusal names a surface token rather than the node key.
+///
+/// The `Error` frame has no structured surface field (the frame does not change), so the
+/// home's refusal text is the discriminator. A refused node key is still a disconnect.
+fn is_surface_token_refusal(message: &str) -> bool {
+    message.trim_start().starts_with("surface token")
 }
 
 fn capabilities(path_maps: &[AgentPathMap]) -> AgentCapabilities {

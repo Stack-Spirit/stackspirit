@@ -54,6 +54,11 @@ pub fn paired_token_for_session(state_dir: &Path, session: &SessionId) -> Result
         if !path.is_dir() {
             continue;
         }
+        // A refused or revoked surface keeps its dead token for inspection but must never be
+        // presented again; only a re-pair clears the state.
+        if !crate::surface_state::state_of_dir(&path).is_active() {
+            continue;
+        }
         let bound = match fs::read_to_string(path.join(SURFACE_SESSION_FILE)) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -146,6 +151,33 @@ pub enum TransportConfig {
         /// ssh destination of the home.
         target: String,
     },
+    /// The optional WSS ingress through the owner's TLS reverse proxy.
+    ///
+    /// Spec: `docs/design/v0.4/hardening.md` §2.2. TLS is the proxy's job; the agent uses
+    /// the system trust store by default, or a hard `sha256:` pin for a self-signed
+    /// deployment. The first system-mode connection records the leaf fingerprint in this
+    /// file; a later change is refused until the owner confirms it.
+    Wss {
+        /// `wss://host[:port]/agent/v1` URL.
+        url: String,
+        /// `system` (default) or `pin`.
+        #[serde(default)]
+        tls: WssTlsMode,
+        /// Required for `tls = "pin"`; also stores the first system-mode observation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+    },
+}
+
+/// How the WSS transport verifies the proxy's certificate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WssTlsMode {
+    /// System trust store plus hostname verification, with a recorded leaf fingerprint.
+    #[default]
+    System,
+    /// A hard pin for a self-signed deployment.
+    Pin,
 }
 
 impl AgentConfig {
@@ -274,7 +306,15 @@ impl AgentConfig {
                     Ok(target)
                 }
             }
+            TransportConfig::Wss { .. } => Err(AgentError::Config(
+                "agent.transport is wss; no ssh target is configured".to_owned(),
+            )),
         }
+    }
+
+    /// Returns the configured transport.
+    pub fn transport(&self) -> &TransportConfig {
+        &self.transport
     }
 
     /// Validates a project path-map set before it is persisted or sent.
@@ -311,7 +351,14 @@ impl AgentConfig {
         if self.home.trim().is_empty() {
             return Err(AgentError::Config("home name must not be empty".to_owned()));
         }
-        self.ssh_target()?;
+        match &self.transport {
+            TransportConfig::Ssh { .. } => {
+                self.ssh_target()?;
+            }
+            TransportConfig::Wss { .. } => {
+                crate::wss::WssTransport::from_transport_config(&self.transport)?;
+            }
+        }
         Self::validate_path_maps(&self.state_dir, &self.path_maps)?;
         Ok(())
     }
@@ -419,4 +466,79 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), AgentError> {
     file.sync_all()?;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wss(url: &str, tls: WssTlsMode, fingerprint: Option<&str>) -> TransportConfig {
+        TransportConfig::Wss {
+            url: url.to_owned(),
+            tls,
+            fingerprint: fingerprint.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_wss_pin_without_a_fingerprint_is_refused() {
+        let config = wss("wss://home.example/agent/v1", WssTlsMode::Pin, None);
+        let error =
+            crate::wss::WssTransport::from_transport_config(&config).expect_err("tls = pin requires a fingerprint");
+        assert!(error.to_string().contains("requires a fingerprint"), "{error}");
+
+        let bad = wss("wss://home.example/agent/v1", WssTlsMode::Pin, Some("sha256:ABC"));
+        let error = crate::wss::WssTransport::from_transport_config(&bad).expect_err("a malformed pin is refused");
+        assert!(error.to_string().contains("64 lowercase hex"), "{error}");
+    }
+
+    #[test]
+    fn a_wss_system_transport_defaults_and_needs_no_fingerprint() {
+        let parsed: TransportConfig = serde_json::from_str(r#"{"kind":"wss","url":"wss://home.example/agent/v1"}"#)
+            .expect("the minimal transport table parses");
+        assert!(matches!(
+            parsed,
+            TransportConfig::Wss {
+                tls: WssTlsMode::System,
+                fingerprint: None,
+                ..
+            }
+        ));
+        crate::wss::WssTransport::from_transport_config(&parsed).expect("system mode needs no pin");
+
+        let pinned = wss(
+            "wss://home.example/agent/v1",
+            WssTlsMode::Pin,
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        crate::wss::WssTransport::from_transport_config(&pinned).expect("a full pin is accepted");
+    }
+
+    #[test]
+    fn a_wss_url_must_be_the_one_route() {
+        for bad in [
+            "wss://home.example/",
+            "wss://home.example/other",
+            "ws://home.example/agent/v1",
+        ] {
+            let config = wss(bad, WssTlsMode::System, None);
+            assert!(
+                crate::wss::WssTransport::from_transport_config(&config).is_err(),
+                "{bad} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_config_with_a_bad_wss_transport_does_not_validate() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = AgentConfig {
+            home: "home-1".to_owned(),
+            node: NodeName::parse("mac-studio").expect("node slug"),
+            state_dir: dir.path().to_path_buf(),
+            transport: wss("wss://home.example/agent/v1", WssTlsMode::Pin, None),
+            path_maps: Vec::new(),
+        };
+        assert!(config.validate().is_err(), "a pin without a fingerprint never loads");
+    }
 }
