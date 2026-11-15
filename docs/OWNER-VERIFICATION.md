@@ -566,7 +566,8 @@ the specified language and does not invent a value.
 | No provider caps | Limits | Caps load with the capacity report; hide them rather than guessing |
 | No inbox items | Inbox | **Inbox is clear** / **No inbox items** |
 | No included models | Engine | **This engine build has no included models available. Add your own provider key to continue.** |
-| No session id | Job drawer / worker card | **not reported** |
+| No session id | Job drawer | **not reported** |
+| No session id | Worker card | The footer omits the session id entirely; it does not print **not reported** |
 | Unknown job state | Lanes / job card | **Unknown** chip; raw state kept in tooltip/drawer |
 | No external harness | Engine | **No existing harness found. StackSpirit scans only the exact names opencode, claude and claude-code on PATH; it does not walk the disk.** |
 | Gates not probed | Engine | **Capability gates not probed**; **Probe gates** disabled with a reason |
