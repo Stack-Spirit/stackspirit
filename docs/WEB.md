@@ -1,6 +1,7 @@
 # Web Surface Contract — W1
 
-Status: frozen pre-build contract, 2026-11-15.
+Status: frozen pre-build contract, 2026-11-15. The W1a read-only implementation is
+recorded in §9.
 Audience: the W1 Web job, `packages/spirit-ui`, and the VOWP daemon owner.
 
 This document is the contract for `apps/spirit-web` **before any Web app code exists**. It
@@ -1060,8 +1061,184 @@ gates stay unchanged.
 | Capability gates | desktop-only | StackSpirit | no daemon route; §2.6 |
 | Job/inbox writes in the browser | W1c | StackSpirit | local write proxy; §5.4 |
 | CORS | not provided | VOWP daemon | same-origin proxy is the supported path; §1.3 |
-| Web app | not built | StackSpirit W1 | `apps/spirit-web`; this document is the pre-build contract |
+| Web app | W1a read-only implemented | StackSpirit W1 | `apps/spirit-web`; see §9 |
 
 Until every “missing” row lands, the Web shell shows the exact copy in §3.7 and no data for
 that feature. It never fills a gap with zeroes, a guessed target, an empty state, or mock
 data.
+
+---
+
+## 9. W1a implementation status (2026-11-15)
+
+Status: **read-only Web shell implemented** in `apps/spirit-web` as `@stackspirit/web`.
+W1c writes and every D5/D6-gated feature remain absent.
+
+### 9.1 Local commands
+
+```sh
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:e2e
+```
+
+The Web e2e suite is **MockBridge-only**. Its Playwright projects build two preview bundles
+with fixed scenarios (`fresh` and `stale-cache`) and never need a live daemon, a token, or a
+network beyond the two local preview servers.
+
+Development against a real daemon needs both the server-side proxy target and the browser
+origin:
+
+```sh
+# Terminal 1: the real loopback daemon started by `vowp up` (read the port from its output).
+export VOWP_DAEMON_URL=http://127.0.0.1:<port>
+
+# Terminal 2: Vite proxies /api to VOWP_DAEMON_URL; the browser uses this same origin.
+export VITE_VOWP_DAEMON_URL=http://127.0.0.1:5174
+npm run dev:web
+```
+
+Do not put a token in either variable. The Web build performs no write and sends no
+`Authorization` header. A production deployment serves the built SPA and proxies
+`/api/v1/*` from the same origin, as §1.3 requires.
+
+### 9.2 Routes actually called
+
+`apps/spirit-web/src/bridge/HttpSseBridge.ts` calls only:
+
+| Method | Route | Use |
+|---|---|---|
+| `GET` | `/api/v1/health` | Node, project, daemon version, schema, heartbeat age. |
+| `GET` | `/api/v1/board` | Board facts, job counts, running cards, limits, cost, checkpoint. |
+| `GET` | `/api/v1/board/stream` | `board` snapshots and `heartbeat` liveness. |
+| `GET` | `/api/v1/jobs` | Ready, parked/blocked, title, priority, state-age rows. |
+| `GET` | `/api/v1/sessions` | Join a running board run to its newest session node/id. |
+| `GET` | `/api/v1/inbox?state=open` | Open inbox snapshot; `state=answered` and `state=dismissed` only for the read-only all-items drawer. |
+
+The bridge does **not** call `/api/v1/capacity` or `/api/v1/fleet`. Those routes are absent
+from the current daemon; the pre-build acceptance text proposed one-time `404` probes, but
+the implementation deliberately makes no request to a route the served daemon does not
+register. The capability stays false and the exact §3.7 copy is shown.
+
+The bridge also does not call these existing routes, per §2.7:
+
+| Route | Why it is not called |
+|---|---|
+| `GET /api/v1/cost` | No `SpiritBridge` cost method; `Board.cost_today_usd` is the W1 fact. |
+| `GET /api/v1/nodes` | `Node` is not a `HostProfile`; W1 avoids putting `ssh_target` values in the browser. |
+| `GET /api/v1/sessions/{id}` and `/events` | No session drawer or event-timeline method in W1. |
+| `POST` routes | W1c write proxy is not built; zero `POST`s are sent. |
+
+`GET /api/v1/jobs/{id}`, `/runs`, and `/gates` are still **not implemented** by the daemon.
+The bridge never calls them; a missing job on a board run is labelled
+“job detail unavailable”, and the review/fix lane shows the count plus
+`GATE_FAILURES_UNAVAILABLE`.
+
+### 9.3 Honest data mapping
+
+`WebFleetView` is the Web read model. It deliberately does not reuse the desktop
+`FleetView`, because `FleetView` requires a complete `CapacityView` and `SupervisorView`.
+The Web snapshot supplies:
+
+- `source: "daemon"`, `host_id: "daemon"`, a local monotonic `revision`, `fetched_at`, and
+  `generated_at` from `Board.at` (labelled “snapshot changed at”).
+- One project from `Health.project`; its `state` is `"unknown"` and the shell shows
+  `PROJECT_STATE_UNAVAILABLE` instead of rendering an empty paused reason as “active”.
+- No `CapacityView` is constructed at all; `capacity_unavailable = { code: "no_route",
+  route: "/api/v1/capacity" }`. The capacity rail contains no gauges, target, brake,
+  estimate, waiting list, or zeroes.
+- No `SupervisorView` is constructed; `supervisor_unavailable` carries the exact reason.
+  The shell shows only the heartbeat age from `/api/v1/health` and never infers “running” or
+  “stopped”.
+- A separate “Board facts” strip for `slots_busy / slots_total` (“configured slots”, not a
+  target), active limits from `Board.limits`, `cost_today_usd` (`null` stays unknown),
+  `inbox_open`, and `last_checkpoint`.
+- Running cards joined to `Job` by id and to the newest `Session` by `job_id`; an unmatched
+  board run stays visible with `node: null` and “job detail unavailable”.
+- Lanes whose counts come from `Board.jobs`; ready and parked/blocked cards come from
+  `GET /api/v1/jobs`; review/fix intentionally has no cards; done is count-only.
+- `sessions: []`, `orchestrators: []`, and explicit `UnavailableNotice` rows for
+  `active_surfaces`, `orchestrators`, `raw_documents`, `gate_failures`, and the capacity and
+  supervisor gaps.
+
+`JobPage.next` is treated honestly: `queue_truncated` becomes true and a notice is added if
+the daemon ever paginates the list. `queue_cap` is `null` for the unpaginated list.
+
+### 9.4 Bridge behaviour and tests
+
+`HttpSseBridge` implements `SpiritBridge` with:
+
+- Token-free reads using `credentials: "omit"`, `redirect: "manual"`, `cache: "no-store"`,
+  and a 10 s `AbortController` timeout.
+- Typed mapping for `daemon_unreachable`, `daemon_incompatible`, `remote_timeout`, `parse`,
+  `auth`, `not_found`, `conflict`, `invalid_input`, `writes_disabled`, `desktop_only`, and
+  `no_route`.
+- Controlled SSE reconnect with 1 s → 2 s → 4 s → 8 s → 15 s backoff, a 45 s heartbeat
+  timeout, a 5 s polling fallback, three-failure stale state with a 30 s backoff, and
+  cleanup that closes the stream, clears timers, and aborts in-flight reads.
+- Request-generation ordering: an older poll or refresh response is dropped when a newer
+  SSE frame has already applied; `Board.at` is never used as a version.
+- Coalesced secondary refetches for changed board frames; unchanged polls do not refetch
+  jobs, sessions, or inbox.
+- `fleet.inbox(true)` merges `open`, `answered`, and `dismissed`, sorted by `created_at`
+  then `id`; `state=all` is never sent.
+- Desktop-only methods reject with `desktop_only` **before** any fetch; `setTarget` rejects
+  with `no_route`; `jobAction` and `answerInbox` reject with `writes_disabled`.
+
+Unit coverage lives in `apps/spirit-web/src/bridge/HttpSseBridge.test.ts` with a fake
+fetch/EventSource and fake timers; no test needs a live daemon. The coverage map in
+`src/bridge/contract.test.ts` fails if a bridge method is added without an availability
+class. The source scan fails on an `Authorization` header, bearer literal, token assignment,
+or local storage use.
+
+### 9.5 Preview mode
+
+`VITE_SPIRIT_MOCK=1` builds `WebMockBridge`, which wraps the shared `MockBridge` and replaces
+its desktop capacity/supervisor fields with the same unavailable notices as the live bridge.
+The shell shows a persistent **Preview data** badge in both the top bar and the content
+header. An unknown scenario name falls back to `fresh`, never to a live daemon.
+`web-read-only` maps to `fresh`, `web-stale` maps to the shared `stale-cache` scenario, and
+`web-recovering` maps to `fresh` because the shared mock has no separate recovering
+scenario. The mock never claims capacity; the capacity rail keeps the unavailable copy.
+
+The Playwright flows are `e2e/read-only.spec.ts`, `e2e/stale.spec.ts`, and
+`e2e/accessibility.spec.ts` (WCAG 2.2 AA). They assert no `/api/` request, no `POST`, no
+`Authorization` header, the exact unavailable copy, the desktop-only direct routes, and the
+read-only inbox drawer with no answer control.
+
+### 9.6 Deliberate UI deviation
+
+The shared `AppShell`, `FleetCanvas`, and `CapacityRail` are desktop-shaped: they read the
+desktop store and require `FleetView.capacity`/`fleet.supervisor` to be non-null. Mounting
+them in the Web build would force fake capacity or supervisor values. This job therefore:
+
+- reuses the shared design system (`Badge`, `Button`, `Drawer`, `Panel`, `EmptyState`),
+  the shared `JobCard`/`JobLane`/`WorkerCard` prop-driven views, and the shared lane/format
+  domain helpers from `packages/spirit-ui` source;
+- composes a Web-specific shell over `WebFleetView` and the same `SpiritBridge` boundary.
+
+The clean follow-up is in `packages/spirit-ui` (outside this job's ownership): make
+`FleetView.capacity`/`supervisor` nullable, add the §3.6 capability map to the shared shell,
+export the pure job views for all hosts, and add the five Web error codes to the shared
+`errors.ts` title table. The Web shell uses a local title map in
+`apps/spirit-web/src/bridge/errors.ts` today. Until those follow-ups land, the Web shell
+keeps the honest `WebFleetView` and does not mount a desktop view with fabricated fields.
+
+### 9.7 Still missing (unchanged W1b/W1c)
+
+| Gap | Status | Exact route / field |
+|---|---|---|
+| Capacity and storage read | missing | `GET /api/v1/capacity` |
+| Supervisor state | missing | `GET /api/v1/fleet`; `snapshot.supervisor` |
+| Project state | missing | `GET /api/v1/fleet`; `snapshot.projects[].state` |
+| Session surfaces and orchestrators | missing | `GET /api/v1/fleet`; session/orchestrator fields |
+| Job detail and gate failures | missing | `GET /api/v1/jobs/{id}` with `/runs` and `/gates` |
+| Capacity target write | missing | `POST /api/v1/capacity/target` |
+| Job and inbox writes in the browser | W1c | local write proxy; §5.4 |
+| Hosts, Engine, Gates | desktop-only | no daemon route; §2.2, §2.5, §2.6 |
+
+No gated D5/D6 feature is claimed. The Web build is read-only and has no browser token,
+provider key, SSH code, or mock fallback on a live failure.

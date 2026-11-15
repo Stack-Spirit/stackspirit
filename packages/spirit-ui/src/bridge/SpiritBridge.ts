@@ -1,8 +1,10 @@
 import type {
   ActionResult,
+  BridgeCapabilities,
   CapacityTargetView,
   CapacityView,
   ConnectionSnapshot,
+  DaemonHealth,
   EngineStatus,
   ExternalHarness,
   ExternalHarnessKind,
@@ -22,14 +24,21 @@ import type {
   RawDocument,
   SetTargetInput,
   StateEvent,
+  WebBridgeStatus,
+  WebFleetView,
 } from "./wire";
 
-/** The only surface the UI may call. Tauri and Mock both implement it. */
+/** The only surface the UI may call. Tauri, Mock, and the Web HTTP/SSE bridge implement it. */
 export interface SpiritBridge {
   /** Which transport is behind this bridge. */
-  readonly kind: "tauri" | "mock";
+  readonly kind: "tauri" | "mock" | "http-sse";
   /** True only for preview data. The shell always shows a persistent badge. */
   readonly preview: boolean;
+  /**
+   * Optional capability map. Desktop bridges may omit it; the shared desktop shell keeps
+   * its existing behaviour. The Web shell reads it instead of branching on `kind`.
+   */
+  readonly capabilities?: BridgeCapabilities;
 
   hosts: {
     list(): Promise<HostProfile[]>;
@@ -65,7 +74,24 @@ export interface SpiritBridge {
     setTarget(input: SetTargetInput): Promise<CapacityTargetView>;
     /** Parsed VOWP documents plus every `WireWarning` from the last parse. */
     rawDocument(): Promise<RawDocument | null>;
+    /**
+     * Optional honest Web read model. Desktop bridges omit it; the Web bridge returns
+     * `null` only before its first successful snapshot. `refresh` forces a full read.
+     */
+    snapshot?(refresh?: boolean): Promise<WebFleetView | null>;
+    /** Optional push for new Web snapshots. Returns an unsubscribe function. */
+    watch?(listener: (snapshot: WebFleetView) => void): () => void;
+    /** Optional transport/liveness detail for the stale and polling notices. */
+    webStatus?(): WebBridgeStatus;
   };
+
+  /** Optional daemon health read. Present on the Web and preview bridges. */
+  daemon?: {
+    health(): Promise<DaemonHealth>;
+  };
+
+  /** Releases streams, timers, and in-flight requests. Safe to call more than once. */
+  dispose?(): void;
 
   engine: {
     status(): Promise<EngineStatus>;

@@ -1,0 +1,137 @@
+/* Web-only layout. The shared stylesheet owns the design tokens and primitives. */
+
+.web-shell {
+  min-height: 100vh;
+}
+
+.web-topbar {
+  gap: 12px;
+}
+
+.web-rail-notice {
+  margin: 12px;
+  font-size: 12px;
+}
+
+.web-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 12px 18px;
+  margin: 0;
+}
+
+.web-facts div {
+  min-width: 0;
+}
+
+.web-facts dt {
+  color: var(--text-muted, #8b94a7);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.web-facts dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.web-lanes-notice {
+  grid-column: 1 / -1;
+}
+
+.web-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 6px;
+}
+
+.web-subtitle {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, #8b94a7);
+}
+
+.web-error-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.web-error-banner p {
+  margin: 4px 0 0;
+}
+
+.web-error-banner__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.web-boot {
+  max-width: 46rem;
+  margin: 10vh auto;
+  padding: 0 20px;
+}
+
+.web-setup-form {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.web-worker {
+  display: grid;
+  gap: 4px;
+}
+
+.web-inbox-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+.web-inbox-item {
+  border: 1px solid var(--line, #2a3040);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.web-inbox-item h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.web-inbox-item__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.web-inbox-item__body {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.web-inbox-item__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.web-job-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.web-job-detail__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

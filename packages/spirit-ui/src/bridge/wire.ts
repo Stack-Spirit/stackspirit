@@ -306,7 +306,8 @@ export interface WorkerCardView {
   state: string;
   stalled: boolean;
   executor: ExecutorView | null;
-  node: string;
+  /** The joined session's node, or `null` when no session was matched. */
+  node: string | null;
   age_secs: number;
   last_event_age_secs: number | null;
   session_id: string | null;
@@ -554,3 +555,146 @@ export type StateEvent =
   | { kind: "engine"; revision: number; engine: EngineStatus }
   | { kind: "gates"; revision: number; gates: GateSnapshot }
   | { kind: "error"; revision: number; error: SpiritErrorDto };
+
+/**
+ * What a bridge can honestly supply. The shell reads this map instead of branching on
+ * `kind`. Desktop bridges omit it (every capability they implement is assumed present);
+ * the Web bridge always publishes the map so a missing daemon route is visible.
+ */
+export interface BridgeCapabilities {
+  capacity_detail: boolean;
+  supervisor_state: boolean;
+  host_management: boolean;
+  engine_management: boolean;
+  capability_gates: boolean;
+  /** The route exists and a local write proxy is configured. */
+  job_actions: boolean;
+  /** The route exists and a local write proxy is configured. */
+  inbox_answer: boolean;
+  set_target: boolean;
+  raw_documents: boolean;
+  session_detail: boolean;
+}
+
+/** The `/api/v1/health` document as the Web shell uses it. */
+export interface DaemonHealth {
+  /** Scheme + host + optional port. Never a path, query, or token. */
+  origin: string;
+  /** Version of the running `vowp-daemon` binary. */
+  version: string;
+  node: string;
+  project: string;
+  /** Store schema version, not the snapshot schema. */
+  schema_version: number;
+  heartbeat_at: Timestamp | null;
+  received_at: Timestamp;
+}
+
+/** Why a desktop-shaped view could not be constructed. */
+export interface CapacityUnavailable {
+  code: "no_route" | "not_loaded";
+  /** The route the daemon does not serve, or `null` when no route would fill it. */
+  route: string | null;
+  detail: string;
+}
+
+export interface SupervisorUnavailable {
+  code: "no_route";
+  detail: string;
+}
+
+export type UnavailableFeature =
+  | "capacity_report"
+  | "supervisor_state"
+  | "active_surfaces"
+  | "gate_failures"
+  | "orchestrators"
+  | "project_state"
+  | "raw_documents"
+  | "session_detail";
+
+/** One feature the daemon cannot supply, with the exact reason. */
+export interface UnavailableNotice {
+  feature: UnavailableFeature;
+  code: "no_route";
+  route: string | null;
+  detail: string;
+}
+
+/** A board limit row, reduced exactly as `GET /api/v1/board` reports it. */
+export interface BoardLimitView {
+  provider: string;
+  kind: string;
+  resets_at: Timestamp | null;
+}
+
+/**
+ * The board facts that exist on the current daemon. These are deliberately not a
+ * `CapacityView`: no host sample, target, brake, estimate, or waiting list is implied.
+ */
+export interface BoardFacts {
+  slots_busy: number;
+  slots_total: number;
+  planner: string | null;
+  keeper: string | null;
+  limits: BoardLimitView[];
+  cost_today_usd: number | null;
+  inbox_open: number;
+  last_checkpoint: Timestamp | null;
+}
+
+/** `JobLanes` with the honest "no server-side cap" value for the unpaginated list. */
+export interface WebJobLanes extends Omit<JobLanes, "queue_cap"> {
+  queue_cap: number | null;
+}
+
+/**
+ * The honest Web read model for one daemon.
+ *
+ * It intentionally does not reuse `FleetView`: `FleetView` requires a complete
+ * `CapacityView` and `SupervisorView`, and the current daemon exposes neither. The Web
+ * shell consumes this type; desktop bridges keep returning `FleetView`.
+ */
+export interface WebFleetView {
+  /** Monotonic per applied snapshot; a local counter, never a server value. */
+  revision: number;
+  /** Opaque key for the one daemon. It is not a `HostProfile` id. */
+  host_id: string;
+  /** Time the complete snapshot was received (client clock). */
+  fetched_at: Timestamp;
+  /** `Board.at`, the time the changed board was collected. Not a freshness signal. */
+  generated_at: Timestamp;
+  source: "daemon" | "preview";
+  /** True only when the last reads failed and the retained view is not current. */
+  stale: boolean;
+  home: string;
+  project: ProjectView;
+  board: BoardFacts;
+  capacity_unavailable: CapacityUnavailable;
+  supervisor_unavailable: SupervisorUnavailable;
+  running: WorkerCardView[];
+  lanes: WebJobLanes;
+  inbox: InboxItemView[];
+  /** Empty plus an `active_surfaces` notice; VOWP exposes no surface lease. */
+  sessions: SessionCardView[];
+  /** Empty plus an `orchestrators` notice. */
+  orchestrators: OrchestratorView[];
+  /** HTTP round-trip to the daemon. Never SSH or VOWP latency. */
+  latency: LatencyStats;
+  unavailable: UnavailableNotice[];
+  daemon: DaemonHealth;
+}
+
+/** Transport state the Web shell shows beside the connection label. */
+export interface WebBridgeStatus {
+  /** `EventSource` is absent or failed permanently; reads use the 5 s poll. */
+  polling_only: boolean;
+  /** Epoch milliseconds of the next stale-backoff poll, or `null` when polling is off. */
+  next_retry_at: number | null;
+  /** Last board frame or poll success. */
+  last_frame_at: Timestamp | null;
+  /** Last stream heartbeat. */
+  heartbeat_at: Timestamp | null;
+  /** `open`, `reconnecting`, `polling`, `idle`, or `closed`. */
+  stream_state: "open" | "reconnecting" | "polling" | "idle" | "closed";
+}
