@@ -7,6 +7,8 @@ import {
   gateActionReason,
   gateMissingMilestones,
 } from "../../domain/engine";
+import { asifGateBadge, asifGateDetail } from "../../domain/session";
+import { useFleetStore } from "../../state/fleetStore";
 
 export interface GateCardProps {
   kind: "local" | "asif";
@@ -38,19 +40,17 @@ function asifDetail(gates: GateSnapshot): string | null {
     return `Detected ${gate.detected}; required ${gate.required}.`;
   }
   if (gate.state === "unreachable") return gate.detail;
-  if (gate.state === "ready") {
-    return `export ${gate.export ? "proven" : "not proven"} · import ${
-      gate.import ? "proven" : "not proven"
-    }`;
-  }
+  if (gate.state === "ready") return asifGateDetail(gates);
   return null;
 }
 
 export function GateCard({ kind, gates, onDetails }: GateCardProps) {
+  const openSessions = useFleetStore((state) => state.openSessions);
   const local = gates.local_orchestrator;
   const asif = gates.asif;
   const gate = kind === "local" ? local : asif;
   const detail = kind === "local" ? localDetail(gates) : asifDetail(gates);
+  const asifBadge = asifGateBadge(gates);
   const missing =
     kind === "local"
       ? local.state === "waiting_for_vowp_phase3"
@@ -68,7 +68,9 @@ export function GateCard({ kind, gates, onDetails }: GateCardProps) {
     <div className="gate-card" data-testid={`gate-card-${kind}`}>
       <div className="gate-card__head">
         <span>{kind === "local" ? "Local orchestrator" : ".asif.zip sessions"}</span>
-        <Badge tone={gateTone(gate.state)}>{gateStateLabel(gate.state)}</Badge>
+        <Badge tone={kind === "local" ? gateTone(gate.state) : asifBadge.tone}>
+          {kind === "local" ? gateStateLabel(gate.state) : asifBadge.label}
+        </Badge>
       </div>
       <p className="muted small">
         {kind === "local"
@@ -112,6 +114,7 @@ export function GateCard({ kind, gates, onDetails }: GateCardProps) {
               size="sm"
               disabled={!exportEnabled}
               title={exportEnabled ? undefined : gateActionReason(gates, "asif_export")}
+              onClick={() => openSessions("list")}
             >
               Export .asif.zip
             </Button>
@@ -120,6 +123,7 @@ export function GateCard({ kind, gates, onDetails }: GateCardProps) {
               size="sm"
               disabled={!importEnabled}
               title={importEnabled ? undefined : gateActionReason(gates, "asif_import")}
+              onClick={() => openSessions("import")}
             >
               Import .asif.zip
             </Button>

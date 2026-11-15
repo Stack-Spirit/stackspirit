@@ -2,7 +2,13 @@ import { Badge, Drawer } from "../../components";
 import type { GateSnapshot } from "../../bridge/wire";
 import { gateStateLabel, gateTone } from "../../domain/connection";
 import { formatDateTime } from "../../domain/format";
-import { gateMissingMilestones, localAgentLabel } from "../../domain/engine";
+import {
+  gateActionEnabled,
+  gateActionReason,
+  gateMissingMilestones,
+  localAgentLabel,
+} from "../../domain/engine";
+import { asifGateBadge } from "../../domain/session";
 
 export interface GateDrawerProps {
   kind: "local" | "asif";
@@ -32,12 +38,17 @@ export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
   const missing = gates ? gateMissingMilestones(gates)[kind] : [];
   const detected =
     gate && "detected_version" in gate ? gate.detected_version : null;
+  const asifBadge = asifGateBadge(gates);
+  const badge =
+    kind === "asif"
+      ? asifBadge
+      : { label: gateStateLabel(state), tone: gateTone(state) };
 
   return (
     <Drawer open={open} title={`${title} details`} onClose={onClose}>
       <div className="engine-section" data-testid="gate-drawer">
         <div className="engine-actions">
-          <Badge tone={gateTone(state)}>{gateStateLabel(state)}</Badge>
+          <Badge tone={badge.tone}>{badge.label}</Badge>
           {detected ? <span className="muted small">VOWP {detected}</span> : null}
           {gates ? (
             <span className="muted small">probed {formatDateTime(gates.probed_at)}</span>
@@ -85,6 +96,36 @@ export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
           </div>
         ) : null}
 
+        {kind === "asif" ? (
+          <div>
+            <h3 className="panel__title">Export and import availability</h3>
+            <ul className="gate-availability" aria-label="ASIF action availability">
+              {(["asif_export", "asif_import"] as const).map((action) => {
+                const enabled = gates ? gateActionEnabled(gates, action) : false;
+                return (
+                  <li key={action} className="gate-availability__row">
+                    <Badge tone={enabled ? "ok" : "warn"}>
+                      {enabled ? "Enabled" : "Disabled"}
+                    </Badge>
+                    <span>{action === "asif_export" ? "Export .asif.zip" : "Import .asif.zip"}</span>
+                    <span className="muted small">
+                      {enabled
+                        ? "The probe proves this direction and the D5 build flag is on."
+                        : gates
+                          ? gateActionReason(gates, action)
+                          : "Probe the VOWP home to check this capability."}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="muted small">
+              A Ready gate can prove one direction only. The disabled direction keeps its
+              exact reason; it is never presented as ready.
+            </p>
+          </div>
+        ) : null}
+
         <div>
           <h3 className="panel__title">StackSpirit action</h3>
           <p className="muted small">
@@ -100,6 +141,13 @@ export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
             Evidence contains command names, exit codes and versions only. It never
             contains a provider key, a path or a response body.
           </p>
+          {kind === "asif" ? (
+            <p className="muted small">
+              The renderer receives only a local file name, byte count, declared losses,
+              warnings and unsupported operations. It never receives package bytes, a
+              remote path, a token or a provider key.
+            </p>
+          ) : null}
         </div>
       </div>
     </Drawer>

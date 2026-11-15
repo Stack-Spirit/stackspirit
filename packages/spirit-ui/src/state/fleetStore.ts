@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { SpiritBridge } from "../bridge";
 import { toSpiritError, type SpiritError } from "../bridge/errors";
 import { engineSetupComplete } from "../domain/engine";
+import type { SessionsIntent } from "../domain/session";
 import type {
   CapacityTargetView,
   CapacityView,
@@ -15,6 +16,7 @@ import type {
   HostProfilePatch,
   NewHostProfile,
   RawDocument,
+  SessionCardView,
   SetTargetInput,
   StateEvent,
 } from "../bridge/wire";
@@ -52,6 +54,9 @@ interface FleetState {
   lastError: SpiritError | null;
   /** Epoch milliseconds of the next automatic poll after a stale backoff. */
   nextRetryAt: number | null;
+  /** The Sessions drawer is shared by the fleet header, top bar, and gate cards. */
+  sessionsOpen: boolean;
+  sessionsIntent: SessionsIntent;
 
   initialize(bridge: SpiritBridge): Promise<() => void>;
   dispose(): void;
@@ -72,6 +77,8 @@ interface FleetState {
   setTarget(input: SetTargetInput): Promise<CapacityTargetView>;
   refreshEngine(): Promise<void>;
   probeGates(): Promise<void>;
+  openSessions(intent?: SessionsIntent): void;
+  closeSessions(): void;
   clearError(): void;
 }
 
@@ -115,6 +122,8 @@ export function createInitialFleetState(): Pick<
   | "latencyHistory"
   | "lastError"
   | "nextRetryAt"
+  | "sessionsOpen"
+  | "sessionsIntent"
 > {
   return {
     bridge: null,
@@ -134,6 +143,8 @@ export function createInitialFleetState(): Pick<
     latencyHistory: [],
     lastError: null,
     nextRetryAt: null,
+    sessionsOpen: false,
+    sessionsIntent: "list",
   };
 }
 
@@ -440,6 +451,10 @@ export const useFleetStore = create<FleetState>((set, get) => ({
     }
   },
 
+  openSessions: (intent = "list") => set({ sessionsOpen: true, sessionsIntent: intent }),
+
+  closeSessions: () => set({ sessionsOpen: false, sessionsIntent: "list" }),
+
   clearError: () => set({ lastError: null }),
 }));
 
@@ -463,6 +478,9 @@ export const selectNextRetryAt = (state: FleetState): number | null => state.nex
 export const selectRawDocument = (state: FleetState): RawDocument | null => state.rawDocument;
 export const selectSelectedHostId = (state: FleetState): string | null => state.selectedHostId;
 export const selectProjectFilter = (state: FleetState): string | null => state.projectFilter;
+const NO_SESSIONS: SessionCardView[] = [];
+export const selectSessions = (state: FleetState): SessionCardView[] =>
+  state.fleet?.sessions ?? NO_SESSIONS;
 
 /** Writes are allowed only while connected and while the last view is fresh. */
 export const selectMutationsAllowed = (state: FleetState): boolean =>
@@ -520,4 +538,7 @@ export function useRawDocument(): RawDocument | null {
 }
 export function useProjectFilter(): string | null {
   return useFleetStore(selectProjectFilter);
+}
+export function useSessions(): SessionCardView[] {
+  return useFleetStore(selectSessions);
 }

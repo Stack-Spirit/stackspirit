@@ -1,8 +1,10 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
+import { useFleetStore } from "../../state/fleetStore";
 import {
   engineWith,
   readyAsifGates,
@@ -11,6 +13,15 @@ import {
   unprobedGates,
   waitingGates,
 } from "./helpers";
+
+const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
+
+async function wcagViolations(container: HTMLElement) {
+  const results = await axe.run(container, {
+    runOnly: { type: "tag", values: WCAG_TAGS },
+  });
+  return results.violations;
+}
 
 describe("VOWP capability gate cards", () => {
   it("engine_view_probes_automatically_on_a_live_connection", async () => {
@@ -137,9 +148,100 @@ describe("VOWP capability gate cards", () => {
     const asif = screen.getByTestId("gate-card-asif");
     expect(within(asif).getByRole("button", { name: "Export .asif.zip" })).toBeEnabled();
     expect(within(asif).getByRole("button", { name: "Import .asif.zip" })).toBeDisabled();
+    expect(within(asif).getByText("Ready · export only")).toBeInTheDocument();
     expect(
       within(asif).getByText("ASIF import capability is not proven."),
     ).toBeInTheDocument();
+  });
+
+  it("incompatible_and_unreachable_gates_disable_both_directions", () => {
+    const incompatible = readyAsifGates();
+    incompatible.features.asif_actions = true;
+    incompatible.asif = {
+      state: "incompatible",
+      detected: "asif/0.3",
+      required: "asif/0.4",
+      evidence: ["synthetic capability document"],
+    };
+    const first = renderEngine(engineWith(), { gates: incompatible });
+    const firstCard = screen.getByTestId("gate-card-asif");
+    expect(within(firstCard).getByRole("button", { name: "Export .asif.zip" })).toBeDisabled();
+    expect(within(firstCard).getByRole("button", { name: "Import .asif.zip" })).toBeDisabled();
+    expect(within(firstCard).getAllByText(/Incompatible ASIF surface/).length).toBeGreaterThan(0);
+    expect(within(firstCard).getByText("Incompatible")).toBeInTheDocument();
+    first.unmount();
+
+    const unreachable = readyAsifGates();
+    unreachable.features.asif_actions = true;
+    unreachable.asif = { state: "unreachable", detail: "SSH command failed" };
+    renderEngine(engineWith(), { gates: unreachable });
+    const secondCard = screen.getByTestId("gate-card-asif");
+    expect(within(secondCard).getByRole("button", { name: "Export .asif.zip" })).toBeDisabled();
+    expect(within(secondCard).getByRole("button", { name: "Import .asif.zip" })).toBeDisabled();
+    expect(within(secondCard).getAllByText(/could not be reached/).length).toBeGreaterThan(0);
+    expect(within(secondCard).getByText("Unreachable")).toBeInTheDocument();
+  });
+
+  it("gate_details_show_each_direction_and_its_exact_reason", async () => {
+    const user = userEvent.setup();
+    const gates = readyAsifGates();
+    gates.features.asif_actions = true;
+    gates.asif = {
+      state: "ready",
+      export: true,
+      import: false,
+      detected_version: "0.4.0",
+      evidence: ["synthetic export evidence"],
+    };
+    renderEngine(engineWith(), { gates });
+    await user.click(
+      within(screen.getByTestId("gate-card-asif")).getByRole("button", { name: "Details" }),
+    );
+    const drawer = screen.getByTestId("gate-drawer");
+    const availability = within(drawer).getByRole("list", {
+      name: "ASIF action availability",
+    });
+    expect(within(availability).getByText("Export .asif.zip")).toBeInTheDocument();
+    expect(within(availability).getByText("Import .asif.zip")).toBeInTheDocument();
+    expect(within(availability).getByText("Enabled")).toBeInTheDocument();
+    expect(within(availability).getByText("Disabled")).toBeInTheDocument();
+    expect(
+      within(availability).getByText("ASIF import capability is not proven."),
+    ).toBeInTheDocument();
+  });
+
+  it("enabled_asif_actions_open_the_sessions_drawer_intent", async () => {
+    const user = userEvent.setup();
+    const gates = readyAsifGates();
+    gates.features.asif_actions = true;
+    renderEngine(engineWith(), { gates });
+    const card = screen.getByTestId("gate-card-asif");
+
+    await user.click(within(card).getByRole("button", { name: "Export .asif.zip" }));
+    expect(useFleetStore.getState().sessionsOpen).toBe(true);
+    expect(useFleetStore.getState().sessionsIntent).toBe("list");
+
+    useFleetStore.getState().closeSessions();
+    await user.click(within(card).getByRole("button", { name: "Import .asif.zip" }));
+    expect(useFleetStore.getState().sessionsOpen).toBe(true);
+    expect(useFleetStore.getState().sessionsIntent).toBe("import");
+  });
+
+  it("has no critical or serious axe violations on gate cards", async () => {
+    const gates = readyAsifGates();
+    gates.features.asif_actions = true;
+    gates.asif = {
+      state: "ready",
+      export: true,
+      import: false,
+      detected_version: "0.4.0",
+      evidence: ["synthetic export evidence"],
+    };
+    const { container } = renderEngine(engineWith(), { gates });
+    const violations = (await wcagViolations(container)).filter(
+      (violation) => violation.impact === "critical" || violation.impact === "serious",
+    );
+    expect(violations).toEqual([]);
   });
 
   it("local_orchestrator_requires_a_connected_local_agent", () => {

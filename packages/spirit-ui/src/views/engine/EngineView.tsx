@@ -47,6 +47,7 @@ export function EngineView() {
   const connection = useConnection();
   const refreshEngine = useFleetStore((state) => state.refreshEngine);
   const probeGates = useFleetStore((state) => state.probeGates);
+  const openSessions = useFleetStore((state) => state.openSessions);
 
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [keyStatuses, setKeyStatuses] = useState<KeyStatus[]>([]);
@@ -425,15 +426,26 @@ export function EngineView() {
           <Panel
             title="Capability gates"
             actions={
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleProbe}
-                disabled={probeDisabledReason !== null}
-                title={probeDisabledReason ?? undefined}
-              >
-                Re-probe
-              </Button>
+              <div className="inline-actions">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => openSessions("list")}
+                  disabled={!bridge.sessions}
+                  title={bridge.sessions ? undefined : "Sessions are not available in this build."}
+                >
+                  Sessions
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleProbe}
+                  disabled={probeDisabledReason !== null}
+                  title={probeDisabledReason ?? undefined}
+                >
+                  Re-probe
+                </Button>
+              </div>
             }
           >
             {visibleGates ? (
@@ -464,7 +476,8 @@ export function EngineView() {
             ) : null}
             <p className="muted small">
               A Ready gate still says not implemented in this build while its StackSpirit
-              action flag is false. D5 and D6 remain gated until VOWP proves the capability.
+              action flag is false. D5 export and import live only in the Sessions drawer
+              and stay disabled until VOWP proves that direction. D6 remains gated.
             </p>
           </Panel>
 

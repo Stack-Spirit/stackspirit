@@ -10,6 +10,7 @@ import { FleetCanvas } from "../views/fleet/FleetCanvas";
 import { HostManager } from "../views/hosts/HostManager";
 import { HostRail } from "../views/hosts/HostRail";
 import { InboxDrawer } from "../views/inbox/InboxDrawer";
+import { SessionsDrawer } from "../views/sessions/SessionsDrawer";
 import { StatusStrip } from "./StatusStrip";
 import { TopBar, type AppView } from "./TopBar";
 
@@ -22,6 +23,11 @@ const VIEWS: Array<{ id: AppView; label: string; icon: string }> = [
 export function AppShell({ bridge }: { bridge: SpiritBridge }) {
   const initialize = useFleetStore((state) => state.initialize);
   const preview = usePreview();
+  const sessionsOpen = useFleetStore((state) => state.sessionsOpen);
+  const sessionsIntent = useFleetStore((state) => state.sessionsIntent);
+  const openSessions = useFleetStore((state) => state.openSessions);
+  const closeSessions = useFleetStore((state) => state.closeSessions);
+  const sessionCount = useFleetStore((state) => state.fleet?.sessions.length ?? 0);
   const [view, setView] = useState<AppView>("fleet");
   const [inboxOpen, setInboxOpen] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
@@ -82,6 +88,15 @@ export function AppShell({ bridge }: { bridge: SpiritBridge }) {
               {preview ? <Badge tone="warn">Preview data</Badge> : null}
               <button
                 type="button"
+                className="btn btn--secondary btn--sm canvas__sessions-toggle"
+                data-testid="open-sessions"
+                aria-label={`Sessions, ${sessionCount}`}
+                onClick={() => openSessions("list")}
+              >
+                Sessions
+              </button>
+              <button
+                type="button"
                 className="btn btn--secondary btn--sm canvas__capacity-toggle"
                 onClick={() => setCapacityOpen(true)}
               >
@@ -112,6 +127,11 @@ export function AppShell({ bridge }: { bridge: SpiritBridge }) {
         onClose={() => setInboxOpen(false)}
       />
       <RawDocumentDrawer open={rawOpen} onClose={() => setRawOpen(false)} />
+      <SessionsDrawer
+        key={`${sessionsOpen ? "open" : "closed"}-${sessionsIntent}`}
+        open={sessionsOpen}
+        onClose={closeSessions}
+      />
 
       {capacityOpen ? (
         <Drawer
