@@ -113,6 +113,8 @@ const LISTED_TYPES: &[&str] = &[
     "BoardLimit",
     "Page",
     "JobPage",
+    "RunPage",
+    "GateResultPage",
     "JobAction",
     "JobActionResponse",
     "SessionPage",

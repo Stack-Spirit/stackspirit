@@ -21,10 +21,12 @@ use crate::capsule::Capsule;
 use crate::cost::Tokens;
 use crate::error::ErrorKind;
 use crate::event::{EventEnvelope, SwitchReason};
+use crate::gate::GateResult;
 use crate::ids::{JobId, NodeName, ProjectName, SessionId};
 use crate::inbox::InboxItem;
 use crate::job::Job;
 use crate::limit::LimitRowKind;
+use crate::run::Run;
 use crate::session::{Node, Session};
 use crate::time::Timestamp;
 
@@ -123,6 +125,20 @@ pub struct Page<T> {
 
 /// One page of [`Job`] objects.
 pub type JobPage = Page<Job>;
+
+/// One page of [`Run`] objects for `GET /api/v1/jobs/{id}/runs`.
+///
+/// The items are the job's stored runs in the store's order, oldest first: `started_at`
+/// then `id`. The list is unpaginated, so `next` is always `null` and `total` is the
+/// number of runs in this response.
+pub type RunPage = Page<Run>;
+
+/// One page of [`GateResult`] objects for `GET /api/v1/jobs/{id}/gates`.
+///
+/// The items are the stored results of the job's newest attempt, ordered by `gate_index`
+/// then row id. The list is unpaginated, so `next` is always `null` and `total` is the
+/// number of results in this response.
+pub type GateResultPage = Page<GateResult>;
 
 /// One job action the loopback API may queue for the supervisor.
 ///

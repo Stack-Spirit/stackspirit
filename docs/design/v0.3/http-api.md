@@ -1,9 +1,9 @@
 # v0.3 — daemon HTTP + SSE API
 
-Status: the read API (including session detail, single-capsule reads and the node list), the
-per-session SSE stream, the board snapshot SSE stream, the token-gated writes (inbox
-answer, local session switch, ASIF import and the three job actions) and the ASIF download
-are implemented in
+Status: the read API (including job detail, session detail, single-capsule reads and the
+node list), the per-session SSE stream, the board snapshot SSE stream, the token-gated writes
+(inbox answer, local session switch, ASIF import and the three job actions) and the ASIF
+download are implemented in
 `crates/vowp-daemon`, and `vowp up` starts the daemon as a separate child process; the rest of
 this note is design. The daemon is not part of v0.2. Nothing here is implemented in v0.1.
 
@@ -37,6 +37,18 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   waits for the next snapshot. A collect error ends the stream cleanly; the page reconnects
   and keeps its five-second polling fallback. The board still has no write or auth surface.
 - `/api/v1/jobs?state=&kind=&role=` — a `JobPage`; `state` may repeat or be comma-separated.
+- `/api/v1/jobs/{id}` — one exact stored `Job`. An invalid id is `400`, an unknown job is
+  `404`, and a store failure is a path-free `500`. The route is read-only and token-free; it
+  adds no job-row write.
+- `/api/v1/jobs/{id}/runs` — a `RunPage` of the job's exact stored `Run` objects in the
+  store's order, oldest first by `started_at` then `id`. `total` is the item count and `next`
+  is `null` because the list is unpaginated. An invalid id is `400`, an unknown job is `404`
+  before the run query, and a store failure is a path-free `500`.
+- `/api/v1/jobs/{id}/gates` — a `GateResultPage` of the job's exact stored `GateResult`
+  objects from its newest attempt only, ordered by `gate_index` then row id. `total` is the
+  item count and `next` is `null` because the list is unpaginated. The errors are the same as
+  `/runs`: `400` for an invalid id, `404` for an unknown job and a path-free `500` for a
+  store failure.
 - `/api/v1/sessions?project=&job=&state=` — a `SessionPage`; `project` defaults to the
   served project.
 - `/api/v1/sessions/{id}` — a `SessionDetail`: the exact `Session`, its latest capsule by
@@ -145,8 +157,9 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
-`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `JobAction`,
-`JobActionResponse`, `SessionPage`, `NodePage`, `SessionDetail`, `EventPage`, `InboxPage`,
+`Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `RunPage`,
+`GateResultPage`, `JobAction`, `JobActionResponse`, `SessionPage`, `NodePage`, `SessionDetail`,
+`EventPage`, `InboxPage`,
 `InboxAnswerRequest`, `SessionSwitchRequest`, `CostReport`, `CostRow`, `CostTotal`, `AsifReport`,
 `AsifImportResponse`, `ApiError`
 and `ApiErrorBody`. Failures use the same `ApiError` shape as `vowp --json` errors and map to
@@ -176,7 +189,8 @@ browser chat and the remaining browser pages. There are no placeholder routes fo
 The per-session SSE stream is implemented and used by the session detail page; the board
 stream is implemented and used by the board page; the inbox answer form and the session
 switch form are implemented and use their write routes; the three job action routes are
-implemented for the `/jobs` controls a later page job adds. The session detail page carries
+implemented for the `/jobs` controls and the read-only `/jobs/{id}` page adds no action.
+The session detail page carries
 the ASIF download link and loss preview, and the separate `/import` page posts one raw
 archive to the token-gated import route.
 
@@ -249,7 +263,10 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
 
 - `GET /api/v1/health` — version, node name, project, schema version, supervisor heartbeat.
 - `GET /api/v1/jobs?state=&kind=&role=` — `Job` objects.
-- `GET /api/v1/jobs/{id}` — one `Job`; `/runs` and `/gates` as sub-resources.
+- `GET /api/v1/jobs/{id}` — one `Job`; `/runs` and `/gates` are its sub-resources, all
+  implemented read-only in this slice. `/runs` is a `RunPage` ordered by `started_at` then
+  `id`; `/gates` is a `GateResultPage` of the newest attempt, ordered by `gate_index` then
+  row id. Both lists are unpaginated (`next` is `null`) and an unknown job is `404`.
 - `GET /api/v1/sessions?project=&job=&state=` — `Session` objects.
 - `GET /api/v1/sessions/{id}` — metadata, latest capsule and lineage.
 - `GET /api/v1/sessions/{id}/events?after_seq=<n>&limit=<n>` — exact `EventEnvelope` lines.
@@ -311,6 +328,14 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   the canonical limit class (`quota`, `credits`, `rate`, `context`, `auth` or `unavailable`) and
   `resets_at` is an RFC 3339 time or null.
 - `Page<T> { items, next, total }` for lists.
+- `JobPage` = `Page<Job>` — the `/api/v1/jobs` document; every item is an exact `Job` and
+  the list is unpaginated, so `next` is null.
+- `RunPage` = `Page<Run>` — the `/api/v1/jobs/{id}/runs` document. Every item is an exact
+  stored `Run`, ordered by `started_at` then `id`; `total` is the item count and `next` is
+  null.
+- `GateResultPage` = `Page<GateResult>` — the `/api/v1/jobs/{id}/gates` document. Every item
+  is an exact stored `GateResult` from the newest attempt, ordered by `gate_index` then row
+  id; `total` is the item count and `next` is null.
 - `NodePage` = `Page<Node>` — the `/api/v1/nodes` document. Each item is the exact stored
   `Node` (`name`, `ssh_target`, `is_local`, `capabilities`, `last_seen_at`, `created_at`),
   ordered by name; `next` is null and `Node` keeps its existing shape and schema.
@@ -354,10 +379,12 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
-`JobAction`, `JobActionResponse`, `SessionDetail`, `NodePage`, `InboxAnswerRequest`,
+`JobPage`, `RunPage`, `GateResultPage`, `JobAction`, `JobActionResponse`, `SessionDetail`, `NodePage`,
+`InboxAnswerRequest`,
 `SessionSwitchRequest`, `AsifReport`, `AsifImportResponse` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples.
 Export the concrete page instantiations
-the API serves (`JobPage`, `SessionPage`, `NodePage`, `EventPage` and `InboxPage`) and
+the API serves (`JobPage`, `RunPage`, `GateResultPage`, `SessionPage`, `NodePage`, `EventPage`
+and `InboxPage`) and
 `CostReport` alongside their item types, and keep the SSE frame as the one explicit schema
 exception above.
 
@@ -409,6 +436,7 @@ exception above.
 Implemented: `crates/vowp-daemon` opens an existing node home read-only for reads
 (and writable-but-non-creating for the writes) and serves
 `GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/board/stream`, `GET /api/v1/jobs`,
+`GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/runs`, `GET /api/v1/jobs/{id}/gates`,
 `GET /api/v1/sessions`,
 `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/capsules/{capsuleId}`,
 `GET /api/v1/sessions/{id}/events?after_seq=`,
@@ -423,7 +451,13 @@ and a parent/child session chain with a capsule and a bounded long chain, a limi
 open/answered inbox items, cost ledger rows from every source and a checkpoint, and asserts
 that every JSON document validates against its exported schema — including `SessionDetail`
 for the session detail, `Capsule` for the capsule read, `Board`, `BoardRun` and `BoardLimit`
-for the board, `InboxPage` for the inbox and `CostReport` for cost. The SSE tests use a real
+for the board, `JobPage` for the job list, `RunPage` and `GateResultPage` for the job
+sub-resources, `InboxPage` for the inbox and `CostReport` for cost. The job detail tests pin
+the single job, the `400` for an invalid id, the `404` for an unknown job on all three
+routes, the run order (`started_at`, then `id`), the newest-attempt gate selection and its
+gate-index order, the `/jobs/{id}` page's shell fields and its three data sources, the
+not-found text for an unknown job, and the absence of a home path, token value or the
+unrendered `worktree`, `brief`, `owns`, `cwd` and `window` fields from the page. The SSE tests use a real
 loopback listener and short injected intervals: the session stream compares exact
 `EventEnvelope` frames and appends live through `SessionLog::open`; the board stream validates
 its `board` frames against the `Board` schema, compares them with `GET /api/v1/board` apart

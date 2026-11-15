@@ -220,6 +220,9 @@ fn jobs_page_serves_the_shell_fields_and_state_action_mapping() {
         "Cancel",
         "aria-current=\"page\"",
         "href=\"/jobs\"",
+        "function jobIdCell(job)",
+        "link.href = \"/jobs/\" + encodeURIComponent(job.id);",
+        "jobIdCell(job)",
         "<noscript>The jobs page requires JavaScript.</noscript>",
     ] {
         assert!(page.body.contains(needle), "jobs page is missing {needle:?}");
@@ -400,7 +403,9 @@ fn unknown_paths_still_return_the_json_404() {
     let fixture = Fixture::new();
     let server = support::Server::start_for(&fixture.paths);
 
-    for path in ["/jobs/missing", "/no-such-page"] {
+    // `/jobs/{id}` is now the static detail page, not a fallback path; an unknown nested
+    // path and an unknown page still get the API's JSON 404.
+    for path in ["/jobs/missing/extra", "/no-such-page"] {
         let response = support::get(server.address, path);
         assert_eq!(response.status, 404, "{path} body: {}", response.body);
         let value = body(&response);

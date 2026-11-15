@@ -58,6 +58,7 @@ python3 docs/reference/check-reference.py
 | `Gate` | [gate.md](gate.md) |
 | `GateFailureCard` | [gate-failure-card.md](gate-failure-card.md) |
 | `GateResult` | [gate-result.md](gate-result.md) |
+| `GateResultPage` | [gate-result-page.md](gate-result-page.md) |
 | `GcClassReport` | [gc-class-report.md](gc-class-report.md) |
 | `GcReport` | [gc-report.md](gc-report.md) |
 | `Health` | [health.md](health.md) |
@@ -109,6 +110,7 @@ python3 docs/reference/check-reference.py
 | `RemoteRunState` | [remote-run-state.md](remote-run-state.md) |
 | `ReportFrontMatter` | [report-front-matter.md](report-front-matter.md) |
 | `Run` | [run.md](run.md) |
+| `RunPage` | [run-page.md](run-page.md) |
 | `RunRejectReason` | [run-reject-reason.md](run-reject-reason.md) |
 | `RunResume` | [run-resume.md](run-resume.md) |
 | `RunResumeResult` | [run-resume-result.md](run-resume-result.md) |

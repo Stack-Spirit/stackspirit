@@ -17,9 +17,9 @@ use crate::agent::{
     NodeStatus, PathRef, SurfaceInfo, SurfaceScope, SurfaceState, TurnSummary,
 };
 use crate::api::{
-    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, Health,
-    InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, NodePage, Page, SessionDetail, SessionPage,
-    SessionSwitchRequest,
+    ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow, CostTotal, EventPage, GateResultPage,
+    Health, InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, NodePage, Page, RunPage,
+    SessionDetail, SessionPage, SessionSwitchRequest,
 };
 use crate::asif::{AsifCounts, AsifImportResponse, AsifLoss, AsifReport};
 use crate::capacity::{
@@ -149,6 +149,8 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("BoardLimit", schema_value::<BoardLimit>());
     schemas.insert("Page", schema_value::<Page<serde_json::Value>>());
     schemas.insert("JobPage", schema_value::<JobPage>());
+    schemas.insert("RunPage", schema_value::<RunPage>());
+    schemas.insert("GateResultPage", schema_value::<GateResultPage>());
     schemas.insert("JobAction", schema_value::<JobAction>());
     schemas.insert("JobActionResponse", schema_value::<JobActionResponse>());
     schemas.insert("SessionPage", schema_value::<SessionPage>());

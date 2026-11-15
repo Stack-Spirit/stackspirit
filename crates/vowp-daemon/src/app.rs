@@ -38,13 +38,13 @@ use vowp_core::{AdapterRegistry, CoreError, Deps, SystemGit, SystemRunner};
 use vowp_graph::{JobEvent, transition};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
-    Health, InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, MAX_LINEAGE, NodePage, SessionDetail,
-    SessionPage, SessionSwitchRequest,
+    GateResultPage, Health, InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, MAX_LINEAGE,
+    NodePage, RunPage, SessionDetail, SessionPage, SessionSwitchRequest,
 };
 use vowp_protocol::{
-    Capsule, CapsuleId, ErrorKind, Executor, ExecutorRef, InboxId, InboxItem, InboxState, JobId, JobState, NodeName,
-    ProjectName, Session, SessionId, SessionState, Switch, SwitchReason, SwitchRequest, SystemClock, Timestamp,
-    VowpConfig,
+    Capsule, CapsuleId, ErrorKind, Executor, ExecutorRef, InboxId, InboxItem, InboxState, Job, JobId, JobState,
+    NodeName, ProjectName, Session, SessionId, SessionState, Switch, SwitchReason, SwitchRequest, SystemClock,
+    Timestamp, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{CostQuery, CostRow as StoreCostRow, JobFilter, NodePaths, SessionFilter, Store, StoreError};
@@ -360,6 +360,54 @@ impl ApiState {
         })
     }
 
+    /// Returns one stored job by id.
+    ///
+    /// The response is the exact stored `Job`; the web page decides which fields to render.
+    /// An unknown job is a `404` and a store failure is a path-free `500`.
+    fn job_detail(&self, id: &JobId) -> Result<Job, ApiFailure> {
+        let store = self.open()?;
+        store
+            .job(id)
+            .map_err(|_| store_failure())?
+            .ok_or_else(|| ApiFailure::not_found(format!("job {id} not found")))
+    }
+
+    /// Returns one job's runs in the store's order, oldest first (`started_at`, then `id`).
+    ///
+    /// The list is unpaginated, so `next` is always `null` and `total` counts the returned
+    /// items. An unknown job is a `404` before the run query, so a missing job never answers
+    /// an empty page; a store failure is a path-free `500`.
+    fn job_runs(&self, id: &JobId) -> Result<RunPage, ApiFailure> {
+        let store = self.open()?;
+        if store.job(id).map_err(|_| store_failure())?.is_none() {
+            return Err(ApiFailure::not_found(format!("job {id} not found")));
+        }
+        let runs = store.runs_of_job(id).map_err(|_| store_failure())?;
+        Ok(RunPage {
+            total: usize_to_u64(runs.len()),
+            items: runs,
+            next: None,
+        })
+    }
+
+    /// Returns the gate results of one job's newest attempt, ordered by gate index then row id.
+    ///
+    /// The list is unpaginated, so `next` is always `null` and `total` counts the returned
+    /// items. An unknown job is a `404` before the gate query, so a missing job never answers
+    /// an empty page; a store failure is a path-free `500`.
+    fn job_gates(&self, id: &JobId) -> Result<GateResultPage, ApiFailure> {
+        let store = self.open()?;
+        if store.job(id).map_err(|_| store_failure())?.is_none() {
+            return Err(ApiFailure::not_found(format!("job {id} not found")));
+        }
+        let gates = store.latest_gate_results(id).map_err(|_| store_failure())?;
+        Ok(GateResultPage {
+            total: usize_to_u64(gates.len()),
+            items: gates,
+            next: None,
+        })
+    }
+
     /// Returns the sessions matching `filter`.
     fn sessions(&self, filter: &SessionFilter) -> Result<SessionPage, ApiFailure> {
         let store = self.open()?;
@@ -618,11 +666,11 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 
 /// Builds the router: the static board page at `/` and its phone alias `/board`, the static
 /// session pages at `/sessions` and `/sessions/{id}`, the static capsule page at
-/// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox, nodes and jobs pages at
-/// `/cost`, `/inbox`, `/nodes` and `/jobs`, the static ASIF import page at `/import`, the
-/// PWA manifest, icon and service worker, plus the API under `/api/v1`. The only non-GET
-/// API routes are the token-gated inbox answer, session switch, ASIF import and job
-/// retry/park/cancel writes.
+/// `/sessions/{id}/capsules/{capsule_id}`, the static cost, inbox, nodes, jobs and job-detail
+/// pages at `/cost`, `/inbox`, `/nodes`, `/jobs` and `/jobs/{id}`, the static ASIF import
+/// page at `/import`, the PWA manifest, icon and service worker, plus the API under
+/// `/api/v1`. The only non-GET API routes are the token-gated inbox answer, session switch,
+/// ASIF import and job retry/park/cancel writes.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -634,6 +682,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/inbox", get(inbox_page))
         .route("/nodes", get(nodes_page))
         .route("/jobs", get(jobs_page))
+        .route("/jobs/{id}", get(job_page))
         .route("/import", get(import_page))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(service_worker))
@@ -642,6 +691,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/board", get(board))
         .route("/api/v1/board/stream", get(board_stream))
         .route("/api/v1/jobs", get(jobs))
+        .route("/api/v1/jobs/{id}", get(job_detail))
+        .route("/api/v1/jobs/{id}/runs", get(job_runs))
+        .route("/api/v1/jobs/{id}/gates", get(job_gates))
         .route("/api/v1/jobs/{id}/retry", post(retry_job))
         .route("/api/v1/jobs/{id}/park", post(park_job))
         .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
@@ -765,9 +817,24 @@ const JOBS_PAGE: &str = include_str!("../web/jobs.html");
 /// The page renders each job's id, state, kind, role, priority, needs, attempts, updated
 /// time and note. Reads stay token-free. Retry, park and cancel appear only after the daemon
 /// write token is stored in `sessionStorage`; they post to the existing token-gated
-/// `/api/v1/jobs/{id}/retry|park|cancel` routes and refresh the list on `202`.
+/// `/api/v1/jobs/{id}/retry|park|cancel` routes and refresh the list on `202`. Each job id
+/// links to the read-only `/jobs/{id}` detail page.
 async fn jobs_page() -> Html<&'static str> {
     Html(JOBS_PAGE)
+}
+
+/// The embedded static job-detail shell, served read-only at `/jobs/{id}`.
+const JOB_PAGE: &str = include_str!("../web/job.html");
+
+/// Serves the static job-detail shell.
+///
+/// The page reads the id from its own path and fetches `/api/v1/jobs/{id}`,
+/// `/api/v1/jobs/{id}/runs` and `/api/v1/jobs/{id}/gates` on load. It is read-only: the
+/// shell has no unlock panel, no `sessionStorage` token and no action route. An unknown job
+/// is the API's `404`, which the page shows as a not-found line while keeping its nav and
+/// back link.
+async fn job_page() -> Html<&'static str> {
+    Html(JOB_PAGE)
 }
 
 /// The embedded static ASIF import shell, served at `/import`.
@@ -850,6 +917,36 @@ async fn board_stream(State(state): State<ApiState>) -> Sse<impl Stream<Item = R
 async fn jobs(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Json<JobPage>, ApiFailure> {
     let filter = filters::job_filter(query.as_deref()).map_err(ApiFailure::invalid)?;
     let page = blocking(move || state.jobs(&filter)).await?;
+    Ok(Json(page))
+}
+
+/// Returns one job.
+///
+/// An invalid id is `400`, an unknown job is `404`, and a store failure is a path-free
+/// `500`. The route is read-only and token-free.
+async fn job_detail(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Json<Job>, ApiFailure> {
+    let id = JobId::parse(&id).map_err(|_| ApiFailure::invalid("invalid job id"))?;
+    let job = blocking(move || state.job_detail(&id)).await?;
+    Ok(Json(job))
+}
+
+/// Returns one job's runs in the store's order, oldest first (`started_at`, then `id`).
+///
+/// An invalid id is `400`, an unknown job is `404`, and a store failure is a path-free
+/// `500`. The list is unpaginated: `next` is always `null`.
+async fn job_runs(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Json<RunPage>, ApiFailure> {
+    let id = JobId::parse(&id).map_err(|_| ApiFailure::invalid("invalid job id"))?;
+    let page = blocking(move || state.job_runs(&id)).await?;
+    Ok(Json(page))
+}
+
+/// Returns the gate results of one job's newest attempt, ordered by gate index then row id.
+///
+/// An invalid id is `400`, an unknown job is `404`, and a store failure is a path-free
+/// `500`. The list is unpaginated: `next` is always `null`.
+async fn job_gates(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Json<GateResultPage>, ApiFailure> {
+    let id = JobId::parse(&id).map_err(|_| ApiFailure::invalid("invalid job id"))?;
+    let page = blocking(move || state.job_gates(&id)).await?;
     Ok(Json(page))
 }
 

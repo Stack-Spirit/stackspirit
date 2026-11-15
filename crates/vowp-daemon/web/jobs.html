@@ -271,6 +271,16 @@
     return element;
   }
 
+  function jobIdCell(job) {
+    const element = document.createElement("td");
+    element.className = "mono";
+    const link = document.createElement("a");
+    link.href = "/jobs/" + encodeURIComponent(job.id);
+    link.textContent = formatValue(job.id, "unknown");
+    element.appendChild(link);
+    return element;
+  }
+
   async function errorDetail(response) {
     try {
       const body = await response.json();
@@ -385,7 +395,7 @@
     for (const job of items) {
       const row = document.createElement("tr");
       row.append(
-        cell(formatValue(job.id, "unknown"), "mono"),
+        jobIdCell(job),
         cell(formatValue(job.state, "unknown"), "state"),
         cell(formatValue(job.kind, "unknown")),
         cell(formatValue(job.role, "unknown")),
