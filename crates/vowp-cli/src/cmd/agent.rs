@@ -355,6 +355,7 @@ fn status(global: &Global, io: &mut dyn IoStreams, _args: &AgentStatusArgs) -> R
         status.key_fingerprint = load_public(&state_dir).ok().map(|key| fingerprint_of(&key));
     }
     status.pending_spool_bytes = pending_spool_bytes(&state_dir);
+    status.refresh_cache(&state_dir);
     if let Some(expiry) = surface_token_expiry(&state_dir) {
         status.surface_token_expires_at = Some(expiry);
     }
@@ -410,6 +411,20 @@ fn print_status(io: &mut dyn IoStreams, status: &AgentStatus) -> Result<(), CliE
             .unwrap_or_else(|| "-".to_owned())
     )?;
     writeln!(io.out(), "pending spool: {} bytes", status.pending_spool_bytes)?;
+    writeln!(
+        io.out(),
+        "cache: {} entries, {} bytes",
+        status.cache_entries,
+        status.cache_bytes
+    )?;
+    writeln!(
+        io.out(),
+        "cache oldest: {}",
+        status
+            .cache_oldest_at
+            .map(|at| at.as_rfc3339())
+            .unwrap_or_else(|| "-".to_owned())
+    )?;
     writeln!(io.out(), "key: {}", status.key_fingerprint.as_deref().unwrap_or("-"))?;
     if let Some(expiry) = status.surface_token_expires_at {
         writeln!(io.out(), "surface token expires: {}", expiry.as_rfc3339())?;

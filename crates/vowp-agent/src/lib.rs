@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod bridge;
+pub mod cache;
 pub mod chat;
 pub mod client;
 pub mod config;
@@ -26,6 +27,10 @@ pub use bridge::{
     BRIDGE_BLOBS_DIR, BRIDGE_DIR, BRIDGE_EVENTS_FILE, BRIDGE_SENT_FILE, BRIDGE_SPOOL_DIR, BridgeAttachment,
     BridgeFrame, BridgeNotice, BridgeState, BridgeSync, DEFAULT_MAX_ATTACHMENT_BYTES, DRAIN_TIMEOUT, MIRROR_FILE,
     MirrorCursor, OpencodeBridge, PathRoot, Redaction, SSE_PATH, SSE_READ_TIMEOUT,
+};
+pub use cache::{
+    CACHE_DIR, CACHE_MAX_BYTES, CACHE_MAX_ENTRIES, CACHE_TTL, Cache, CacheStats, CachedRead, READ_TOOLS,
+    is_cacheable_tool,
 };
 pub use chat::{
     CHAT_EPOCH, ChatClient, ChatTurnRequest, ChatTurnStatus, EVENT_POLL, LEASE_HEARTBEAT_EVERY, MAX_RECONNECTS,

@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use vowp_agent::{
-    AGENT_SOCKET_FILE, AgentClient, AgentConfig, AgentError, AgentSocket, FrameRead, FrameStream,
-    MAX_SOCKET_REQUEST_BYTES, NODE_KEY_FILE, NodeKey, RunOptions, RunOutcome, SystemAgentClock, TOOL_CALL_TIMEOUT,
-    Transport,
+    AGENT_SOCKET_FILE, AgentClient, AgentConfig, AgentError, AgentSocket, AgentStatus, Cache,
+    ConnectionState as AgentConnectionState, FrameRead, FrameStream, MAX_SOCKET_REQUEST_BYTES, NODE_KEY_FILE, NodeKey,
+    RunOptions, RunOutcome, SystemAgentClock, TOOL_CALL_TIMEOUT, Transport,
 };
 use vowp_protocol::agent::surface::{ToolCall, ToolError};
 use vowp_protocol::{AGENT_PROTOCOL, AgentFrame, AgentRole, NodeName, SessionId, SurfaceId, Timestamp};
@@ -45,6 +45,12 @@ enum Mode {
     CloseOnCall,
     /// Answer with the home's `refused` tool error.
     Refuse,
+    /// Answer every tool call with a small successful MCP read result.
+    Answer,
+    /// Answer the first tool call with a successful read, then close the connection.
+    AnswerThenClose,
+    /// Answer with a protocol-successful MCP envelope whose `isError` is true.
+    ErrorEnvelope,
 }
 
 #[derive(Default)]
@@ -118,6 +124,7 @@ struct HomeState {
     current: Option<Arc<Connection>>,
     pending_calls: Vec<ToolCall>,
     revoke_after_welcome: Option<usize>,
+    answered: usize,
 }
 
 #[derive(Clone)]
@@ -168,6 +175,35 @@ impl FakeHome {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .revoke_after_welcome = Some(connection);
+    }
+
+    /// Stops the run whether the client is connected now or reconnects later.
+    fn stop(&self) {
+        let current = {
+            let mut state = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.revoke_after_welcome = Some(state.connections + 1);
+            state.current.clone()
+        };
+        if let Some(connection) = current {
+            connection.push(AgentFrame::Revoked {
+                reason: "the test stopped the home".to_owned(),
+            });
+        }
+    }
+
+    fn revoke_surface(&self, surface: SurfaceId) {
+        let current = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current
+            .clone();
+        if let Some(connection) = current {
+            connection.push(AgentFrame::SurfaceRevoked {
+                surface_id: surface,
+                reason: "the test revoked the surface".to_owned(),
+            });
+        }
     }
 }
 
@@ -236,8 +272,51 @@ impl FakeStream {
                         retryable: false,
                     }),
                 })),
+            Mode::Answer => self
+                .connection
+                .push(AgentFrame::ToolResult(vowp_protocol::agent::surface::ToolResult {
+                    request_id: call.request_id.clone(),
+                    result: Some(read_result()),
+                    error: None,
+                })),
+            Mode::AnswerThenClose => {
+                let first = {
+                    let mut state = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let first = state.answered == 0;
+                    state.answered += 1;
+                    first
+                };
+                if first {
+                    self.connection
+                        .push(AgentFrame::ToolResult(vowp_protocol::agent::surface::ToolResult {
+                            request_id: call.request_id.clone(),
+                            result: Some(read_result()),
+                            error: None,
+                        }));
+                }
+                self.connection.close();
+            }
+            Mode::ErrorEnvelope => {
+                self.connection
+                    .push(AgentFrame::ToolResult(vowp_protocol::agent::surface::ToolResult {
+                        request_id: call.request_id.clone(),
+                        result: Some(json!({
+                            "content": [{"type": "text", "text": "refused: not attached"}],
+                            "isError": true,
+                        })),
+                        error: None,
+                    }))
+            }
         }
     }
+}
+
+/// The successful home result for one cacheable read.
+fn read_result() -> Value {
+    json!({
+        "content": [{"type": "text", "text": "{\"nodes\":[]}"}],
+        "isError": false,
+    })
 }
 
 impl FrameStream for FakeStream {
@@ -349,6 +428,23 @@ fn wait_for_socket(path: &Path) {
     }
 }
 
+/// Waits until the agent has written a status document matching `predicate`.
+fn wait_for_status<F>(dir: &Path, predicate: F) -> AgentStatus
+where
+    F: Fn(&AgentStatus) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(Some(status)) = AgentStatus::load(dir)
+            && predicate(&status)
+        {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for status.json");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn connect(path: &Path) -> UnixStream {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -388,6 +484,10 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Value {
 }
 
 fn call_tool(path: &Path, request_id: &str, value: i64) -> Value {
+    call_tool_named(path, request_id, "session.show", json!({ "value": value }))
+}
+
+fn call_tool_named(path: &Path, request_id: &str, tool: &str, arguments: Value) -> Value {
     let mut stream = connect(path);
     send_request(
         &mut stream,
@@ -396,8 +496,8 @@ fn call_tool(path: &Path, request_id: &str, value: i64) -> Value {
             "request_id": request_id,
             "surface": SURFACE,
             "session": SESSION,
-            "tool": "session.show",
-            "arguments": { "value": value },
+            "tool": tool,
+            "arguments": arguments,
         }),
     );
     let mut reader = BufReader::new(stream);
@@ -678,6 +778,218 @@ fn socket_never_logs_arguments_or_a_secret() {
         let text = String::from_utf8_lossy(&bytes);
         assert!(!text.contains(SECRET), "{} contains the tool argument", path.display());
     }
+
+    stop_run(&home, run);
+}
+
+/// Waits for one cached read and returns it.
+fn wait_for_cached_read(dir: &Path, tool: &str, arguments: &Value) -> vowp_agent::CachedRead {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(Some(cached)) = Cache::new(dir).lookup(tool, &surface(), arguments, Timestamp::now()) {
+            return cached;
+        }
+        assert!(Instant::now() < deadline, "the successful read was not cached");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_cache_entries(dir: &Path, entries: u64) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Cache::new(dir).stats().entries == entries {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the cache did not reach {entries} entries");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn mcp_tool_call_works_read_only_with_the_cache_when_the_home_is_offline() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(AGENT_SOCKET_FILE);
+    let home = FakeHome::new(Mode::AnswerThenClose);
+    let run = start_run(dir.path(), home.clone());
+    wait_for_socket(&path);
+    wait_for_connection(&home);
+
+    // One successful read while connected is stored exactly as the home returned it.
+    let arguments = json!({"project": "vowp"});
+    let response = call_tool_named(&path, "request-cache-first", "fleet_status", arguments.clone());
+    assert_eq!(response["kind"], "tool_result");
+    assert_eq!(response["result"], read_result());
+    let cached = wait_for_cached_read(dir.path(), "fleet_status", &arguments);
+    assert_eq!(cached.result, read_result(), "the exact home payload is stored");
+
+    // The home closed the connection; the agent is either retrying or connected to a home
+    // that drops the next call, and both answer from the cache.
+    wait_for_status(dir.path(), |status| {
+        matches!(
+            status.connection,
+            AgentConnectionState::Reconnecting | AgentConnectionState::Stopped
+        )
+    });
+
+    let response = call_tool_named(&path, "request-cache-second", "fleet_status", arguments.clone());
+    assert_eq!(response["kind"], "tool_result");
+    assert_eq!(response["request_id"], "request-cache-second");
+    assert!(response.get("error").is_none(), "cached read failed: {response}");
+    assert_eq!(response["result"]["content"][0]["text"], "{\"nodes\":[]}");
+    let marker = response["result"]["content"][1]["text"]
+        .as_str()
+        .expect("the as-of line");
+    assert_eq!(
+        marker,
+        format!(
+            "as of {} (the home is unreachable; this is a cached read)",
+            cached.stored_at.as_rfc3339()
+        )
+    );
+    assert_eq!(response["result"]["isError"], false);
+
+    // A different argument set is a miss and keeps the existing offline error.
+    let miss = call_tool_named(
+        &path,
+        "request-cache-miss",
+        "fleet_status",
+        json!({"project": "another-project"}),
+    );
+    assert_eq!(miss["kind"], "tool_result");
+    assert_eq!(miss["error"]["code"], "home_offline");
+    assert_eq!(
+        miss["error"]["message"],
+        "the agent is not connected to the home; start `vowp agent run`"
+    );
+
+    home.stop();
+    let outcome = run.join().expect("run thread").expect("run outcome");
+    assert!(matches!(outcome, RunOutcome::Revoked { .. }), "got {outcome:?}");
+}
+
+#[test]
+fn cache_miss_returns_the_existing_home_offline_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let socket = AgentSocket::bind(dir.path()).expect("bind");
+
+    let response = call_tool_named(
+        socket.path(),
+        "request-cache-miss",
+        "fleet_status",
+        json!({"project": "vowp"}),
+    );
+    assert_eq!(response["kind"], "tool_result");
+    assert_eq!(response["request_id"], "request-cache-miss");
+    assert_eq!(response["error"]["code"], "home_offline");
+    assert_eq!(
+        response["error"]["message"],
+        "the agent is not connected to the home; start `vowp agent run`"
+    );
+    assert_eq!(response["error"]["retryable"], true);
+    assert_eq!(
+        Cache::new(dir.path()).stats().entries,
+        0,
+        "a miss writes no cache entry"
+    );
+}
+
+#[test]
+fn cached_read_answers_while_the_agent_is_not_connected() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let socket = AgentSocket::bind(dir.path()).expect("bind");
+    let arguments = json!({"project": "vowp"});
+    let stored_at = Timestamp::now();
+    Cache::new(dir.path())
+        .store("fleet_status", &surface(), &arguments, &read_result(), stored_at)
+        .expect("cache entry");
+
+    let response = call_tool_named(socket.path(), "request-offline-cache", "fleet_status", arguments);
+    assert!(response.get("error").is_none(), "cached read failed: {response}");
+    assert_eq!(response["result"]["content"][0]["text"], "{\"nodes\":[]}");
+    assert_eq!(
+        response["result"]["content"][1]["text"],
+        format!(
+            "as of {} (the home is unreachable; this is a cached read)",
+            stored_at.as_rfc3339()
+        )
+    );
+    assert_eq!(response["result"]["isError"], false);
+}
+
+#[test]
+fn cached_read_answers_a_tool_timeout() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(AGENT_SOCKET_FILE);
+    let home = FakeHome::new(Mode::Accept);
+    let run = start_run_with_timeout(dir.path(), home.clone(), Duration::from_millis(150));
+    wait_for_socket(&path);
+    wait_for_connection(&home);
+
+    let arguments = json!({"project": "vowp"});
+    let stored_at = Timestamp::now();
+    Cache::new(dir.path())
+        .store("fleet_status", &surface(), &arguments, &read_result(), stored_at)
+        .expect("cache entry");
+
+    let started = Instant::now();
+    let response = call_tool_named(&path, "request-timeout-cache", "fleet_status", arguments);
+    assert!(
+        started.elapsed() >= Duration::from_millis(150),
+        "the call waits for the configured tool timeout"
+    );
+    assert!(response.get("error").is_none(), "cached read failed: {response}");
+    assert_eq!(
+        response["result"]["content"][1]["text"],
+        format!(
+            "as of {} (the home is unreachable; this is a cached read)",
+            stored_at.as_rfc3339()
+        )
+    );
+
+    stop_run(&home, run);
+}
+
+#[test]
+fn a_tool_error_envelope_is_not_cached() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(AGENT_SOCKET_FILE);
+    let home = FakeHome::new(Mode::ErrorEnvelope);
+    let run = start_run(dir.path(), home.clone());
+    wait_for_socket(&path);
+    wait_for_connection(&home);
+
+    let response = call_tool_named(
+        &path,
+        "request-error-envelope",
+        "fleet_status",
+        json!({"project": "vowp"}),
+    );
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        Cache::new(dir.path()).stats().entries,
+        0,
+        "an MCP error envelope is not a successful read"
+    );
+
+    stop_run(&home, run);
+}
+
+#[test]
+fn socket_surface_revoked_clears_the_cached_reads() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(AGENT_SOCKET_FILE);
+    let home = FakeHome::new(Mode::Answer);
+    let run = start_run(dir.path(), home.clone());
+    wait_for_socket(&path);
+    wait_for_connection(&home);
+
+    let arguments = json!({"project": "vowp"});
+    let response = call_tool_named(&path, "request-cache-before-revoke", "fleet_status", arguments);
+    assert_eq!(response["result"], read_result());
+    wait_for_cache_entries(dir.path(), 1);
+
+    home.revoke_surface(surface());
+    wait_for_cache_entries(dir.path(), 0);
 
     stop_run(&home, run);
 }

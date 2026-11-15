@@ -18,6 +18,7 @@ use vowp_protocol::{
 };
 
 use crate::bridge::{BridgeState, OpencodeBridge};
+use crate::cache::{Cache, debug_failure, is_cacheable_tool};
 use crate::config::{AgentConfig, ensure_private_dir, write_private, write_surface_binding};
 use crate::error::AgentError;
 use crate::executor::{RunDriver, RunHandler};
@@ -37,6 +38,8 @@ pub const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// How long `pair` waits for the home's answer after the handshake.
 pub const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a running agent prunes the read cache, in addition to a bounded store.
+const CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// The clock and sleeper the client uses. Tests inject a fake clock.
 pub trait AgentClock: Send + Sync {
@@ -234,6 +237,8 @@ pub struct AgentClient {
     socket: Option<AgentSocket>,
     pending_tool_calls: HashMap<String, PendingToolCall>,
     tool_call_timeout: Duration,
+    cache: Cache,
+    cache_pruned_at: Option<Timestamp>,
     bridge: Option<BridgeLink>,
     orchestrator: OrchestratorHost,
     pending_orchestrator: Option<PendingOrchestrator>,
@@ -247,6 +252,14 @@ struct PendingOrchestrator {
 struct PendingToolCall {
     reply: mpsc::Sender<SocketResponse>,
     deadline: Instant,
+    cache_key: Option<CacheKey>,
+}
+
+/// The surface, tool and arguments needed to store one successful read.
+struct CacheKey {
+    tool: String,
+    surface: SurfaceId,
+    arguments: serde_json::Value,
 }
 
 struct BridgeLink {
@@ -278,6 +291,7 @@ impl AgentClient {
         let status = base_status(&state_dir, Some(&config), &key);
         let pending_path_maps = config.path_maps.clone();
         let orchestrator = OrchestratorHost::new(state_dir.clone());
+        let cache = Cache::new(&state_dir);
         Self {
             state_dir,
             key,
@@ -297,6 +311,8 @@ impl AgentClient {
             socket: None,
             pending_tool_calls: HashMap::new(),
             tool_call_timeout: TOOL_CALL_TIMEOUT,
+            cache,
+            cache_pruned_at: None,
             bridge: None,
             orchestrator,
             pending_orchestrator: None,
@@ -312,6 +328,7 @@ impl AgentClient {
     ) -> Self {
         let status = base_status(&state_dir, None, &key);
         let orchestrator = OrchestratorHost::new(state_dir.clone());
+        let cache = Cache::new(&state_dir);
         Self {
             state_dir,
             key,
@@ -329,6 +346,8 @@ impl AgentClient {
             socket: None,
             pending_tool_calls: HashMap::new(),
             tool_call_timeout: TOOL_CALL_TIMEOUT,
+            cache,
+            cache_pruned_at: None,
             bridge: None,
             orchestrator,
             pending_orchestrator: None,
@@ -558,6 +577,11 @@ impl AgentClient {
         };
         let token_path = write_surface_token(&self.state_dir, &request.surface_id, &token, expires_at)?;
         write_surface_binding(&self.state_dir, &request.surface_id, &request.session)?;
+        // A fresh pairing replaces every read cached before it, so a re-paired surface
+        // can never read data fetched under the previous token.
+        if let Err(error) = self.cache.clear_surface(&request.surface_id) {
+            debug_failure("cache clear after pairing failed", &error);
+        }
         Ok(PairedSurface {
             surface_id: request.surface_id.clone(),
             scopes,
@@ -720,6 +744,14 @@ impl AgentClient {
         self.status.connection = ConnectionState::Connected;
         self.status.last_heartbeat = Some(now);
         self.status.pending_spool_bytes = spool;
+        if self
+            .cache_pruned_at
+            .is_none_or(|at| now.since(at) >= CACHE_PRUNE_INTERVAL)
+        {
+            self.cache.prune(now);
+            self.cache_pruned_at = Some(now);
+        }
+        self.status.refresh_cache(&self.state_dir);
         if let Some(expiry) = surface_token_expiry(&self.state_dir) {
             self.status.surface_token_expires_at = Some(expiry);
         }
@@ -1217,6 +1249,13 @@ impl AgentClient {
             ));
             return Ok(());
         }
+        // Only a cacheable read needs its surface, tool and arguments kept for a later
+        // store; a write tool never reaches the cache.
+        let cache_key = is_cacheable_tool(&call.tool).then(|| CacheKey {
+            tool: call.tool.clone(),
+            surface: call.surface.clone(),
+            arguments: call.arguments.clone(),
+        });
         match self.send_frame(&AgentFrame::ToolCall(call)) {
             Ok(()) => {
                 self.pending_tool_calls.insert(
@@ -1224,6 +1263,7 @@ impl AgentClient {
                     PendingToolCall {
                         reply,
                         deadline: Instant::now() + self.tool_call_timeout,
+                        cache_key,
                     },
                 );
                 Ok(())
@@ -1254,11 +1294,28 @@ impl AgentClient {
         let Some(pending) = self.pending_tool_calls.remove(&result.request_id) else {
             return;
         };
-        let _ = pending.reply.send(SocketResponse::ToolResult {
+        let stored = match (
+            result.error.is_none(),
+            pending.cache_key.as_ref(),
+            result.result.as_ref(),
+        ) {
+            (true, Some(key), Some(payload)) if is_successful_result(payload) => Some((key, payload.clone())),
+            _ => None,
+        };
+        let response = SocketResponse::ToolResult {
             request_id: result.request_id,
             result: result.result,
             error: result.error,
-        });
+        };
+        let _ = pending.reply.send(response);
+        // The reply is already on its way; a cache failure must never fail the tool call.
+        if let Some((key, payload)) = stored
+            && let Err(error) = self
+                .cache
+                .store(&key.tool, &key.surface, &key.arguments, &payload, self.clock.now())
+        {
+            debug_failure("cache store failed", &error);
+        }
     }
 
     fn expire_pending_tool_calls(&mut self) {
@@ -1297,6 +1354,7 @@ impl AgentClient {
     pub fn status(&self) -> AgentStatus {
         let mut status = self.status.clone();
         status.pending_spool_bytes = pending_spool_bytes(&self.state_dir);
+        status.refresh_cache(&self.state_dir);
         if let Some(expiry) = surface_token_expiry(&self.state_dir) {
             status.surface_token_expires_at = Some(expiry);
         }
@@ -1407,6 +1465,9 @@ impl AgentClient {
                             self.surface_read_only(reason);
                         }
                         AgentFrame::SurfaceRevoked { surface_id, reason } => {
+                            if let Err(error) = self.cache.clear_surface(&surface_id) {
+                                debug_failure("cache clear after surface revocation failed", &error);
+                            }
                             if self
                                 .bridge
                                 .as_ref()
@@ -1646,7 +1707,7 @@ fn write_surface_token(
 }
 
 fn base_status(state_dir: &Path, config: Option<&AgentConfig>, key: &NodeKey) -> AgentStatus {
-    AgentStatus {
+    let mut status = AgentStatus {
         connection: ConnectionState::Unknown,
         node: config.map(|config| config.node.clone()),
         home: config.map(|config| config.home.clone()),
@@ -1656,7 +1717,20 @@ fn base_status(state_dir: &Path, config: Option<&AgentConfig>, key: &NodeKey) ->
         pending_spool_bytes: pending_spool_bytes(state_dir),
         key_fingerprint: Some(key.fingerprint()),
         surface_token_expires_at: surface_token_expiry(state_dir),
-    }
+        cache_entries: 0,
+        cache_bytes: 0,
+        cache_oldest_at: None,
+    };
+    status.refresh_cache(state_dir);
+    status
+}
+
+/// Returns whether a home result is a successful MCP envelope.
+///
+/// The protocol-level `ToolResult` success (`error == None`) is not enough: the home's
+/// tool layer reports a refused read inside the envelope with `isError: true`.
+fn is_successful_result(result: &serde_json::Value) -> bool {
+    result.get("isError").and_then(serde_json::Value::as_bool) != Some(true)
 }
 
 fn next_handshake_frame(stream: &mut dyn FrameStream) -> Result<AgentFrame, AgentError> {

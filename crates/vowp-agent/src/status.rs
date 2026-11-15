@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{NodeName, Timestamp};
 
+use crate::cache::Cache;
 use crate::config::{STATUS_FILE, write_private};
 use crate::error::AgentError;
 
@@ -55,6 +56,15 @@ pub struct AgentStatus {
     pub key_fingerprint: Option<String>,
     /// Earliest local surface-token expiry, when a token is paired.
     pub surface_token_expires_at: Option<Timestamp>,
+    /// Number of entries in the local read cache.
+    #[serde(default)]
+    pub cache_entries: u64,
+    /// Bytes on disk used by the local read cache.
+    #[serde(default)]
+    pub cache_bytes: u64,
+    /// When the oldest local cache entry was stored.
+    #[serde(default)]
+    pub cache_oldest_at: Option<Timestamp>,
 }
 
 impl Default for AgentStatus {
@@ -69,6 +79,9 @@ impl Default for AgentStatus {
             pending_spool_bytes: 0,
             key_fingerprint: None,
             surface_token_expires_at: None,
+            cache_entries: 0,
+            cache_bytes: 0,
+            cache_oldest_at: None,
         }
     }
 }
@@ -94,6 +107,17 @@ impl AgentStatus {
     pub fn write(&self, state_dir: &Path) -> Result<(), AgentError> {
         let bytes = serde_json::to_vec_pretty(self)?;
         write_private(&Self::file_path(state_dir), &bytes)
+    }
+
+    /// Fills the cache fields from a directory walk below `state_dir`.
+    ///
+    /// Only counts and the oldest timestamp are read; no cached value, argument or path is
+    /// copied into the status document.
+    pub fn refresh_cache(&mut self, state_dir: &Path) {
+        let stats = Cache::new(state_dir).stats();
+        self.cache_entries = stats.entries;
+        self.cache_bytes = stats.bytes;
+        self.cache_oldest_at = stats.oldest_stored_at;
     }
 }
 

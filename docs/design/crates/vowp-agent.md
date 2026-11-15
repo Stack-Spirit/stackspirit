@@ -23,6 +23,7 @@ crates/vowp-agent/
   src/bridge.rs     OpencodeBridge, SSE mapping, mirror cursor, path/redaction, attachment bytes
   src/orchestrator.rs OrchestratorHost, local config, app process group, pid/state and attach seam
   src/socket.rs     AgentSocket, the local request/response protocol and the 0600 listener
+  src/cache.rs      the bounded read cache used when the home is unreachable
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
   src/worktree.rs   PathMap, WorktreeManager, Worktree, push/cleanup and the disk guard
@@ -32,7 +33,8 @@ crates/vowp-agent/
   tests/orchestrator.rs fake app script, temp agent home and a fake transport for the host
   tests/chat.rs     fake home and fake adapter for local chat spool/replay/takeover
   tests/executor.rs fake home and fake handler for assignments, acks, replay and fencing
-  tests/socket.rs   real Unix socket plus in-memory home for attach/detach and tool calls
+  tests/socket.rs   real Unix socket plus in-memory home for attach/detach, tool calls and the read cache
+  tests/cache.rs    temporary state dir, injected timestamps and the cache bounds
   tests/worktree.rs temporary origin/clone plus real git for create/reuse/cleanup/push
 ```
 
@@ -48,6 +50,8 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `node.pub` | 0644 | the 32-byte public key as lowercase hex |
 | `status.json` | 0600 | the last `AgentStatus` document |
 | `agent.sock` | 0600 | the local agent socket bound by `vowp agent run`; removed on clean exit |
+| `cache/` | 0700 | read-cache root, walked for the counts in `vowp agent status` |
+| `cache/<surface>.<tool>.<sha256>.json` | 0600 | one cached read: the surface, tool, argument hash, `stored_at` and the exact result |
 | `spool/` | — | pending bytes counted by `status`, never opened as a database |
 | `bridge/<surface>/mirror.json` | 0600 | last raw event, durable sequence and native id applied by the opencode bridge |
 | `bridge/<surface>/spool/events.jsonl` | 0600 | mirrored `SurfaceEvent`/`SurfaceTurn` frames, fsynced before send |
@@ -253,6 +257,29 @@ pub enum SocketResponse {
     Error { code: String, message: String },
 }
 
+pub const CACHE_DIR: &str;                     // "cache"
+pub const CACHE_MAX_ENTRIES: usize;            // 256
+pub const CACHE_MAX_BYTES: u64;                // 8 MiB
+pub const CACHE_TTL: Duration;                 // 24 h
+pub const READ_TOOLS: [&str; 6];               // fleet_status, fleet_queue, inbox_list,
+                                               // capacity_report, session_tail, session_resume
+pub fn is_cacheable_tool(tool: &str) -> bool;
+pub struct CachedRead { pub result: serde_json::Value, pub stored_at: Timestamp }
+pub struct CacheStats { pub entries: u64, pub bytes: u64,
+                        pub oldest_stored_at: Option<Timestamp> }
+pub struct Cache { /* cache root */ }
+impl Cache {
+    pub fn new(state_dir: &Path) -> Self;                           // <state_dir>/cache
+    pub fn root(&self) -> &Path;
+    pub fn store(&self, tool: &str, surface: &SurfaceId, arguments: &serde_json::Value,
+                 result: &serde_json::Value, now: Timestamp) -> Result<(), AgentError>;
+    pub fn lookup(&self, tool: &str, surface: &SurfaceId, arguments: &serde_json::Value,
+                  now: Timestamp) -> Result<Option<CachedRead>, AgentError>;
+    pub fn prune(&self, now: Timestamp) -> CacheStats;
+    pub fn stats(&self) -> CacheStats;
+    pub fn clear_surface(&self, surface: &SurfaceId) -> Result<usize, AgentError>;
+}
+
 pub struct SurfacePairRequest { pub code: String, pub surface_id: SurfaceId, pub session: SessionId, pub app: String }
 pub struct PairedSurface { pub surface_id: SurfaceId, pub scopes: Vec<SurfaceScope>, pub expires_at: Timestamp, pub token_path: PathBuf }
 pub fn validate_pairing_code(code: &str) -> Result<(), AgentError>;
@@ -369,6 +396,13 @@ pub struct AgentStatus {
     pub protocol: Option<String>, pub last_heartbeat: Option<Timestamp>, pub last_error: Option<String>,
     pub pending_spool_bytes: u64, pub key_fingerprint: Option<String>,
     pub surface_token_expires_at: Option<Timestamp>,
+    pub cache_entries: u64, pub cache_bytes: u64, pub cache_oldest_at: Option<Timestamp>,
+}
+impl AgentStatus {
+    pub fn file_path(state_dir: &Path) -> PathBuf;
+    pub fn load(state_dir: &Path) -> Result<Option<Self>, AgentError>;
+    pub fn write(&self, state_dir: &Path) -> Result<(), AgentError>;
+    pub fn refresh_cache(&mut self, state_dir: &Path);                  // directory walk
 }
 
 pub struct PathMap { /* validated canonical roots and allow list */ }
@@ -477,9 +511,10 @@ a `Revoked`/`Superseded` node credential keeps its existing meaning. The client 
 `run` opens a connection, sends one heartbeat immediately, then sends another every
 `heartbeat_secs` (10 by default). A heartbeat carries `Timestamp::now` from the injected clock, a
 local capacity snapshot (CPU count, `/proc/loadavg` and `/proc/meminfo` when available, `df -Pk`
-free bytes, zero busy slots) and the current `spool/` byte count. Each heartbeat also reloads
-`agent.json` and sends any changed `PathMapUpdate` frames. Every heartbeat rewrites
-`status.json` 0600; that file holds names and counts, never a path map.
+free bytes, zero busy slots) and the current `spool/` byte count. Each heartbeat also refreshes
+the read cache's entry/byte/oldest counters; the first heartbeat and one per hour prune it. Each
+heartbeat also reloads `agent.json` and sends any changed `PathMapUpdate` frames. Every heartbeat
+rewrites `status.json` 0600; that file holds names and counts, never a path map.
 
 `Ping` is answered with `Pong`. `Revoked` and `Superseded` end the loop with the matching
 `RunOutcome`. A dropped transport, EOF or retryable home error is reported in `status.json` and
@@ -488,9 +523,10 @@ for 60 seconds resets the backoff. Fatal authentication, config, key, protocol a
 home errors end the loop.
 
 The CLI loads `status.json` through `AgentStatus::load`, fills missing node, home and protocol/
-fingerprint fields from `agent.json` and `node.pub`, and recounts `spool/` so the displayed byte
-count is current even when the agent is stopped. A missing enrollment is exit 3 with the
-enrollment hint.
+fingerprint fields from `agent.json` and `node.pub`, recounts `spool/` so the displayed byte
+count is current even when the agent is stopped, and recounts `cache/` for `cache_entries`,
+`cache_bytes` and `cache_oldest_at`. The human output shows `cache: <n> entries, <bytes> bytes`
+and `cache oldest: <RFC 3339 or ->`. A missing enrollment is exit 3 with the enrollment hint.
 
 ### Local chat
 
@@ -548,8 +584,9 @@ frame loop serializes every frame write on the one outbound connection.
 A local request is queued only while the frame loop reports a live home connection. A
 disconnected home, a request that raced a drop, or a closed listener answers a tool call
 with the typed `home_offline` `ToolError` (`retryable: true`) and an attach/detach with
-`{"kind":"error","code":"home_offline"}`; neither panics. A tool call whose `ToolResult`
-does not arrive within [`TOOL_CALL_TIMEOUT`] (60 seconds, replaceable with
+`{"kind":"error","code":"home_offline"}`; neither panics. The one exception is a cacheable
+read answered from a fresh cache entry (see **Read cache** below). A tool call whose
+`ToolResult` does not arrive within [`TOOL_CALL_TIMEOUT`] (60 seconds, replaceable with
 `AgentClient::with_tool_call_timeout`) is removed from the pending map and answered with
 a typed `tool_timeout` error. A late result with an unknown request id is ignored. Attach,
 detach and tool calls never block the event stream or the heartbeat: the frame loop keeps
@@ -560,6 +597,49 @@ lost lease produces the home's `ToolError`, which the server returns unchanged. 
 never tracks token scopes or leases for the socket and never decides that a tool call is
 allowed. The socket is the local transport only; `vowp mcp` remains a separate job, and the
 opencode bridge is the separate module documented next.
+
+### Read cache
+
+When the home is unreachable, the six MCP read tools can still be answered from the
+agent's local snapshot cache. The cache lives below `<state_dir>/cache/` and is never part
+of a frame, a status value or a log line.
+
+- **Allowlist.** Exactly `fleet_status`, `fleet_queue`, `inbox_list`, `capacity_report`,
+  `session_tail` and `session_resume`. Every other tool writes, opens a tunnel, requests a
+  secret or is unknown; `Cache::store` and `Cache::lookup` refuse it with
+  `AgentError::Config`, so a write never reads or writes the cache even while connected.
+- **Key.** `<surface>.<tool>.<sha256>.json`, where the digest is over the canonical JSON of
+  `arguments` (object keys are sorted recursively, array order is kept). Only the surface
+  id, the tool name and the digest are in the file name and the entry metadata; the raw
+  arguments, a token, a secret value and an absolute path are never written. The entry
+  body is `{surface, tool, arguments_sha256, stored_at, result}`.
+- **Value.** The exact successful home `ToolResult` result plus `stored_at`. A `ToolError`
+  or an MCP envelope with `isError: true` is never stored. The key depends only on the
+  surface, tool and arguments, so two equivalent argument objects share one entry.
+- **Bounds.** 256 entries and 8 MiB on disk. A write goes through a 0600 temporary file
+  and a rename, so a crash leaves no half entry. A write that would exceed either bound
+  prunes expired entries before evicting the oldest ones until both bounds hold; the first
+  heartbeat and one per hour do the same. A lookup that notices an expired entry removes
+  it. A single result larger than 8 MiB is refused. A corrupt, unreadable or expired entry
+  is a miss and is never fatal; `prune` removes it. A hidden temporary file left by a crash
+  or a failed write is never served and is removed by the next prune, and `SurfaceRevoked`
+  removes it with the surface's entries.
+- **Permissions.** `cache/` is 0700 and every entry is 0600.
+- **Fallback.** A read tool is answered from a fresh entry when the agent has no home
+  connection, when the home answers `home_offline`, or when the reply times out. The MCP
+  envelope shape is kept and one text line is appended:
+  `as of <RFC 3339> (the home is unreachable; this is a cached read)`. The other members,
+  including `isError: false`, are unchanged. A miss keeps the exact existing `home_offline`
+  or `tool_timeout` error. A write tool never takes this path.
+- **Storage point.** Every successful cacheable read is stored after its reply is built.
+  A store failure is a stderr diagnostic and never fails the tool call.
+- **Invalidation.** A `SurfaceRevoked` frame clears every entry of that surface, and a
+  fresh pairing for the same surface id also clears its old entries. One surface can
+  therefore never read another surface's cache.
+- **Status.** `vowp agent status` walks `cache/` and reports `cache_entries`,
+  `cache_bytes` and `cache_oldest_at`; `status.json` carries the same counters and
+  `serde(default)` keeps an older file without them readable. Only counts and the oldest
+  timestamp are shown; no cached value, argument or path is printed.
 
 ### opencode bridge
 
@@ -792,12 +872,14 @@ memory and never spawn ssh, a socket or the network.
 `AgentError` is the crate's transport and client error type: `Io`, `Config`, `Protocol`,
 `Transport`, `Auth`, `ReplayNonce`, `FrameTooLarge`, `NotEnrolled`, `Key`,
 `Remote { kind, message, retryable }`, `Revoked`, `Superseded` and `Json`. `is_fatal` names the
-errors that must not be retried. The worktree primitives use their own `WorktreeError`, mapped
-to the protocol's refusal vocabulary by `reject_reason`; §8 lists its variants. The
-orchestrator host uses the protocol's `OrchestratorError` (codes such as `invalid_name`,
-`spawn_failed`, `config_invalid`, `service_timeout`, `surface_missing`, `surface_ambiguous`,
-`attach_failed`, `stop_failed`, `not_found` and `busy`); its messages never name a local path,
-a port or a secret value.
+errors that must not be retried. The read cache returns `Config` for a tool outside the six-read
+allowlist and `Io`/`Json` for a file problem; its callers treat every store or lookup failure as
+diagnostic-only and never fail a tool call because of it. The worktree primitives use their own
+`WorktreeError`, mapped to the protocol's refusal vocabulary by `reject_reason`; §8 lists its
+variants. The orchestrator host uses the protocol's `OrchestratorError` (codes such as
+`invalid_name`, `spawn_failed`, `config_invalid`, `service_timeout`, `surface_missing`,
+`surface_ambiguous`, `attach_failed`, `stop_failed`, `not_found` and `busy`); its messages never
+name a local path, a port or a secret value.
 
 ## 7. Named tests
 
@@ -857,6 +939,18 @@ state directory and an in-memory fake home:
 `socket_pending_tool_call_does_not_block_heartbeats`,
 `socket_rejects_an_unknown_kind_and_an_oversized_frame` and
 `socket_never_logs_arguments_or_a_secret`.
+
+The read-cache slice adds `mcp_tool_call_works_read_only_with_the_cache_when_the_home_is_offline`,
+`cache_miss_returns_the_existing_home_offline_error`,
+`cached_read_answers_while_the_agent_is_not_connected`, `cached_read_answers_a_tool_timeout`,
+`a_tool_error_envelope_is_not_cached` and `socket_surface_revoked_clears_the_cached_reads` to
+`tests/socket.rs`, and
+`cache_never_stores_a_write_tool_or_a_secret`, `cache_is_bounded_and_prunes_old_entries`,
+`cache_file_is_0600_and_its_directory_is_0700`, `cache_key_and_file_do_not_contain_arguments`,
+`cache_is_cleared_when_the_surface_is_revoked` and `an_older_status_json_still_loads` to
+`tests/cache.rs`. Every cache test uses a temporary state directory and an injected timestamp;
+the socket tests use the in-memory home and a real Unix socket below the temporary state dir,
+never the network.
 
 The local-orchestrator slice adds, in `tests/orchestrator.rs`, with a fake app script, a
 temporary agent home and a fake transport:

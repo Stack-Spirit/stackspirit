@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use tempfile::TempDir;
 use vowp_agent::{
-    AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, ConnectionState, FrameRead, FrameStream, NodeKey,
-    PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, Transport,
+    AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, Cache, ConnectionState, FrameRead, FrameStream,
+    NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, Transport,
 };
 use vowp_cli::BufferIo;
 use vowp_cli::agent_exec::CoreRunHandler;
@@ -81,10 +81,24 @@ fn agent_status_prints_json() {
         pending_spool_bytes: 42,
         key_fingerprint: Some("sha256:0123456789abcdef".to_owned()),
         surface_token_expires_at: None,
+        cache_entries: 0,
+        cache_bytes: 0,
+        cache_oldest_at: None,
     };
     status.write(&state_dir).expect("status.json");
     std::fs::create_dir_all(state_dir.join("spool")).expect("spool dir");
     std::fs::write(state_dir.join("spool/pending.json"), vec![b'x'; 42]).expect("spool bytes");
+    let cached_at = Timestamp::parse("2026-11-14T09:00:00.000Z").expect("timestamp");
+    let surface = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned());
+    Cache::new(&state_dir)
+        .store(
+            "fleet_status",
+            &surface,
+            &serde_json::json!({"project": "vowp"}),
+            &serde_json::json!({"content": [{"type": "text", "text": "{}"}], "isError": false}),
+            cached_at,
+        )
+        .expect("cache entry");
 
     let (code, stdout, stderr) = run_binary(home.path(), &["--json", "agent", "status"]);
     assert_eq!(code, 0, "status reports even when stopped; stderr: {stderr}");
@@ -96,6 +110,14 @@ fn agent_status_prints_json() {
     assert_eq!(value["pending_spool_bytes"], 42);
     assert_eq!(value["last_heartbeat"], "2026-11-14T10:00:00.000Z");
     assert_eq!(value["key_fingerprint"], "sha256:0123456789abcdef");
+    assert_eq!(value["cache_entries"], 1);
+    assert!(value["cache_bytes"].as_u64().expect("cache bytes") > 0);
+    assert_eq!(value["cache_oldest_at"], "2026-11-14T09:00:00.000Z");
+
+    let (code, human, stderr) = run_binary(home.path(), &["agent", "status"]);
+    assert_eq!(code, 0, "human status failed: {stderr}");
+    assert!(human.contains("cache: 1 entries"), "{human}");
+    assert!(human.contains("cache oldest: 2026-11-14T09:00:00.000Z"), "{human}");
 }
 
 #[test]
@@ -276,6 +298,9 @@ fn agent_status_redacts_absolute_paths_from_the_snapshot_cache() {
         pending_spool_bytes: 0,
         key_fingerprint: Some("sha256:0123456789abcdef".to_owned()),
         surface_token_expires_at: None,
+        cache_entries: 0,
+        cache_bytes: 0,
+        cache_oldest_at: None,
     };
     status.write(&state_dir).expect("status.json");
     let cached_before = std::fs::read_to_string(AgentStatus::file_path(&state_dir)).expect("status cache");

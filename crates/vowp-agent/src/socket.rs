@@ -22,8 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vowp_protocol::SessionId;
 use vowp_protocol::SurfaceId;
+use vowp_protocol::Timestamp;
 use vowp_protocol::agent::surface::{ToolCall, ToolError};
 
+use crate::cache::{Cache, CachedRead, debug_failure, is_cacheable_tool};
 use crate::client::validate_surface_id;
 use crate::config::ensure_private_dir;
 use crate::error::AgentError;
@@ -156,6 +158,7 @@ struct SocketShared {
     connected: AtomicBool,
     clients: AtomicUsize,
     inbox: Sender<SocketEvent>,
+    cache: Cache,
 }
 
 /// The mode-0600 Unix socket served by `vowp agent run`.
@@ -192,6 +195,7 @@ impl AgentSocket {
             connected: AtomicBool::new(false),
             clients: AtomicUsize::new(0),
             inbox: sender,
+            cache: Cache::new(state_dir),
         });
         let accept_shared = Arc::clone(&shared);
         let accept = match thread::Builder::new()
@@ -409,9 +413,16 @@ fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) 
             tool,
             arguments,
         } => {
+            // Only a cacheable read keeps the values needed for an offline answer. They
+            // are cloned because the original values move into the outbound frame.
+            let cache_key = is_cacheable_tool(&tool).then(|| (surface.clone(), tool.clone(), arguments.clone()));
             let (reply, receiver) = mpsc::channel();
             if !shared.connected.load(Ordering::SeqCst) {
-                return (offline_tool_result(&request_id), false);
+                let response = offline_tool_result(&request_id);
+                return (
+                    with_cached_fallback(shared, &request_id, cache_key.as_ref(), response),
+                    false,
+                );
             }
             let call = ToolCall {
                 request_id: request_id.clone(),
@@ -421,9 +432,17 @@ fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) 
                 arguments,
             };
             if shared.inbox.send(SocketEvent::ToolCall { call, reply }).is_err() {
-                return (offline_tool_result(&request_id), false);
+                let response = offline_tool_result(&request_id);
+                return (
+                    with_cached_fallback(shared, &request_id, cache_key.as_ref(), response),
+                    false,
+                );
             }
-            (wait_for_reply(&receiver, shared, Some(&request_id)), false)
+            let response = wait_for_reply(&receiver, shared, Some(&request_id));
+            (
+                with_cached_fallback(shared, &request_id, cache_key.as_ref(), response),
+                false,
+            )
         }
     }
 }
@@ -479,6 +498,71 @@ fn offline_tool_result(request_id: &str) -> SocketResponse {
         "the agent is not connected to the home; start `vowp agent run`",
         true,
     )
+}
+
+/// Replaces an offline or timed-out read with a fresh cached result when there is one.
+///
+/// The cache key is present only for the six cacheable read tools, so a write tool keeps
+/// its exact `home_offline` or `tool_timeout` error and never reads the cache.
+fn with_cached_fallback(
+    shared: &SocketShared,
+    request_id: &str,
+    cache_key: Option<&(SurfaceId, String, Value)>,
+    response: SocketResponse,
+) -> SocketResponse {
+    if !is_cache_fallback(&response) {
+        return response;
+    }
+    let Some((surface, tool, arguments)) = cache_key else {
+        return response;
+    };
+    match shared.cache.lookup(tool, surface, arguments, Timestamp::now()) {
+        Ok(Some(cached)) => SocketResponse::ToolResult {
+            request_id: request_id.to_owned(),
+            result: Some(cached_result(&cached)),
+            error: None,
+        },
+        Ok(None) => response,
+        Err(error) => {
+            debug_failure("cache lookup failed", &error);
+            response
+        }
+    }
+}
+
+fn is_cache_fallback(response: &SocketResponse) -> bool {
+    match response {
+        SocketResponse::ToolResult { error: Some(error), .. } => {
+            matches!(error.code.as_str(), "home_offline" | "tool_timeout")
+        }
+        _ => false,
+    }
+}
+
+/// Returns the cached MCP envelope with one extra text line naming when it was stored.
+fn cached_result(cached: &CachedRead) -> Value {
+    let marker = format!(
+        "as of {} (the home is unreachable; this is a cached read)",
+        cached.stored_at.as_rfc3339()
+    );
+    let mut envelope = match &cached.result {
+        Value::Object(map) => Value::Object(map.clone()),
+        other => serde_json::json!({
+            "content": [{"type": "text", "text": other.to_string()}],
+            "isError": false,
+        }),
+    };
+    if let Some(object) = envelope.as_object_mut() {
+        let content = object.entry("content").or_insert_with(|| Value::Array(Vec::new()));
+        if !content.is_array() {
+            *content = Value::Array(Vec::new());
+        }
+        if let Some(items) = content.as_array_mut() {
+            items.push(serde_json::json!({"type": "text", "text": marker}));
+        }
+        object.insert("isError".to_owned(), Value::Bool(false));
+    }
+    envelope
 }
 
 struct SocketFailure {
