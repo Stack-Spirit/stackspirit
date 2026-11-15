@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use vowp_protocol::api::{JobAction, JobActionKind, JobActionResponse};
+use vowp_protocol::api::{JobAction, JobActionResponse};
 use vowp_protocol::capsule::Capsule;
 use vowp_protocol::cost::Cost;
 use vowp_protocol::event::EventEnvelope;
@@ -116,7 +116,6 @@ const LISTED_TYPES: &[&str] = &[
     "RunPage",
     "GateResultPage",
     "JobAction",
-    "JobActionKind",
     "JobActionResponse",
     "SessionPage",
     "NodePage",
@@ -269,6 +268,10 @@ fn job_action_response_has_a_schema_and_stable_action_names() {
         (JobAction::Retry, "retry"),
         (JobAction::Park, "park"),
         (JobAction::Cancel, "cancel"),
+        (JobAction::Nudge, "nudge"),
+        (JobAction::Restart, "restart"),
+        (JobAction::Replan, "replan"),
+        (JobAction::Fail, "fail"),
     ] {
         assert_eq!(
             serde_json::to_value(action).expect("action JSON"),
@@ -276,24 +279,6 @@ fn job_action_response_has_a_schema_and_stable_action_names() {
             "the wire name of {action:?}"
         );
     }
-    for (action, name) in [
-        (JobActionKind::Retry, "retry"),
-        (JobActionKind::Park, "park"),
-        (JobActionKind::Cancel, "cancel"),
-        (JobActionKind::Nudge, "nudge"),
-        (JobActionKind::Restart, "restart"),
-        (JobActionKind::Replan, "replan"),
-        (JobActionKind::Fail, "fail"),
-    ] {
-        assert_eq!(
-            serde_json::to_value(action).expect("action JSON"),
-            Value::String(name.to_owned()),
-            "the wire name of {action:?}"
-        );
-    }
-    assert_eq!(JobActionKind::from(JobAction::Park), JobActionKind::Park);
-    assert!(JobActionKind::Nudge != JobAction::Retry);
-    assert!(JobActionKind::Park == JobAction::Park);
 
     let schema = schema_for_name("JobActionResponse").expect("JobActionResponse is exported");
     assert_eq!(schema["title"], "JobActionResponse");
@@ -309,7 +294,7 @@ fn job_action_response_has_a_schema_and_stable_action_names() {
 
     let response = JobActionResponse {
         job: JobId::parse("job-a").expect("job id"),
-        action: JobActionKind::Park,
+        action: JobAction::Park,
         request: "01J00000000000000000000000".to_owned(),
     };
     let value = serde_json::to_value(&response).expect("response JSON");

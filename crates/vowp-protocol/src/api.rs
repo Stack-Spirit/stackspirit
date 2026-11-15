@@ -141,21 +141,6 @@ pub type RunPage = Page<Run>;
 /// number of results in this response.
 pub type GateResultPage = Page<GateResult>;
 
-/// The three job actions the first loopback job-action API exposed.
-///
-/// `Retry`, `Park` and `Cancel` mirror `vowp job retry|park|cancel`. [`JobActionKind`] is
-/// the full action set, including the keeper actions, carried by [`JobActionResponse`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum JobAction {
-    /// Retry a failed or stalled job, or resolve a parked one.
-    Retry,
-    /// Park a non-terminal job until a human resolves it.
-    Park,
-    /// Cancel a non-terminal job.
-    Cancel,
-}
-
 /// One job action the loopback API may queue for the supervisor.
 ///
 /// `Retry`, `Park` and `Cancel` mirror `vowp job retry|park|cancel`; `Nudge`, `Restart`,
@@ -165,7 +150,7 @@ pub enum JobAction {
 /// it never changes the job row itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum JobActionKind {
+pub enum JobAction {
     /// Retry a failed or stalled job, or resolve a parked one.
     Retry,
     /// Park a non-terminal job until a human resolves it.
@@ -182,29 +167,6 @@ pub enum JobActionKind {
     Fail,
 }
 
-impl From<JobAction> for JobActionKind {
-    fn from(action: JobAction) -> Self {
-        match action {
-            JobAction::Retry => Self::Retry,
-            JobAction::Park => Self::Park,
-            JobAction::Cancel => Self::Cancel,
-        }
-    }
-}
-
-/// Compares the full action set with the original three-action subset.
-///
-/// This keeps callers written against [`JobAction`] able to compare a response's
-/// [`JobActionResponse::action`] without a conversion.
-impl PartialEq<JobAction> for JobActionKind {
-    fn eq(&self, other: &JobAction) -> bool {
-        matches!(
-            (self, other),
-            (Self::Retry, JobAction::Retry) | (Self::Park, JobAction::Park) | (Self::Cancel, JobAction::Cancel)
-        )
-    }
-}
-
 /// The `POST /api/v1/jobs/{id}/retry|park|cancel|nudge|restart|replan|fail` document
 /// returned with `202 Accepted`.
 ///
@@ -216,7 +178,7 @@ pub struct JobActionResponse {
     /// Job the action was queued for.
     pub job: JobId,
     /// Action that was queued.
-    pub action: JobActionKind,
+    pub action: JobAction,
     /// Id of the request row the supervisor will apply.
     pub request: String,
 }

@@ -70,7 +70,6 @@ python3 docs/reference/check-reference.py
 | `IngestAck` | [ingest-ack.md](ingest-ack.md) |
 | `Job` | [job.md](job.md) |
 | `JobAction` | [job-action.md](job-action.md) |
-| `JobActionKind` | [job-action-kind.md](job-action-kind.md) |
 | `JobActionResponse` | [job-action-response.md](job-action-response.md) |
 | `JobPage` | [job-page.md](job-page.md) |
 | `JobPatch` | [job-patch.md](job-patch.md) |

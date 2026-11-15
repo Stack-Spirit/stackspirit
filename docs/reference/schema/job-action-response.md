@@ -10,7 +10,7 @@ Exported by `vowp schema JobActionResponse` and generated from the protocol type
 ```json
 {
   "$defs": {
-    "JobActionKind": {
+    "JobAction": {
       "description": "One job action the loopback API may queue for the supervisor.\n\n`Retry`, `Park` and `Cancel` mirror `vowp job retry|park|cancel`; `Nudge`, `Restart`,\n`Replan` and `Fail` mirror `vowp job nudge|restart|replan|fail`. The daemon validates\nthe current job state with `vowp_graph::transition` and queues the same\n`vowp_core::requests::Request` the CLI would queue. The handler only queues a request;\nit never changes the job row itself.",
       "oneOf": [
         {
@@ -59,7 +59,7 @@ Exported by `vowp schema JobActionResponse` and generated from the protocol type
   "description": "The `POST /api/v1/jobs/{id}/retry|park|cancel|nudge|restart|replan|fail` document\nreturned with `202 Accepted`.\n\n`request` is the id of the queued request row (`req:<project>:<ULID>`); the supervisor\napplies it on its next tick. The response carries no home path, SQL text, token or\nsecret.",
   "properties": {
     "action": {
-      "$ref": "#/$defs/JobActionKind",
+      "$ref": "#/$defs/JobAction",
       "description": "Action that was queued."
     },
     "job": {

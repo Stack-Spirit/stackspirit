@@ -176,8 +176,8 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
 `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `RunPage`,
-`GateResultPage`, `JobAction`, `JobActionKind`, `JobActionResponse`, `SessionPage`, `NodePage`,
-`SessionDetail`, `EventPage`, `InboxPage`,
+`GateResultPage`, `JobAction`, `JobActionResponse`, `SessionPage`, `NodePage`, `SessionDetail`,
+`EventPage`, `InboxPage`,
 `InboxAnswerRequest`, `SessionSwitchRequest`, `CostReport`, `CostRow`, `CostTotal`, `AsifReport`,
 `AsifImportResponse`, `ApiError`
 and `ApiErrorBody`. Failures use the same `ApiError` shape as `vowp --json` errors and map to
@@ -360,11 +360,10 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
 - `NodePage` = `Page<Node>` — the `/api/v1/nodes` document. Each item is the exact stored
   `Node` (`name`, `ssh_target`, `is_local`, `capabilities`, `last_seen_at`, `created_at`),
   ordered by name; `next` is null and `Node` keeps its existing shape and schema.
-- `JobActionKind { retry | park | cancel | nudge | restart | replan | fail }` — the action
+- `JobAction { retry | park | cancel | nudge | restart | replan | fail }` — the action
   selected by one of the seven job write routes. The names are the CLI's verbs and never
   describe a raw state transition. `nudge`, `restart` and `fail` are valid only in `stalled`;
-  `replan` is also valid in `parked` and `failed`. `JobAction` keeps the original
-  `retry | park | cancel` subset for callers of the first three-action API.
+  `replan` is also valid in `parked` and `failed`.
 - `AsifReport { adapter_version, asif_version, asif_pin, source_session, target_session,
   counts, loss_count, losses, unsupported }` — the `?report=1` preview document and the report
   inside the import response. `counts` carries `events_in`, `events_out`, `resources` and
@@ -373,7 +372,7 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   import. `session` is the normal registered `Session` row, `report` is the summary above and
   `warnings` are non-fatal reindex warnings.
 - `JobActionResponse { job, action, request }` — the `202 Accepted` document of a job action.
-  `job` is the `JobId`, `action` is the queued `JobActionKind`, and `request` is the
+  `job` is the `JobId`, `action` is the queued `JobAction`, and `request` is the
   `req:<project>:<ULID>` id the supervisor will apply. The document never carries a home path,
   SQL text, token or secret.
 - `SessionDetail { session, latest_capsule, lineage }` — the `/api/v1/sessions/{id}` document.
@@ -403,8 +402,7 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
-`JobPage`, `RunPage`, `GateResultPage`, `JobAction`, `JobActionKind`, `JobActionResponse`,
-`SessionDetail`, `NodePage`,
+`JobPage`, `RunPage`, `GateResultPage`, `JobAction`, `JobActionResponse`, `SessionDetail`, `NodePage`,
 `InboxAnswerRequest`,
 `SessionSwitchRequest`, `AsifReport`, `AsifImportResponse` and `ApiError` to `all_schemas()` rather than hand-writing JSON examples.
 Export the concrete page instantiations

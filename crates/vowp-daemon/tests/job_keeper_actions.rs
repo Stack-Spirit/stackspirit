@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use vowp_core::requests::{self, Request};
 use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemGit, SystemRunner};
-use vowp_protocol::api::{ApiError, JobActionKind, JobActionResponse};
+use vowp_protocol::api::{ApiError, JobAction, JobActionResponse};
 use vowp_protocol::{
     FakeClock, Job, JobId, JobKind, JobState, MemoryLog, NewJob, NodeName, ParkedReason, Project, ProjectName, Role,
     Timestamp, VowpConfig,
@@ -191,15 +191,15 @@ impl Fixture {
     }
 
     /// Builds the action path for one job.
-    fn path(&self, job: &JobId, action: JobActionKind) -> String {
+    fn path(&self, job: &JobId, action: JobAction) -> String {
         let suffix = match action {
-            JobActionKind::Retry => "retry",
-            JobActionKind::Park => "park",
-            JobActionKind::Cancel => "cancel",
-            JobActionKind::Nudge => "nudge",
-            JobActionKind::Restart => "restart",
-            JobActionKind::Replan => "replan",
-            JobActionKind::Fail => "fail",
+            JobAction::Retry => "retry",
+            JobAction::Park => "park",
+            JobAction::Cancel => "cancel",
+            JobAction::Nudge => "nudge",
+            JobAction::Restart => "restart",
+            JobAction::Replan => "replan",
+            JobAction::Fail => "fail",
         };
         format!("/api/v1/jobs/{job}/{suffix}")
     }
@@ -276,7 +276,7 @@ fn assert_queued_response(
     response: &support::HttpResponse,
     fixture: &Fixture,
     job: &JobId,
-    action: JobActionKind,
+    action: JobAction,
     expected: &Request,
 ) -> JobActionResponse {
     assert_eq!(response.status, 202, "body: {}", response.body);
@@ -313,11 +313,11 @@ fn keeper_nudge_queues_one_request_for_a_stalled_job() {
     };
     let response = support::post(
         server.address,
-        &fixture.path(&fixture.stalled, JobActionKind::Nudge),
+        &fixture.path(&fixture.stalled, JobAction::Nudge),
         "",
         Some(&authorization),
     );
-    let document = assert_queued_response(&response, &fixture, &fixture.stalled, JobActionKind::Nudge, &expected);
+    let document = assert_queued_response(&response, &fixture, &fixture.stalled, JobAction::Nudge, &expected);
     assert!(!document.request.is_empty(), "the response must carry a request id");
     assert_eq!(
         fixture.job(&fixture.stalled),
@@ -342,11 +342,11 @@ fn keeper_restart_queues_one_request_for_a_stalled_job() {
     };
     let response = support::post(
         server.address,
-        &fixture.path(&fixture.stalled, JobActionKind::Restart),
+        &fixture.path(&fixture.stalled, JobAction::Restart),
         "",
         Some(&authorization),
     );
-    let document = assert_queued_response(&response, &fixture, &fixture.stalled, JobActionKind::Restart, &expected);
+    let document = assert_queued_response(&response, &fixture, &fixture.stalled, JobAction::Restart, &expected);
     assert!(!document.request.is_empty(), "the response must carry a request id");
     assert_eq!(
         fixture.job(&fixture.stalled),
@@ -369,11 +369,11 @@ fn keeper_replan_accepts_stalled_parked_and_failed() {
         let expected = Request::ReplanJob { job: job.clone() };
         let response = support::post(
             server.address,
-            &fixture.path(job, JobActionKind::Replan),
+            &fixture.path(job, JobAction::Replan),
             "",
             Some(&authorization),
         );
-        assert_queued_response(&response, &fixture, job, JobActionKind::Replan, &expected);
+        assert_queued_response(&response, &fixture, job, JobAction::Replan, &expected);
         assert_eq!(fixture.job(job), before, "the endpoint must not change the job row");
 
         fixture.apply_one(&expected);
@@ -386,7 +386,7 @@ fn keeper_fail_requires_a_reason_and_queues_it() {
     let fixture = Fixture::new();
     let server = support::Server::start_for_with_token(&fixture.paths, Some(TOKEN));
     let authorization = format!("Bearer {TOKEN}");
-    let path = fixture.path(&fixture.stalled, JobActionKind::Fail);
+    let path = fixture.path(&fixture.stalled, JobAction::Fail);
     let before = fixture.job(&fixture.stalled);
 
     for (request_body, label) in [
@@ -430,7 +430,7 @@ fn keeper_fail_requires_a_reason_and_queues_it() {
         &json!({"reason": "  owner gave up  "}).to_string(),
         Some(&authorization),
     );
-    assert_queued_response(&response, &fixture, &fixture.stalled, JobActionKind::Fail, &expected);
+    assert_queued_response(&response, &fixture, &fixture.stalled, JobAction::Fail, &expected);
     assert_eq!(
         fixture.job(&fixture.stalled),
         before,
@@ -450,25 +450,20 @@ fn keeper_actions_refuse_a_wrong_state_with_409() {
     let authorization = format!("Bearer {TOKEN}");
 
     for (job, action, body, refusal) in [
-        (&fixture.ready, JobActionKind::Nudge, "", "nudged"),
-        (&fixture.running, JobActionKind::Nudge, "", "nudged"),
-        (&fixture.pending, JobActionKind::Nudge, "", "nudged"),
-        (&fixture.parked, JobActionKind::Restart, "", "restarted"),
-        (&fixture.pending, JobActionKind::Restart, "", "restarted"),
-        (
-            &fixture.failed,
-            JobActionKind::Fail,
-            "{\"reason\":\"gave up\"}",
-            "failed",
-        ),
-        (&fixture.ready, JobActionKind::Replan, "", "replanned"),
-        (&fixture.pending, JobActionKind::Replan, "", "replanned"),
-        (&fixture.done, JobActionKind::Nudge, "", "nudged"),
-        (&fixture.done, JobActionKind::Restart, "", "restarted"),
-        (&fixture.done, JobActionKind::Replan, "", "replanned"),
-        (&fixture.done, JobActionKind::Fail, "{\"reason\":\"gave up\"}", "failed"),
-        (&fixture.cancelled, JobActionKind::Replan, "", "replanned"),
-        (&fixture.replanned, JobActionKind::Replan, "", "replanned"),
+        (&fixture.ready, JobAction::Nudge, "", "nudged"),
+        (&fixture.running, JobAction::Nudge, "", "nudged"),
+        (&fixture.pending, JobAction::Nudge, "", "nudged"),
+        (&fixture.parked, JobAction::Restart, "", "restarted"),
+        (&fixture.pending, JobAction::Restart, "", "restarted"),
+        (&fixture.failed, JobAction::Fail, "{\"reason\":\"gave up\"}", "failed"),
+        (&fixture.ready, JobAction::Replan, "", "replanned"),
+        (&fixture.pending, JobAction::Replan, "", "replanned"),
+        (&fixture.done, JobAction::Nudge, "", "nudged"),
+        (&fixture.done, JobAction::Restart, "", "restarted"),
+        (&fixture.done, JobAction::Replan, "", "replanned"),
+        (&fixture.done, JobAction::Fail, "{\"reason\":\"gave up\"}", "failed"),
+        (&fixture.cancelled, JobAction::Replan, "", "replanned"),
+        (&fixture.replanned, JobAction::Replan, "", "replanned"),
     ] {
         let before = fixture.job(job);
         let response = support::post(server.address, &fixture.path(job, action), body, Some(&authorization));
@@ -506,10 +501,10 @@ fn keeper_actions_refuse_a_wrong_state_with_409() {
 
     let unknown = JobId::parse("missing-keeper-job").expect("unknown job id");
     for (action, body) in [
-        (JobActionKind::Nudge, ""),
-        (JobActionKind::Restart, ""),
-        (JobActionKind::Replan, ""),
-        (JobActionKind::Fail, "{\"reason\":\"gave up\"}"),
+        (JobAction::Nudge, ""),
+        (JobAction::Restart, ""),
+        (JobAction::Replan, ""),
+        (JobAction::Fail, "{\"reason\":\"gave up\"}"),
     ] {
         let response = support::post(
             server.address,
@@ -536,10 +531,10 @@ fn keeper_actions_require_the_token() {
 
     let disabled = support::Server::start_for(&fixture.paths);
     for (action, body) in [
-        (JobActionKind::Nudge, ""),
-        (JobActionKind::Restart, ""),
-        (JobActionKind::Replan, ""),
-        (JobActionKind::Fail, "{\"reason\":\"gave up\"}"),
+        (JobAction::Nudge, ""),
+        (JobAction::Restart, ""),
+        (JobAction::Replan, ""),
+        (JobAction::Fail, "{\"reason\":\"gave up\"}"),
     ] {
         let response = support::post(
             disabled.address,
@@ -579,10 +574,10 @@ fn keeper_actions_require_the_token() {
         // The invalid id and malformed body prove authorization runs first: a 401 is not
         // a 400.
         for (action, body) in [
-            (JobActionKind::Nudge, "{"),
-            (JobActionKind::Restart, "{"),
-            (JobActionKind::Replan, "{"),
-            (JobActionKind::Fail, "{"),
+            (JobAction::Nudge, "{"),
+            (JobAction::Restart, "{"),
+            (JobAction::Replan, "{"),
+            (JobAction::Fail, "{"),
         ] {
             let path = fixture.path(&fixture.stalled, action);
             let response = support::post(server.address, &path, body, authorization);
