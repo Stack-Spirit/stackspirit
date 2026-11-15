@@ -1,11 +1,12 @@
-//! Hermetic tests for the read-only job-detail slice: `GET /api/v1/jobs/{id}`, its
-//! `/runs` and `/gates` sub-resources, and the `/jobs/{id}` page shell.
+//! Hermetic tests for the job-detail slice: `GET /api/v1/jobs/{id}`, its `/runs` and
+//! `/gates` sub-resources, and the `/jobs/{id}` page shell.
 //!
 //! A temporary home holds one job with two needs, runs recorded out of order, and gate
 //! results from two attempts; a real loopback listener serves the daemon routes. Every
 //! JSON document is checked against the schema exported by `vowp_protocol::schema`. The
-//! page is a static HTML shell over the same three endpoints, so the tests pin its shell
-//! fields and read the endpoints again to prove its data source. No browser, Node runtime,
+//! page is a static HTML shell over the same three endpoints and the token-gated keeper
+//! actions, so the tests pin its shell fields, its state-gated action lists and its write
+//! wiring, then read the endpoints again to prove its data source. No browser, Node runtime,
 //! harness, tmux server or real home is involved.
 
 mod support;
@@ -494,19 +495,12 @@ fn job_detail_page_serves_the_shell_fields_and_its_data_sources() {
         assert!(page.body.contains(needle), "job page is missing {needle:?}");
     }
 
-    // The page is a read-only consumer: no unlock panel, storage key or write route.
-    for forbidden in [
-        "sessionStorage",
-        "Authorization",
-        "Bearer",
-        "method: \"POST\"",
-        "/retry",
-        "/park",
-        "/cancel",
-    ] {
+    // The page carries the keeper controls but never duplicates the jobs-page
+    // retry/park/cancel actions or their routes.
+    for forbidden in ["/retry", "/park", "/cancel"] {
         assert!(
             !page.body.contains(forbidden),
-            "job page must not carry the write-only surface {forbidden:?}"
+            "job page must not carry the jobs-page action route {forbidden:?}"
         );
     }
 
@@ -551,7 +545,6 @@ fn job_detail_page_prints_no_home_path_token_or_worktree() {
         "owns",
         "cwd",
         "window",
-        "token",
         ".worktree",
         ".brief",
         ".owns",
@@ -569,6 +562,82 @@ fn job_detail_page_prints_no_home_path_token_or_worktree() {
             "job page rendered the sensitive fixture value {value:?}"
         );
     }
+}
+
+#[test]
+fn job_detail_page_offers_keeper_actions_only_when_allowed() {
+    let fixture = Fixture::new();
+    let server = support::Server::start_for_with_token(&fixture.paths, Some(WRITE_TOKEN));
+
+    let page = support::get(server.address, &format!("/jobs/{}", fixture.job.id));
+    assert_eq!(page.status, 200, "body: {}", page.body);
+    let content_type = page.content_type.as_deref().expect("content-type header");
+    assert!(
+        content_type.to_ascii_lowercase().starts_with("text/html"),
+        "job page must be text/html, got {content_type:?}"
+    );
+
+    for needle in [
+        "id=\"unlock\"",
+        "id=\"unlock-form\"",
+        "id=\"actions-card\"",
+        "id=\"actions\"",
+        "Keeper actions",
+        "Unlock keeper actions",
+        "vowp-api-token",
+        "Authorization",
+        "Bearer ",
+        "method: \"POST\"",
+        "Action queued; the supervisor applies it on the next tick.",
+        "Writes are disabled: the daemon was started without a write key.",
+        "The key was rejected. Unlock with the current daemon write key.",
+        "Unlock to use the keeper actions.",
+        "No keeper actions in this state.",
+        "A fail reason is required.",
+        "Nudge",
+        "Restart",
+        "Replan",
+        "Fail",
+        "/nudge",
+        "/restart",
+        "/replan",
+        "/fail",
+        "NUDGE_STATES",
+        "RESTART_STATES",
+        "REPLAN_STATES",
+        "FAIL_STATES",
+    ] {
+        assert!(page.body.contains(needle), "job page is missing {needle:?}");
+    }
+
+    // The state lists are the page's gate: nudge, restart and fail only for a stalled
+    // job; replan also for parked and failed. Terminal states never appear.
+    for rule in [
+        "const NUDGE_STATES = [\"stalled\"];",
+        "const RESTART_STATES = [\"stalled\"];",
+        "const REPLAN_STATES = [\"stalled\", \"parked\", \"failed\"];",
+        "const FAIL_STATES = [\"stalled\"];",
+    ] {
+        assert!(page.body.contains(rule), "job page is missing the state rule {rule:?}");
+    }
+    for line in page.body.lines().filter(|line| line.contains("_STATES = [")) {
+        for state in ["done", "cancelled", "replanned"] {
+            assert!(
+                !line.contains(&format!("\"{state}\"")),
+                "keeper action state list must not allow {state}: {line}"
+            );
+        }
+    }
+    assert!(
+        page.body.contains("states.includes(job.state)"),
+        "the keeper controls must be gated by the job state"
+    );
+    assert!(
+        page.body.contains("await load()"),
+        "a queued keeper action must refresh the job and its runs/gates"
+    );
+
+    assert_no_home_or_token(&page.body, &fixture);
 }
 
 #[test]

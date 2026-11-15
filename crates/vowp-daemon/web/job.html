@@ -79,6 +79,39 @@
     background: var(--card);
     font-weight: 600;
   }
+  .notice {
+    margin: 0;
+    padding: .65rem .9rem;
+    border: 1px solid var(--accent);
+    border-radius: .5rem;
+    color: var(--accent);
+    background: var(--card);
+    font-weight: 600;
+  }
+  .unlock-form { display: flex; flex-wrap: wrap; gap: .35rem .5rem; align-items: center; }
+  .unlock-form label { color: var(--muted); font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .unlock-form input {
+    font: inherit;
+    flex: 1 1 12rem;
+    min-width: 0;
+    padding: .35rem .5rem;
+    border: 1px solid var(--line);
+    border-radius: .4rem;
+    background: var(--paper);
+    color: var(--ink);
+  }
+  .unlock-form button, .actions button {
+    font: inherit;
+    padding: .35rem .7rem;
+    border: 1px solid var(--accent);
+    border-radius: .4rem;
+    background: var(--card);
+    color: var(--accent);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+  .actions button.danger { border-color: var(--warn); color: var(--warn); }
   [hidden] { display: none !important; }
   @media (max-width: 420px) {
     main { padding: .75rem .5rem 2rem; gap: .65rem; }
@@ -108,6 +141,7 @@
   </header>
 
   <p id="error" class="error" role="alert" hidden></p>
+  <p id="notice" class="notice" role="status" hidden></p>
   <p id="not-found" class="not-found" role="status" hidden>Job not found.</p>
 
   <section id="summary-card" class="card" aria-labelledby="summary-heading" hidden>
@@ -133,6 +167,23 @@
       <dd id="job-note"></dd>
     </dl>
     <p class="muted"><a id="job-sessions" href="/sessions">Sessions for this job</a></p>
+  </section>
+
+  <section id="unlock" class="card" aria-labelledby="unlock-heading" hidden>
+    <h2 id="unlock-heading">Unlock keeper actions</h2>
+    <p class="muted">Paste the daemon write token. It stays in this tab's sessionStorage and is never put in the URL.</p>
+    <form id="unlock-form" class="unlock-form">
+      <label for="key">Token</label>
+      <input id="key" name="key" type="password" autocomplete="off" spellcheck="false">
+      <button type="submit">Save token</button>
+    </form>
+  </section>
+
+  <section id="actions-card" class="card" aria-labelledby="actions-heading" hidden>
+    <h2 id="actions-heading">Keeper actions</h2>
+    <p class="muted">Nudge or restart a stalled job, replan a stalled, parked or failed job, or fail a stalled job with a reason. The supervisor applies a queued action on its next tick.</p>
+    <p id="actions-hint" class="muted">Unlock to use the keeper actions.</p>
+    <div id="actions" class="actions" hidden></div>
   </section>
 
   <section class="card" aria-labelledby="runs-heading">
@@ -191,13 +242,33 @@
 
   const match = document.location.pathname.match(/^\/jobs\/([^/]+)\/?$/);
   const jobId = match ? decodeURIComponent(match[1]) : "";
+  const TOKEN_KEY = "vowp-api-token";
+  const AUTH_HEADER = "Authorization";
+  const QUEUED_MESSAGE = "Action queued; the supervisor applies it on the next tick.";
+  const DISABLED_MESSAGE = "Writes are disabled: the daemon was started without a write key.";
+  // These lists mirror the graph's transition table: nudge, restart and fail are valid
+  // only in `stalled`; replan is also valid in `parked` and `failed`. done, cancelled and
+  // replanned are terminal and offer no keeper action.
+  const NUDGE_STATES = ["stalled"];
+  const RESTART_STATES = ["stalled"];
+  const REPLAN_STATES = ["stalled", "parked", "failed"];
+  const FAIL_STATES = ["stalled"];
+  const ACTION_PATHS = { nudge: "/nudge", restart: "/restart", replan: "/replan", fail: "/fail" };
   const updatedLine = document.getElementById("updated");
   const errorLine = document.getElementById("error");
+  const noticeLine = document.getElementById("notice");
   const notFoundLine = document.getElementById("not-found");
   const summaryCard = document.getElementById("summary-card");
+  const unlockCard = document.getElementById("unlock");
+  const unlockForm = document.getElementById("unlock-form");
+  const keyInput = document.getElementById("key");
+  const actionsCard = document.getElementById("actions-card");
+  const actionsHint = document.getElementById("actions-hint");
+  const actionsBox = document.getElementById("actions");
   const runsBody = document.getElementById("runs-body");
   const gatesBody = document.getElementById("gates-body");
   const sessionsLink = document.getElementById("job-sessions");
+  let lastJob = null;
 
   function showError(message) {
     errorLine.textContent = message;
@@ -209,9 +280,49 @@
     errorLine.hidden = true;
   }
 
+  function showNotice(message) {
+    noticeLine.textContent = message;
+    noticeLine.hidden = false;
+  }
+
+  function hideNotice() {
+    noticeLine.textContent = "";
+    noticeLine.hidden = true;
+  }
+
+  // The shared unlock panel: the daemon write token lives only in this tab's
+  // sessionStorage, is never put in the URL and is never printed or logged.
+  function readKey() {
+    try {
+      return globalThis.sessionStorage.getItem(TOKEN_KEY) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function writeKey(value) {
+    try {
+      if (value) {
+        globalThis.sessionStorage.setItem(TOKEN_KEY, value);
+      } else {
+        globalThis.sessionStorage.removeItem(TOKEN_KEY);
+      }
+    } catch {
+      // A browser with storage disabled cannot unlock; reads still work.
+    }
+    updateUnlock();
+  }
+
+  function updateUnlock() {
+    unlockCard.hidden = readKey() !== "";
+    renderActions(lastJob);
+  }
+
   function showNotFound() {
     notFoundLine.hidden = false;
     summaryCard.hidden = true;
+    actionsCard.hidden = true;
+    unlockCard.hidden = true;
     runsBody.replaceChildren();
     gatesBody.replaceChildren();
   }
@@ -322,6 +433,118 @@
     }
   }
 
+  function actionButton(action, label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.action = action;
+    button.textContent = label;
+    if (action === "fail") button.className = "danger";
+    button.addEventListener("click", () => runAction(action));
+    return button;
+  }
+
+  function renderActions(job) {
+    if (!job) {
+      actionsCard.hidden = true;
+      return;
+    }
+    actionsCard.hidden = false;
+    actionsBox.replaceChildren();
+    if (readKey() === "") {
+      actionsBox.hidden = true;
+      actionsHint.textContent = "Unlock to use the keeper actions.";
+      actionsHint.hidden = false;
+      return;
+    }
+    const candidates = [
+      ["nudge", "Nudge", NUDGE_STATES],
+      ["restart", "Restart", RESTART_STATES],
+      ["replan", "Replan", REPLAN_STATES],
+      ["fail", "Fail", FAIL_STATES]
+    ];
+    for (const [action, label, states] of candidates) {
+      if (states.includes(job.state)) actionsBox.appendChild(actionButton(action, label));
+    }
+    if (actionsBox.childElementCount === 0) {
+      actionsBox.hidden = true;
+      actionsHint.textContent = "No keeper actions in this state.";
+      actionsHint.hidden = false;
+    } else {
+      actionsBox.hidden = false;
+      actionsHint.hidden = true;
+    }
+  }
+
+  async function errorDetail(response) {
+    try {
+      const value = await response.json();
+      if (value && value.error && value.error.message) return value.error.message;
+    } catch {
+      // Fall back to the status when the body is not the API error document.
+    }
+    return "HTTP " + response.status;
+  }
+
+  function runAction(action) {
+    if (!lastJob) return;
+    if (action === "fail") {
+      const reason = prompt("Fail reason (required) for " + lastJob.id, "");
+      if (reason === null) return;
+      const trimmed = reason.trim();
+      if (!trimmed) {
+        showError("A fail reason is required.");
+        return;
+      }
+      submitAction(action, { reason: trimmed });
+      return;
+    }
+    submitAction(action, null);
+  }
+
+  async function submitAction(action, payload) {
+    if (!lastJob) return;
+    const key = readKey();
+    if (!key) {
+      updateUnlock();
+      showError("Unlock the keeper actions with the daemon write key first.");
+      return;
+    }
+    hideError();
+    hideNotice();
+    const options = {
+      method: "POST",
+      headers: { [AUTH_HEADER]: "Bearer " + key }
+    };
+    if (payload !== null) {
+      options.headers["Content-Type"] = "application/json";
+      options.body = JSON.stringify(payload);
+    }
+    try {
+      const response = await fetch(
+        "/api/v1/jobs/" + encodeURIComponent(lastJob.id) + ACTION_PATHS[action],
+        options
+      );
+      if (response.status === 202) {
+        showNotice(QUEUED_MESSAGE);
+        await load();
+        return;
+      }
+      if (response.status === 401) {
+        writeKey("");
+        showError("The key was rejected. Unlock with the current daemon write key.");
+        return;
+      }
+      if (response.status === 503) {
+        showError(DISABLED_MESSAGE);
+        return;
+      }
+      showError("Could not " + action + " " + lastJob.id + " (" + (await errorDetail(response)) + ").");
+    } catch (error) {
+      const detail = error && error.message ? error.message : "the daemon may be down";
+      showError("Could not " + action + " " + lastJob.id + " (" + detail + ").");
+    }
+  }
+
   async function load() {
     if (!jobId) {
       showError("This page needs a job id in its path.");
@@ -344,10 +567,12 @@
       if (!gatesResponse.ok) throw new Error("HTTP " + gatesResponse.status + " for gates");
       const runsPage = await runsResponse.json();
       const gatesPage = await gatesResponse.json();
+      lastJob = job;
       renderJob(job);
       renderRuns(runsPage.items);
       renderGates(gatesPage.items);
       hideError();
+      updateUnlock();
       updatedLine.textContent = "Last updated: " + new Date().toLocaleString();
     } catch (error) {
       const detail = error && error.message ? error.message : "the daemon may be down";
@@ -355,6 +580,21 @@
     }
   }
 
+  unlockForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = keyInput.value.trim();
+    if (!value) {
+      showError("Enter the daemon write key.");
+      return;
+    }
+    writeKey(value);
+    keyInput.value = "";
+    hideError();
+    showNotice("Unlocked for this tab.");
+    updateUnlock();
+  });
+
+  updateUnlock();
   load();
 })();
 </script>

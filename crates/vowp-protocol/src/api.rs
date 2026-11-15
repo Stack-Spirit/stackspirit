@@ -4,11 +4,12 @@
 //! objects the CLI prints; these are only the transport documents layered on top.
 //!
 //! Reads are token-free. The writes are `POST /api/v1/inbox/{id}/answer`,
-//! `POST /api/v1/sessions/{id}/switch` and the three job actions
-//! `POST /api/v1/jobs/{id}/retry|park|cancel`, all gated by the daemon's bearer token
-//! (`VOWP_API_TOKEN`). Their request bodies are [`InboxAnswerRequest`] and
-//! [`SessionSwitchRequest`]; the answer response reuses [`InboxItem`], the switch response
-//! reuses [`Switch`] and a job action returns [`JobActionResponse`]. The per-session and
+//! `POST /api/v1/sessions/{id}/switch` and the seven job actions
+//! `POST /api/v1/jobs/{id}/retry|park|cancel|nudge|restart|replan|fail`, all gated by the
+//! daemon's bearer token (`VOWP_API_TOKEN`). Their request bodies are
+//! [`InboxAnswerRequest`] and [`SessionSwitchRequest`]; the answer response reuses
+//! [`InboxItem`], the switch response reuses [`Switch`] and a job action returns
+//! [`JobActionResponse`]. The per-session and
 //! board SSE streams are transports in `vowp-daemon`, not document types here. The listener
 //! stays loopback-only.
 
@@ -142,10 +143,11 @@ pub type GateResultPage = Page<GateResult>;
 
 /// One job action the loopback API may queue for the supervisor.
 ///
-/// The three actions mirror `vowp job retry|park|cancel`; the daemon validates the
-/// current job state with `vowp_graph::transition` and queues the same
-/// `vowp_core::requests::Request` the CLI would queue. The handler never changes the job
-/// row itself.
+/// `Retry`, `Park` and `Cancel` mirror `vowp job retry|park|cancel`; `Nudge`, `Restart`,
+/// `Replan` and `Fail` mirror `vowp job nudge|restart|replan|fail`. The daemon validates
+/// the current job state with `vowp_graph::transition` and queues the same
+/// `vowp_core::requests::Request` the CLI would queue. The handler only queues a request;
+/// it never changes the job row itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobAction {
@@ -155,9 +157,18 @@ pub enum JobAction {
     Park,
     /// Cancel a non-terminal job.
     Cancel,
+    /// Nudge a stalled job to continue without a restart; valid only in `stalled`.
+    Nudge,
+    /// Restart a stalled job with a fresh process; valid only in `stalled`.
+    Restart,
+    /// Have the planner replace a job; valid in `stalled`, `parked` and `failed`.
+    Replan,
+    /// Give up on a stalled job and mark it failed; valid only in `stalled`.
+    Fail,
 }
 
-/// The `POST /api/v1/jobs/{id}/retry|park|cancel` document returned with `202 Accepted`.
+/// The `POST /api/v1/jobs/{id}/retry|park|cancel|nudge|restart|replan|fail` document
+/// returned with `202 Accepted`.
 ///
 /// `request` is the id of the queued request row (`req:<project>:<ULID>`); the supervisor
 /// applies it on its next tick. The response carries no home path, SQL text, token or

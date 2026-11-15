@@ -2,8 +2,8 @@
 
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
 board, session, capsule, cost, inbox, nodes, jobs and job-detail pages, the cost chart, the
-token-gated inbox answer, local session switch and job retry/park/cancel, and the PWA
-manifest/service-worker
+token-gated inbox answer, local session switch, job retry/park/cancel and the four keeper
+actions, and the PWA manifest/service-worker
 shell are implemented. `vowp up` starts the serving `vowp-daemon` as a separate child process,
 prints the window address and the actual-port `vowp tunnel open window` hint, and the rest of this
 note is design. v0.1 has no browser UI and no listening socket.
@@ -21,16 +21,17 @@ tunnel. It should answer the questions an operator asks from a browser without o
   executor, intent, constraints, decisions, state, files, gotchas and open questions).
 - **Board** — job counts, running jobs, slot occupancy, limits, today's cost and open inbox count.
 - **Jobs** — every job in the served project with its state and the fields an operator needs,
-  plus token-gated retry, park and cancel controls and a read-only detail view with the job's
-  runs and gate results.
+  plus token-gated retry, park and cancel controls, and a detail view with the job's runs and
+  gate results and the token-gated keeper actions (nudge, restart, replan, fail).
 
 The board uses the same JSON shape as `vowp board --json`; the session list and event timeline use
 the API from [`http-api.md`](http-api.md). Reads are token-free. The browser writes are answering an
 inbox item through the existing request queue, switching the local executor on the session detail
-page through the same `SessionService` switch as the CLI (the queue has no switch variant), and
-retrying, parking or cancelling a job from the jobs page through the queued job-action routes. They
-all sit behind the daemon bearer token. The switch is local-node only, requires the token, and shows
-the drain and its blocked result.
+page through the same `SessionService` switch as the CLI (the queue has no switch variant),
+retrying, parking or cancelling a job from the jobs page through the queued job-action routes, and
+nudging, restarting, replanning or failing a job from the detail page through the queued keeper
+routes. They all sit behind the daemon bearer token. The switch is local-node only, requires the
+token, and shows the drain and its blocked result.
 
 ## Non-goals
 
@@ -56,12 +57,12 @@ the drain and its blocked result.
 - Routes: `/` (board; `/board` is its phone alias), `/sessions`, `/sessions/:id`,
   `/sessions/:id/capsules/:capsuleId`, `/nodes`, `/cost`, `/inbox`, `/jobs` and `/jobs/:id`.
   All are implemented, with `/nodes` a read-only node list and no node mutation or SSH path;
-  `/jobs/:id` is the read-only job detail page.
+  `/jobs/:id` is the job detail page with the four token-gated keeper controls.
 - PWA manifest and a small hand-written service worker; cache only the static shell, never cache
   event data as authoritative.
-- The write token is kept in `sessionStorage`, never in a URL. The inbox, session switch and jobs
-  pages show a one-field unlock panel when no token is stored; a `401` clears it and shows the
-  panel again. Rotating the token means restarting the daemon with a new `VOWP_API_TOKEN`, then
+- The write token is kept in `sessionStorage`, never in a URL. The inbox, session switch, jobs and
+  job detail pages show a one-field unlock panel when no token is stored; a `401` clears it and shows
+  the panel again. Rotating the token means restarting the daemon with a new `VOWP_API_TOKEN`, then
   unlocking again.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
   The session timeline uses the per-session stream with `after_seq` resume. The board uses the
@@ -135,7 +136,8 @@ The same page is the PWA at any width. On a phone, use `/board` for the narrow c
 same shell is also at `/`) and add the tunnel's local URL to the home screen. Reads need no
 token. `VOWP_API_TOKEN` is set in the environment that runs `vowp up` (for example the systemd
 unit), inherited by the daemon, and typed into a page's unlock panel; the page keeps it in
-`sessionStorage` and only the inbox answer, session switch, ASIF import and jobs action writes use it. The
+`sessionStorage` and only the inbox answer, session switch, ASIF import, jobs action and keeper
+action writes use it. The
 value is never put in a URL, logged or returned by the API. Rotating the token means restarting
 the daemon with a new value and unlocking again.
 
@@ -251,7 +253,7 @@ prints a home path, token or provider secret.
 The jobs page is `crates/vowp-daemon/web/jobs.html`, served at `GET /jobs`. It fetches
 `GET /api/v1/jobs` on load and every five seconds, and after an action, and renders a table of job
 id, state, kind, role, priority, needs, attempts, updated time and note. Each job id links to
-the read-only detail page at `/jobs/{id}`. A long list scrolls
+the detail page at `/jobs/{id}`. A long list scrolls
 horizontally inside its own table wrapper, so the page stays usable on a narrow screen. Reads are
 token-free; a failed fetch shows an error line and keeps the last list and its "last updated" time
 visible, and an empty list shows "No jobs." The page carries the shared unlock panel: the
@@ -265,7 +267,7 @@ confirmation first. Every action sends `Authorization: Bearer`, shows the queued
 refreshes the list and renders the API error message on `4xx`/`5xx`. The page is a consumer only:
 it never writes a job row and adds no API route. It links to the other pages, carries
 `<noscript>The jobs page requires JavaScript.</noscript>`, and never prints a home path, token
-value or provider secret. Job SSE for the list and the keeper actions remain later work.
+value or provider secret. Job SSE for the list remains later work.
 
 The job-detail page is `crates/vowp-daemon/web/job.html`, served at `GET /jobs/{id}`. It
 reads the id from its own path and fetches `GET /api/v1/jobs/{id}`,
@@ -275,12 +277,19 @@ run id, role, purpose, executor, provider, node, started, ended, exit, outcome a
 a gates table with attempt, gate index, kind, passed, duration and timestamp. The job id
 links to its sessions at `/sessions?job=<id>`, and the page links back to `/jobs` and keeps
 the shared nav and a visible "last updated" line. A `404` for an unknown job shows "Job not
-found." while keeping the nav and the back link. The page is read-only: it has no unlock
-panel, no `sessionStorage` value, no write control and no action route. It never renders the
-stored `worktree`, `brief`, `owns`, `cwd` or `window` fields, a home path, a token value or a
+found." while keeping the nav and the back link. The page carries the shared unlock panel:
+the `VOWP_API_TOKEN` value lives in `sessionStorage` (never the URL), a `401` clears it and
+shows the panel again, and a daemon started without a token shows the disabled `503` line.
+Keeper controls appear only after unlock and only when the graph's state table allows them:
+nudge and restart for `stalled`; replan for `stalled`, `parked` and `failed`; fail for
+`stalled` with a required reason prompt. There is no control for `done`, `cancelled` or
+`replanned`. Every control posts to `/api/v1/jobs/{id}/nudge`, `/restart`, `/replan` or
+`/fail` with `Authorization: Bearer`, shows the queued `202` outcome, refreshes the job and
+its runs and gates, and renders the API error message on `4xx`/`5xx`; fail posts
+`{"reason":"<text>"}`. The page never writes a job row itself. It never renders the stored
+`worktree`, `brief`, `owns`, `cwd` or `window` fields, a home path, a token value or a
 provider secret. It carries `<noscript>The job page requires JavaScript.</noscript>`.
-SSE for the jobs list and the keeper actions (nudge, restart, replan and fail) remain later
-work.
+SSE for the jobs list and browser chat remain later work.
 
 ## PWA shell (implemented)
 
@@ -351,8 +360,11 @@ panel, the queued `202` and `401`/`503` paths and the `<noscript>` fallback; it 
 endpoint to prove the page's data source is a schema-valid `JobPage` and proves the existing retry,
 park and cancel routes still answer. The job-detail-page test pins the `/jobs/{id}` shell, the
 `/api/v1/jobs/{id}`, `/runs` and `/gates` fetches, the job and runs/gates column labels, the
-`/sessions?job=` and `/jobs` links, the not-found text, the absence of a write surface and the
-absence of a home path, token value or the `worktree`, `brief`, `owns`, `cwd` and `window`
+`/sessions?job=` and `/jobs` links, the not-found text, the four keeper controls, the shared
+unlock panel, the exact state lists (nudge/restart/fail only for `stalled`, replan also for
+`parked` and `failed`, none for terminal states), the `Authorization: Bearer` write, the
+queued `202` refresh, the `401` and `503` paths, and the absence of a home path, token value
+or the `worktree`, `brief`, `owns`, `cwd` and `window`
 fields; it reads the same three endpoints to prove the shell's data sources, and the job-detail
 API test pins the single `Job`, the `400` for an invalid id, the `404` for an unknown job, the
 run order (`started_at`, then `id`) and the newest-attempt gate order. The PWA test parses the manifest, pins the three asset content
@@ -363,9 +375,8 @@ The CLI `up` tests pin the printed window URL and the actual-port
 `vowp tunnel open window --remote-port <port>` hint, and prove a missing daemon warns without
 printing a hint.
 
-Still later: SSE for the jobs list, the keeper actions (nudge, restart, replan and
-fail), browser chat, the reconnect UI on the pages that still poll, cross-node switching, dismiss
-and the other write endpoints, and a token rotation service.
+Still later: SSE for the jobs list, browser chat, the reconnect UI on the pages that still poll,
+cross-node switching, dismiss and the other write endpoints, and a token rotation service.
 Offline data entry, offline event data and push notifications remain out of scope. Markdown
 rendering, capsule editing and capsule writes remain out of scope. The API routes and their
 fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.

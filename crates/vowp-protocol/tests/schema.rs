@@ -268,6 +268,10 @@ fn job_action_response_has_a_schema_and_stable_action_names() {
         (JobAction::Retry, "retry"),
         (JobAction::Park, "park"),
         (JobAction::Cancel, "cancel"),
+        (JobAction::Nudge, "nudge"),
+        (JobAction::Restart, "restart"),
+        (JobAction::Replan, "replan"),
+        (JobAction::Fail, "fail"),
     ] {
         assert_eq!(
             serde_json::to_value(action).expect("action JSON"),

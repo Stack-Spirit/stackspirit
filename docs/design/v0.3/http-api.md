@@ -2,7 +2,7 @@
 
 Status: the read API (including job detail, session detail, single-capsule reads and the
 node list), the per-session SSE stream, the board snapshot SSE stream, the token-gated writes
-(inbox answer, local session switch, ASIF import and the three job actions) and the ASIF
+(inbox answer, local session switch, ASIF import and the seven job actions) and the ASIF
 download are implemented in
 `crates/vowp-daemon`, and `vowp up` starts the daemon as a separate child process; the rest of
 this note is design. The daemon is not part of v0.2. Nothing here is implemented in v0.1.
@@ -116,6 +116,24 @@ Served endpoints; every response is JSON except the two SSE streams and the stat
   `500`. Success is `202 Accepted` with
   `JobActionResponse { job, action, request }`, where `request` is the queued request id.
   There is no direct state write and no other job action route.
+- `POST /api/v1/jobs/{id}/nudge`, `POST /api/v1/jobs/{id}/restart`,
+  `POST /api/v1/jobs/{id}/replan` and `POST /api/v1/jobs/{id}/fail` — the four keeper job
+  actions. Each validates the current state with `vowp_graph::transition` and queues exactly
+  one `vowp_core::requests::Request` on the writable, non-creating store; the supervisor
+  applies it on its next tick and the handler never changes the job row. Nudge
+  (`KeeperNudge { text: None }` → `nudge_job`) and restart (`KeeperRestart` →
+  `restart_job`) accept only `stalled`. Fail (`KeeperFail` → `fail_job`) accepts only
+  `stalled` and requires a JSON body `{"reason":"<text>"}`; the reason is trimmed, must be
+  non-empty and at most 10,000 UTF-8 bytes, and a missing, empty, malformed or oversized
+  body is `400`. Replan (`KeeperReplan` → `replan_job`) accepts `stalled`, `parked` and
+  `failed`. Nudge, restart and replan accept an empty body. A state the event refuses is
+  `409` with the CLI's `job <id> is <state> and cannot be <verb>` wording. Every action
+  requires `Authorization: Bearer <VOWP_API_TOKEN>`: a daemon without a token is `503`, and
+  a missing or wrong token is `401` with `WWW-Authenticate: Bearer` before the id or body is
+  read. An invalid id is `400`, an unknown job is `404`, and a store or request failure is a
+  path-free `500`. Success is `202 Accepted` with
+  `JobActionResponse { job, action, request }`. There is no direct state write and no other
+  keeper route.
 - `/api/v1/sessions/{id}/export/asif` — the token-free ASIF 0.4 (review draft) download.
   `200` streams a deterministic `.asif.zip` with `Content-Type: application/zip`,
   `Content-Disposition: attachment; filename="<id>.asif.zip"`, `Cache-Control: no-store`,
@@ -170,10 +188,12 @@ or an ASIF import conflict, `415` for an unsupported ASIF upload content type, `
 ASIF archive/resource over a limit, `503` when writes are disabled
 and `500` for a store, config or I/O failure. Write error messages stay path-free.
 
-**Six writes, one token.** Every `GET` stays token-free and read-only. The privileged actions
+**Ten writes, one token.** Every `GET` stays token-free and read-only. The privileged actions
 are `POST /api/v1/inbox/{id}/answer`, `POST /api/v1/sessions/{id}/switch`,
-`POST /api/v1/sessions/import/asif` and the three
-`POST /api/v1/jobs/{id}/retry|park|cancel` writes, and the listener stays loopback-only. The
+`POST /api/v1/sessions/import/asif`, the three
+`POST /api/v1/jobs/{id}/retry|park|cancel` writes and the four
+`POST /api/v1/jobs/{id}/nudge|restart|replan|fail` keeper writes, and the listener stays
+loopback-only. The
 daemon reads the token from the `VOWP_API_TOKEN` environment variable at startup; a missing or
 empty value leaves reads working and disables all writes with `503`. The value is compared in
 constant time, is never logged, echoed, put in a URL or returned in a response, and rotation is
@@ -183,14 +203,14 @@ migrates it. The switch is local-node only; a running session needs an explicit 
 the switch drains and stops it. The job actions only queue the CLI's request; none of them
 writes a job row.
 
-Still later: the keeper job actions (`nudge`, `restart`, `replan`, `fail`), capsule edits, the
-reconnect UI on the pages that still poll, the cost dashboard page, node add/remove/probe,
-browser chat and the remaining browser pages. There are no placeholder routes for any of them.
+Still later: capsule edits, the reconnect UI on the pages that still poll, the cost dashboard
+page, node add/remove/probe, browser chat and the remaining browser pages. There are no
+placeholder routes for any of them.
 The per-session SSE stream is implemented and used by the session detail page; the board
 stream is implemented and used by the board page; the inbox answer form and the session
 switch form are implemented and use their write routes; the three job action routes are
-implemented for the `/jobs` controls and the read-only `/jobs/{id}` page adds no action.
-The session detail page carries
+implemented for the `/jobs` controls and the four keeper action routes are implemented for
+the `/jobs/{id}` detail page. The session detail page carries
 the ASIF download link and loss preview, and the separate `/import` page posts one raw
 archive to the token-gated import route.
 
@@ -284,7 +304,8 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   read-only in this slice for the web-window `/nodes` page.
 - `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — one capsule belonging to the session;
   implemented in this slice. The window's capsule view remains later.
-- `POST /api/v1/jobs/{id}/retry|park|cancel` — enqueue the existing
+- `POST /api/v1/jobs/{id}/retry|park|cancel` and
+  `POST /api/v1/jobs/{id}/nudge|restart|replan|fail` — enqueue the existing
   `vowp_core::requests::Request`; implemented in this slice. The daemon validates the state
   with `vowp_graph::transition`, queues exactly one request and never duplicates the state
   machine or writes the job row.
@@ -339,8 +360,10 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
 - `NodePage` = `Page<Node>` — the `/api/v1/nodes` document. Each item is the exact stored
   `Node` (`name`, `ssh_target`, `is_local`, `capabilities`, `last_seen_at`, `created_at`),
   ordered by name; `next` is null and `Node` keeps its existing shape and schema.
-- `JobAction { retry | park | cancel }` — the action selected by one of the three job write
-  routes. The names are the CLI's verbs and never describe a raw state transition.
+- `JobAction { retry | park | cancel | nudge | restart | replan | fail }` — the action
+  selected by one of the seven job write routes. The names are the CLI's verbs and never
+  describe a raw state transition. `nudge`, `restart` and `fail` are valid only in `stalled`;
+  `replan` is also valid in `parked` and `failed`.
 - `AsifReport { adapter_version, asif_version, asif_pin, source_session, target_session,
   counts, loss_count, losses, unsupported }` — the `?report=1` preview document and the report
   inside the import response. `counts` carries `events_in`, `events_out`, `resources` and
@@ -444,7 +467,8 @@ Implemented: `crates/vowp-daemon` opens an existing node home read-only for read
 `GET /api/v1/sessions/{id}/export/asif?report=`,
 `POST /api/v1/sessions/import/asif?branch=`,
 `POST /api/v1/sessions/{id}/switch`, `GET /api/v1/inbox?state=`,
-`POST /api/v1/inbox/{id}/answer`, `POST /api/v1/jobs/{id}/retry|park|cancel` and
+`POST /api/v1/inbox/{id}/answer`,
+`POST /api/v1/jobs/{id}/retry|park|cancel|nudge|restart|replan|fail` and
 `GET /api/v1/cost?by=&since=&until=`. It binds
 `127.0.0.1:0` in tests, uses a temporary store with jobs in several states, one running job
 and a parent/child session chain with a capsule and a bounded long chain, a limit,
@@ -491,7 +515,16 @@ test pins the answer form and its queued message. The `vowp up` tests pin the da
 exact `vowp tunnel open window --remote-port <port>` hint with the daemon's actual port, the
 detached address file and hint, SIGTERM/`down` shutdown without an orphan, and the
 warning-and-continue path when the binary is missing (including no tunnel hint). The keeper
-job actions, capsule edits, node writes and browser chat remain later.
+job-action tests pin `503` without a token, `401` for a missing or wrong Bearer value before
+the id or body is read, exactly one schema-valid `JobActionResponse` and one decoded request
+row for nudge and restart on `stalled`, replan on `stalled`/`parked`/`failed`, and a trimmed
+`fail` reason on `stalled`; a job row unchanged immediately after every success, `400` for
+invalid ids and missing/empty/malformed/oversized fail reasons, `404` for an unknown job, the
+`409` keeper guards with no request row, and each drained request applied through
+`requests::apply_direct` to its new state. The detail-page test pins the four controls, the
+shared unlock panel, the `Authorization: Bearer` write, the exact state lists, the queued
+`202` refresh, the `401` clear and the disabled `503` line. Capsule edits, node writes and
+browser chat remain later.
 
 Tests are hermetic: temporary `NodePaths`, a fake clock, no network beyond loopback, no real
 harness and no tmux.

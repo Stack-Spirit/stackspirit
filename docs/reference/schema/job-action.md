@@ -10,7 +10,7 @@ Exported by `vowp schema JobAction` and generated from the protocol types in
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "One job action the loopback API may queue for the supervisor.\n\nThe three actions mirror `vowp job retry|park|cancel`; the daemon validates the\ncurrent job state with `vowp_graph::transition` and queues the same\n`vowp_core::requests::Request` the CLI would queue. The handler never changes the job\nrow itself.",
+  "description": "One job action the loopback API may queue for the supervisor.\n\n`Retry`, `Park` and `Cancel` mirror `vowp job retry|park|cancel`; `Nudge`, `Restart`,\n`Replan` and `Fail` mirror `vowp job nudge|restart|replan|fail`. The daemon validates\nthe current job state with `vowp_graph::transition` and queues the same\n`vowp_core::requests::Request` the CLI would queue. The handler only queues a request;\nit never changes the job row itself.",
   "oneOf": [
     {
       "const": "retry",
@@ -25,6 +25,26 @@ Exported by `vowp schema JobAction` and generated from the protocol types in
     {
       "const": "cancel",
       "description": "Cancel a non-terminal job.",
+      "type": "string"
+    },
+    {
+      "const": "nudge",
+      "description": "Nudge a stalled job to continue without a restart; valid only in `stalled`.",
+      "type": "string"
+    },
+    {
+      "const": "restart",
+      "description": "Restart a stalled job with a fresh process; valid only in `stalled`.",
+      "type": "string"
+    },
+    {
+      "const": "replan",
+      "description": "Have the planner replace a job; valid in `stalled`, `parked` and `failed`.",
+      "type": "string"
+    },
+    {
+      "const": "fail",
+      "description": "Give up on a stalled job and mark it failed; valid only in `stalled`.",
       "type": "string"
     }
   ],
