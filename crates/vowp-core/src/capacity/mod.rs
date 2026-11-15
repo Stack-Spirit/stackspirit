@@ -8,6 +8,7 @@ pub mod advisor;
 pub mod brakes;
 pub mod estimates;
 pub mod fair;
+pub mod history;
 pub mod reload;
 pub mod sampler;
 pub mod scope;
@@ -19,6 +20,9 @@ pub use advisor::{AdviceTrigger, maybe_advise};
 pub use brakes::evaluate;
 pub use estimates::{estimate_for, recompute};
 pub use fair::order;
+pub use history::{
+    HistoryBucket, RAW_RETENTION_SECS, ROLLUP_BUCKET_SECS, ROLLUP_RETENTION_SECS, read as read_history, record_rollup,
+};
 pub use reload::{
     ConfigCell, ConfigFingerprint, ConfigPreview, ReloadOutcome, ReloadState, effective_config, pending, preview,
     provider_free, reload_project,

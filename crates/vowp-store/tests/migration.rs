@@ -187,7 +187,7 @@ fn v01_database_migrates_with_matching_row_counts() {
     assert_eq!(report.tables["global:node_ledger"].after, 1);
 
     let global = Store::open_global(&paths).expect("global");
-    assert_eq!(global.global_schema_version().expect("version"), 6);
+    assert_eq!(global.global_schema_version().expect("version"), 7);
     assert_eq!(
         global.list_projects().expect("projects").len(),
         3,
@@ -400,7 +400,7 @@ fn migration_resume_finishes_a_swap() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(paths.project_db_path(&project("alpha")).is_file());
     assert!(paths.project_db_path(&project("_node")).is_file());
 }
@@ -531,7 +531,10 @@ fn older_split_home() -> (TempDir, NodePaths, ProjectName) {
     // v6 adds only `agent_assignments` and `node_limits` over v5.
     let global = Connection::open(paths.db_path()).expect("global database");
     global
-        .execute_batch("DROP TABLE agent_assignments; DROP TABLE node_limits; PRAGMA user_version = 5;")
+        .execute_batch(
+            "DROP TABLE agent_assignments; DROP TABLE node_limits; DROP TABLE capacity_rollups;
+             PRAGMA user_version = 5;",
+        )
         .expect("rewind global schema");
     drop(global);
     // v2 adds only `job_placement` over the project v1 schema.

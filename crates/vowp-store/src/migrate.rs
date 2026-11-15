@@ -113,6 +113,9 @@ const V05_GLOBAL_TABLES: [&str; 25] = V04_GLOBAL_TABLES;
 /// The tables added by the v6 global schema; a migrated v5 home starts with none.
 const V06_NEW_TABLES: [&str; 2] = ["agent_assignments", "node_limits"];
 
+/// The tables added by the v7 global schema; a migrated v6 home starts with none.
+const V07_NEW_TABLES: [&str; 1] = ["capacity_rollups"];
+
 /// Schema version written by the v2 → v3 migration.
 const V03_SCHEMA_VERSION: i64 = 3;
 
@@ -124,6 +127,9 @@ const V05_SCHEMA_VERSION: i64 = 5;
 
 /// Schema version written by the v5 → v6 migration.
 const V06_SCHEMA_VERSION: i64 = 6;
+
+/// Schema version written by the v6 → v7 migration.
+const V07_SCHEMA_VERSION: i64 = 7;
 
 /// Every table in the project v1 schema; all must exist before the v2 upgrade.
 const PROJECT_V1_TABLES: [&str; 10] = [
@@ -665,10 +671,10 @@ pub fn migrate_v05(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
     resume_migration(paths)?;
     let version = db_version(&paths.db_path())?;
     match version {
-        Some(V06_SCHEMA_VERSION) => {
+        Some(version) if (V06_SCHEMA_VERSION..=GLOBAL_SCHEMA_VERSION).contains(&version) => {
             return Ok(MigrationReport {
-                from_version: V06_SCHEMA_VERSION,
-                to_version: V06_SCHEMA_VERSION,
+                from_version: version,
+                to_version: version,
                 backup: String::new(),
                 projects: Vec::new(),
                 tables: BTreeMap::new(),
@@ -680,7 +686,7 @@ pub fn migrate_v05(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
                 node_wide_loops: Vec::new(),
                 node_wide_schedules: Vec::new(),
                 warnings: vec![format!(
-                    "the global database is already at schema version {V06_SCHEMA_VERSION}"
+                    "the global database is already at schema version {version}, not v5"
                 )],
             });
         }
@@ -689,7 +695,7 @@ pub fn migrate_v05(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
         Some(found) => {
             return Err(StoreError::SchemaTooNew {
                 found,
-                supported: V06_SCHEMA_VERSION,
+                supported: GLOBAL_SCHEMA_VERSION,
             });
         }
         None => {
@@ -833,6 +839,171 @@ pub(crate) fn migrate_v05_if_needed(paths: &NodePaths) -> Result<(), StoreError>
     Ok(())
 }
 
+/// Migrates an existing v6 global database to the v7 capacity-history schema.
+///
+/// The upgrade is additive: `capacity_rollups` and its bucket index are created in one
+/// immediate transaction, after the original file is copied to `backups/pre-0.7-<ms>.db`.
+/// Every existing table's rows are counted before and after, and integrity and foreign keys
+/// are checked before `user_version = 7` commits; a failure rolls the whole transaction back
+/// and leaves the v6 file readable. Calling it again on a v7 home is a no-op.
+pub fn migrate_v06(paths: &NodePaths) -> Result<MigrationReport, StoreError> {
+    resume_migration(paths)?;
+    let version = db_version(&paths.db_path())?;
+    match version {
+        Some(V07_SCHEMA_VERSION) => {
+            return Ok(MigrationReport {
+                from_version: V07_SCHEMA_VERSION,
+                to_version: V07_SCHEMA_VERSION,
+                backup: String::new(),
+                projects: Vec::new(),
+                tables: BTreeMap::new(),
+                verified: true,
+                dry_run: false,
+                dropped_workers: 0,
+                dropped_worker_rows: Vec::new(),
+                primary_runs: Vec::new(),
+                node_wide_loops: Vec::new(),
+                node_wide_schedules: Vec::new(),
+                warnings: vec![format!(
+                    "the global database is already at schema version {V07_SCHEMA_VERSION}, not v6"
+                )],
+            });
+        }
+        Some(V06_SCHEMA_VERSION) => {}
+        Some(1..=5) => return Err(StoreError::MigrationRequired),
+        Some(found) => {
+            return Err(StoreError::SchemaTooNew {
+                found,
+                supported: V07_SCHEMA_VERSION,
+            });
+        }
+        None => {
+            return Err(StoreError::not_found(
+                "v0.6 database",
+                paths.db_path().display().to_string(),
+            ));
+        }
+    }
+    refuse_live_supervisor(paths)?;
+    validate_v06_source(paths)?;
+    let backup = paths
+        .backups_dir()
+        .join(format!("pre-0.7-{}.db", Timestamp::now().unix_millis()));
+    backup_global(paths, &backup)?;
+
+    let conn = Connection::open(paths.db_path())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    let tx = rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+    let before = table_counts(&tx, "main")?;
+    tx.execute_batch(
+        "CREATE TABLE capacity_rollups (
+           bucket                   TEXT NOT NULL,
+           bucket_secs              INTEGER NOT NULL,
+           samples                  INTEGER NOT NULL,
+           mem_available_min_bytes  INTEGER NOT NULL,
+           mem_available_avg_bytes  INTEGER NOT NULL,
+           mem_available_max_bytes  INTEGER NOT NULL,
+           load1_avg                REAL NOT NULL,
+           disk_free_home_min_bytes INTEGER NOT NULL,
+           source                   TEXT NOT NULL CHECK (source IN ('proc','fallback','mixed')),
+           PRIMARY KEY (bucket, bucket_secs)
+         ) STRICT;
+         CREATE INDEX capacity_rollups_bucket ON capacity_rollups(bucket);",
+    )?;
+    tx.pragma_update(None, "user_version", V07_SCHEMA_VERSION)?;
+
+    let after = table_counts(&tx, "main")?;
+    let mut tables = BTreeMap::new();
+    for (table, before_rows) in &before {
+        let after_rows = after.get(table).copied().ok_or_else(|| StoreError::Corrupt {
+            path: format!("stage/global.db:{table}"),
+            line: None,
+            reason: "existing table disappeared during the v7 migration".to_owned(),
+        })?;
+        if after_rows != *before_rows {
+            return Err(StoreError::Corrupt {
+                path: format!("stage/global.db:{table}"),
+                line: None,
+                reason: format!("row count changed: before {before_rows}, after {after_rows}"),
+            });
+        }
+        tables.insert(
+            format!("global:{table}"),
+            MigrationCount {
+                before: *before_rows,
+                after: after_rows,
+            },
+        );
+    }
+    for table in V07_NEW_TABLES {
+        let after_rows = after.get(table).copied().ok_or_else(|| StoreError::Corrupt {
+            path: format!("stage/global.db:{table}"),
+            line: None,
+            reason: "new table is missing after the v7 migration".to_owned(),
+        })?;
+        if after_rows != 0 {
+            return Err(StoreError::Corrupt {
+                path: format!("stage/global.db:{table}"),
+                line: None,
+                reason: format!("new table is not empty: {after_rows} rows"),
+            });
+        }
+        tables.insert(
+            format!("global:{table}"),
+            MigrationCount {
+                before: 0,
+                after: after_rows,
+            },
+        );
+    }
+    let integrity: String = tx.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(StoreError::Corrupt {
+            path: "global.db:integrity_check".to_owned(),
+            line: None,
+            reason: integrity,
+        });
+    }
+    {
+        let mut statement = tx.prepare("PRAGMA foreign_key_check")?;
+        if statement.query([])?.next()?.is_some() {
+            return Err(StoreError::Corrupt {
+                path: "global.db:foreign_key_check".to_owned(),
+                line: None,
+                reason: "foreign key violations".to_owned(),
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(MigrationReport {
+        from_version: 6,
+        to_version: 7,
+        backup: backup.display().to_string(),
+        projects: Vec::new(),
+        tables,
+        verified: true,
+        dry_run: false,
+        dropped_workers: 0,
+        dropped_worker_rows: Vec::new(),
+        primary_runs: Vec::new(),
+        node_wide_loops: Vec::new(),
+        node_wide_schedules: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
+/// Runs [`migrate_v06`] when an existing home still has the v6 global schema.
+///
+/// Earlier versions are handled by the previous migrations before this check. A future
+/// version is left for the normal open path to refuse with [`StoreError::SchemaTooNew`].
+pub(crate) fn migrate_v06_if_needed(paths: &NodePaths) -> Result<(), StoreError> {
+    if db_version(&paths.db_path())? == Some(V06_SCHEMA_VERSION) {
+        migrate_v06(paths)?;
+    }
+    Ok(())
+}
+
 /// Checks that the source really is a healthy v2 global database.
 fn validate_v02_source(paths: &NodePaths) -> Result<(), StoreError> {
     validate_global_source(paths, 2, &V02_GLOBAL_TABLES, "v2")
@@ -851,6 +1022,13 @@ fn validate_v04_source(paths: &NodePaths) -> Result<(), StoreError> {
 /// Checks that the source really is a healthy v5 global database.
 fn validate_v05_source(paths: &NodePaths) -> Result<(), StoreError> {
     validate_global_source(paths, V05_SCHEMA_VERSION, &V05_GLOBAL_TABLES, "v5")
+}
+
+/// Checks that the source really is a healthy v6 global database.
+fn validate_v06_source(paths: &NodePaths) -> Result<(), StoreError> {
+    let mut tables: Vec<&str> = V05_GLOBAL_TABLES.to_vec();
+    tables.extend(V06_NEW_TABLES);
+    validate_global_source(paths, V06_SCHEMA_VERSION, &tables, "v6")
 }
 
 /// Migrates one project database from v1 to v2 in place.
@@ -1034,9 +1212,10 @@ fn backup_global(paths: &NodePaths, backup: &Path) -> Result<(), StoreError> {
 
 /// Builds the staged v3 database and returns per-table counts.
 ///
-/// The embedded schema is v4, so the stage is first shaped back to the v3 `surfaces`
-/// definition (no `state`/`revoked_at`, no `agent` kind, no `surface_tokens`). The v2 rows
-/// then copy with their original column lists and the next migration brings the stage to v4.
+/// The embedded schema is v7, so the stage is first shaped back to the v3 `surfaces`
+/// definition (no `state`/`revoked_at`, no `agent` kind, no `surface_tokens`) and the newer
+/// tables are dropped. The v2 rows then copy with their original column lists and the next
+/// migration brings the stage to v4.
 fn create_v02_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, MigrationCount>, StoreError> {
     std::fs::create_dir_all(stage).map_err(|err| StoreError::io(stage.display(), err))?;
     let stage_db = stage.join("global.db");
@@ -1047,6 +1226,7 @@ fn create_v02_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, 
     conn.execute_batch(
         "DROP TABLE agent_assignments;
          DROP TABLE node_limits;
+         DROP TABLE capacity_rollups;
          DROP TABLE surface_tokens;
          CREATE TABLE surfaces_v3 (
            id            TEXT PRIMARY KEY,
@@ -1150,6 +1330,7 @@ fn create_v03_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, 
     conn.execute_batch(
         "DROP TABLE agent_assignments;
          DROP TABLE node_limits;
+         DROP TABLE capacity_rollups;
          DROP TABLE leases;
          CREATE TABLE leases (
            session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
@@ -1237,7 +1418,7 @@ fn copy_v03_global(conn: &Connection) -> Result<BTreeMap<String, MigrationCount>
 
 /// Builds the staged v5 database and returns per-table counts.
 ///
-/// The embedded schema is v6, so the stage first drops the two v6-only tables and sets
+/// The embedded schema is v7, so the stage first drops the v6-only and v7-only tables and sets
 /// `user_version = 5`. Every v4 row is copied except `leases`: a v4 lease token is plaintext
 /// and leases are ephemeral, so the upgrade clears them and lets surfaces re-acquire.
 fn create_v04_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, MigrationCount>, StoreError> {
@@ -1247,7 +1428,11 @@ fn create_v04_stage(stage: &Path, paths: &NodePaths) -> Result<BTreeMap<String, 
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(GLOBAL_SCHEMA_SQL)?;
-    conn.execute_batch("DROP TABLE agent_assignments; DROP TABLE node_limits;")?;
+    conn.execute_batch(
+        "DROP TABLE agent_assignments;
+         DROP TABLE node_limits;
+         DROP TABLE capacity_rollups;",
+    )?;
     conn.pragma_update(None, "user_version", V05_SCHEMA_VERSION)?;
     conn.execute(
         "ATTACH DATABASE ?1 AS old",

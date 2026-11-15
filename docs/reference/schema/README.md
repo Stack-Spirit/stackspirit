@@ -39,6 +39,7 @@ python3 docs/reference/check-reference.py
 | `BrakeState` | [brake-state.md](brake-state.md) |
 | `BriefFrontMatter` | [brief-front-matter.md](brief-front-matter.md) |
 | `CapacityAdvice` | [capacity-advice.md](capacity-advice.md) |
+| `CapacityHistory` | [capacity-history.md](capacity-history.md) |
 | `CapacityReport` | [capacity-report.md](capacity-report.md) |
 | `CapacitySnapshot` | [capacity-snapshot.md](capacity-snapshot.md) |
 | `CapacityTarget` | [capacity-target.md](capacity-target.md) |

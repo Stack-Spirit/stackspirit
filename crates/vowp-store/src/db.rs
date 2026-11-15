@@ -22,7 +22,7 @@ use crate::error::StoreError;
 use crate::paths::NodePaths;
 
 /// Schema version of the global database written by this build.
-pub const GLOBAL_SCHEMA_VERSION: i64 = 6;
+pub const GLOBAL_SCHEMA_VERSION: i64 = 7;
 
 /// Schema version of every project database written by this build.
 pub const PROJECT_SCHEMA_VERSION: i64 = 2;
@@ -34,7 +34,7 @@ pub const PROJECT_SCHEMA_VERSION: i64 = 2;
 /// callers of the pre-split `schema_version()` API.
 pub const SCHEMA_VERSION: i64 = 1;
 
-/// Embedded global schema (user_version 6).
+/// Embedded global schema (user_version 7).
 pub(crate) const GLOBAL_SCHEMA_SQL: &str = include_str!("schema/global.sql");
 
 /// Embedded project schema (user_version 2).
@@ -308,7 +308,8 @@ impl Store {
             });
         }
         // Read-only handles never migrate. Any split-home version can be read: the core
-        // tables fleet/status/daemon reads share their columns across v2–v6.
+        // tables fleet/status/daemon reads share their columns across v2–v7. A table that
+        // only v7 has (capacity history) reports [`StoreError::MigrationRequired`].
         if version < 2 {
             return Err(StoreError::MigrationRequired);
         }
@@ -424,7 +425,7 @@ impl Store {
         Ok(SCHEMA_VERSION)
     }
 
-    /// Returns the global file's real `PRAGMA user_version` (6).
+    /// Returns the global file's real `PRAGMA user_version` (7).
     pub fn global_schema_version(&self) -> Result<i64, StoreError> {
         Ok(self.conn.query_row("PRAGMA main.user_version", [], |row| row.get(0))?)
     }
@@ -628,6 +629,7 @@ impl Store {
             crate::migrate::migrate_v03_if_needed(paths)?;
             crate::migrate::migrate_v04_if_needed(paths)?;
             crate::migrate::migrate_v05_if_needed(paths)?;
+            crate::migrate::migrate_v06_if_needed(paths)?;
         }
         let path = paths.db_path();
         let conn = Connection::open(&path)?;
@@ -899,11 +901,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_versions_are_global_6_project_2_compat_1() {
-        assert_eq!(GLOBAL_SCHEMA_VERSION, 6);
+    fn schema_versions_are_global_7_project_2_compat_1() {
+        assert_eq!(GLOBAL_SCHEMA_VERSION, 7);
         assert_eq!(PROJECT_SCHEMA_VERSION, 2);
         assert_eq!(SCHEMA_VERSION, 1);
-        assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 6;"));
+        assert!(GLOBAL_SCHEMA_SQL.contains("PRAGMA user_version = 7;"));
         assert!(PROJECT_SCHEMA.contains("PRAGMA user_version = 2;"));
     }
 

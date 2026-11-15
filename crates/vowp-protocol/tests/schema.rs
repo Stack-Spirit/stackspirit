@@ -68,6 +68,7 @@ const LISTED_TYPES: &[&str] = &[
     "RunningCapacity",
     "WaitingJob",
     "CapacitySnapshot",
+    "CapacityHistory",
     "Surface",
     "Lease",
     "SurfaceRef",
@@ -301,6 +302,49 @@ fn job_action_response_has_a_schema_and_stable_action_names() {
     check_structure("JobActionResponse", &schema, &value);
     let decoded: JobActionResponse = serde_json::from_value(value.clone()).expect("round-trip");
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn capacity_history_json_matches_the_exported_schema() {
+    use vowp_protocol::capacity::{CapacityHistory, CapacityMemory, CapacityPoint, HistorySource};
+    use vowp_protocol::time::Timestamp;
+
+    let history = CapacityHistory {
+        generated_at: Timestamp::parse("2026-11-10T12:10:00Z").expect("generated_at"),
+        since: Timestamp::parse("2026-11-10T12:00:00Z").expect("since"),
+        until: Timestamp::parse("2026-11-10T12:10:00Z").expect("until"),
+        bucket_secs: 300,
+        retention_secs: 30 * 24 * 60 * 60,
+        points: vec![CapacityPoint {
+            at: Timestamp::parse("2026-11-10T12:05:00Z").expect("bucket"),
+            samples: 5,
+            mem_available: CapacityMemory {
+                min: 1000,
+                avg: 2000,
+                max: 3000,
+            },
+            load1_avg: 0.5,
+            disk_free_home_min: 42_000_000_000,
+            source: HistorySource::Proc,
+        }],
+    };
+    let value = serde_json::to_value(&history).expect("history JSON");
+    let schema = schema_for_name("CapacityHistory").expect("CapacityHistory is exported");
+    check_structure("capacity_history.json", &schema, &value);
+
+    assert_eq!(value["bucket_secs"], 300);
+    assert_eq!(value["points"][0]["mem_available"]["avg"], 2000);
+    assert_eq!(value["points"][0]["source"], "proc");
+    let decoded: CapacityHistory = serde_json::from_value(value).expect("round-trip");
+    assert_eq!(decoded, history);
+
+    let empty = CapacityHistory {
+        points: Vec::new(),
+        ..history
+    };
+    let value = serde_json::to_value(&empty).expect("empty history JSON");
+    check_structure("capacity_history_empty.json", &schema, &value);
+    assert_eq!(value["points"], serde_json::json!([]));
 }
 
 #[test]
