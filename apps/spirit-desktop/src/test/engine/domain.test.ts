@@ -49,9 +49,7 @@ describe("engine domain helpers", () => {
       "opencode",
     ]);
     const options = providerOptions([], [], engineProviders(status));
-    expect(options.map((option) => option.id)).toContain("groq");
-    expect(options.map((option) => option.id)).toContain("mistral");
-    expect(options.map((option) => option.id)).not.toContain("opencode");
+    expect(options.map((option) => option.id)).toEqual(["groq", "mistral"]);
   });
 
   it("gate missing milestones never adds capabilities the probe did not report", () => {
