@@ -5,7 +5,9 @@
 //! its app and its project. The agent writes the private local copy below
 //! `<state_dir>/orchestrators/<name>/`, starts the configured app command in its own process
 //! group, waits for the app's mode-0600 `service.json` when the app is opencode, and asks the
-//! caller to attach the paired surface before it reports `running`.
+//! caller to attach the paired surface before it reports `running`. The same private directory
+//! holds the app-facing `AGENTS.md`, `opencode.json` and `orchestrator.json`; an opencode app
+//! loads them through its private global config directory, never from the project checkout.
 //!
 //! The port, service password, pair link and absolute local paths are private configuration.
 //! They are read when needed and never appear in a host state file, a result detail, an error
@@ -23,13 +25,14 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{
-    OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, ProjectName,
-    SessionId, SurfaceId, Timestamp,
+    NodeName, OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult,
+    ProjectName, SessionId, SurfaceId, Timestamp,
 };
 
 use crate::client::validate_surface_id;
 use crate::config::{AgentConfig, ensure_private_dir};
 use crate::error::AgentError;
+use crate::socket::AGENT_SOCKET_FILE;
 
 /// Directory below the agent state directory that holds every orchestrator.
 pub const ORCHESTRATORS_DIR: &str = "orchestrators";
@@ -37,6 +40,19 @@ pub const ORCHESTRATORS_DIR: &str = "orchestrators";
 pub const ORCHESTRATOR_CONFIG_FILE: &str = "config.json";
 /// Private host state and pid file name.
 pub const ORCHESTRATOR_HOST_FILE: &str = "host.json";
+/// The app-facing standing instruction file name.
+pub const ORCHESTRATOR_AGENTS_FILE: &str = "AGENTS.md";
+/// The app-facing opencode MCP and instruction config file name.
+pub const ORCHESTRATOR_OPENCODE_FILE: &str = "opencode.json";
+/// The redacted app-facing record file name.
+pub const ORCHESTRATOR_RECORD_FILE: &str = "orchestrator.json";
+/// Environment variable that names opencode's global configuration directory.
+///
+/// opencode 2.0.28 resolves its global config directory from `OPENCODE_CONFIG_DIR` when it is
+/// set, and otherwise from `$XDG_CONFIG_HOME/opencode`. Pointing it at the orchestrator directory
+/// makes the app read `<orchestrator>/opencode.json` and `<orchestrator>/AGENTS.md` without any
+/// copy in the project checkout.
+pub const ORCHESTRATOR_CONFIG_DIR_ENV: &str = "OPENCODE_CONFIG_DIR";
 /// Private XDG root for one managed opencode app.
 pub const ORCHESTRATOR_XDG_DIR: &str = ".opencode";
 /// Default time to wait for an opencode `service.json` before failing the start.
@@ -47,6 +63,48 @@ pub const ORCHESTRATOR_POLL: Duration = Duration::from_millis(25);
 const SERVICE_INVALID_GRACE: Duration = Duration::from_millis(750);
 /// Time between SIGTERM and SIGKILL when a host is stopped.
 pub const ORCHESTRATOR_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// The local-surface `AGENTS.md` template written for every orchestrator app.
+///
+/// It carries the rules from `docs/design/v0.4/local-orchestrator.md` §5.7: a local surface,
+/// project-relative paths, a home that cannot see the Mac's local files, `session_resume` when
+/// the tool is available, an explicit yes before public actions, no secret reads, and no tunnel
+/// because the agent is the transport. It deliberately does not promise MCP tool calls: an
+/// opencode 2.0.28 server can report `connected` without exposing its tools to the model.
+pub const ORCHESTRATOR_LOCAL_INSTRUCTIONS: &str = r#"# VOWP local surface
+
+You are on a local surface: an app on the owner's Mac, paired to one VOWP session on the home.
+This file is your standing instruction, not a job brief.
+
+## Paths
+
+- Paths are project-relative. The project checkout is the working directory; write and report
+  relative paths.
+- The home cannot see the Mac's local files. Do not ask it to open a local path; send the bytes
+  or a description through a VOWP tool instead.
+
+## Working with the owner
+
+- Call `session_resume` if the tool is available when you need the session capsule or the last
+  turns. If it is not available, continue here and say which path you used.
+- Ask before public actions. Push, publish, deploy or change repository visibility only after an
+  explicit yes in the current turn: state the repository or remote, branch, files and expected
+  effect, then wait.
+- Never read a secret value, token, key or `.env` file. Refer to secrets by name only.
+
+## Tunnels
+
+- Do not open a tunnel. The agent is the transport between this surface and the home; tunnels
+  are refused on a local surface and the home or phone cannot reach this Mac's loopback server.
+
+## Tools
+
+- Some opencode 2.0.28 builds report a configured MCP server as `connected` without exposing its
+  tools to the model. Do not promise a VOWP tool call. If the tools are not visible, use the
+  `vowp` CLI or the `vowp chat` fallback and tell the owner which path you used.
+
+Do not edit this file; the agent writes it at every start and resume.
+"#;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -146,6 +204,28 @@ pub struct SurfaceBinding {
     pub surface: SurfaceId,
     /// Session the surface mirrors.
     pub session: SessionId,
+}
+
+/// The subset of `agent.json` the app record needs; nothing else is read or validated.
+#[derive(Deserialize)]
+struct AgentNodeRecord {
+    node: NodeName,
+}
+
+/// The redacted app-facing record written as `orchestrator.json`.
+///
+/// It never carries the app command, a working directory, the service port or password, the
+/// surface token, a pair link or any path outside the agent's state directory.
+#[derive(Serialize)]
+struct AppRecord {
+    name: String,
+    app: OrchestratorApp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectName>,
+    session: SessionId,
+    surface: SurfaceId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<NodeName>,
 }
 
 /// The attach and detach side effects the client owns.
@@ -373,6 +453,11 @@ impl OrchestratorHost {
         if let Err(error) = self.write_config(&config) {
             return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
         }
+        // The surface binding is resolved before the process starts, so the app can read its
+        // MCP config and standing instruction from its first request.
+        if let Err(error) = self.write_app_files(&config, &binding) {
+            return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
+        }
         let program = config.command.clone().unwrap_or_default();
         let args = config.args.clone();
         let working_dir = PathBuf::from(config.working_dir.clone().unwrap_or_default());
@@ -460,21 +545,12 @@ impl OrchestratorHost {
         };
         let already_attached = prepared.state == OrchestratorNodeState::Running;
         if !already_attached && let Err(error) = link.attach(&prepared.binding) {
-            if prepared.state == OrchestratorNodeState::Starting {
-                self.abort(&prepared.name);
-            } else {
-                let _ = self.set_state(
-                    &prepared.name,
-                    OrchestratorNodeState::Degraded,
-                    Some(error.message.clone()),
-                );
-            }
-            let state = if prepared.state == OrchestratorNodeState::Starting {
-                OrchestratorNodeState::Failed
-            } else {
-                OrchestratorNodeState::Degraded
-            };
-            return failed_result(&prepared.request_id, state, error);
+            return self.fail_prepared(&prepared, error);
+        }
+        // Refresh once the surface is bound: a resumed host whose binding changed now carries
+        // the new surface id in opencode.json and orchestrator.json.
+        if !already_attached && let Err(error) = self.refresh_app_files(&prepared.name, &prepared.binding) {
+            return self.fail_prepared(&prepared, error);
         }
         if let Err(error) = self.set_state(&prepared.name, OrchestratorNodeState::Running, None) {
             self.abort(&prepared.name);
@@ -756,6 +832,74 @@ impl OrchestratorHost {
             .map_err(|_| config_error("the local orchestrator config could not be written"))
     }
 
+    /// Writes the app-facing files for `config` and its bound surface.
+    ///
+    /// The files live in the same 0600/0700 orchestrator directory as `config.json` and are
+    /// written through the atomic private helper, so a start or resume is idempotent and a
+    /// reader never sees a partial file. An opencode app gets `opencode.json`; every app gets
+    /// `AGENTS.md` and the redacted `orchestrator.json`.
+    fn write_app_files(&self, config: &OrchestratorConfig, binding: &SurfaceBinding) -> Result<(), OrchestratorError> {
+        let dir = Self::dir(&self.state_dir, &config.name)?;
+        write_atomic_private(
+            &dir.join(ORCHESTRATOR_AGENTS_FILE),
+            ORCHESTRATOR_LOCAL_INSTRUCTIONS.as_bytes(),
+        )
+        .map_err(|_| config_error("the local app instructions could not be written"))?;
+        let record = AppRecord {
+            name: config.name.clone(),
+            app: config.app,
+            project: config.project.clone(),
+            session: binding.session.clone(),
+            surface: binding.surface.clone(),
+            node: self.node_name(),
+        };
+        let bytes = serde_json::to_vec_pretty(&record)
+            .map_err(|_| config_error("the local app record could not be encoded"))?;
+        write_atomic_private(&dir.join(ORCHESTRATOR_RECORD_FILE), &bytes)
+            .map_err(|_| config_error("the local app record could not be written"))?;
+        if config.app == OrchestratorApp::Opencode {
+            let socket = self.state_dir.join(AGENT_SOCKET_FILE).display().to_string();
+            let instructions = dir.join(ORCHESTRATOR_AGENTS_FILE).display().to_string();
+            let value = serde_json::json!({
+                "mcp": {
+                    "vowp": {
+                        "type": "local",
+                        "command": [
+                            "vowp",
+                            "mcp",
+                            "--agent-socket",
+                            socket,
+                            "--surface",
+                            binding.surface.0,
+                        ],
+                        "enabled": true,
+                    }
+                },
+                "instructions": [instructions],
+            });
+            let bytes = serde_json::to_vec_pretty(&value)
+                .map_err(|_| config_error("the local opencode config could not be encoded"))?;
+            write_atomic_private(&dir.join(ORCHESTRATOR_OPENCODE_FILE), &bytes)
+                .map_err(|_| config_error("the local opencode config could not be written"))?;
+        }
+        Ok(())
+    }
+
+    /// Rewrites the app-facing files after a surface attach, using the persisted config.
+    fn refresh_app_files(&self, name: &str, binding: &SurfaceBinding) -> Result<(), OrchestratorError> {
+        let config = self
+            .config(name)?
+            .ok_or_else(|| config_error("the local orchestrator config is missing"))?;
+        self.write_app_files(&config, binding)
+    }
+
+    /// Reads only the node name from `agent.json`, or `None` before enrollment.
+    fn node_name(&self) -> Option<NodeName> {
+        let bytes = fs::read(AgentConfig::file_path(&self.state_dir)).ok()?;
+        let record: AgentNodeRecord = serde_json::from_slice(&bytes).ok()?;
+        Some(record.node)
+    }
+
     fn default_command(&self, app: OrchestratorApp) -> (String, Vec<String>) {
         if let Some(command) = &self.command_override
             && command.app == app
@@ -767,6 +911,25 @@ impl OrchestratorHost {
             OrchestratorApp::ClaudeCode => ("claude".to_owned(), Vec::new()),
             OrchestratorApp::Chat => ("vowp".to_owned(), vec!["chat".to_owned(), "--agent".to_owned()]),
         }
+    }
+
+    /// Stops or degrades a prepared host after a failed attach or app-file refresh.
+    fn fail_prepared(&self, prepared: &PreparedHost, error: OrchestratorError) -> OrchestratorResult {
+        if prepared.state == OrchestratorNodeState::Starting {
+            self.abort(&prepared.name);
+        } else {
+            let _ = self.set_state(
+                &prepared.name,
+                OrchestratorNodeState::Degraded,
+                Some(error.message.clone()),
+            );
+        }
+        let state = if prepared.state == OrchestratorNodeState::Starting {
+            OrchestratorNodeState::Failed
+        } else {
+            OrchestratorNodeState::Degraded
+        };
+        failed_result(&prepared.request_id, state, error)
     }
 
     /// Stops a fresh process and removes its state after a failed attach.
@@ -937,6 +1100,11 @@ fn spawn_app(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    if app == OrchestratorApp::Opencode {
+        // opencode reads its global `opencode.json` and `AGENTS.md` from this directory. The
+        // app's working directory stays the project checkout, which is never written to.
+        command.env(ORCHESTRATOR_CONFIG_DIR_ENV, &dir);
+    }
     command
         .spawn()
         .map_err(|_| OrchestratorError::new("spawn_failed", "the app command could not be started", true))

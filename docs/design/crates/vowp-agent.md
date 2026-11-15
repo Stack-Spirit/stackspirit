@@ -62,6 +62,9 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `surfaces/<id>/session` | 0600 | the session id the surface was paired for |
 | `surfaces/<id>/expires_at` | 0600 | RFC 3339 surface-token expiry, read by `agent status` |
 | `orchestrators/<name>/config.json` | 0600 | local app, project, surface binding, command, working directory and `service.json` path |
+| `orchestrators/<name>/AGENTS.md` | 0600 | the local-surface standing instruction; opencode reads it as its global `AGENTS.md` |
+| `orchestrators/<name>/opencode.json` | 0600 | opencode's global MCP config: the local `mcp.vowp` proxy command and the `instructions` entry for `AGENTS.md`; no token |
+| `orchestrators/<name>/orchestrator.json` | 0600 | redacted app record: name, app, project, session, surface and node; no token, port, password or local path |
 | `orchestrators/<name>/host.json` | 0600 | pid, lifecycle state (`starting`/`running`/`degraded`/`failed`/`stopped`) and a redacted detail |
 | `orchestrators/<name>/.opencode/{config,data,state,cache}/` | 0700 | private XDG roots for a managed opencode app |
 | `orchestrators/<name>/.opencode/state/opencode/service.json` | 0600 | the app's own service state; read for a port/password, never copied or logged |
@@ -751,6 +754,42 @@ stop and resume keep the command and surface binding. A new config uses `opencod
 `claude` or `vowp chat --agent` for the three apps; `OrchestratorHost::with_app_command`
 replaces that default for a test or an owner whose binary lives outside `PATH`.
 
+Every fresh start and every resume also writes the app-facing files in that same 0700
+directory, through the same atomic 0600 helper: `AGENTS.md`, `opencode.json` for opencode and
+`orchestrator.json`. `AGENTS.md` is the local-surface template from
+[`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §5.7. It says that this is a
+local surface, that paths are project-relative, that the home cannot see the Mac's local files,
+to call `session_resume` if the tool is available, to ask before public actions, never to read a
+secret, and not to open a tunnel because the agent is the transport. It deliberately does not
+promise MCP tool calls: an opencode 2.0.28 server can report its MCP server `connected` without
+exposing the tools to the model.
+
+`opencode.json` is one local `mcp.vowp` entry whose command is
+`vowp mcp --agent-socket <state_dir>/agent.sock --surface <surface>`, plus an `instructions`
+array naming the local `AGENTS.md` by absolute path. It carries no token, token file, password,
+port or pair link. `orchestrator.json` is the redacted app record: `name`, `app`, `project`,
+`session`, `surface` and `node` (the node is read from `agent.json` and omitted before
+enrollment). It carries no command, working directory, service path, port or token.
+
+The files are actually loaded by the app without touching the checkout. opencode 2.0.28 resolves
+its global config directory from `OPENCODE_CONFIG_DIR` when set and otherwise from
+`$XDG_CONFIG_HOME/opencode`; it reads `opencode.json` and the global `AGENTS.md` from that
+directory, and walks the working directory and its ancestors for project config and
+`AGENTS.md`. The host sets `OPENCODE_CONFIG_DIR` to the orchestrator directory and keeps
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` below
+`<orchestrator>/.opencode/`. A project orchestrator still runs with the project checkout as its
+working directory, but no `opencode.json`, `AGENTS.md` or `orchestrator.json` is ever written
+there. `OPENCODE_CONFIG_DIR=<dir> opencode debug paths` reports `<dir>` as `config`; that probe
+is how the mechanism was checked on opencode 2.0.28.
+
+`prepare_start` resolves the surface binding first and writes the files before the process
+starts, so the app can read them from its first request. After `SurfaceAttach` succeeds,
+`finish_start` rewrites the same three files once, so a resumed host whose binding changed
+carries the new surface id. The writes are idempotent and atomic (0600 temporary file below the
+same directory, then a rename); a stale wider file is replaced and tightened, and no temporary
+file is left behind. The files never carry the service password, the loopback port, the surface
+token, a pair link or a path outside the agent state directory.
+
 A start or resume runs on a worker thread, not in the frame loop, so heartbeats, runs and local
 tool calls keep flowing while the app starts. The worker writes `host.json` with the process
 group leader's pid and `starting`, then waits up to `ORCHESTRATOR_START_TIMEOUT` (20 seconds)
@@ -980,7 +1019,15 @@ temporary agent home and a fake transport:
 `orchestrator_disconnect_reports_degraded_and_reconnect_does_not_spawn_a_second_host` and
 `orchestrator_connection_result_is_correlated_and_revoke_cleans_the_host`. The connection test
 also proves a `Ping` is answered while a start is in flight and that a node revoke removes the
-private directory and stops the fake app.
+private directory and stops the fake app. The app-files slice adds
+`orchestrator_start_materializes_the_app_files_0600`,
+`orchestrator_agents_md_carries_the_local_surface_rules`,
+`orchestrator_opencode_json_names_the_socket_and_surface_without_a_token`,
+`orchestrator_app_files_never_land_in_the_project_checkout`,
+`orchestrator_resume_refreshes_the_app_files_atomically` and
+`orchestrator_app_files_never_contain_a_secret_or_pair_link`; the fake app records its
+environment and reads `opencode.json` and `AGENTS.md` from `OPENCODE_CONFIG_DIR`, so the tests
+prove the files are readable by the process opencode would start, not only present on disk.
 
 ## 8. Worktrees, path maps and result return
 

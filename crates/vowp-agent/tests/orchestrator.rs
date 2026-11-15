@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use vowp_agent::orchestrator::ORCHESTRATOR_LOCAL_INSTRUCTIONS;
 use vowp_agent::{
     AgentClient, AgentClock, AgentConfig, AgentError, FrameRead, FrameStream, NodeKey, OrchestratorConfig,
     OrchestratorHost, RunOptions, RunOutcome, SurfaceAttachment, SurfaceBinding, Transport, validate_name,
@@ -82,6 +83,12 @@ fn fake_app(root: &Path, label: &str, password: &str) -> (PathBuf, PathBuf) {
          count=\"$1\"\n\
          password=\"{password}\"\n\
          printf '%s\\n' \"$$\" >> \"$count\"\n\
+         pwd > \"$count.cwd\"\n\
+         env > \"$count.env\"\n\
+         if [ -n \"${{OPENCODE_CONFIG_DIR:-}}\" ]; then\n\
+           cat \"$OPENCODE_CONFIG_DIR/opencode.json\" > \"$count.seen-opencode.json\"\n\
+           cat \"$OPENCODE_CONFIG_DIR/AGENTS.md\" > \"$count.seen-agents.md\"\n\
+         fi\n\
          state=\"${{XDG_STATE_HOME:?}}/opencode\"\n\
          mkdir -p \"$state\"\n\
          umask 077\n\
@@ -107,6 +114,46 @@ fn last_pid(count: &Path) -> u32 {
         .filter_map(|line| line.trim().parse().ok())
         .next_back()
         .expect("a recorded pid")
+}
+
+/// Returns one value from the environment snapshot the fake app wrote.
+fn env_value(env: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    env.lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// Returns the argument after `flag` in an argv list.
+fn arg_after<'a>(args: &'a [String], flag: &str) -> &'a str {
+    let position = args
+        .iter()
+        .position(|arg| arg == flag)
+        .unwrap_or_else(|| panic!("{flag} missing from {args:?}"));
+    args.get(position + 1)
+        .unwrap_or_else(|| panic!("{flag} has no value in {args:?}"))
+}
+
+fn inode(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).expect("metadata").ino()
+}
+
+fn directory_names(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(path)
+        .expect("directory")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn assert_private_file(path: &Path) {
+    let mode = fs::metadata(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "{} is not 0600", path.display());
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -158,6 +205,7 @@ struct RecordingLink {
     attached: Vec<SurfaceBinding>,
     detached: Vec<SurfaceBinding>,
     fail_attach: bool,
+    remove_on_attach: Option<PathBuf>,
 }
 
 impl SurfaceAttachment for RecordingLink {
@@ -168,6 +216,9 @@ impl SurfaceAttachment for RecordingLink {
                 "the surface attach frame could not be sent to the home",
                 true,
             ));
+        }
+        if let Some(path) = self.remove_on_attach.as_ref() {
+            let _ = fs::remove_file(path);
         }
         self.attached.push(binding.clone());
         Ok(())
@@ -281,6 +332,9 @@ fn orchestrator_duplicate_start_is_idempotent() {
         &mut link,
     );
     assert!(first.accepted);
+    let dir = OrchestratorHost::dir(&state, "dup").expect("dir");
+    let agents = fs::read_to_string(dir.join("AGENTS.md")).expect("instructions");
+    let opencode = fs::read(dir.join("opencode.json")).expect("opencode config");
     let pid = host.state("dup").expect("state").expect("running").pid.expect("pid");
     let second = host.start(
         &start_command("dup", OrchestratorApp::Opencode),
@@ -292,6 +346,16 @@ fn orchestrator_duplicate_start_is_idempotent() {
     assert_eq!(pid_count(&count), 1, "a duplicate start spawned no second app");
     assert_eq!(host.state("dup").expect("state").expect("running").pid, Some(pid));
     assert_eq!(link.attached.len(), 1, "a running host is not attached twice");
+    assert_eq!(
+        fs::read_to_string(dir.join("AGENTS.md")).expect("instructions"),
+        agents,
+        "a duplicate start keeps the app files idempotent"
+    );
+    assert_eq!(
+        fs::read(dir.join("opencode.json")).expect("opencode config"),
+        opencode,
+        "a duplicate start keeps the app files idempotent"
+    );
 
     host.stop(&stop_command("dup"), &mut link);
 }
@@ -579,6 +643,358 @@ fn orchestrator_disconnect_reports_degraded_and_reconnect_does_not_spawn_a_secon
     assert_eq!(last_pid(&count), pid);
 
     host.stop(&stop_command("degraded"), &mut link);
+}
+
+#[test]
+fn orchestrator_start_materializes_the_app_files_0600() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    AgentConfig::new("home-1", node(), state.clone(), "example.invalid")
+        .write()
+        .expect("agent config");
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "app-files", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let dir = OrchestratorHost::dir(&state, "app-files").expect("dir");
+    // Delete one app file during the attach: `finish_start` must rewrite it once the surface
+    // is bound, not only rely on the pre-start copy.
+    let mut link = RecordingLink {
+        remove_on_attach: Some(dir.join("AGENTS.md")),
+        ..RecordingLink::default()
+    };
+
+    let result = host.start(
+        &start_command("app-files", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+
+    assert!(
+        dir.join("AGENTS.md").is_file(),
+        "finish_start did not refresh the app files after the attach"
+    );
+    assert_eq!(
+        fs::metadata(&dir).expect("dir metadata").permissions().mode() & 0o777,
+        0o700,
+        "the orchestrator directory is private"
+    );
+    for name in ["AGENTS.md", "opencode.json", "orchestrator.json", "config.json"] {
+        assert_private_file(&dir.join(name));
+    }
+    assert_eq!(
+        fs::read_to_string(dir.join("AGENTS.md")).expect("instructions"),
+        ORCHESTRATOR_LOCAL_INSTRUCTIONS,
+        "AGENTS.md is exactly the local-surface template"
+    );
+
+    // The app's own environment points at the private dirs and at the directory opencode
+    // reads its global config from; both files are readable there when the app starts.
+    let env = fs::read_to_string(format!("{}.env", count.display())).expect("environment record");
+    assert_eq!(
+        env_value(&env, "XDG_STATE_HOME"),
+        Some(dir.join(".opencode/state").display().to_string())
+    );
+    assert_eq!(
+        env_value(&env, "XDG_CONFIG_HOME"),
+        Some(dir.join(".opencode/config").display().to_string())
+    );
+    assert_eq!(env_value(&env, "OPENCODE_CONFIG_DIR"), Some(dir.display().to_string()));
+    let app_config = PathBuf::from(env_value(&env, "OPENCODE_CONFIG_DIR").expect("config dir"));
+    assert!(app_config.join("opencode.json").is_file());
+    assert!(app_config.join("AGENTS.md").is_file());
+    // The child process could read both files from the directory opencode loads its global
+    // config and AGENTS.md from.
+    assert_eq!(
+        fs::read(format!("{}.seen-opencode.json", count.display())).expect("app read opencode.json"),
+        fs::read(dir.join("opencode.json")).expect("opencode.json")
+    );
+    assert_eq!(
+        fs::read(format!("{}.seen-agents.md", count.display())).expect("app read AGENTS.md"),
+        fs::read(dir.join("AGENTS.md")).expect("AGENTS.md")
+    );
+    let cwd = fs::read_to_string(format!("{}.cwd", count.display())).expect("cwd record");
+    assert_eq!(
+        fs::canonicalize(cwd.trim()).expect("app cwd"),
+        fs::canonicalize(&working).expect("project root")
+    );
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("orchestrator.json")).expect("record")).expect("record json");
+    assert_eq!(record["name"], "app-files");
+    assert_eq!(record["app"], "opencode");
+    assert_eq!(record["project"], PROJECT);
+    assert_eq!(record["session"], SESSION);
+    assert_eq!(record["surface"], SURFACE);
+    assert_eq!(record["node"], "mac-studio");
+    for private in [
+        "token",
+        "password",
+        "port",
+        "pair",
+        "command",
+        "working_dir",
+        "service_json",
+    ] {
+        assert!(record.get(private).is_none(), "orchestrator.json has {private}");
+    }
+
+    host.stop(&stop_command("app-files"), &mut link);
+}
+
+#[test]
+fn orchestrator_agents_md_carries_the_local_surface_rules() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "agents-rules", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("agents-rules", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+    let dir = OrchestratorHost::dir(&state, "agents-rules").expect("dir");
+    let agents = fs::read_to_string(dir.join("AGENTS.md")).expect("instructions");
+
+    for rule in [
+        "local surface",
+        "project-relative",
+        "The home cannot see the Mac's local files.",
+        "Call `session_resume` if the tool is available",
+        "Ask before public actions",
+        "Never read a secret",
+        "Do not open a tunnel",
+        "The agent is the transport",
+        "Do not promise a VOWP tool call",
+    ] {
+        assert!(agents.contains(rule), "missing {rule:?}:\n{agents}");
+    }
+    for forbidden in ["tunnel_open", "tunnel_close", "will expose", "MCP tools are available"] {
+        assert!(
+            !agents.contains(forbidden),
+            "AGENTS.md promises {forbidden:?}:\n{agents}"
+        );
+    }
+
+    host.stop(&stop_command("agents-rules"), &mut link);
+}
+
+#[test]
+fn orchestrator_opencode_json_names_the_socket_and_surface_without_a_token() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "opencode-config", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("opencode-config", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+    let dir = OrchestratorHost::dir(&state, "opencode-config").expect("dir");
+    let text = fs::read_to_string(dir.join("opencode.json")).expect("opencode config");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("opencode json");
+    let server = &value["mcp"]["vowp"];
+    assert_eq!(server["type"], "local");
+    assert_eq!(server["enabled"], true);
+    let command: Vec<String> = server["command"]
+        .as_array()
+        .expect("mcp command")
+        .iter()
+        .map(|value| value.as_str().expect("command string").to_owned())
+        .collect();
+    assert_eq!(command[0], "vowp");
+    assert_eq!(command[1], "mcp");
+    let socket = state.join("agent.sock").display().to_string();
+    assert_eq!(arg_after(&command, "--agent-socket"), socket.as_str());
+    assert_eq!(arg_after(&command, "--surface"), SURFACE);
+    let instructions = dir.join("AGENTS.md").display().to_string();
+    assert_eq!(value["instructions"][0].as_str(), Some(instructions.as_str()));
+    assert!(!text.contains("vowp_surf_"), "{text}");
+    assert!(!text.to_ascii_lowercase().contains("token"), "{text}");
+    assert!(!text.contains("--token-file"), "{text}");
+
+    host.stop(&stop_command("opencode-config"), &mut link);
+}
+
+#[test]
+fn orchestrator_app_files_never_land_in_the_project_checkout() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "checkout", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+    let before = directory_names(&working);
+
+    let result = host.start(
+        &start_command("checkout", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+
+    assert_eq!(directory_names(&working), before, "the checkout was changed");
+    for name in [
+        "AGENTS.md",
+        "opencode.json",
+        "orchestrator.json",
+        ".opencode",
+        ".mcp.json",
+    ] {
+        assert!(!working.join(name).exists(), "{name} landed in the checkout");
+    }
+    assert!(!root.path().join("AGENTS.md").exists());
+    assert!(!root.path().join("opencode.json").exists());
+
+    host.stop(&stop_command("checkout"), &mut link);
+}
+
+#[test]
+fn orchestrator_resume_refreshes_the_app_files_atomically() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "refresh", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+
+    let started = host.start(
+        &start_command("refresh", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(started.accepted, "{started:?}");
+    let dir = OrchestratorHost::dir(&state, "refresh").expect("dir");
+    let agents_path = dir.join("AGENTS.md");
+    let first_inode = inode(&agents_path);
+    let first_agents = fs::read_to_string(&agents_path).expect("instructions");
+    let first_record: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("orchestrator.json")).expect("record")).expect("record json");
+    assert_eq!(first_record["surface"], SURFACE);
+
+    let pid = last_pid(&count);
+    let stopped = host.stop(&stop_command("refresh"), &mut link);
+    assert!(stopped.accepted, "{stopped:?}");
+    wait_until(|| !process_alive(pid));
+
+    // Stale app files must be replaced, a wider mode tightened and a missing file recreated.
+    fs::write(&agents_path, "stale\n").expect("stale instructions");
+    fs::set_permissions(&agents_path, fs::Permissions::from_mode(0o644)).expect("stale mode");
+    fs::remove_file(dir.join("opencode.json")).expect("remove opencode config");
+    fs::write(dir.join("orchestrator.json"), "{}").expect("stale record");
+    bind(&state, "refresh", SURFACE_TWO, SESSION_TWO, &working, &script, &count);
+
+    let resumed = host.start(&resume_command("refresh"), None, &mut link);
+    assert!(resumed.accepted, "{resumed:?}");
+    assert_eq!(
+        fs::read_to_string(&agents_path).expect("refreshed instructions"),
+        first_agents,
+        "the resume restored the local template"
+    );
+    assert_ne!(
+        inode(&agents_path),
+        first_inode,
+        "the refresh replaces the file atomically"
+    );
+    for name in ["AGENTS.md", "opencode.json", "orchestrator.json"] {
+        assert_private_file(&dir.join(name));
+    }
+    let opencode: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("opencode.json")).expect("opencode config")).expect("opencode json");
+    let command: Vec<String> = opencode["mcp"]["vowp"]["command"]
+        .as_array()
+        .expect("mcp command")
+        .iter()
+        .map(|value| value.as_str().expect("command string").to_owned())
+        .collect();
+    assert_eq!(arg_after(&command, "--surface"), SURFACE_TWO);
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("orchestrator.json")).expect("record")).expect("record json");
+    assert_eq!(record["surface"], SURFACE_TWO);
+    assert_eq!(record["session"], SESSION_TWO);
+    assert!(
+        directory_names(&dir).iter().all(|name| !name.starts_with(".tmp-")),
+        "a temporary file was left behind"
+    );
+
+    host.stop(&stop_command("refresh"), &mut link);
+}
+
+#[test]
+fn orchestrator_app_files_never_contain_a_secret_or_pair_link() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let token = format!("vowp_surf_{}", "T".repeat(43));
+    let token_path = AgentConfig::surface_token_path(&state, &surface(SURFACE));
+    fs::write(&token_path, &token).expect("surface token");
+    fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).expect("token mode");
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "secrets", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("secrets", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+    let dir = OrchestratorHost::dir(&state, "secrets").expect("dir");
+    for name in ["AGENTS.md", "opencode.json", "orchestrator.json"] {
+        let text = fs::read_to_string(dir.join(name)).expect(name);
+        for secret in [password.as_str(), token.as_str(), "vowp_surf_", "54321", "127.0.0.1"] {
+            assert!(!text.contains(secret), "{name} contains {secret:?}:\n{text}");
+        }
+        for link in ["pair=", "vowp://", "wss://"] {
+            assert!(!text.contains(link), "{name} contains a pair link:\n{text}");
+        }
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("orchestrator.json")).expect("record")).expect("record json");
+    for private in ["token", "token_file", "password", "port", "pair", "pair_link", "url"] {
+        assert!(record.get(private).is_none(), "orchestrator.json has {private}");
+    }
+    let record_text = fs::read_to_string(dir.join("orchestrator.json")).expect("record text");
+    assert!(!record_text.contains(&state.display().to_string()), "{record_text}");
+    assert!(!record_text.contains(&working.display().to_string()), "{record_text}");
+
+    // opencode.json may name the agent socket and the local AGENTS.md, but no other absolute
+    // path: both live below the agent state directory.
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("opencode.json")).expect("opencode config")).expect("opencode json");
+    let command = value["mcp"]["vowp"]["command"].as_array().expect("mcp command");
+    for arg in command.iter().filter_map(|value| value.as_str()) {
+        if arg.starts_with('/') {
+            assert!(Path::new(arg).starts_with(&state), "external path {arg}");
+        }
+    }
+    let instructions = value["instructions"][0].as_str().expect("instructions");
+    assert!(
+        Path::new(instructions).starts_with(&state),
+        "external path {instructions}"
+    );
+
+    host.stop(&stop_command("secrets"), &mut link);
 }
 
 #[test]
