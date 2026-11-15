@@ -9,8 +9,8 @@ use vowp_protocol::agent::surface::{
     SurfaceAttach, SurfaceDetach, SurfaceEvent, SurfaceTurn, SurfaceTurnState, ToolCall, ToolError, ToolResult,
 };
 use vowp_protocol::event::{AssistantMessage, EventBody};
-use vowp_protocol::ids::SessionId;
-use vowp_protocol::surface::SurfaceId;
+use vowp_protocol::ids::{NodeName, SessionId};
+use vowp_protocol::surface::{JoinInstructions, OrchestratorApp, OrchestratorCard, OrchestratorNodeState, SurfaceId};
 use vowp_protocol::time::Timestamp;
 
 /// A fixed timestamp for frame fixtures.
@@ -187,6 +187,52 @@ fn tool_result_error_is_typed() {
         bad.to_string().contains("invalid type") || bad.to_string().contains("expected struct"),
         "error explains the typed shape: {bad}"
     );
+}
+
+#[test]
+fn orchestrator_card_carries_its_node_and_typed_state() {
+    let card = OrchestratorCard {
+        name: "mac".to_owned(),
+        session_id: SessionId::new(),
+        project: None,
+        app: OrchestratorApp::Opencode,
+        state: OrchestratorNodeState::NodeOffline,
+        node: Some(NodeName::parse("mac-studio").expect("node name")),
+        join: JoinInstructions {
+            desktop: "vowp orchestrator resume mac".to_owned(),
+            phone: "vowp chat <session>".to_owned(),
+            chat: "vowp chat --agent --session <session>".to_owned(),
+        },
+    };
+
+    let value = serde_json::to_value(&card).expect("orchestrator card JSON");
+    assert_eq!(value["state"], "node_offline");
+    assert_eq!(value["node"], "mac-studio");
+    let text = value.to_string();
+    for forbidden in ["/", "token", "secret", "password", "127.0.0.1"] {
+        assert!(!text.contains(forbidden), "card carries {forbidden:?}: {text}");
+    }
+    let decoded: OrchestratorCard = serde_json::from_value(value).expect("orchestrator card back");
+    assert_eq!(decoded, card);
+}
+
+#[test]
+fn orchestrator_card_decodes_a_v0_2_row_without_a_node() {
+    let value = json!({
+        "name": "home",
+        "session_id": SessionId::new(),
+        "project": null,
+        "app": "chat",
+        "state": "running",
+        "join": {
+            "desktop": "vowp chat <session>",
+            "phone": "vowp chat <session>",
+            "chat": "vowp chat <session>",
+        },
+    });
+    let card: OrchestratorCard = serde_json::from_value(value).expect("v0.2 card back");
+    assert_eq!(card.state, OrchestratorNodeState::Running);
+    assert_eq!(card.node, None);
 }
 
 #[test]

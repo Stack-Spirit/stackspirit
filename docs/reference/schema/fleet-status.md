@@ -839,6 +839,18 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
           "description": "Orchestrator name.",
           "type": "string"
         },
+        "node": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Node that runs the app; `None` for a v0.2 orchestrator hosted on the home."
+        },
         "project": {
           "anyOf": [
             {
@@ -855,8 +867,8 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
           "description": "Session the orchestrator uses."
         },
         "state": {
-          "description": "`running`, `stopped` or `degraded`.",
-          "type": "string"
+          "$ref": "#/$defs/OrchestratorNodeState",
+          "description": "Lifecycle state."
         }
       },
       "required": [
@@ -867,6 +879,41 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
         "join"
       ],
       "type": "object"
+    },
+    "OrchestratorNodeState": {
+      "description": "Lifecycle state of an orchestrator.\n\nThe first three states are the v0.2 home states. The v0.4 local-node states add\n`node_offline` (the record exists but the node that runs the app is unreachable) and\n`failed` (the node refused or lost the app). `starting` covers the window between the\nhome sending a start command and the node accepting it.",
+      "oneOf": [
+        {
+          "const": "starting",
+          "description": "The home sent a start command and is waiting for the node's result.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "The app host is running.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "The app host was stopped by the owner.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "The node is reachable but the app is not healthy.",
+          "type": "string"
+        },
+        {
+          "const": "node_offline",
+          "description": "The node that runs the app is offline, degraded or revoked.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The node refused the command or the app could not start.",
+          "type": "string"
+        }
+      ]
     },
     "ProjectName": {
       "description": "Project name slug, for example `vowp`.\n\n`_node` is the reserved project that owns project-less session runs.",

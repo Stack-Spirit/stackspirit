@@ -18,7 +18,10 @@ use vowp_protocol::ids::{EventId, JobId, NodeName, ProjectName, RunId, SessionId
 use vowp_protocol::offload::{AssignmentPayload, RemoteRunState, RunRejectReason};
 use vowp_protocol::run::{RunOutcome, RunPurpose};
 use vowp_protocol::schema::{all_schemas, schema_for_name};
-use vowp_protocol::surface::{RemoteLine, SurfaceId, SurfaceKind};
+use vowp_protocol::surface::{
+    OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, RemoteLine,
+    SurfaceId, SurfaceKind,
+};
 use vowp_protocol::time::Timestamp;
 use vowp_protocol::vault::SecretName;
 
@@ -658,6 +661,10 @@ fn all_schemas_includes_agent_types() {
         "SurfaceScope",
         "SurfaceState",
         "LeaseMode",
+        "OrchestratorNodeState",
+        "OrchestratorCommand",
+        "OrchestratorResult",
+        "OrchestratorError",
         "AgentFrame",
     ] {
         assert!(schemas.contains_key(name), "all_schemas is missing {name}");
@@ -770,6 +777,84 @@ fn agent_frame_round_trips_assign_run_with_the_remote_url() {
         panic!("expected an AssignRun frame");
     };
     assert_eq!(assignment.remote_url, payload.remote_url);
+}
+
+#[test]
+fn agent_frame_round_trips_orchestrator_commands_and_results() {
+    let commands = [
+        (
+            "start",
+            AgentFrame::OrchestratorCommand(OrchestratorCommand::Start {
+                request_id: "req-start".to_owned(),
+                name: "mac".to_owned(),
+                app: OrchestratorApp::Opencode,
+                project: Some(project("vowp")),
+            }),
+        ),
+        (
+            "stop",
+            AgentFrame::OrchestratorCommand(OrchestratorCommand::Stop {
+                request_id: "req-stop".to_owned(),
+                name: "mac".to_owned(),
+            }),
+        ),
+        (
+            "resume",
+            AgentFrame::OrchestratorCommand(OrchestratorCommand::Resume {
+                request_id: "req-resume".to_owned(),
+                name: "mac".to_owned(),
+            }),
+        ),
+    ];
+    for (action, frame) in commands {
+        let value = serde_json::to_value(&frame).expect("orchestrator command JSON");
+        assert_eq!(value["type"], "orchestrator_command");
+        assert_eq!(value["action"], action);
+        assert_eq!(value["name"], "mac");
+        assert_no_absolute_strings(&value);
+        let decoded: AgentFrame = serde_json::from_value(value).expect("orchestrator command back");
+        assert_eq!(decoded, frame);
+    }
+
+    let accepted = OrchestratorResult::accepted("req-start", OrchestratorNodeState::Running);
+    let frame = AgentFrame::OrchestratorResult(accepted.clone());
+    let value = serde_json::to_value(&frame).expect("orchestrator result JSON");
+    assert_eq!(value["type"], "orchestrator_result");
+    assert_eq!(value["request_id"], "req-start");
+    assert_eq!(value["accepted"], true);
+    assert_eq!(value["state"], "running");
+    assert!(value.get("error").is_none(), "{value}");
+    assert_no_absolute_strings(&value);
+    let decoded: AgentFrame = serde_json::from_value(value).expect("orchestrator result back");
+    assert_eq!(decoded, frame);
+
+    let failed = OrchestratorResult::failed(
+        "req-start",
+        OrchestratorNodeState::Failed,
+        OrchestratorError::new("spawn_failed", "the app did not start", true),
+    );
+    let frame = AgentFrame::OrchestratorResult(failed);
+    let value = serde_json::to_value(&frame).expect("failed orchestrator result JSON");
+    assert_eq!(value["accepted"], false);
+    assert_eq!(value["state"], "failed");
+    assert_eq!(value["error"]["code"], "spawn_failed");
+    assert_eq!(value["error"]["retryable"], true);
+    assert_no_absolute_strings(&value);
+    let decoded: AgentFrame = serde_json::from_value(value).expect("failed orchestrator result back");
+    assert_eq!(decoded, frame);
+}
+
+#[test]
+fn orchestrator_node_state_wire_names_are_stable() {
+    for state in OrchestratorNodeState::ALL {
+        let value = serde_json::to_value(state).expect("state JSON");
+        assert_eq!(value, json!(state.as_str()));
+        let decoded: OrchestratorNodeState = serde_json::from_value(value).expect("state back");
+        assert_eq!(decoded, state);
+        assert_eq!(state.to_string(), state.as_str());
+    }
+    assert_eq!(OrchestratorNodeState::NodeOffline.as_str(), "node_offline");
+    assert!(serde_json::from_value::<OrchestratorNodeState>(json!("sleeping")).is_err());
 }
 
 #[test]

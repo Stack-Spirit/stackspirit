@@ -20,7 +20,9 @@ use crate::offload::{
     AssignmentPayload, RemoteRunState, RunRejectReason, RunResume, RunResumeResult, SurfaceResume, SurfaceResumeResult,
 };
 use crate::run::{RunOutcome, RunPurpose};
-use crate::surface::{RemoteLine as SurfaceRemoteLine, SurfaceId, SurfaceKind};
+use crate::surface::{
+    OrchestratorCommand, OrchestratorResult, RemoteLine as SurfaceRemoteLine, SurfaceId, SurfaceKind,
+};
 use crate::time::Timestamp;
 use crate::vault::SecretName;
 
@@ -755,6 +757,17 @@ pub enum AgentFrame {
         /// Worktree to remove; the agent resolves it locally.
         worktree: PathRef,
     },
+    /// Home -> agent: create, stop or resume one local orchestrator.
+    ///
+    /// The frame carries no port, password, pairing link, absolute local path or secret
+    /// value. The agent materializes the local record and answers with
+    /// [`Self::OrchestratorResult`], correlated by `request_id`.
+    OrchestratorCommand(OrchestratorCommand),
+    /// Agent -> home: the result of one [`Self::OrchestratorCommand`].
+    ///
+    /// The result carries the resulting state and a typed error or a redacted detail; it
+    /// never carries a port, password, absolute local path or secret value.
+    OrchestratorResult(OrchestratorResult),
 }
 
 /// The terminal summary an agent sends in [`AgentFrame::TurnEnd`].

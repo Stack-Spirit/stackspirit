@@ -28,6 +28,7 @@ integration. It does not add a second session type or a second transcript store.
     adapters.json                  {"natives":[{harness,native_session_id,node,first_seq,created_at}]} append-only
     manifest.json                  optional; written by `session pull --full`, informational only
   orchestrators/<name>/            orchestrator.json (0600), app config, lease token, mirror.json
+                                   (a local-node record has only orchestrator.json)
   runs/<runId>.jsonl               raw harness stdout mirror on the home (debug only, compressed/rotated)
   logs/supervisor.log  backups/  tmp/
 project/.vowp/jobs/<job>/{brief.md,report.md}
@@ -536,6 +537,16 @@ project-local configuration.
 - **resume**: `session_resume` (MCP) builds the capsule and the last turns for a new app from the
   log; `surface::resume_context` is implemented and tested in core. The new app continues the same
   session id and log.
+- **local-node orchestrator**: the home owns the canonical session row, the session log and the
+  `orchestrator.json` record, and the card names the node (`OrchestratorCard.node`). The app host
+  runs on that node, not on the home; the home never writes a local path, port, lease token or
+  pairing link into the card. The session's `cwd` is the project-relative `"."` because the node
+  resolves its own checkout. `orchestrator.json` carries the node, a typed state
+  (`starting|running|stopped|degraded|node_offline|failed`), the last command request id and a
+  redacted detail. A node disconnect marks a live record `degraded`, and a reconnect resumes it;
+  an offline node at create time records `node_offline` and the home never starts the app. The
+  app-side materialization under `~/.vowp-agent/orchestrators/<name>/` is the agent's job, not the
+  home's.
 
 ## 11. MCP tools and what a surface may write
 

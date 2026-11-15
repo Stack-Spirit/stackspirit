@@ -5,34 +5,38 @@
 //! Claude, or read the real home. The `chat` app has no host and is exercised through the
 //! real CLI and its project-local state.
 
-// This file is compiled as a `vowp-cli` unit-test module through the owned
-// `src/cmd/orchestrator.rs`; the workspace package root has no auto-discovered
-// `tests/` directory, and the job may not edit the shared root `Cargo.toml`.
+// This file is the `orchestrator` integration test target declared in the root
+// `Cargo.toml` (the `vowp-cli` package root is the workspace root).
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::TempDir;
 use vowp_protocol::{
-    JoinInstructions, Lease, Node, NodeName, OrchestratorApp, Project, ProjectName, SessionRole, Surface, SurfaceId,
+    AgentFrame, JoinInstructions, Lease, Node, NodeName, NodeStatus, OrchestratorApp, OrchestratorCommand,
+    OrchestratorNodeState, OrchestratorResult, Project, ProjectName, SessionId, SessionRole, Surface, SurfaceId,
     SurfaceKind, Timestamp, VowpConfig,
 };
 use vowp_store::{NodePaths, Store, hash_lease_token};
 
+use vowp_core::CoreError;
 use vowp_core::deps::Deps;
 use vowp_core::surface::mirror::MirrorCursor;
 use vowp_core::surface::native::{AppHandle, AppHost, HostHealth, HostRequest, TranscriptBatch, TranscriptEntry};
-use vowp_core::surface::orchestrator::{NewOrchestrator, Orchestrator};
+use vowp_core::surface::orchestrator::{NewOrchestrator, Orchestrator, OrchestratorTransport};
 
-use crate::{BufferIo, Ctx, Global};
+use vowp_cli::{BufferIo, Ctx, Global};
 
 /// A temporary node home and project, with no tmux and no real harness.
 struct TestEnv {
     home: TempDir,
     project: TempDir,
+    project_name: ProjectName,
 }
 
 impl TestEnv {
@@ -71,7 +75,15 @@ impl TestEnv {
                 updated_at: now,
             })
             .expect("project row");
-        Self { home, project }
+        Self {
+            home,
+            project,
+            project_name: config.project.name,
+        }
+    }
+
+    fn project_name(&self) -> &ProjectName {
+        &self.project_name
     }
 
     fn home_path(&self) -> &Path {
@@ -101,7 +113,7 @@ impl TestEnv {
         ];
         full.extend(args.iter().map(|value| (*value).to_owned()));
         let mut io = BufferIo::new("");
-        let code = crate::run(full, &mut io);
+        let code = vowp_cli::run(full, &mut io);
         (code, io.stdout(), io.stderr())
     }
 
@@ -116,6 +128,45 @@ impl TestEnv {
 
     fn store(&self) -> Store {
         Store::open(&NodePaths::new(self.home.path())).expect("store opens")
+    }
+
+    /// Registers an active agent node that is online now.
+    fn agent_node(&self, name: &str) -> NodeName {
+        let node = NodeName::parse(name).expect("node name");
+        let store = self.store();
+        let now = store.clock().now();
+        store
+            .insert_pending_node(&node, &["darwin-arm64".to_owned()], now)
+            .expect("pending node");
+        store
+            .set_node_status(&node, NodeStatus::Active, "", now)
+            .expect("active node");
+        store
+            .touch_node(&node, now, Some("0.4.0"), Some("vowp-agent/1"), &serde_json::json!({}))
+            .expect("node heartbeat");
+        node
+    }
+
+    /// Ages a node's last heartbeat past the offline threshold.
+    fn age_node(&self, node: &NodeName) {
+        let store = self.store();
+        let old = store.clock().now().minus(Duration::from_secs(120));
+        store
+            .set_node_status(node, NodeStatus::Active, "", old)
+            .expect("offline node");
+    }
+
+    /// Revokes a node's enrollment.
+    fn revoke_node(&self, node: &NodeName) {
+        let store = self.store();
+        store
+            .set_node_status(node, NodeStatus::Revoked, "", store.clock().now())
+            .expect("revoked node");
+    }
+
+    /// Returns one orchestrator's directory below the temporary home.
+    fn orchestrator_dir(&self, name: &str) -> PathBuf {
+        self.home_path().join("orchestrators").join(name)
     }
 }
 
@@ -270,6 +321,115 @@ fn manager(
         claude_starts,
         claude_stops,
     )
+}
+
+/// A fake agent frame stream backed by the home's command spool.
+///
+/// It reads `agent-commands/<node>/*.json`, records each `OrchestratorCommand` and writes
+/// the matching `OrchestratorResult` to `agent-results/<node>/`. It never opens a socket,
+/// reaches the network or starts a real app.
+struct FakeAgent {
+    commands: Arc<Mutex<Vec<OrchestratorCommand>>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl FakeAgent {
+    fn start(home: &Path, node: &NodeName) -> Self {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let command_dir = home.join("agent-commands").join(node.as_str());
+        let result_dir = home.join("agent-results").join(node.as_str());
+        let handle = {
+            let commands = Arc::clone(&commands);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if let Ok(entries) = std::fs::read_dir(&command_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                                continue;
+                            }
+                            let Ok(bytes) = std::fs::read(&path) else {
+                                continue;
+                            };
+                            let Ok(AgentFrame::OrchestratorCommand(command)) =
+                                serde_json::from_slice::<AgentFrame>(&bytes)
+                            else {
+                                continue;
+                            };
+                            let request_id = command.request_id().to_owned();
+                            let state = match command {
+                                OrchestratorCommand::Stop { .. } => OrchestratorNodeState::Stopped,
+                                OrchestratorCommand::Start { .. } | OrchestratorCommand::Resume { .. } => {
+                                    OrchestratorNodeState::Running
+                                }
+                            };
+                            let frame =
+                                AgentFrame::OrchestratorResult(OrchestratorResult::accepted(request_id.clone(), state));
+                            std::fs::create_dir_all(&result_dir).expect("fake result dir");
+                            let result_path = result_dir.join(format!("{request_id}.json"));
+                            let temp = result_dir.join(format!("{request_id}.tmp"));
+                            std::fs::write(&temp, serde_json::to_vec(&frame).expect("result JSON"))
+                                .expect("fake result write");
+                            std::fs::rename(&temp, &result_path).expect("fake result rename");
+                            let _ = std::fs::remove_file(&path);
+                            commands.lock().expect("fake command log").push(command);
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        Self {
+            commands,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn commands(&self) -> Vec<OrchestratorCommand> {
+        self.commands.lock().expect("fake command log").clone()
+    }
+}
+
+impl Drop for FakeAgent {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// An in-memory transport that records the frame and answers synchronously.
+struct RecordingTransport {
+    sent: Arc<Mutex<Vec<OrchestratorCommand>>>,
+}
+
+impl OrchestratorTransport for RecordingTransport {
+    fn send(&self, _node: &NodeName, command: &OrchestratorCommand) -> Result<Option<OrchestratorResult>, CoreError> {
+        self.sent.lock().expect("recording transport log").push(command.clone());
+        let state = match command {
+            OrchestratorCommand::Stop { .. } => OrchestratorNodeState::Stopped,
+            OrchestratorCommand::Start { .. } | OrchestratorCommand::Resume { .. } => OrchestratorNodeState::Running,
+        };
+        Ok(Some(OrchestratorResult::accepted(command.request_id(), state)))
+    }
+}
+
+/// A transport that queues every command and records it, like a live connection that is
+/// momentarily slow: the home must record `starting` and apply the late result later.
+struct QueuedTransport {
+    sent: Arc<Mutex<Vec<OrchestratorCommand>>>,
+}
+
+impl OrchestratorTransport for QueuedTransport {
+    fn send(&self, _node: &NodeName, command: &OrchestratorCommand) -> Result<Option<OrchestratorResult>, CoreError> {
+        self.sent.lock().expect("queued transport log").push(command.clone());
+        Ok(None)
+    }
 }
 
 fn request(name: &str, app: OrchestratorApp) -> NewOrchestrator {
@@ -520,7 +680,7 @@ fn orchestrator_stop_releases_lease() {
     assert!(!info.dir.join("lease.token").exists(), "stop left the token file");
     assert!(!info.dir.join("host.json").exists(), "stop left the host state");
     let state = orchestrator.info("lease").expect("info after stop");
-    assert_eq!(state.card.state, "stopped");
+    assert_eq!(state.card.state, OrchestratorNodeState::Stopped);
     assert!(state.host.is_none());
     assert!(state.card.join.chat.contains("vowp chat"), "join lost after stop");
 }
@@ -845,6 +1005,361 @@ fn orchestrator_keeper_keeps_the_lease_after_the_cli_exits() {
         store.lease(&info.session).expect("lease lookup").is_none(),
         "stop left the keeper lease in place"
     );
+}
+
+#[test]
+fn orchestrator_new_with_a_node_creates_a_card_and_sends_start() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let agent = FakeAgent::start(env.home_path(), &node);
+
+    let (code, card, stderr) = env.run_json(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "mac",
+        "--app",
+        "opencode",
+        "--node",
+        node.as_str(),
+        "--project",
+        env.project_name().as_str(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(card["name"], "mac");
+    assert_eq!(card["node"], "mac-studio");
+    assert_eq!(card["state"], "running");
+    assert_eq!(card["app"], "opencode");
+    assert_eq!(card["project"], env.project_name().as_str());
+
+    let commands = agent.commands();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    match &commands[0] {
+        OrchestratorCommand::Start {
+            name,
+            app,
+            project,
+            request_id,
+        } => {
+            assert_eq!(name, "mac");
+            assert_eq!(*app, OrchestratorApp::Opencode);
+            assert_eq!(
+                project.as_ref().map(ProjectName::as_str),
+                Some(env.project_name().as_str())
+            );
+            assert!(!request_id.is_empty(), "start has no correlation id");
+        }
+        other => panic!("expected a start command, got {other:?}"),
+    }
+
+    let dir = env.orchestrator_dir("mac");
+    let state = read_json(&state_path(&dir));
+    assert_eq!(state["node"], "mac-studio");
+    assert_eq!(state["state"], "running");
+    assert!(
+        state["last_request_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "no request id: {state}"
+    );
+    for absent in ["host.json", "opencode.json", "lease.token", "mirror.json"] {
+        assert!(
+            !dir.join(absent).exists(),
+            "{absent} was written for a local-node orchestrator"
+        );
+    }
+    let session = SessionId::parse(state["session_id"].as_str().expect("session id")).expect("session id");
+    assert!(
+        env.store().lease(&session).expect("lease lookup").is_none(),
+        "a local-node orchestrator took a home lease"
+    );
+
+    let (code, cards, stderr) = env.run_json(&["orchestrator", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    let cards = cards.as_array().expect("orchestrator list");
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["node"], "mac-studio");
+    assert_eq!(cards[0]["state"], "running");
+}
+
+#[test]
+fn orchestrator_new_refuses_an_unknown_or_revoked_node() {
+    let env = TestEnv::new();
+
+    let (code, _, stderr) = env.run(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "ghost",
+        "--app",
+        "chat",
+        "--node",
+        "ghost-node",
+    ]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("node ghost-node"), "{stderr}");
+    assert!(!env.orchestrator_dir("ghost").exists(), "unknown node left a record");
+
+    let node = env.agent_node("revoked-node");
+    env.revoke_node(&node);
+    let (code, _, stderr) = env.run(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "revoked",
+        "--app",
+        "chat",
+        "--node",
+        node.as_str(),
+    ]);
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains("revoked"), "{stderr}");
+    assert!(!env.orchestrator_dir("revoked").exists(), "revoked node left a record");
+}
+
+#[test]
+fn orchestrator_resume_on_an_offline_node_reports_node_offline() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let agent = FakeAgent::start(env.home_path(), &node);
+    let (code, _, stderr) = env.run(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "mac",
+        "--app",
+        "opencode",
+        "--node",
+        node.as_str(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(agent.commands().len(), 1);
+
+    env.age_node(&node);
+    let (code, _, stderr) = env.run(&["orchestrator", "resume", "mac"]);
+    assert_eq!(code, 7, "{stderr}");
+    assert!(stderr.contains("node_offline"), "{stderr}");
+    assert!(stderr.contains("mac-studio"), "{stderr}");
+    assert_eq!(agent.commands().len(), 1, "resume reached a node that is offline");
+    let state = read_json(&state_path(&env.orchestrator_dir("mac")));
+    assert_eq!(state["state"], "node_offline");
+}
+
+#[test]
+fn orchestrator_stop_sends_detach_and_releases_the_lease() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let agent = FakeAgent::start(env.home_path(), &node);
+    let (code, card, stderr) = env.run_json(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "mac",
+        "--app",
+        "opencode",
+        "--node",
+        node.as_str(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let session = SessionId::parse(card["session_id"].as_str().expect("session id")).expect("session id");
+    let store = env.store();
+    let now = Timestamp::now();
+    store
+        .take_lease(&Lease {
+            session_id: session.clone(),
+            surface_id: None,
+            surface_kind: SurfaceKind::Opencode,
+            node: node.clone(),
+            holder: "mac".to_owned(),
+            token: vowp_core::surface::new_lease_token(),
+            acquired_at: now,
+            heartbeat_at: now,
+        })
+        .expect("simulate the node surface lease");
+    assert!(store.lease(&session).expect("lease lookup").is_some());
+
+    let (code, stdout, stderr) = env.run(&["orchestrator", "stop", "mac"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    let commands = agent.commands();
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    match &commands[1] {
+        OrchestratorCommand::Stop { name, request_id } => {
+            assert_eq!(name, "mac");
+            assert!(!request_id.is_empty());
+        }
+        other => panic!("expected a stop command, got {other:?}"),
+    }
+    assert!(
+        store.lease(&session).expect("lease lookup").is_none(),
+        "stop left the lease in place"
+    );
+    let dir = env.orchestrator_dir("mac");
+    assert!(!dir.join("lease.token").exists(), "stop left the token file");
+    assert!(!dir.join("host.json").exists(), "stop started a home host");
+    assert_eq!(read_json(&state_path(&dir))["state"], "stopped");
+}
+
+#[test]
+fn orchestrator_disconnect_marks_it_degraded_and_reconnect_resumes() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = Orchestrator::with_transport(
+        deps(&env),
+        Vec::new(),
+        Arc::new(RecordingTransport {
+            sent: Arc::clone(&sent),
+        }),
+    );
+    let info = orchestrator
+        .create_on_node(&request("mac", OrchestratorApp::Opencode), Some(node.clone()))
+        .expect("create on node");
+    assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    assert_eq!(info.card.node.as_ref(), Some(&node));
+
+    assert_eq!(orchestrator.mark_node_disconnected(&node).expect("disconnect"), 1);
+    let info = orchestrator.info("mac").expect("info after disconnect");
+    assert_eq!(info.card.state, OrchestratorNodeState::Degraded);
+    assert!(
+        info.detail.as_deref().is_some_and(|text| text.contains("connection")),
+        "{info:?}"
+    );
+
+    let resumed = orchestrator.node_reconnected(&node).expect("reconnect");
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert_eq!(resumed[0].card.state, OrchestratorNodeState::Running);
+    let sent = sent.lock().expect("recording transport log");
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(matches!(sent[0], OrchestratorCommand::Start { .. }));
+    assert!(matches!(sent[1], OrchestratorCommand::Resume { .. }));
+}
+
+#[test]
+fn orchestrator_new_on_the_home_node_keeps_the_local_path() {
+    let env = TestEnv::new();
+    let home = NodeName::parse("local").expect("home node");
+    let (orchestrator, _, _, _, _) = manager(deps(&env));
+    let info = orchestrator
+        .create_on_node(&request("home-node", OrchestratorApp::Chat), Some(home.clone()))
+        .expect("create on the home node");
+    assert_eq!(info.card.node.as_ref(), Some(&home));
+    assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    assert!(
+        info.dir.join("AGENTS.md").is_file(),
+        "the home path stopped writing its local files"
+    );
+    let state = read_json(&state_path(&info.dir));
+    assert_eq!(state["node"], "local");
+}
+
+#[test]
+fn orchestrator_resume_all_marks_an_offline_node_degraded() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = Orchestrator::with_transport(
+        deps(&env),
+        Vec::new(),
+        Arc::new(RecordingTransport {
+            sent: Arc::clone(&sent),
+        }),
+    );
+    let info = orchestrator
+        .create_on_node(&request("mac", OrchestratorApp::Opencode), Some(node.clone()))
+        .expect("create on node");
+    assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    let sent_before = sent.lock().expect("recording transport log").len();
+
+    env.age_node(&node);
+    let resumed = orchestrator.resume_all().expect("resume all");
+    assert!(resumed.is_empty(), "an offline node was resumed: {resumed:?}");
+    let info = orchestrator.info("mac").expect("info after resume all");
+    assert_eq!(info.card.state, OrchestratorNodeState::Degraded);
+    assert!(info.host.is_none(), "resume_all started a home host");
+    assert_eq!(
+        sent.lock().expect("recording transport log").len(),
+        sent_before,
+        "resume_all sent a command to an offline node"
+    );
+    let state = read_json(&state_path(&info.dir));
+    assert_eq!(state["state"], "degraded");
+}
+
+#[test]
+fn orchestrator_apply_result_correlates_the_late_node_result() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = Orchestrator::with_transport(
+        deps(&env),
+        Vec::new(),
+        Arc::new(QueuedTransport {
+            sent: Arc::clone(&sent),
+        }),
+    );
+    let info = orchestrator
+        .create_on_node(&request("mac", OrchestratorApp::Opencode), Some(node.clone()))
+        .expect("create on node");
+    assert_eq!(info.card.state, OrchestratorNodeState::Starting);
+    let command = sent
+        .lock()
+        .expect("queued transport log")
+        .first()
+        .cloned()
+        .expect("queued start");
+
+    let unknown = OrchestratorResult::accepted("not-this-request", OrchestratorNodeState::Running);
+    assert!(
+        orchestrator
+            .apply_result(&node, &unknown)
+            .expect("unknown result")
+            .is_none(),
+        "an uncorrelated result changed a record"
+    );
+
+    let mut result = OrchestratorResult::accepted(command.request_id(), OrchestratorNodeState::Running);
+    result.detail = Some("started /srv/vowp/app token=FAKE-NOT-A-SECRET".to_owned());
+    let applied = orchestrator
+        .apply_result(&node, &result)
+        .expect("apply result")
+        .expect("correlated result");
+    assert_eq!(applied.card.state, OrchestratorNodeState::Running);
+    let detail = applied.detail.expect("redacted detail");
+    assert!(!detail.contains("/srv/"), "{detail}");
+    assert!(!detail.contains("FAKE-NOT-A-SECRET"), "{detail}");
+}
+
+#[test]
+fn orchestrator_card_contains_no_path_or_secret() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = Orchestrator::with_transport(deps(&env), Vec::new(), Arc::new(RecordingTransport { sent }));
+    let project = env.project_name().clone();
+    let mut req = request("mac", OrchestratorApp::Opencode);
+    req.project = Some(project);
+    let info = orchestrator.create_on_node(&req, Some(node)).expect("create on node");
+
+    let card = serde_json::to_string(&info.card).expect("card JSON");
+    let state = std::fs::read_to_string(state_path(&info.dir)).expect("state file");
+    let home = env.home_path().display().to_string();
+    let project_path = env.project_path().display().to_string();
+    for text in [&card, &state] {
+        for forbidden in [
+            home.as_str(),
+            project_path.as_str(),
+            "/home/",
+            "/Users/",
+            "token",
+            "secret",
+            "password",
+            "127.0.0.1",
+            "4096",
+            "lease",
+        ] {
+            assert!(!text.contains(forbidden), "found {forbidden:?} in {text}");
+        }
+    }
+    assert_eq!(info.card.node.as_ref().map(NodeName::as_str), Some("mac-studio"));
+    assert_eq!(info.card.project.as_ref(), Some(env.project_name()));
 }
 
 /// Returns the built `vowp` binary next to the test harness.

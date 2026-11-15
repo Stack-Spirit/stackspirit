@@ -743,6 +743,215 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
       "description": "Node name slug, for example `vps`.",
       "type": "string"
     },
+    "OrchestratorApp": {
+      "description": "Which app an orchestrator runs in.",
+      "oneOf": [
+        {
+          "const": "opencode",
+          "description": "The opencode desktop or server app.",
+          "type": "string"
+        },
+        {
+          "const": "claude_code",
+          "description": "Claude Code.",
+          "type": "string"
+        },
+        {
+          "const": "chat",
+          "description": "The `vowp chat` fallback.",
+          "type": "string"
+        }
+      ]
+    },
+    "OrchestratorCommand": {
+      "description": "One home -> agent orchestrator command.\n\nThe home correlates the agent's [`OrchestratorResult`] by `request_id`; the agent\nmaterializes the local copy and starts, stops or resumes the app. The payload never\ncarries a port, a password, a pairing link, an absolute local path or a secret value.",
+      "oneOf": [
+        {
+          "description": "Create the local record and start the app host.",
+          "properties": {
+            "action": {
+              "const": "start",
+              "type": "string"
+            },
+            "app": {
+              "$ref": "#/$defs/OrchestratorApp",
+              "description": "App to run."
+            },
+            "name": {
+              "description": "Orchestrator name.",
+              "type": "string"
+            },
+            "project": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProjectName"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Project to bind, when any."
+            },
+            "request_id": {
+              "description": "Home-assigned correlation id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "request_id",
+            "name",
+            "app"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Stop the app host and release its surface.",
+          "properties": {
+            "action": {
+              "const": "stop",
+              "type": "string"
+            },
+            "name": {
+              "description": "Orchestrator name.",
+              "type": "string"
+            },
+            "request_id": {
+              "description": "Home-assigned correlation id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "request_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Start the app host again for an existing record.",
+          "properties": {
+            "action": {
+              "const": "resume",
+              "type": "string"
+            },
+            "name": {
+              "description": "Orchestrator name.",
+              "type": "string"
+            },
+            "request_id": {
+              "description": "Home-assigned correlation id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "request_id",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OrchestratorError": {
+      "description": "A typed orchestrator failure.\n\n`message` and `detail` are redacted by the sender: neither carries a local path, a port,\na password, a pairing link or a secret value.",
+      "properties": {
+        "code": {
+          "description": "Machine-readable code, for example `node_offline`, `refused` or `spawn_failed`.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable message; never a secret value or an absolute local path.",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "Whether retrying the same command may succeed.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "OrchestratorNodeState": {
+      "description": "Lifecycle state of an orchestrator.\n\nThe first three states are the v0.2 home states. The v0.4 local-node states add\n`node_offline` (the record exists but the node that runs the app is unreachable) and\n`failed` (the node refused or lost the app). `starting` covers the window between the\nhome sending a start command and the node accepting it.",
+      "oneOf": [
+        {
+          "const": "starting",
+          "description": "The home sent a start command and is waiting for the node's result.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "The app host is running.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "The app host was stopped by the owner.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "The node is reachable but the app is not healthy.",
+          "type": "string"
+        },
+        {
+          "const": "node_offline",
+          "description": "The node that runs the app is offline, degraded or revoked.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The node refused the command or the app could not start.",
+          "type": "string"
+        }
+      ]
+    },
+    "OrchestratorResult": {
+      "description": "One agent -> home orchestrator command result.\n\nExactly one of `error` and a successful `accepted` result describes the outcome; `state`\nis the node's resulting record state. The agent never sends a port, a password, an\nabsolute local path or a secret value.",
+      "properties": {
+        "accepted": {
+          "description": "Whether the node accepted and applied the command.",
+          "type": "boolean"
+        },
+        "detail": {
+          "description": "Redacted explanation for the owner; never a path or a secret value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrchestratorError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed failure, when the command was refused or failed."
+        },
+        "request_id": {
+          "description": "Request id from the matching [`OrchestratorCommand`].",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/OrchestratorNodeState",
+          "description": "Resulting lifecycle state of the orchestrator on the node."
+        }
+      },
+      "required": [
+        "request_id",
+        "accepted",
+        "state"
+      ],
+      "type": "object"
+    },
     "PathRef": {
       "description": "A project-relative path the agent resolves locally.\n\nThe wire form is one short string: `project:vowp`, `worktree:vowp/<job>` or\n`subdir:vowp/src`. Parsing rejects `..`, absolute paths, backslashes, NUL, an empty\nproject and an empty subdirectory, and normalises repeated `/` and `.` components.",
       "type": "string"
@@ -2960,6 +3169,34 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "run_id",
         "job",
         "worktree"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OrchestratorCommand",
+      "description": "Home -> agent: create, stop or resume one local orchestrator.\n\nThe frame carries no port, password, pairing link, absolute local path or secret\nvalue. The agent materializes the local record and answers with\n[`Self::OrchestratorResult`], correlated by `request_id`.",
+      "properties": {
+        "type": {
+          "const": "orchestrator_command",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OrchestratorResult",
+      "description": "Agent -> home: the result of one [`Self::OrchestratorCommand`].\n\nThe result carries the resulting state and a typed error or a redacted detail; it\nnever carries a port, password, absolute local path or secret value.",
+      "properties": {
+        "type": {
+          "const": "orchestrator_result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
       ],
       "type": "object"
     }

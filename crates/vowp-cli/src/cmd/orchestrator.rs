@@ -53,6 +53,7 @@ pub enum OrchestratorCommand {
 
 /// Arguments for `vowp orchestrator new`.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "For `orchestrator new`, --node <name> names the node that runs the app, not an SSH redirect.")]
 pub struct OrchestratorNewArgs {
     /// Orchestrator name; defaults to the project name, or `orchestrator`.
     #[arg(long, value_name = "NAME")]
@@ -66,9 +67,30 @@ pub struct OrchestratorNewArgs {
     /// Executor to use.
     #[arg(long, value_name = "EXECUTOR")]
     pub executor: Option<String>,
+    /// Node that runs the app; taken from the global `--node` flag, not an SSH redirect.
+    #[arg(skip)]
+    pub node: Option<String>,
     /// Replace an orchestrator with the same name.
     #[arg(long)]
     pub force: bool,
+}
+
+impl OrchestratorArgs {
+    /// Moves the global `--node` value into `orchestrator new`, where it names the
+    /// orchestrator's node instead of an SSH redirect.
+    ///
+    /// Every other `vowp orchestrator` subcommand keeps the global meaning. `cli.rs`
+    /// calls this immediately after parsing and returns the value only when the command
+    /// is `new`.
+    pub fn take_new_node(&mut self, node: Option<String>) -> Option<String> {
+        match &mut self.command {
+            OrchestratorCommand::New(args) => {
+                args.node = node;
+                None
+            }
+            _ => node,
+        }
+    }
 }
 
 /// Arguments carrying only an orchestrator name.
@@ -119,13 +141,22 @@ fn create(
         }),
         None => None,
     };
-    let info = orchestrator.create(&NewOrchestrator {
-        name,
-        project,
-        app,
-        executor,
-        force: args.force,
-    })?;
+    let node = match args.node.as_deref() {
+        Some(value) => Some(vowp_protocol::NodeName::parse(value)?),
+        None => None,
+    };
+    let info = orchestrator
+        .create_on_node(
+            &NewOrchestrator {
+                name,
+                project,
+                app,
+                executor,
+                force: args.force,
+            },
+            node,
+        )
+        .map_err(map_orchestrator_error)?;
     ensure_keeper(ctx, &info)?;
     print_info(ctx, io, &info)
 }
@@ -142,15 +173,29 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator) -> Resul
         writeln!(io.out(), "orchestrators: none")?;
         return Ok(0);
     }
-    writeln!(io.out(), "{:<24} {:<12} {:<10} SESSION", "NAME", "APP", "STATE")?;
+    writeln!(
+        io.out(),
+        "{:<24} {:<12} {:<10} {:<26} NODE",
+        "NAME",
+        "APP",
+        "STATE",
+        "SESSION"
+    )?;
     for info in &infos {
+        let node = info
+            .card
+            .node
+            .as_ref()
+            .map(|node| node.as_str().to_owned())
+            .unwrap_or_else(|| "home".to_owned());
         writeln!(
             io.out(),
-            "{:<24} {:<12} {:<10} {}",
+            "{:<24} {:<12} {:<10} {:<26} {}",
             info.card.name,
             app_name(info.card.app),
             info.card.state,
-            info.card.session_id
+            info.card.session_id,
+            node
         )?;
     }
     Ok(0)
@@ -158,14 +203,14 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator) -> Resul
 
 /// Runs `orchestrator stop`.
 fn stop(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: &str) -> Result<i32, CliError> {
-    orchestrator.stop(name)?;
+    orchestrator.stop(name).map_err(map_orchestrator_error)?;
     let info = orchestrator.info(name)?;
     print_info(ctx, io, &info)
 }
 
 /// Runs `orchestrator resume`.
 fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: &str) -> Result<i32, CliError> {
-    let info = orchestrator.resume(name)?;
+    let info = orchestrator.resume(name).map_err(map_orchestrator_error)?;
     ensure_keeper(ctx, &info)?;
     print_info(ctx, io, &info)
 }
@@ -176,7 +221,7 @@ fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: 
 /// `LeaseGuard` heartbeat keeps the session from becoming stale. It refuses to steal a
 /// lease that another surface has taken over (see `Orchestrator::keep_alive`).
 fn ensure_keeper(ctx: &Ctx, info: &OrchestratorInfo) -> Result<(), CliError> {
-    if info.card.app == OrchestratorApp::Chat {
+    if info.card.app == OrchestratorApp::Chat || info.card.node.is_some() {
         return Ok(());
     }
     let dir = info.dir.clone();
@@ -272,19 +317,43 @@ fn print_info(ctx: &Ctx, io: &mut dyn IoStreams, info: &OrchestratorInfo) -> Res
         print_json(io, &info.card)?;
         return Ok(0);
     }
+    let node = info
+        .card
+        .node
+        .as_ref()
+        .map(|node| format!(", node {node}"))
+        .unwrap_or_default();
     writeln!(
         io.out(),
-        "orchestrator {} ({}, {}) session {}",
+        "orchestrator {} ({}{node}, {}) session {}",
         info.card.name,
         app_name(info.card.app),
         info.card.state,
         info.card.session_id
     )?;
     writeln!(io.out(), "  directory: {}", info.dir.display())?;
+    if let Some(detail) = &info.detail
+        && !detail.is_empty()
+    {
+        writeln!(io.out(), "  detail: {detail}")?;
+    }
     writeln!(io.out(), "  desktop: {}", info.card.join.desktop)?;
     writeln!(io.out(), "  phone: {}", info.card.join.phone)?;
     writeln!(io.out(), "  chat: {}", info.card.join.chat)?;
     Ok(0)
+}
+
+/// Maps a typed core error onto the CLI's exit classes.
+///
+/// `node_offline` is a transport failure (`cli.md` §1.1 exit 7), not a refusal. Every
+/// other core error keeps its own class.
+fn map_orchestrator_error(error: CoreError) -> CliError {
+    match &error {
+        CoreError::Refused(message) if message.to_ascii_lowercase().contains("node_offline") => {
+            CliError::Remote(message.clone())
+        }
+        _ => CliError::Core(error),
+    }
 }
 
 /// Resolves `--project`, accepting a registry name or a checkout path.
@@ -326,10 +395,3 @@ fn app_name(app: OrchestratorApp) -> &'static str {
         OrchestratorApp::Chat => "chat",
     }
 }
-
-// The package root is the workspace root, so Cargo does not auto-discover the
-// `crates/vowp-cli/tests/` directory. Compile the owned integration-style suite as a
-// library test instead; the shared root `Cargo.toml` stays untouched.
-#[cfg(test)]
-#[path = "../../tests/orchestrator.rs"]
-mod integration_tests;

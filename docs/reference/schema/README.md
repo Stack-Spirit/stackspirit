@@ -91,6 +91,10 @@ python3 docs/reference/check-reference.py
 | `NodePresence` | [node-presence.md](node-presence.md) |
 | `NodeStatus` | [node-status.md](node-status.md) |
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
+| `OrchestratorCommand` | [orchestrator-command.md](orchestrator-command.md) |
+| `OrchestratorError` | [orchestrator-error.md](orchestrator-error.md) |
+| `OrchestratorNodeState` | [orchestrator-node-state.md](orchestrator-node-state.md) |
+| `OrchestratorResult` | [orchestrator-result.md](orchestrator-result.md) |
 | `Page` | [page.md](page.md) |
 | `PathRef` | [path-ref.md](path-ref.md) |
 | `Placement` | [placement.md](placement.md) |

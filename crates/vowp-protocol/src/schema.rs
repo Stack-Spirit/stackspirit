@@ -51,8 +51,8 @@ use crate::snapshot::{
     RunningJobCard, SessionSurfaceCard, Snapshot, SupervisorSnapshot,
 };
 use crate::surface::{
-    IngestAck, JoinInstructions, Lease, LeaseStatus, OrchestratorCard, RemoteEvent, RemoteLine, Surface, SurfaceRef,
-    TakeoverReport, TurnGrant,
+    IngestAck, JoinInstructions, Lease, LeaseStatus, OrchestratorCard, OrchestratorCommand, OrchestratorError,
+    OrchestratorNodeState, OrchestratorResult, RemoteEvent, RemoteLine, Surface, SurfaceRef, TakeoverReport, TurnGrant,
 };
 use crate::vault::{SecretInfo, SecretRequest};
 
@@ -114,6 +114,10 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("IngestAck", schema_value::<IngestAck>());
     schemas.insert("TurnGrant", schema_value::<TurnGrant>());
     schemas.insert("OrchestratorCard", schema_value::<OrchestratorCard>());
+    schemas.insert("OrchestratorNodeState", schema_value::<OrchestratorNodeState>());
+    schemas.insert("OrchestratorCommand", schema_value::<OrchestratorCommand>());
+    schemas.insert("OrchestratorResult", schema_value::<OrchestratorResult>());
+    schemas.insert("OrchestratorError", schema_value::<OrchestratorError>());
     schemas.insert("JoinInstructions", schema_value::<JoinInstructions>());
     schemas.insert("Snapshot", schema_value::<Snapshot>());
     schemas.insert("SupervisorSnapshot", schema_value::<SupervisorSnapshot>());

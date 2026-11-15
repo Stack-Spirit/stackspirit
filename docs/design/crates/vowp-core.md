@@ -21,6 +21,8 @@ crates/vowp-core/src/
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
   agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs dispatch.rs result.rs
+  surface/        mod.rs lease.rs native.rs orchestrator.rs mirror.rs opencode_host.rs claude_remote.rs
+                  takeover.rs follow.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs,
                   agent.rs, offload_dispatch.rs, offload_result.rs, offload_e2e.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
@@ -852,6 +854,77 @@ What remains Phase 3/4: the fake node stands in for `vowp-agent`'s `WorktreeMana
 `CoreRunHandler` (their own tests cover creation, reuse and push), the gateway is the in-process
 stdio server rather than the SSH forced command, and the suite stops at `gating` rather than running
 the merge queue. The WSS transport, bundle result, launchd and a separate node user are not built.
+
+### 9.4 Orchestrators on a local node (`surface/orchestrator.rs`)
+
+The v0.2 manager still owns the home-hosted orchestrator: a project-local directory, an app
+config, one surface lease, an optional host and the lease keeper. The v0.4 slice adds the node
+record and the home state machine; the agent-side materialization and app start are the next
+slice (3g).
+
+```rust
+pub trait OrchestratorTransport: Send + Sync {
+    fn send(&self, node: &NodeName, command: &OrchestratorCommand)
+        -> Result<Option<OrchestratorResult>, CoreError>;
+}
+pub struct CommandSpool { /* root, timeout */ }
+pub const COMMAND_RESULT_TIMEOUT: Duration;                        // 5 seconds
+
+pub fn create(&self, req: &NewOrchestrator) -> Result<OrchestratorInfo, CoreError>;               // home
+pub fn create_on_node(&self, req: &NewOrchestrator, node: Option<NodeName>)
+    -> Result<OrchestratorInfo, CoreError>;
+pub fn resume(&self, name: &str) -> Result<OrchestratorInfo, CoreError>;
+pub fn stop(&self, name: &str) -> Result<(), CoreError>;
+pub fn resume_all(&self) -> Result<Vec<OrchestratorInfo>, CoreError>;
+pub fn mark_node_disconnected(&self, node: &NodeName) -> Result<usize, CoreError>;
+pub fn node_reconnected(&self, node: &NodeName) -> Result<Vec<OrchestratorInfo>, CoreError>;
+pub fn apply_result(&self, node: &NodeName, result: &OrchestratorResult)
+    -> Result<Option<OrchestratorInfo>, CoreError>;
+pub fn redact_text(text: &str) -> String;
+```
+
+The persisted `orchestrator.json` now carries `node: Option<NodeName>`,
+`last_request_id: Option<String>`, a typed `state` and an optional redacted `detail`. The card
+exposes `node` and `state`; a node orchestrator card never contains a path, port, token, pair
+link or secret. The session's `cwd` for a node orchestrator is `"."` (project-relative), not a
+home path.
+
+- `create_on_node` validates the node before creating a directory or session: an unknown node
+  is `NotFound`, a pending or revoked node is `Refused`. An active node that is offline gets the
+  home record in `node_offline`; it is never started on the home and receives no command. An
+  online node gets `starting`, a `Start` command and the correlated result (`running` or
+  `failed`).
+- `resume` on a node orchestrator requires an active, online node. Otherwise it writes
+  `node_offline` and returns a `Refused` error whose message starts with `node_offline`; the
+  CLI maps that to exit 7. It never starts a home host and never starts a keeper.
+- `resume_all` never starts a node orchestrator on the home. At startup, an offline node marks
+  a live record `degraded` and leaves it for `node_reconnected`; a `stopped` or `failed` record
+  stays as it is. `node_reconnected` sends `Resume` for a degraded record and `Start` for a
+  `node_offline` record, then applies the result.
+- `mark_node_disconnected` is the gateway hook for a closed authenticated connection: it marks
+  only `starting`, `running` and `degraded` records `degraded`. `apply_result` is the hook for a
+  late `OrchestratorResult`: it matches the node and `last_request_id` and applies the typed
+  state. The gateway wiring is the 3g slice; this slice defines and tests the state machine.
+- `stop` on a node orchestrator sends `Stop` (the agent maps it to `SurfaceDetach`), releases
+  any home lease, writes `stopped` and stops no local host and no agent process.
+- `CommandSpool` is the default transport. It writes the frame under
+  `agent-commands/<node>/<request_id>.json` and waits up to `COMMAND_RESULT_TIMEOUT` for
+  `agent-results/<node>/<request_id>.json`; a result that arrives later is applied by
+  `apply_result`. A timeout leaves the command durably queued and records `starting`. A live
+  gateway drains the outbox; hermetic tests inject a fake transport instead.
+- `redact_text` replaces absolute paths with `<path>` and obvious `key=value` secrets with
+  `<redacted>`, and caps the text at 512 characters. Every result detail and error message
+  passes through it before `orchestrator.json` or a log sees it.
+
+Named tests (in `crates/vowp-cli/tests/orchestrator.rs`): `orchestrator_new_with_a_node_creates_a_card_and_sends_start`,
+`orchestrator_new_refuses_an_unknown_or_revoked_node`,
+`orchestrator_resume_on_an_offline_node_reports_node_offline`,
+`orchestrator_stop_sends_detach_and_releases_the_lease`,
+`orchestrator_disconnect_marks_it_degraded_and_reconnect_resumes`,
+`orchestrator_resume_all_marks_an_offline_node_degraded`,
+`orchestrator_apply_result_correlates_the_late_node_result` and
+`orchestrator_card_contains_no_path_or_secret`. All use a temporary home, a fake app host or
+a fake command transport, and no real tmux, app, network or home directory.
 
 ## 10. `offload` — pure offload eligibility (v0.4 Phase 2)
 

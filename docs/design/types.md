@@ -1449,9 +1449,30 @@ pub struct TurnGrant {
 #[serde(rename_all = "snake_case")]
 pub enum OrchestratorApp { Opencode, ClaudeCode, Chat }
 pub struct JoinInstructions { pub desktop: String, pub phone: String, pub chat: String }
+
+#[serde(rename_all = "snake_case")]
+pub enum OrchestratorNodeState { Starting, Running, Stopped, Degraded, NodeOffline, Failed }
+
 pub struct OrchestratorCard {
     pub name: String, pub session_id: SessionId, pub project: Option<ProjectName>,
-    pub app: OrchestratorApp, pub state: String, pub join: JoinInstructions,
+    pub app: OrchestratorApp, pub state: OrchestratorNodeState,
+    pub node: Option<NodeName>,  // absent on a v0.2 home orchestrator
+    pub join: JoinInstructions,
+}
+
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum OrchestratorCommand {
+    Start { request_id: String, name: String, app: OrchestratorApp,
+            project: Option<ProjectName> },
+    Stop { request_id: String, name: String },
+    Resume { request_id: String, name: String },
+}
+
+pub struct OrchestratorError { pub code: String, pub message: String, pub retryable: bool }
+
+pub struct OrchestratorResult {
+    pub request_id: String, pub accepted: bool, pub state: OrchestratorNodeState,
+    pub error: Option<OrchestratorError>, pub detail: Option<String>,
 }
 
 // Changed enums:
@@ -1694,6 +1715,8 @@ pub enum AgentFrame {
     ResumeOk { runs: Vec<RunResumeResult>, surfaces: Vec<SurfaceResumeResult> },
     PathMapUpdate { map: AgentPathMap },
     Cleanup { run_id: RunId, job: JobId, worktree: PathRef },
+    OrchestratorCommand(OrchestratorCommand),
+    OrchestratorResult(OrchestratorResult),
     Ping,
     Pong,
     Revoked { reason: String },
@@ -1712,8 +1735,8 @@ pub struct TurnSummary {
 `NodeCard` is the redacted read model: it has no path-map field and no secret names. The
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
 snapshot or log. `AgentFrame` covers Phase 0, surface pairing, lease control, the Phase 1
-local-chat stream, the Phase 2 offload assignment/resume frames in §16.8 and the Phase 3
-app-surface frames in §16.12.
+local-chat stream, the Phase 2 offload assignment/resume frames in §16.8, the Phase 3
+app-surface frames in §16.12 and the orchestrator node commands in §16.13.
 `TurnBegin.cwd_ref` is a project-relative [`PathRef`]; the home never receives the Mac's
 absolute working directory. `RemoteLine` wraps the existing v0.2 event, heartbeat and summary
 line with a run id and epoch, and `IngestAck` carries the home-assigned sequence or a
@@ -2029,3 +2052,22 @@ or a secret value. The home checks the call against the surface token scope and 
 session lease before executing the same core path as its own MCP server. `ToolResult` carries
 either `result` or a typed `ToolError` (`code`, `message`, `retryable`), never a free-string
 error, a home secret value or an absolute local path.
+
+### 16.13 v0.4 orchestrator node commands (`surface`)
+
+These are the frames the home uses to create, stop and resume an orchestrator whose app host
+runs on a local node. The command is home → agent and the result is agent → home; both travel
+inside [`crate::agent::AgentFrame`]. The payload types and the card state live in
+`surface` beside [`OrchestratorCard`].
+
+`OrchestratorCommand` carries a home-assigned `request_id`; the agent echoes it in
+`OrchestratorResult` so the home can correlate the answer with the record even when the result
+arrives after the CLI exited. `Start` carries the app and optional project; `Stop` and
+`Resume` carry the orchestrator name. The wire frame adds the outer `type` tag, for example
+`{"type":"orchestrator_command","action":"start","request_id":"…","name":"mac","app":"opencode"}`.
+
+`OrchestratorResult` carries `accepted`, the resulting `OrchestratorNodeState` and either a
+typed `OrchestratorError` (`code`, `message`, `retryable`) or a redacted `detail`. The
+`OrchestratorNodeState` values are `starting|running|stopped|degraded|node_offline|failed`.
+Neither frame carries a port, password, pair link, absolute local path or secret value. The
+home runs the same redaction over a result before it writes `orchestrator.json`.

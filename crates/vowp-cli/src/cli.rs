@@ -123,9 +123,20 @@ impl Parser for Cli {
         let mut args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         record_agent_chat(false);
         inject_agent_chat_id(&mut args);
-        ParsedCli::try_parse_from(args).map(|parsed| Self {
-            global: parsed.global,
-            command: parsed.command,
+        ParsedCli::try_parse_from(args).map(|mut parsed| {
+            // `orchestrator new --node <name>` names the node that runs the app, not an
+            // SSH redirect. Move the global value into the subcommand before
+            // `remote::maybe_run` sees it; every other command keeps the global meaning.
+            let node = parsed.global.node.take();
+            if let Command::Orchestrator(args) = &mut parsed.command {
+                parsed.global.node = args.take_new_node(node);
+            } else {
+                parsed.global.node = node;
+            }
+            Self {
+                global: parsed.global,
+                command: parsed.command,
+            }
         })
     }
 }

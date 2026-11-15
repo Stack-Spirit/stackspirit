@@ -240,6 +240,24 @@ worktree or runs an agent.
   after the job row, and deletes the job if either the placement or brief write fails. `job show`
   adds the placement to human output and to its JSON object; `job ls` is unchanged.
 
+### Orchestrator commands (`cmd/orchestrator.rs`)
+
+The v0.2 `new/ls/stop/resume` handlers keep their home behaviour. The v0.4 slice adds the
+node that runs the app:
+
+- `vowp orchestrator new --app <app> [--node <name>] [--project <p>] [--name <n>]` passes the
+  node to `Orchestrator::create_on_node`. For this one command the global `--node` names the
+  orchestrator's node, not an SSH redirect: `Cli::try_parse_from` moves the parsed global value
+  into `OrchestratorNewArgs.node` before `remote::maybe_run` sees it, and the `new` help footer
+  says so. Every other command keeps the global redirect. A local-node orchestrator never takes
+  a home lease, never starts a home host and never starts a keeper; the home creates the
+  session/card and sends a typed command.
+- `orchestrator ls` adds a `NODE` column (`home` for a v0.2 orchestrator) and the JSON card
+  carries `node` and the typed `state`. `stop`/`resume <name>` read the node from
+  `orchestrator.json`; `resume` on an offline node prints `node_offline` and exits 7.
+- The output is the `OrchestratorCard`; a node card carries no directory, port, token, pair
+  link or secret. Human output prints the orchestrator directory and the card's join text only.
+
 ### Local chat (`chat --agent`)
 
 `vowp chat --agent --session <id> [--executor <exec>] [--node <name>]` runs the Phase 1 local
@@ -382,7 +400,18 @@ temporary repositories and a temporary `VOWP_AGENT_HOME`. The local MCP proxy sl
 `mcp_proxy_refuses_tunnel_and_secret_tools_without_touching_the_socket`,
 `mcp_proxy_returns_home_offline_when_the_socket_is_absent` and
 `mcp_proxy_never_prints_arguments_or_the_socket_path` in `tests/mcp.rs`. They use a temporary
-home with no database and a fake mode-0600 Unix socket.
+home with no database and a fake mode-0600 Unix socket. The local-orchestrator slice adds
+`orchestrator_new_with_a_node_creates_a_card_and_sends_start`,
+`orchestrator_new_refuses_an_unknown_or_revoked_node`,
+`orchestrator_resume_on_an_offline_node_reports_node_offline`,
+`orchestrator_stop_sends_detach_and_releases_the_lease`,
+`orchestrator_disconnect_marks_it_degraded_and_reconnect_resumes`,
+`orchestrator_resume_all_marks_an_offline_node_degraded`,
+`orchestrator_new_on_the_home_node_keeps_the_local_path`,
+`orchestrator_apply_result_correlates_the_late_node_result` and
+`orchestrator_card_contains_no_path_or_secret` in `tests/orchestrator.rs`. They use a
+temporary home, a fake app host and a fake agent command stream; no real app, tmux, network
+or home directory is touched.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

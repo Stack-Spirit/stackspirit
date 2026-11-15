@@ -2827,6 +2827,8 @@ Options:
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
+
+For `orchestrator new`, --node <name> names the node that runs the app, not an SSH redirect.
 ```
 
 #### `vowp orchestrator ls`

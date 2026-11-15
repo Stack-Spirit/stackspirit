@@ -49,6 +49,9 @@ crates/vowp-protocol/
 Its nested `agent::surface` module holds the Phase 3 app-surface frame payloads
 (`SurfaceAttach`, `SurfaceDetach`, `SurfaceEvent`, `SurfaceTurn`, `SurfaceTurnState`,
 `ToolCall`, `ToolResult` and `ToolError`); see rule 16 and types.md §16.12.
+`src/surface.rs` holds the orchestrator card and the v0.4 node-command documents
+(`OrchestratorCard`, `OrchestratorNodeState`, `OrchestratorCommand`, `OrchestratorResult` and
+`OrchestratorError`); see rule 17.
 `src/offload.rs` holds the v0.4 offload wire format (`Placement`, `NodeFallback`,
 `WaitingReason`, `AssignmentPayload`, `RunRejectReason`, `RemoteRunState` and the resume
 records); see rule 15.
@@ -136,7 +139,9 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"IngestAck"`, `"Job"`, `"JobAction"`, `"JobActionResponse"`, `"JobPage"`, `"JobPatch"`,
     `"JoinInstructions"`, `"Lease"`, `"LeaseStatus"`,
     `"LedgerEntry"`, `"Limit"`, `"Loop"`, `"MergeCard"`, `"MigrationCount"`, `"MigrationReport"`, `"NewJob"`,
-    `"Node"`, `"NodePage"`, `"OrchestratorCard"`, `"Page"`, `"Profile"`, `"Project"`, `"ProjectEntry"`,
+    `"Node"`, `"NodePage"`, `"OrchestratorCard"`, `"OrchestratorCommand"`,
+    `"OrchestratorError"`, `"OrchestratorNodeState"`, `"OrchestratorResult"`, `"Page"`, `"Profile"`, `"Project"`,
+    `"ProjectEntry"`,
     `"ProjectSnapshot"`, `"QueueJobCard"`, `"Release"`, `"RemoteEvent"`, `"RemoteLine"`,
     `"ReportFrontMatter"`, `"Run"`, `"RunUsage"`, `"RunningCapacity"`, `"RunningJobCard"`, `"Schedule"`,
     `"SecretInfo"`, `"SecretRequest"`, `"Session"`, `"SessionDetail"`, `"SessionPage"`, `"SessionSwitchRequest"`,
@@ -162,6 +167,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `LeaseRelease`, `LeaseGrant`, `LeaseLost`, `LeaseRevoked`, `TurnBegin`, `TurnGrant`,
     `RemoteLine`, `IngestAck`, `Credit`, `TurnEnd`, `RunLost`, `AssignRun`, `RunAccepted`,
     `RunRejected`, `RunState`, `CancelRun`, `Resume`, `ResumeOk`, `PathMapUpdate`, `Cleanup`,
+    `OrchestratorCommand`, `OrchestratorResult`,
     `Ping`, `Pong`, `Revoked`, `Superseded` and `Error`. `SurfacePair.code` and `SurfaceIssued.token` are secret frame values: never logged,
     echoed or put in a URL. `SurfaceScope` is a transparent string (`session.read:<id>`,
     `fleet.read`, `tool:<name>`); `SurfaceState` is `pending|attached|revoked`; `SurfaceInfo` is
@@ -206,6 +212,18 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     secret value; the home checks the call against the surface token scope and the live lease
     before executing it. `ToolResult` never carries a home secret value or an absolute local
     path, and its failure is the typed `ToolError` rather than a free string.
+
+17. **v0.4 orchestrator node commands.** `OrchestratorNodeState` is
+    `starting|running|stopped|degraded|node_offline|failed`; `OrchestratorCard.state` is that
+    typed value and `OrchestratorCard.node` is `Option<NodeName>` (`None` on a v0.2 home card).
+    `OrchestratorCommand` is the internally tagged (`action`) home → agent payload
+    `start|stop|resume`; every variant carries a home-assigned `request_id`, and `start` also
+    carries the app and optional project. `OrchestratorResult` is the agent → home reply with
+    `request_id`, `accepted`, the resulting state, an optional typed `OrchestratorError`
+    (`code`, `message`, `retryable`) and an optional redacted `detail`. `AgentFrame` adds the
+    newtype variants `OrchestratorCommand` and `OrchestratorResult`; the inner tagged maps are
+    flattened under the outer `type` tag. Neither frame carries a port, password, pair link,
+    absolute local path or secret value.
 
 ## 5. Error enum
 
@@ -293,6 +311,10 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `tool_call_and_result_round_trip` | `tool_call` and `tool_result` round-trip with JSON arguments/results and no absolute local path |
 | `tool_result_error_is_typed` | a failed `tool_result` carries the typed `ToolError` object and rejects a free-string error |
 | `unknown_surface_frame_type_is_rejected` | an unknown surface `type`, a missing field and an unknown turn state all fail |
+| `agent_frame_round_trips_orchestrator_commands_and_results` | `start`, `stop` and `resume` carry the same `request_id`/`name` fields, and accepted/failed results round-trip with their typed error and no absolute path |
+| `orchestrator_node_state_wire_names_are_stable` | all six `OrchestratorNodeState` values serialise to their documented names, display identically and reject an unknown value |
+| `orchestrator_card_carries_its_node_and_typed_state` | a card carries `node` and a typed state, round-trips, and its JSON has no path, token or password |
+| `orchestrator_card_decodes_a_v0_2_row_without_a_node` | a v0.2 card without `node` decodes to `node: None` and its old `running` state |
 
 ## 7. Out of scope / v0.2
 
