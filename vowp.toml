@@ -36,7 +36,7 @@ on_quota = "next_then_probe_back"
 [providers]
 
 [providers.deepseek]
-max_concurrent = 8
+max_concurrent = 1
 
 [harnesses]
 
