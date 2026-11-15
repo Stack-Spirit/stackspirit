@@ -894,7 +894,7 @@ home path.
   home record in `node_offline`; it is never started on the home and receives no command. An
   online node gets `starting`, a `Start` command and the correlated result (`running` or
   `failed`).
-- `resume` on a node orchestrator requires an active, online node. Otherwise it writes
+- `resume` on a remote-node orchestrator requires an active, online node. Otherwise it writes
   `node_offline` and returns a `Refused` error whose message starts with `node_offline`; the
   CLI maps that to exit 7. It never starts a home host and never starts a keeper.
 - `resume_all` never starts a node orchestrator on the home. At startup, an offline node marks
@@ -904,14 +904,19 @@ home path.
 - `mark_node_disconnected` is the gateway hook for a closed authenticated connection: it marks
   only `starting`, `running` and `degraded` records `degraded`. `apply_result` is the hook for a
   late `OrchestratorResult`: it matches the node and `last_request_id` and applies the typed
-  state. The gateway wiring is the 3g slice; this slice defines and tests the state machine.
+  state. `gateway.rs` calls both: a current connection closing calls `mark_node_disconnected`,
+  each heartbeat on an online node calls `node_reconnected`, and an
+  `AgentFrame::OrchestratorResult` calls `apply_result` before publishing the result.
 - `stop` on a node orchestrator sends `Stop` (the agent maps it to `SurfaceDetach`), releases
   any home lease, writes `stopped` and stops no local host and no agent process.
 - `CommandSpool` is the default transport. It writes the frame under
   `agent-commands/<node>/<request_id>.json` and waits up to `COMMAND_RESULT_TIMEOUT` for
   `agent-results/<node>/<request_id>.json`; a result that arrives later is applied by
   `apply_result`. A timeout leaves the command durably queued and records `starting`. A live
-  gateway drains the outbox; hermetic tests inject a fake transport instead.
+  gateway connection drains the outbox at the top of every frame loop, sends
+  `AgentFrame::OrchestratorCommand` on that authenticated connection, and calls
+  `CommandSpool::complete` with the correlated result; a command stays on disk until its result
+  is published, so a reconnect re-sends it. Hermetic tests can inject a fake transport instead.
 - `redact_text` replaces absolute paths with `<path>` and obvious `key=value` secrets with
   `<redacted>`, and caps the text at 512 characters. Every result detail and error message
   passes through it before `orchestrator.json` or a log sees it.

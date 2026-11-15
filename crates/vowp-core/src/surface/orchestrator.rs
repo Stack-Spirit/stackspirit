@@ -162,10 +162,9 @@ pub trait OrchestratorTransport: Send + Sync {
 /// agent-results/<node>/<request_id>.json    one AgentFrame::OrchestratorResult
 /// ```
 ///
-/// The gateway on a live agent connection (wired by the agent-side slice) drains the outbox
-/// and writes the result back. The files carry the same frame the connection carries: no
-/// port, password, pairing link, absolute path or secret value. They are 0600 in a 0700
-/// directory.
+/// A live gateway connection drains the outbox, sends the frame to the agent and writes the
+/// correlated result back. The files carry the same frame the connection carries: no port,
+/// password, pairing link, absolute path or secret value. They are 0600 in a 0700 directory.
 #[derive(Debug, Clone)]
 pub struct CommandSpool {
     root: PathBuf,
@@ -198,6 +197,82 @@ impl CommandSpool {
     fn inbox(&self, node: &NodeName) -> PathBuf {
         self.root.join(INBOX_DIR).join(node.as_str())
     }
+
+    /// Returns the commands waiting for a live connection, oldest request id first.
+    ///
+    /// A command whose result already exists is skipped: the waiting home command or an
+    /// earlier delivery already completed it. A missing outbox is an empty queue.
+    pub fn pending(&self, node: &NodeName) -> Result<Vec<OrchestratorCommand>, CoreError> {
+        let outbox = self.outbox(node);
+        let entries = match fs::read_dir(&outbox) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(CoreError::Io {
+                    path: outbox.display().to_string(),
+                    source,
+                });
+            }
+        };
+        let inbox = self.inbox(node);
+        let mut commands = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| CoreError::Io {
+                path: outbox.display().to_string(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|source| CoreError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+            let frame: AgentFrame = serde_json::from_slice(&bytes)
+                .map_err(|error| CoreError::Invalid(format!("{}: {error}", path.display())))?;
+            let AgentFrame::OrchestratorCommand(command) = frame else {
+                return Err(CoreError::Invalid(format!(
+                    "{} does not contain an orchestrator command",
+                    path.display()
+                )));
+            };
+            if inbox.join(format!("{}.json", command.request_id())).exists() {
+                continue;
+            }
+            commands.push(command);
+        }
+        commands.sort_by(|left, right| left.request_id().cmp(right.request_id()));
+        Ok(commands)
+    }
+
+    /// Publishes one agent result and retires its command.
+    ///
+    /// The result file is written before the command is removed, so an interrupted write
+    /// leaves the command queued for the next connection instead of losing it.
+    pub fn complete(&self, node: &NodeName, result: &OrchestratorResult) -> Result<(), CoreError> {
+        if !safe_request_id(&result.request_id) {
+            return Err(CoreError::Invalid(format!(
+                "invalid orchestrator request id {:?}",
+                result.request_id
+            )));
+        }
+        let inbox = self.inbox(node);
+        create_private_dir(&inbox)?;
+        let result_path = inbox.join(format!("{}.json", result.request_id));
+        write_spool_frame(&result_path, &AgentFrame::OrchestratorResult(result.clone()))?;
+        let _ = fs::remove_file(self.outbox(node).join(format!("{}.json", result.request_id)));
+        Ok(())
+    }
+}
+
+/// Returns whether a request id is a plain file name component.
+fn safe_request_id(request_id: &str) -> bool {
+    !request_id.is_empty()
+        && request_id.len() <= 128
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 impl OrchestratorTransport for CommandSpool {
@@ -207,6 +282,11 @@ impl OrchestratorTransport for CommandSpool {
         create_private_dir(&outbox)?;
         create_private_dir(&inbox)?;
         let request_id = command.request_id();
+        if !safe_request_id(request_id) {
+            return Err(CoreError::Invalid(format!(
+                "invalid orchestrator request id {request_id:?}"
+            )));
+        }
         let command_path = outbox.join(format!("{request_id}.json"));
         let result_path = inbox.join(format!("{request_id}.json"));
         write_spool_frame(&command_path, &AgentFrame::OrchestratorCommand(command.clone()))?;
@@ -296,6 +376,15 @@ pub struct OrchestratorInfo {
     pub detail: Option<String>,
 }
 
+/// What one command send did to the caller's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandDelivery {
+    /// The transport returned a correlated result, which was applied to the state.
+    Applied,
+    /// The command is durably queued for a live gateway; the state is still `starting`.
+    Queued,
+}
+
 /// The orchestrator manager.
 pub struct Orchestrator {
     deps: Deps,
@@ -307,6 +396,20 @@ impl Orchestrator {
     /// Creates a manager over `deps` with the real opencode and Claude Code hosts.
     pub fn new(deps: Deps) -> Self {
         let transport = Arc::new(CommandSpool::new(deps.paths.root()));
+        Self::with_transport(
+            deps,
+            vec![Arc::new(OpencodeHost::default()), Arc::new(ClaudeRemoteHost::default())],
+            transport,
+        )
+    }
+
+    /// Creates a manager that only queues commands for a live gateway to drain.
+    ///
+    /// The gateway uses this for `node_reconnected`: it must not block the connection for
+    /// the full [`COMMAND_RESULT_TIMEOUT`] while the agent runs the command. The result is
+    /// applied later by [`Orchestrator::apply_result`].
+    pub fn new_queued(deps: Deps) -> Self {
+        let transport = Arc::new(CommandSpool::with_timeout(deps.paths.root(), Duration::ZERO));
         Self::with_transport(
             deps,
             vec![Arc::new(OpencodeHost::default()), Arc::new(ClaudeRemoteHost::default())],
@@ -529,7 +632,12 @@ impl Orchestrator {
             project: req.project.clone(),
         };
         let result = self.send_command(&card.name, &command, &mut state);
-        write_state(&dir, &state)?;
+        // A queued command already persisted `starting` and its request id before the
+        // send. Writing this in-memory copy again could overwrite a `degraded` mark that
+        // the gateway wrote when the connection dropped during the wait.
+        if !matches!(&result, Ok(CommandDelivery::Queued)) {
+            write_state(&dir, &state)?;
+        }
         if let Err(error) = result {
             self.deps.log.log(
                 Level::Warn,
@@ -830,9 +938,11 @@ impl Orchestrator {
             }
         };
         let result = self.send_command(&node, &command, state);
-        write_state(dir, state)?;
+        if !matches!(&result, Ok(CommandDelivery::Queued)) {
+            write_state(dir, state)?;
+        }
         match result {
-            Ok(()) => Ok(Some(info_from_state(state.clone(), dir.to_path_buf(), None))),
+            Ok(_) => Ok(Some(info_from_state(state.clone(), dir.to_path_buf(), None))),
             Err(error) => {
                 self.deps.log.log(
                     Level::Warn,
@@ -906,7 +1016,11 @@ impl Orchestrator {
                 }
             };
             match self.send_command(node, &command, &mut state) {
-                Ok(()) => {
+                Ok(CommandDelivery::Queued) => {
+                    // `starting` and the request id are already persisted.
+                    resumed.push(info_from_state(state, dir, None));
+                }
+                Ok(CommandDelivery::Applied) => {
                     write_state(&dir, &state)?;
                     resumed.push(info_from_state(state, dir, None));
                 }
@@ -972,7 +1086,9 @@ impl Orchestrator {
             name: state.name.clone(),
         };
         let result = self.send_command(&node, &command, &mut state);
-        write_state(dir, &state)?;
+        if !matches!(&result, Ok(CommandDelivery::Queued)) {
+            write_state(dir, &state)?;
+        }
         result?;
         if state.state == OrchestratorNodeState::Failed {
             return Err(CoreError::Refused(format!(
@@ -990,15 +1106,17 @@ impl Orchestrator {
         node: &NodeName,
         command: &OrchestratorCommand,
         state: &mut StateFile,
-    ) -> Result<(), CoreError> {
+    ) -> Result<CommandDelivery, CoreError> {
         match self.transport.send(node, command) {
             Ok(Some(result)) => {
                 apply_result_to_state(state, &sanitize_result(result));
-                Ok(())
+                Ok(CommandDelivery::Applied)
             }
             Ok(None) => {
-                state.state = OrchestratorNodeState::Starting;
-                Ok(())
+                // The caller already wrote `starting` before sending. Leave the field as
+                // it is: the gateway may have marked the record `degraded` on a disconnect
+                // while this command waited, and this process must not overwrite that.
+                Ok(CommandDelivery::Queued)
             }
             Err(error) => {
                 state.state = if is_node_offline_error(&error) {
@@ -1021,7 +1139,11 @@ impl Orchestrator {
     }
 
     /// Returns whether `node` is this home.
-    fn is_home_node(&self, node: &NodeName) -> Result<bool, CoreError> {
+    ///
+    /// The home is the local identity in `deps`, or a registry row marked `is_local` (for
+    /// example the `local` row a fresh home creates). A node orchestrator bound to the home
+    /// keeps the home host, lease and keeper path.
+    pub fn is_home_node(&self, node: &NodeName) -> Result<bool, CoreError> {
         if *node == self.deps.node {
             return Ok(true);
         }

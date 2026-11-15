@@ -1,5 +1,5 @@
 //! The stdio gateway: enroll, authenticate, heartbeat, ping, revocation, surface pairing,
-//! local chat and offload dispatch.
+//! local chat, offload dispatch and orchestrator commands.
 //!
 //! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2–§4.3, §6.3, §8.2–§8.3, §12.1 and §12.3.
 //! [`serve`] reads one JSON [`AgentFrame`] per line from stdin and writes one JSON frame per
@@ -15,7 +15,7 @@
 //! connection open so the agent can retry with a fresh code, while an internal store failure
 //! closes it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
@@ -34,6 +34,7 @@ use crate::deps::Deps;
 use crate::error::CoreError;
 use crate::session::remote::{BeginTurn, IngestGrant, IngestSession};
 use crate::surface::lease::{self, AgentLeaseAcquire, AgentLeaseGrant, AgentLeaseHeartbeat, AgentLeaseRelease};
+use crate::surface::orchestrator::{CommandSpool, Orchestrator};
 
 /// Largest accepted frame, in bytes (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -315,6 +316,13 @@ fn run_connection(
     // connection that closes leaves its accepted runs resumable for the grace period.
     if was_current {
         let _ = dispatch::disconnect_node(deps, store, &node, "the agent connection closed", deps.clock.now());
+        if let Err(error) = Orchestrator::new_queued(deps.clone()).mark_node_disconnected(&node) {
+            deps.log.log(
+                Level::Warn,
+                "orchestrator",
+                &format!("cannot mark orchestrators on node {node} degraded: {error}"),
+            );
+        }
     }
     result
 }
@@ -335,7 +343,15 @@ fn run_connection_inner(
     // owns the session log handle, so a fenced run is dropped here and its later frames
     // are answered with `RunLost` instead of being appended.
     let mut chats: BTreeMap<RunId, ChatStream<'_>> = BTreeMap::new();
+    // Orchestrator commands cross the same authenticated connection. The home command
+    // writes the durable spool; this connection drains it and publishes the result back.
+    let orchestrator = Orchestrator::new_queued(deps.clone());
+    let spool = CommandSpool::new(deps.paths.root());
+    let mut sent_commands: BTreeSet<String> = BTreeSet::new();
     loop {
+        if connection_is_current(store, &session.node, &session.connection_id) {
+            drain_orchestrator_commands(writer, &session.node, &spool, &mut sent_commands)?;
+        }
         let frame = match poll_frame(incoming, writer, options.max_frame_bytes)? {
             Polled::Frame(frame) => frame,
             Polled::Timeout => {
@@ -402,6 +418,16 @@ fn run_connection_inner(
                     Some(AGENT_PROTOCOL),
                     &capabilities,
                 )?;
+                // The node is now online at `now`. Queued `Resume`/`Start` commands for a
+                // degraded record go to the spool; the drain at the top of the next loop
+                // sends them on this connection without blocking the heartbeat.
+                if let Err(error) = orchestrator.node_reconnected(&session.node) {
+                    deps.log.log(
+                        Level::Warn,
+                        "orchestrator",
+                        &format!("cannot resume orchestrators on node {}: {error}", session.node),
+                    );
+                }
                 // Dispatch on the heartbeat so the slot count is the node's latest
                 // report. Expired run leases are fenced before they can be resumed.
                 let lost = dispatch::sweep_expired(deps, store, &session.node, now)?;
@@ -837,6 +863,24 @@ fn run_connection_inner(
                     )?;
                 }
             }
+            AgentFrame::OrchestratorResult(result) => {
+                match orchestrator.apply_result(&session.node, &result) {
+                    Ok(Some(_)) => {
+                        // Publish the result for the waiting home command and retire the
+                        // queued command. A late result was already applied above.
+                        spool.complete(&session.node, &result)?;
+                        sent_commands.remove(&result.request_id);
+                    }
+                    Ok(None) => {
+                        // No record has this request id as its latest command. Do not
+                        // publish an unsolicited result file.
+                    }
+                    Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             AgentFrame::Ping => send_frame(writer, &AgentFrame::Pong)?,
             AgentFrame::Pong => {}
             _ => {
@@ -847,6 +891,30 @@ fn run_connection_inner(
             }
         }
     }
+}
+
+/// Sends queued orchestrator commands that this connection has not carried yet.
+///
+/// The spool is the cross-process queue between `vowp orchestrator …` and the gateway.
+/// A command stays on disk until its result is published, so a dropped connection
+/// re-sends it once on the next authenticated connection.
+fn drain_orchestrator_commands(
+    writer: &mut dyn Write,
+    node: &NodeName,
+    spool: &CommandSpool,
+    sent: &mut BTreeSet<String>,
+) -> Result<(), CoreError> {
+    for command in spool.pending(node)? {
+        let request_id = command.request_id().to_owned();
+        if !sent.insert(request_id.clone()) {
+            continue;
+        }
+        if let Err(error) = send_frame(writer, &AgentFrame::OrchestratorCommand(command)) {
+            sent.remove(&request_id);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// The in-flight event window replenished by a `Credit` frame.
