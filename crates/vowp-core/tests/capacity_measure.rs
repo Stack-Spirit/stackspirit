@@ -322,6 +322,40 @@ fn sampler_prunes_old_rows() {
 }
 
 #[test]
+fn sampler_tick_writes_one_rollup_for_the_previous_bucket() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let store = test_store(&root);
+    let deps = test_deps(&root);
+    let base = now();
+    store
+        .insert_host_sample(&host_sample(
+            base.minus(Duration::from_secs(10)),
+            1000,
+            1.0,
+            900,
+            SampleSource::Proc,
+        ))
+        .unwrap();
+
+    assert!(capacity::sample(&deps, &store, base).unwrap().is_some());
+    let previous = base.minus(Duration::from_secs(capacity::ROLLUP_BUCKET_SECS));
+    let rows = store.capacity_rollups_since(previous, 300).unwrap();
+    assert_eq!(rows.len(), 1, "the tick writes exactly one rollup");
+    assert_eq!(rows[0].bucket, previous);
+    assert_eq!(rows[0].samples, 1, "the current bucket's new sample is not in it");
+    assert_eq!(rows[0].mem_available_avg_bytes, 1000);
+    assert_eq!(
+        store
+            .host_samples_since(base.minus(Duration::from_secs(60)))
+            .unwrap()
+            .len(),
+        2,
+        "the tick still writes the raw sample"
+    );
+}
+
+#[test]
 fn capacity_history_buckets_raw_samples_into_five_minute_points() {
     let tmp = tempdir().unwrap();
     let store = test_store(&tmp.path().join("node"));

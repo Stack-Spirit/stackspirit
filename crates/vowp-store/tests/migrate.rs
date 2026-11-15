@@ -471,6 +471,17 @@ fn capacity_rollups_migrates_v6_to_v7_with_a_backup() {
         .count();
     assert_eq!(backups, 1, "the idempotent call wrote no second backup");
 
+    // The shared open path, not only the direct call, migrates a v6 home.
+    {
+        let conn = Connection::open(paths.db_path()).expect("global db");
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); DROP TABLE capacity_rollups; PRAGMA user_version = 6;")
+            .expect("rewind to v6 again");
+    }
+    let opened = Store::open(&paths).expect("open migrates a v6 home");
+    assert_eq!(opened.global_schema_version().expect("version"), 7);
+    let conn = Connection::open(paths.db_path()).expect("migrated db");
+    assert!(table_exists(&conn, "capacity_rollups"));
+
     // An empty home opens directly at v7 with the rollup table.
     let empty = tempfile::tempdir().expect("empty tempdir");
     let empty_paths = NodePaths::new(empty.path());
