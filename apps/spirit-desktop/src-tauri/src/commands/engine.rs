@@ -102,6 +102,23 @@ pub async fn store_key(
     preferences.onboarding_complete = true;
     state.save_engine_preferences(&preferences)?;
 
+    // The sidecar reads stored keys at spawn time. Restart a live bundled engine so the
+    // new key is immediately usable; an external harness keeps its own login.
+    {
+        let mut core = state.core().await;
+        let status = core.engine_status();
+        if matches!(status.choice, EngineChoice::Bundled)
+            && matches!(
+                status.state,
+                EngineState::Ready | EngineState::Degraded { .. } | EngineState::Failed { .. }
+            )
+        {
+            core.stop_engine().await;
+            core.start_engine().await;
+        }
+    }
+    state.apply_saved_model().await;
+
     Ok(KeyStatus {
         provider,
         state: "saved".to_owned(),
@@ -244,7 +261,8 @@ pub async fn restart_engine(state: State<'_, AppState>) -> CommandResult<EngineS
             )
             .with_hint("Use the bundled engine to supervise a process from StackSpirit."));
         }
-        core.restart_engine().await;
+        core.stop_engine().await;
+        core.start_engine().await;
     }
     state.apply_saved_model().await;
     let status = state.core().await.engine_status();

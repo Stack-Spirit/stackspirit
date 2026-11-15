@@ -1,13 +1,18 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
 import type { EngineStatus, ModelChoice } from "../../bridge/wire";
-import { engineWithoutModel, renderEngine } from "./helpers";
+import {
+  engineSetupComplete,
+  needsEngineOnboarding,
+} from "../../domain/engine";
+import { useFleetStore } from "../../state/fleetStore";
+import { engineWith, engineWithoutModel, renderEngine } from "./helpers";
 
 const NOW = "2026-11-14T12:00:00.000Z";
 
@@ -67,6 +72,28 @@ describe("StackSpirit Engine first-run flow", () => {
     } as EngineStatus;
     renderEngine(status);
 
+    expect(screen.queryByTestId("engine-onboarding")).not.toBeInTheDocument();
+    expect(screen.getByTestId("engine-status-card")).toBeInTheDocument();
+  });
+
+  it("a_saved_byok_setup_survives_engine_events", async () => {
+    const saved = {
+      ...engineWithoutModel(),
+      onboarding_complete: true,
+    } as EngineStatus;
+    renderEngine(saved);
+
+    await act(async () => {
+      useFleetStore.getState().applyEvent({
+        kind: "engine",
+        revision: useFleetStore.getState().revision + 1,
+        engine: { ...saved, onboarding_complete: false } as EngineStatus,
+      });
+    });
+
+    const current = useFleetStore.getState().engine;
+    expect(engineSetupComplete(current)).toBe(true);
+    expect(needsEngineOnboarding(current, false)).toBe(false);
     expect(screen.queryByTestId("engine-onboarding")).not.toBeInTheDocument();
     expect(screen.getByTestId("engine-status-card")).toBeInTheDocument();
   });
@@ -139,5 +166,35 @@ describe("StackSpirit Engine first-run flow", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(await screen.findByText(/External harness selected/)).toBeInTheDocument();
     expect(useBundled).not.toHaveBeenCalled();
+  });
+
+  it("engine_status_card_shows_the_bounded_redacted_log_tail", async () => {
+    const user = userEvent.setup();
+    const logs = Array.from({ length: 205 }, (_, index) => `engine line ${index + 1}`);
+    const status = { ...engineWith(), logs } as EngineStatus;
+    renderEngine(status);
+
+    await user.click(screen.getByRole("button", { name: "View logs" }));
+    const dialog = screen.getByRole("dialog", { name: "StackSpirit Engine logs" });
+    expect(within(dialog).getByText("Last 200 redacted lines (maximum 200). Provider keys and full prompts are never written here.")).toBeInTheDocument();
+    expect(within(dialog).getByText("engine line 205")).toBeInTheDocument();
+    expect(within(dialog).queryByText("engine line 1")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("engine line 5")).not.toBeInTheDocument();
+  });
+
+  it("an_external_harness_never_shows_a_stale_bundled_model", () => {
+    const status = engineWith({
+      choice: {
+        type: "external",
+        kind: "opencode",
+        path: "/opt/homebrew/bin/opencode",
+      },
+      state: { state: "stopped" },
+    });
+    expect(status.selected_model?.label).toBe("DeepSeek V4.1 Flash");
+    renderEngine(status);
+
+    expect(screen.getByText("Managed by the external harness")).toBeInTheDocument();
+    expect(screen.queryByText("DeepSeek V4.1 Flash")).not.toBeInTheDocument();
   });
 });

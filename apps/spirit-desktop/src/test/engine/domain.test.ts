@@ -5,6 +5,7 @@ import {
   GATE_NOT_IMPLEMENTED_ASIF,
   GATE_NOT_IMPLEMENTED_LOCAL,
   PHASE3_MILESTONES,
+  engineLogs,
   engineSetupComplete,
   gateActionEnabled,
   gateActionReason,
@@ -66,6 +67,17 @@ describe("engine domain helpers", () => {
       }),
     ).toBe(false);
     expect(gatesProbed(readyLocalGates())).toBe(true);
+  });
+
+  it("engine logs are read structurally and capped again at 200 lines", () => {
+    const logs = Array.from({ length: 205 }, (_, index) => `line ${index + 1}`);
+    const status = { ...engineWith(), logs } as EngineStatus;
+    expect(engineLogs(status)).toHaveLength(200);
+    expect(engineLogs(status)[0]).toBe("line 6");
+    expect(engineLogs(engineWith())).toEqual([]);
+    expect(
+      engineLogs({ ...engineWith(), logs: [1, "safe"] } as unknown as EngineStatus),
+    ).toEqual(["safe"]);
   });
 
   it("models mark included access and context windows", () => {

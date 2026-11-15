@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { Badge, Button, EmptyState, Panel } from "../../components";
+import { Badge, Button, EmptyState, Modal, Panel } from "../../components";
 import type {
   EngineStatus,
   ExternalHarness,
@@ -11,6 +11,7 @@ import type {
 } from "../../bridge/wire";
 import { toSpiritError } from "../../bridge/errors";
 import {
+  engineLogs,
   gatesProbed,
   includedModels,
   needsEngineOnboarding,
@@ -59,6 +60,7 @@ export function EngineView() {
   const [onboardingComplete, setOnboardingComplete] = useState(false);
   const [initialStep, setInitialStep] = useState<1 | 2>(1);
   const [gateDetails, setGateDetails] = useState<GateDetails>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
   const autoProbedHost = useRef<string | null>(null);
   const liveConnection =
     connection.state === "connected" || connection.state === "stale";
@@ -303,6 +305,11 @@ export function EngineView() {
 
   const external = status.choice.type === "external";
   const available = includedModels(models);
+  const logs = engineLogs(status);
+  const probeDisabledReason =
+    liveConnection && connection.host_id
+      ? null
+      : "Connect to a VOWP home before probing capability gates.";
 
   return (
     <div className="view-stack engine-view" data-testid="engine-view">
@@ -353,6 +360,7 @@ export function EngineView() {
             }}
             onUseBundled={() => void handleUseBundled()}
             onDetails={() => setAdvancedOpen(true)}
+            onViewLogs={() => setLogsOpen(true)}
           />
 
           <div className="engine-columns">
@@ -412,7 +420,13 @@ export function EngineView() {
           <Panel
             title="Capability gates"
             actions={
-              <Button variant="secondary" size="sm" onClick={handleProbe}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleProbe}
+                disabled={probeDisabledReason !== null}
+                title={probeDisabledReason ?? undefined}
+              >
                 Re-probe
               </Button>
             }
@@ -437,8 +451,12 @@ export function EngineView() {
                 body="Connect to the VOWP home and re-probe. A gate is never Ready from a version string alone."
                 actionLabel="Probe gates"
                 onAction={handleProbe}
+                actionDisabled={probeDisabledReason !== null}
               />
             )}
+            {probeDisabledReason ? (
+              <p className="gate-reason">{probeDisabledReason}</p>
+            ) : null}
             <p className="muted small">
               A Ready gate still says not implemented in this build while its StackSpirit
               action flag is false. D5 and D6 remain gated until VOWP proves the capability.
@@ -465,6 +483,28 @@ export function EngineView() {
         open={gateDetails !== null}
         onClose={() => setGateDetails(null)}
       />
+
+      <Modal
+        open={logsOpen}
+        title="StackSpirit Engine logs"
+        onClose={() => setLogsOpen(false)}
+      >
+        <p className="muted small">
+          Last {logs.length} redacted lines (maximum 200). Provider keys and full prompts
+          are never written here.
+        </p>
+        {logs.length > 0 ? (
+          <div className="gate-evidence engine-logs" data-testid="engine-logs">
+            {logs.map((line, index) => (
+              <span key={`${index}:${line}`}>{line}</span>
+            ))}
+          </div>
+        ) : (
+          <p className="muted small" data-testid="engine-logs-empty">
+            No engine log lines have been captured yet.
+          </p>
+        )}
+      </Modal>
     </div>
   );
 }

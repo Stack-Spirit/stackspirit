@@ -2,8 +2,9 @@
 //!
 //! The runtime starts only the binary resolved by [`EngineBinaryLocator`] from the
 //! Tauri resource/binary directories. It never resolves the bundled engine from `PATH`.
-//! All HTTP traffic is loopback-only and carries no provider key: key verification uses a
-//! provider inventory read, never a credential write.
+//! All HTTP traffic is loopback-only. Stored BYOK keys reach the child only through its
+//! ephemeral environment (`OPENCODE_AUTH_CONTENT`), never through the engine's auth file
+//! and never through a request URL or log line.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -14,12 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
-use crate::engine::SecretString;
 use crate::engine::runtime::{
     EngineHealth, EngineRuntime, EngineRuntimeInfo, KeyVerification, RuntimeModel,
 };
+use crate::engine::{Keychain, SecretString};
 use crate::error::{SpiritError, SpiritErrorCode, redact};
 
 /// The only host a bundled engine may listen on.
@@ -256,6 +258,7 @@ struct ProcessState {
 pub struct ProcessEngineRuntime {
     locator: EngineBinaryLocator,
     explicit_binary: Option<PathBuf>,
+    key_source: Option<Arc<dyn Keychain>>,
     state: Mutex<ProcessState>,
     logs: Arc<Mutex<EngineLogBuffer>>,
 }
@@ -276,6 +279,7 @@ impl ProcessEngineRuntime {
         Self {
             locator,
             explicit_binary: None,
+            key_source: None,
             state: Mutex::new(ProcessState { child: None }),
             logs: Arc::new(Mutex::new(EngineLogBuffer::default())),
         }
@@ -287,9 +291,18 @@ impl ProcessEngineRuntime {
         Self {
             locator: EngineBinaryLocator::default(),
             explicit_binary: Some(binary),
+            key_source: None,
             state: Mutex::new(ProcessState { child: None }),
             logs: Arc::new(Mutex::new(EngineLogBuffer::default())),
         }
+    }
+
+    /// Supplies the local keychain used to make stored BYOK keys available to the
+    /// child process. Keys are read at spawn time; no key is written to disk.
+    #[must_use]
+    pub fn with_key_source(mut self, keychain: Arc<dyn Keychain>) -> Self {
+        self.key_source = Some(keychain);
+        self
     }
 
     /// Builds a runtime for the installed application.
@@ -313,6 +326,28 @@ impl ProcessEngineRuntime {
     }
 
     fn spawn_process(&self, port: u16) -> Result<EngineRuntimeInfo, SpiritError> {
+        let auth = self.key_source.as_deref().and_then(keychain_auth_content);
+        self.spawn_process_with_auth(port, auth)
+    }
+
+    fn spawn_process_with_auth(
+        &self,
+        port: u16,
+        auth_content: Option<Zeroizing<String>>,
+    ) -> Result<EngineRuntimeInfo, SpiritError> {
+        let (child, info) = self.spawn_child(port, auth_content)?;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .child = Some(child);
+        Ok(info)
+    }
+
+    fn spawn_child(
+        &self,
+        port: u16,
+        auth_content: Option<Zeroizing<String>>,
+    ) -> Result<(Child, EngineRuntimeInfo), SpiritError> {
         let binary = self.resolve_binary()?;
         let port = if port == 0 {
             reserve_loopback_port()?
@@ -325,6 +360,11 @@ impl ProcessEngineRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(auth_content) = auth_content {
+            // The engine reads this as an in-memory auth document. It is an environment
+            // value for the child only; StackSpirit never writes it to a file or a log.
+            Command::env(&mut command, "OPENCODE_AUTH_CONTENT", auth_content.as_str());
+        }
         let mut child = command.spawn().map_err(|error| {
             let detail = redact(&error.to_string());
             SpiritError::new(
@@ -340,16 +380,15 @@ impl ProcessEngineRuntime {
         if let Some(stderr) = child.stderr.take() {
             spawn_log_reader(stderr, "stderr", self.logs.clone());
         }
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .child = Some(child);
-        Ok(EngineRuntimeInfo {
-            pid: Some(pid),
-            port,
-            version: None,
-            binary_path: Some(binary),
-        })
+        Ok((
+            child,
+            EngineRuntimeInfo {
+                pid: Some(pid),
+                port,
+                version: None,
+                binary_path: Some(binary),
+            },
+        ))
     }
 
     fn shutdown_blocking(&self) -> Result<(), SpiritError> {
@@ -432,6 +471,130 @@ impl ProcessEngineRuntime {
         collect_provider_ids(&document, &mut ids);
         Ok(ids)
     }
+
+    fn provider_model(&self, port: u16, provider: &str) -> Option<String> {
+        self.fetch_models(port)
+            .ok()?
+            .into_iter()
+            .find(|model| model.provider == provider)
+            .map(|model| model.id)
+    }
+
+    fn verify_against_engine(&self, port: u16, provider: &str) -> KeyVerification {
+        let Some(model_id) = self.provider_model(port, provider) else {
+            return KeyVerification::Unverified;
+        };
+        let response = match http_request(
+            port,
+            "POST",
+            "/session",
+            Some(b"{}"),
+            Duration::from_secs(3),
+        ) {
+            Ok(response) if (200..300).contains(&response.status) => response,
+            _ => return KeyVerification::Unverified,
+        };
+        let Ok(session) = serde_json::from_slice::<Value>(&response.body) else {
+            return KeyVerification::Unverified;
+        };
+        let Some(session_id) = session.get("id").and_then(Value::as_str) else {
+            return KeyVerification::Unverified;
+        };
+        let model_id = model_id
+            .strip_prefix(&format!("{provider}/"))
+            .unwrap_or(&model_id);
+        let body = json!({
+            "model": {
+                "providerID": provider,
+                "modelID": model_id,
+            },
+            "parts": [{
+                "type": "text",
+                "text": "Reply with OK.",
+            }],
+        })
+        .to_string();
+        let message_path = format!("/session/{session_id}/message");
+        let result = match http_request(
+            port,
+            "POST",
+            &message_path,
+            Some(body.as_bytes()),
+            Duration::from_secs(20),
+        ) {
+            Ok(response) if (200..300).contains(&response.status) => KeyVerification::Verified,
+            Ok(response) if (400..500).contains(&response.status) => KeyVerification::Invalid,
+            _ => KeyVerification::Unverified,
+        };
+        let delete_path = format!("/session/{session_id}");
+        let _ = http_request(port, "DELETE", &delete_path, None, Duration::from_secs(3));
+        result
+    }
+
+    async fn verify_with_secret(&self, provider: &str, secret: &SecretString) -> KeyVerification {
+        let Some(auth_content) = secret_auth_content(provider, secret) else {
+            return KeyVerification::Invalid;
+        };
+        let (child, info) = match self.spawn_child(0, Some(auth_content)) {
+            Ok(spawned) => spawned,
+            Err(_) => return KeyVerification::Unverified,
+        };
+        let mut healthy = false;
+        for _ in 0..20 {
+            if self.probe_health(&info).await.is_ok() {
+                healthy = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let result = if healthy {
+            self.verify_against_engine(info.port, provider)
+        } else {
+            KeyVerification::Unverified
+        };
+        terminate_child(child);
+        result
+    }
+}
+
+fn secret_auth_content(provider: &str, secret: &SecretString) -> Option<Zeroizing<String>> {
+    if provider.trim().is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some(Zeroizing::new(
+        json!({
+            provider: {
+                "type": "api",
+                "key": secret.expose(),
+            }
+        })
+        .to_string(),
+    ))
+}
+
+fn keychain_auth_content(keychain: &dyn Keychain) -> Option<Zeroizing<String>> {
+    let providers = keychain.list().ok()?;
+    let mut entries = serde_json::Map::new();
+    for provider in providers {
+        let Ok(Some(secret)) = keychain.get(&provider) else {
+            continue;
+        };
+        if secret.is_empty() {
+            continue;
+        }
+        entries.insert(
+            provider,
+            json!({
+                "type": "api",
+                "key": secret.expose(),
+            }),
+        );
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(Zeroizing::new(Value::Object(entries).to_string()))
+    }
 }
 
 impl Drop for ProcessEngineRuntime {
@@ -462,16 +625,17 @@ impl EngineRuntime for ProcessEngineRuntime {
         &self,
         port: u16,
         provider: &str,
-        _secret: &SecretString,
+        secret: &SecretString,
     ) -> KeyVerification {
-        // Never send the key to the engine: opencode's auth PUT persists credentials,
-        // which would violate the keychain-only rule. A provider inventory read is the
-        // strongest local check that does not move the secret.
-        match self.provider_ids(port) {
-            Ok(ids) if ids.iter().any(|id| id == provider) => KeyVerification::Unverified,
-            Ok(_) => KeyVerification::Invalid,
-            Err(_) => KeyVerification::Unverified,
+        // A provider inventory read without a key cannot prove access. Exercise the
+        // supplied key on an isolated loopback engine instead: the child receives only
+        // this key through its ephemeral auth environment, makes one minimal model call,
+        // and is terminated. `port` belongs to the supervised engine; verification never
+        // writes the key into that engine's auth store.
+        if self.provider_ids(port).is_err() {
+            return KeyVerification::Unverified;
         }
+        self.verify_with_secret(provider, secret).await
     }
 
     fn logs(&self) -> Vec<String> {
@@ -541,6 +705,16 @@ struct HttpResponse {
 }
 
 fn http_get(port: u16, path: &str) -> Result<HttpResponse, SpiritError> {
+    http_request(port, "GET", path, None, Duration::from_secs(3))
+}
+
+fn http_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    read_timeout: Duration,
+) -> Result<HttpResponse, SpiritError> {
     if !path.starts_with('/') {
         return Err(SpiritError::new(
             SpiritErrorCode::Internal,
@@ -551,17 +725,24 @@ fn http_get(port: u16, path: &str) -> Result<HttpResponse, SpiritError> {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(700))
         .map_err(|error| SpiritError::io("connecting to the local engine", &error))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|error| SpiritError::io("setting the engine read timeout", &error))?;
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| SpiritError::io("setting the engine write timeout", &error))?;
+    let body = body.unwrap_or_default();
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {LOOPBACK_HOST}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {LOOPBACK_HOST}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
     stream
         .write_all(request.as_bytes())
         .map_err(|error| SpiritError::io("writing the engine request", &error))?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .map_err(|error| SpiritError::io("writing the engine request body", &error))?;
+    }
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
     loop {
@@ -838,27 +1019,61 @@ mod tests {
             .is_ok_and(|status| status.success())
     }
 
+    /// Process tests create and execute temporary scripts; running them one at a time
+    /// avoids Linux ETXTBSY races between test threads.
+    static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// A unique executable name prevents a reused temp directory from colliding with a
+    /// fixture named `opencode` written by another test.
+    static FAKE_ENGINE_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     #[cfg(unix)]
     fn write_fake_engine(directory: &Path) -> PathBuf {
-        let path = directory.join("opencode");
+        let sequence = FAKE_ENGINE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = directory.join(format!("opencode-fake-{sequence}"));
         let script = r#"#!/usr/bin/env python3
-import http.server, json, sys
+import http.server, json, os, sys
 port = int(sys.argv[sys.argv.index("--port") + 1])
+try:
+    auth = json.loads(os.getenv("OPENCODE_AUTH_CONTENT", "{}"))
+except Exception:
+    auth = {}
 class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/global/health":
-            payload = {"healthy": True, "version": "1.19.5"}
-        elif self.path == "/provider":
-            payload = {"all": [{"id": "opencode", "models": {"big-pickle": {"name": "Big Pickle", "cost": {"input": 0}}}}], "default": {}, "connected": []}
-        else:
-            self.send_error(404)
-            return
+    def send_json(self, payload, status=200):
         body = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def providers(self):
+        all_providers = [{"id": "opencode", "models": {"big-pickle": {"name": "Big Pickle", "cost": {"input": 0}}}}]
+        if "deepseek" in auth:
+            all_providers.append({"id": "deepseek", "models": {"deepseek-flash": {"name": "DeepSeek Flash", "cost": {"input": 1}}}})
+        return all_providers
+    def do_GET(self):
+        if self.path == "/global/health":
+            self.send_json({"healthy": True, "version": "1.19.5"})
+        elif self.path == "/provider":
+            self.send_json({"all": self.providers(), "default": {}, "connected": list(auth)})
+        else:
+            self.send_error(404)
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length:
+            self.rfile.read(length)
+        if self.path == "/session":
+            self.send_json({"id": "ses_test"})
+        elif self.path.endswith("/message"):
+            key = (auth.get("deepseek") or {}).get("key")
+            if key == "valid-test-key":
+                self.send_json({"ok": True})
+            else:
+                self.send_error(401)
+        else:
+            self.send_error(404)
+    def do_DELETE(self):
+        self.send_json({"ok": True})
     def log_message(self, *args):
         pass
 http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
@@ -886,6 +1101,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         if !python_available() {
             return;
         }
+        let _guard = PROCESS_TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let binary = write_fake_engine(directory.path());
         let runtime = ProcessEngineRuntime::with_binary(binary);
@@ -910,10 +1126,58 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn engine_process_runtime_uses_and_verifies_a_stored_byok_key() {
+        if !python_available() {
+            return;
+        }
+        let _guard = PROCESS_TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().unwrap();
+        let binary = write_fake_engine(directory.path());
+        let keychain = Arc::new(crate::engine::FakeKeychain::new());
+        keychain
+            .set("deepseek", &SecretString::new("valid-test-key"))
+            .unwrap();
+        let runtime = ProcessEngineRuntime::with_binary(binary).with_key_source(keychain);
+        let info = runtime.spawn(0).await.unwrap();
+        let mut healthy = false;
+        for _ in 0..80 {
+            if runtime.probe_health(&info).await.is_ok() {
+                healthy = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(healthy, "fake engine should become healthy");
+        let models = runtime.models(info.port).await.unwrap();
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == "deepseek/deepseek-flash"),
+            "the stored key must reach the sidecar so its provider is usable"
+        );
+
+        let verified = runtime
+            .verify_key(info.port, "deepseek", &SecretString::new("valid-test-key"))
+            .await;
+        assert_eq!(verified, KeyVerification::Verified);
+        let rejected = runtime
+            .verify_key(
+                info.port,
+                "deepseek",
+                &SecretString::new("invalid-test-key"),
+            )
+            .await;
+        assert_eq!(rejected, KeyVerification::Invalid);
+        runtime.shutdown(&info).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn engine_process_runtime_drop_kills_a_live_child() {
         if !python_available() {
             return;
         }
+        let _guard = PROCESS_TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let binary = write_fake_engine(directory.path());
         let runtime = ProcessEngineRuntime::with_binary(binary);

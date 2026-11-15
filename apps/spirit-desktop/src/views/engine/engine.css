@@ -259,6 +259,12 @@
   font-size: var(--text-sm);
 }
 
+.engine-logs {
+  max-height: 45vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 1100px) {
   .engine-columns,
   .engine-status-grid {

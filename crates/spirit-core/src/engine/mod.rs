@@ -125,6 +125,9 @@ pub struct EngineStatus {
     /// True after the user completes the local first-run flow.
     #[serde(default)]
     pub onboarding_complete: bool,
+    /// Bounded, redacted engine log tail for the View logs action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<String>,
 }
 
 impl Default for EngineStatus {
@@ -140,6 +143,7 @@ impl Default for EngineStatus {
             started_at: None,
             last_error: None,
             onboarding_complete: false,
+            logs: Vec::new(),
         }
     }
 }
@@ -206,7 +210,7 @@ impl StackSpiritEngine {
         self.supervisor.start().await
     }
 
-    /// Restarts the engine within its budget.
+    /// Restarts the engine with capped backoff.
     pub async fn restart(&mut self) -> EngineStatus {
         self.supervisor.restart().await
     }
@@ -216,13 +220,13 @@ impl StackSpiritEngine {
         self.supervisor.stop().await
     }
 
-    /// Verifies the catalog against runtime model ids.
+    /// Verifies the catalog against the engine's runtime models.
     #[must_use]
     pub fn verify_catalog(
         &self,
-        runtime_ids: &[String],
+        runtime_models: &[RuntimeModel],
         verified_at: Timestamp,
     ) -> CatalogVerification {
-        self.catalog.verify(runtime_ids, verified_at)
+        self.catalog.verify_runtime(runtime_models, verified_at)
     }
 }

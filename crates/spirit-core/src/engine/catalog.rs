@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{ModelAccess, ModelChoice};
+use crate::engine::{ModelAccess, ModelChoice, RuntimeModel};
 use crate::time::Timestamp;
 
 const BUNDLED_CATALOG: &str = include_str!("../../../../engine/models.json");
@@ -32,9 +32,9 @@ pub struct ModelCatalog {
 /// The result of checking the catalog against a running engine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogVerification {
-    /// Models present at runtime, marked `Included`.
+    /// Models present at runtime. Only free runtime models are marked `Included`.
     pub models: Vec<ModelChoice>,
-    /// True when at least one included model is available.
+    /// True when at least one runtime model is still free.
     pub included_models_available: bool,
 }
 
@@ -45,28 +45,61 @@ impl ModelCatalog {
         Self { entries }
     }
 
-    /// Verifies the catalog against the engine's runtime model ids.
+    /// Verifies the catalog against raw runtime model ids.
     ///
-    /// A model is marked `Included` only when the runtime reports it. The catalog never
-    /// claims a model is available from the build list alone.
+    /// Id-only callers cannot know whether a model still needs a key, so this method is
+    /// retained only for fixture compatibility. Runtime adapters must call
+    /// [`verify_runtime`](Self::verify_runtime), which honours the engine's free flag.
     #[must_use]
     pub fn verify(&self, runtime_ids: &[String], verified_at: Timestamp) -> CatalogVerification {
+        let models = runtime_ids
+            .iter()
+            .map(|id| RuntimeModel {
+                id: id.clone(),
+                provider: String::new(),
+                label: String::new(),
+                context_tokens: None,
+                free: true,
+            })
+            .collect::<Vec<_>>();
+        self.verify_runtime(&models, verified_at)
+    }
+
+    /// Verifies the catalog against the engine's runtime models.
+    ///
+    /// A model is shown only when the runtime reports it. It is marked `Included` only
+    /// when the runtime also reports that it needs no user key; a catalog entry the
+    /// engine now reports as paid becomes `Byok` and never claims `no key`.
+    #[must_use]
+    pub fn verify_runtime(
+        &self,
+        runtime_models: &[RuntimeModel],
+        verified_at: Timestamp,
+    ) -> CatalogVerification {
         let models: Vec<ModelChoice> = self
             .entries
             .iter()
-            .filter(|entry| runtime_ids.iter().any(|id| id == &entry.id))
-            .map(|entry| ModelChoice {
-                id: entry.id.clone(),
-                label: entry.label.clone(),
-                provider: entry.provider.clone(),
-                access: ModelAccess::Included,
-                context_tokens: entry.context_tokens,
-                notes: entry.notes.clone(),
-                verified_at: Some(verified_at),
+            .filter_map(|entry| {
+                let runtime = runtime_models.iter().find(|model| model.id == entry.id)?;
+                Some(ModelChoice {
+                    id: entry.id.clone(),
+                    label: entry.label.clone(),
+                    provider: entry.provider.clone(),
+                    access: if runtime.free {
+                        ModelAccess::Included
+                    } else {
+                        ModelAccess::Byok
+                    },
+                    context_tokens: entry.context_tokens,
+                    notes: entry.notes.clone(),
+                    verified_at: Some(verified_at),
+                })
             })
             .collect();
         CatalogVerification {
-            included_models_available: !models.is_empty(),
+            included_models_available: models
+                .iter()
+                .any(|model| model.access == ModelAccess::Included),
             models,
         }
     }
@@ -112,22 +145,44 @@ pub fn bundled_catalog() -> ModelCatalog {
 mod tests {
     use super::*;
 
+    fn runtime_model(entry: &CatalogEntry, free: bool) -> RuntimeModel {
+        RuntimeModel {
+            id: entry.id.clone(),
+            provider: entry.provider.clone(),
+            label: entry.label.clone(),
+            context_tokens: entry.context_tokens,
+            free,
+        }
+    }
+
     #[test]
     fn engine_bundled_catalog_is_unverified_until_the_runtime_reports_it() {
         let catalog = bundled_catalog();
         assert!(!catalog.entries.is_empty());
         let before = catalog.unverified_choices();
         assert!(before.iter().all(|model| model.verified_at.is_none()));
-        let verification = catalog.verify(&[], Timestamp::now());
+        let verification = catalog.verify_runtime(&[], Timestamp::now());
         assert!(!verification.included_models_available);
         assert!(verification.models.is_empty());
 
-        let first = catalog.entries[0].id.clone();
-        let verification = catalog.verify(std::slice::from_ref(&first), Timestamp::now());
+        let first = &catalog.entries[0];
+        let verification = catalog.verify_runtime(&[runtime_model(first, true)], Timestamp::now());
         assert!(verification.included_models_available);
         assert_eq!(verification.models.len(), 1);
-        assert_eq!(verification.models[0].id, first);
+        assert_eq!(verification.models[0].id, first.id);
+        assert_eq!(verification.models[0].access, ModelAccess::Included);
         assert!(verification.models[0].verified_at.is_some());
+    }
+
+    #[test]
+    fn engine_bundled_catalog_marks_a_now_paid_model_as_byok() {
+        let catalog = bundled_catalog();
+        let first = &catalog.entries[0];
+        let verification = catalog.verify_runtime(&[runtime_model(first, false)], Timestamp::now());
+        assert!(!verification.included_models_available);
+        assert_eq!(verification.models.len(), 1);
+        assert_eq!(verification.models[0].id, first.id);
+        assert_eq!(verification.models[0].access, ModelAccess::Byok);
     }
 
     #[test]

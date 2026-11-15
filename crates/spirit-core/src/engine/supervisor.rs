@@ -11,6 +11,13 @@ use crate::time::{Clock, SystemClock, Timestamp};
 /// The upper bound for an automatic restart delay.
 const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(4);
 
+/// PLAN §8.5.2: the first-run health wait is 10 seconds.
+const DEFAULT_HEALTH_WAIT: Duration = Duration::from_secs(10);
+/// Health polling interval used to spend that budget.
+const DEFAULT_HEALTH_RETRY: Duration = Duration::from_millis(250);
+/// 40 retry intervals plus the initial probe cover the full 10-second budget.
+const DEFAULT_HEALTH_ATTEMPTS: u32 = 41;
+
 /// Supervisor tuning. The production defaults are deliberately conservative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineSupervisorConfig {
@@ -28,10 +35,20 @@ impl Default for EngineSupervisorConfig {
     fn default() -> Self {
         Self {
             restart_budget: 3,
-            health_attempts: 10,
-            retry_delay: Duration::from_millis(250),
+            health_attempts: DEFAULT_HEALTH_ATTEMPTS,
+            retry_delay: DEFAULT_HEALTH_RETRY,
             port: 0,
         }
+    }
+}
+
+impl EngineSupervisorConfig {
+    /// The time a cold start may spend waiting for health before it is failed.
+    #[must_use]
+    pub fn health_wait_budget(&self) -> Duration {
+        self.retry_delay
+            .checked_mul(self.health_attempts.saturating_sub(1))
+            .unwrap_or(DEFAULT_HEALTH_WAIT)
     }
 }
 
@@ -75,16 +92,26 @@ impl EngineSupervisor {
         self
     }
 
-    /// Returns the current status.
+    /// Returns the current status with the bounded log tail attached.
     #[must_use]
     pub fn status(&self) -> EngineStatus {
-        self.status.clone()
+        self.snapshot()
+    }
+
+    /// Clones the stored status and attaches the runtime's redacted log tail.
+    fn snapshot(&self) -> EngineStatus {
+        let mut status = self.status.clone();
+        status.logs = self.runtime.logs();
+        status
     }
 
     /// Selects bundled or external engine.
     pub fn set_choice(&mut self, choice: EngineChoice) {
         if matches!(choice, EngineChoice::External { .. }) {
             self.status.included_models_available = false;
+            // The external harness owns its model access; never show a stale bundled
+            // model as the selected model while it is active.
+            self.status.selected_model = None;
         }
         self.status.choice = choice;
     }
@@ -109,14 +136,14 @@ impl EngineSupervisor {
             self.status.state = EngineState::Stopped;
             self.status.port = None;
             self.status.started_at = None;
-            return self.status.clone();
+            return self.snapshot();
         }
         if self.handle.is_some() {
             if self.status.state == EngineState::Ready {
                 if let Some(info) = self.handle.clone() {
                     self.reverify_selected_model(&info).await;
                 }
-                return self.status.clone();
+                return self.snapshot();
             }
             self.stop_runtime().await;
         }
@@ -130,7 +157,7 @@ impl EngineSupervisor {
                     detail: error.message.clone(),
                 };
                 self.status.last_error = Some(error.message);
-                return self.status.clone();
+                return self.snapshot();
             }
         };
         let mut last_error: Option<SpiritError> = None;
@@ -153,7 +180,7 @@ impl EngineSupervisor {
                     self.status.started_at = Some(self.clock.now());
                     self.status.last_error = None;
                     self.handle = Some(info);
-                    return self.status.clone();
+                    return self.snapshot();
                 }
                 Err(error) => {
                     last_error = Some(error);
@@ -178,11 +205,13 @@ impl EngineSupervisor {
         self.status.last_error = Some(detail);
         self.status.port = None;
         self.status.started_at = None;
-        self.status.clone()
+        self.snapshot()
     }
 
-    /// Restarts within the bounded budget. An exhausted budget leaves the engine
-    /// `Degraded`; it does not fork-bomb retries.
+    /// Restarts within the bounded automatic budget. An exhausted budget leaves the
+    /// engine `Degraded`; it does not fork-bomb retries. The explicit desktop
+    /// Restart/Retry action stops and starts instead, so a user can always request a
+    /// fresh attempt.
     pub async fn restart(&mut self) -> EngineStatus {
         if self.consecutive_failures >= self.config.restart_budget {
             let detail = format!(
@@ -193,7 +222,7 @@ impl EngineSupervisor {
                 detail: detail.clone(),
             };
             self.status.last_error = Some(detail);
-            return self.status.clone();
+            return self.snapshot();
         }
         let backoff = backoff_delay(self.config.retry_delay, self.consecutive_failures);
         if !backoff.is_zero() {
@@ -209,7 +238,7 @@ impl EngineSupervisor {
             if self.status.state != EngineState::NotConfigured {
                 self.status.state = EngineState::Stopped;
             }
-            return self.status.clone();
+            return self.snapshot();
         };
         match self.runtime.probe_health(&info).await {
             Ok(health) => {
@@ -228,7 +257,7 @@ impl EngineSupervisor {
                 self.status.last_error = Some(error.message);
             }
         }
-        self.status.clone()
+        self.snapshot()
     }
 
     /// Stops the engine and clears its port.
@@ -238,7 +267,7 @@ impl EngineSupervisor {
         self.status.port = None;
         self.status.started_at = None;
         self.status.binary_path = None;
-        self.status.clone()
+        self.snapshot()
     }
 
     async fn stop_runtime(&mut self) {
@@ -320,6 +349,28 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn engine_default_health_budget_waits_ten_seconds() {
+        let config = EngineSupervisorConfig::default();
+        assert!(
+            config.health_wait_budget() >= Duration::from_secs(10),
+            "the production health wait must cover PLAN §8.5.2's 10 s budget: {config:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_default_health_budget_tolerates_a_slow_cold_start() {
+        // Ten failed probes exceed the old 2.25 s budget; the production default must
+        // keep waiting and reach the eleventh probe instead of killing the child.
+        let runtime = Arc::new(FakeEngineRuntime::new().with_health_failures(10));
+        let mut supervisor =
+            EngineSupervisor::new(runtime.clone(), EngineSupervisorConfig::default());
+        let status = supervisor.start().await;
+        assert!(matches!(status.state, EngineState::Ready));
+        assert_eq!(runtime.spawns(), 1);
+        assert_eq!(runtime.shutdowns(), 0);
+    }
+
+    #[test]
     fn engine_restart_backoff_caps_and_never_fork_bombs() {
         assert_eq!(backoff_delay(Duration::ZERO, 99), Duration::ZERO);
         assert_eq!(
@@ -353,6 +404,41 @@ mod tests {
         assert!(status.port.is_none());
         assert_eq!(runtime.spawns(), 1);
         assert_eq!(runtime.shutdowns(), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_explicit_restart_after_the_budget_makes_a_fresh_attempt() {
+        let runtime = Arc::new(FakeEngineRuntime::new().with_health_failures(2));
+        let mut supervisor = EngineSupervisor::new(
+            runtime.clone(),
+            EngineSupervisorConfig {
+                restart_budget: 2,
+                health_attempts: 1,
+                retry_delay: Duration::ZERO,
+                port: 0,
+            },
+        );
+        assert!(matches!(
+            supervisor.start().await.state,
+            EngineState::Degraded { .. }
+        ));
+        assert!(matches!(
+            supervisor.restart().await.state,
+            EngineState::Degraded { .. }
+        ));
+        let exhausted = supervisor.restart().await;
+        assert!(matches!(exhausted.state, EngineState::Degraded { .. }));
+        assert!(exhausted.last_error.unwrap().contains("restart budget"));
+        assert_eq!(runtime.spawns(), 2, "the automatic budget stays bounded");
+
+        // The desktop Restart/Retry action uses stop + start, not the automatic path.
+        supervisor.stop().await;
+        let retried = supervisor.start().await;
+        assert!(
+            matches!(retried.state, EngineState::Ready),
+            "the explicit action must spawn again after the budget: {retried:?}"
+        );
+        assert_eq!(runtime.spawns(), 3);
     }
 
     #[tokio::test]
@@ -391,12 +477,17 @@ mod tests {
                 port: 0,
             },
         );
+        supervisor.select_model(model_choice("opencode/big-pickle"));
         supervisor.set_choice(EngineChoice::External {
             path: std::path::PathBuf::from("/opt/example/bin/opencode"),
             kind: crate::engine::ExternalHarnessKind::Opencode,
         });
         let status = supervisor.start().await;
         assert!(matches!(status.state, EngineState::Stopped));
+        assert!(
+            status.selected_model.is_none(),
+            "the external harness owns model access; a bundled model must not stay selected"
+        );
         assert_eq!(runtime.spawns(), 0);
     }
 

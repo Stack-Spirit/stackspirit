@@ -111,7 +111,14 @@ describe("gate state lifecycle", () => {
     await act(async () => {
       useFleetStore.getState().setConnection(disconnected());
     });
-    await user.click(screen.getByRole("button", { name: "Re-probe" }));
+    const reprobe = screen.getByRole("button", { name: "Re-probe" });
+    const probeGates = screen.getByRole("button", { name: "Probe gates" });
+    expect(reprobe).toBeDisabled();
+    expect(probeGates).toBeDisabled();
+    expect(
+      screen.getByText("Connect to a VOWP home before probing capability gates."),
+    ).toBeInTheDocument();
+    await user.click(reprobe);
     expect(probe).not.toHaveBeenCalled();
   });
 });

@@ -56,9 +56,15 @@ impl AppState {
         let hosts: Arc<dyn HostStore> = host_store;
         let known_hosts = app_data_dir.join("known_hosts");
 
+        let keychain: Arc<dyn Keychain> = Arc::new(
+            OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
+        );
+
         // The bundled choice resolves only the sidecar next to the application binary or
-        // in its resource directory. It never consults PATH.
-        let runtime: Arc<dyn EngineRuntime> = Arc::new(ProcessEngineRuntime::for_current_exe());
+        // in its resource directory. It never consults PATH. Stored BYOK keys are read
+        // from the same keychain and passed to the child through its ephemeral env only.
+        let runtime: Arc<dyn EngineRuntime> =
+            Arc::new(ProcessEngineRuntime::for_current_exe().with_key_source(keychain.clone()));
         let engine = EngineSupervisor::new(runtime.clone(), EngineSupervisorConfig::default());
         let preferences = JsonEnginePreferences::new(app_data_dir.join("engine.json"));
         let saved = preferences.load().unwrap_or_default();
@@ -66,9 +72,6 @@ impl AppState {
         core.select_engine(saved.choice.clone());
         let events = core.subscribe();
         let connection = core.connection().clone();
-        let keychain: Arc<dyn Keychain> = Arc::new(
-            OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
-        );
 
         Ok((
             Self {
@@ -207,8 +210,9 @@ impl AppState {
             return Vec::new();
         };
         let runtime_models = self.engine_runtime.models(port).await.unwrap_or_default();
-        let ids: Vec<String> = runtime_models.into_iter().map(|model| model.id).collect();
-        self.engine_catalog.verify(&ids, Timestamp::now()).models
+        self.engine_catalog
+            .verify_runtime(&runtime_models, Timestamp::now())
+            .models
     }
 
     pub(crate) fn set_client(&self, client: Option<Arc<dyn VowpClient>>) {

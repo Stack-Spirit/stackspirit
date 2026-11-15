@@ -36,8 +36,10 @@ to install or configure `opencode` in the normal onboarding path.
   its id. An engine build with no included models shows the BYOK empty state instead.
 - **BYOK stays local.** Provider keys go to the OS keychain through the `Keychain`/`SecretStore`
   boundary. Status exposes provider names and states only; keys are zeroized, never logged, never
-  written to fixtures or reports, and never sent to the VPS. Verification is a local provider
-  inventory read; StackSpirit does not persist a key into the engine's auth file.
+  written to fixtures or reports, and never sent to the VPS. Verification exercises the key on an
+  isolated loopback engine with a minimal model call. Stored keys reach the sidecar only through
+  its ephemeral `OPENCODE_AUTH_CONTENT` environment; StackSpirit never writes them into the
+  engine's auth file.
 - **External harnesses are opt-in.** **Scan PATH** checks only the exact names `opencode`, `claude`
   and `claude-code`, probes `--version`, and requires an explicit **Use this installation**. It
   never edits the external configuration and never falls back silently.

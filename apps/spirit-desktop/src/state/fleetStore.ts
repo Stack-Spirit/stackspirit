@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { SpiritBridge } from "../bridge";
 import { toSpiritError, type SpiritError } from "../bridge/errors";
+import { engineSetupComplete } from "../domain/engine";
 import type {
   CapacityTargetView,
   CapacityView,
@@ -223,12 +224,19 @@ export const useFleetStore = create<FleetState>((set, get) => ({
         set({ revision: Math.max(state.revision, event.revision) });
         get().acceptFleet(event.fleet, true);
         break;
-      case "engine":
+      case "engine": {
+        // Engine events are published inside core, before the desktop can add its
+        // persisted first-run flag. A completed local setup must survive them.
+        const engine =
+          engineSetupComplete(state.engine) && !engineSetupComplete(event.engine)
+            ? ({ ...event.engine, onboarding_complete: true } as EngineStatus)
+            : event.engine;
         set({
           revision: Math.max(state.revision, event.revision),
-          engine: event.engine,
+          engine,
         });
         break;
+      }
       case "gates":
         set({ revision: Math.max(state.revision, event.revision), gates: event.gates });
         break;

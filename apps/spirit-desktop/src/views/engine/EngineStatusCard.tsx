@@ -11,6 +11,7 @@ export interface EngineStatusCardProps {
   onChangeModel: () => void;
   onUseBundled: () => void;
   onDetails: () => void;
+  onViewLogs: () => void;
   advancedOpen: boolean;
   onToggleAdvanced: () => void;
 }
@@ -22,6 +23,7 @@ export function EngineStatusCard({
   onChangeModel,
   onUseBundled,
   onDetails,
+  onViewLogs,
   advancedOpen,
   onToggleAdvanced,
 }: EngineStatusCardProps) {
@@ -58,7 +60,11 @@ export function EngineStatusCard({
           </div>
           <div>
             <span className="muted small">Selected model</span>
-            <p>{selectedModelLabel(status)}</p>
+            <p>
+              {external
+                ? "Managed by the external harness"
+                : selectedModelLabel(status)}
+            </p>
           </div>
         </div>
 
@@ -103,6 +109,9 @@ export function EngineStatusCard({
               Use bundled engine
             </Button>
           ) : null}
+          <Button variant="ghost" size="sm" onClick={onViewLogs} disabled={busy}>
+            View logs
+          </Button>
           <Button variant="ghost" size="sm" onClick={onDetails} disabled={busy}>
             Engine details
           </Button>

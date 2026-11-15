@@ -101,6 +101,19 @@ export function selectedModelLabel(status: EngineStatus | null): string {
   return status.selected_model.label || status.selected_model.id;
 }
 
+/**
+ * The bounded, redacted log tail returned with `engine_status`. It is not part of the
+ * D2 bridge interface, so it is read structurally and capped again at the UI boundary.
+ */
+export function engineLogs(status: EngineStatus | null): string[] {
+  if (!status) return [];
+  const raw = (status as { logs?: unknown }).logs;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((line): line is string => typeof line === "string")
+    .slice(-200);
+}
+
 export function modelContextLabel(contextTokens: number | null): string {
   if (contextTokens === null) return "Context window unknown";
   if (contextTokens >= 1_000_000) {
