@@ -16,6 +16,7 @@ pub fn run() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let (state, events) = AppState::new(app_data_dir)?;
@@ -52,8 +53,10 @@ pub fn run() {
             commands::engine::select_external,
             commands::engine::use_bundled,
             commands::engine::restart_engine,
-            commands::gates::gates_get,
-            commands::gates::probe_gates,
+            commands::asif::gates_get_with_build_flags,
+            commands::asif::probe_gates_with_build_flags,
+            commands::asif::asif_export,
+            commands::asif::asif_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running StackSpirit");

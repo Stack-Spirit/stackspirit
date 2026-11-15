@@ -1,7 +1,12 @@
 import type { SpiritBridge } from "./SpiritBridge";
 import type {
   ActionResult,
+  AsifExportOptions,
+  AsifExportResult,
   AsifGate,
+  AsifImportOptions,
+  AsifImportResult,
+  AsifLoss,
   BrakeView,
   CapacityTargetView,
   CapacityView,
@@ -32,6 +37,7 @@ import type {
   NewHostProfile,
   ProjectView,
   RawDocument,
+  SessionCardView,
   SetTargetInput,
   SpiritErrorDto,
   StateEvent,
@@ -39,6 +45,7 @@ import type {
   WireWarning,
   WorkerCardView,
 } from "./wire";
+import { gateActionEnabled, gateActionReason } from "../domain/engine";
 import { parseExecutor } from "../domain/executor";
 
 export const MOCK_SCENARIOS = [
@@ -60,6 +67,13 @@ export const MOCK_SCENARIOS = [
   "engine-ready",
   "engine-no-key",
   "gates-ready",
+  "gate-asif-waiting",
+  "gate-asif-ready-export-only",
+  "gate-asif-ready",
+  "asif-export-losses",
+  "asif-import-warnings",
+  "asif-strict-refusal",
+  "asif-conflict",
   "job-detail-error",
 ] as const;
 
@@ -99,6 +113,55 @@ export interface MockJobAction extends ActionResult {
   reason: string | null;
 }
 
+/** One recorded ASIF call. Preview-only; it never touches a package or a host. */
+export interface MockAsifCall {
+  kind: "export" | "import";
+  session_id: string | null;
+  strict: boolean;
+  allow_loss: boolean;
+  path: string | null;
+}
+
+const ASIF_IMPORTED_SESSION = "01JCF5WQ8ZK3M2V7N4P6R8T0AF";
+
+type MockGateMode = "unknown" | "waiting" | "ready" | "ready-export-only";
+
+const ASIF_EXPORT_LOSSES: AsifLoss[] = [
+  {
+    kind: "cwd-omitted",
+    stage: "translation",
+    scope: "environment",
+    message: "The working directory was omitted from the portable document.",
+  },
+  {
+    kind: "contexts-reconstructed",
+    stage: "normalization",
+    scope: "contexts",
+    message: "Context references were reconstructed from the event log.",
+  },
+];
+
+const ASIF_IMPORT_LOSSES: AsifLoss[] = [
+  {
+    kind: "capture-id-not-preserved",
+    stage: "translation",
+    scope: "native",
+    message: "The source capture identifier was not preserved.",
+  },
+  {
+    kind: "cwd-rebound",
+    stage: "translation",
+    scope: "environment",
+    message: "The working directory was rebound to the target project.",
+  },
+  {
+    kind: "session-id-changed",
+    stage: "translation",
+    scope: "native",
+    message: "The imported session received a new VOWP session id.",
+  },
+];
+
 export class MockBridge implements SpiritBridge {
   readonly kind = "mock" as const;
   readonly preview = true;
@@ -118,6 +181,7 @@ export class MockBridge implements SpiritBridge {
   private failures = 0;
   private backendDown: boolean;
   private actions: MockJobAction[] = [];
+  private asifCalls: MockAsifCall[] = [];
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
 
@@ -172,7 +236,7 @@ export class MockBridge implements SpiritBridge {
       started_at: readyEngine ? now : null,
       last_error: null,
     };
-    this.gateSnapshot = this.makeGates("unknown");
+    this.gateSnapshot = this.makeGates(this.gateMode(false));
     this.inboxItems = this.makeInbox();
   }
 
@@ -617,12 +681,92 @@ export class MockBridge implements SpiritBridge {
   gatesApi = {
     get: async (): Promise<GateSnapshot> => clone(this.gateSnapshot),
     probe: async (): Promise<GateSnapshot> => {
-      this.gateSnapshot = this.makeGates(
-        this.scenario === "gates-ready" ? "ready" : "waiting",
-        this.now(),
-      );
+      this.gateSnapshot = this.makeGates(this.gateMode(true), this.now());
       this.emit({ kind: "gates", revision: this.nextRevision(), gates: clone(this.gateSnapshot) });
       return clone(this.gateSnapshot);
+    },
+  };
+
+  sessionsApi = {
+    list: async (): Promise<SessionCardView[]> =>
+      clone(this.fleetView?.sessions ?? []),
+    exportAsif: async (
+      sessionId: string,
+      options: AsifExportOptions = {},
+    ): Promise<AsifExportResult | null> => {
+      this.requireAsifAction("asif_export");
+      this.validateAsifOptions(options, ["strict", "allowLoss", "path"]);
+      this.requireSessionId(sessionId);
+      const strict = options.strict === true;
+      const allowLoss = options.allowLoss === true;
+      this.recordAsifCall({
+        kind: "export",
+        session_id: sessionId,
+        strict,
+        allow_loss: allowLoss,
+        path: options.path ?? null,
+      });
+      if (this.scenario === "asif-strict-refusal" && strict) {
+        throw errorDto(
+          "refused",
+          "VOWP refused the ASIF export: a blocking or integrity loss was found.",
+          "Review the declared losses, or choose allow-loss explicitly. StackSpirit has no force switch.",
+        );
+      }
+      const losses = ASIF_EXPORT_LOSSES;
+      return {
+        session_id: sessionId,
+        file_name: this.localFileName(sessionId, options.path),
+        bytes: 18342,
+        loss_count: losses.length,
+        losses: clone(losses),
+        unsupported: ["vowp.jobs", "vowp.gates", "vowp.leases", "vowp.project-db"],
+      };
+    },
+    importAsif: async (options: AsifImportOptions = {}): Promise<AsifImportResult | null> => {
+      this.requireAsifAction("asif_import");
+      this.validateAsifOptions(options, ["branch", "strict", "allowLoss", "path"]);
+      if (options.branch !== undefined && options.branch !== null) {
+        const branch = options.branch;
+        if (
+          typeof branch !== "string" ||
+          branch.length === 0 ||
+          branch.length > 200 ||
+          branch.startsWith("-")
+        ) {
+          throw errorDto("invalid_input", "ASIF import branch: must be 1-200 non-whitespace characters");
+        }
+        const invalidChar = [...branch].some((char) => {
+          const code = char.codePointAt(0) ?? 0;
+          return char.trim() === "" || code < 0x20 || code === 0x7f;
+        });
+        if (invalidChar) {
+          throw errorDto("invalid_input", "ASIF import branch: must be 1-200 non-whitespace characters");
+        }
+      }
+      this.recordAsifCall({
+        kind: "import",
+        session_id: null,
+        strict: options.strict === true,
+        allow_loss: options.allowLoss === true,
+        path: options.path ?? null,
+      });
+      if (this.scenario === "asif-conflict") {
+        throw errorDto(
+          "conflict",
+          "The ASIF import conflicts with an existing session's event ids.",
+          "StackSpirit does not retry with a mutated package. Inspect the source session and choose a clean package.",
+        );
+      }
+      const withWarnings = this.scenario === "asif-import-warnings";
+      return {
+        session_id: ASIF_IMPORTED_SESSION,
+        loss_count: ASIF_IMPORT_LOSSES.length,
+        losses: clone(ASIF_IMPORT_LOSSES),
+        warnings: withWarnings ? ["project example-source left null"] : [],
+        unsupported: [],
+        state: "idle",
+      };
     },
   };
 
@@ -631,10 +775,74 @@ export class MockBridge implements SpiritBridge {
   fleet = this.fleetApi;
   engine = this.engineApi;
   gates = this.gatesApi;
+  sessions = this.sessionsApi;
 
   /** Test hook: recorded job actions. */
   recordedActions(): MockJobAction[] {
     return clone(this.actions);
+  }
+
+  /** Test hook: recorded ASIF calls in order. */
+  recordedAsifCalls(): MockAsifCall[] {
+    return clone(this.asifCalls);
+  }
+
+  private recordAsifCall(call: MockAsifCall): void {
+    this.asifCalls = [...this.asifCalls, call];
+  }
+
+  private requireSessionId(sessionId: string): void {
+    if (typeof sessionId !== "string" || !/^[0-9A-HJKMNP-TV-Z]{26}$/.test(sessionId)) {
+      throw errorDto("invalid_input", "session id: must be a 26-character ULID");
+    }
+  }
+
+  private localFileName(sessionId: string, path: string | null | undefined): string {
+    if (!path) return `${sessionId}.asif.zip`;
+    const name = path.split(/[\\/]/).filter(Boolean).pop();
+    if (!name) throw errorDto("invalid_input", "local ASIF package path: must name a file");
+    if (!name.toLowerCase().endsWith(".zip")) {
+      throw errorDto("invalid_input", "local ASIF package path: must end in .zip");
+    }
+    return name;
+  }
+
+  private requireAsifAction(action: "asif_export" | "asif_import"): void {
+    if (gateActionEnabled(this.gateSnapshot, action)) return;
+    throw errorDto(
+      "gate",
+      gateActionReason(this.gateSnapshot, action) || "The ASIF action is unavailable.",
+      "Probe the VOWP home gates, then retry.",
+    );
+  }
+
+  private validateAsifOptions(
+    options: AsifExportOptions | AsifImportOptions,
+    allowed: readonly string[],
+  ): void {
+    for (const key of Object.keys(options)) {
+      if (!allowed.includes(key)) {
+        throw errorDto("invalid_input", `ASIF options: ${key} is not a supported option`);
+      }
+    }
+    for (const key of ["strict", "allowLoss"] as const) {
+      const value = options[key];
+      if (value !== undefined && typeof value !== "boolean") {
+        throw errorDto("invalid_input", `ASIF options: ${key} must be a boolean`);
+      }
+    }
+    if (options.strict === true && options.allowLoss === true) {
+      throw errorDto(
+        "invalid_input",
+        "ASIF options: strict and allowLoss are mutually exclusive",
+      );
+    }
+    const path = options.path;
+    if (path !== undefined && path !== null) {
+      if (typeof path !== "string" || path.length === 0 || path.includes("\u0000")) {
+        throw errorDto("invalid_input", "local ASIF package path: must be a non-empty string");
+      }
+    }
   }
 
   private makeHost(label: string, host: string, now: string): HostProfile {
@@ -781,7 +989,7 @@ export class MockBridge implements SpiritBridge {
         body: null,
         options: [],
       })),
-      sessions: [],
+      sessions: this.makeSessions(),
       orchestrators: [],
       latency: this.latency(),
     };
@@ -1447,45 +1655,100 @@ export class MockBridge implements SpiritBridge {
     ];
   }
 
-  private makeGates(mode: "unknown" | "waiting" | "ready", now = iso(this.nowMs)): GateSnapshot {
-    const localOrchestrator: LocalOrchestratorGate =
-      mode === "ready"
+  private makeSessions(): SessionCardView[] {
+    return [
+      {
+        id: "01MOCKSESSION00000000000000",
+        project: "vowp",
+        job_id: "ss-2-desktop-shell",
+        role: "worker",
+        title: "Desktop shell",
+        state: "active",
+        executor: {
+          raw: "opencode:deepseek/deepseek-flash#max",
+          harness: "opencode",
+          provider: "deepseek",
+          model: "deepseek/deepseek-flash",
+          effort: null,
+          variant: "max",
+          display: "DeepSeek V4.1 Flash · max",
+        },
+        node: "vps",
+        active_surface: null,
+        last_event_at: this.now(),
+      },
+      {
+        id: "01MOCKSESSION00000000000001",
+        project: "vowp",
+        job_id: null,
+        role: null,
+        title: "Imported session",
+        state: "idle",
+        executor: null,
+        node: "vps",
+        active_surface: null,
+        last_event_at: iso(this.nowMs - 120_000),
+      },
+    ];
+  }
+
+  private gateMode(probed: boolean): MockGateMode {
+    switch (this.scenario) {
+      case "gate-asif-waiting":
+        return "waiting";
+      case "gate-asif-ready-export-only":
+        return "ready-export-only";
+      case "gate-asif-ready":
+      case "gates-ready":
+      case "asif-export-losses":
+      case "asif-import-warnings":
+      case "asif-strict-refusal":
+      case "asif-conflict":
+        return "ready";
+      default:
+        return probed ? "waiting" : "unknown";
+    }
+  }
+
+  private makeGates(mode: MockGateMode, now = iso(this.nowMs)): GateSnapshot {
+    const localReady = mode === "ready" || mode === "ready-export-only";
+    const localOrchestrator: LocalOrchestratorGate = localReady
+      ? {
+          state: "ready",
+          agent_protocol: "vowp-agent/1",
+          node: "macbook",
+          capabilities: [
+            "node_card",
+            "offload_status",
+            "surface_start",
+            "surface_attach",
+            "mcp_agent_socket",
+            "orchestrator_new_node",
+            "orchestrator_read",
+          ],
+          evidence: ["synthetic preview evidence"],
+        }
+      : mode === "waiting"
         ? {
-            state: "ready",
-            agent_protocol: "vowp-agent/1",
-            node: "macbook",
-            capabilities: [
-              "node_card",
-              "offload_status",
-              "surface_start",
-              "surface_attach",
-              "mcp_agent_socket",
-              "orchestrator_new_node",
-              "orchestrator_read",
+            state: "waiting_for_vowp_phase3",
+            missing: [
+              "local opencode app host",
+              "surface bridge",
+              "MCP proxy",
+              "orchestrator materialization",
             ],
-            evidence: ["synthetic preview evidence"],
+            detected_version: "0.4.0-mock",
+            evidence: ["vowp agent surface start --help: exit 2"],
           }
-        : mode === "waiting"
-          ? {
-              state: "waiting_for_vowp_phase3",
-              missing: [
-                "local opencode app host",
-                "surface bridge",
-                "MCP proxy",
-                "orchestrator materialization",
-              ],
-              detected_version: "0.4.0-mock",
-              evidence: ["vowp agent surface start --help: exit 2"],
-            }
-          : { state: "unknown" };
+        : { state: "unknown" };
     const asif: AsifGate =
-      mode === "ready"
+      mode === "ready" || mode === "ready-export-only"
         ? {
             state: "ready",
             export: true,
-            import: true,
+            import: mode === "ready",
             detected_version: "0.4.0-mock",
-            evidence: ["synthetic preview evidence"],
+            evidence: ["synthetic preview export/import evidence"],
           }
         : mode === "waiting"
           ? {
@@ -1500,13 +1763,15 @@ export class MockBridge implements SpiritBridge {
       local_orchestrator: localOrchestrator,
       asif,
       local_agent: {
-        state: mode === "ready" ? "connected" : "not_installed",
-        node: mode === "ready" ? "macbook" : null,
-        protocol: mode === "ready" ? "vowp-agent/1" : null,
+        state: localReady ? "connected" : "not_installed",
+        node: localReady ? "macbook" : null,
+        protocol: localReady ? "vowp-agent/1" : null,
         last_heartbeat: null,
         last_error: null,
       },
-      features: { asif_actions: false, local_orchestrator_actions: false },
+      // The D5 preview build ships the flag; a waiting or partial gate still disables
+      // the missing action through `gateActionEnabled`.
+      features: { asif_actions: true, local_orchestrator_actions: false },
     };
   }
 

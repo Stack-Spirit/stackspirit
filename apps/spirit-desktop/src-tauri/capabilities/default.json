@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the StackSpirit main window. No shell permission: the engine sidecar is launched only by Rust.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

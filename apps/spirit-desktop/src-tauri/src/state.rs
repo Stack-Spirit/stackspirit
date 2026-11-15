@@ -8,9 +8,9 @@ use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
-    EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateSnapshot, HostGateCache,
-    JsonEnginePreferences, Keychain, ModelCatalog, ModelChoice, OsKeychain, ProcessEngineRuntime,
-    bundled_catalog,
+    EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateFeatureFlags, GateSnapshot,
+    HostGateCache, JsonEnginePreferences, Keychain, ModelCatalog, ModelChoice, OsKeychain,
+    ProcessEngineRuntime, bundled_catalog,
 };
 use spirit_core::error::SpiritError;
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
@@ -22,6 +22,35 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use crate::error::CommandResult;
 
 const KEYCHAIN_SERVICE: &str = "com.stackspirit.desktop";
+
+/// True only in the D5 build, which ships the ASIF export/import actions.
+pub(crate) const ASIF_ACTIONS_ENABLED: bool = cfg!(feature = "d5");
+
+/// The feature flags this build advertises. D5 flips exactly the ASIF switch; local
+/// orchestrator actions remain off until D6.
+pub(crate) fn build_gate_features() -> GateFeatureFlags {
+    GateFeatureFlags {
+        asif_actions: ASIF_ACTIONS_ENABLED,
+        local_orchestrator_actions: false,
+    }
+}
+
+/// Applies the build feature flags to a gate snapshot from any command path.
+///
+/// The D4 probe deliberately reports conservative defaults. The D5 host overlays this
+/// build's flags at the command boundary so the renderer sees the real build capability
+/// without weakening the probe: a waiting, incompatible, unreachable, or partial gate
+/// still disables its missing action.
+pub(crate) fn with_build_gate_features(mut snapshot: GateSnapshot) -> GateSnapshot {
+    snapshot.features = build_gate_features();
+    snapshot
+}
+
+/// The gate snapshot shown before any probe. It carries the build flags but no
+/// capability claim.
+pub(crate) fn default_gate_snapshot() -> GateSnapshot {
+    with_build_gate_features(GateSnapshot::default())
+}
 
 /// Everything a Tauri command may touch.
 pub struct AppState {
@@ -70,6 +99,7 @@ impl AppState {
         let saved = preferences.load().unwrap_or_default();
         let mut core = SpiritCore::desktop(hosts.clone(), engine, KEYCHAIN_SERVICE);
         core.select_engine(saved.choice.clone());
+        core.set_gates(default_gate_snapshot());
         let events = core.subscribe();
         let connection = core.connection().clone();
 
@@ -218,9 +248,10 @@ impl AppState {
     pub(crate) fn set_client(&self, client: Option<Arc<dyn VowpClient>>) {
         // Every connect, failed connect and disconnect changes the target connection.
         // Cached gate evidence must never survive across that boundary: clear the
-        // in-memory cache and publish the default snapshot so no view keeps a Ready.
+        // in-memory cache and publish the build's default snapshot so no view keeps a
+        // Ready. The ASIF action flag stays on in the D5 build; the gate is Unknown.
         self.gate_cache.clear();
-        self.connection.publish_gates(GateSnapshot::default());
+        self.connection.publish_gates(default_gate_snapshot());
         *self
             .client
             .lock()

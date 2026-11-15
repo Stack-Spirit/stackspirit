@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 spirit-core = { path = "../../../crates/spirit-core", features = ["desktop"] }
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -24,5 +25,6 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = []
+default = ["d5"]
+d5 = []
 custom-protocol = ["tauri/custom-protocol"]

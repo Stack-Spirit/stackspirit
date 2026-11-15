@@ -1,5 +1,9 @@
 import type {
   ActionResult,
+  AsifExportOptions,
+  AsifExportResult,
+  AsifImportOptions,
+  AsifImportResult,
   BridgeCapabilities,
   CapacityTargetView,
   CapacityView,
@@ -23,6 +27,7 @@ import type {
   ModelChoice,
   NewHostProfile,
   RawDocument,
+  SessionCardView,
   SetTargetInput,
   StateEvent,
   WebBridgeStatus,
@@ -118,5 +123,32 @@ export interface SpiritBridge {
   gates: {
     get(): Promise<GateSnapshot>;
     probe(): Promise<GateSnapshot>;
+  };
+
+  /**
+   * Optional read/action surface for VOWP sessions. Present on the desktop and preview
+   * bridges; the read-only Web bridge omits it.
+   *
+   * Every action requires the ASIF gate snapshot to be `ready` for that direction and
+   * `features.asif_actions` to be true. The renderer never receives a remote path,
+   * package bytes, token, or provider key.
+   */
+  sessions?: {
+    /** Sessions from the last snapshot; read-only and never a fresh remote read. */
+    list(): Promise<SessionCardView[]>;
+    /**
+     * Exports one session to a local `.asif.zip`. The host opens the native save dialog
+     * unless `options.path` is supplied, then returns a safe summary. `null` means the
+     * user cancelled the picker; nothing was exported.
+     */
+    exportAsif(
+      sessionId: string,
+      options: AsifExportOptions,
+    ): Promise<AsifExportResult | null>;
+    /**
+     * Imports one local `.asif.zip` as a new idle session. The host opens the native
+     * open dialog unless `options.path` is supplied. `null` means the user cancelled.
+     */
+    importAsif(options: AsifImportOptions): Promise<AsifImportResult | null>;
   };
 }

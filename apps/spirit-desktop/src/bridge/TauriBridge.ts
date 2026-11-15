@@ -5,6 +5,10 @@ import type { SpiritBridge } from "@stackspirit/ui";
 import { toSpiritError } from "@stackspirit/ui";
 import type {
   ActionResult,
+  AsifExportOptions,
+  AsifExportResult,
+  AsifImportOptions,
+  AsifImportResult,
   CapacityTargetView,
   CapacityView,
   ConnectionSnapshot,
@@ -25,6 +29,7 @@ import type {
   ModelChoice,
   NewHostProfile,
   RawDocument,
+  SessionCardView,
   SetTargetInput,
   StateEvent,
 } from "@stackspirit/ui";
@@ -122,5 +127,19 @@ export class TauriBridge implements SpiritBridge {
   gates = {
     get: (): Promise<GateSnapshot> => call("gates_get"),
     probe: (): Promise<GateSnapshot> => call("probe_gates"),
+  };
+
+  sessions = {
+    list: async (): Promise<SessionCardView[]> => {
+      const fleet = await call<FleetView | null>("fleet_get");
+      return fleet?.sessions ?? [];
+    },
+    exportAsif: (
+      sessionId: string,
+      options: AsifExportOptions,
+    ): Promise<AsifExportResult | null> =>
+      call("asif_export", { sessionId, options }),
+    importAsif: (options: AsifImportOptions): Promise<AsifImportResult | null> =>
+      call("asif_import", { options }),
   };
 }

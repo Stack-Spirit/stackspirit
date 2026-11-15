@@ -351,6 +351,69 @@ export interface SessionCardView {
   last_event_at: Timestamp;
 }
 
+/** One declared ASIF information change or omission. It is path-free by contract. */
+export interface AsifLoss {
+  kind: string;
+  stage: string;
+  scope: string | null;
+  message: string;
+}
+
+/**
+ * Strict/allow-loss is mutually exclusive. `strict` and `allowLoss` are the only
+ * loss-policy switches; there is no `allowUnsupported` force switch.
+ */
+export interface AsifExportOptions {
+  strict?: boolean;
+  allowLoss?: boolean;
+  /**
+   * An optional absolute local save path. Desktop callers normally omit it so the
+   * native save dialog chooses the location; a supplied path is validated locally.
+   */
+  path?: string | null;
+}
+
+/** Import has no remote `cwd` selector: the renderer never sends or receives a remote path. */
+export interface AsifImportOptions {
+  branch?: string | null;
+  strict?: boolean;
+  allowLoss?: boolean;
+  /**
+   * An optional absolute local package path. Desktop callers normally omit it so the
+   * native open dialog chooses the file; a supplied path is validated locally.
+   */
+  path?: string | null;
+}
+
+/**
+ * The safe DTO an export returns to the renderer.
+ *
+ * `file_name` is a local basename only. There is deliberately no remote path,
+ * `report_path`, package bytes, token, or provider key.
+ */
+export interface AsifExportResult {
+  session_id: string;
+  file_name: string;
+  bytes: number;
+  loss_count: number;
+  losses: AsifLoss[];
+  unsupported: string[];
+}
+
+/**
+ * The safe DTO an import returns. The imported session is always idle; no turn,
+ * capsule, lease, or job is created.
+ */
+export interface AsifImportResult {
+  session_id: string;
+  loss_count: number;
+  losses: AsifLoss[];
+  /** VOWP reindex warnings (for example a project left null), not declared losses. */
+  warnings: string[];
+  unsupported: string[];
+  state: "idle";
+}
+
 export interface JoinView {
   desktop: string;
   phone: string;
