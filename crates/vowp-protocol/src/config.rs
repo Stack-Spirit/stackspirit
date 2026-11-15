@@ -8,6 +8,7 @@
 //! raw TOML table before decoding. Validation covers the rules in architecture.md §5.3.
 
 use std::collections::{BTreeMap, HashSet};
+use std::net::SocketAddr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -927,6 +928,126 @@ impl VowpConfig {
     }
 }
 
+/// Returns the default WSS listen address (loopback only).
+fn default_wss_listen() -> String {
+    "127.0.0.1:8743".to_owned()
+}
+
+/// Returns the one WSS route.
+fn default_wss_path() -> String {
+    "/agent/v1".to_owned()
+}
+
+/// Returns the default concurrent WSS connection cap.
+fn default_wss_max_connections() -> u32 {
+    64
+}
+
+/// Returns the default WSS frame cap (1 MiB).
+fn default_wss_max_frame_bytes() -> u64 {
+    1_048_576
+}
+
+/// Returns the default WSS handshake timeout in seconds.
+fn default_wss_handshake_timeout_secs() -> u64 {
+    10
+}
+
+/// The optional `[ingress.wss]` table: a loopback WebSocket listener behind the owner's
+/// TLS reverse proxy.
+///
+/// Spec: `docs/design/v0.4/hardening.md` §2.2. TLS and the public port belong to the proxy;
+/// VOWP never terminates TLS, stores a proxy key or binds a non-loopback address. The table
+/// exists so `vowp up` can parse it before starting the listener, and so an operator can see
+/// the deployment in one file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WssIngressConfig {
+    /// Whether `vowp up` starts the loopback listener. Defaults to off.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Loopback socket address the listener binds.
+    #[serde(default = "default_wss_listen")]
+    pub listen: String,
+    /// The single literal route the listener serves.
+    #[serde(default = "default_wss_path")]
+    pub path: String,
+    /// Concurrent accepted connections.
+    #[serde(default = "default_wss_max_connections")]
+    pub max_connections: u32,
+    /// Largest accepted WebSocket message in bytes.
+    #[serde(default = "default_wss_max_frame_bytes")]
+    pub max_frame_bytes: u64,
+    /// Time allowed for the TLS or WebSocket handshake, in seconds.
+    #[serde(default = "default_wss_handshake_timeout_secs")]
+    pub handshake_timeout_secs: u64,
+}
+
+impl Default for WssIngressConfig {
+    /// Matches the serde defaults: disabled, loopback, one route, 64 connections, 1 MiB.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_wss_listen(),
+            path: default_wss_path(),
+            max_connections: default_wss_max_connections(),
+            max_frame_bytes: default_wss_max_frame_bytes(),
+            handshake_timeout_secs: default_wss_handshake_timeout_secs(),
+        }
+    }
+}
+
+impl WssIngressConfig {
+    /// Parses `listen` as a socket address and refuses anything that is not loopback.
+    pub fn listen_addr(&self) -> Result<SocketAddr, ProtocolError> {
+        let addr = self.listen.parse::<SocketAddr>().map_err(|_| {
+            ProtocolError::Config(format!("ingress.wss.listen is not a socket address: {}", self.listen))
+        })?;
+        if !addr.ip().is_loopback() {
+            return Err(ProtocolError::Config(format!(
+                "ingress.wss.listen must be a loopback address, not {}",
+                self.listen
+            )));
+        }
+        Ok(addr)
+    }
+
+    /// Validates the listener settings; an invalid table is refused, never silently used.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.listen_addr()?;
+        if self.path != "/agent/v1" {
+            return Err(ProtocolError::Config(
+                "ingress.wss.path must be exactly \"/agent/v1\"".to_owned(),
+            ));
+        }
+        if self.max_connections == 0 {
+            return Err(ProtocolError::Config(
+                "ingress.wss.max_connections must be at least 1".to_owned(),
+            ));
+        }
+        if self.max_frame_bytes == 0 || self.max_frame_bytes > 16 * 1_048_576 {
+            return Err(ProtocolError::Config(
+                "ingress.wss.max_frame_bytes must be between 1 and 16777216".to_owned(),
+            ));
+        }
+        if self.handshake_timeout_secs == 0 {
+            return Err(ProtocolError::Config(
+                "ingress.wss.handshake_timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The optional `[ingress]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IngressConfig {
+    /// Optional loopback WebSocket ingress behind a reverse proxy.
+    #[serde(default)]
+    pub wss: WssIngressConfig,
+}
+
 /// The node-level configuration file, `~/.vowp/config.toml`.
 ///
 /// It carries the node-wide subset of [`VowpConfig`]: it has no `[project]` table.
@@ -948,6 +1069,9 @@ pub struct NodeFile {
     /// Node-wide capsule settings.
     #[serde(default)]
     pub capsule: CapsuleConfig,
+    /// Optional ingress listeners. WSS is off by default.
+    #[serde(default)]
+    pub ingress: IngressConfig,
 }
 
 impl NodeFile {

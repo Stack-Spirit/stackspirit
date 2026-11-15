@@ -5,8 +5,8 @@
 use pretty_assertions::assert_eq;
 
 use vowp_protocol::config::{
-    Approval, CapsuleConfig, MergeConfig, NodeConfig, NodeFile, OffloadConfig, ProjectConfig, ResultTransport,
-    VowpConfig,
+    Approval, CapsuleConfig, IngressConfig, MergeConfig, NodeConfig, NodeFile, OffloadConfig, ProjectConfig,
+    ResultTransport, VowpConfig, WssIngressConfig,
 };
 use vowp_protocol::{CmdGate, Executor, Gate, JobKind, Placement, ProtocolError};
 
@@ -388,6 +388,115 @@ tail_turns = 4
         NodeFile::from_toml("[node]\nnot_a_key = 1\n").is_err(),
         "unknown node keys are errors"
     );
+}
+
+#[test]
+fn node_file_accepts_the_ingress_wss_table() {
+    let node = NodeFile::from_toml(
+        r#"
+[ingress.wss]
+enabled = false
+listen = "127.0.0.1:8743"
+path = "/agent/v1"
+max_connections = 64
+max_frame_bytes = 1048576
+handshake_timeout_secs = 10
+"#,
+    )
+    .expect("the ingress table parses");
+
+    assert_eq!(node.ingress.wss, WssIngressConfig::default());
+    assert!(!node.ingress.wss.enabled);
+    assert_eq!(node.ingress.wss.listen, "127.0.0.1:8743");
+    assert_eq!(
+        node.ingress.wss.listen_addr().expect("loopback").to_string(),
+        "127.0.0.1:8743"
+    );
+    assert_eq!(node.ingress.wss.path, "/agent/v1");
+    assert_eq!(node.ingress.wss.max_connections, 64);
+    assert_eq!(node.ingress.wss.max_frame_bytes, 1_048_576);
+    assert_eq!(node.ingress.wss.handshake_timeout_secs, 10);
+    node.ingress.wss.validate().expect("the documented table validates");
+
+    // The table is optional and defaults to off; an empty node file has no ingress.
+    assert_eq!(
+        NodeFile::from_toml("").expect("empty node file").ingress,
+        IngressConfig::default()
+    );
+    let enabled = NodeFile::from_toml("[ingress.wss]\nenabled = true\n").expect("minimal ingress table");
+    assert!(
+        enabled.ingress.wss.enabled,
+        "an enabled table needs no other key to parse"
+    );
+    assert_eq!(enabled.ingress.wss.listen, "127.0.0.1:8743");
+    enabled.ingress.wss.validate().expect("defaults validate");
+
+    // A round trip keeps the table and its defaults.
+    let text = toml::to_string_pretty(&node).expect("serialise node file");
+    let reparsed = NodeFile::from_toml(&text).expect("reparse node file");
+    assert_eq!(reparsed, node);
+}
+
+#[test]
+fn node_file_refuses_an_unknown_ingress_field() {
+    let error = NodeFile::from_toml("[ingress.wss]\nnot_a_key = 1\n").expect_err("unknown ingress keys are errors");
+    assert!(error.to_string().contains("not_a_key"), "{error}");
+    let error = NodeFile::from_toml("[ingress]\nnot_a_key = 1\n").expect_err("unknown ingress tables are errors");
+    assert!(error.to_string().contains("not_a_key"), "{error}");
+}
+
+#[test]
+fn ingress_wss_refuses_a_non_loopback_listen() {
+    for listen in ["0.0.0.0:8743", "192.0.2.10:8743", "[::]:8743"] {
+        let table = WssIngressConfig {
+            listen: listen.to_owned(),
+            ..WssIngressConfig::default()
+        };
+        let error = table.validate().expect_err("a non-loopback listen is refused");
+        assert!(error.to_string().contains("loopback"), "{error}");
+    }
+    for listen in ["127.0.0.1:0", "127.0.0.1:8743", "[::1]:8743"] {
+        let table = WssIngressConfig {
+            listen: listen.to_owned(),
+            ..WssIngressConfig::default()
+        };
+        table.validate().expect("loopback listens are accepted");
+    }
+    let not_an_address = WssIngressConfig {
+        listen: "localhost:8743".to_owned(),
+        ..WssIngressConfig::default()
+    };
+    assert!(
+        not_an_address.validate().is_err(),
+        "the listen field is a socket address, not a name"
+    );
+}
+
+#[test]
+fn ingress_wss_refuses_a_second_route_or_a_zero_limit() {
+    let other_path = WssIngressConfig {
+        path: "/health".to_owned(),
+        ..WssIngressConfig::default()
+    };
+    assert!(other_path.validate().is_err(), "there is exactly one route");
+
+    let no_connections = WssIngressConfig {
+        max_connections: 0,
+        ..WssIngressConfig::default()
+    };
+    assert!(no_connections.validate().is_err());
+
+    let no_frames = WssIngressConfig {
+        max_frame_bytes: 0,
+        ..WssIngressConfig::default()
+    };
+    assert!(no_frames.validate().is_err());
+
+    let no_handshake = WssIngressConfig {
+        handshake_timeout_secs: 0,
+        ..WssIngressConfig::default()
+    };
+    assert!(no_handshake.validate().is_err());
 }
 
 #[test]
