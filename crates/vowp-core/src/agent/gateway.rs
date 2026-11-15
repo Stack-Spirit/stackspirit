@@ -24,14 +24,15 @@ use std::time::{Duration, Instant};
 
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Executor, ExecutorRef, IngestAck, Lease, LeaseMode,
-    Level, NodeName, NodeStatus, RemoteLine, RunId, RunPurpose, SessionId, SurfaceId, SurfaceInfo, SurfaceKind,
-    SurfaceState, Timestamp, TurnSummary,
+    LedgerEntry, LedgerKind, Level, NodeName, NodeStatus, RemoteLine, RunId, RunPurpose, SessionId, SurfaceId,
+    SurfaceInfo, SurfaceKind, SurfaceState, Timestamp, TurnSummary,
 };
 use vowp_store::{NodeCredential, Store};
 
 use super::{auth, dispatch, enroll, pair, spool::AgentFrameSpool};
 use crate::deps::Deps;
 use crate::error::CoreError;
+use crate::ledger::Ledger;
 use crate::session::remote::{BeginTurn, IngestGrant, IngestSession};
 use crate::surface::lease::{self, AgentLeaseAcquire, AgentLeaseGrant, AgentLeaseHeartbeat, AgentLeaseRelease};
 use crate::surface::orchestrator::{CommandSpool, Orchestrator};
@@ -547,6 +548,53 @@ fn run_connection_inner(
                         &format!("agent {}", session.node),
                         &format!("surface {} paired for session {}", issued.surface_id, session_id),
                     );
+                    // §4.4: the token-issuing path writes one node-ledger `note` row. The
+                    // detail names the surface, node, prefix and expiry; never the token or
+                    // its hash. A missing audit row does not fail a valid pairing.
+                    let prefix = store
+                        .list_surface_tokens(&issued.surface_id)
+                        .ok()
+                        .and_then(|tokens| {
+                            tokens
+                                .into_iter()
+                                .rev()
+                                .find(|token| token.expires_at == Some(issued.expires_at))
+                                .map(|token| token.prefix)
+                        })
+                        .unwrap_or_default();
+                    let entry = LedgerEntry {
+                        id: None,
+                        ts: now,
+                        kind: LedgerKind::Note,
+                        project: None,
+                        job_id: None,
+                        run_id: None,
+                        session_id: Some(session_id.clone()),
+                        role: None,
+                        provider: None,
+                        harness: None,
+                        model: None,
+                        cost: None,
+                        summary: format!("surface {} paired", issued.surface_id),
+                        detail: serde_json::json!({
+                            "action": "paired",
+                            "surface": issued.surface_id.to_string(),
+                            "node": session.node.as_str(),
+                            "prefix": prefix,
+                            "expires_at": issued.expires_at,
+                        }),
+                    };
+                    if let Err(error) = Ledger::new(deps.clone()).record(store, entry) {
+                        deps.log.log(
+                            Level::Warn,
+                            &format!("agent {}", session.node),
+                            &format!(
+                                "surface {} pairing ledger row failed: {:?}",
+                                issued.surface_id,
+                                error.kind()
+                            ),
+                        );
+                    }
                     send_frame(
                         writer,
                         &AgentFrame::SurfaceIssued {
@@ -864,6 +912,57 @@ fn run_connection_inner(
                         },
                     )?;
                 }
+            }
+            AgentFrame::BundleStart {
+                run_id,
+                epoch,
+                base,
+                head,
+                branch,
+                bytes,
+                sha256,
+            } => match super::result::start_bundle(
+                deps,
+                store,
+                &session.node,
+                &run_id,
+                epoch,
+                &base,
+                &head,
+                &branch,
+                bytes,
+                &sha256,
+                now,
+            ) {
+                Ok(offset) => send_frame(writer, &AgentFrame::BundleAccept { run_id, epoch, offset })?,
+                Err(reason) => send_frame(writer, &AgentFrame::BundleAbort { run_id, epoch, reason })?,
+            },
+            AgentFrame::BundleChunk {
+                run_id,
+                epoch,
+                offset,
+                data,
+            } => {
+                if let Err(reason) =
+                    super::result::append_bundle_chunk(deps, store, &session.node, &run_id, epoch, offset, &data, now)
+                {
+                    send_frame(writer, &AgentFrame::BundleAbort { run_id, epoch, reason })?;
+                }
+            }
+            AgentFrame::BundleEnd {
+                run_id,
+                epoch,
+                bytes,
+                sha256,
+            } => {
+                if let Err(reason) =
+                    super::result::finish_bundle(deps, store, &session.node, &run_id, epoch, bytes, &sha256, now)
+                {
+                    send_frame(writer, &AgentFrame::BundleAbort { run_id, epoch, reason })?;
+                }
+            }
+            AgentFrame::BundleAbort { run_id, epoch, .. } => {
+                super::result::abort_bundle(deps, store, &session.node, &run_id, epoch);
             }
             AgentFrame::OrchestratorResult(result) => {
                 match orchestrator.apply_result(&session.node, &result) {

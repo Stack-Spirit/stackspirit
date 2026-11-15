@@ -1748,6 +1748,12 @@ impl AgentClient {
                         AgentFrame::RunLost { run_id, reason } => driver.handle_run_lost(self, &run_id, &reason),
                         AgentFrame::Cleanup { run_id, job, .. } => driver.handle_cleanup(self, &run_id, &job),
                         AgentFrame::Credit { run_id, count } => driver.handle_credit(&run_id, count),
+                        AgentFrame::BundleAccept { run_id, epoch, offset } => {
+                            driver.handle_bundle_accept(&run_id, epoch, offset)
+                        }
+                        AgentFrame::BundleAbort { run_id, epoch, reason } => {
+                            driver.handle_bundle_abort(&run_id, epoch, &reason)
+                        }
                         AgentFrame::IngestAck {
                             run_id,
                             event_id,

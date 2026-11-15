@@ -450,7 +450,8 @@ pub enum ResultTransport {
     /// Push the job branch from the node; the home fetches and verifies it.
     #[default]
     Push,
-    /// Return a bundle over the agent connection. Phase 4; refused by validation.
+    /// Return a `base..head` git bundle over the agent connection; the home verifies it
+    /// and imports only the verified head.
     Bundle,
 }
 
@@ -505,8 +506,9 @@ pub struct OffloadNodeConfig {
 /// Offload settings from `[offload]`.
 ///
 /// Defaults disabled: every job stays on the home until the owner enables offload and a
-/// project opts in with a placement. Validation rejects a zero fleet or disk cap, a
-/// `node:<name>` fleet default and the Phase 4 `bundle` transport.
+/// project opts in with a placement. Validation rejects a zero fleet or disk cap and a
+/// `node:<name>` fleet default. `result_transport` is `push` by default and `bundle` is the
+/// read-only-node alternative; the two are mutually exclusive per assignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OffloadConfig {
@@ -910,11 +912,6 @@ impl VowpConfig {
         if matches!(&offload.default, Placement::Node { .. }) {
             return Err(ProtocolError::Config(
                 "offload.default must be \"home\" or \"any\"; a node:<name> default is not allowed".to_owned(),
-            ));
-        }
-        if offload.result_transport == ResultTransport::Bundle {
-            return Err(ProtocolError::Config(
-                "offload.result_transport = \"bundle\" is Phase 4, not supported; use \"push\"".to_owned(),
             ));
         }
         for (name, project) in &offload.projects {

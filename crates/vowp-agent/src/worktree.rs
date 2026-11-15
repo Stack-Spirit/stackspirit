@@ -15,13 +15,14 @@
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use vowp_protocol::{AgentPathMap, JobId, MAX_PATH_REF_LEN, PathRef, ProjectName, RunRejectReason};
 
@@ -574,6 +575,113 @@ pub struct PushResult {
     pub head_commit: String,
 }
 
+/// One `base..head` git bundle created from a job worktree.
+///
+/// The bundle is a local staging artifact: its path never crosses the agent channel. Only
+/// [`Self::branch`], [`Self::head`], [`Self::bytes`] and [`Self::sha256`] are sent in
+/// `BundleStart`/`BundleEnd`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobBundle {
+    /// Absolute bundle file path on the node.
+    pub path: PathBuf,
+    /// The bundle's single branch, `job/<id>`.
+    pub branch: String,
+    /// Committed head the bundle returns.
+    pub head: String,
+    /// Bundle size in bytes.
+    pub bytes: u64,
+    /// Lowercase hex SHA-256 of the bundle file.
+    pub sha256: String,
+}
+
+impl JobBundle {
+    /// Returns the bundle size in bytes.
+    pub fn len(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Returns whether the bundle has no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.bytes == 0
+    }
+}
+
+/// Creates exactly one `base..job/<id>` bundle in `dest_dir`.
+///
+/// The command is `git bundle create <file> <base>..job/<id>` in the job worktree: one
+/// ref, no tags and no `--all`. Only committed objects are in the bundle, so a dirty
+/// worktree is allowed and uncommitted files are not returned. The file is written 0600 in
+/// a 0700 directory and hashed as it is read back.
+pub fn create_job_bundle(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    job: &JobId,
+    base: &str,
+    dest_dir: &Path,
+) -> Result<JobBundle, WorktreeError> {
+    validate_commit(base)?;
+    fs::create_dir_all(dest_dir)?;
+    fs::set_permissions(dest_dir, fs::Permissions::from_mode(0o700))?;
+    let path = dest_dir.join("result.gitbundle");
+    remove_if_exists(&path)?;
+    let branch = job_branch(job);
+    let range = format!("{base}..{branch}");
+    let Some(path_text) = path.to_str() else {
+        return Err(WorktreeError::Refused {
+            detail: "the bundle path is not valid UTF-8".to_owned(),
+        });
+    };
+    let output = git.run(worktree, &["bundle", "create", path_text, range.as_str()])?;
+    if !output.success() {
+        return Err(WorktreeError::GitFailed {
+            command: format!("git bundle create {range}"),
+            stderr: output.stderr_tail(),
+        });
+    }
+    let head = run_checked(
+        git,
+        worktree,
+        &["rev-parse", &format!("refs/heads/{branch}")],
+        "git rev-parse",
+    )?;
+    let head = head.stdout.trim().to_ascii_lowercase();
+    if !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WorktreeError::Refused {
+            detail: "the job branch did not resolve to a commit".to_owned(),
+        });
+    }
+    let (bytes, sha256) = hash_file(&path)?;
+    Ok(JobBundle {
+        path,
+        branch,
+        head,
+        bytes,
+        sha256,
+    })
+}
+
+/// Returns the size and lowercase hex SHA-256 of one file.
+fn hash_file(path: &Path) -> Result<(u64, String), WorktreeError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        sha256.push_str(&format!("{byte:02x}"));
+    }
+    Ok((total, sha256))
+}
+
 /// Creates, reuses and cleans one worktree per job.
 pub struct WorktreeManager {
     map: PathMap,
@@ -1063,6 +1171,14 @@ impl Worktree {
             remote: self.remote.clone(),
             head_commit: head,
         })
+    }
+
+    /// Creates exactly one `base..job/<id>` bundle in `dest_dir`.
+    ///
+    /// The slice starts at `base` and carries only this worktree's committed job branch; a
+    /// dirty worktree is allowed, but uncommitted files are not in the bundle.
+    pub fn create_bundle(&self, base: &str, dest_dir: &Path) -> Result<JobBundle, WorktreeError> {
+        create_job_bundle(self.git.as_ref(), &self.path, &self.job, base, dest_dir)
     }
 
     /// Removes this worktree and its `job/<id>` branch.

@@ -15,6 +15,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::PathRef;
+use crate::config::ResultTransport;
 use crate::error::ProtocolError;
 use crate::executor::Executor;
 use crate::ids::{JobId, NodeName, ProjectName, RunId, SessionId};
@@ -190,8 +191,15 @@ pub struct AssignmentPayload {
     ///
     /// The agent compares its push URL (not the fetch URL) with this value and refuses a
     /// mismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the
-    /// agent never logs the raw value.
+    /// agent never logs the raw value. A bundle assignment carries an empty value: it needs
+    /// no git credential and must not push.
     pub remote_url: String,
+    /// How the run returns its result: `push` or `bundle`.
+    ///
+    /// The assignment's value wins for the whole run; the agent and the home never fall
+    /// back to the other transport. An older literal without this field parses as `push`.
+    #[serde(default)]
+    pub result_transport: ResultTransport,
     /// Environment variable names to resolve on the node; never values.
     pub env_names: Vec<String>,
     /// Secret names to resolve on the node; never values.

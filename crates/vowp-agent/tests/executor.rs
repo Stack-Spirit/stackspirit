@@ -11,14 +11,14 @@ use std::time::Duration;
 
 use vowp_agent::RunOutcome as ClientOutcome;
 use vowp_agent::{
-    AcceptedRun, AgentClient, AgentClock, AgentConfig, AgentError, EVENT_WINDOW, FrameRead, FrameStream, HandlerReject,
-    NodeKey, PushStatus, QUARANTINE_FILE, RunHandler, RunSink, RunSummary, Transport,
+    AcceptedRun, AgentClient, AgentClock, AgentConfig, AgentError, EVENT_WINDOW, FrameRead, FrameStream, GitRunner,
+    HandlerReject, NodeKey, PushStatus, QUARANTINE_FILE, RunHandler, RunSink, RunSummary, SystemGit, Transport,
 };
 use vowp_protocol::{
     AGENT_PROTOCOL, Actor, AgentFrame, AgentRole, AssignmentPayload, BuildMode, Cost, EventId, EventSource, EventType,
     Executor, HarnessKind, JobId, NodeName, PathRef, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, RemoteUsage,
-    RunId, RunOutcome, RunPurpose, RunRejectReason, RunResumeResult, SecretName, SessionId, StopReason, Timestamp,
-    Tokens, UsageSource,
+    ResultTransport, RunId, RunOutcome, RunPurpose, RunRejectReason, RunResumeResult, SecretName, SessionId,
+    StopReason, Timestamp, Tokens, UsageSource,
 };
 
 const SESSION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -82,6 +82,14 @@ struct ConnPlan {
     ack: AckMode,
     /// What the home does after the terminal summary.
     end: EndMode,
+    /// Answer `BundleStart` with `BundleAccept`.
+    accept_bundle: bool,
+    /// Accept from the bytes already stored on an earlier connection.
+    resume_bundle: bool,
+    /// Refuse `BundleStart` with this reason.
+    abort_bundle: Option<String>,
+    /// Drop the transport after this many bundle chunks.
+    drop_after_bundle_chunks: Option<usize>,
 }
 
 impl Default for ConnPlan {
@@ -93,6 +101,10 @@ impl Default for ConnPlan {
             lease: LEASE.to_owned(),
             ack: AckMode::AckAll,
             end: EndMode::Summary,
+            accept_bundle: false,
+            resume_bundle: false,
+            abort_bundle: None,
+            drop_after_bundle_chunks: None,
         }
     }
 }
@@ -133,6 +145,8 @@ struct FakeState {
     extras: VecDeque<AgentFrame>,
     spool_check: Option<PathBuf>,
     assignment: Option<AssignmentPayload>,
+    bundle_received: u64,
+    bundle_offsets: Vec<(usize, u64)>,
 }
 
 #[derive(Clone)]
@@ -199,6 +213,14 @@ impl FakeHome {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .assignment = Some(assignment);
     }
+
+    fn bundle_offsets(&self) -> Vec<(usize, u64)> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bundle_offsets
+            .clone()
+    }
 }
 
 impl Transport for FakeHome {
@@ -219,6 +241,7 @@ impl Transport for FakeHome {
             acked_events: 0,
             in_flight: 0,
             conflict_sent: false,
+            bundle_chunks: 0,
         }))
     }
 }
@@ -233,6 +256,7 @@ struct FakeStream {
     acked_events: usize,
     in_flight: u64,
     conflict_sent: bool,
+    bundle_chunks: usize,
 }
 
 impl FakeStream {
@@ -442,6 +466,51 @@ impl FrameStream for FakeStream {
                     self.drop_on_next_send = true;
                 }
             }
+            AgentFrame::BundleStart { run_id, epoch, .. } => {
+                if let Some(reason) = &self.plan.abort_bundle {
+                    self.outbound.push_back(AgentFrame::BundleAbort {
+                        run_id: run_id.clone(),
+                        epoch: *epoch,
+                        reason: reason.clone(),
+                    });
+                } else if self.plan.accept_bundle {
+                    let offset = if self.plan.resume_bundle {
+                        self.shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .bundle_received
+                    } else {
+                        0
+                    };
+                    self.outbound.push_back(AgentFrame::BundleAccept {
+                        run_id: run_id.clone(),
+                        epoch: *epoch,
+                        offset,
+                    });
+                    self.shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .bundle_offsets
+                        .push((self.connection, offset));
+                }
+            }
+            AgentFrame::BundleChunk { data, .. } => {
+                {
+                    let mut state = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.bundle_received = state
+                        .bundle_received
+                        .saturating_add(u64::try_from(data.len() / 2).unwrap_or(u64::MAX));
+                }
+                self.bundle_chunks += 1;
+                if self
+                    .plan
+                    .drop_after_bundle_chunks
+                    .is_some_and(|count| self.bundle_chunks >= count)
+                {
+                    self.drop_on_next_send = true;
+                }
+            }
+            AgentFrame::BundleEnd { .. } => {}
             AgentFrame::TurnEnd { run_id, .. } => {
                 let seq = self.next_seq();
                 self.outbound.push_back(AgentFrame::IngestAck {
@@ -510,6 +579,7 @@ fn assignment_with_lease(_lease: &str) -> AssignmentPayload {
         base_commit: "a".repeat(40),
         remote: "origin".to_owned(),
         remote_url: "https://example.com/vowp.git".to_owned(),
+        result_transport: vowp_protocol::ResultTransport::Push,
         env_names: vec!["API_KEY".to_owned()],
         secret_names: vec![SecretName::parse("API_KEY").expect("secret name")],
         epoch: 1,
@@ -609,6 +679,7 @@ struct HandlerBehavior {
     push_after_events: Option<AgentFrame>,
     wait_for_stop: bool,
     push_after_wait: Option<AgentFrame>,
+    worktree: Option<PathBuf>,
 }
 
 impl Default for HandlerBehavior {
@@ -620,6 +691,7 @@ impl Default for HandlerBehavior {
             push_after_events: None,
             wait_for_stop: false,
             push_after_wait: None,
+            worktree: None,
         }
     }
 }
@@ -665,7 +737,11 @@ impl RunHandler for FakeHandler {
             assignment: assignment.clone(),
             epoch: assignment.epoch,
             cwd: PathBuf::from("/private/tmp/vowp-agent-test/work"),
-            worktree: PathBuf::from("/private/tmp/vowp-agent-test/worktree"),
+            worktree: self
+                .behavior
+                .worktree
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/private/tmp/vowp-agent-test/worktree")),
             project_root: PathBuf::from("/private/tmp/vowp-agent-test/root"),
             reserve_bytes: 5 * 1024 * 1024 * 1024,
         })
@@ -1325,4 +1401,329 @@ fn spool_full_stops_the_run_and_records_the_reason() {
     );
     let events = vowp_agent::spool::spool_dir(&state, &session(), &run()).join(vowp_agent::EVENTS_FILE);
     assert_eq!(std::fs::metadata(events).expect("events file").len(), 0);
+}
+
+#[test]
+fn bundle_result_is_chunked_and_resumed_after_a_disconnect() {
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let repo = repo_dir.path().join("worktree");
+    let git = SystemGit::new();
+    std::fs::create_dir_all(&repo).expect("repo");
+    git_ok(&git, &repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "base"]);
+    let base = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+    git_ok(&git, &repo, &["checkout", "-B", &format!("job/{JOB}")]);
+    // Varied enough that the bundle needs several 256 KiB chunks.
+    let mut seed = 0x1234_5678_9abc_def0u64;
+    let mut text = String::with_capacity(4 * 1024 * 1024);
+    while text.len() < 4 * 1024 * 1024 {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        for byte in seed.to_le_bytes() {
+            text.push(char::from(b'a' + (byte % 26)));
+        }
+    }
+    std::fs::write(repo.join("large.txt"), text).expect("large file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "job work"]);
+    let head = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+
+    let home = FakeHome::new(vec![
+        ConnPlan {
+            send_assignment: true,
+            accept_bundle: true,
+            drop_after_bundle_chunks: Some(1),
+            end: EndMode::Never,
+            ..ConnPlan::default()
+        },
+        ConnPlan {
+            resume: true,
+            resend_assignment: true,
+            accept_bundle: true,
+            resume_bundle: true,
+            ..ConnPlan::default()
+        },
+    ]);
+    let mut assignment = assignment_with_lease(LEASE);
+    assignment.result_transport = ResultTransport::Bundle;
+    assignment.remote_url = String::new();
+    assignment.base_commit = base.clone();
+    home.set_assignment(assignment);
+    let mut run_summary = summary();
+    run_summary.head_commit = Some(head.clone());
+    run_summary.push_status = None;
+    let handler = Arc::new(FakeHandler::new(
+        home.clone(),
+        HandlerBehavior {
+            summary: run_summary,
+            worktree: Some(repo.clone()),
+            ..HandlerBehavior::default()
+        },
+    ));
+    let dir = tempfile::tempdir().expect("state dir");
+    state_dir(dir.path());
+    let mut client = agent_client(dir.path(), home.clone());
+
+    let outcome = run_client(&mut client, &handler);
+    assert!(matches!(outcome, ClientOutcome::Revoked { .. }), "{outcome:?}");
+    assert_eq!(home.connections(), 2, "the first connection dropped mid-transfer");
+
+    let first = home.frames_on(0);
+    let second = home.frames_on(1);
+    let first_start = first
+        .iter()
+        .find_map(|frame| match frame {
+            AgentFrame::BundleStart {
+                base: start_base,
+                head: start_head,
+                branch,
+                sha256,
+                bytes,
+                ..
+            } => Some((
+                start_base.clone(),
+                start_head.clone(),
+                branch.clone(),
+                sha256.clone(),
+                *bytes,
+            )),
+            _ => None,
+        })
+        .expect("first BundleStart");
+    assert_eq!(first_start.0, base);
+    assert_eq!(first_start.1, head);
+    assert_eq!(first_start.2, format!("job/{JOB}"));
+    assert!(first_start.4 > 256 * 1024, "the bundle needs more than one chunk");
+
+    let first_chunks = first
+        .iter()
+        .filter_map(|frame| match frame {
+            AgentFrame::BundleChunk { offset, data, .. } => Some((*offset, data.len() / 2)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_chunks.len(), 1, "the connection dropped after one chunk");
+    assert_eq!(first_chunks[0].0, 0, "the first chunk starts at zero");
+    let stored = first_chunks[0].1 as u64;
+    assert_eq!(stored, 256 * 1024, "one chunk is at most 256 KiB");
+
+    let second_accept = home
+        .bundle_offsets()
+        .into_iter()
+        .find_map(|(connection, offset)| (connection == 1).then_some(offset))
+        .expect("the home accepts the resume");
+    assert_eq!(second_accept, stored, "the home answers with the stored bytes");
+
+    let second_chunks = second
+        .iter()
+        .filter_map(|frame| match frame {
+            AgentFrame::BundleChunk { offset, data, .. } => Some((*offset, data.len() / 2)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!second_chunks.is_empty(), "the transfer continues after the resume");
+    assert_eq!(
+        second_chunks[0].0, stored,
+        "the first resumed chunk starts at the offset"
+    );
+    let mut next = stored;
+    for (offset, len) in &second_chunks {
+        assert_eq!(*offset, next, "chunk offsets stay contiguous");
+        next = next.saturating_add(*len as u64);
+    }
+
+    let end = second
+        .iter()
+        .find_map(|frame| match frame {
+            AgentFrame::BundleEnd { bytes, sha256, .. } => Some((*bytes, sha256.clone())),
+            _ => None,
+        })
+        .expect("one BundleEnd after the resume");
+    assert_eq!(end.0, next, "every bundle byte was sent exactly once");
+    assert_eq!(end.1, first_start.3, "the end digest is the start digest");
+
+    let ends = count_matching(&home.frames(), |frame| matches!(frame, AgentFrame::BundleEnd { .. }));
+    assert_eq!(ends, 1, "the dropped transfer never sent an end");
+    let turn_ends = home
+        .frames()
+        .into_iter()
+        .filter_map(|frame| match frame {
+            AgentFrame::TurnEnd { summary, .. } => Some(summary),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(turn_ends.len(), 1, "one terminal summary after the bundle");
+    assert_eq!(turn_ends[0].outcome, RunOutcome::Ok);
+
+    let bundles = dir.path().join("run-bundles");
+    assert!(
+        !bundles.exists() || std::fs::read_dir(&bundles).expect("bundle dir").next().is_none(),
+        "the local bundle staging file is removed after the summary is acknowledged"
+    );
+}
+
+#[test]
+fn a_home_bundle_abort_fails_the_run_without_chunks() {
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let repo = repo_dir.path().join("worktree");
+    let git = SystemGit::new();
+    std::fs::create_dir_all(&repo).expect("repo");
+    git_ok(&git, &repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "base"]);
+    let base = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+    git_ok(&git, &repo, &["checkout", "-B", &format!("job/{JOB}")]);
+    std::fs::write(repo.join("work.txt"), "work\n").expect("work file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "job work"]);
+    let head = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+
+    let home = FakeHome::new(vec![ConnPlan {
+        send_assignment: true,
+        abort_bundle: Some("bundle_rejected: the reported head is foreign".to_owned()),
+        ..ConnPlan::default()
+    }]);
+    let mut assignment = assignment_with_lease(LEASE);
+    assignment.result_transport = ResultTransport::Bundle;
+    assignment.remote_url = String::new();
+    assignment.base_commit = base;
+    home.set_assignment(assignment);
+    let mut run_summary = summary();
+    run_summary.head_commit = Some(head);
+    run_summary.push_status = None;
+    let handler = Arc::new(FakeHandler::new(
+        home.clone(),
+        HandlerBehavior {
+            summary: run_summary,
+            worktree: Some(repo),
+            ..HandlerBehavior::default()
+        },
+    ));
+    let dir = tempfile::tempdir().expect("state dir");
+    state_dir(dir.path());
+    let mut client = agent_client(dir.path(), home.clone());
+
+    let outcome = run_client(&mut client, &handler);
+    assert!(matches!(outcome, ClientOutcome::Revoked { .. }), "{outcome:?}");
+
+    let frames = home.frames();
+    assert_eq!(
+        count_matching(&frames, |frame| matches!(frame, AgentFrame::BundleChunk { .. })),
+        0,
+        "a refused start sends no chunk"
+    );
+    assert_eq!(
+        count_matching(&frames, |frame| matches!(frame, AgentFrame::BundleEnd { .. })),
+        0
+    );
+    let summary = frames
+        .iter()
+        .find_map(|frame| match frame {
+            AgentFrame::TurnEnd { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("one terminal summary");
+    assert_eq!(summary.outcome, RunOutcome::Error);
+    assert!(
+        summary
+            .result_text
+            .as_deref()
+            .is_some_and(|text| text.starts_with("bundle_rejected:")),
+        "the abort reason is kept: {:?}",
+        summary.result_text
+    );
+}
+
+/// Runs git in `cwd`, asserting success.
+fn git_ok(git: &SystemGit, cwd: &Path, args: &[&str]) {
+    let output = git.run(cwd, args).expect("git");
+    assert!(output.success(), "git {args:?} failed: {}", output.stderr);
+}
+
+/// Runs git in `cwd` and returns trimmed stdout.
+fn git_stdout(git: &SystemGit, cwd: &Path, args: &[&str]) -> String {
+    let output = git.run(cwd, args).expect("git");
+    assert!(output.success(), "git {args:?} failed: {}", output.stderr);
+    output.stdout.trim().to_owned()
+}
+
+#[test]
+fn create_job_bundle_returns_one_ref_and_only_committed_objects() {
+    let dir = tempfile::tempdir().expect("dir");
+    let repo = dir.path().join("worktree");
+    let git = SystemGit::new();
+    std::fs::create_dir_all(&repo).expect("repo");
+    git_ok(&git, &repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "base"]);
+    let base = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+    git_ok(&git, &repo, &["checkout", "-B", &format!("job/{JOB}")]);
+    std::fs::write(repo.join("change.txt"), "change\n").expect("change file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "job work"]);
+    // A tag and a dirty file are allowed but neither belongs to the bundle.
+    git_ok(&git, &repo, &["tag", "v-bundle"]);
+    std::fs::write(repo.join("dirty.txt"), "not committed\n").expect("dirty file");
+    let head = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+    let dest = dir.path().join("bundles");
+
+    let bundle = vowp_agent::worktree::create_job_bundle(&git, &repo, &job(), &base, &dest).expect("bundle");
+
+    assert_eq!(bundle.branch, format!("job/{JOB}"));
+    assert_eq!(bundle.head, head);
+    assert_eq!(
+        bundle.bytes,
+        std::fs::metadata(&bundle.path).expect("bundle file").len()
+    );
+    assert_eq!(bundle.sha256.len(), 64, "the digest is lowercase hex sha256");
+    assert!(bundle.path.starts_with(&dest), "the file stays in the staging dir");
+
+    let listed = git_stdout(
+        &git,
+        &repo,
+        &["bundle", "list-heads", bundle.path.to_str().expect("bundle path")],
+    );
+    let lines = listed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "exactly one ref: {listed}");
+    let parts = lines[0].split_whitespace().collect::<Vec<_>>();
+    assert_eq!(parts[0], head);
+    assert_eq!(parts[1], format!("refs/heads/job/{JOB}"));
+
+    let bare = dir.path().join("checkout.git");
+    git_ok(
+        &git,
+        dir.path(),
+        &["init", "-q", "--bare", bare.to_str().expect("bare")],
+    );
+    git_ok(&git, &bare, &["fetch", "-q", repo.to_str().expect("repo"), &base]);
+    git_ok(
+        &git,
+        &bare,
+        &[
+            "fetch",
+            "-q",
+            bundle.path.to_str().expect("bundle path"),
+            &format!("refs/heads/job/{JOB}:refs/vowp/jobs/{JOB}"),
+        ],
+    );
+    assert_eq!(
+        git_stdout(&git, &bare, &["rev-parse", &format!("refs/vowp/jobs/{JOB}")]),
+        head
+    );
+    assert_eq!(
+        git_stdout(&git, &bare, &["show", &format!("{head}:change.txt")]),
+        "change"
+    );
+    let dirty = git
+        .run(&bare, &["cat-file", "-e", &format!("{head}:dirty.txt")])
+        .expect("git");
+    assert!(!dirty.success(), "an uncommitted file is not in the bundle");
 }

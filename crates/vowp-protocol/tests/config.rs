@@ -718,19 +718,22 @@ fn offload_policy_parses_projects_nodes_and_rejects_bad_values() {
 }
 
 #[test]
-fn offload_bundle_transport_is_refused_with_a_phase_4_message() {
-    match VowpConfig::from_toml(&format!("{BASE}\n[offload]\nresult_transport = \"bundle\"\n")) {
-        Err(ProtocolError::Config(message)) => {
-            assert!(message.contains("Phase 4"), "message must name Phase 4: {message}");
-            assert!(message.contains("bundle"), "message must name the value: {message}");
-            assert!(
-                message.contains("push"),
-                "message must name the supported value: {message}"
-            );
-        }
-        other => panic!("bundle transport must be a Config error, got {other:?}"),
-    }
+fn offload_accepts_the_bundle_and_push_transports() {
+    let config = parse(&format!("{BASE}\n[offload]\nresult_transport = \"bundle\"\n"));
+    assert_eq!(config.offload.result_transport, ResultTransport::Bundle);
+    assert_eq!(
+        ResultTransport::default(),
+        ResultTransport::Push,
+        "push stays the default"
+    );
 
     let config = parse(&format!("{BASE}\n[offload]\nresult_transport = \"push\"\n"));
     assert_eq!(config.offload.result_transport, ResultTransport::Push);
+
+    let err = VowpConfig::from_toml(&format!("{BASE}\n[offload]\nresult_transport = \"carrier-pigeon\"\n"))
+        .expect_err("an unknown transport must be a Config error");
+    assert!(
+        err.to_string().contains("carrier-pigeon"),
+        "error names the value: {err}"
+    );
 }

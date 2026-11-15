@@ -7,6 +7,12 @@
 //! before the client sends it, and a reconnect replays the first unacknowledged line.
 //! The lease token from `AssignRun` stays in memory: it is never part of [`AcceptedRun`],
 //! never written to the spool and never reported in a status or error.
+//!
+//! A `bundle` assignment creates one `base..job/<id>` git bundle after the handler returns
+//! `Ok` and streams it as `BundleStart`/`BundleChunk`/`BundleEnd`. Chunks are at most 256
+//! KiB, a reconnect re-announces the same digest and size so the home answers with its
+//! stored offset, and a home `BundleAbort` turns the terminal summary into a
+//! `bundle_failed` error instead of a successful one.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -22,14 +28,15 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use vowp_protocol::{
-    AgentFrame, AssignmentPayload, Cost, ErrorKind, JobId, LimitEvent, PathRef, ProjectName, RemoteLine,
-    RemoteRunState, RemoteUsage, RunId, RunOutcome, RunRejectReason, RunResume, SessionId, StopReason, Timestamp,
-    TurnSummary,
+    AgentFrame, AssignmentPayload, Cost, ErrorKind, JobId, LimitEvent, MAX_BUNDLE_CHUNK_BYTES, PathRef, ProjectName,
+    RemoteLine, RemoteRunState, RemoteUsage, ResultTransport, RunId, RunOutcome, RunRejectReason, RunResume, SessionId,
+    StopReason, Timestamp, TurnSummary,
 };
 
 use crate::client::AgentClient;
 use crate::error::AgentError;
 use crate::spool::{DEFAULT_SPOOL_CAP_BYTES, Spool, SpoolAppend};
+use crate::worktree::{JobBundle, SystemGit, create_job_bundle};
 
 /// File written into a run spool when a conflicting event id stops the stream.
 pub const QUARANTINE_FILE: &str = "quarantine.json";
@@ -501,6 +508,147 @@ struct ActiveRun {
     stopped: bool,
     fenced: bool,
     cancel_called: bool,
+    bundle: Option<BundleOutgoing>,
+}
+
+/// One bundle transfer owned by a finished run.
+///
+/// The bundle file is created once when the handler returns `Ok`; `BundleAccept` supplies
+/// the byte offset the home already stored, so a reconnect resumes instead of restarting.
+struct BundleOutgoing {
+    bundle: JobBundle,
+    start_sent: bool,
+    accepted_offset: Option<u64>,
+    next_offset: u64,
+    end_sent: bool,
+}
+
+/// What the outgoing bundle transfer should send next.
+enum BundleStep {
+    /// Send `BundleStart` and wait for `BundleAccept`.
+    Start,
+    /// Send this chunk at `offset`.
+    Chunk {
+        /// Byte offset the chunk starts at.
+        offset: u64,
+        /// Lowercase hex chunk data.
+        data: String,
+    },
+    /// Every chunk was sent; send `BundleEnd`.
+    End,
+    /// Wait for the home's answer.
+    Wait,
+    /// The local bundle cannot be read; fail with this stable detail.
+    Failed(String),
+}
+
+/// Decides the next bundle frame without touching the client.
+fn bundle_step(run: &mut ActiveRun) -> BundleStep {
+    let Some(bundle) = run.bundle.as_mut() else {
+        return BundleStep::Wait;
+    };
+    if bundle.end_sent {
+        return BundleStep::Wait;
+    }
+    if bundle.accepted_offset.is_none() {
+        if bundle.start_sent {
+            return BundleStep::Wait;
+        }
+        bundle.start_sent = true;
+        return BundleStep::Start;
+    }
+    if bundle.next_offset >= bundle.bundle.bytes {
+        bundle.end_sent = true;
+        return BundleStep::End;
+    }
+    let offset = bundle.next_offset;
+    match read_bundle_chunk(&bundle.bundle.path, offset) {
+        Ok(chunk) if !chunk.is_empty() => {
+            bundle.next_offset = offset.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            BundleStep::Chunk {
+                offset,
+                data: hex::encode(chunk),
+            }
+        }
+        _ => BundleStep::Failed("bundle_failed: the bundle could not be read".to_owned()),
+    }
+}
+
+/// Builds the `BundleStart` frame of one run.
+fn bundle_start_frame(run: &ActiveRun) -> Option<AgentFrame> {
+    let bundle = run.bundle.as_ref()?;
+    Some(AgentFrame::BundleStart {
+        run_id: run.accepted.assignment.run_id.clone(),
+        epoch: run.epoch,
+        base: run.accepted.assignment.base_commit.trim().to_ascii_lowercase(),
+        head: bundle.bundle.head.clone(),
+        branch: bundle.bundle.branch.clone(),
+        bytes: bundle.bundle.bytes,
+        sha256: bundle.bundle.sha256.clone(),
+    })
+}
+
+/// Builds the `BundleEnd` frame of one run.
+fn bundle_end_frame(run: &ActiveRun) -> Option<AgentFrame> {
+    let bundle = run.bundle.as_ref()?;
+    Some(AgentFrame::BundleEnd {
+        run_id: run.accepted.assignment.run_id.clone(),
+        epoch: run.epoch,
+        bytes: bundle.bundle.bytes,
+        sha256: bundle.bundle.sha256.clone(),
+    })
+}
+
+/// Fails one bundle transfer, removes its local file and turns the summary into an error.
+///
+/// A spooled `TurnEnd` from before the reconnect carries the old successful summary; it is
+/// dropped so only the failure summary reaches the home.
+fn fail_bundle(run: &mut ActiveRun, detail: &str) {
+    if let Some(bundle) = run.bundle.take()
+        && let Some(parent) = bundle.bundle.path.parent()
+    {
+        let _ = fs::remove_dir_all(parent);
+    }
+    run.pending.retain(|frame| !matches!(frame, AgentFrame::TurnEnd { .. }));
+    if let Some(summary) = run.summary.as_mut() {
+        summary.outcome = RunOutcome::Error;
+        summary.stop_reason = StopReason::Error;
+        summary.result_text = Some(detail.to_owned());
+    }
+}
+
+/// Removes a run's local bundle staging directory, when it has one.
+fn discard_local_bundle(run: &mut ActiveRun) {
+    if let Some(bundle) = run.bundle.take()
+        && let Some(parent) = bundle.bundle.path.parent()
+    {
+        let _ = fs::remove_dir_all(parent);
+    }
+}
+
+/// Reads at most one chunk of the bundle starting at `offset`.
+fn read_bundle_chunk(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buffer = vec![0u8; MAX_BUNDLE_CHUNK_BYTES];
+    let read = file.read(&mut buffer)?;
+    buffer.truncate(read);
+    Ok(buffer)
+}
+
+/// Keeps only a stable, path-free refusal code from the home.
+fn sanitize_bundle_reason(reason: &str) -> String {
+    let reason = reason.trim();
+    let stable = ["bundle_failed:", "bundle_rejected:", "result_empty:"]
+        .iter()
+        .find(|prefix| reason.starts_with(**prefix))
+        .copied();
+    match stable {
+        Some(_) if !reason.contains('/') => reason.chars().take(200).collect(),
+        _ => "bundle_failed: the home refused the bundle".to_owned(),
+    }
 }
 
 /// Why a run was stopped locally.
@@ -722,6 +870,7 @@ impl RunDriver {
                 stopped: false,
                 fenced: false,
                 cancel_called: false,
+                bundle: None,
             },
         );
         self.jobs.insert(assignment.job.clone(), run.clone());
@@ -779,6 +928,7 @@ impl RunDriver {
             }
         }
         if let Some(mut run) = self.runs.remove(run_id) {
+            discard_local_bundle(&mut run);
             if let Some(thread) = run.thread.take() {
                 self.reaping.push(thread);
             }
@@ -794,6 +944,39 @@ impl RunDriver {
         if let Some(run) = self.runs.get_mut(run_id) {
             run.credits = run.credits.saturating_add(count);
         }
+    }
+
+    /// Accepts the home's resume offset for one bundle transfer.
+    pub(crate) fn handle_bundle_accept(&mut self, run_id: &RunId, epoch: u64, offset: u64) {
+        let Some(run) = self.runs.get_mut(run_id) else {
+            return;
+        };
+        if run.epoch != epoch {
+            return;
+        }
+        let Some(bundle) = run.bundle.as_ref() else {
+            return;
+        };
+        if offset > bundle.bundle.bytes {
+            fail_bundle(run, "bundle_failed: the home asked for an offset past the bundle");
+            return;
+        }
+        let Some(bundle) = run.bundle.as_mut() else {
+            return;
+        };
+        bundle.accepted_offset = Some(offset);
+        bundle.next_offset = offset;
+    }
+
+    /// Stops one bundle transfer after a home refusal.
+    pub(crate) fn handle_bundle_abort(&mut self, run_id: &RunId, epoch: u64, reason: &str) {
+        let Some(run) = self.runs.get_mut(run_id) else {
+            return;
+        };
+        if run.epoch != epoch || run.bundle.is_none() {
+            return;
+        }
+        fail_bundle(run, &sanitize_bundle_reason(reason));
     }
 
     /// Applies an acknowledgement that arrived outside a send wait.
@@ -915,6 +1098,14 @@ impl RunDriver {
             // The home opens a fresh ingest stream on this connection, so the old window
             // credit is meaningless. Start every resumable run with a full window.
             run.credits = EVENT_WINDOW;
+            // A bundle transfer is resumed by re-announcing the same digest and size; the
+            // home answers `BundleAccept` with its stored offset and the chunks continue
+            // from there. The local file is still the source of truth.
+            if let Some(bundle) = run.bundle.as_mut() {
+                bundle.start_sent = false;
+                bundle.accepted_offset = None;
+                bundle.end_sent = false;
+            }
         }
         for run_id in accepted {
             self.send_hello(client, &run_id)?;
@@ -1002,9 +1193,47 @@ impl RunDriver {
                     }
                 }
                 Ok(DriverEvent::Finished { run, summary }) => {
+                    let mut summary = *summary;
+                    let bundle_transport = self
+                        .runs
+                        .get(&run)
+                        .is_some_and(|active| active.accepted.assignment.result_transport == ResultTransport::Bundle);
+                    if bundle_transport
+                        && summary.outcome == RunOutcome::Ok
+                        && summary
+                            .head_commit
+                            .as_deref()
+                            .is_some_and(|head| head.eq_ignore_ascii_case(&self.base_of(&run)))
+                    {
+                        // No commit: a bundle would be empty, and the home classifies the
+                        // run as `result_empty`.
+                        summary.outcome = RunOutcome::Error;
+                        summary.stop_reason = StopReason::Error;
+                        summary.result_text = Some("result_empty: the run produced no commit".to_owned());
+                    } else if bundle_transport && summary.outcome == RunOutcome::Ok {
+                        match self.create_outgoing_bundle(client, &run) {
+                            Ok(bundle) => {
+                                summary.head_commit = Some(bundle.head.clone());
+                                if let Some(active) = self.runs.get_mut(&run) {
+                                    active.bundle = Some(BundleOutgoing {
+                                        next_offset: 0,
+                                        bundle,
+                                        start_sent: false,
+                                        accepted_offset: None,
+                                        end_sent: false,
+                                    });
+                                }
+                            }
+                            Err(detail) => {
+                                summary.outcome = RunOutcome::Error;
+                                summary.stop_reason = StopReason::Error;
+                                summary.result_text = Some(detail);
+                            }
+                        }
+                    }
                     let head = summary.head_commit.clone();
                     if let Some(active) = self.runs.get_mut(&run) {
-                        active.summary = Some(*summary);
+                        active.summary = Some(summary);
                         let frame = run_state(
                             &active.shared,
                             active.epoch,
@@ -1094,14 +1323,8 @@ impl RunDriver {
     }
 
     fn send_next(&mut self, client: &mut AgentClient, run_id: &RunId) -> Result<(), AgentError> {
-        let Some(run) = self.runs.get(run_id) else {
-            return Ok(());
-        };
-        if run.stopped {
-            return Ok(());
-        }
         let next_is_event = matches!(
-            run.pending.front(),
+            self.runs.get(run_id).and_then(|run| run.pending.front()),
             Some(AgentFrame::RemoteLine {
                 line: RemoteLine::Event { .. },
                 ..
@@ -1110,28 +1333,87 @@ impl RunDriver {
         if next_is_event && !self.take_credit(client, run_id)? {
             return Ok(());
         }
-        let frame = {
-            let Some(run) = self.runs.get_mut(run_id) else {
-                return Ok(());
-            };
-            if let Some(frame) = run.pending.pop_front() {
-                frame
-            } else if let Some(summary) = &run.summary {
-                AgentFrame::TurnEnd {
-                    run_id: run_id.clone(),
-                    summary: summary.to_turn_summary(),
-                }
-            } else {
-                return Ok(());
-            }
+        let Some(run) = self.runs.get_mut(run_id) else {
+            return Ok(());
         };
-        client.send_frame(&frame)?;
-        if let AckOutcome::Acked = self.wait_for_ack(client, run_id, &frame)? {
-            if let Some(id) = event_id(&frame) {
-                self.absorb_ack(run_id, &id);
+        if run.stopped {
+            return Ok(());
+        }
+        // A spooled TurnEnd after a reconnect must wait for the bundle: the summary may
+        // claim success, and the home settles it against a complete bundle. Events may
+        // still flow before the transfer.
+        let bundle_pending = run.bundle.as_ref().is_some_and(|bundle| !bundle.end_sent);
+        let mut frame = match run.pending.front() {
+            Some(AgentFrame::TurnEnd { .. }) if bundle_pending => None,
+            _ => run.pending.pop_front(),
+        };
+        if frame.is_none() {
+            match bundle_step(run) {
+                BundleStep::Start => frame = bundle_start_frame(run),
+                BundleStep::Chunk { offset, data } => {
+                    frame = Some(AgentFrame::BundleChunk {
+                        run_id: run_id.clone(),
+                        epoch: run.epoch,
+                        offset,
+                        data,
+                    });
+                }
+                BundleStep::End => frame = bundle_end_frame(run),
+                BundleStep::Failed(detail) => fail_bundle(run, &detail),
+                BundleStep::Wait => {}
             }
         }
+        if frame.is_none()
+            && let Some(summary) = &run.summary
+        {
+            frame = Some(AgentFrame::TurnEnd {
+                run_id: run_id.clone(),
+                summary: summary.to_turn_summary(),
+            });
+        }
+        let Some(frame) = frame else {
+            return Ok(());
+        };
+        let needs_ack = matches!(
+            &frame,
+            AgentFrame::RemoteLine {
+                line: RemoteLine::Event { .. },
+                ..
+            } | AgentFrame::TurnEnd { .. }
+        );
+        client.send_frame(&frame)?;
+        if needs_ack
+            && let AckOutcome::Acked = self.wait_for_ack(client, run_id, &frame)?
+            && let Some(id) = event_id(&frame)
+        {
+            self.absorb_ack(run_id, &id);
+        }
         Ok(())
+    }
+
+    /// Creates the outgoing bundle for one finished run.
+    fn create_outgoing_bundle(&self, client: &AgentClient, run_id: &RunId) -> Result<JobBundle, String> {
+        let Some(active) = self.runs.get(run_id) else {
+            return Err("bundle_failed: the run is not active".to_owned());
+        };
+        let base = active.accepted.assignment.base_commit.trim().to_owned();
+        let dir = client.state_dir().join("run-bundles").join(run_id.as_str());
+        create_job_bundle(
+            &SystemGit::new(),
+            &active.accepted.worktree,
+            &active.accepted.assignment.job,
+            &base,
+            &dir,
+        )
+        .map_err(|_| "bundle_failed: the job branch could not be bundled".to_owned())
+    }
+
+    /// Returns the lowercased base commit of one active run.
+    fn base_of(&self, run_id: &RunId) -> String {
+        self.runs
+            .get(run_id)
+            .map(|active| active.accepted.assignment.base_commit.trim().to_ascii_lowercase())
+            .unwrap_or_default()
     }
 
     fn take_credit(&mut self, client: &mut AgentClient, run_id: &RunId) -> Result<bool, AgentError> {
@@ -1320,6 +1602,14 @@ impl RunDriver {
                 self.handle_credit(&run_id, count);
                 Ok(())
             }
+            AgentFrame::BundleAccept { run_id, epoch, offset } => {
+                self.handle_bundle_accept(&run_id, epoch, offset);
+                Ok(())
+            }
+            AgentFrame::BundleAbort { run_id, epoch, reason } => {
+                self.handle_bundle_abort(&run_id, epoch, &reason);
+                Ok(())
+            }
             AgentFrame::IngestAck {
                 run_id,
                 event_id,
@@ -1383,6 +1673,7 @@ impl RunDriver {
             return;
         };
         let _ = run.shared.summary_acked.swap(true, Ordering::SeqCst);
+        discard_local_bundle(run);
         let reply = run
             .shared
             .finish_reply
@@ -1415,6 +1706,7 @@ impl RunDriver {
             StopKind::Fenced | StopKind::Conflict | StopKind::SpoolFull => run.fenced = true,
         }
         run.shared.set_stopped(reason);
+        discard_local_bundle(run);
         let cancel = !run.cancel_called;
         run.cancel_called = true;
         if cancel {

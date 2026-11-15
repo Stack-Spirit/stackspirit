@@ -1097,6 +1097,7 @@ impl ExecFixture {
             base_commit: self.base.clone(),
             remote: "origin".to_owned(),
             remote_url: String::new(),
+            result_transport: vowp_protocol::ResultTransport::Push,
             env_names: vec!["FAKE_EXIT".to_owned()],
             secret_names: Vec::new(),
             epoch: 1,

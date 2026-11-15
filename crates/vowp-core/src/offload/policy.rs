@@ -13,7 +13,7 @@ use std::fmt;
 use vowp_protocol::config::{OffloadConfig, OffloadProjectConfig};
 use vowp_protocol::{
     AgentCapacity, JobKind, LimitKind, NodeFallback, NodeName, NodePresence, NodeStatus, Placement, ProjectName,
-    SecretName, WaitingReason,
+    ResultTransport, SecretName, WaitingReason,
 };
 
 /// What the home knows about itself.
@@ -120,6 +120,9 @@ pub struct NodeFacts {
     /// Path map facts for the job's project.
     pub path: Option<PathFacts>,
     /// Whether the node's origin matches the project remote.
+    ///
+    /// Only a `push` assignment requires it. A `bundle` assignment returns its commits over
+    /// the agent channel and never reads or uses a git remote on the node.
     pub origin_matches: Option<bool>,
     /// Whether the job's base commit is fetchable on the node.
     pub base_fetchable: Option<bool>,
@@ -638,20 +641,24 @@ fn check_node(
         }
     }
 
-    // 11. Origin matches, the base commit is fetchable and the base is clean.
-    match facts.origin_matches {
-        Some(true) => {}
-        Some(false) => {
-            return Err((
-                WaitingReason::RemoteMismatch,
-                format!("node {node} origin does not match the project remote"),
-            ));
-        }
-        None => {
-            return Err((
-                WaitingReason::RemoteMismatch,
-                format!("node {node} origin match is not known"),
-            ));
+    // 11. Origin matches (push only), the base commit is fetchable and the base is clean.
+    // A bundle assignment needs read access to the base, not a push remote: the push-remote
+    // match is not a bundle eligibility fact.
+    if fleet.result_transport == ResultTransport::Push {
+        match facts.origin_matches {
+            Some(true) => {}
+            Some(false) => {
+                return Err((
+                    WaitingReason::RemoteMismatch,
+                    format!("node {node} origin does not match the project remote"),
+                ));
+            }
+            None => {
+                return Err((
+                    WaitingReason::RemoteMismatch,
+                    format!("node {node} origin match is not known"),
+                ));
+            }
         }
     }
     match facts.base_fetchable {
@@ -727,5 +734,138 @@ fn kind_name(kind: JobKind) -> &'static str {
         JobKind::Promote => "promote",
         JobKind::Release => "release",
         JobKind::Decision => "decision",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vowp_protocol::AgentCapacity;
+
+    fn project() -> ProjectName {
+        ProjectName::parse("alpha").expect("project")
+    }
+
+    fn node() -> NodeName {
+        NodeName::parse("mac-studio").expect("node")
+    }
+
+    fn fact() -> NodeFacts {
+        NodeFacts {
+            name: node(),
+            status: NodeStatus::Active,
+            presence: NodePresence::Online,
+            labels: Vec::new(),
+            capabilities: NodeCapabilities {
+                harnesses: vec!["opencode".to_owned()],
+                secrets: Vec::new(),
+                projects: vec![project()],
+            },
+            capacity: Some(AgentCapacity {
+                cpu_cores: 8,
+                load1: 0.1,
+                mem_total_bytes: 16 * 1024 * 1024 * 1024,
+                mem_free_bytes: 8 * 1024 * 1024 * 1024,
+                disk_free_bytes: 1024 * 1024 * 1024 * 1024,
+                busy_slots: 0,
+                max_slots: 2,
+                on_battery: Some(false),
+                thermal_state: Some("nominal".to_owned()),
+            }),
+            power: Some(NodePower {
+                on_battery: false,
+                thermal_state: ThermalState::Nominal,
+            }),
+            limits: Vec::new(),
+            path: Some(PathFacts {
+                map_present: true,
+                local_root_present: true,
+                worktree_root_present: true,
+                writable: true,
+            }),
+            // A node with no push access: it can read the base but its origin does not
+            // match the project remote.
+            origin_matches: Some(false),
+            base_fetchable: Some(true),
+            clean_base: Some(true),
+            owns_conflict: Some(false),
+        }
+    }
+
+    fn request() -> JobRequest {
+        JobRequest {
+            kind: JobKind::Build,
+            placement: Some(Placement::Node {
+                node: node(),
+                fallback: None,
+            }),
+            requires: JobRequirements {
+                harnesses: vec!["opencode".to_owned()],
+                ..JobRequirements::default()
+            },
+        }
+    }
+
+    #[test]
+    fn bundle_eligibility_does_not_require_a_push_remote() {
+        let fleet = OffloadConfig {
+            enabled: true,
+            result_transport: ResultTransport::Bundle,
+            ..OffloadConfig::default()
+        };
+        let decision = evaluate(
+            &fleet,
+            &project(),
+            &OffloadProjectConfig::default(),
+            &request(),
+            &HomeFacts::default(),
+            &[fact()],
+        );
+        assert!(
+            decision.is_eligible(),
+            "bundle is eligible without a push remote: {decision:?}"
+        );
+
+        let fleet = OffloadConfig {
+            enabled: true,
+            result_transport: ResultTransport::Push,
+            ..OffloadConfig::default()
+        };
+        let decision = evaluate(
+            &fleet,
+            &project(),
+            &OffloadProjectConfig::default(),
+            &request(),
+            &HomeFacts::default(),
+            &[fact()],
+        );
+        assert_eq!(
+            decision.waiting_reason(),
+            Some(WaitingReason::RemoteMismatch),
+            "push still requires the remote match"
+        );
+    }
+
+    #[test]
+    fn bundle_eligibility_still_requires_a_fetchable_base() {
+        let fleet = OffloadConfig {
+            enabled: true,
+            result_transport: ResultTransport::Bundle,
+            ..OffloadConfig::default()
+        };
+        let mut facts = fact();
+        facts.base_fetchable = Some(false);
+        let decision = evaluate(
+            &fleet,
+            &project(),
+            &OffloadProjectConfig::default(),
+            &request(),
+            &HomeFacts::default(),
+            &[facts],
+        );
+        assert!(
+            decision.detail().is_some_and(|detail| detail.contains("not fetchable")),
+            "a bundle node still needs read access to the base: {decision:?}"
+        );
     }
 }

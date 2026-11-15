@@ -6,6 +6,7 @@
 //! Spec: `docs/design/v0.4/local-orchestrator.md` §6.3 step 7, §6.4 and §14.3.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +17,9 @@ use vowp_core::session::remote::{BeginTurn, IngestGrant, IngestSession, begin_tu
 use vowp_core::{AdapterRegistry, CommandRunner, CommandSpec, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
     AssignmentPayload, Cost, Executor, ExecutorRef, FakeClock, Gate, GateKind, HarnessKind, Job, JobId, JobKind,
-    JobState, Lease, MemoryLog, NewJob, NodeName, PathRef, Project, ProjectName, RemoteLine, Role, RunId, RunOutcome,
-    RunPurpose, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceKind, Timestamp, VowpConfig,
+    JobState, Lease, MemoryLog, NewJob, NodeName, PathRef, Project, ProjectName, RemoteLine, ResultTransport, Role,
+    RunId, RunOutcome, RunPurpose, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceKind, Timestamp,
+    VowpConfig,
 };
 use vowp_store::repo_offload::{AgentAssignment, AgentAssignmentState};
 use vowp_store::session_log::SessionLog;
@@ -63,6 +65,16 @@ struct Fixture {
 
 impl Fixture {
     fn new(owns: &[&str]) -> Self {
+        Self::with_transport(owns, ResultTransport::Push)
+    }
+
+    /// Builds a bundle fixture: the assignment carries no remote URL and the project's
+    /// checkout is never pushed to.
+    fn new_bundle(owns: &[&str]) -> Self {
+        Self::with_transport(owns, ResultTransport::Bundle)
+    }
+
+    fn with_transport(owns: &[&str], transport: ResultTransport) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         let origin = root.join("origin.git");
@@ -84,6 +96,7 @@ impl Fixture {
         config.project.remote = "origin".to_owned();
         config.project.default_branch = "main".to_owned();
         config.offload.enabled = true;
+        config.offload.result_transport = transport;
         let deps = Deps {
             paths,
             config: Arc::new(config),
@@ -192,7 +205,11 @@ impl Fixture {
             },
             base_commit: base.clone(),
             remote: "origin".to_owned(),
-            remote_url: origin.display().to_string(),
+            remote_url: match transport {
+                ResultTransport::Push => origin.display().to_string(),
+                ResultTransport::Bundle => String::new(),
+            },
+            result_transport: transport,
             env_names: Vec::new(),
             secret_names: Vec::new(),
             epoch: 1,
@@ -300,6 +317,132 @@ impl Fixture {
         head
     }
 
+    /// Returns the job's branch name.
+    fn job_branch(&self) -> String {
+        format!("job/{}", self.job.id)
+    }
+
+    /// Returns the private staging directory of the run.
+    fn staging_dir(&self) -> PathBuf {
+        self.deps
+            .paths
+            .root()
+            .join("tmp")
+            .join("agent-bundles")
+            .join(self.run.as_str())
+    }
+
+    /// Creates or reuses the agent clone and checks out the job branch from `origin/main`.
+    fn agent_clone(&self) -> PathBuf {
+        let agent = self.root.join("agent");
+        if !agent.join(".git").is_dir() {
+            git_ok(
+                &self.root,
+                &[
+                    "clone",
+                    &self.origin.display().to_string(),
+                    &agent.display().to_string(),
+                ],
+            );
+        }
+        agent
+    }
+
+    /// Commits `files` on `job/<id>` in the agent clone and returns the head.
+    fn commit_job(&self, files: &[(&str, &str)]) -> (PathBuf, String) {
+        let agent = self.agent_clone();
+        git_ok(&agent, &["checkout", "-B", &self.job_branch(), "origin/main"]);
+        for (path, text) in files {
+            write(&agent.join(path), text);
+        }
+        git_ok(&agent, &["add", "-A"]);
+        git_ok(&agent, &["commit", "-m", "job work"]);
+        let head = git_output(&agent, &["rev-parse", "HEAD"]).trim().to_owned();
+        (agent, head)
+    }
+
+    /// Creates one bundle from the agent clone over the given rev-list arguments.
+    fn bundle_from(&self, files: &[(&str, &str)], revs: &[String]) -> (String, Vec<u8>, String) {
+        let (agent, head) = self.commit_job(files);
+        let (bytes, sha) = self.bundle_file(&agent, revs);
+        (head, bytes, sha)
+    }
+
+    /// Creates one bundle file in the agent clone over `revs`.
+    fn bundle_file(&self, agent: &Path, revs: &[String]) -> (Vec<u8>, String) {
+        let file = self.root.join("upload.bundle");
+        let _ = fs::remove_file(&file);
+        let mut args = vec!["bundle".to_owned(), "create".to_owned(), file.display().to_string()];
+        args.extend(revs.iter().cloned());
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        git_ok(agent, &argv);
+        let bytes = fs::read(&file).expect("bundle bytes");
+        let sha = result::sha256_hex(&bytes);
+        (bytes, sha)
+    }
+
+    /// Returns the one staged bundle file.
+    fn staged_file(&self) -> PathBuf {
+        let dir = self.staging_dir();
+        let mut files = fs::read_dir(&dir)
+            .expect("staging dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("bundle"))
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1, "exactly one staged bundle");
+        files.remove(0)
+    }
+
+    /// Returns the sidecar manifest text of the staged transfer.
+    fn manifest_text(&self) -> String {
+        fs::read_to_string(self.staging_dir().join("manifest.json")).expect("staging manifest")
+    }
+
+    /// Creates the standard one-ref `base..job/<id>` bundle.
+    fn make_bundle(&self, files: &[(&str, &str)]) -> (String, Vec<u8>, String) {
+        let range = format!("{}..{}", self.base, self.job_branch());
+        self.bundle_from(files, &[range])
+    }
+
+    /// Stages one bundle through the real receiver, returning the start offset.
+    fn stage_bundle(&self, head: &str, bytes: &[u8], sha: &str) -> u64 {
+        let branch = self.job_branch();
+        let start = result::start_bundle(
+            &self.deps,
+            &self.store,
+            &self.node,
+            &self.run,
+            1,
+            &self.base,
+            head,
+            &branch,
+            bytes.len() as u64,
+            sha,
+            ts(),
+        )
+        .expect("bundle start");
+        let mut offset = start;
+        while (offset as usize) < bytes.len() {
+            let end = ((offset as usize) + 256 * 1024).min(bytes.len());
+            let data = to_hex(&bytes[offset as usize..end]);
+            result::append_bundle_chunk(&self.deps, &self.store, &self.node, &self.run, 1, offset, &data, ts())
+                .expect("bundle chunk");
+            offset = end as u64;
+        }
+        result::finish_bundle(
+            &self.deps,
+            &self.store,
+            &self.node,
+            &self.run,
+            1,
+            bytes.len() as u64,
+            sha,
+            ts(),
+        )
+        .expect("bundle end");
+        start
+    }
+
     /// Feeds one hello and one summary through the real ingest state machine.
     fn ingest(&self, reported_head: Option<&str>, summary: RemoteLine) -> result::Settled {
         let mut ingest = IngestSession::begin(
@@ -358,6 +501,19 @@ impl Fixture {
             limit: None,
             result_text: Some(format!("git_push_failed: {detail}")),
             stop_reason: StopReason::Error,
+            usage: None,
+        }
+    }
+
+    fn summary_ok_with_text(text: &str) -> RemoteLine {
+        RemoteLine::Summary {
+            exit_code: Some(0),
+            outcome: RunOutcome::Ok,
+            native_session_id: None,
+            cost: Cost::unknown(),
+            limit: None,
+            result_text: Some(text.to_owned()),
+            stop_reason: StopReason::EndTurn,
             usage: None,
         }
     }
@@ -638,11 +794,550 @@ fn a_failed_push_keeps_the_job_retryable() {
     assert!(fixture.store.lease(&fixture.session).expect("lease").is_none());
 }
 
+#[test]
+fn offloaded_run_returns_a_bundle_without_push_access() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (head, bytes, sha) = fixture.make_bundle(&[("src/lib.rs", "pub fn bundled() {}\n")]);
+    assert_ne!(head, fixture.base);
+
+    let offset = fixture.stage_bundle(&head, &bytes, &sha);
+    assert_eq!(offset, 0, "a new transfer starts at zero");
+    let mode = fs::metadata(fixture.staged_file())
+        .expect("staged bundle")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the staging file is 0600");
+    let dir_mode = fs::metadata(fixture.staging_dir())
+        .expect("staging dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700, "the staging directory is 0700");
+    let manifest_mode = fs::metadata(fixture.staging_dir().join("manifest.json"))
+        .expect("manifest")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(manifest_mode, 0o600, "the sidecar manifest is 0600");
+
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok());
+
+    assert_eq!(settled.outcome, RunOutcome::Ok, "detail: {}", settled.detail);
+    assert!(
+        settled.detail.contains("transport=bundle"),
+        "detail: {}",
+        settled.detail
+    );
+    assert!(settled.detail.contains(&head), "detail: {}", settled.detail);
+
+    let run = fixture.store.require_run(&fixture.run).expect("run row");
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+    assert!(run.detail.contains(&head), "run detail: {}", run.detail);
+
+    let record = result::load(&fixture.store, &fixture.run)
+        .expect("result record")
+        .expect("returned record");
+    assert_eq!(record.status, "returned");
+    assert_eq!(record.transport, "bundle");
+    assert_eq!(record.base_commit, fixture.base);
+    assert_eq!(record.head_commit.as_deref(), Some(head.as_str()));
+    assert_eq!(record.bundle_bytes, Some(bytes.len() as u64));
+    assert_eq!(record.bundle_sha256.as_deref(), Some(sha.as_str()));
+
+    let job = fixture.job();
+    assert_eq!(job.state, JobState::Gating, "job moved to the normal gate path");
+    let job_ref = format!("refs/vowp/jobs/{}", fixture.job.id);
+    assert!(
+        ref_exists(&fixture.home, &job_ref),
+        "the verified inspection ref exists"
+    );
+    assert_eq!(
+        git_output(&fixture.home, &["rev-parse", &job_ref]).trim(),
+        head,
+        "the inspection ref is the verified head"
+    );
+    assert_eq!(
+        git_output(
+            &fixture.home,
+            &["rev-parse", &format!("refs/heads/{}", fixture.job_branch())]
+        )
+        .trim(),
+        head,
+        "the job branch points at the verified head"
+    );
+
+    let pushed = git_output(
+        &fixture.origin,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/job"],
+    );
+    assert!(pushed.trim().is_empty(), "the node never pushed: {pushed}");
+    assert!(
+        !fixture.staging_dir().exists(),
+        "the staging directory is removed after settle"
+    );
+    assert_eq!(fixture.assignment().state, AgentAssignmentState::Finished);
+}
+
+#[test]
+fn bundle_result_is_verified_by_size_sha256_and_bundle_verify() {
+    // A byte appended after the transfer is a size/digest mismatch: bundle_failed.
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (head, bytes, sha) = fixture.make_bundle(&[("src/lib.rs", "pub fn checked() {}\n")]);
+    let branch = fixture.job_branch();
+    let start = result::start_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        &fixture.base,
+        &head,
+        &branch,
+        bytes.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect("start");
+    assert_eq!(start, 0);
+    result::append_bundle_chunk(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        0,
+        &to_hex(&bytes),
+        ts(),
+    )
+    .expect("one chunk");
+    let file = fixture.staged_file();
+    let mut tampered = fs::read(&file).expect("staged bytes");
+    tampered.push(0);
+    fs::write(&file, &tampered).expect("tamper");
+    let refused = result::finish_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        bytes.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect_err("a size mismatch must fail");
+    assert!(refused.starts_with("bundle_failed:"), "reason: {refused}");
+    assert!(!fixture.staging_dir().exists(), "the tampered file is removed");
+
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok());
+    assert_eq!(settled.outcome, RunOutcome::Error);
+    assert!(settled.detail.contains("bundle_failed"), "detail: {}", settled.detail);
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/vowp/jobs/{}", fixture.job.id)
+    ));
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/heads/{}", fixture.job_branch())
+    ));
+
+    // A file with a matching digest that is not a bundle fails `git bundle verify`:
+    // bundle_rejected, still with no project ref.
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (head, _, _) = fixture.make_bundle(&[("src/lib.rs", "pub fn verified() {}\n")]);
+    let not_a_bundle = b"not a git bundle\n".to_vec();
+    let sha = result::sha256_hex(&not_a_bundle);
+    let branch = fixture.job_branch();
+    result::start_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        &fixture.base,
+        &head,
+        &branch,
+        not_a_bundle.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect("start");
+    result::append_bundle_chunk(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        0,
+        &to_hex(&not_a_bundle),
+        ts(),
+    )
+    .expect("chunk");
+    result::finish_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        not_a_bundle.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect("digest matches");
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok());
+    assert_eq!(settled.outcome, RunOutcome::Error);
+    assert!(settled.detail.contains("bundle_rejected"), "detail: {}", settled.detail);
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/vowp/jobs/{}", fixture.job.id)
+    ));
+    assert!(!fixture.staging_dir().exists());
+}
+
+#[test]
+fn bundle_result_rejects_a_foreign_ref_or_head() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (agent, head) = fixture.commit_job(&[("src/lib.rs", "pub fn main_ref() {}\n")]);
+    git_ok(&agent, &["checkout", "-b", "side", "origin/main"]);
+    write(&agent.join("side.txt"), "side\n");
+    git_ok(&agent, &["add", "-A"]);
+    git_ok(&agent, &["commit", "-m", "side work"]);
+    git_ok(&agent, &["checkout", &fixture.job_branch()]);
+    let range = format!("{}..{}", fixture.base, fixture.job_branch());
+    let (bytes, sha) = fixture.bundle_file(&agent, &[range, "side".to_owned()]);
+    fixture.stage_bundle(&head, &bytes, &sha);
+
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok());
+    assert_eq!(settled.outcome, RunOutcome::Error);
+    assert!(
+        settled.detail.contains("bundle_rejected"),
+        "a second ref is rejected: {}",
+        settled.detail
+    );
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/vowp/jobs/{}", fixture.job.id)
+    ));
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/heads/{}", fixture.job_branch())
+    ));
+    assert!(!fixture.staging_dir().exists());
+
+    // A bundle whose job ref is not the reported head is rejected before the import.
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (agent, _head) = fixture.commit_job(&[("src/lib.rs", "pub fn wrong_head() {}\n")]);
+    git_ok(&agent, &["checkout", "-b", "side", "origin/main"]);
+    write(&agent.join("side.txt"), "side\n");
+    git_ok(&agent, &["add", "-A"]);
+    git_ok(&agent, &["commit", "-m", "side work"]);
+    let side_head = git_output(&agent, &["rev-parse", "HEAD"]).trim().to_owned();
+    git_ok(&agent, &["checkout", &fixture.job_branch()]);
+    let range = format!("{}..{}", fixture.base, fixture.job_branch());
+    let (bytes, sha) = fixture.bundle_file(&agent, &[range]);
+    fixture.stage_bundle(&side_head, &bytes, &sha);
+
+    let settled = fixture.ingest(Some(&side_head), Fixture::summary_ok());
+    assert_eq!(settled.outcome, RunOutcome::Error);
+    assert!(
+        settled.detail.contains("bundle_rejected"),
+        "a wrong head is rejected: {}",
+        settled.detail
+    );
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/vowp/jobs/{}", fixture.job.id)
+    ));
+}
+
+#[test]
+fn bundle_result_rejects_a_base_that_is_not_a_prerequisite() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    // A complete-history bundle declares no prerequisite, so it cannot prove that the
+    // assigned base is its starting point.
+    let branch = fixture.job_branch();
+    let (head, bytes, sha) = fixture.bundle_from(&[("src/lib.rs", "pub fn complete() {}\n")], &[branch]);
+    assert_ne!(head, fixture.base);
+    fixture.stage_bundle(&head, &bytes, &sha);
+
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok());
+    assert_eq!(settled.outcome, RunOutcome::Error);
+    assert!(
+        settled.detail.contains("prerequisite"),
+        "detail names the missing prerequisite: {}",
+        settled.detail
+    );
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/vowp/jobs/{}", fixture.job.id)
+    ));
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/heads/{}", fixture.job_branch())
+    ));
+    assert!(!fixture.staging_dir().exists());
+}
+
+#[test]
+fn bundle_result_resumes_after_a_disconnect() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (head, bytes, sha) = fixture.make_bundle(&[("src/lib.rs", "pub fn resumed() {}\n")]);
+    assert!(bytes.len() > 2, "the test needs a multi-byte bundle");
+    let branch = fixture.job_branch();
+    let start = |epoch: u64| {
+        result::start_bundle(
+            &fixture.deps,
+            &fixture.store,
+            &fixture.node,
+            &fixture.run,
+            epoch,
+            &fixture.base,
+            &head,
+            &branch,
+            bytes.len() as u64,
+            &sha,
+            ts(),
+        )
+    };
+
+    assert_eq!(start(1).expect("start"), 0);
+    let half = bytes.len() / 2;
+    result::append_bundle_chunk(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        0,
+        &to_hex(&bytes[..half]),
+        ts(),
+    )
+    .expect("partial chunk");
+
+    // The same (run, epoch, digest, size) start resumes at the stored length.
+    assert_eq!(
+        start(1).expect("resume"),
+        half as u64,
+        "the home answers with the bytes it already stored"
+    );
+
+    // A lower epoch is refused and writes nothing.
+    let stale = start(0).expect_err("a lower epoch must be refused");
+    assert!(stale.contains("stale"), "reason: {stale}");
+    assert_eq!(
+        fs::metadata(fixture.staged_file()).expect("partial file").len(),
+        half as u64,
+        "the refused start did not write"
+    );
+
+    // A higher epoch supersedes the old partial: a fresh file starts at zero.
+    let mut payload = fixture.assignment().payload;
+    payload.epoch = 2;
+    payload.assignment_id = format!("assignment-{}-epoch-2", fixture.run);
+    fixture
+        .store
+        .insert_assignment(&AgentAssignment {
+            id: payload.assignment_id.clone(),
+            run_id: fixture.run.clone(),
+            session_id: fixture.session.clone(),
+            project: payload.project.clone(),
+            node: fixture.node.clone(),
+            epoch: 2,
+            state: AgentAssignmentState::Sent,
+            payload,
+            created_at: ts(),
+            claimed_at: Some(ts()),
+            expires_at: None,
+            detail: String::new(),
+        })
+        .expect("epoch 2 assignment");
+    assert_eq!(start(2).expect("a higher epoch supersedes"), 0);
+    assert_eq!(
+        fs::metadata(fixture.staged_file()).expect("fresh file").len(),
+        0,
+        "the old partial is gone"
+    );
+
+    result::append_bundle_chunk(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        2,
+        0,
+        &to_hex(&bytes),
+        ts(),
+    )
+    .expect("full chunk");
+    result::finish_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        2,
+        bytes.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect("end");
+
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok());
+    assert_eq!(settled.outcome, RunOutcome::Ok, "detail: {}", settled.detail);
+    let record = result::load(&fixture.store, &fixture.run)
+        .expect("record")
+        .expect("returned record");
+    assert_eq!(record.status, "returned");
+    assert_eq!(record.transport, "bundle");
+    assert!(!fixture.staging_dir().exists());
+}
+
+#[test]
+fn bundle_result_with_no_commit_is_result_empty() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    // No bundle is staged: the job branch never moved, so base == head.
+    let settled = fixture.ingest(Some(&fixture.base), Fixture::summary_ok());
+
+    assert_eq!(settled.outcome, RunOutcome::Error);
+    assert!(settled.detail.contains("result_empty"), "detail: {}", settled.detail);
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/vowp/jobs/{}", fixture.job.id)
+    ));
+    assert!(!ref_exists(
+        &fixture.home,
+        &format!("refs/heads/{}", fixture.job_branch())
+    ));
+    let job = fixture.job();
+    assert_eq!(job.state, JobState::Ready, "the job stays retryable");
+    let record = result::load(&fixture.store, &fixture.run)
+        .expect("record")
+        .expect("failed record");
+    assert_eq!(record.status, "failed");
+    assert_eq!(record.transport, "bundle");
+    assert!(record.bundle_bytes.is_none());
+}
+
+#[test]
+fn bundle_result_over_the_cap_removes_the_staging_file() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (head, _, _) = fixture.make_bundle(&[("src/lib.rs", "pub fn capped() {}\n")]);
+    let branch = fixture.job_branch();
+    let refused = result::start_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        &fixture.base,
+        &head,
+        &branch,
+        result::BUNDLE_MAX_BYTES + 1,
+        &"a".repeat(64),
+        ts(),
+    )
+    .expect_err("over the cap is refused before staging");
+    assert!(refused.starts_with("bundle_failed:"), "reason: {refused}");
+    assert!(
+        !fixture.staging_dir().exists(),
+        "no staging file is created for an oversized start"
+    );
+}
+
+#[test]
+fn bundle_result_manifest_and_run_row_carry_no_absolute_path_or_secret() {
+    let fixture = Fixture::new_bundle(&["src/**"]);
+    let (head, bytes, sha) = fixture.make_bundle(&[("src/lib.rs", "pub fn private() {}\n")]);
+    let branch = fixture.job_branch();
+    result::start_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        &fixture.base,
+        &head,
+        &branch,
+        bytes.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect("start");
+    result::append_bundle_chunk(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        0,
+        &to_hex(&bytes),
+        ts(),
+    )
+    .expect("chunk");
+    result::finish_bundle(
+        &fixture.deps,
+        &fixture.store,
+        &fixture.node,
+        &fixture.run,
+        1,
+        bytes.len() as u64,
+        &sha,
+        ts(),
+    )
+    .expect("end");
+
+    let manifest = fixture.manifest_text();
+    assert!(
+        !manifest.contains(&fixture.root.display().to_string()),
+        "the staging manifest carries no absolute path: {manifest}"
+    );
+
+    // Built at runtime so this source never contains a scannable literal.
+    let secret = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123"].concat();
+    let settled = fixture.ingest(Some(&head), Fixture::summary_ok_with_text(&format!("done {secret}")));
+    assert_eq!(settled.outcome, RunOutcome::Ok, "detail: {}", settled.detail);
+
+    let record = result::load(&fixture.store, &fixture.run)
+        .expect("record")
+        .expect("returned record");
+    let record_text = serde_json::to_string(&record).expect("record JSON");
+    assert!(record_text.contains("bundle_bytes"), "record: {record_text}");
+    assert!(record_text.contains("bundle_sha256"), "record: {record_text}");
+    let run = fixture.store.require_run(&fixture.run).expect("run row");
+    for text in [record_text, run.detail.clone(), settled.detail.clone()] {
+        assert!(
+            !text.contains(&fixture.root.display().to_string()),
+            "no home path: {text}"
+        );
+        assert!(
+            !text.contains(&fixture.home.display().to_string()),
+            "no checkout path: {text}"
+        );
+        assert!(!text.contains(&secret), "no secret value: {text}");
+        assert!(!text.contains("ghp_"), "no token fragment: {text}");
+    }
+}
+
 /// Runs git in `cwd`, asserting success.
 fn git_ok(cwd: &Path, args: &[&str]) -> String {
     let output = run_git(cwd, args);
     assert_eq!(output.exit_code, Some(0), "git {args:?} failed: {}", output.text());
     output.text()
+}
+
+/// Returns whether one ref resolves in `repo`.
+fn ref_exists(repo: &Path, reference: &str) -> bool {
+    run_git(repo, &["rev-parse", "--verify", "--quiet", reference]).exit_code == Some(0)
+}
+
+/// Encodes bytes as lowercase hex for `BundleChunk.data`.
+fn to_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    text
 }
 
 /// Runs git in `cwd` and returns its trimmed output.

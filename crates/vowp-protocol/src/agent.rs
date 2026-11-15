@@ -32,6 +32,30 @@ pub const AGENT_PROTOCOL: &str = "vowp-agent/1";
 /// Longest accepted `PathRef` wire string, in bytes.
 pub const MAX_PATH_REF_LEN: usize = 1024;
 
+/// Largest raw payload of one [`AgentFrame::BundleChunk`], in bytes.
+///
+/// The data travels as lowercase hex, so one chunk's wire string is at most twice this
+/// length and stays well inside the 1 MiB frame cap.
+pub const MAX_BUNDLE_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Largest accepted result bundle, in bytes (256 MiB).
+///
+/// The cap is a wire contract: a `BundleStart` over it is refused before the home stages
+/// any bytes.
+pub const MAX_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Returns whether a chunk payload is lowercase hex of at most [`MAX_BUNDLE_CHUNK_BYTES`].
+///
+/// Uppercase, an odd length and any non-hex byte are invalid: the wire contract is one
+/// spelling so a receiver can compare and hash without a decoder option.
+pub fn is_bundle_chunk_data(data: &str) -> bool {
+    data.len() % 2 == 0
+        && data.len() <= MAX_BUNDLE_CHUNK_BYTES * 2
+        && data
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// A project-relative path the agent resolves locally.
 ///
 /// The wire form is one short string: `project:vowp`, `worktree:vowp/<job>` or
@@ -668,6 +692,74 @@ pub enum AgentFrame {
         /// Run that was fenced.
         run_id: RunId,
         /// Human-readable reason.
+        reason: String,
+    },
+    /// Agent -> home: announce one `base..head` git bundle before its chunks.
+    ///
+    /// The bundle holds exactly `refs/heads/job/<id>` (`branch`) with `base` as its
+    /// prerequisite. `bytes` is the transfer size and `sha256` its lowercase hex digest;
+    /// both are re-checked at [`Self::BundleEnd`].
+    BundleStart {
+        /// Run the bundle belongs to.
+        run_id: RunId,
+        /// Run epoch.
+        epoch: u64,
+        /// Assigned base commit; the bundle's prerequisite.
+        base: String,
+        /// Committed head the bundle returns.
+        head: String,
+        /// The bundle's single branch, `job/<id>`.
+        branch: String,
+        /// Bundle size in bytes.
+        bytes: u64,
+        /// Lowercase hex SHA-256 of the bundle file.
+        sha256: String,
+    },
+    /// Home -> agent: the transfer may continue from `offset`.
+    ///
+    /// A start with the same run, epoch, digest and size resumes at the stored length; a
+    /// fresh transfer is `offset = 0`.
+    BundleAccept {
+        /// Run the bundle belongs to.
+        run_id: RunId,
+        /// Run epoch.
+        epoch: u64,
+        /// Bytes already stored by the home.
+        offset: u64,
+    },
+    /// Agent -> home: one chunk of the bundle at `offset`.
+    ///
+    /// `data` is lowercase hex and at most [`MAX_BUNDLE_CHUNK_BYTES`] raw bytes. A chunk's
+    /// `offset` must equal the bytes already stored; a gap, overlap or oversized chunk
+    /// aborts the bundle.
+    BundleChunk {
+        /// Run the bundle belongs to.
+        run_id: RunId,
+        /// Run epoch.
+        epoch: u64,
+        /// Byte offset this chunk starts at.
+        offset: u64,
+        /// Lowercase hex chunk data.
+        data: String,
+    },
+    /// Agent -> home: the last chunk was sent; verify size and digest.
+    BundleEnd {
+        /// Run the bundle belongs to.
+        run_id: RunId,
+        /// Run epoch.
+        epoch: u64,
+        /// Bundle size in bytes.
+        bytes: u64,
+        /// Lowercase hex SHA-256 of the bundle file.
+        sha256: String,
+    },
+    /// Either direction: the transfer is refused or cannot continue.
+    BundleAbort {
+        /// Run the bundle belongs to.
+        run_id: RunId,
+        /// Run epoch.
+        epoch: u64,
+        /// Stable, path-free reason.
         reason: String,
     },
     /// Home -> agent: offload one run assignment.

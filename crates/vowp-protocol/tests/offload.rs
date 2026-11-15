@@ -4,7 +4,8 @@
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-use vowp_protocol::agent::{AgentFrame, AgentPathMap, PathRef};
+use vowp_protocol::agent::{AgentFrame, AgentPathMap, MAX_BUNDLE_CHUNK_BYTES, PathRef, is_bundle_chunk_data};
+use vowp_protocol::config::ResultTransport;
 use vowp_protocol::error::ErrorKind;
 use vowp_protocol::executor::Executor;
 use vowp_protocol::ids::{JobId, NodeName, ProjectName, RunId, SessionId};
@@ -55,6 +56,7 @@ fn assignment() -> AssignmentPayload {
         base_commit: "abc1234".to_owned(),
         remote: "origin".to_owned(),
         remote_url: "https://example.invalid/owner/repo.git".to_owned(),
+        result_transport: ResultTransport::Push,
         env_names: vec!["CI".to_owned()],
         secret_names: vec![SecretName::parse("HOME_GITHUB_TOKEN").expect("secret name")],
         epoch: 1,
@@ -239,6 +241,95 @@ fn assign_run_frame_carries_the_lease_token_but_the_payload_does_not() {
 
     let decoded: AgentFrame = serde_json::from_value(value).expect("assign frame back");
     assert_eq!(decoded, frame);
+}
+
+#[test]
+fn assignment_payload_defaults_an_older_literal_to_push() {
+    let mut value = serde_json::to_value(assignment()).expect("payload JSON");
+    value
+        .as_object_mut()
+        .expect("payload object")
+        .remove("result_transport");
+
+    let decoded: AssignmentPayload = serde_json::from_value(value).expect("older payload parses");
+    assert_eq!(
+        decoded.result_transport,
+        ResultTransport::Push,
+        "an older literal without the field is a push assignment"
+    );
+
+    let bundle = AssignmentPayload {
+        result_transport: ResultTransport::Bundle,
+        ..assignment()
+    };
+    let value = serde_json::to_value(&bundle).expect("bundle payload JSON");
+    assert_eq!(value["result_transport"], json!("bundle"));
+    let decoded: AssignmentPayload = serde_json::from_value(value).expect("bundle payload back");
+    assert_eq!(decoded.result_transport, ResultTransport::Bundle);
+}
+
+#[test]
+fn bundle_frames_round_trip_with_run_id_and_epoch() {
+    let run_id = RunId::new();
+    let frames = [
+        AgentFrame::BundleStart {
+            run_id: run_id.clone(),
+            epoch: 2,
+            base: "a".repeat(40),
+            head: "b".repeat(40),
+            branch: "job/graph-engine".to_owned(),
+            bytes: 4096,
+            sha256: "c".repeat(64),
+        },
+        AgentFrame::BundleAccept {
+            run_id: run_id.clone(),
+            epoch: 2,
+            offset: 1024,
+        },
+        AgentFrame::BundleChunk {
+            run_id: run_id.clone(),
+            epoch: 2,
+            offset: 1024,
+            data: "00ff".to_owned(),
+        },
+        AgentFrame::BundleEnd {
+            run_id: run_id.clone(),
+            epoch: 2,
+            bytes: 4096,
+            sha256: "c".repeat(64),
+        },
+        AgentFrame::BundleAbort {
+            run_id: run_id.clone(),
+            epoch: 2,
+            reason: "bundle_rejected: the head does not descend".to_owned(),
+        },
+    ];
+    let wires = [
+        "bundle_start",
+        "bundle_accept",
+        "bundle_chunk",
+        "bundle_end",
+        "bundle_abort",
+    ];
+    for (frame, wire) in frames.iter().zip(wires) {
+        let value = serde_json::to_value(frame).expect("bundle frame JSON");
+        assert_eq!(value["type"], wire);
+        assert_eq!(value["run_id"], run_id.as_str(), "every frame carries run_id");
+        assert_eq!(value["epoch"], 2, "every frame carries epoch");
+        let decoded: AgentFrame = serde_json::from_value(value).expect("bundle frame back");
+        assert_eq!(&decoded, frame);
+    }
+}
+
+#[test]
+fn bundle_chunk_data_is_lowercase_hex_and_capped() {
+    assert!(is_bundle_chunk_data(""));
+    assert!(is_bundle_chunk_data("00ff"));
+    assert!(!is_bundle_chunk_data("00FF"), "uppercase is not the wire spelling");
+    assert!(!is_bundle_chunk_data("abc"), "an odd length cannot be hex bytes");
+    assert!(!is_bundle_chunk_data("zz"));
+    assert!(is_bundle_chunk_data(&"ab".repeat(MAX_BUNDLE_CHUNK_BYTES)));
+    assert!(!is_bundle_chunk_data(&"ab".repeat(MAX_BUNDLE_CHUNK_BYTES + 1)));
 }
 
 #[test]

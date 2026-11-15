@@ -20,9 +20,10 @@ use std::time::Duration;
 
 use vowp_protocol::{
     Actor, AgentFrame, AssignmentPayload, EventBody, EventSource, Executor, ExecutorRef, HarnessKind, Job, JobId,
-    JobState, Lease, NodeCard, NodeName, PathRef, Placement, ProjectName, RemoteRunState, RunId, RunOutcome,
-    RunPurpose, RunRejectReason, RunResume, RunResumeResult, Session, SessionCreated, SessionId, SessionRole,
-    SessionState, SurfaceKind, SurfaceResume, SurfaceResumeResult, SurfaceState, Timestamp, VowpConfig, WaitingReason,
+    JobState, Lease, NodeCard, NodeName, PathRef, Placement, ProjectName, RemoteRunState, ResultTransport, RunId,
+    RunOutcome, RunPurpose, RunRejectReason, RunResume, RunResumeResult, Session, SessionCreated, SessionId,
+    SessionRole, SessionState, SurfaceKind, SurfaceResume, SurfaceResumeResult, SurfaceState, Timestamp, VowpConfig,
+    WaitingReason,
 };
 use vowp_store::repo_offload::{AgentAssignment, AgentAssignmentState, AssignmentFilter};
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
@@ -291,6 +292,7 @@ pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<
                         continue;
                     }
                 };
+            let result_transport = project_config.offload.result_transport;
             let payload = AssignmentPayload {
                 assignment_id: format!("assignment-{run_id}"),
                 run_id: run_id.clone(),
@@ -306,7 +308,14 @@ pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<
                 },
                 base_commit: base_commit.clone(),
                 remote: project_config.project.remote.clone(),
-                remote_url: remote_url.clone().unwrap_or_default(),
+                // A bundle assignment never pushes: it carries no remote URL, so the node
+                // neither needs nor uses a git credential. A push assignment keeps the
+                // stripped project URL the agent compares with its own push URL.
+                remote_url: match result_transport {
+                    ResultTransport::Push => remote_url.clone().unwrap_or_default(),
+                    ResultTransport::Bundle => String::new(),
+                },
+                result_transport,
                 env_names,
                 secret_names,
                 epoch: 1,
@@ -635,6 +644,9 @@ pub fn lose(
     if !job.state.is_terminal() && job.state != JobState::Parked {
         record_waiting_note(&project_store, &assignment.payload.job, &format!("run lost: {reason}"))?;
     }
+    // A fenced bundle transfer cannot resume: the partial file is a staging artifact, not
+    // the run's log or worktree. Its removal matches §5.5 (a fenced run removes it).
+    super::result::discard_staged_bundle(deps, &assignment.run_id);
     Ok(assignment)
 }
 

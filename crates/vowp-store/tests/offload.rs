@@ -139,6 +139,7 @@ fn payload(
         base_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         remote: "origin".to_owned(),
         remote_url: "https://example.invalid/owner/repo.git".to_owned(),
+        result_transport: vowp_protocol::ResultTransport::Push,
         env_names: vec!["CARGO_HOME".to_owned()],
         secret_names: vec![SecretName::parse("CARGO_REGISTRY_TOKEN").expect("secret name")],
         epoch,

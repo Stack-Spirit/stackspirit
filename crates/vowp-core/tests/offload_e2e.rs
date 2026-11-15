@@ -25,8 +25,8 @@ use vowp_core::{AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, Deps
 use vowp_protocol::{
     Actor, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AssignmentPayload, Clock, Cost, EventBody,
     EventId, EventSource, EventType, FakeClock, Gate, GateKind, Job, JobId, JobKind, JobState, MemoryLog, NewJob,
-    NodeName, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, Role, RunId,
-    RunOutcome, RunResume, SecretName, StopReason, Timestamp, TurnSummary, VowpConfig,
+    NodeName, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, ResultTransport, Role,
+    RunId, RunOutcome, RunResume, SecretName, StopReason, Timestamp, TurnSummary, VowpConfig,
 };
 use vowp_store::repo_offload::{AgentAssignment, AgentAssignmentState};
 use vowp_store::session_log::SessionLog;
@@ -77,6 +77,7 @@ struct HomeOptions {
     kind: JobKind,
     project_home_only: bool,
     online: bool,
+    result_transport: ResultTransport,
 }
 
 impl Default for HomeOptions {
@@ -86,6 +87,7 @@ impl Default for HomeOptions {
             kind: JobKind::Build,
             project_home_only: false,
             online: true,
+            result_transport: ResultTransport::Push,
         }
     }
 }
@@ -155,6 +157,7 @@ impl Home {
         config.project.remote = "origin".to_owned();
         config.project.default_branch = "main".to_owned();
         config.offload.enabled = true;
+        config.offload.result_transport = options.result_transport;
         config.offload.projects.insert(
             project.clone(),
             vowp_protocol::config::OffloadProjectConfig {
@@ -964,6 +967,119 @@ fn fake_gateway_full_turn_and_job_end_to_end() {
 }
 
 #[test]
+fn fake_gateway_bundle_result_end_to_end() {
+    let home = Home::new(HomeOptions {
+        result_transport: ResultTransport::Bundle,
+        ..HomeOptions::default()
+    });
+    let gateway = home.connect();
+    home.heartbeat(&gateway);
+    let (assignment, lease, _) = home.expect_assign(&gateway, 0);
+    assert_eq!(assignment.result_transport, ResultTransport::Bundle);
+    assert!(
+        assignment.remote_url.is_empty(),
+        "a bundle assignment carries no push remote"
+    );
+    home.accept(&gateway, &assignment);
+    let run = home.run_job(&assignment, &[("src/lib.rs", "pub fn bundled() -> u32 {\n    4\n}\n")]);
+    home.hello(&gateway, &assignment, &lease);
+
+    // The node creates exactly one `base..job/<id>` bundle in its worktree.
+    let bundle_path = home.root.join("node-bundle");
+    let bundle_text = bundle_path.display().to_string();
+    git_ok(
+        &run.worktree,
+        &[
+            "bundle",
+            "create",
+            &bundle_text,
+            &format!("{}..job/{}", assignment.base_commit, assignment.job),
+        ],
+    );
+    let bytes = fs::read(&bundle_path).expect("bundle file");
+    let sha = result::sha256_hex(&bytes);
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::BundleStart {
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+        base: assignment.base_commit.clone(),
+        head: run.head.clone(),
+        branch: format!("job/{}", assignment.job),
+        bytes: bytes.len() as u64,
+        sha256: sha.clone(),
+    });
+    let accepted = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::BundleAccept { .. }));
+    match accepted {
+        AgentFrame::BundleAccept { offset, .. } => assert_eq!(offset, 0, "a fresh transfer starts at zero"),
+        other => panic!("expected BundleAccept, got {other:?}"),
+    }
+    for (index, chunk) in bytes.chunks(256 * 1024).enumerate() {
+        gateway.send(&AgentFrame::BundleChunk {
+            run_id: assignment.run_id.clone(),
+            epoch: assignment.epoch,
+            offset: (index * 256 * 1024) as u64,
+            data: to_hex(chunk),
+        });
+    }
+    gateway.send(&AgentFrame::BundleEnd {
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+        bytes: bytes.len() as u64,
+        sha256: sha.clone(),
+    });
+    gateway.barrier();
+    assert!(
+        !gateway
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::BundleAbort { .. })),
+        "the gateway did not refuse the bundle: {:?}",
+        gateway.frames()
+    );
+
+    home.finishing(&gateway, &assignment, &run.head);
+    home.turn_end(&gateway, &assignment, summary_ok());
+
+    let job = home.job();
+    assert_eq!(job.state, JobState::Gating, "note: {}", job.note);
+    let inspection = format!("refs/vowp/jobs/{}", home.job.id);
+    assert_eq!(
+        git_output(&home.checkout, &["rev-parse", &inspection]).trim(),
+        run.head,
+        "the verified inspection ref is the bundled head"
+    );
+    assert_eq!(
+        git_output(
+            &home.checkout,
+            &["rev-parse", &format!("refs/heads/job/{}", home.job.id)]
+        )
+        .trim(),
+        run.head
+    );
+    let pushed = git_output(&home.origin, &["for-each-ref", "--format=%(refname)", "refs/heads/job"]);
+    assert!(pushed.trim().is_empty(), "the node never pushed: {pushed}");
+    let record = result::load(&home.store, &assignment.run_id)
+        .expect("result record")
+        .expect("returned record");
+    assert_eq!(record.status, "returned");
+    assert_eq!(record.transport, "bundle");
+    assert_eq!(record.base_commit, home.base);
+    assert_eq!(record.head_commit.as_deref(), Some(run.head.as_str()));
+    assert_eq!(record.bundle_bytes, Some(bytes.len() as u64));
+    assert_eq!(record.bundle_sha256.as_deref(), Some(sha.as_str()));
+    let staging = home
+        .root
+        .join("tmp")
+        .join("agent-bundles")
+        .join(assignment.run_id.as_str());
+    assert!(!staging.exists(), "the home staging file is removed after settle");
+
+    let outcome = gateway.shutdown();
+    assert!(matches!(outcome, GatewayOutcome::Closed { .. }));
+    drop(home);
+}
+
+#[test]
 fn offload_rejects_a_home_only_project_and_a_denied_kind() {
     let home_only = Home::new(HomeOptions {
         placement: Placement::Node {
@@ -1333,6 +1449,17 @@ fn git_run(cwd: &Path, args: &[&str]) -> CommandOutput {
             timeout: Duration::from_secs(60),
         })
         .expect("git")
+}
+
+/// Encodes bytes as lowercase hex for `BundleChunk.data`.
+fn to_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    text
 }
 
 /// Environment that keeps git hermetic: no user or system config, fixed identity.

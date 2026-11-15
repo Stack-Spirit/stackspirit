@@ -99,6 +99,7 @@ fn assignment() -> AssignmentPayload {
         base_commit: "abc1234".to_owned(),
         remote: "origin".to_owned(),
         remote_url: "https://example.invalid/owner/repo.git".to_owned(),
+        result_transport: vowp_protocol::config::ResultTransport::Push,
         env_names: vec!["CI".to_owned()],
         secret_names: vec![SecretName::parse("HOME_GITHUB_TOKEN").expect("secret name")],
         epoch: 1,
