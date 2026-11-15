@@ -44,13 +44,8 @@ export const SAME_ORIGIN_REQUIRED =
 export const JOB_DETAIL_UNAVAILABLE =
   "Job detail is unavailable — the daemon does not serve GET /api/v1/jobs/{id}, /runs, or /gates.";
 
-export const SESSION_DETAIL_UNAVAILABLE =
-  "Session detail is unavailable in this Web build — the daemon serves session documents, but this shell has no session drawer yet.";
-
 export const JOB_PAGE_TRUNCATED =
   "This daemon paginated the job list; only the returned page is shown. The board counts remain exact.";
 
 export const WRITES_DISABLED =
   "Writes are disabled on this daemon. The local write proxy is not configured.";
-
-export const NO_CAPACITY_ROUTE = "no_route";
