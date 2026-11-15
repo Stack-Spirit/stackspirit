@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/spirit-core", "apps/spirit-desktop/src-tauri"]
+members = [
+    "crates/spirit-core",
+    "crates/spirit-cli",
+    "apps/spirit-desktop/src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +15,7 @@ repository = "https://example.invalid/stackspirit"
 
 [workspace.dependencies]
 async-trait = "0.1"
+clap = "4.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
