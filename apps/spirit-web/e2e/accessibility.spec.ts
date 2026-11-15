@@ -20,3 +20,10 @@ test("the read-only inbox drawer meets WCAG 2.2 AA", async ({ page }) => {
   await expect(page.getByTestId("web-inbox-drawer")).toBeVisible();
   await expectNoWcagViolations(page);
 });
+
+test("the job drawer meets WCAG 2.2 AA", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("job-card-ss-9-gate-check").click();
+  await expect(page.getByTestId("job-detail-fields")).toBeVisible();
+  await expectNoWcagViolations(page);
+});

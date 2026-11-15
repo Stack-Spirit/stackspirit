@@ -18,6 +18,7 @@ import type {
   HostProbe,
   InboxItemView,
   JobAction,
+  JobDetailView,
   KeyStatus,
   ModelChoice,
   NewHostProfile,
@@ -72,6 +73,13 @@ export interface SpiritBridge {
     inbox(all: boolean): Promise<InboxItemView[]>;
     answerInbox(id: string, answer: string): Promise<InboxItemView>;
     setTarget(input: SetTargetInput): Promise<CapacityTargetView>;
+    /**
+     * Optional read-only detail for one job: the full `Job` fields the drawer needs, its
+     * runs oldest first, and the gate results of its newest attempt. Present on the Web
+     * and preview bridges; desktop bridges may omit it until the desktop drawer adopts it.
+     * A 404 is a typed `not_found`, not a missing route.
+     */
+    job?(id: string): Promise<JobDetailView>;
     /** Parsed VOWP documents plus every `WireWarning` from the last parse. */
     rawDocument(): Promise<RawDocument | null>;
     /**

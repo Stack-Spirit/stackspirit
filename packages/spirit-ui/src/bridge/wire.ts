@@ -530,6 +530,72 @@ export interface JobLanes {
   queue_cap: number;
 }
 
+/** One stored run of a job. `JobDetailView.runs` is oldest first. */
+export interface JobRunView {
+  id: string;
+  role: string;
+  purpose: string;
+  /** `null` for shell, gate, and merge runs. */
+  executor: ExecutorView | null;
+  started_at: Timestamp;
+  ended_at: Timestamp | null;
+  /** `RunOutcome` string, or `null` while the run is still open. */
+  outcome: string | null;
+  exit_code: number | null;
+  /** Redacted by VOWP; StackSpirit also strips control characters and local paths. */
+  detail: string;
+}
+
+/** One gate result of a job's newest attempt. */
+export interface JobGateView {
+  attempt: number;
+  /** Gate index in the job's gate list; -1 for repo-wide merge checks. */
+  gate_index: number;
+  /** The `Gate` variant name, for example `report`, `cmd`, or `secret_scan`. */
+  kind: string;
+  passed: boolean;
+  /** Safe summary only: no raw output tail, report body, token, or local path. */
+  evidence_summary: string | null;
+  duration_ms: number;
+  checked_at: Timestamp;
+}
+
+/**
+ * The read-only detail behind one job drawer: the `Job` fields the drawer needs, its runs
+ * oldest first, and the gate results of its newest attempt.
+ *
+ * `Job.worktree` (an absolute local path) and every home path are deliberately omitted.
+ * `report_path` is present only when VOWP reports a repo-relative path.
+ */
+export interface JobDetailView {
+  id: string;
+  project: string;
+  title: string;
+  kind: string;
+  role: string;
+  state: string;
+  priority: number;
+  needs: string[];
+  attempts: number;
+  note: string;
+  report_path: string | null;
+  parked_reason: string | null;
+  created_at: Timestamp;
+  state_changed_at: Timestamp;
+  updated_at: Timestamp;
+  last_progress_at: Timestamp | null;
+  /** Client time the three job-detail reads completed. */
+  fetched_at: Timestamp;
+  /** Oldest first (`started_at`, then id). */
+  runs: JobRunView[];
+  /** True when the daemon set a `next` cursor on the run page. */
+  runs_truncated: boolean;
+  /** Ordered by `gate_index`. */
+  gates: JobGateView[];
+  /** True when the daemon set a `next` cursor on the gate page. */
+  gates_truncated: boolean;
+}
+
 export interface FleetView {
   revision: number;
   host_id: string;
@@ -616,7 +682,8 @@ export type UnavailableFeature =
 /** One feature the daemon cannot supply, with the exact reason. */
 export interface UnavailableNotice {
   feature: UnavailableFeature;
-  code: "no_route";
+  /** `no_route` means the route is absent; `read_failed` means a present route failed. */
+  code: "no_route" | "read_failed";
   route: string | null;
   detail: string;
 }

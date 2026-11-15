@@ -21,7 +21,10 @@ import type {
   HostProbeStage,
   InboxItemView,
   JobAction,
+  JobDetailView,
+  JobGateView,
   JobLanes,
+  JobRunView,
   KeyStatus,
   LatencyStats,
   LocalOrchestratorGate,
@@ -36,6 +39,7 @@ import type {
   WireWarning,
   WorkerCardView,
 } from "./wire";
+import { parseExecutor } from "../domain/executor";
 
 export const MOCK_SCENARIOS = [
   "fresh",
@@ -56,6 +60,7 @@ export const MOCK_SCENARIOS = [
   "engine-ready",
   "engine-no-key",
   "gates-ready",
+  "job-detail-error",
 ] as const;
 
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
@@ -437,6 +442,26 @@ export class MockBridge implements SpiritBridge {
     },
     capacity: async (): Promise<CapacityView | null> =>
       this.fleetView ? clone(this.fleetView.capacity) : null,
+    job: async (id: string): Promise<JobDetailView> => {
+      if (this.scenario === "job-detail-error") {
+        throw errorDto(
+          "daemon_unreachable",
+          "The daemon at mock.invalid did not answer.",
+          "Start the daemon and retry.",
+          true,
+        );
+      }
+      const detail = this.makeJobDetail(id);
+      if (!detail) {
+        throw errorDto(
+          "not_found",
+          `Job ${id} was not found.`,
+          "Refresh the job list.",
+          false,
+        );
+      }
+      return clone(detail);
+    },
     jobAction: async (
       jobId: string,
       action: JobAction,
@@ -804,6 +829,319 @@ export class MockBridge implements SpiritBridge {
       last_event_age_secs: 3 + index * 8,
       session_id: `01MOCKSESSION00000000000000${index}`,
     };
+  }
+
+  /**
+   * Deterministic job-detail fixtures for preview and tests.
+   *
+   * `ss-9-gate-check` has runs and two failed gates (the review/fix case);
+   * `ss-5-mock` is ready and has no runs (the true empty case); any unknown id is a 404.
+   */
+  private makeJobDetail(id: string): JobDetailView | null {
+    const now = this.nowMs;
+    const queued = /^ss-(\d+)-mock$/.exec(id);
+    const specs: Record<
+      string,
+      {
+        title: string;
+        kind: string;
+        role: string;
+        state: string;
+        priority: number;
+        needs: string[];
+        attempts: number;
+        note: string;
+        report: string;
+        parked_reason: string | null;
+      }
+    > = {
+      "ss-2-desktop-shell": {
+        title: "Build the desktop shell",
+        kind: "build",
+        role: "worker",
+        state: "running",
+        priority: 80,
+        needs: [],
+        attempts: 0,
+        note: "",
+        report: ".vowp/jobs/ss-2-desktop-shell/report.md",
+        parked_reason: null,
+      },
+      "ss-3-fleet-canvas": {
+        title: "Build the fleet canvas",
+        kind: "build",
+        role: "worker",
+        state: "running",
+        priority: 60,
+        needs: ["ss-2-desktop-shell"],
+        attempts: 1,
+        note: "First attempt produced the layout.",
+        report: ".vowp/jobs/ss-3-fleet-canvas/report.md",
+        parked_reason: null,
+      },
+      "ss-4-engine-onboarding": {
+        title: "Engine onboarding",
+        kind: "build",
+        role: "worker",
+        state: "running",
+        priority: 50,
+        needs: [],
+        attempts: 0,
+        note: "",
+        report: ".vowp/jobs/ss-4-engine-onboarding/report.md",
+        parked_reason: null,
+      },
+      "ss-5-fleet-inbox": {
+        title: "Fleet inbox",
+        kind: "build",
+        role: "worker",
+        state: "running",
+        priority: 50,
+        needs: [],
+        attempts: 0,
+        note: "",
+        report: ".vowp/jobs/ss-5-fleet-inbox/report.md",
+        parked_reason: null,
+      },
+      "ss-9-gate-check": {
+        title: "Gate check",
+        kind: "build",
+        role: "worker",
+        state: "reviewing",
+        priority: 50,
+        needs: ["ss-5-mock"],
+        attempts: 1,
+        note: "Verifier reported a failing report gate.",
+        report: ".vowp/jobs/ss-9-gate-check/report.md",
+        parked_reason: null,
+      },
+      "ss-8-blocked-review": {
+        title: "Blocked review",
+        kind: "verify",
+        role: "verifier",
+        state: "parked",
+        priority: 20,
+        needs: ["ss-9-gate-check"],
+        attempts: 2,
+        note: "Waiting for the owner to choose a merge policy.",
+        report: ".vowp/jobs/ss-8-blocked-review/report.md",
+        parked_reason: "question",
+      },
+      "ss-5-mock": {
+        title: "Build the visual fleet canvas",
+        kind: "build",
+        role: "worker",
+        state: "ready",
+        priority: 50,
+        needs: [],
+        attempts: 0,
+        note: "",
+        report: ".vowp/jobs/ss-5-mock/report.md",
+        parked_reason: null,
+      },
+      "ss-6-mock": {
+        title: "Capacity and storage rail",
+        kind: "build",
+        role: "worker",
+        state: "ready",
+        priority: 50,
+        needs: [],
+        attempts: 0,
+        note: "",
+        report: ".vowp/jobs/ss-6-mock/report.md",
+        parked_reason: null,
+      },
+      "ss-7-mock": {
+        title: "Engine model catalog",
+        kind: "build",
+        role: "worker",
+        state: "pending",
+        priority: 50,
+        needs: ["ss-6-mock"],
+        attempts: 0,
+        note: "",
+        report: ".vowp/jobs/ss-7-mock/report.md",
+        parked_reason: null,
+      },
+    };
+    if (queued && !specs[id]) {
+      const index = Number(queued[1]);
+      specs[id] = {
+        title: `Queued mock job ${index}`,
+        kind: "build",
+        role: "worker",
+        state: index === 7 ? "pending" : "ready",
+        priority: 50,
+        needs: [],
+        attempts: 0,
+        note: "",
+        report: `.vowp/jobs/${id}/report.md`,
+        parked_reason: null,
+      };
+    }
+    const spec = specs[id];
+    if (!spec) return null;
+    const knownCard = this.fleetView
+      ? [
+          ...this.fleetView.running,
+          ...this.fleetView.lanes.running,
+          ...this.fleetView.lanes.ready,
+          ...this.fleetView.lanes.review_fix,
+          ...this.fleetView.lanes.parked_blocked,
+          ...this.fleetView.lanes.done,
+        ].find((card) => card.job_id === id)
+      : undefined;
+
+    const base: JobDetailView = {
+      id,
+      project: knownCard?.project ?? "vowp",
+      title: spec.title,
+      kind: spec.kind,
+      role: spec.role,
+      state: spec.state,
+      priority: spec.priority,
+      needs: spec.needs,
+      attempts: spec.attempts,
+      note: spec.note,
+      report_path: spec.report,
+      parked_reason: spec.parked_reason,
+      created_at: iso(now - 7_200_000),
+      state_changed_at: iso(now - 2_400_000),
+      updated_at: iso(now - 600_000),
+      last_progress_at: iso(now - 1_800_000),
+      fetched_at: this.now(),
+      runs: [],
+      runs_truncated: false,
+      gates: [],
+      gates_truncated: false,
+    };
+
+    if (id === "ss-9-gate-check") {
+      const runs: JobRunView[] = [
+        {
+          id: "01MOCKRUN00000000000000001",
+          role: "worker",
+          purpose: "start",
+          executor: parseExecutor("opencode:deepseek/deepseek-flash#max"),
+          started_at: iso(now - 7_200_000),
+          ended_at: iso(now - 5_400_000),
+          outcome: "ok",
+          exit_code: 0,
+          detail: "Implemented the gate check and wrote the report.",
+        },
+        {
+          id: "01MOCKRUN00000000000000002",
+          role: "verifier",
+          purpose: "verify",
+          executor: parseExecutor("claude-code:model-a@medium"),
+          started_at: iso(now - 5_000_000),
+          ended_at: iso(now - 4_200_000),
+          outcome: "error",
+          exit_code: 1,
+          detail: "Report gate failed: the tests field is missing.",
+        },
+      ];
+      const gates: JobGateView[] = [
+        {
+          attempt: 1,
+          gate_index: 0,
+          kind: "report",
+          passed: false,
+          evidence_summary: "missing: tests · 1 problem",
+          duration_ms: 1_200,
+          checked_at: iso(now - 4_500_000),
+        },
+        {
+          attempt: 1,
+          gate_index: 1,
+          kind: "owns_respected",
+          passed: true,
+          evidence_summary: "2 changed · 0 outside owns",
+          duration_ms: 45,
+          checked_at: iso(now - 4_500_000),
+        },
+        {
+          attempt: 1,
+          gate_index: 2,
+          kind: "secret_scan",
+          passed: false,
+          evidence_summary: "12 files scanned · 1 hit",
+          duration_ms: 800,
+          checked_at: iso(now - 4_500_000),
+        },
+      ];
+      return { ...base, runs, gates };
+    }
+
+    if (id === "ss-8-blocked-review") {
+      return {
+        ...base,
+        runs: [
+          {
+            id: "01MOCKRUN00000000000000003",
+            role: "verifier",
+            purpose: "verify",
+            executor: parseExecutor("claude-code:model-a@medium"),
+            started_at: iso(now - 12_000_000),
+            ended_at: iso(now - 11_000_000),
+            outcome: "error",
+            exit_code: 1,
+            detail: "Review found an unanswered merge-policy question.",
+          },
+        ],
+        gates: [
+          {
+            attempt: 2,
+            gate_index: 0,
+            kind: "review",
+            passed: false,
+            evidence_summary: "verdict: request_changes · 1 finding",
+            duration_ms: 1_500,
+            checked_at: iso(now - 11_500_000),
+          },
+        ],
+      };
+    }
+
+    if (id === "ss-3-fleet-canvas") {
+      return {
+        ...base,
+        runs: [
+          {
+            id: "01MOCKRUN00000000000000004",
+            role: "worker",
+            purpose: "start",
+            executor: parseExecutor("opencode:deepseek/deepseek-flash#max"),
+            started_at: iso(now - 3_600_000),
+            ended_at: iso(now - 2_400_000),
+            outcome: "ok",
+            exit_code: 0,
+            detail: "Built the visual fleet canvas.",
+          },
+        ],
+      };
+    }
+
+    if (id === "ss-2-desktop-shell" || id === "ss-4-engine-onboarding" || id === "ss-5-fleet-inbox") {
+      return {
+        ...base,
+        runs: [
+          {
+            id: `01MOCKRUN0000000000000${id === "ss-2-desktop-shell" ? "5" : id === "ss-4-engine-onboarding" ? "6" : "7"}`,
+            role: "worker",
+            purpose: "start",
+            executor: parseExecutor("opencode:deepseek/deepseek-flash#max"),
+            started_at: iso(now - 1_200_000),
+            ended_at: null,
+            outcome: null,
+            exit_code: null,
+            detail: "Run is still open.",
+          },
+        ],
+      };
+    }
+
+    return base;
   }
 
   private makeProjects(running: WorkerCardView[]): ProjectView[] {

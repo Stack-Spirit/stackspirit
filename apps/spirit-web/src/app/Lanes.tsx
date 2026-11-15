@@ -1,13 +1,9 @@
 import type { JobCardView, WebFleetView } from "@stackspirit/ui";
-import { Badge, EmptyState, Panel } from "@stackspirit/ui";
+import { Badge, Button, EmptyState, Panel } from "@stackspirit/ui";
 
-import {
-  GATE_FAILURES_UNAVAILABLE,
-  JOB_DETAIL_UNAVAILABLE,
-  JOB_PAGE_TRUNCATED,
-} from "../copy";
+import { JOB_PAGE_TRUNCATED } from "../copy";
 import { LANES, laneFooterText, sortWorkerCards } from "../shared/domain";
-import { JobLane, WorkerCard } from "../shared/views";
+import { JobCard, JobLane, WorkerCard } from "../shared/views";
 
 function titleForJob(snapshot: WebFleetView, jobId: string): string | null {
   for (const cards of [
@@ -23,7 +19,13 @@ function titleForJob(snapshot: WebFleetView, jobId: string): string | null {
   return null;
 }
 
-export function RunningWorkers({ snapshot }: { snapshot: WebFleetView }) {
+export function RunningWorkers({
+  snapshot,
+  onOpenJob,
+}: {
+  snapshot: WebFleetView;
+  onOpenJob: (job: JobCardView) => void;
+}) {
   const sorted = sortWorkerCards(snapshot.running);
   return (
     <Panel title="Running workers" data-testid="running-workers">
@@ -35,23 +37,108 @@ export function RunningWorkers({ snapshot }: { snapshot: WebFleetView }) {
         />
       ) : (
         <div className="running-grid__cards">
-          {sorted.map((card) => (
-            <div key={`${card.project}:${card.job_id}`} className="web-worker">
-              <WorkerCard
-                card={card}
-                title={titleForJob(snapshot, card.job_id)}
-                showProject={false}
-              />
-              {card.project === "unknown" ? (
-                <p className="muted small" data-testid={`job-detail-unavailable-${card.job_id}`}>
-                  Job detail unavailable for this board run.
-                </p>
-              ) : null}
-            </div>
-          ))}
+          {sorted.map((card) => {
+            const laneCard = snapshot.lanes.running.find(
+              (candidate) =>
+                candidate.job_id === card.job_id && candidate.project === card.project,
+            );
+            return (
+              <div key={`${card.project}:${card.job_id}`} className="web-worker">
+                <WorkerCard
+                  card={card}
+                  title={titleForJob(snapshot, card.job_id)}
+                  showProject={false}
+                />
+                {card.project === "unknown" ? (
+                  <p className="muted small" data-testid={`job-row-missing-${card.job_id}`}>
+                    No matching job row for this board run.
+                  </p>
+                ) : null}
+                {laneCard && card.project !== "unknown" ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => onOpenJob(laneCard)}
+                    data-testid={`open-job-${card.job_id}`}
+                  >
+                    Open job
+                  </Button>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       )}
     </Panel>
+  );
+}
+
+function ReviewFixLane({
+  snapshot,
+  count,
+  onOpenJob,
+}: {
+  snapshot: WebFleetView;
+  count: number;
+  onOpenJob: (job: JobCardView) => void;
+}) {
+  const lane = LANES.find((candidate) => candidate.key === "review_fix");
+  if (!lane) return null;
+  const cards = snapshot.lanes.review_fix;
+  const gateNotice = snapshot.unavailable.find(
+    (notice) => notice.feature === "gate_failures",
+  );
+  return (
+    <section
+      className={`job-lane job-lane--${lane.key}`}
+      aria-label={`${lane.label} lane`}
+      data-testid={`lane-${lane.key}`}
+      data-count={count}
+    >
+      <header className={`job-lane__head job-lane__head--${lane.headerTone}`}>
+        <h3 className="job-lane__title">{lane.label}</h3>
+        <span className="job-lane__count" data-testid={`lane-count-${lane.key}`}>
+          {count}
+        </span>
+      </header>
+      <div className="job-lane__cards">
+        {cards.map((job) => (
+          <JobCard
+            key={`${job.project}:${job.job_id}`}
+            job={job}
+            lane={lane.key}
+            showProject={false}
+            onOpen={onOpenJob}
+          />
+        ))}
+        {cards.length < count ? (
+          <p
+            className="notice notice--warn"
+            data-testid="review-fix-count-mismatch"
+            role="status"
+          >
+            The board reports {count} review/fix job{count === 1 ? "" : "s"}, but
+            GET /api/v1/jobs returned {cards.length} matching row
+            {cards.length === 1 ? "" : "s"} for this snapshot.
+          </p>
+        ) : null}
+        {cards.length === 0 && count === 0 ? (
+          <p className="job-lane__empty">No jobs in review or fix.</p>
+        ) : null}
+        {gateNotice ? (
+          <p
+            className="notice notice--warn"
+            data-testid="gate-failures-unavailable"
+            role="status"
+          >
+            {gateNotice.detail}
+          </p>
+        ) : null}
+      </div>
+      <footer className="job-lane__foot">
+        <span>{laneFooterText(lane.key, count)}</span>
+      </footer>
+    </section>
   );
 }
 
@@ -75,28 +162,12 @@ export function Lanes({
         const count = snapshot.lanes.counts[lane.key] ?? 0;
         if (lane.key === "review_fix") {
           return (
-            <section
+            <ReviewFixLane
               key={lane.key}
-              className={`job-lane job-lane--${lane.key}`}
-              aria-label={`${lane.label} lane`}
-              data-testid={`lane-${lane.key}`}
-              data-count={count}
-            >
-              <header className={`job-lane__head job-lane__head--${lane.headerTone}`}>
-                <h3 className="job-lane__title">{lane.label}</h3>
-                <span className="job-lane__count" data-testid={`lane-count-${lane.key}`}>
-                  {count}
-                </span>
-              </header>
-              <div className="job-lane__cards">
-                <p className="notice notice--warn" data-testid="gate-failures-unavailable">
-                  {GATE_FAILURES_UNAVAILABLE}
-                </p>
-              </div>
-              <footer className="job-lane__foot">
-                <span>{laneFooterText(lane.key, count)}</span>
-              </footer>
-            </section>
+              snapshot={snapshot}
+              count={count}
+              onOpenJob={onOpenJob}
+            />
           );
         }
         return (
@@ -131,14 +202,17 @@ export function UnavailableDetails({ snapshot }: { snapshot: WebFleetView }) {
       <p className="muted small">
         This build does not render empty states for features the daemon cannot supply.
       </p>
-      <ul className="web-list">
-        {shown.map((notice) => (
-          <li key={notice.feature}>
-            <Badge tone="unknown">{notice.feature}</Badge> {notice.detail}
-          </li>
-        ))}
-      </ul>
-      <p className="muted small">{JOB_DETAIL_UNAVAILABLE}</p>
+      {shown.length === 0 ? (
+        <p className="muted small">No other unavailable features are reported.</p>
+      ) : (
+        <ul className="web-list">
+          {shown.map((notice) => (
+            <li key={notice.feature}>
+              <Badge tone="unknown">{notice.feature}</Badge> {notice.detail}
+            </li>
+          ))}
+        </ul>
+      )}
     </Panel>
   );
 }

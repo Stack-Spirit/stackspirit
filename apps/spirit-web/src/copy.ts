@@ -27,7 +27,10 @@ export const READ_ONLY_NOTICE =
   "Read-only Web build. Job and inbox actions require the local write proxy.";
 
 export const GATE_FAILURES_UNAVAILABLE =
-  "Gate failure detail is unavailable — the daemon serves the job-gate route, but this Web build does not read it yet.";
+  "Gate failure detail is unavailable — this daemon does not serve the job-detail routes (GET /api/v1/jobs/{id}, /runs, and /gates).";
+
+export const GATE_FAILURES_READ_FAILED =
+  "Gate failure detail could not be read — the job-detail routes are present, but a read failed. The cards below still come from GET /api/v1/jobs.";
 
 export const SESSION_SURFACES_UNAVAILABLE =
   "Session surfaces are unavailable — the daemon does not expose active surface leases or last-event times.";
@@ -42,7 +45,28 @@ export const SAME_ORIGIN_REQUIRED =
   "This daemon has no CORS support. Serve this app and /api/v1 from the same origin through the reverse proxy.";
 
 export const JOB_DETAIL_UNAVAILABLE =
-  "Job detail is unavailable — the daemon serves GET /api/v1/jobs/{id}, /runs, and /gates, but this Web build does not call them yet.";
+  "Job detail is unavailable — this daemon does not serve GET /api/v1/jobs/{id} with /runs and /gates.";
+
+export const JOB_DETAIL_NOT_FOUND =
+  "Job not found — the daemon has no job with this id. It may have been removed or replanned.";
+
+export const JOB_DETAIL_STALE =
+  "The board snapshot is stale. This job detail was read directly from the daemon when the drawer opened.";
+
+export const JOB_DETAIL_LOADING =
+  "Reading the job, runs, and gates from the daemon…";
+
+export const JOB_RUNS_EMPTY =
+  "No runs recorded — the daemon returned an empty run list for this job.";
+
+export const JOB_GATES_EMPTY =
+  "No gate results recorded — the daemon returned an empty list for the newest attempt.";
+
+export const JOB_RUNS_TRUNCATED =
+  "The daemon paginated this job's run list; only the returned page is shown.";
+
+export const JOB_GATES_TRUNCATED =
+  "The daemon paginated this job's gate results; only the returned page is shown.";
 
 export const JOB_PAGE_TRUNCATED =
   "This daemon paginated the job list; only the returned page is shown. The board counts remain exact.";

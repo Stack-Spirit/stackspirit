@@ -169,15 +169,19 @@ renders the desktop-only panel with the exact copy in §3.7 and makes no bridge 
 | `fleet.get()` | `GET /api/v1/health`, `GET /api/v1/board`, `GET /api/v1/jobs`, `GET /api/v1/sessions`, `GET /api/v1/inbox?state=open` | available | Builds a partial `FleetView` and attaches the `unavailable` notices from §3. Missing fields are `null` + a notice, never zeroes. |
 | `fleet.refresh()` | same reads as `get()` | available | Fetches one complete snapshot, applies it if it is the newest generation, and returns the retained view. |
 | `fleet.capacity()` | no route | unavailable | Resolves `null` with `capacity_unavailable = { code: "no_route", route: "/api/v1/capacity", ... }`. No `CapacityView` is fabricated. |
+| `fleet.job(id)` | `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/runs`, `GET /api/v1/jobs/{id}/gates` | available | Reads the full `Job` fields the drawer needs (no worktree or home path), its runs oldest first, and the gate results of its newest attempt. Returns `JobDetailView` with safe evidence summaries. A 404 on the job is typed `not_found` ("job not found"), a 404 on `/runs` or `/gates` is a missing route, a 500 is `remote`, and a network failure is `daemon_unreachable`. |
 | `fleet.jobAction(jobId, action, reason?)` | `POST /api/v1/jobs/{id}/retry`, `POST /api/v1/jobs/{id}/park`, `POST /api/v1/jobs/{id}/cancel` | available (token-gated write) | Hidden in W1a. W1c proxies only these three. `retry` and `cancel` send no body; `park` sends `{"reason": "..."}`. A success is `202` and means **queued**, not applied. |
 | `fleet.inbox(all)` | `GET /api/v1/inbox?state=open`, `?state=answered`, `?state=dismissed` | available | `all: false` fetches only `open`. `all: true` fetches the three states and merges them, sorted by `created_at` ascending then `id` ascending (the daemon's own order). `state=all` is a `400`; never send it. |
 | `fleet.answerInbox(id, answer)` | `POST /api/v1/inbox/{id}/answer` | available (token-gated write) | Hidden in W1a. W1c only. Success is `202` with the answered `InboxItem` and `answered_by: "web"`. The supervisor applies the request on its next tick. |
 | `fleet.setTarget(input)` | no route | unavailable | Rejects before any fetch with `no_route` (`/api/v1/capacity/target`). The target editor is hidden; no guessed target is shown. |
 | `fleet.rawDocument()` | no route | unavailable | Resolves `null` with a notice. The raw-document drawer is hidden; the daemon does not serve the fleet-status or capacity-report documents. |
 
-The current bridge has no `fleet.job(id)` or gate-failure method, so W1a does not call the
-daemon's `GET /api/v1/jobs/{id}`, `/runs`, or `/gates` routes. See §2.7 and §6.2 Ask 3 for
-the bridge work a later job drawer needs.
+The Web bridge implements `fleet.job(id)` for the job drawer. The review/fix lane reads
+the same method for jobs in `gating`, `reviewing`, and `fixing`, so a lane card carries its
+real failed gate kind and safe summary instead of the old `GATE_FAILURES_UNAVAILABLE`
+placeholder. If a job-detail route is absent, the lane shows the exact route-missing copy;
+if a present route fails in transport, the notice code is `read_failed`. Neither case is
+rendered as an empty “no failures” state.
 
 ### 2.5 `engine`
 
@@ -214,6 +218,9 @@ claim a Ready gate.
 
 These routes exist today but have no `SpiritBridge` method. W1a does not call them.
 
+The three job-detail routes (`GET /api/v1/jobs/{id}`, `/runs`, and `/gates`) are no longer
+in this table: they now back `fleet.job(id)` in §2.4.
+
 | Route | Auth | Why it is not mapped | W1 |
 |---|---|---|---|
 | `GET /api/v1/sessions/{id}` | none | The bridge has no session-detail method; it returns `SessionDetail` (session, latest capsule, lineage). | Not used. A later session drawer adds `fleet.session(id)`. |
@@ -225,16 +232,13 @@ These routes exist today but have no `SpiritBridge` method. W1a does not call th
 | `POST /api/v1/sessions/{id}/switch` | Bearer token | No executor-switch method; local-node only. | Not used. |
 | `GET /api/v1/cost?by=&since=&until=` | none | No cost method. `FleetView` carries only `Board.cost_today_usd`. | Not used. A later `fleet.cost(by)` can map it. |
 | `GET /api/v1/nodes` | none | `Node` is not a `HostProfile`; it carries `ssh_target` and no pinned key. Exposing it in W1 adds host data for no user value. | Not used. |
-| `GET /api/v1/jobs/{id}` | none | Returns the full `Job`. The bridge has no per-job detail method; the list rows already carry every W1 field. | Not used. A later job drawer adds `fleet.job(id)`. |
-| `GET /api/v1/jobs/{id}/runs` | none | Returns `RunPage` (`Page<Run>`), oldest first, unpaginated. No runs method. | Not used. The same later job drawer needs it. |
-| `GET /api/v1/jobs/{id}/gates` | none | Returns `GateResultPage` (`Page<GateResult>`) for the newest attempt, unpaginated. No gate-failure method. | Not used. The review/fix lane shows the exact count plus `GATE_FAILURES_UNAVAILABLE` until then. |
 
 The daemon also serves static pages and PWA assets (`/`, `/board`, `/jobs`, `/sessions`,
 `/cost`, `/inbox`, `/nodes`, `/import`, `/manifest.webmanifest`, `/sw.js`, `/icon.svg`).
 They are VOWP's own window and are not part of the StackSpirit Web contract.
 
 W1a does not need the job-detail reads because `GET /api/v1/jobs` returns every job. They
-are the exact routes a later job drawer needs for runs and gate failures (§6.2, Ask 3).
+now power the read-only job drawer and the review/fix lane (§6.2, Ask 3).
 
 ### 2.8 Token-gated writes
 
@@ -273,10 +277,10 @@ item is answered in place with no job request. The browser never claims the job 
 |---|---|---|---|---|
 | `hosts` | 0 | 0 | 7 | 7 |
 | `connection` | 2 | 0 | 2 | 4 |
-| `fleet` | 5 | 3 | 0 | 8 |
+| `fleet` | 6 | 3 | 0 | 9 |
 | `engine` | 0 | 0 | 11 | 11 |
 | `gates` | 0 | 0 | 2 | 2 |
-| **Total** | **7** | **3** | **22** | **32** |
+| **Total** | **8** | **3** | **22** | **33** |
 
 `fleet.jobAction` and `fleet.answerInbox` are counted as available because the routes exist;
 they are hidden in W1a and enabled only in W1c.
@@ -318,11 +322,11 @@ non-nullable field; it never means `0`, `false`, `"active"`, or an empty array p
 | `supervisor` | none | `null`. `Health.heartbeat` is only the last heartbeat timestamp; it does not tell us `running`, `pid`, `paused`, `last_tick_at`, `last_tick_age_secs`, `tick_secs`, `fail_streak`, or the supervisor version. `Health.version` is the daemon version and must not be copied into `SupervisorView.version`. Show “supervisor state unavailable” plus the heartbeat age as a separate fact. |
 | `projects` | `Health.project`, `Board` | One entry. `name` = `Health.project` (must equal `Board.project`; otherwise `daemon_incompatible`). `state` = `"unknown"`; `paused_reason` = `""` only because the field is non-nullable — consumers must gate on `state == "unknown"` and must not render the empty reason as “active”. `jobs_by_state` = `Board.jobs` (exact). `cost_today_usd` = `Board.cost_today_usd` (`null` stays unknown). |
 | `capacity` | none | `null`. See §3.3. |
-| `running` | `Board.running` + `Job` + `Session` | One card per board run, joined to the matching `Job` by id and to the `Session` with that `job_id` and the newest `updated_at`. `kind`, `role`, and `project` come from the job; `state` is `"stalled"` when the job is stalled and `"active"` otherwise, with `stalled` mirroring that state, exactly as the desktop card; `executor`, `age_secs`, `last_event_age_secs` from the board run; `session_id` from the joined session; `node` from the joined session or `null`. `WorkerCardView` has no title; the shell may show the title from the matching lane card as the desktop does, or the job id, never an invented title. A run with no matching job keeps its board fields and says “job detail unavailable” rather than disappearing. |
+| `running` | `Board.running` + `Job` + `Session` | One card per board run, joined to the matching `Job` by id and to the `Session` with that `job_id` and the newest `updated_at`. `kind`, `role`, and `project` come from the job; `state` is `"stalled"` when the job is stalled and `"active"` otherwise, with `stalled` mirroring that state, exactly as the desktop card; `executor`, `age_secs`, `last_event_age_secs` from the board run; `session_id` from the joined session; `node` from the joined session or `null`. `WorkerCardView` has no title; the shell may show the title from the matching lane card as the desktop does, or the job id, never an invented title. A run with no matching job keeps its board fields and says “No matching job row for this board run.” rather than disappearing. |
 | `lanes.counts` | `Board.jobs` | Exact. Map states to lanes with the same table as `crates/spirit-core/src/view/lanes.rs`: running/stalled/merging → `running`; pending/ready → `ready`; gating/reviewing/fixing → `review_fix`; parked/failed/cancelled/unknown → `parked_blocked`; done/replanned → `done`. Missing key = 0. |
 | `lanes.running` | `Board.running` + `Job` | Cards built like `FleetView.running`: `title`, `priority` from the job; `executor`, `age_secs` from the board run; `session_id` from the joined session; `reason`, `detail`, and `gate*` are `null`. No fabricated title, gate, or waiting reason. |
 | `lanes.ready` | `GET /api/v1/jobs` | Jobs in `pending`/`ready`. `title`, `kind`, `role`, `priority`, `state` come from the job; `age_secs` is client `now - state_changed_at`; `reason`, `detail`, `gate*`, `executor`, and `session_id` are `null`. |
-| `lanes.review_fix` | none | **No cards.** The count is exact from `Board.jobs`, but gate failures are not exposed. Show the count with “gate failure detail unavailable”, never an empty lane that implies no failures. |
+| `lanes.review_fix` | `GET /api/v1/jobs` + `fleet.job(id)` | Cards for jobs in `gating`/`reviewing`/`fixing`. `title`, `kind`, `role`, `priority`, and `state` come from the job. The first failed gate of the newest attempt supplies `gate`, `gate_at`, and `gate_evidence` (a safe summary); a passed-only attempt says so, and an empty gate page says “No gate results recorded for the newest attempt”. Missing route detail shows `GATE_FAILURES_UNAVAILABLE`; a transport failure shows a `read_failed` notice. Never an empty lane that implies no failures. |
 | `lanes.parked_blocked` | `GET /api/v1/jobs` | Jobs in `parked`/`failed`/`cancelled` and unknown states. `title`, `kind`, `role`, `priority`, `state` come from the job; `age_secs` is client `now - state_changed_at`; `reason` = `parked_reason` when present, otherwise the state string; `detail`, `gate*`, `executor`, and `session_id` are `null`. Do not copy `Job.note`, which is not the redacted `BlockedJobCard.detail`. |
 | `lanes.done` | `Board.jobs` | Count only, exactly as the desktop does. There is no `last_merge` in `Board`; do not invent a merge card. |
 | `lanes.queue_truncated` | none | `false`. The current list is unpaginated. If a future daemon caps it, the bridge must set this from the response, not assume. |
@@ -525,8 +529,16 @@ does **not** say “retrying”: retrying cannot create a missing route.
 | `ENGINE_DESKTOP_ONLY` | `The StackSpirit Engine runs beside the desktop app. This Web build cannot start the engine, manage provider keys, or switch models.` |
 | `GATES_DESKTOP_ONLY` | `Capability gates are probed over SSH from the desktop app. This Web build cannot probe them.` |
 | `READ_ONLY_NOTICE` | `Read-only Web build. Job and inbox actions require the local write proxy.` |
-| `GATE_FAILURES_UNAVAILABLE` | `Gate failure detail is unavailable — the daemon serves the job-gate route, but this Web build does not read it yet.` |
-| `JOB_DETAIL_UNAVAILABLE` | `Job detail is unavailable — the daemon serves GET /api/v1/jobs/{id}, /runs, and /gates, but this Web build does not call them yet.` |
+| `GATE_FAILURES_UNAVAILABLE` | `Gate failure detail is unavailable — this daemon does not serve the job-detail routes (GET /api/v1/jobs/{id}, /runs, and /gates).` |
+| `GATE_FAILURES_READ_FAILED` | `Gate failure detail could not be read — the job-detail routes are present, but a read failed. The cards below still come from GET /api/v1/jobs.` |
+| `JOB_DETAIL_UNAVAILABLE` | `Job detail is unavailable — this daemon does not serve GET /api/v1/jobs/{id} with /runs and /gates.` |
+| `JOB_DETAIL_NOT_FOUND` | `Job not found — the daemon has no job with this id. It may have been removed or replanned.` |
+| `JOB_DETAIL_STALE` | `The board snapshot is stale. This job detail was read directly from the daemon when the drawer opened.` |
+| `JOB_DETAIL_LOADING` | `Reading the job, runs, and gates from the daemon…` |
+| `JOB_RUNS_EMPTY` | `No runs recorded — the daemon returned an empty run list for this job.` |
+| `JOB_GATES_EMPTY` | `No gate results recorded — the daemon returned an empty list for the newest attempt.` |
+| `JOB_RUNS_TRUNCATED` | `The daemon paginated this job's run list; only the returned page is shown.` |
+| `JOB_GATES_TRUNCATED` | `The daemon paginated this job's gate results; only the returned page is shown.` |
 | `SESSION_SURFACES_UNAVAILABLE` | `Session surfaces are unavailable — the daemon does not expose active surface leases or last-event times.` |
 | `ORCHESTRATORS_UNAVAILABLE` | `Orchestrators are unavailable — the daemon has no orchestrator read route.` |
 | `RAW_DOCUMENT_UNAVAILABLE` | `Raw VOWP documents are unavailable — the daemon serves board and list documents, not the fleet-status or capacity-report documents.` |
@@ -745,6 +757,10 @@ path, not a public listener, but it still serves VOWP's page rather than the Sta
   status, and duration; it never includes values from the payload.
 - Errors show the daemon's path-free message plus a fixed StackSpirit title. They never
   concatenate raw response text, HTML, a stack trace, or an internal URL.
+- `fleet.job(id)` omits `Job.worktree` and every home path. `report_path` is kept only when
+  VOWP reports a repo-relative value; absolute, home, traversal, and Windows paths become
+  `null`. Run detail and gate evidence summaries strip control characters and local
+  absolute paths, and never include a raw output tail, report body, token, or provider key.
 - The UI renders all server strings as text nodes (React escapes by default); no
   `dangerouslySetInnerHTML`.
 - Production CSP:
@@ -804,8 +820,9 @@ Scope:
 - Add the capability map, the nullable `capacity`/`supervisor`, and the `unavailable`
   notices from §3.6.
 - Shell: top bar (node, project, daemon version, connection state, preview badge), fleet
-  canvas, job lanes, inbox drawer, capacity notice. Hosts, Engine, and Gates are absent from
-  the nav; direct URLs show the desktop-only panel.
+  canvas, job lanes, inbox drawer, capacity notice. A lane card opens a read-only job
+  drawer with the job, its runs oldest first, and the newest-attempt gate results. Hosts,
+  Engine, and Gates are absent from the nav; direct URLs show the desktop-only panel.
 - Select one project from `Health.project`; no project switcher.
 - Show slots as a plain “N / M configured slots” fact from
   `Board.slots_busy / slots_total`; do not draw the target-based worker-slot ring, because
@@ -818,13 +835,17 @@ Acceptance:
 - The network trace contains only `GET` to `/api/v1/health`, `/api/v1/board`,
   `/api/v1/board/stream`, `/api/v1/jobs`, `/api/v1/sessions`, and `/api/v1/inbox`, plus the
   one-time W1b capability probes to `/api/v1/capacity` and `/api/v1/fleet` (expected `404`
-  in W1a; no retry loop).
+  in W1a; no retry loop), plus `/api/v1/jobs/{id}`, `/runs`, and `/gates` for each job in the
+  review/fix lane and for the opened drawer.
 - No `Authorization` header, no `POST`, no token field, and no provider key anywhere.
 - The capacity panel shows `CAPACITY_DETAIL_UNAVAILABLE` and does not contain “retrying”,
   “0 B”, “0%”, “target 0”, or a guessed advised worker count.
 - The supervisor area shows the heartbeat age and `SUPERVISOR_STATE_UNAVAILABLE`; it never
   says “stopped” or “running” from `health.heartbeat` alone.
-- The review/fix lane shows its count and `GATE_FAILURES_UNAVAILABLE`.
+- The review/fix lane shows its count and the real failed gates from
+  `GET /api/v1/jobs/{id}/gates`, or a true empty state. A missing route shows
+  `GATE_FAILURES_UNAVAILABLE`; a failed read shows the `read_failed` notice. It never shows
+  an empty “no failures” lane for a failed read.
 - A stale stream falls back to 5 s polling; three failed polls show stale and the 30 s
   countdown.
 - No console errors, no unhandled rejection, and no mock fallback when the live daemon is
@@ -885,13 +906,26 @@ This single route would fill `SupervisorView`, `ProjectView.state`, session surf
 orchestrators, and the `source`/`stale` flags. It is optional for W1a; without it those
 fields stay `null` plus notices.
 
-#### Ask 3: `GET /api/v1/jobs/{id}` — now served
+#### Ask 3: `GET /api/v1/jobs/{id}` — served and consumed
 
 The daemon registers `GET /api/v1/jobs/{id}` (the full `Job`) and its `/runs`
-(`RunPage`) and `/gates` (`GateResultPage`) sub-resources as token-free reads. The remaining
-gap is on the StackSpirit side: `SpiritBridge` has no `fleet.job(id)` or gate-failure
-method, so W1a does not call them. W1a does not need them because `GET /api/v1/jobs`
-returns every job; a later job drawer does.
+(`RunPage`) and `/gates` (`GateResultPage`) sub-resources as token-free reads. The
+StackSpirit gap is now closed by `fleet.job(id)`:
+
+| Piece | Contract |
+|---|---|
+| Method | `fleet.job(id): Promise<JobDetailView>` on the Web and preview bridges. Desktop bridges may omit it until the desktop drawer adopts it. |
+| Reads | `GET /api/v1/jobs/{id}` first, then `/runs` and `/gates` in parallel. All three use `credentials: "omit"`, `redirect: "manual"`, `cache: "no-store"`, and the same-origin guard. |
+| Job fields | `id`, `project`, `title`, `kind`, `role`, `state`, `priority`, `needs`, `attempts`, `note`, `parked_reason`, `report_path`, `created_at`, `state_changed_at`, `updated_at`, `last_progress_at`. No `worktree` and no home path. |
+| Runs | Oldest first by `started_at` then id. Each row carries `id`, `role`, `purpose`, executor, `started_at`, `ended_at`, `outcome`, `exit_code`, and a sanitized `detail`. |
+| Gates | The newest attempt, ordered by `gate_index`. Each row carries `attempt`, `gate_index`, `kind`, `passed`, a safe `evidence_summary`, `duration_ms`, and `checked_at`. |
+| Errors | A 404 on the job is `not_found` with `JOB_DETAIL_NOT_FOUND`; a 404 on `/runs` or `/gates` after the job read is `daemon_incompatible`; a 500 is `remote`; a network failure is `daemon_unreachable`. A missing page is never an empty list. |
+
+The review/fix lane uses the same method for jobs in `gating`, `reviewing`, and `fixing`
+and shows the real failed gate or a true empty state. The remaining job-detail gap is only
+the daemon contract itself: the routes stay unpaginated (`next: null`); if VOWP ever
+paginates them, the view sets `runs_truncated`/`gates_truncated` and the drawer labels it
+rather than presenting the page as complete.
 
 #### Ask 4: capacity target write
 
@@ -959,6 +993,9 @@ Location: `apps/spirit-web/src/bridge/HttpSseBridge.test.ts` (Vitest, jsdom), wi
 | changed board poll | one coalesced refetch; a second change during the fetch causes exactly one more |
 | inbox all | three state requests merged, sorted by `created_at` then `id`, de-duplicated by id; `state=all` never sent |
 | inbox open | one request with `state=open` |
+| job detail | the three routes return `JobDetailView`; runs sorted oldest first; gates sorted by index; no worktree or home path; `report_path` only when repo-relative |
+| job detail errors | job 404 → `not_found`; `/runs` or `/gates` 404 after the job read → `daemon_incompatible`; 500 retried once → `remote`; network → `daemon_unreachable`; an invalid id rejects before fetch |
+| review/fix lane | cards come from `GET /api/v1/jobs` plus `fleet.job(id)`; a real failed gate shows its kind and summary; a passed-only or empty gate page says so; a missing route adds `no_route`, a failed read adds `read_failed`, and neither is a false “no failures” state |
 | job actions | correct URL per action; no body for retry/cancel; reason body only for park; `202` → `ActionResult` with `refreshed` |
 | answer inbox | `202 InboxItem` → `InboxItemView`; `answered_by` preserved |
 | errors | 400/401/404 fixed route/404 write/409/413/415/500/503/non-JSON/timeout/network map to the exact codes and copy |
@@ -982,7 +1019,8 @@ The scenario is fixed at build time; a test must not switch it silently.
 | desktop-only surfaces | Hosts/Engine/Gates are absent from the nav; direct `/hosts`, `/engine`, `/gates` show the exact desktop-only copy |
 | read-only network | `page.on("request")`: every `/api/` request is a `GET` to an allowlisted route; no `Authorization` header; no `POST` |
 | stale/reconnect | `web-stale` scenario dims data, shows the stale banner and the retry countdown; a recovery scenario clears it |
-| review/fix lane | count is visible; `GATE_FAILURES_UNAVAILABLE` is visible; there is no empty “no failures” state |
+| review/fix lane | count is visible; the real failed gate kind and safe evidence summary render from `fleet.job(id)`; there is no `GATE_FAILURES_UNAVAILABLE` placeholder when the routes answer |
+| job drawer | a lane card opens the job, runs oldest first, and newest-attempt gates; a job with no runs shows a true empty state; Esc closes the drawer and focus returns to the trigger |
 | inbox drawer | full body/options; answer control absent without the write capability; Esc closes the drawer; focus returns to the trigger |
 | disabled actions | every disabled control has its reason text, per `PLAN.md` §10.4 |
 
@@ -1050,7 +1088,7 @@ gates stay unchanged.
 | Project state and paused reason | missing | VOWP daemon | `GET /api/v1/fleet`; `snapshot.projects[]` |
 | Session active surface and last event | missing | VOWP daemon | `GET /api/v1/fleet`; `snapshot.sessions[]` |
 | Orchestrator cards with node | missing | VOWP daemon | `GET /api/v1/fleet`; `snapshot.orchestrators[]` |
-| Job detail and gate failures | bridge missing | StackSpirit W1 | daemon serves `GET /api/v1/jobs/{id}` with `/runs` and `/gates`; no W1 bridge method |
+| Job detail and gate failures | closed (W1b) | StackSpirit | `fleet.job(id)` consumes `GET /api/v1/jobs/{id}` with `/runs` and `/gates` |
 | Capacity target write | missing | VOWP daemon | `POST /api/v1/capacity/target`, token-gated |
 | Host profiles, SSH, keychain, engine | desktop-only | StackSpirit | no daemon route; §2.2, §2.5 |
 | Capability gates | desktop-only | StackSpirit | no daemon route; §2.6 |
@@ -1067,7 +1105,8 @@ data.
 ## 9. W1a implementation status (2026-11-15)
 
 Status: **read-only Web shell implemented** in `apps/spirit-web` as `@stackspirit/web`.
-W1c writes and every D5/D6-gated feature remain absent.
+The W1b read-only job drawer and review/fix gate detail are implemented; W1c writes and
+every D5/D6-gated feature remain absent.
 
 ### 9.1 Local commands
 
@@ -1110,6 +1149,9 @@ Do not put a token in either variable. The Web build performs no write and sends
 | `GET` | `/api/v1/board` | Board facts, job counts, running cards, limits, cost, checkpoint. |
 | `GET` | `/api/v1/board/stream` | `board` snapshots and `heartbeat` liveness. |
 | `GET` | `/api/v1/jobs` | Ready, parked/blocked, title, priority, state-age rows. |
+| `GET` | `/api/v1/jobs/{id}` | The opened job drawer's full job fields. |
+| `GET` | `/api/v1/jobs/{id}/runs` | The drawer's runs, oldest first. |
+| `GET` | `/api/v1/jobs/{id}/gates` | The review/fix lane card and drawer gates for the newest attempt. |
 | `GET` | `/api/v1/sessions` | Join a running board run to its newest session node/id. |
 | `GET` | `/api/v1/inbox?state=open` | Open inbox snapshot; `state=answered` and `state=dismissed` only for the read-only all-items drawer. |
 
@@ -1127,10 +1169,10 @@ The bridge also does not call these existing routes, per §2.7:
 | `GET /api/v1/sessions/{id}` and `/events` | No session drawer or event-timeline method in W1. |
 | `POST` routes | W1c write proxy is not built; zero `POST`s are sent. |
 
-`GET /api/v1/jobs/{id}`, `/runs`, and `/gates` are served by the daemon but have no W1
-bridge method, so the bridge never calls them. A board run without a job row is labelled
-“job detail unavailable”, and the review/fix lane shows the count plus
-`GATE_FAILURES_UNAVAILABLE`.
+`GET /api/v1/jobs/{id}`, `/runs`, and `/gates` are served by the daemon and back
+`fleet.job(id)`. The review/fix lane reads them for each `gating`/`reviewing`/`fixing` job,
+and a lane card opens the drawer with the same data. A board run without a job row is
+labelled “No matching job row for this board run”; it is not presented as a job detail.
 
 ### 9.3 Honest data mapping
 
@@ -1152,12 +1194,17 @@ The Web snapshot supplies:
   target), active limits from `Board.limits`, `cost_today_usd` (`null` stays unknown),
   `inbox_open`, and `last_checkpoint`.
 - Running cards joined to `Job` by id and to the newest `Session` by `job_id`; an unmatched
-  board run stays visible with `node: null` and “job detail unavailable”.
+  board run stays visible with `node: null` and “No matching job row for this board run.”
 - Lanes whose counts come from `Board.jobs`; ready and parked/blocked cards come from
-  `GET /api/v1/jobs`; review/fix intentionally has no cards; done is count-only.
+  `GET /api/v1/jobs`; review/fix cards come from the same list plus `fleet.job(id)`, so each
+  card shows its real failed gate or a true “no gate results” state; done is count-only.
+- `fleet.job(id)` maps the full job, runs oldest first, and newest-attempt gates into
+  `JobDetailView`. It omits `worktree` and home paths, keeps only a repo-relative report
+  path, and sanitizes run detail and gate evidence.
 - `sessions: []`, `orchestrators: []`, and explicit `UnavailableNotice` rows for
-  `active_surfaces`, `orchestrators`, `raw_documents`, `gate_failures`, and the capacity and
-  supervisor gaps.
+  `active_surfaces`, `orchestrators`, `raw_documents`, and the capacity and supervisor gaps.
+  A `gate_failures` notice appears only when a served job-detail route is missing
+  (`no_route`) or a present one fails (`read_failed`).
 
 `JobPage.next` is treated honestly: `queue_truncated` becomes true and a notice is added if
 the daemon ever paginates the list. `queue_cap` is `null` for the unpaginated list.
@@ -1180,6 +1227,9 @@ the daemon ever paginates the list. `queue_cap` is `null` for the unpaginated li
   jobs, sessions, or inbox.
 - `fleet.inbox(true)` merges `open`, `answered`, and `dismissed`, sorted by `created_at`
   then `id`; `state=all` is never sent.
+- `fleet.job(id)` reads the job first, then `/runs` and `/gates`, so a job 404 is
+  `not_found` while a missing sub-route is `daemon_incompatible`. Runs are sorted oldest
+  first, gates by index, and both pages remember a `next` cursor as a truncation flag.
 - Desktop-only methods reject with `desktop_only` **before** any fetch; `setTarget` rejects
   with `no_route`; `jobAction` and `answerInbox` reject with `writes_disabled`.
 
@@ -1198,6 +1248,12 @@ header. An unknown scenario name falls back to `fresh`, never to a live daemon.
 `web-read-only` maps to `fresh`, `web-stale` maps to the shared `stale-cache` scenario, and
 `web-recovering` maps to `fresh` because the shared mock has no separate recovering
 scenario. The mock never claims capacity; the capacity rail keeps the unavailable copy.
+
+The shared mock also serves `fleet.job(id)` without a live daemon. In `fresh`,
+`ss-9-gate-check` has two runs and two failed gates (the review/fix case), `ss-5-mock` is
+ready with no runs (the true empty case), and any unknown id is a typed `not_found`. The
+`job-detail-error` scenario makes every job read fail with `daemon_unreachable`. Preview
+stays labeled with the persistent **Preview data** badge.
 
 The Playwright flows are `e2e/read-only.spec.ts`, `e2e/stale.spec.ts`, and
 `e2e/accessibility.spec.ts` (WCAG 2.2 AA). They assert no `/api/` request, no `POST`, no
@@ -1230,7 +1286,6 @@ keeps the honest `WebFleetView` and does not mount a desktop view with fabricate
 | Supervisor state | missing | `GET /api/v1/fleet`; `snapshot.supervisor` |
 | Project state | missing | `GET /api/v1/fleet`; `snapshot.projects[].state` |
 | Session surfaces and orchestrators | missing | `GET /api/v1/fleet`; session/orchestrator fields |
-| Job detail and gate failures | W1b | bridge method for `GET /api/v1/jobs/{id}` with `/runs` and `/gates`; the daemon routes exist |
 | Capacity target write | missing | `POST /api/v1/capacity/target` |
 | Job and inbox writes in the browser | W1c | local write proxy; §5.4 |
 | Hosts, Engine, Gates | desktop-only | no daemon route; §2.2, §2.5, §2.6 |

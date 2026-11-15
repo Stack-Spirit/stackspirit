@@ -135,3 +135,49 @@
   flex-wrap: wrap;
   gap: 6px;
 }
+
+.web-job-detail__section {
+  display: grid;
+  gap: 8px;
+}
+
+.web-job-runs,
+.web-job-gates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.web-job-run,
+.web-job-gate {
+  border: 1px solid var(--line, #2a3040);
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.web-job-gate--failed {
+  border-color: var(--danger-line, #6b2a34);
+}
+
+.web-job-run__head,
+.web-job-gate__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.web-job-run p,
+.web-job-gate p {
+  margin: 0;
+}
+
+.web-job-run__detail,
+.web-job-gate__evidence {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

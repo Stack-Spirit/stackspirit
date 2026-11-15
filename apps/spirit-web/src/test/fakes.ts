@@ -162,6 +162,162 @@ export const SESSIONS = {
   total: 3,
 };
 
+/** `GET /api/v1/jobs/ss-4-review`: the reviewing job the review/fix lane opens. */
+export const JOB_DETAIL = {
+  id: "ss-4-review",
+  project: "vowp",
+  title: "Review the contract",
+  kind: "verify",
+  role: "verifier",
+  profile: "verifier",
+  state: "reviewing",
+  priority: 40,
+  needs: ["ss-3-ready"],
+  owns: ["docs/**"],
+  reads: ["docs/WEB.md"],
+  brief: ".vowp/jobs/ss-4-review/brief.md",
+  report: ".vowp/jobs/ss-4-review/report.md",
+  gates: [],
+  loop: { until: "gates", max_attempts: 2, on_exhausted: "escalate" },
+  branch: "job/ss-4-review",
+  // An absolute worktree path the drawer must never receive or render.
+  worktree: "/home/owner/.vowp/worktrees/ss-4-review",
+  attempts: 1,
+  continues: 0,
+  hang_restarts: 0,
+  parked_reason: null,
+  note: "Checked docs/WEB.md and /home/owner/private/notes.md.",
+  created_by: "planner",
+  last_progress_at: "2026-11-15T11:58:00.000Z",
+  state_changed_at: "2026-11-15T11:55:00.000Z",
+  created_at: "2026-11-15T10:00:00.000Z",
+  updated_at: "2026-11-15T11:59:00.000Z",
+};
+
+/** `GET /api/v1/jobs/ss-4-review/runs`; deliberately newest first to exercise sorting. */
+export const JOB_RUNS = {
+  items: [
+    {
+      id: "run-new",
+      job_id: "ss-4-review",
+      session_id: null,
+      role: "verifier",
+      purpose: "verify",
+      profile: "verifier",
+      rung: 0,
+      executor: {
+        harness: "claude-code",
+        model: "model-a",
+        effort: "medium",
+        variant: null,
+      },
+      provider: "claude",
+      node: "vps",
+      native_session_id: null,
+      pid: 1235,
+      window: null,
+      cwd: "/home/owner/.vowp/worktrees/ss-4-review",
+      started_at: "2026-11-15T11:57:00.000Z",
+      ended_at: "2026-11-15T11:58:00.000Z",
+      exit_code: 1,
+      outcome: "error",
+      limit_kind: null,
+      cost: {},
+      detail: "Report gate failed; see /home/owner/.vowp/jobs/ss-4-review/report.md.",
+    },
+    {
+      id: "run-old",
+      job_id: "ss-4-review",
+      session_id: null,
+      role: "worker",
+      purpose: "start",
+      profile: "verifier",
+      rung: 0,
+      executor: {
+        harness: "opencode",
+        model: "deepseek/deepseek-flash",
+        effort: null,
+        variant: "max",
+      },
+      provider: "deepseek",
+      node: "vps",
+      native_session_id: null,
+      pid: 1234,
+      window: null,
+      cwd: null,
+      started_at: "2026-11-15T11:40:00.000Z",
+      ended_at: "2026-11-15T11:50:00.000Z",
+      exit_code: 0,
+      outcome: "ok",
+      limit_kind: null,
+      cost: {},
+      detail: "Read docs/WEB.md.",
+    },
+  ],
+  next: null,
+  total: 2,
+};
+
+/** `GET /api/v1/jobs/ss-4-review/gates`; deliberately out of gate-index order. */
+export const JOB_GATES = {
+  items: [
+    {
+      id: 3,
+      job_id: "ss-4-review",
+      run_id: "run-new",
+      attempt: 1,
+      gate_index: 2,
+      gate: { secret_scan: true },
+      passed: false,
+      evidence: {
+        kind: "secret_scan",
+        files_scanned: 4,
+        hits: [{ path: "docs/example.md", line: 2, rule: "generic_token" }],
+      },
+      output_blob: null,
+      duration_ms: 30,
+      ts: "2026-11-15T11:58:00.000Z",
+    },
+    {
+      id: 1,
+      job_id: "ss-4-review",
+      run_id: "run-new",
+      attempt: 1,
+      gate_index: 0,
+      gate: { report: { fields: ["status", "branch", "commits", "tests"] } },
+      passed: false,
+      evidence: {
+        kind: "report",
+        front_matter: null,
+        missing_fields: ["tests"],
+        problems: ["front matter has no closing delimiter"],
+      },
+      output_blob: null,
+      duration_ms: 12,
+      ts: "2026-11-15T11:58:00.000Z",
+    },
+    {
+      id: 2,
+      job_id: "ss-4-review",
+      run_id: "run-old",
+      attempt: 1,
+      gate_index: 1,
+      gate: { owns_respected: true },
+      passed: true,
+      evidence: {
+        kind: "owns_respected",
+        changed: ["docs/WEB.md"],
+        violations: [],
+      },
+      output_blob: null,
+      duration_ms: 5,
+      ts: "2026-11-15T11:58:00.000Z",
+    },
+  ],
+  next: null,
+  total: 3,
+};
+
 export const INBOX = {
   items: [
     {
@@ -344,7 +500,7 @@ export function resetFakeEventSources(): void {
 }
 
 export async function flush(): Promise<void> {
-  for (let index = 0; index < 20; index += 1) {
+  for (let index = 0; index < 100; index += 1) {
     await Promise.resolve();
   }
 }

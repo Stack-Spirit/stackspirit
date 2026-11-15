@@ -342,7 +342,10 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
                 </dl>
               </Panel>
 
-              <RunningWorkers snapshot={snapshot} />
+              <RunningWorkers
+                snapshot={snapshot}
+                onOpenJob={(job) => setSelectedJobKey(`${job.project}:${job.job_id}`)}
+              />
               <Lanes
                 snapshot={snapshot}
                 onOpenJob={(job) => setSelectedJobKey(`${job.project}:${job.job_id}`)}
@@ -374,7 +377,12 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
         bridge={bridge}
         snapshot={snapshot}
       />
-      <JobDrawer job={selectedJob} onClose={() => setSelectedJobKey(null)} />
+      <JobDrawer
+        job={selectedJob}
+        bridge={bridge}
+        stale={stale}
+        onClose={() => setSelectedJobKey(null)}
+      />
 
       {capacityOpen ? (
         <Drawer open title="Capacity & VPS Storage" onClose={() => setCapacityOpen(false)}>

@@ -2,8 +2,12 @@ import type {
   BridgeCapabilities,
   ConnectionSnapshot,
   DaemonHealth,
+  ExecutorView,
   InboxItemView,
   JobCardView,
+  JobDetailView,
+  JobGateView,
+  JobRunView,
   LatencyStats,
   ProjectView,
   SpiritBridge,
@@ -20,7 +24,9 @@ import { parseExecutor } from "@stackspirit/ui";
 
 import {
   CAPACITY_DETAIL_UNAVAILABLE,
+  GATE_FAILURES_READ_FAILED,
   GATE_FAILURES_UNAVAILABLE,
+  JOB_DETAIL_NOT_FOUND,
   ORCHESTRATORS_UNAVAILABLE,
   PROJECT_STATE_UNAVAILABLE,
   RAW_DOCUMENT_UNAVAILABLE,
@@ -32,7 +38,7 @@ import { countsFromProjects, laneForState } from "../shared/domain";
 import { isSameOrigin, sameOriginError } from "./baseUrl";
 import { asSpiritError, webError } from "./errors";
 
-/** Routes W1a calls. Tests assert the bridge never calls a route outside this set. */
+/** Routes W1 calls. Tests assert the bridge never calls a route outside this set. */
 export const READ_ROUTES = {
   health: "/api/v1/health",
   board: "/api/v1/board",
@@ -42,8 +48,31 @@ export const READ_ROUTES = {
   inbox: "/api/v1/inbox",
 } as const;
 
+/** The three token-free job-detail reads documented for `fleet.job(id)`. */
+export const JOB_DETAIL_ROUTES = {
+  job: (id: string) => `/api/v1/jobs/${encodeURIComponent(id)}`,
+  runs: (id: string) => `/api/v1/jobs/${encodeURIComponent(id)}/runs`,
+  gates: (id: string) => `/api/v1/jobs/${encodeURIComponent(id)}/gates`,
+} as const;
+
+/** Route templates for the job-detail reads; the report and tests name these exactly. */
+export const JOB_DETAIL_ROUTE_PATTERNS = [
+  "/api/v1/jobs/{id}",
+  "/api/v1/jobs/{id}/runs",
+  "/api/v1/jobs/{id}/gates",
+] as const;
+
+const JOB_DETAIL_PATH =
+  /^\/api\/v1\/jobs\/(?!$)[^/]+(?:\/(?:runs|gates))?$/;
+
+/** True for every fixed or job-detail path the bridge may read. */
+export function isReadRoute(pathname: string): boolean {
+  if ((Object.values(READ_ROUTES) as string[]).includes(pathname)) return true;
+  return JOB_DETAIL_PATH.test(pathname);
+}
+
 /**
- * Routes the v0.3 daemon serves but W1a deliberately does not call. They are listed so a
+ * Routes the v0.3 daemon serves but W1 deliberately does not call. They are listed so a
  * route-allowlist test can prove the browser never touches them.
  */
 export const KNOWN_UNUSED_ROUTES = [
@@ -51,7 +80,6 @@ export const KNOWN_UNUSED_ROUTES = [
   "/api/v1/fleet",
   "/api/v1/cost",
   "/api/v1/nodes",
-  "/api/v1/jobs/{id}",
   "/api/v1/sessions/{id}",
   "/api/v1/sessions/{id}/events",
   "/api/v1/sessions/{id}/events/stream",
@@ -204,11 +232,36 @@ interface PageDoc<T> {
   total: number;
 }
 
+interface JobDetailDoc {
+  id: string;
+  project: string;
+  title: string;
+  kind: string;
+  role: string;
+  state: string;
+  priority: number;
+  needs: string[];
+  attempts: number;
+  note: string;
+  report_path: string | null;
+  parked_reason: string | null;
+  created_at: Timestamp;
+  state_changed_at: Timestamp;
+  updated_at: Timestamp;
+  last_progress_at: Timestamp | null;
+}
+
 interface SecondaryRows {
   jobs: JobDoc[];
   sessions: SessionDoc[];
   inbox: InboxDoc[];
   jobsTruncated: boolean;
+  /** Detail reads for jobs in the review/fix lane, keyed by job id. */
+  reviewDetails: Map<string, JobDetailView>;
+  /** A gate/run detail read failed for a reason other than the route being absent. */
+  reviewReadError: SpiritErrorDto | null;
+  /** The daemon does not serve one of the job-detail routes. */
+  reviewRouteMissing: boolean;
 }
 
 interface PendingBoard {
@@ -424,6 +477,216 @@ function parsePage<T>(value: unknown, parseItem: (item: unknown, index: number) 
   return { items, next, total };
 }
 
+function requireBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw webError("parse", `The daemon returned an unreadable ${field}.`);
+  }
+  return value;
+}
+
+function requireInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isInteger(number)) {
+    throw webError("parse", `The daemon returned an unreadable ${field}.`);
+  }
+  return number;
+}
+
+function optionalInteger(value: unknown, field: string): number | null {
+  if (value === null || value === undefined) return null;
+  return requireInteger(value, field);
+}
+
+/** Rejects absolute, home, traversal, and Windows paths; keeps a repo-relative path. */
+function safeRepoPath(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^(?:\/|~|[A-Za-z]:|\\\\)/.test(trimmed)) return null;
+  if (trimmed.split(/[\\/]/).includes("..")) return null;
+  return trimmed;
+}
+
+const LOCAL_PATH_PATTERN =
+  /(^|[\s("'=])((?:\/home\/|\/Users\/|\/root\/|\/tmp\/|\/var\/|\/etc\/|\/opt\/|\/srv\/)[^\s"'`)]*)/g;
+
+/** Removes control characters, local absolute paths, and over-long text. */
+function safeDetail(value: string): string {
+  return sanitizeMessage(value).replace(
+    LOCAL_PATH_PATTERN,
+    (_match, prefix: string) => `${prefix}[path]`,
+  );
+}
+
+function safeDetailList(value: unknown, field: string): string[] {
+  return requireStringArray(value, field).map((item) => safeDetail(item));
+}
+
+function parseExecutorDoc(value: unknown, field: string): ExecutorView | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return parseExecutor(safeDetail(value));
+  if (!isRecord(value)) {
+    throw webError("parse", `The daemon returned an unreadable ${field}.`);
+  }
+  const harness = requireString(value.harness, `${field}.harness`);
+  const model = requireString(value.model, `${field}.model`);
+  const effort = optionalString(value.effort, `${field}.effort`);
+  const variant = optionalString(value.variant, `${field}.variant`);
+  const raw = `${harness}:${model}${effort ? `@${effort}` : ""}${variant ? `#${variant}` : ""}`;
+  return parseExecutor(safeDetail(raw));
+}
+
+function parseJobDetailDoc(value: unknown): JobDetailDoc {
+  if (!isRecord(value)) {
+    throw webError("parse", "The daemon returned an unreadable job document.");
+  }
+  return {
+    id: requireString(value.id, "job.id"),
+    project: requireString(value.project, "job.project"),
+    title: requireString(value.title, "job.title"),
+    kind: requireString(value.kind, "job.kind"),
+    role: requireString(value.role, "job.role"),
+    state: requireString(value.state, "job.state"),
+    priority:
+      value.priority === undefined ? 50 : requireInteger(value.priority, "job.priority"),
+    needs: value.needs === undefined ? [] : safeDetailList(value.needs, "job.needs"),
+    attempts:
+      value.attempts === undefined
+        ? 0
+        : Math.max(0, requireInteger(value.attempts, "job.attempts")),
+    note: safeDetail(optionalString(value.note, "job.note") ?? ""),
+    report_path: safeRepoPath(optionalString(value.report, "job.report")),
+    parked_reason: optionalString(value.parked_reason, "job.parked_reason"),
+    created_at: requireTimestamp(value.created_at, "job.created_at"),
+    state_changed_at: requireTimestamp(value.state_changed_at, "job.state_changed_at"),
+    updated_at: requireTimestamp(value.updated_at, "job.updated_at"),
+    last_progress_at: optionalTimestamp(value.last_progress_at, "job.last_progress_at"),
+  };
+}
+
+function parseRunDoc(value: unknown, index: number): JobRunView {
+  if (!isRecord(value)) {
+    throw webError("parse", `The daemon returned an unreadable run row at ${index}.`);
+  }
+  return {
+    id: requireString(value.id, "run.id"),
+    role: requireString(value.role, "run.role"),
+    purpose: requireString(value.purpose, "run.purpose"),
+    executor: parseExecutorDoc(value.executor, "run.executor"),
+    started_at: requireTimestamp(value.started_at, "run.started_at"),
+    ended_at: optionalTimestamp(value.ended_at, "run.ended_at"),
+    outcome: optionalString(value.outcome, "run.outcome"),
+    exit_code: optionalInteger(value.exit_code, "run.exit_code"),
+    detail: safeDetail(optionalString(value.detail, "run.detail") ?? ""),
+  };
+}
+
+function evidenceKind(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.kind !== "string") return null;
+  return value.kind;
+}
+
+function gateKind(value: unknown): string {
+  if (!isRecord(value)) return "unknown";
+  const keys = Object.keys(value);
+  return keys.length === 1 ? (keys[0] ?? "unknown") : "unknown";
+}
+
+function evidenceSummary(value: unknown): string | null {
+  const kind = evidenceKind(value);
+  if (!isRecord(value) || !kind) return null;
+  const parts: string[] = [];
+  switch (kind) {
+    case "report": {
+      const missing = safeDetailList(value.missing_fields ?? [], "gate.evidence.missing_fields");
+      const problems = safeDetailList(value.problems ?? [], "gate.evidence.problems");
+      if (missing.length > 0) parts.push(`missing: ${missing.join(", ")}`);
+      if (problems.length > 0) {
+        parts.push(`${problems.length} problem${problems.length === 1 ? "" : "s"}`);
+      }
+      return parts.join(" · ") || "report parsed";
+    }
+    case "cmd":
+    case "script": {
+      if (value.timed_out === true) parts.push("timed out");
+      const code = optionalInteger(value.exit_code, "gate.evidence.exit_code");
+      parts.push(code === null ? "no exit code" : `exit ${code}`);
+      return parts.join(" · ");
+    }
+    case "owns_respected": {
+      const changed = safeDetailList(value.changed ?? [], "gate.evidence.changed");
+      const violations = safeDetailList(value.violations ?? [], "gate.evidence.violations");
+      parts.push(`${changed.length} changed`);
+      if (violations.length > 0) {
+        parts.push(
+          `${violations.length} outside owns: ${violations.slice(0, 3).join(", ")}${
+            violations.length > 3 ? ", …" : ""
+          }`,
+        );
+      }
+      return parts.join(" · ");
+    }
+    case "pushed": {
+      const branch = optionalString(value.branch, "gate.evidence.branch");
+      return branch ? `branch ${safeDetail(branch)}` : "no branch reported";
+    }
+    case "review": {
+      const verdict = optionalString(value.verdict, "gate.evidence.verdict");
+      const findings = safeDetailList(value.findings ?? [], "gate.evidence.findings");
+      parts.push(verdict ? `verdict ${safeDetail(verdict)}` : "no verdict");
+      if (findings.length > 0) {
+        parts.push(`${findings.length} finding${findings.length === 1 ? "" : "s"}`);
+      }
+      return parts.join(" · ");
+    }
+    case "deploy": {
+      const code = optionalInteger(value.exit_code, "gate.evidence.exit_code");
+      parts.push(code === null ? "no exit code" : `exit ${code}`);
+      return parts.join(" · ");
+    }
+    case "secret_scan": {
+      const files = optionalInteger(value.files_scanned, "gate.evidence.files_scanned") ?? 0;
+      const hits = Array.isArray(value.hits) ? value.hits : [];
+      parts.push(`${files} files scanned`);
+      if (hits.length > 0) parts.push(`${hits.length} hit${hits.length === 1 ? "" : "s"}`);
+      return parts.join(" · ");
+    }
+    default:
+      return null;
+  }
+}
+
+function parseGateDoc(value: unknown, index: number): JobGateView {
+  if (!isRecord(value)) {
+    throw webError("parse", `The daemon returned an unreadable gate row at ${index}.`);
+  }
+  const fromGate = gateKind(value.gate);
+  const fromEvidence = evidenceKind(value.evidence);
+  return {
+    attempt: Math.max(0, requireInteger(value.attempt, "gate.attempt")),
+    gate_index: requireInteger(value.gate_index, "gate.gate_index"),
+    kind: safeDetail(fromGate !== "unknown" ? fromGate : (fromEvidence ?? "unknown")),
+    passed: requireBoolean(value.passed, "gate.passed"),
+    evidence_summary: evidenceSummary(value.evidence),
+    duration_ms: Math.max(0, requireInteger(value.duration_ms, "gate.duration_ms")),
+    checked_at: requireTimestamp(value.ts, "gate.ts"),
+  };
+}
+
+function sortRuns(runs: JobRunView[]): JobRunView[] {
+  return [...runs].sort((left, right) => {
+    const byStarted = left.started_at.localeCompare(right.started_at);
+    return byStarted !== 0 ? byStarted : left.id.localeCompare(right.id);
+  });
+}
+
+function sortGates(gates: JobGateView[]): JobGateView[] {
+  return [...gates].sort((left, right) => {
+    const byIndex = left.gate_index - right.gate_index;
+    return byIndex !== 0 ? byIndex : left.checked_at.localeCompare(right.checked_at);
+  });
+}
+
 function ageSeconds(timestamp: Timestamp, nowMs: number): number {
   const parsed = Date.parse(timestamp);
   if (Number.isNaN(parsed)) return 0;
@@ -436,9 +699,16 @@ function boardKey(board: BoardDoc): string {
   return JSON.stringify({ ...board, at: "" });
 }
 
-function errorFromStatus(status: number, path: string, body: unknown): SpiritErrorDto {
+type NotFoundClass = "item" | "route";
+
+function errorFromStatus(
+  status: number,
+  path: string,
+  body: unknown,
+  notFound: NotFoundClass = "route",
+): SpiritErrorDto {
   const apiMessage = isRecord(body) && isRecord(body.error) && typeof body.error.message === "string"
-    ? sanitizeMessage(body.error.message)
+    ? safeDetail(body.error.message)
     : "";
   switch (status) {
     case 400:
@@ -452,8 +722,13 @@ function errorFromStatus(status: number, path: string, body: unknown): SpiritErr
         false,
       );
     case 404:
-      if (path.includes("/jobs/") || path.includes("/inbox/")) {
-        return webError("not_found", "That item no longer exists.", "Refresh the view.", false);
+      if (notFound === "item") {
+        return webError(
+          "not_found",
+          JOB_DETAIL_NOT_FOUND,
+          "Refresh the job list; the job may have been replanned or removed.",
+          false,
+        );
       }
       return webError(
         "daemon_incompatible",
@@ -572,6 +847,9 @@ export class HttpSseBridge {
     sessions: [],
     inbox: [],
     jobsTruncated: false,
+    reviewDetails: new Map(),
+    reviewReadError: null,
+    reviewRouteMissing: false,
   };
   private latencySamples: number[] = [];
   private ewmaMs = 0;
@@ -688,6 +966,10 @@ export class HttpSseBridge {
       );
     },
     capacity: async (): Promise<null> => null,
+    job: async (id: string): Promise<JobDetailView> => {
+      if (this.disposed) throw webError("internal", "The Web bridge is disposed.");
+      return this.readJobDetail(id);
+    },
     jobAction: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);
     },
@@ -918,8 +1200,35 @@ export class HttpSseBridge {
     if (inbox.status === "rejected") {
       this.publishError(asSpiritError(inbox.reason));
     }
+    const jobsRows = jobs.status === "fulfilled" ? jobs.value.items : this.secondary.jobs;
+    let reviewDetails = this.secondary.reviewDetails;
+    let reviewReadError = this.secondary.reviewReadError;
+    let reviewRouteMissing = this.secondary.reviewRouteMissing;
+    if (jobs.status === "fulfilled") {
+      reviewDetails = new Map();
+      reviewReadError = null;
+      reviewRouteMissing = false;
+      const targets = jobsRows.filter((job) => laneForState(job.state) === "review_fix");
+      const details = await Promise.allSettled(
+        targets.map((job) => this.readJobDetail(job.id)),
+      );
+      details.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          const job = targets[index];
+          if (job) reviewDetails.set(job.id, result.value);
+          return;
+        }
+        const error = asSpiritError(result.reason);
+        if (error.code === "not_found") return;
+        if (error.code === "daemon_incompatible") {
+          reviewRouteMissing = true;
+          return;
+        }
+        reviewReadError = reviewReadError ?? error;
+      });
+    }
     const rows: SecondaryRows = {
-      jobs: jobs.status === "fulfilled" ? jobs.value.items : this.secondary.jobs,
+      jobs: jobsRows,
       sessions:
         sessions.status === "fulfilled" ? sessions.value.items : this.secondary.sessions,
       inbox: inbox.status === "fulfilled" ? inbox.value.items : this.secondary.inbox,
@@ -927,6 +1236,9 @@ export class HttpSseBridge {
         jobs.status === "fulfilled"
           ? jobs.value.next !== null
           : this.secondary.jobsTruncated,
+      reviewDetails,
+      reviewReadError,
+      reviewRouteMissing,
     };
     this.secondary = rows;
     return rows;
@@ -1005,6 +1317,7 @@ export class HttpSseBridge {
     });
 
     const ready: JobCardView[] = [];
+    const reviewFix: JobCardView[] = [];
     const parked: JobCardView[] = [];
     let queueShown = 0;
     for (const job of rows.jobs) {
@@ -1012,16 +1325,17 @@ export class HttpSseBridge {
       if (lane !== "done" && lane !== "running") queueShown += 1;
       if (lane === "ready") {
         ready.push(this.jobCard(job, nowMs));
+      } else if (lane === "review_fix") {
+        reviewFix.push(this.reviewFixCard(job, rows.reviewDetails.get(job.id) ?? null, nowMs));
       } else if (lane === "parked_blocked") {
         parked.push(this.jobCard(job, nowMs));
       }
-      // `review_fix` intentionally has no cards: the daemon exposes no gate failures.
     }
 
     const lanes: WebJobLanes = {
       running: runningLane,
       ready,
-      review_fix: [],
+      review_fix: reviewFix,
       parked_blocked: parked,
       done: [],
       counts: { ...counts },
@@ -1062,18 +1376,27 @@ export class HttpSseBridge {
         detail: ORCHESTRATORS_UNAVAILABLE,
       },
       {
-        feature: "gate_failures",
-        code: "no_route",
-        route: "/api/v1/jobs/{id}/gates",
-        detail: GATE_FAILURES_UNAVAILABLE,
-      },
-      {
         feature: "raw_documents",
         code: "no_route",
         route: null,
         detail: RAW_DOCUMENT_UNAVAILABLE,
       },
     ];
+    if (rows.reviewRouteMissing) {
+      unavailable.push({
+        feature: "gate_failures",
+        code: "no_route",
+        route: "/api/v1/jobs/{id}/gates",
+        detail: GATE_FAILURES_UNAVAILABLE,
+      });
+    } else if (rows.reviewReadError) {
+      unavailable.push({
+        feature: "gate_failures",
+        code: "read_failed",
+        route: "/api/v1/jobs/{id}/gates",
+        detail: GATE_FAILURES_READ_FAILED,
+      });
+    }
     return {
       revision,
       host_id: "daemon",
@@ -1130,6 +1453,48 @@ export class HttpSseBridge {
       gate_evidence: null,
       executor: null,
       session_id: null,
+    };
+  }
+
+  /**
+   * A review/fix card carries the real failed gates read from
+   * `GET /api/v1/jobs/{id}/gates`, or an honest "no gate results" label. It never falls
+   * back to the old "route unavailable" placeholder when the read succeeded.
+   */
+  private reviewFixCard(
+    job: JobDoc,
+    detail: JobDetailView | null,
+    nowMs: number,
+  ): JobCardView {
+    const card = this.jobCard(job, nowMs);
+    if (!detail) {
+      return {
+        ...card,
+        detail: "Gate results were not read for this job; the board card is still real.",
+      };
+    }
+    const failed = detail.gates.filter((gate) => !gate.passed);
+    if (failed.length > 0) {
+      const kinds = [...new Set(failed.map((gate) => gate.kind))];
+      const first = failed[0];
+      return {
+        ...card,
+        gate: kinds.join(", "),
+        gate_at: first?.checked_at ?? null,
+        gate_evidence:
+          first?.evidence_summary ??
+          `${failed.length} gate${failed.length === 1 ? "" : "s"} failed`,
+      };
+    }
+    if (detail.gates.length === 0) {
+      return {
+        ...card,
+        detail: "No gate results recorded for the newest attempt.",
+      };
+    }
+    return {
+      ...card,
+      detail: "All recorded gates passed for the newest attempt.",
     };
   }
 
@@ -1207,6 +1572,39 @@ export class HttpSseBridge {
     return parseBoardDoc(value);
   }
 
+  /**
+   * Reads the three token-free job-detail routes. The job read comes first so a `404` can
+   * be reported as `not_found`; a `404` from `/runs` or `/gates` after the job read is a
+   * missing route, not an empty list.
+   */
+  private async readJobDetail(id: string): Promise<JobDetailView> {
+    const trimmed = id.trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(trimmed) || trimmed.endsWith("-")) {
+      throw webError("invalid_input", "A job id must be a lowercase slug.", null, false);
+    }
+    const jobValue = await this.requestJson<unknown>(JOB_DETAIL_ROUTES.job(trimmed), "item");
+    const base = parseJobDetailDoc(jobValue);
+    if (base.id !== trimmed) {
+      throw incompatibleError(
+        `GET /api/v1/jobs/${trimmed} returned a document for job "${base.id}".`,
+      );
+    }
+    const [runsValue, gatesValue] = await Promise.all([
+      this.requestJson<unknown>(JOB_DETAIL_ROUTES.runs(trimmed), "route"),
+      this.requestJson<unknown>(JOB_DETAIL_ROUTES.gates(trimmed), "route"),
+    ]);
+    const runsPage = parsePage(runsValue, parseRunDoc);
+    const gatesPage = parsePage(gatesValue, parseGateDoc);
+    return {
+      ...base,
+      fetched_at: iso(this.now()),
+      runs: sortRuns(runsPage.items),
+      runs_truncated: runsPage.next !== null,
+      gates: sortGates(gatesPage.items),
+      gates_truncated: gatesPage.next !== null,
+    };
+  }
+
   private async getJobs(): Promise<PageDoc<JobDoc>> {
     const value = await this.requestJson<unknown>(READ_ROUTES.jobs);
     return parsePage(value, parseJobDoc);
@@ -1224,11 +1622,14 @@ export class HttpSseBridge {
     return parsePage(value, parseInboxDoc);
   }
 
-  private async requestJson<T>(path: string): Promise<T> {
+  private async requestJson<T>(
+    path: string,
+    notFound: NotFoundClass = "route",
+  ): Promise<T> {
     let lastError: SpiritErrorDto | null = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.requestJsonOnce<T>(path);
+        return await this.requestJsonOnce<T>(path, notFound);
       } catch (error) {
         const mapped = asSpiritError(error);
         lastError = mapped;
@@ -1238,7 +1639,10 @@ export class HttpSseBridge {
     throw lastError ?? webError("remote", "The daemon failed to serve the request.");
   }
 
-  private async requestJsonOnce<T>(path: string): Promise<T> {
+  private async requestJsonOnce<T>(
+    path: string,
+    notFound: NotFoundClass = "route",
+  ): Promise<T> {
     const controller = new AbortController();
     this.inflight.add(controller);
     let timedOut = false;
@@ -1280,7 +1684,7 @@ export class HttpSseBridge {
         }
       }
       if (!response.ok) {
-        throw errorFromStatus(response.status, path.split("?")[0] ?? path, body);
+        throw errorFromStatus(response.status, path.split("?")[0] ?? path, body, notFound);
       }
       if (body === null) throw parseError();
       return body as T;

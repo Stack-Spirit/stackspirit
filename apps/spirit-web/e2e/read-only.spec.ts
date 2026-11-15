@@ -17,15 +17,39 @@ test("read-only preview renders the board, lanes, capacity notice, and preview b
   await expect(page.getByTestId("capacity-unavailable")).toContainText(
     "Capacity detail unavailable",
   );
-  await expect(page.getByTestId("gate-failures-unavailable")).toContainText(
-    "Gate failure detail is unavailable",
-  );
+  const reviewLane = page.getByTestId("lane-review_fix");
+  await expect(reviewLane.getByTestId("job-card-ss-9-gate-check")).toBeVisible();
+  await expect(reviewLane.getByTestId("gate-failures-unavailable")).toHaveCount(0);
 
   const nav = page.getByRole("navigation", { name: "Primary views" });
   await expect(nav.getByRole("button")).toHaveCount(1);
   await expect(nav.getByRole("button", { name: "Fleet" })).toBeVisible();
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
+});
+
+test("the job drawer shows the real job, runs, and gate failures", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("job-card-ss-9-gate-check").click();
+  const drawer = page.getByTestId("web-job-detail");
+  await expect(drawer).toBeVisible();
+  await expect(drawer).toContainText("Gate check");
+  await expect(page.getByTestId("job-detail-fields")).toContainText("reviewing");
+  await expect(page.getByTestId("job-runs")).toContainText("Runs (2)");
+  await expect(page.getByTestId("job-gate-0")).toContainText("report");
+  await expect(page.getByTestId("job-gate-0")).toContainText("missing: tests");
+  await expect(page.getByTestId("job-gate-2")).toContainText("secret_scan");
+  await expect(page.getByTestId("job-detail-error")).toHaveCount(0);
+  await expect(page.getByTestId("gate-failures-unavailable")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("web-job-detail")).toHaveCount(0);
+});
+
+test("the job drawer shows a true empty state for a job with no runs", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("job-card-ss-5-mock").click();
+  await expect(page.getByTestId("job-runs")).toContainText("No runs recorded");
+  await expect(page.getByTestId("job-gates")).toContainText("No gate results");
 });
 
 test("read-only preview sends no API request, no POST, and no Authorization header", async ({

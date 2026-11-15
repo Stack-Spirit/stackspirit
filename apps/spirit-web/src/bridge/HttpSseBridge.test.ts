@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HttpSseBridge, READ_ROUTES } from "../bridge/HttpSseBridge";
+import { HttpSseBridge, isReadRoute } from "../bridge/HttpSseBridge";
 import { resolveBaseUrl, parseBaseUrl, isSameOrigin } from "../bridge/baseUrl";
 import {
   BOARD,
@@ -10,6 +10,9 @@ import {
   INBOX,
   INBOX_ANSWERED,
   INBOX_DISMISSED,
+  JOB_DETAIL,
+  JOB_GATES,
+  JOB_RUNS,
   JOBS,
   SESSIONS,
   deferred,
@@ -53,6 +56,9 @@ function makeBridge(overrides: {
       .onPath("/api/v1/health", () => jsonResponse(HEALTH))
       .onPath("/api/v1/board", () => jsonResponse(BOARD))
       .onPath("/api/v1/jobs", () => jsonResponse(JOBS))
+      .onPath("/api/v1/jobs/ss-4-review", () => jsonResponse(JOB_DETAIL))
+      .onPath("/api/v1/jobs/ss-4-review/runs", () => jsonResponse(JOB_RUNS))
+      .onPath("/api/v1/jobs/ss-4-review/gates", () => jsonResponse(JOB_GATES))
       .onPath("/api/v1/sessions", () => jsonResponse(SESSIONS))
       .onQuery("/api/v1/inbox", "open", () => jsonResponse(INBOX))
       .onQuery("/api/v1/inbox", "answered", () => jsonResponse(INBOX_ANSWERED))
@@ -230,7 +236,14 @@ describe("startup and snapshot", () => {
       parked_blocked: 2,
       done: 4,
     });
-    expect(snapshot.lanes.review_fix).toEqual([]);
+    expect(snapshot.lanes.review_fix).toHaveLength(1);
+    expect(snapshot.lanes.review_fix[0]).toMatchObject({
+      job_id: "ss-4-review",
+      title: "Review the contract",
+      state: "reviewing",
+      gate: "report, secret_scan",
+      gate_evidence: "missing: tests · 1 problem",
+    });
     expect(snapshot.lanes.queue_cap).toBeNull();
     expect(snapshot.lanes.queue_shown).toBe(3);
     expect(snapshot.lanes.ready.map((card) => card.job_id)).toEqual(["ss-3-ready"]);
@@ -243,7 +256,7 @@ describe("startup and snapshot", () => {
     expect(snapshot.unavailable.map((notice) => notice.feature)).toContain(
       "capacity_report",
     );
-    expect(snapshot.unavailable.map((notice) => notice.feature)).toContain(
+    expect(snapshot.unavailable.map((notice) => notice.feature)).not.toContain(
       "gate_failures",
     );
   });
@@ -565,6 +578,165 @@ describe("inbox", () => {
   });
 });
 
+describe("job detail", () => {
+  it("reads the three job routes and maps runs oldest first, gates by index, and safe fields", async () => {
+    const { bridge, fetch } = makeBridge();
+    const read = bridge.fleet.job;
+    if (!read) throw new Error("fleet.job missing");
+    const detail = await read("ss-4-review");
+
+    expect(detail).toMatchObject({
+      id: "ss-4-review",
+      project: "vowp",
+      title: "Review the contract",
+      kind: "verify",
+      role: "verifier",
+      state: "reviewing",
+      priority: 40,
+      needs: ["ss-3-ready"],
+      attempts: 1,
+      report_path: ".vowp/jobs/ss-4-review/report.md",
+      parked_reason: null,
+    });
+    expect(detail).not.toHaveProperty("worktree");
+    expect(detail.note).toContain("[path]");
+    expect(JSON.stringify(detail)).not.toContain("/home/owner");
+
+    expect(detail.runs.map((run) => run.id)).toEqual(["run-old", "run-new"]);
+    expect(detail.runs[0]?.executor?.display).toBe("DeepSeek V4.1 Flash · max");
+    expect(detail.runs[1]).toMatchObject({
+      role: "verifier",
+      outcome: "error",
+      exit_code: 1,
+    });
+    expect(detail.runs[1]?.detail).not.toContain("/home/owner");
+
+    expect(detail.gates.map((gate) => gate.gate_index)).toEqual([0, 1, 2]);
+    expect(detail.gates[0]).toMatchObject({
+      kind: "report",
+      passed: false,
+      evidence_summary: "missing: tests · 1 problem",
+      duration_ms: 12,
+    });
+    expect(detail.gates[1]).toMatchObject({ kind: "owns_respected", passed: true });
+    expect(detail.gates[2]?.evidence_summary).toBe("4 files scanned · 1 hit");
+    expect(detail.runs_truncated).toBe(false);
+    expect(detail.gates_truncated).toBe(false);
+
+    const paths = fetch.calls
+      .filter((call) => call.url.pathname.startsWith("/api/v1/jobs/"))
+      .map((call) => call.url.pathname);
+    expect(paths).toContain("/api/v1/jobs/ss-4-review");
+    expect(paths).toContain("/api/v1/jobs/ss-4-review/runs");
+    expect(paths).toContain("/api/v1/jobs/ss-4-review/gates");
+    for (const call of fetch.calls) {
+      if (!call.url.pathname.startsWith("/api/v1/jobs/")) continue;
+      expect(call.method).toBe("GET");
+      expect(call.init.credentials).toBe("omit");
+      expect(call.init.redirect).toBe("manual");
+      expect(call.init.cache).toBe("no-store");
+      expect(call.headers.get("authorization")).toBeNull();
+    }
+  });
+
+  it("maps an unknown job id to not_found, not a missing route", async () => {
+    const { bridge } = makeBridge();
+    const read = bridge.fleet.job;
+    if (!read) throw new Error("fleet.job missing");
+    await expect(read("missing-job")).rejects.toMatchObject({
+      code: "not_found",
+      message: expect.stringContaining("Job not found"),
+    });
+  });
+
+  it("rejects an invalid job id before making a request", async () => {
+    const { bridge, fetch } = makeBridge();
+    const read = bridge.fleet.job;
+    if (!read) throw new Error("fleet.job missing");
+    await expect(read("")).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(read("Has Spaces")).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fetch.calls).toHaveLength(0);
+  });
+
+  it("does not treat a missing runs or gates page as an empty list", async () => {
+    const fetch = new FakeFetch();
+    fetch
+      .onPath("/api/v1/health", () => jsonResponse(HEALTH))
+      .onPath("/api/v1/board", () => jsonResponse(BOARD))
+      .onPath("/api/v1/jobs", () => jsonResponse(JOBS))
+      .onPath("/api/v1/jobs/ss-4-review", () => jsonResponse(JOB_DETAIL))
+      .onPath("/api/v1/sessions", () => jsonResponse(SESSIONS))
+      .onQuery("/api/v1/inbox", "open", () => jsonResponse(INBOX));
+    const { bridge } = makeBridge({ fetch });
+    const read = bridge.fleet.job;
+    if (!read) throw new Error("fleet.job missing");
+    await expect(read("ss-4-review")).rejects.toMatchObject({
+      code: "daemon_incompatible",
+    });
+
+    const snapshot = await bridge.fleet.snapshot(false);
+    expect(snapshot?.lanes.review_fix[0]?.gate).toBeNull();
+    const notice = snapshot?.unavailable.find(
+      (entry) => entry.feature === "gate_failures",
+    );
+    expect(notice?.code).toBe("no_route");
+  });
+
+  it("labels a failed gate read as read_failed instead of a missing route", async () => {
+    const fetch = new FakeFetch();
+    fetch
+      .onPath("/api/v1/health", () => jsonResponse(HEALTH))
+      .onPath("/api/v1/board", () => jsonResponse(BOARD))
+      .onPath("/api/v1/jobs", () => jsonResponse(JOBS))
+      .onPath("/api/v1/jobs/ss-4-review", () => jsonResponse(JOB_DETAIL))
+      .onPath("/api/v1/jobs/ss-4-review/runs", () => jsonResponse(JOB_RUNS))
+      .onPath("/api/v1/jobs/ss-4-review/gates", () => {
+        throw new TypeError("Failed to fetch");
+      })
+      .onPath("/api/v1/sessions", () => jsonResponse(SESSIONS))
+      .onQuery("/api/v1/inbox", "open", () => jsonResponse(INBOX));
+    const { bridge } = makeBridge({ fetch });
+    const read = bridge.fleet.job;
+    if (!read) throw new Error("fleet.job missing");
+    await expect(read("ss-4-review")).rejects.toMatchObject({
+      code: "daemon_unreachable",
+    });
+
+    const snapshot = await bridge.fleet.snapshot(false);
+    const notice = snapshot?.unavailable.find(
+      (entry) => entry.feature === "gate_failures",
+    );
+    expect(notice?.code).toBe("read_failed");
+    expect(snapshot?.lanes.review_fix[0]?.detail).toContain("Gate results were not read");
+  });
+
+  it("retries a 500 once, then reports remote", async () => {
+    const fetch = new FakeFetch();
+    let calls = 0;
+    fetch
+      .onPath("/api/v1/jobs/ss-4-review", () => {
+        calls += 1;
+        return jsonResponse({ error: { kind: "internal", message: "boom" } }, 500);
+      });
+    const { bridge } = makeBridge({ fetch });
+    const read = bridge.fleet.job;
+    if (!read) throw new Error("fleet.job missing");
+    await expect(read("ss-4-review")).rejects.toMatchObject({ code: "remote" });
+    expect(calls).toBe(2);
+  });
+
+  it("fetches detail only for jobs in the review/fix lane", async () => {
+    const { bridge, fetch } = makeBridge();
+    await bridge.fleet.snapshot(false);
+    const detailIds = new Set(
+      fetch.calls
+        .filter((call) => /^\/api\/v1\/jobs\/[^/]+$/.test(call.url.pathname))
+        .map((call) => call.url.pathname.split("/").pop()),
+    );
+    expect(detailIds).toEqual(new Set(["ss-4-review"]));
+  });
+});
+
 describe("desktop-only and read-only methods", () => {
   it("rejects every desktop-only method without making a network request", async () => {
     const { bridge, fetch } = makeBridge();
@@ -728,10 +900,10 @@ describe("security and cleanup", () => {
   it("only calls the documented read routes", async () => {
     const { bridge, fetch } = makeBridge();
     await bridge.fleet.snapshot(false);
-    const allowed = new Set<string>(Object.values(READ_ROUTES));
     for (const call of fetch.calls) {
-      expect(allowed.has(call.url.pathname)).toBe(true);
+      expect(isReadRoute(call.url.pathname)).toBe(true);
     }
+    expect(fetch.calls.some((call) => call.url.pathname.endsWith("/gates"))).toBe(true);
   });
 
   it("closes the stream, clears timers, and aborts in-flight reads on dispose", async () => {

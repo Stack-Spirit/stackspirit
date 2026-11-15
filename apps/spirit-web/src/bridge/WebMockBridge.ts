@@ -4,6 +4,7 @@ import {
   type DaemonHealth,
   type FleetView,
   type InboxItemView,
+  type JobDetailView,
   type MockScenario,
   type SpiritBridge,
   type StateEvent,
@@ -13,7 +14,7 @@ import {
 
 import {
   CAPACITY_DETAIL_UNAVAILABLE,
-  GATE_FAILURES_UNAVAILABLE,
+  JOB_DETAIL_UNAVAILABLE,
   ORCHESTRATORS_UNAVAILABLE,
   PROJECT_STATE_UNAVAILABLE,
   RAW_DOCUMENT_UNAVAILABLE,
@@ -82,6 +83,13 @@ export class WebMockBridge implements SpiritBridge {
       );
     },
     capacity: async (): Promise<null> => null,
+    job: async (id: string): Promise<JobDetailView> => {
+      const job = this.inner.fleet.job;
+      if (!job) {
+        throw webError("daemon_incompatible", JOB_DETAIL_UNAVAILABLE);
+      }
+      return job(id);
+    },
     jobAction: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);
     },
@@ -338,12 +346,6 @@ export class WebMockBridge implements SpiritBridge {
           code: "no_route",
           route: "/api/v1/fleet",
           detail: ORCHESTRATORS_UNAVAILABLE,
-        },
-        {
-          feature: "gate_failures",
-          code: "no_route",
-          route: "/api/v1/jobs/{id}/gates",
-          detail: GATE_FAILURES_UNAVAILABLE,
         },
         {
           feature: "raw_documents",

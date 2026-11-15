@@ -5,7 +5,14 @@ import { describe, expect, it } from "vitest";
 
 import type { SpiritBridge } from "@stackspirit/ui";
 
-import { HttpSseBridge, KNOWN_UNUSED_ROUTES, READ_ROUTES, WRITE_ROUTES } from "./HttpSseBridge";
+import {
+  HttpSseBridge,
+  JOB_DETAIL_ROUTE_PATTERNS,
+  KNOWN_UNUSED_ROUTES,
+  READ_ROUTES,
+  WRITE_ROUTES,
+  isReadRoute,
+} from "./HttpSseBridge";
 import { WebMockBridge } from "./WebMockBridge";
 
 type MethodClass = "available" | "unavailable" | "desktop-only" | "write-gated";
@@ -30,6 +37,7 @@ export const WEB_METHOD_CLASSES: Record<string, MethodClass> = {
   "fleet.get": "unavailable",
   "fleet.refresh": "unavailable",
   "fleet.capacity": "unavailable",
+  "fleet.job": "available",
   "fleet.jobAction": "write-gated",
   "fleet.inbox": "available",
   "fleet.answerInbox": "write-gated",
@@ -93,6 +101,24 @@ describe("SpiritBridge coverage", () => {
     expect(WRITE_ROUTES).toContain("/api/v1/capacity/target");
     expect(Object.values(READ_ROUTES)).not.toContain("/api/v1/nodes");
     expect(Object.values(READ_ROUTES)).not.toContain("/api/v1/cost");
+    expect(JOB_DETAIL_ROUTE_PATTERNS).toEqual([
+      "/api/v1/jobs/{id}",
+      "/api/v1/jobs/{id}/runs",
+      "/api/v1/jobs/{id}/gates",
+    ]);
+    expect(KNOWN_UNUSED_ROUTES).not.toContain("/api/v1/jobs/{id}");
+  });
+
+  it("allows only the fixed reads and the job-detail reads", () => {
+    for (const route of Object.values(READ_ROUTES)) {
+      expect(isReadRoute(route)).toBe(true);
+    }
+    expect(isReadRoute("/api/v1/jobs/ss-1-web-job-detail")).toBe(true);
+    expect(isReadRoute("/api/v1/jobs/ss-1-web-job-detail/runs")).toBe(true);
+    expect(isReadRoute("/api/v1/jobs/ss-1-web-job-detail/gates")).toBe(true);
+    expect(isReadRoute("/api/v1/jobs/")).toBe(false);
+    expect(isReadRoute("/api/v1/jobs/ss-1-web-job-detail/retry")).toBe(false);
+    expect(isReadRoute("/api/v1/nodes")).toBe(false);
   });
 });
 
