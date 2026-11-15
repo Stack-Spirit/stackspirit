@@ -1,0 +1,46 @@
+# Build context for docker/desktop-build.Dockerfile.
+#
+# The desktop build image installs tools only; it never copies the repository.
+# These ignores keep the context small and keep local state, build output, and
+# fetched engine binaries out of the image build entirely.
+
+# Version control, job metadata, and local tool configuration.
+.git
+.gitignore
+.dockerignore
+.vowp
+.env
+.env.*
+.direnv
+.idea
+.vscode
+
+# Rust and Node build output.
+target/
+**/target/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Browser test output.
+test-results/
+playwright-report/
+blob-report/
+**/test-results/
+**/playwright-report/
+**/blob-report/
+
+# Fetched engine sidecar binaries, their generated lock file, and local logs.
+apps/spirit-desktop/src-tauri/binaries/
+**/binaries/opencode-*
+**/binaries/opencode.exe
+**/engine-lock.json
+*.log
+**/*.log
+
+# Host noise.
+.DS_Store
+**/.DS_Store

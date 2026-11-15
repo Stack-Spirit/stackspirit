@@ -1,0 +1,237 @@
+# Developer setup — Linux desktop build container
+
+The desktop application is a Tauri 2 host (`apps/spirit-desktop/src-tauri`) plus a
+React/TypeScript UI (`apps/spirit-desktop/src`). Compiling the host on Linux needs the
+GTK 3, WebKitGTK 4.1, Soup 3, and JavaScriptCore GTK 4.1 development packages. Those
+packages are not installed on every worker or developer machine, and installing them
+with `sudo` is not always possible.
+
+`scripts/desktop-build-container.sh` solves that with a pinned Docker image. It installs
+nothing on the host, uses no `sudo`, and keeps every generated artifact outside the
+repository.
+
+> The container proves the **Linux host compile** and the desktop UI gates. It does
+> **not** prove a signed or notarized macOS bundle, a Windows installer, a real
+> OS-keychain round trip, or an AppImage/deb bundle. Those remain native and CI checks.
+
+## Prerequisites
+
+- Docker Engine (or Docker Desktop) with a reachable daemon.
+- Your user can run Docker, for example as a member of the `docker` group
+  (`docker info` succeeds without `sudo`).
+- About 4 GB of free disk for the image plus 2–4 GB for the Rust, Cargo, and npm caches
+  after the first full check. The caches grow with each toolchain and dependency update.
+- Network access for the first run: the image build pulls the pinned base images and
+  installs Debian packages, and `check` downloads crates, npm packages, and the pinned
+  engine release.
+- Node.js is not required on the host for this workflow; Node 22 runs inside the image.
+
+The script exits with a clear error if Docker is missing or the daemon is unreachable.
+It never installs packages, never runs `sudo`, and never deletes repository files.
+
+## Quick start
+
+From any directory, inside the repository checkout:
+
+```sh
+scripts/desktop-build-container.sh check
+```
+
+The first run builds the image if it is missing; later runs reuse it. The script bind-
+mounts the worktree read-write at `/work`, runs as your UID/GID, sets `HOME=/tmp`, and
+runs these gates in this order:
+
+```sh
+cargo fmt --all -- --check
+node scripts/fetch-engine.mjs
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run build
+cargo check -p spirit-desktop
+cargo test -p spirit-desktop
+```
+
+`npm ci` and `npm run build` run before the Rust steps because the Tauri build script
+reads the frontend output directory (`../dist`, produced by `npm run build`).
+`node scripts/fetch-engine.mjs` runs first because `tauri-build` validates
+`bundle.externalBin` while compiling the host; the fetch is checksum-verified, skips
+when the existing binary and lock match, and writes only the gitignored sidecar.
+
+A successful run ends with:
+
+```text
+==> desktop-build: all desktop gates passed
+```
+
+and exits `0`. Each step prints a header such as:
+
+```text
+==> desktop-build: cargo check -p spirit-desktop
+```
+
+so a failure identifies the exact command. A failing step exits non-zero with that
+command's output; the script does not continue past it.
+
+On a warm cache the run is dominated by the Rust host compile and takes a few minutes;
+the first run is slower because it builds the image and downloads crates and npm
+packages.
+
+This covers the Linux host compile and the desktop UI gates from `docs/PLAN.md` §10.6.
+`npm run test:e2e` (Playwright) is deliberately not included: the image does not
+download browser binaries. Run browser e2e on a host or in CI that installs Playwright
+browsers. `cargo clippy -p spirit-desktop --all-targets -- -D warnings` also passes in
+this image (run it through `scripts/desktop-build-container.sh shell`); it is not part
+of the default `check` command.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `scripts/desktop-build-container.sh check` | Default. Image build if needed, then the Rust and UI gates listed above. |
+| `scripts/desktop-build-container.sh tauri-build` | Fetches the pinned engine sidecar if missing, then runs `npx tauri build --debug --no-bundle` in `apps/spirit-desktop`. Best-effort: records a real host compile plus frontend bundle, no AppImage/deb. |
+| `scripts/desktop-build-container.sh shell` | Interactive bash in the same image with the worktree at `/work`, `HOME=/tmp`, and the same caches. |
+| `scripts/desktop-build-container.sh build` | Builds or refreshes the image only (`stackspirit-desktop-build:local`). |
+| `scripts/desktop-build-container.sh --help` | Usage summary. |
+
+Environment overrides:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STACKSPIRIT_DESKTOP_BUILD_IMAGE` | `stackspirit-desktop-build:local` | Docker image tag. |
+| `STACKSPIRIT_DESKTOP_RUST_TOOLCHAIN` | `1.90.0` | rustup toolchain selected with `RUSTUP_TOOLCHAIN`. |
+| `XDG_CACHE_HOME` | `~/.cache` | Base directory for the host caches. |
+
+## What is in the image
+
+`docker/desktop-build.Dockerfile` pins:
+
+- `rust:1.90-bookworm` — Rust 1.90.0 with `rustfmt` and `clippy`, plus `pkg-config`,
+  `build-essential`, `curl`, `wget`, `file`, `git`, `ca-certificates`, and `libssl-dev`.
+  The workspace `rust-version` is 1.85, but the pinned `Cargo.lock` (Tauri 2.12 and
+  its `tauri-utils`/`muda`/`uuid` dependencies) declares `rust-version = 1.90`; a 1.85
+  compiler stops with "rustc 1.85.1 is not supported by the following packages". The
+  image pins 1.90.0, the minimum version the locked tree accepts.
+- `node:22.23.5-bookworm-slim` — Node 22 LTS and npm copied from the exact official
+  image tag. No NodeSource setup script runs at build time.
+- `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libjavascriptcoregtk-4.1-dev`,
+  `libsoup-3.0-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libxdo-dev`, and
+  `patchelf`.
+
+The image installs tools only; it never copies the repository into the image. The
+build context is filtered by `.dockerignore`, which excludes `target`, `node_modules`,
+`.git`, `.vowp`, `dist`, Playwright output, and local engine binaries and lock files.
+
+`RUSTUP_TOOLCHAIN` is set so the repository's `rust-toolchain.toml` channel (`stable`)
+cannot make the container download a newer compiler. It is `1.90.0`, not a moving
+`stable` channel: a container run never updates Rust. Bumping `Cargo.lock` may raise
+the required minimum; the image tag and this pin must move together.
+
+To refresh the image after editing the Dockerfile or bumping a base tag:
+
+```sh
+scripts/desktop-build-container.sh build
+```
+
+Version tags for official images are immutable. For a fully digest-pinned workflow,
+replace the `FROM` tags with `image@sha256:<index-digest>` and record the digest next to
+the tag in this document.
+
+## Caches and generated files
+
+The script keeps all build state outside the worktree:
+
+```text
+${XDG_CACHE_HOME:-$HOME/.cache}/stackspirit/desktop-build/
+├── cargo/    # CARGO_HOME: crates.io registry and git checkouts
+├── target/   # CARGO_TARGET_DIR: Rust build artifacts, including the tauri-build debug binary
+└── npm/      # npm_config_cache
+```
+
+The first `check` downloads the crates and npm packages into those directories; later
+runs reuse them. Deleting that directory is safe and only forces a slower rebuild.
+
+Inside the worktree the script leaves only normal, gitignored build output owned by
+your UID: `node_modules/` and `apps/spirit-desktop/dist/`. It verifies after each run
+that no root-owned path exists under the repository.
+
+`check` also fetches the pinned StackSpirit Engine sidecar when it is missing:
+
+```sh
+node scripts/fetch-engine.mjs
+```
+
+The binary is written to `apps/spirit-desktop/src-tauri/binaries/opencode-<triple>` with
+the generated `engine-lock.json`; both are gitignored and must never be committed. The
+fetch verifies the pinned SHA-256 from `engine/manifest.json` before extraction. If the
+binary is already present and verified, the fetch is a no-op. To re-verify:
+
+```sh
+bash scripts/verify-engine-checksum.sh
+```
+
+The debug Tauri application binary is written to
+`${XDG_CACHE_HOME:-$HOME/.cache}/stackspirit/desktop-build/target/debug/spirit-desktop`.
+A successful `tauri-build` ends with:
+
+```text
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in ...
+       Built application at: /cache/target/debug/spirit-desktop
+
+==> desktop-build: tauri-build finished
+```
+
+Because `tauri build --no-bundle` skips packaging, no AppImage or `.deb` is produced.
+
+## Troubleshooting
+
+**`docker is not installed` or `the Docker daemon is not reachable`**
+Install Docker Engine or start the daemon, and make sure your user can run `docker info`
+without `sudo`. The script cannot work around a missing daemon.
+
+**`permission denied` writing `/work`**
+Run the script as the repository owner. The container uses `--user "$(id -u):$(id -g)"`;
+running the script through `sudo` would create root-owned files and is rejected.
+
+**A check fails inside the container**
+The failure is a real repository failure (formatting, types, lint, tests, or the Rust
+host compile), not a host-package problem. Run the printed command on the host or use
+`scripts/desktop-build-container.sh shell` to reproduce it with the same toolchain.
+
+**Out of disk space**
+The image is roughly 3.5 GB and the target cache can reach a few GB. Remove old images
+or the cache directory:
+
+```sh
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/stackspirit/desktop-build"
+```
+
+That path is outside the repository; the script never deletes repository files.
+
+**The image needs rebuilding**
+`check` and `tauri-build` reuse an existing `stackspirit-desktop-build:local` image.
+Run `scripts/desktop-build-container.sh build` after changing the Dockerfile.
+
+## What remains a native, macOS, or CI check
+
+The Docker workflow is a Linux compile and test environment, not a release pipeline.
+The following are **not** covered and remain owner or CI verification:
+
+- a signed and notarized macOS `.app`/`.dmg`, and a Windows installer (Tauri bundles
+  are native per platform);
+- a real OS-keychain round trip. The container has no logged-in desktop session or
+  platform credential store, so keychain integration is exercised by tests with a fake
+  keychain; a real macOS/Windows/Linux Secret Service round trip must run on a real
+  desktop session;
+- AppImage and `.deb` packaging (`tauri build --no-bundle` skips bundling), Tauri
+  update signing, and icon/installer verification;
+- Playwright browser end-to-end flows (needs downloaded browsers plus a running
+  preview server; not in the image);
+- a visually inspected application window (the container has no display server);
+- live SSH, VOWP, and local-orchestrator execution, which the product gates behind
+  VOWP milestones and the `.asif.zip` gate.
+
+The StackSpirit Engine sidecar is downloaded and checksum-verified but never committed.
+It is fetched into a gitignored path for the host compile and `tauri-build`; see
+`README.md` and `scripts/verify-engine-checksum.sh`.
