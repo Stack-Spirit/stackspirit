@@ -18,12 +18,24 @@ import { NOW } from "../scenarios/fixtures";
 import { sessionFixtures } from "./helpers";
 
 describe("ASIF session domain", () => {
-  it("keeps an unknown session state visible", () => {
-    expect(sessionStateLabel("active")).toBe("Active");
+  it("maps every VOWP session state to a label and tone", () => {
+    expect(sessionStateLabel("idle")).toBe("Idle");
+    expect(sessionStateLabel("running")).toBe("Running");
+    expect(sessionStateLabel("blocked")).toBe("Blocked");
+    expect(sessionStateLabel("switching")).toBe("Switching");
+    expect(sessionStateLabel("closed")).toBe("Closed");
+    expect(sessionStateTone("idle")).toBe("info");
+    expect(sessionStateTone("running")).toBe("ok");
+    expect(sessionStateTone("blocked")).toBe("danger");
+    expect(sessionStateTone("switching")).toBe("warn");
+    expect(sessionStateTone("closed")).toBe("info");
+  });
+
+  it("keeps a non-contract session state visible", () => {
     expect(sessionStateLabel("unknown")).toBe("Unknown");
     expect(sessionStateLabel("quarantined")).toBe("Unknown (quarantined)");
-    expect(sessionStateTone("idle")).toBe("info");
-    expect(sessionStateTone("failed")).toBe("danger");
+    expect(sessionStateLabel("active")).toBe("Unknown (active)");
+    expect(sessionStateTone("quarantined")).toBe("unknown");
   });
 
   it("uses the snapshot clock for the updated label", () => {

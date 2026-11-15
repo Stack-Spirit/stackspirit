@@ -58,15 +58,13 @@ export interface SessionUpdated {
   relative: string;
 }
 
+/** Labels for the VOWP `SessionState` values in `VOWP-CONTRACT.md` §3.2. */
 const SESSION_STATE_LABELS: Record<string, string> = {
-  active: "Active",
   idle: "Idle",
-  paused: "Paused",
-  stopped: "Stopped",
-  failed: "Failed",
-  error: "Error",
-  ended: "Ended",
-  unknown: "Unknown",
+  running: "Running",
+  blocked: "Blocked",
+  switching: "Switching",
+  closed: "Closed",
 };
 
 /**
@@ -74,25 +72,25 @@ const SESSION_STATE_LABELS: Record<string, string> = {
  * of being mapped to an invented happy state.
  */
 export function sessionStateLabel(state: string): string {
-  const known = SESSION_STATE_LABELS[state.trim().toLowerCase()];
+  const trimmed = state.trim();
+  const known = SESSION_STATE_LABELS[trimmed.toLowerCase()];
   if (known) return known;
-  return state.trim() ? `Unknown (${state})` : "Unknown";
+  if (trimmed.toLowerCase() === "unknown") return "Unknown";
+  return trimmed ? `Unknown (${trimmed})` : "Unknown";
 }
 
 export function sessionStateTone(state: string): Tone {
   switch (state.trim().toLowerCase()) {
-    case "active":
-    case "running":
-    case "ready":
-      return "ok";
     case "idle":
       return "info";
-    case "paused":
-    case "stopped":
-      return "warn";
-    case "failed":
-    case "error":
+    case "running":
+      return "ok";
+    case "blocked":
       return "danger";
+    case "switching":
+      return "warn";
+    case "closed":
+      return "info";
     default:
       return "unknown";
   }

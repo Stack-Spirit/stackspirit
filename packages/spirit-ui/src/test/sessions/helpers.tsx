@@ -25,7 +25,7 @@ export function sessionFixtures(): SessionCardView[] {
       job_id: "ss-2-desktop-shell",
       role: "worker",
       title: "Desktop shell",
-      state: "active",
+      state: "running",
       executor: parseExecutor("opencode:deepseek/deepseek-flash#max"),
       node: "vps",
       active_surface: null,

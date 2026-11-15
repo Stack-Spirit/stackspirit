@@ -188,6 +188,15 @@ describe("Sessions drawer gate state", () => {
     ).toHaveTextContent("Probe the VOWP home to check this capability.");
   });
 
+  it("labels a session with its real VOWP state", async () => {
+    const bridge = new MockBridge("gate-asif-ready");
+    const gates = await bridge.gates.get();
+    renderSessions({ bridge, gates });
+
+    expect(within(firstRow()).getByText("Running")).toBeInTheDocument();
+    expect(within(firstRow()).queryByText(/Unknown/)).not.toBeInTheDocument();
+  });
+
   it("empty_snapshot_names_the_empty_state", async () => {
     const bridge = new MockBridge("gate-asif-ready");
     const gates = await bridge.gates.get();
