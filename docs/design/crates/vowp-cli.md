@@ -249,9 +249,11 @@ node that runs the app:
   node to `Orchestrator::create_on_node`. For this one command the global `--node` names the
   orchestrator's node, not an SSH redirect: `Cli::try_parse_from` moves the parsed global value
   into `OrchestratorNewArgs.node` before `remote::maybe_run` sees it, and the `new` help footer
-  says so. Every other command keeps the global redirect. A local-node orchestrator never takes
+  says so. Every other command keeps the global redirect. A remote-node orchestrator never takes
   a home lease, never starts a home host and never starts a keeper; the home creates the
-  session/card and sends a typed command.
+  session/card and sends a typed command. A node value that names the home (the local `deps.node`
+  or a registry row marked `is_local`) keeps the v0.2 home host and lease, so `new`/`resume`
+  start the detached keeper for it.
 - `orchestrator ls` adds a `NODE` column (`home` for a v0.2 orchestrator) and the JSON card
   carries `node` and the typed `state`. `stop`/`resume <name>` read the node from
   `orchestrator.json`; `resume` on an offline node prints `node_offline` and exits 7.

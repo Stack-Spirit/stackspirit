@@ -194,5 +194,6 @@ vowp-tmux = { version = "0.3.0", path = "crates/vowp-tmux" }
 workspace = true
 
 [dev-dependencies]
+ed25519-dalek = "2"
 tempfile = "3.27.0"
 vowp-asif = { git = "https://github.com/syver777/vowp-asif", rev = "466ebb81f58646febb80996874b46c11288d5a97", version = "0.1.1" }

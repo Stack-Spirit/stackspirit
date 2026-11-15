@@ -157,7 +157,7 @@ fn create(
             node,
         )
         .map_err(map_orchestrator_error)?;
-    ensure_keeper(ctx, &info)?;
+    ensure_keeper(ctx, orchestrator, &info)?;
     print_info(ctx, io, &info)
 }
 
@@ -211,7 +211,7 @@ fn stop(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: &s
 /// Runs `orchestrator resume`.
 fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: &str) -> Result<i32, CliError> {
     let info = orchestrator.resume(name).map_err(map_orchestrator_error)?;
-    ensure_keeper(ctx, &info)?;
+    ensure_keeper(ctx, orchestrator, &info)?;
     print_info(ctx, io, &info)
 }
 
@@ -220,8 +220,17 @@ fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: 
 /// The CLI exits after `new`/`resume`; this child is the long-lived holder whose
 /// `LeaseGuard` heartbeat keeps the session from becoming stale. It refuses to steal a
 /// lease that another surface has taken over (see `Orchestrator::keep_alive`).
-fn ensure_keeper(ctx: &Ctx, info: &OrchestratorInfo) -> Result<(), CliError> {
-    if info.card.app == OrchestratorApp::Chat || info.card.node.is_some() {
+///
+/// A remote node owns its own app host and lease, so the home starts no keeper for it. A
+/// node orchestrator bound to the home (the `local` row or `deps.node`) still runs the
+/// home host and home lease, so it needs the keeper exactly like a v0.2 record.
+fn ensure_keeper(ctx: &Ctx, orchestrator: &Orchestrator, info: &OrchestratorInfo) -> Result<(), CliError> {
+    if info.card.app == OrchestratorApp::Chat {
+        return Ok(());
+    }
+    if let Some(node) = info.card.node.as_ref()
+        && !orchestrator.is_home_node(node).map_err(map_orchestrator_error)?
+    {
         return Ok(());
     }
     let dir = info.dir.clone();

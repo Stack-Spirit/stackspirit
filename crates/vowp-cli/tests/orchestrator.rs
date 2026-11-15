@@ -8,23 +8,28 @@
 // This file is the `orchestrator` integration test target declared in the root
 // `Cargo.toml` (the `vowp-cli` package root is the workspace root).
 
+use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
 use tempfile::TempDir;
 use vowp_protocol::{
-    AgentFrame, JoinInstructions, Lease, Node, NodeName, NodeStatus, OrchestratorApp, OrchestratorCommand,
-    OrchestratorNodeState, OrchestratorResult, Project, ProjectName, SessionId, SessionRole, Surface, SurfaceId,
-    SurfaceKind, Timestamp, VowpConfig,
+    AgentCapabilities, AgentCapacity, AgentFrame, JoinInstructions, Lease, Node, NodeName, NodeStatus, OrchestratorApp,
+    OrchestratorCommand, OrchestratorNodeState, OrchestratorResult, Project, ProjectName, SessionId, SessionRole,
+    Surface, SurfaceId, SurfaceKind, Timestamp, VowpConfig,
 };
-use vowp_store::{NodePaths, Store, hash_lease_token};
+use vowp_store::{NodeCredential, NodePaths, Store, hash_lease_token};
 
 use vowp_core::CoreError;
+use vowp_core::agent::auth;
+use vowp_core::agent::gateway::{self, GatewayOptions};
 use vowp_core::deps::Deps;
 use vowp_core::surface::mirror::MirrorCursor;
 use vowp_core::surface::native::{AppHandle, AppHost, HostHealth, HostRequest, TranscriptBatch, TranscriptEntry};
@@ -400,6 +405,182 @@ impl Drop for FakeAgent {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Returns the lowercase hex public key of `key`.
+fn public_hex(key: &SigningKey) -> String {
+    key.verifying_key()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Signs the gateway challenge payload and returns lowercase hex.
+fn signature_hex(key: &SigningKey, nonce: &str, home: &str, connection: &str) -> String {
+    key.sign(&auth::handshake_payload(nonce, home, connection))
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The agent capabilities sent in `AgentHello`.
+fn agent_capabilities() -> AgentCapabilities {
+    AgentCapabilities {
+        os: "linux".to_owned(),
+        arch: "x86_64".to_owned(),
+        agent_version: "0.4.0".to_owned(),
+        harnesses: std::collections::BTreeMap::new(),
+        git_version: None,
+        labels: vec!["test".to_owned()],
+        secret_names: Vec::new(),
+        projects: Vec::new(),
+    }
+}
+
+/// One real gateway connection over a pair of local sockets.
+///
+/// The test plays the agent: it writes frames to the gateway's stdin and reads the
+/// gateway's stdout. No network, real agent binary or tmux is involved.
+struct LiveGateway {
+    to_gateway: UnixStream,
+    from_gateway: std::io::BufReader<UnixStream>,
+    handle: Option<thread::JoinHandle<Result<gateway::GatewayOutcome, CoreError>>>,
+}
+
+impl LiveGateway {
+    fn start(env: &TestEnv) -> Self {
+        let deps = deps(env);
+        let store = deps.open_store().expect("gateway store");
+        let (to_gateway, gateway_input) = UnixStream::pair().expect("gateway input pair");
+        let (gateway_output, from_gateway) = UnixStream::pair().expect("gateway output pair");
+        from_gateway
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("gateway read timeout");
+        let options = GatewayOptions {
+            home_id: deps.node.to_string(),
+            heartbeat_secs: 10,
+            max_frame_bytes: 1024 * 1024,
+            handshake_timeout: Duration::from_secs(2),
+        };
+        let handle = thread::spawn(move || {
+            gateway::serve_with_options(
+                &store,
+                &deps,
+                std::io::BufReader::new(gateway_input),
+                gateway_output,
+                options,
+            )
+        });
+        Self {
+            to_gateway,
+            from_gateway: std::io::BufReader::new(from_gateway),
+            handle: Some(handle),
+        }
+    }
+
+    fn send(&mut self, frame: &AgentFrame) {
+        let mut bytes = serde_json::to_vec(frame).expect("gateway frame JSON");
+        bytes.push(b'\n');
+        self.to_gateway.write_all(&bytes).expect("write gateway frame");
+        self.to_gateway.flush().expect("flush gateway frame");
+    }
+
+    fn expect(&mut self, predicate: impl Fn(&AgentFrame) -> bool) -> AgentFrame {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut line = String::new();
+            match self.from_gateway.read_line(&mut line) {
+                Ok(0) => panic!("gateway closed while waiting for a frame"),
+                Ok(_) => {
+                    if let Ok(frame) = serde_json::from_str::<AgentFrame>(&line)
+                        && predicate(&frame)
+                    {
+                        return frame;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("gateway read failed: {error}"),
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for a gateway frame");
+        }
+    }
+
+    fn finish(mut self) -> gateway::GatewayOutcome {
+        let _ = self.to_gateway.shutdown(std::net::Shutdown::Write);
+        self.handle
+            .take()
+            .expect("gateway thread")
+            .join()
+            .expect("gateway thread panicked")
+            .expect("gateway connection")
+    }
+}
+
+/// Registers a credential for an already-active test node.
+fn bind_key(env: &TestEnv, node: &NodeName, key: &SigningKey) {
+    let store = env.store();
+    let now = store.clock().now();
+    let key_id = public_hex(key);
+    store
+        .upsert_node_credential(&NodeCredential {
+            node: node.clone(),
+            key_id: key_id.clone(),
+            public_key: key_id,
+            created_at: now,
+            last_used_at: None,
+            revoked_at: None,
+        })
+        .expect("node credential");
+}
+
+/// Runs the real agent handshake over a [`LiveGateway`].
+fn authenticate(gateway: &mut LiveGateway, node: &NodeName, key: &SigningKey) {
+    gateway.send(&AgentFrame::AgentHello {
+        node: node.clone(),
+        key_id: public_hex(key),
+        agent_version: "0.4.0".to_owned(),
+        os: "linux".to_owned(),
+        arch: "x86_64".to_owned(),
+        labels: vec!["test".to_owned()],
+        capabilities: agent_capabilities(),
+    });
+    let AgentFrame::HomeChallenge {
+        nonce,
+        home_id,
+        connection_id,
+        ..
+    } = gateway.expect(|frame| matches!(frame, AgentFrame::HomeChallenge { .. }))
+    else {
+        panic!("expected HomeChallenge");
+    };
+    let signature = signature_hex(key, &nonce, &home_id, &connection_id);
+    gateway.send(&AgentFrame::AgentAuth { signature });
+    gateway.expect(|frame| matches!(frame, AgentFrame::HomeWelcome { .. }));
+}
+
+/// One heartbeat frame with a fixed capacity snapshot.
+fn heartbeat() -> AgentFrame {
+    AgentFrame::Heartbeat {
+        at: Timestamp::now(),
+        capacity: AgentCapacity {
+            cpu_cores: 8,
+            load1: 0.1,
+            mem_total_bytes: 16 * 1024 * 1024 * 1024,
+            mem_free_bytes: 8 * 1024 * 1024 * 1024,
+            disk_free_bytes: 64 * 1024 * 1024 * 1024,
+            busy_slots: 0,
+            max_slots: 2,
+            on_battery: None,
+            thermal_state: None,
+        },
+        pending_spool_bytes: 0,
     }
 }
 
@@ -1005,6 +1186,137 @@ fn orchestrator_keeper_keeps_the_lease_after_the_cli_exits() {
         store.lease(&info.session).expect("lease lookup").is_none(),
         "stop left the keeper lease in place"
     );
+}
+
+#[test]
+fn orchestrator_resume_on_the_home_node_keeps_a_keeper() {
+    let env = TestEnv::new();
+    let home = NodeName::parse("local").expect("home node");
+    let (orchestrator, _, _, _, _) = manager(deps(&env));
+    let info = orchestrator
+        .create_on_node(&request("home-keeper", OrchestratorApp::Opencode), Some(home.clone()))
+        .expect("create a home-node orchestrator");
+    assert_eq!(info.card.node.as_ref(), Some(&home));
+
+    // The fake host already wrote host.json, so the CLI resume reuses it instead of
+    // starting a real opencode service. The card still names the home node.
+    let output = std::process::Command::new(vowp_binary())
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["orchestrator", "resume", "home-keeper"])
+        .output()
+        .expect("run vowp orchestrator resume");
+    assert!(
+        output.status.success(),
+        "resume failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pid: u32 = std::fs::read_to_string(info.dir.join("keeper.pid"))
+        .expect("home-node orchestrator has no keeper pid after resume")
+        .trim()
+        .parse()
+        .expect("keeper pid");
+    assert!(vowp_adapters::proc::process_alive(pid), "keeper {pid} is not alive");
+    orchestrator.stop("home-keeper").expect("stop orchestrator");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while vowp_adapters::proc::process_alive(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !vowp_adapters::proc::process_alive(pid),
+        "stop left the home-node keeper {pid} running"
+    );
+}
+
+#[test]
+fn orchestrator_live_gateway_drains_commands_and_reconnects() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    bind_key(&env, &node, &key);
+
+    let mut gateway = LiveGateway::start(&env);
+    authenticate(&mut gateway, &node, &key);
+
+    // A real home command writes the spool and blocks for the correlated result; this
+    // thread plays `vowp orchestrator new`. The gateway must send the frame on the live
+    // connection and publish the agent's result back.
+    let node_for_create = node.clone();
+    let create_deps = deps(&env);
+    let create = thread::spawn(move || {
+        Orchestrator::new(create_deps)
+            .create_on_node(&request("live", OrchestratorApp::Opencode), Some(node_for_create))
+    });
+    let AgentFrame::OrchestratorCommand(command) =
+        gateway.expect(|frame| matches!(frame, AgentFrame::OrchestratorCommand(_)))
+    else {
+        panic!("expected an OrchestratorCommand frame");
+    };
+    assert_eq!(command.name(), "live");
+    assert!(matches!(command, OrchestratorCommand::Start { .. }), "{command:?}");
+    let request_id = command.request_id().to_owned();
+    gateway.send(&AgentFrame::OrchestratorResult(OrchestratorResult::accepted(
+        request_id.clone(),
+        OrchestratorNodeState::Running,
+    )));
+    let info = create
+        .join()
+        .expect("create thread")
+        .expect("create through the live gateway");
+    assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    assert_eq!(info.card.node.as_ref(), Some(&node));
+    let state = read_json(&state_path(&info.dir));
+    assert_eq!(state["state"], "running");
+    assert_eq!(state["last_request_id"], request_id);
+    assert!(
+        !env.home_path()
+            .join("agent-commands")
+            .join(node.as_str())
+            .join(format!("{request_id}.json"))
+            .exists(),
+        "the gateway left the delivered command in the outbox"
+    );
+
+    // Closing the authenticated connection marks the record degraded.
+    gateway.finish();
+    let orchestrator = Orchestrator::new(deps(&env));
+    let info = orchestrator.info("live").expect("info after disconnect");
+    assert_eq!(info.card.state, OrchestratorNodeState::Degraded);
+
+    // A reconnect heartbeat queues a Resume command; the new connection must send it
+    // and apply the next result to the same record.
+    let mut gateway = LiveGateway::start(&env);
+    authenticate(&mut gateway, &node, &key);
+    gateway.send(&heartbeat());
+    let AgentFrame::OrchestratorCommand(command) =
+        gateway.expect(|frame| matches!(frame, AgentFrame::OrchestratorCommand(_)))
+    else {
+        panic!("expected a Resume frame after reconnect");
+    };
+    assert!(matches!(command, OrchestratorCommand::Resume { .. }), "{command:?}");
+    let request_id = command.request_id().to_owned();
+    gateway.send(&AgentFrame::OrchestratorResult(OrchestratorResult::accepted(
+        request_id,
+        OrchestratorNodeState::Running,
+    )));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let info = loop {
+        let info = orchestrator.info("live").expect("info after reconnect");
+        if info.card.state == OrchestratorNodeState::Running {
+            break info;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reconnect did not resume the record: {info:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    gateway.finish();
 }
 
 #[test]
