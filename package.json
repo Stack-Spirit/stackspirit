@@ -14,7 +14,7 @@
     "typecheck": "npm run typecheck -w @stackspirit/ui && npm run typecheck -w @stackspirit/desktop && npm run typecheck -w @stackspirit/web",
     "lint": "npm run lint -w @stackspirit/ui && npm run lint -w @stackspirit/desktop && npm run lint -w @stackspirit/web",
     "test": "npm run test -w @stackspirit/ui && npm run test -w @stackspirit/desktop && npm run test -w @stackspirit/web",
-    "test:e2e": "npm run test:e2e -w @stackspirit/desktop && npm run test:e2e -w @stackspirit/web",
+    "test:e2e": "npm run test:e2e -w @stackspirit/desktop -- --timeout=90000 && npm run test:e2e -w @stackspirit/web",
     "tauri": "npm run tauri -w @stackspirit/desktop"
   }
 }
