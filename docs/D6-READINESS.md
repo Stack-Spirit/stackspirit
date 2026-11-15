@@ -77,9 +77,9 @@ is not available yet.
 | Exact command | Exit | Parsed result | Meaning |
 |---|---:|---|---|
 | `vowp --project <vowp-project> job show v4-local-4f-cli-surface --json` | 0 | `state: pending`; `kind: build`; no report | The Phase 4 CLI surface job has not run. |
-| `vowp --project <vowp-project> job show v4-local-4d-bundle-result --json` | 0 | `state: reviewing` | A dependency of `4f` is not merged yet. |
+| `vowp --project <vowp-project> job show v4-local-4d-bundle-result --json` | 0 | `state: fixing` (state changed 2026-11-15T23:28:52Z; `v4-local-4d-bundle-result-fix-1` is `running`) | A dependency of `4f` is not merged yet; its first fix round is in progress. |
 | `vowp --project <vowp-project> job show v4-local-4g-hardening-docs --json` | 0 | `state: pending`; depends on `4f` | The docs/release gate follows the CLI surface. |
-| `vowp --project <vowp-project> job ls --all --json` | 0 | `v4-local-4b-node-runtime`, `v4-local-4c-rotation-ux`, and `v4-local-4e-metrics-history` are `done`; `v4-local-4d-bundle-result` is `reviewing`; `v4-local-4f-cli-surface` and `v4-local-4g-hardening-docs` are `pending` | The Phase 4 chain is not complete. |
+| `vowp --project <vowp-project> job ls --all --json` | 0 | `v4-local-4b-node-runtime`, `v4-local-4c-rotation-ux`, and `v4-local-4e-metrics-history` are `done`; `v4-local-4d-bundle-result` is `fixing`; `v4-local-4f-cli-surface` and `v4-local-4g-hardening-docs` are `pending` | The Phase 4 chain is not complete. |
 
 **Conclusion of §1:** the installed VOWP CLI is not D6-ready. The missing surface commands,
 inactive/absent local-agent node, absent home path-map read model, and pending Phase 4 CLI job
@@ -191,16 +191,19 @@ vowp --version
 vowp agent surface start --help
 vowp agent surface attach --help
 vowp mcp --help | grep -F -- '--agent-socket'
-vowp orchestrator new --help | grep -F -- '--node'
+vowp orchestrator new --help | grep -F -- 'not an SSH redirect'
 vowp node paths --help
 vowp --project <project> offload status --json >/dev/null
 vowp --project <project> orchestrator ls --json >/dev/null
 ```
 
-Expected: every help probe exits 0; `vowp mcp --help` lists `--agent-socket`;
-`vowp orchestrator new --help` also shows the local-node sentence; `vowp node paths --help`
-exits 0 only if the build provides the current probe's local-cache read. Do **not** run
-`vowp agent surface start` or `vowp agent surface attach` for real in this step; help only.
+Expected after installing the Phase 4 build: every command exits 0. `vowp mcp --help` lists
+`--agent-socket`. `vowp orchestrator new --help` must match `not an SSH redirect`; matching the
+bare global `--node` line is not enough. On the installed `vowp 0.3.0` this grep exits 1, which
+is the intended failure until a build with `v4-local-4f-cli-surface` is installed.
+`vowp node paths --help` exits 0 only if the build provides the current probe's local-cache
+read. Do **not** run `vowp agent surface start` or `vowp agent surface attach` for real in this
+step; help only.
 
 If the commands or flags are still missing, the build did not include
 `v4-local-4f-cli-surface`. Stop and record the evidence; do not work around it.
@@ -399,7 +402,7 @@ this table. An owner action is not “done” until the named probe has the stat
 
 | Missing or unproven | Action (owner or StackSpirit) | Exact probe that proves it | Current (2026-11-16) |
 |---|---|---|---|
-| Phase 4 CLI release `v4-local-4f-cli-surface` | Wait for `4d` to merge and `4f` to land; install that VOWP build on the home and Mac. Do not substitute the source checkout. | `vowp --project <vowp-project> job show v4-local-4f-cli-surface --json` → `state: done`; record `vowp --version` | `pending`; its dependency `4d` is `reviewing` |
+| Phase 4 CLI release `v4-local-4f-cli-surface` | Wait for `4d` to merge and `4f` to land; install that VOWP build on the home and Mac. Do not substitute the source checkout. | `vowp --project <vowp-project> job show v4-local-4f-cli-surface --json` → `state: done`; record `vowp --version` | `pending`; its dependency `4d` is `fixing` |
 | `vowp agent surface start` and `vowp agent surface attach` | Install the build above on both machines. | `vowp agent surface start --help` and `vowp agent surface attach --help` → exit 0 | Both exit 2, unrecognized subcommand |
 | Active local-agent node with protocol `vowp-agent/1` | On the home, create the pending node; on the Mac, enroll with the private code file, map paths, and run one agent. | `vowp --project <project> node show <node> --json` → `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version` present | Only `kind: home`, `status: active`, `presence: offline`, `protocol: null` |
 | Local agent state `connected` | Enroll and run the agent as above; keep it running. | `vowp agent status --json` → exit 0, `connection: connected`, `protocol: vowp-agent/1`, `last_heartbeat` present | Exit 3, not enrolled |
