@@ -175,8 +175,9 @@ renders the desktop-only panel with the exact copy in §3.7 and makes no bridge 
 | `fleet.setTarget(input)` | no route | unavailable | Rejects before any fetch with `no_route` (`/api/v1/capacity/target`). The target editor is hidden; no guessed target is shown. |
 | `fleet.rawDocument()` | no route | unavailable | Resolves `null` with a notice. The raw-document drawer is hidden; the daemon does not serve the fleet-status or capacity-report documents. |
 
-The current bridge has no `fleet.job(id)` or gate-failure method. `GET /api/v1/jobs/{id}` is
-also unimplemented; see §2.7 for the exact 404 and §6.2 Ask 3 for the route ask.
+The current bridge has no `fleet.job(id)` or gate-failure method, so W1a does not call the
+daemon's `GET /api/v1/jobs/{id}`, `/runs`, or `/gates` routes. See §2.7 and §6.2 Ask 3 for
+the bridge work a later job drawer needs.
 
 ### 2.5 `engine`
 
@@ -224,23 +225,16 @@ These routes exist today but have no `SpiritBridge` method. W1a does not call th
 | `POST /api/v1/sessions/{id}/switch` | Bearer token | No executor-switch method; local-node only. | Not used. |
 | `GET /api/v1/cost?by=&since=&until=` | none | No cost method. `FleetView` carries only `Board.cost_today_usd`. | Not used. A later `fleet.cost(by)` can map it. |
 | `GET /api/v1/nodes` | none | `Node` is not a `HostProfile`; it carries `ssh_target` and no pinned key. Exposing it in W1 adds host data for no user value. | Not used. |
+| `GET /api/v1/jobs/{id}` | none | Returns the full `Job`. The bridge has no per-job detail method; the list rows already carry every W1 field. | Not used. A later job drawer adds `fleet.job(id)`. |
+| `GET /api/v1/jobs/{id}/runs` | none | Returns `RunPage` (`Page<Run>`), oldest first, unpaginated. No runs method. | Not used. The same later job drawer needs it. |
+| `GET /api/v1/jobs/{id}/gates` | none | Returns `GateResultPage` (`Page<GateResult>`) for the newest attempt, unpaginated. No gate-failure method. | Not used. The review/fix lane shows the exact count plus `GATE_FAILURES_UNAVAILABLE` until then. |
 
 The daemon also serves static pages and PWA assets (`/`, `/board`, `/jobs`, `/sessions`,
 `/cost`, `/inbox`, `/nodes`, `/import`, `/manifest.webmanifest`, `/sw.js`, `/icon.svg`).
 They are VOWP's own window and are not part of the StackSpirit Web contract.
 
-The v0.3 design goal also lists these job-detail routes; the implemented router does not
-register them, so a request gets the JSON 404 fallback. They are **no route**, not a bridge
-gap that W1 can fill.
-
-| Design route | Implemented? | Effect |
-|---|---|---|
-| `GET /api/v1/jobs/{id}` | no route | `404 {"error":{"kind":"not_found","message":"unknown endpoint","hint":null}}` |
-| `GET /api/v1/jobs/{id}/runs` | no route | same JSON 404 |
-| `GET /api/v1/jobs/{id}/gates` | no route | same JSON 404 |
-
-W1a does not need them because `GET /api/v1/jobs` returns every job. They are the exact
-routes a later job drawer needs for runs and gate failures (§6.2, Ask 3).
+W1a does not need the job-detail reads because `GET /api/v1/jobs` returns every job. They
+are the exact routes a later job drawer needs for runs and gate failures (§6.2, Ask 3).
 
 ### 2.8 Token-gated writes
 
@@ -531,7 +525,8 @@ does **not** say “retrying”: retrying cannot create a missing route.
 | `ENGINE_DESKTOP_ONLY` | `The StackSpirit Engine runs beside the desktop app. This Web build cannot start the engine, manage provider keys, or switch models.` |
 | `GATES_DESKTOP_ONLY` | `Capability gates are probed over SSH from the desktop app. This Web build cannot probe them.` |
 | `READ_ONLY_NOTICE` | `Read-only Web build. Job and inbox actions require the local write proxy.` |
-| `GATE_FAILURES_UNAVAILABLE` | `Gate failure detail is unavailable — the daemon has no job-gate read route.` |
+| `GATE_FAILURES_UNAVAILABLE` | `Gate failure detail is unavailable — the daemon serves the job-gate route, but this Web build does not read it yet.` |
+| `JOB_DETAIL_UNAVAILABLE` | `Job detail is unavailable — the daemon serves GET /api/v1/jobs/{id}, /runs, and /gates, but this Web build does not call them yet.` |
 | `SESSION_SURFACES_UNAVAILABLE` | `Session surfaces are unavailable — the daemon does not expose active surface leases or last-event times.` |
 | `ORCHESTRATORS_UNAVAILABLE` | `Orchestrators are unavailable — the daemon has no orchestrator read route.` |
 | `RAW_DOCUMENT_UNAVAILABLE` | `Raw VOWP documents are unavailable — the daemon serves board and list documents, not the fleet-status or capacity-report documents.` |
@@ -890,13 +885,13 @@ This single route would fill `SupervisorView`, `ProjectView.state`, session surf
 orchestrators, and the `source`/`stale` flags. It is optional for W1a; without it those
 fields stay `null` plus notices.
 
-#### Ask 3: `GET /api/v1/jobs/{id}`
+#### Ask 3: `GET /api/v1/jobs/{id}` — now served
 
-The v0.3 design goal lists `GET /api/v1/jobs/{id}` with `/runs` and `/gates` sub-resources,
-but the implemented router does not register the route. A request falls through to the JSON
-404 fallback (`{"error":{"kind":"not_found","message":"unknown endpoint","hint":null}}`).
-This is the exact missing route for gate-failure detail and job detail. W1a does not need it
-because `GET /api/v1/jobs` returns every job; a later job drawer does.
+The daemon registers `GET /api/v1/jobs/{id}` (the full `Job`) and its `/runs`
+(`RunPage`) and `/gates` (`GateResultPage`) sub-resources as token-free reads. The remaining
+gap is on the StackSpirit side: `SpiritBridge` has no `fleet.job(id)` or gate-failure
+method, so W1a does not call them. W1a does not need them because `GET /api/v1/jobs`
+returns every job; a later job drawer does.
 
 #### Ask 4: capacity target write
 
@@ -1055,7 +1050,7 @@ gates stay unchanged.
 | Project state and paused reason | missing | VOWP daemon | `GET /api/v1/fleet`; `snapshot.projects[]` |
 | Session active surface and last event | missing | VOWP daemon | `GET /api/v1/fleet`; `snapshot.sessions[]` |
 | Orchestrator cards with node | missing | VOWP daemon | `GET /api/v1/fleet`; `snapshot.orchestrators[]` |
-| Job detail and gate failures | missing | VOWP daemon | `GET /api/v1/jobs/{id}` with `/runs` and `/gates` |
+| Job detail and gate failures | bridge missing | StackSpirit W1 | daemon serves `GET /api/v1/jobs/{id}` with `/runs` and `/gates`; no W1 bridge method |
 | Capacity target write | missing | VOWP daemon | `POST /api/v1/capacity/target`, token-gated |
 | Host profiles, SSH, keychain, engine | desktop-only | StackSpirit | no daemon route; §2.2, §2.5 |
 | Capability gates | desktop-only | StackSpirit | no daemon route; §2.6 |
@@ -1132,8 +1127,8 @@ The bridge also does not call these existing routes, per §2.7:
 | `GET /api/v1/sessions/{id}` and `/events` | No session drawer or event-timeline method in W1. |
 | `POST` routes | W1c write proxy is not built; zero `POST`s are sent. |
 
-`GET /api/v1/jobs/{id}`, `/runs`, and `/gates` are still **not implemented** by the daemon.
-The bridge never calls them; a missing job on a board run is labelled
+`GET /api/v1/jobs/{id}`, `/runs`, and `/gates` are served by the daemon but have no W1
+bridge method, so the bridge never calls them. A board run without a job row is labelled
 “job detail unavailable”, and the review/fix lane shows the count plus
 `GATE_FAILURES_UNAVAILABLE`.
 
@@ -1235,7 +1230,7 @@ keeps the honest `WebFleetView` and does not mount a desktop view with fabricate
 | Supervisor state | missing | `GET /api/v1/fleet`; `snapshot.supervisor` |
 | Project state | missing | `GET /api/v1/fleet`; `snapshot.projects[].state` |
 | Session surfaces and orchestrators | missing | `GET /api/v1/fleet`; session/orchestrator fields |
-| Job detail and gate failures | missing | `GET /api/v1/jobs/{id}` with `/runs` and `/gates` |
+| Job detail and gate failures | W1b | bridge method for `GET /api/v1/jobs/{id}` with `/runs` and `/gates`; the daemon routes exist |
 | Capacity target write | missing | `POST /api/v1/capacity/target` |
 | Job and inbox writes in the browser | W1c | local write proxy; §5.4 |
 | Hosts, Engine, Gates | desktop-only | no daemon route; §2.2, §2.5, §2.6 |

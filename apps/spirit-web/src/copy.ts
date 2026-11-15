@@ -27,7 +27,7 @@ export const READ_ONLY_NOTICE =
   "Read-only Web build. Job and inbox actions require the local write proxy.";
 
 export const GATE_FAILURES_UNAVAILABLE =
-  "Gate failure detail is unavailable — the daemon has no job-gate read route.";
+  "Gate failure detail is unavailable — the daemon serves the job-gate route, but this Web build does not read it yet.";
 
 export const SESSION_SURFACES_UNAVAILABLE =
   "Session surfaces are unavailable — the daemon does not expose active surface leases or last-event times.";
@@ -42,7 +42,7 @@ export const SAME_ORIGIN_REQUIRED =
   "This daemon has no CORS support. Serve this app and /api/v1 from the same origin through the reverse proxy.";
 
 export const JOB_DETAIL_UNAVAILABLE =
-  "Job detail is unavailable — the daemon does not serve GET /api/v1/jobs/{id}, /runs, or /gates.";
+  "Job detail is unavailable — the daemon serves GET /api/v1/jobs/{id}, /runs, and /gates, but this Web build does not call them yet.";
 
 export const JOB_PAGE_TRUNCATED =
   "This daemon paginated the job list; only the returned page is shown. The board counts remain exact.";
