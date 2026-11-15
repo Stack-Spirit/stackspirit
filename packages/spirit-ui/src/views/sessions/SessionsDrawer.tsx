@@ -9,6 +9,7 @@ import {
   asifGateBadge,
   asifGateDetail,
   asifGateMissing,
+  gatesForConnection,
   sessionStateLabel,
   sessionStateTone,
   sessionUpdated,
@@ -53,7 +54,8 @@ export function SessionsDrawer({ open, onClose }: SessionsDrawerProps) {
   const fleet = useFleet();
   const sessions = useSessions();
   const connection = useConnection();
-  const gates = useGates();
+  const rawGates = useGates();
+  const gates = gatesForConnection(rawGates, connection);
   const intent = useFleetStore((state) => state.sessionsIntent);
   // AppShell keys this component on `open` and `intent`, so the initializer is the one
   // place that decides which panel a fresh open starts on.

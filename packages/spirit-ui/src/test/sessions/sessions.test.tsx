@@ -144,6 +144,30 @@ describe("Sessions drawer gate state", () => {
     ).toHaveTextContent("Reconnect before exporting or importing");
   });
 
+  it("a_gate_from_a_previous_connection_never_enables_actions", async () => {
+    const bridge = new MockBridge("gate-asif-ready");
+    const gates = await bridge.gates.get();
+    const fleet = fleetWithSessions();
+    const connection = {
+      state: "connected" as const,
+      host_id: fleet.host_id,
+      since: "2026-11-14T12:00:01.000Z",
+      latency: fleet.latency,
+      last_ok_at: "2026-11-14T12:00:01.000Z",
+      error: null,
+    };
+    renderSessions({ bridge, gates, fleet, connection });
+
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
+    expect(screen.getByTestId("sessions-import")).toBeDisabled();
+    expect(screen.getByTestId("sessions-import-reason")).toHaveTextContent(
+      "Probe the VOWP home to check this capability.",
+    );
+    expect(
+      screen.getByTestId(`session-export-reason-${EXPORT_SESSION_ID}`),
+    ).toHaveTextContent("Probe the VOWP home to check this capability.");
+  });
+
   it("empty_snapshot_names_the_empty_state", async () => {
     const bridge = new MockBridge("gate-asif-ready");
     const gates = await bridge.gates.get();

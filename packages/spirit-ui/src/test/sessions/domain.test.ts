@@ -8,6 +8,7 @@ import {
   asifGateBadge,
   asifLossCountMismatch,
   asifLossPolicyOptions,
+  gatesForConnection,
   sessionStateLabel,
   sessionStateTone,
   sessionUpdated,
@@ -18,6 +19,7 @@ import { sessionFixtures } from "./helpers";
 describe("ASIF session domain", () => {
   it("keeps an unknown session state visible", () => {
     expect(sessionStateLabel("active")).toBe("Active");
+    expect(sessionStateLabel("unknown")).toBe("Unknown");
     expect(sessionStateLabel("quarantined")).toBe("Unknown (quarantined)");
     expect(sessionStateTone("idle")).toBe("info");
     expect(sessionStateTone("failed")).toBe("danger");
@@ -38,6 +40,22 @@ describe("ASIF session domain", () => {
     });
     const full = await new MockBridge("gate-asif-ready").gates.get();
     expect(asifGateBadge(full)).toEqual({ label: "Ready", tone: "ok" });
+  });
+
+  it("drops a gate snapshot probed before the current connection", async () => {
+    const gates = await new MockBridge("gate-asif-ready").gates.get();
+    const connection = {
+      state: "connected" as const,
+      host_id: "01MOCKHOST000000000000000001",
+      since: "2026-11-14T12:00:01.000Z",
+      latency: null,
+      last_ok_at: "2026-11-14T12:00:01.000Z",
+      error: null,
+    };
+    expect(gatesForConnection(gates, connection)).toBeNull();
+    expect(
+      gatesForConnection(gates, { ...connection, since: "2026-11-14T11:59:00.000Z" }),
+    ).toBe(gates);
   });
 
   it("combines connection, gate, and feature flag for availability", async () => {

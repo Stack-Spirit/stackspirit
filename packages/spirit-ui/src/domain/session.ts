@@ -1,9 +1,19 @@
 import type { SpiritError } from "../bridge/errors";
 import { toSpiritError } from "../bridge/errors";
-import type { AsifLoss, GateSnapshot, SessionCardView } from "../bridge/wire";
+import type {
+  AsifLoss,
+  ConnectionSnapshot,
+  GateSnapshot,
+  SessionCardView,
+} from "../bridge/wire";
 import type { Tone } from "./connection";
 import { gateStateLabel, gateTone } from "./connection";
-import { gateActionEnabled, gateActionReason, gateMissingMilestones } from "./engine";
+import {
+  gateActionEnabled,
+  gateActionReason,
+  gateMissingMilestones,
+  gatesProbed,
+} from "./engine";
 import { formatAge, formatDateTime } from "./format";
 
 /** The adapter's hard archive cap from `VOWP-CONTRACT.md` §11.2.3. */
@@ -56,6 +66,7 @@ const SESSION_STATE_LABELS: Record<string, string> = {
   failed: "Failed",
   error: "Error",
   ended: "Ended",
+  unknown: "Unknown",
 };
 
 /**
@@ -147,6 +158,24 @@ export function asifGateDetail(gates: GateSnapshot | null): string {
 
 export function asifGateMissing(gates: GateSnapshot | null): readonly string[] {
   return gateMissingMilestones(gates).asif;
+}
+
+/**
+ * A gate snapshot is only usable for the connection that requested it. A probe taken
+ * before the current connection began can never leave a session action enabled.
+ */
+export function gatesForConnection(
+  gates: GateSnapshot | null,
+  connection: ConnectionSnapshot,
+): GateSnapshot | null {
+  if (!gates || connection.state !== "connected" || !gatesProbed(gates)) return null;
+  if (!connection.since) return gates;
+  const probedAt = Date.parse(gates.probed_at);
+  const since = Date.parse(connection.since);
+  if (Number.isFinite(probedAt) && Number.isFinite(since) && probedAt < since) {
+    return null;
+  }
+  return gates;
 }
 
 /**
