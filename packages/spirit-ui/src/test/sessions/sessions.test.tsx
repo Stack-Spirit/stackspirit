@@ -144,6 +144,26 @@ describe("Sessions drawer gate state", () => {
     ).toHaveTextContent("Reconnect before exporting or importing");
   });
 
+  it("disables writes when a connected fleet snapshot is stale", async () => {
+    const bridge = new MockBridge("gate-asif-ready");
+    const gates = await bridge.gates.get();
+    const fleet = fleetWithSessions();
+    fleet.stale = true;
+    // seedStore's default connection is connected and current, so only `fleet.stale`
+    // distinguishes this case from a fresh snapshot.
+    renderSessions({ bridge, gates, fleet });
+
+    expect(screen.getByTestId("sessions-stale")).toHaveTextContent("marked stale");
+    expect(screen.getByTestId("sessions-import")).toBeDisabled();
+    expect(screen.getByTestId("sessions-import-reason")).toHaveTextContent(
+      "The session snapshot is stale",
+    );
+    expect(within(firstRow()).getByRole("button", { name: "Export .asif.zip" })).toBeDisabled();
+    expect(
+      screen.getByTestId(`session-export-reason-${EXPORT_SESSION_ID}`),
+    ).toHaveTextContent("The session snapshot is stale");
+  });
+
   it("a_gate_from_a_previous_connection_never_enables_actions", async () => {
     const bridge = new MockBridge("gate-asif-ready");
     const gates = await bridge.gates.get();
@@ -374,12 +394,49 @@ describe("import flow", () => {
       "Import conflict (exit 4)",
     );
     expect(screen.getByTestId("import-error")).toHaveTextContent(
-      "did not retry with a changed package",
+      "StackSpirit does not retry with a mutated package.",
     );
     expect(bridge.recordedAsifCalls().filter((call) => call.kind === "import")).toHaveLength(
       1,
     );
     expect(screen.queryByRole("button", { name: /choose allow-loss/i })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      name: "stale fleet view",
+      error: {
+        code: "conflict",
+        message: "the fleet view is stale, so an ASIF import would be unsafe",
+        hint: "Refresh the fleet view, then retry the import.",
+        retryable: false,
+      },
+      hint: "Refresh the fleet view, then retry the import.",
+    },
+    {
+      name: "package changed while reading",
+      error: {
+        code: "conflict",
+        message: "the selected ASIF package changed while it was being read",
+        hint: "Choose the file again.",
+        retryable: false,
+      },
+      hint: "Choose the file again.",
+    },
+  ])("shows the host's $name conflict hint in the panel", async ({ error, hint }) => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge("gate-asif-ready");
+    const gates = await bridge.gates.get();
+    vi.spyOn(sessionsApi(bridge), "importAsif").mockRejectedValueOnce(error);
+    renderSessions({ bridge, gates });
+
+    await user.click(screen.getByTestId("sessions-import"));
+    await user.click(screen.getByRole("button", { name: "Import .asif.zip" }));
+
+    const panel = await screen.findByTestId("import-error");
+    expect(panel).toHaveTextContent("Import conflict (exit 4)");
+    expect(panel).toHaveTextContent(hint);
+    expect(panel).toHaveTextContent(error.message);
   });
 
   it.each([
@@ -417,7 +474,7 @@ describe("import flow", () => {
       name: "oversized package",
       error: {
         code: "invalid_input",
-        message: "the ASIF package exceeds the 272 MiB byte limit",
+        message: "the ASIF package exceeds the 285212672 byte limit",
         hint: null,
         retryable: false,
       },

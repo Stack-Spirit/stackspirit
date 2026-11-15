@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
 import {
+  ASIF_PACKAGE_LIMIT_BYTES,
   ASIF_PACKAGE_LIMIT_LABEL,
   asifActionAvailability,
   asifErrorCopy,
@@ -65,6 +66,7 @@ describe("ASIF session domain", () => {
         gates,
         action: "asif_export",
         connectionState: "connected",
+        snapshotStale: false,
         bridgeAvailable: true,
       }),
     ).toEqual({ enabled: true, reason: "" });
@@ -74,9 +76,23 @@ describe("ASIF session domain", () => {
         gates,
         action: "asif_import",
         connectionState: "stale",
+        snapshotStale: false,
         bridgeAvailable: true,
       }),
     ).toMatchObject({ enabled: false, reason: expect.stringContaining("stale") });
+
+    expect(
+      asifActionAvailability({
+        gates,
+        action: "asif_import",
+        connectionState: "connected",
+        snapshotStale: true,
+        bridgeAvailable: true,
+      }),
+    ).toMatchObject({
+      enabled: false,
+      reason: expect.stringContaining("session snapshot is stale"),
+    });
 
     gates.features.asif_actions = false;
     expect(
@@ -84,6 +100,7 @@ describe("ASIF session domain", () => {
         gates,
         action: "asif_import",
         connectionState: "connected",
+        snapshotStale: false,
         bridgeAvailable: true,
       }).reason,
     ).toContain("not implemented in this build");
@@ -177,11 +194,48 @@ describe("ASIF session domain", () => {
     ).toBe("Package rejected (exit 2)");
   });
 
+  it("passes the host's conflict hint through as the next step", () => {
+    const stale = asifErrorCopy(
+      {
+        code: "conflict",
+        message: "the fleet view is stale, so an ASIF import would be unsafe",
+        hint: "Refresh the fleet view, then retry the import.",
+        retryable: false,
+      },
+      "import",
+    );
+    expect(stale.title).toBe("Import conflict (exit 4)");
+    expect(stale.next).toBe("Refresh the fleet view, then retry the import.");
+
+    const changed = asifErrorCopy(
+      {
+        code: "conflict",
+        message: "the selected ASIF package changed while it was being read",
+        hint: "Choose the file again.",
+        retryable: false,
+      },
+      "import",
+    );
+    expect(changed.title).toBe("Import conflict (exit 4)");
+    expect(changed.next).toBe("Choose the file again.");
+
+    const eventIds = asifErrorCopy(
+      {
+        code: "conflict",
+        message: "The ASIF import conflicts with an existing session's event ids.",
+        hint: null,
+        retryable: false,
+      },
+      "import",
+    );
+    expect(eventIds.next).toContain("did not retry with a changed package");
+  });
+
   it("names the archive limit in the oversized-package error", () => {
     const copy = asifErrorCopy(
       {
         code: "invalid_input",
-        message: `the ASIF package exceeds the ${ASIF_PACKAGE_LIMIT_LABEL} byte limit`,
+        message: `the ASIF package exceeds the ${ASIF_PACKAGE_LIMIT_BYTES} byte limit`,
         hint: null,
         retryable: false,
       },

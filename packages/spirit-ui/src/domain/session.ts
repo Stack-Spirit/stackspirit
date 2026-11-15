@@ -186,6 +186,7 @@ export function asifActionAvailability(input: {
   gates: GateSnapshot | null;
   action: AsifAction;
   connectionState: string;
+  snapshotStale: boolean;
   bridgeAvailable: boolean;
 }): AsifActionAvailability {
   if (!input.bridgeAvailable) {
@@ -206,6 +207,13 @@ export function asifActionAvailability(input: {
       enabled: false,
       reason:
         "Connect to a VOWP home before exporting or importing an ASIF package.",
+    };
+  }
+  if (input.snapshotStale) {
+    return {
+      enabled: false,
+      reason:
+        "The session snapshot is stale. Refresh the fleet view before exporting or importing an ASIF package.",
     };
   }
   if (gateActionEnabled(input.gates, input.action)) {
@@ -277,7 +285,9 @@ const TRANSPORT_CODES = new Set([
 ]);
 
 function isOversizedPackage(message: string): boolean {
-  return /272\s*MiB|272\s*\*\s*1024|archive (?:cap|limit)|exceeds the 272/i.test(message);
+  return /285212672|272\s*MiB|272\s*\*\s*1024|archive (?:cap|limit)|exceeds the 272/i.test(
+    message,
+  );
 }
 
 function isSessionIdError(message: string): boolean {
@@ -312,6 +322,7 @@ export function asifErrorCopy(
         ...base,
         title: `${directionLabel} conflict (exit 4)`,
         next:
+          normalized.hint ??
           "StackSpirit did not retry with a changed package. Inspect the source session and choose a clean package.",
       };
     case "not_found":

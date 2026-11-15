@@ -64,16 +64,19 @@ export function SessionsDrawer({ open, onClose }: SessionsDrawerProps) {
   );
 
   const bridgeAvailable = Boolean(bridge?.sessions);
+  const snapshotStale = fleet?.stale === true;
   const importAvailability = asifActionAvailability({
     gates,
     action: "asif_import",
     connectionState: connection.state,
+    snapshotStale,
     bridgeAvailable,
   });
   const exportAvailability = asifActionAvailability({
     gates,
     action: "asif_export",
     connectionState: connection.state,
+    snapshotStale,
     bridgeAvailable,
   });
   const badge = asifGateBadge(gates);
