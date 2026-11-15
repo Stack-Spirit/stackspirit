@@ -11,13 +11,14 @@ use async_trait::async_trait;
 use crate::error::{SpiritError, SpiritErrorCode, code_for_exit};
 use crate::ssh::command::{CommandOutput, INITIAL_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT};
 use crate::ssh::{CommandRunner, SshOptions, SshRemote, SshTarget};
+use crate::vowp::asif::{AsifExport, AsifExportOptions, AsifImportOptions, AsifPackage};
 use crate::wire::enums::TargetMode;
-use crate::wire::ids::{InboxId, JobId, ProjectName};
+use crate::wire::ids::{InboxId, JobId, ProjectName, SessionId};
 use crate::wire::parse_error_document;
 use crate::wire::{
-    CapacityReportDoc, CapacityTarget, FleetQueueRow, FleetStatus, InboxItem, JobAction,
-    SetTargetInput, WireWarning, parse_capacity_report, parse_fleet_inbox, parse_fleet_queue,
-    parse_fleet_status,
+    AsifExportSummary, AsifImportResponse, CapacityReportDoc, CapacityTarget, FleetQueueRow,
+    FleetStatus, InboxItem, JobAction, SetTargetInput, WireWarning, parse_capacity_report,
+    parse_fleet_inbox, parse_fleet_queue, parse_fleet_status,
 };
 
 /// A successful `vowp --version` probe.
@@ -79,6 +80,39 @@ pub trait VowpClient: Send + Sync {
         override_: bool,
         reason: &str,
     ) -> Result<CapacityTarget, SpiritError>;
+
+    /// Exports one session as a capped `.asif.zip` through the two-step remote temp path.
+    ///
+    /// The default refuses because a client that does not implement ASIF must not
+    /// pretend to export. The live SSH client and the mock implement it.
+    async fn asif_export(
+        &self,
+        _project: &str,
+        _session: &str,
+        _options: AsifExportOptions,
+    ) -> Result<AsifExport, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "ASIF export is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the ASIF contract."))
+    }
+
+    /// Imports one local package by streaming it to `session import - --format asif`.
+    ///
+    /// The default refuses for the same reason as [`Self::asif_export`].
+    async fn asif_import(
+        &self,
+        _project: &str,
+        _package: &[u8],
+        _options: AsifImportOptions,
+    ) -> Result<AsifImportResponse, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "ASIF import is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the ASIF contract."))
+    }
 
     /// Returns the non-fatal [`WireWarning`]s collected since the last drain.
     ///
@@ -142,58 +176,7 @@ impl SshVowpClient {
     }
 
     fn check_output(&self, output: CommandOutput) -> Result<CommandOutput, SpiritError> {
-        if output.success() {
-            return Ok(output);
-        }
-        if let Ok(document) = parse_error_document(&output.stdout) {
-            return Err(document.to_spirit_error(output.status));
-        }
-        let stderr = output.stderr_text();
-        if output.status == 255 {
-            if stderr.contains("Host key verification failed") {
-                return Err(SpiritError::new(
-                    SpiritErrorCode::HostKeyMismatch,
-                    "host key verification failed",
-                )
-                .with_hint("Compare the fingerprint out of band and explicitly re-pin the host."));
-            }
-            if stderr.contains("Permission denied") || stderr.contains("Authentication failed") {
-                return Err(SpiritError::new(
-                    SpiritErrorCode::SshAuth,
-                    "SSH authentication failed",
-                )
-                .with_hint("Check the SSH agent or the identity file path."));
-            }
-            return Err(SpiritError::new(
-                SpiritErrorCode::Remote,
-                format!("SSH transport failed: {}", first_line(&stderr)),
-            )
-            .retryable());
-        }
-        let code = if output.status == 127 {
-            SpiritErrorCode::VowpMissing
-        } else {
-            code_for_exit(output.status)
-        };
-        let detail = if stderr.is_empty() {
-            format!("vowp exited {}", output.status)
-        } else {
-            format!("vowp exited {}: {}", output.status, first_line(&stderr))
-        };
-        let error = SpiritError::new(code, detail);
-        let error = if matches!(
-            code,
-            SpiritErrorCode::InvalidInput | SpiritErrorCode::Refused
-        ) {
-            error
-        } else {
-            error.retryable()
-        };
-        if code == SpiritErrorCode::VowpMissing {
-            Err(error.with_hint("Install VOWP on the host, then re-probe."))
-        } else {
-            Err(error)
-        }
+        check_command_output(output)
     }
 
     async fn read_fleet_status(&self, timeout: Duration) -> Result<FleetStatus, SpiritError> {
@@ -216,6 +199,64 @@ fn first_line(input: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+/// Maps one finished VOWP/SSH command to a typed error without retrying a conflict.
+///
+/// Exit 4 is authoritative: StackSpirit refreshes and lets the user decide, and never
+/// mutates an import package to get past a conflict.
+pub(crate) fn check_command_output(output: CommandOutput) -> Result<CommandOutput, SpiritError> {
+    if output.success() {
+        return Ok(output);
+    }
+    if let Ok(document) = parse_error_document(&output.stdout) {
+        return Err(document.to_spirit_error(output.status));
+    }
+    let stderr = output.stderr_text();
+    if output.status == 255 {
+        if stderr.contains("Host key verification failed") {
+            return Err(SpiritError::new(
+                SpiritErrorCode::HostKeyMismatch,
+                "host key verification failed",
+            )
+            .with_hint("Compare the fingerprint out of band and explicitly re-pin the host."));
+        }
+        if stderr.contains("Permission denied") || stderr.contains("Authentication failed") {
+            return Err(
+                SpiritError::new(SpiritErrorCode::SshAuth, "SSH authentication failed")
+                    .with_hint("Check the SSH agent or the identity file path."),
+            );
+        }
+        return Err(SpiritError::new(
+            SpiritErrorCode::Remote,
+            format!("SSH transport failed: {}", first_line(&stderr)),
+        )
+        .retryable());
+    }
+    let code = if output.status == 127 {
+        SpiritErrorCode::VowpMissing
+    } else {
+        code_for_exit(output.status)
+    };
+    let detail = if stderr.is_empty() {
+        format!("vowp exited {}", output.status)
+    } else {
+        format!("vowp exited {}: {}", output.status, first_line(&stderr))
+    };
+    let error = SpiritError::new(code, detail);
+    let error = if matches!(
+        code,
+        SpiritErrorCode::InvalidInput | SpiritErrorCode::Refused | SpiritErrorCode::Conflict
+    ) {
+        error
+    } else {
+        error.retryable()
+    };
+    if code == SpiritErrorCode::VowpMissing {
+        Err(error.with_hint("Install VOWP on the host, then re-probe."))
+    } else {
+        Err(error)
+    }
 }
 
 fn push_json(argv: &mut Vec<String>) {
@@ -415,6 +456,42 @@ impl VowpClient for SshVowpClient {
             .map_err(|err| SpiritError::parse("capacity target", err))
     }
 
+    async fn asif_export(
+        &self,
+        project: &str,
+        session: &str,
+        options: AsifExportOptions,
+    ) -> Result<AsifExport, SpiritError> {
+        let (export, warnings) = crate::vowp::asif::export_asif(
+            &self.remote,
+            self.home.as_deref(),
+            project,
+            session,
+            options,
+        )
+        .await?;
+        self.record_warnings(warnings);
+        Ok(export)
+    }
+
+    async fn asif_import(
+        &self,
+        project: &str,
+        package: &[u8],
+        options: AsifImportOptions,
+    ) -> Result<AsifImportResponse, SpiritError> {
+        let (response, warnings) = crate::vowp::asif::import_asif(
+            &self.remote,
+            self.home.as_deref(),
+            project,
+            package,
+            options,
+        )
+        .await?;
+        self.record_warnings(warnings);
+        Ok(response)
+    }
+
     fn take_warnings(&self) -> Vec<WireWarning> {
         let mut sink = self
             .warnings
@@ -436,6 +513,10 @@ struct MockState {
     status_calls: u32,
     actions: Vec<(String, String, JobAction, Option<String>)>,
     targets: Vec<SetTargetInput>,
+    asif_export: Option<(AsifExportSummary, Vec<u8>)>,
+    asif_import: Option<AsifImportResponse>,
+    asif_exports: Vec<(String, String, AsifExportOptions)>,
+    asif_imports: Vec<(String, usize, AsifImportOptions)>,
     warnings: Vec<WireWarning>,
 }
 
@@ -465,6 +546,10 @@ impl MockVowpClient {
                 status_calls: 0,
                 actions: Vec::new(),
                 targets: Vec::new(),
+                asif_export: None,
+                asif_import: None,
+                asif_exports: Vec::new(),
+                asif_imports: Vec::new(),
                 warnings: Vec::new(),
             })),
         }
@@ -508,6 +593,46 @@ impl MockVowpClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .inbox = inbox;
         self
+    }
+
+    /// Configures the summary and package bytes returned by `asif_export`.
+    #[must_use]
+    pub fn with_asif_export(self, summary: AsifExportSummary, package: Vec<u8>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .asif_export = Some((summary, package));
+        self
+    }
+
+    /// Configures the response returned by `asif_import`.
+    #[must_use]
+    pub fn with_asif_import(self, response: AsifImportResponse) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .asif_import = Some(response);
+        self
+    }
+
+    /// Returns recorded ASIF export calls.
+    #[must_use]
+    pub fn asif_exports(&self) -> Vec<(String, String, AsifExportOptions)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .asif_exports
+            .clone()
+    }
+
+    /// Returns recorded ASIF import calls.
+    #[must_use]
+    pub fn asif_imports(&self) -> Vec<(String, usize, AsifImportOptions)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .asif_imports
+            .clone()
     }
 
     /// Makes `probe` fail.
@@ -685,6 +810,56 @@ impl VowpClient for MockVowpClient {
         updated.set_at = crate::time::Timestamp::now();
         updated.reason = reason.to_owned();
         Ok(updated)
+    }
+
+    async fn asif_export(
+        &self,
+        project: &str,
+        session: &str,
+        options: AsifExportOptions,
+    ) -> Result<AsifExport, SpiritError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .asif_exports
+            .push((project.to_owned(), session.to_owned(), options));
+        let Some((summary, package)) = state.asif_export.clone() else {
+            return Err(SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the mock ASIF export has no configured package",
+            ));
+        };
+        let requested = SessionId::parse(session)?;
+        if !summary.is_for_session(&requested) {
+            return Err(SpiritError::not_found(&format!("session {session}")));
+        }
+        Ok(AsifExport {
+            summary,
+            package: AsifPackage::new(package),
+        })
+    }
+
+    async fn asif_import(
+        &self,
+        project: &str,
+        package: &[u8],
+        options: AsifImportOptions,
+    ) -> Result<AsifImportResponse, SpiritError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .asif_imports
+            .push((project.to_owned(), package.len(), options));
+        state.asif_import.clone().ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the mock ASIF import has no configured response",
+            )
+        })
     }
 
     fn take_warnings(&self) -> Vec<WireWarning> {

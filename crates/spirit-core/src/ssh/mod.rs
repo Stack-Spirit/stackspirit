@@ -3,6 +3,7 @@
 pub mod command;
 pub mod fingerprint;
 pub mod known_hosts;
+pub(crate) mod remote_file;
 pub mod runner;
 
 use std::path::{Path, PathBuf};
@@ -138,6 +139,20 @@ pub fn ssh_command(
     remote_argv: &[String],
     timeout: Duration,
 ) -> Result<CommandSpec, SpiritError> {
+    ssh_command_with_output_cap(target, options, remote_argv, timeout, OUTPUT_CAP_BYTES)
+}
+
+/// Builds the local `ssh` command with an explicit stdout cap.
+///
+/// The cap is used only for the bounded ASIF package transfer; every JSON read keeps
+/// the 16 MiB document cap.
+pub fn ssh_command_with_output_cap(
+    target: &SshTarget,
+    options: &SshOptions,
+    remote_argv: &[String],
+    timeout: Duration,
+    output_cap: usize,
+) -> Result<CommandSpec, SpiritError> {
     target.validate()?;
     let mut args = vec![
         "-o".to_owned(),
@@ -166,7 +181,7 @@ pub fn ssh_command(
     args.push(remote_command(remote_argv)?);
     Ok(CommandSpec::new("ssh", args)
         .with_timeout(timeout)
-        .with_output_cap(OUTPUT_CAP_BYTES))
+        .with_output_cap(output_cap))
 }
 
 /// A target plus the runner and options needed to execute remote argv arrays.
@@ -212,6 +227,35 @@ impl SshRemote {
         timeout: Duration,
     ) -> Result<CommandOutput, SpiritError> {
         let spec = ssh_command(&self.target, &self.options, argv, timeout)?;
+        self.runner.run(&spec).await
+    }
+
+    /// Runs a fixed remote argv array with an explicit timeout and stdout cap.
+    pub async fn run_with_cap(
+        &self,
+        argv: &[String],
+        timeout: Duration,
+        output_cap: usize,
+    ) -> Result<CommandOutput, SpiritError> {
+        let spec =
+            ssh_command_with_output_cap(&self.target, &self.options, argv, timeout, output_cap)?;
+        self.runner.run(&spec).await
+    }
+
+    /// Runs a fixed remote argv array while streaming `stdin` bytes to it.
+    ///
+    /// The stdin length is bounded by the caller before this method is called. The
+    /// process never goes through a local shell, and stdout keeps the JSON document cap.
+    pub async fn run_with_stdin(
+        &self,
+        argv: &[String],
+        stdin: Vec<u8>,
+        timeout: Duration,
+        output_cap: usize,
+    ) -> Result<CommandOutput, SpiritError> {
+        let spec =
+            ssh_command_with_output_cap(&self.target, &self.options, argv, timeout, output_cap)?
+                .with_stdin(stdin);
         self.runner.run(&spec).await
     }
 

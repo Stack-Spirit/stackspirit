@@ -1,0 +1,7 @@
+{
+  "error": {
+    "kind": "refused",
+    "message": "ASIF export refused: required unsupported feature continuation",
+    "hint": "Export without the unsupported feature or update VOWP."
+  }
+}

@@ -12,11 +12,12 @@ use crate::engine::{
     EngineChoice, EngineStatus, EngineSupervisor, Keychain, KeychainError, ModelChoice,
     SecretString,
 };
-use crate::error::SpiritError;
+use crate::error::{SpiritError, SpiritErrorCode};
 use crate::host::{HostId, HostKeyPin, HostProfile, HostProfilePatch, HostStore, NewHostProfile};
 use crate::time::{Clock, SystemClock, Timestamp};
 use crate::view::FleetView;
-use crate::vowp::VowpClient;
+use crate::vowp::{AsifExport, AsifExportOptions, AsifImportOptions, VowpClient};
+use crate::wire::{AsifImportResponse, ProjectName};
 
 /// A provider-key state returned to the UI. It never carries the key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +154,19 @@ impl SpiritCore {
         self.connection.fleet_view()
     }
 
+    /// Returns the first active project in the current snapshot.
+    ///
+    /// ASIF export and import are project-scoped; when the caller does not name a
+    /// project, this is the one the facade uses.
+    #[must_use]
+    pub fn active_project(&self) -> Option<String> {
+        let view = self.fleet_view()?;
+        view.projects
+            .into_iter()
+            .find(|project| project.state == "active")
+            .map(|project| project.name)
+    }
+
     /// Returns true only when a mutation is safe to send.
     #[must_use]
     pub fn mutations_allowed(&self) -> bool {
@@ -173,6 +187,69 @@ impl SpiritCore {
         client: &dyn VowpClient,
     ) -> Result<Option<FleetView>, SpiritError> {
         self.connection.refresh_capacity(client).await
+    }
+
+    /// Exports one session as a capped `.asif.zip`.
+    ///
+    /// `project` is the active project by default. The result contains the safe summary
+    /// and capped package bytes; it never contains a remote path or a remote file name.
+    /// Callers check the ASIF gate and `features.asif_actions` before enabling the UI
+    /// action; this method does not run a command when the client itself refuses.
+    pub async fn export_asif(
+        &self,
+        client: &dyn VowpClient,
+        project: Option<&str>,
+        session: &str,
+        options: AsifExportOptions,
+    ) -> Result<AsifExport, SpiritError> {
+        let project = self.resolve_asif_project(project)?;
+        client.asif_export(&project, session, options).await
+    }
+
+    /// Imports one local package as a new idle session.
+    ///
+    /// The current snapshot must not be stale: an import is a write. The returned
+    /// response is checked to be idle, and this facade never starts a turn, writes a
+    /// capsule, creates a lease or dispatches a job after an import.
+    pub async fn import_asif(
+        &self,
+        client: &dyn VowpClient,
+        project: Option<&str>,
+        package: &[u8],
+        options: AsifImportOptions,
+    ) -> Result<AsifImportResponse, SpiritError> {
+        if !self.mutations_allowed() {
+            return Err(SpiritError::new(
+                SpiritErrorCode::Conflict,
+                "the fleet view is stale, so an ASIF import would be unsafe",
+            )
+            .with_hint("Refresh the fleet view, then retry the import."));
+        }
+        let project = self.resolve_asif_project(project)?;
+        let response = client.asif_import(&project, package, options).await?;
+        response.ensure_idle()?;
+        Ok(response)
+    }
+
+    /// Resolves an explicit project or the first active project in the snapshot.
+    fn resolve_asif_project(&self, project: Option<&str>) -> Result<String, SpiritError> {
+        if self.fleet_view().is_none() {
+            return Err(
+                SpiritError::new(SpiritErrorCode::NotFound, "no host is connected")
+                    .with_hint("Connect a host before exporting or importing an ASIF package."),
+            );
+        }
+        if let Some(project) = project {
+            ProjectName::parse(project)?;
+            return Ok(project.to_owned());
+        }
+        self.active_project().ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::NotFound,
+                "there is no active project in the current snapshot",
+            )
+            .with_hint("Refresh the fleet view or select a project explicitly.")
+        })
     }
 
     /// Subscribes to state events.

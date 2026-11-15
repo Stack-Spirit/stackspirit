@@ -5,6 +5,7 @@
 //! returns a [`Parsed`] value with a [`WireWarning`] list that the UI may show in its
 //! raw-document drawer.
 
+pub mod asif;
 pub mod capacity;
 pub mod enums;
 pub mod error_doc;
@@ -21,6 +22,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use asif::{
+    ASIF_ARCHIVE_CAP_BYTES, ASIF_FORMAT, ASIF_JSON_CAP_BYTES, AsifCounts, AsifExportSummary,
+    AsifImportResponse, AsifLoss, AsifReport, AsifSessionRef, parse_asif_export_summary,
+    parse_asif_import_response,
+};
 pub use capacity::{
     BrakeReason, BrakeState, CapacityReport, CapacityReportDoc, CapacitySnapshot, CapacityTarget,
     HostSample, RunningCapacity, UsageEstimate, WaitReason, WaitingJob,

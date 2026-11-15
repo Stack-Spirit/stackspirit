@@ -172,6 +172,18 @@ impl SpiritError {
         .with_hint("StackSpirit never truncates a JSON document silently.")
     }
 
+    /// Builds the typed hard-limit error for a file or package transfer.
+    ///
+    /// The message carries the byte cap, never a remote path or a partial document.
+    #[must_use]
+    pub fn transfer_too_large(what: &str, cap: u64) -> Self {
+        Self::new(
+            SpiritErrorCode::InvalidInput,
+            format!("{what} exceeds the {cap} byte limit"),
+        )
+        .with_hint("StackSpirit never truncates or force-imports an oversized file.")
+    }
+
     /// Builds an invalid-input error.
     #[must_use]
     pub fn invalid_input(field: &str, detail: impl fmt::Display) -> Self {

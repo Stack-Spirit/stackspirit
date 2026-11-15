@@ -1,0 +1,7 @@
+{
+  "error": {
+    "kind": "conflict",
+    "message": "ASIF import conflict: an imported event id already belongs to another session",
+    "hint": "Inspect the existing session; StackSpirit does not retry with a changed package."
+  }
+}

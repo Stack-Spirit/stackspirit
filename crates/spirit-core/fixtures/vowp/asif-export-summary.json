@@ -1,0 +1,36 @@
+{
+  "format": "asif",
+  "path": "/srv/example-private/01JCF5WQ8ZK3M2V7N4P6R8T0AB.asif.zip",
+  "session": "01JCF5WQ8ZK3M2V7N4P6R8T0AB",
+  "bytes": 18342,
+  "report_path": null,
+  "report": {
+    "adapter_version": "0.1.1",
+    "asif_version": "0.4",
+    "asif_pin": "652d9e23ddbe5656b9ceea311df7e09e93c1cd2f",
+    "source_session": "01JCF5WQ8ZK3M2V7N4P6R8T0AB",
+    "target_session": null,
+    "counts": {
+      "events_in": 42,
+      "events_out": 42,
+      "resources": 3,
+      "capsules": 1
+    },
+    "loss_count": 2,
+    "losses": [
+      {
+        "kind": "cwd-omitted",
+        "stage": "translation",
+        "scope": "environment",
+        "message": "The working directory was omitted from the portable document."
+      },
+      {
+        "kind": "contexts-reconstructed",
+        "stage": "normalization",
+        "scope": "contexts",
+        "message": "Context references were reconstructed from the event log."
+      }
+    ],
+    "unsupported": ["vowp.jobs", "vowp.gates", "vowp.leases", "vowp.project-db"]
+  }
+}

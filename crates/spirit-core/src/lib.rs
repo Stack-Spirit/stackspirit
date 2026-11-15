@@ -34,5 +34,12 @@ pub use host::{
 pub use service::{KeyStatus, SpiritCore};
 pub use time::{Clock, SystemClock, Timestamp};
 pub use view::{CapacityView, FleetView, JobLanes};
-pub use vowp::{VowpClient, VowpProbe};
-pub use wire::{CapacityReportDoc, FleetQueueRow, FleetStatus, InboxItem, Snapshot};
+pub use vowp::{
+    AsifExport, AsifExportOptions, AsifImportOptions, AsifLossPolicy, AsifPackage, VowpClient,
+    VowpProbe, ensure_package_size,
+};
+pub use wire::{
+    ASIF_ARCHIVE_CAP_BYTES, ASIF_FORMAT, ASIF_JSON_CAP_BYTES, AsifCounts, AsifExportSummary,
+    AsifImportResponse, AsifLoss, AsifReport, AsifSessionRef, CapacityReportDoc, FleetQueueRow,
+    FleetStatus, InboxItem, Snapshot, parse_asif_export_summary, parse_asif_import_response,
+};
