@@ -1363,7 +1363,11 @@ impl RunDriver {
                 BundleStep::Wait => {}
             }
         }
+        // The summary may only follow a finished bundle. While `BundleStart` waits for its
+        // `BundleAccept`, or chunks are still flowing, the terminal frame stays pending.
+        let bundle_pending = run.bundle.as_ref().is_some_and(|bundle| !bundle.end_sent);
         if frame.is_none()
+            && !bundle_pending
             && let Some(summary) = &run.summary
         {
             frame = Some(AgentFrame::TurnEnd {

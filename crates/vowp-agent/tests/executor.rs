@@ -84,6 +84,8 @@ struct ConnPlan {
     end: EndMode,
     /// Answer `BundleStart` with `BundleAccept`.
     accept_bundle: bool,
+    /// Delay `BundleAccept` by this many empty polls after `BundleStart`.
+    bundle_accept_after_polls: Option<usize>,
     /// Accept from the bytes already stored on an earlier connection.
     resume_bundle: bool,
     /// Refuse `BundleStart` with this reason.
@@ -102,6 +104,7 @@ impl Default for ConnPlan {
             ack: AckMode::AckAll,
             end: EndMode::Summary,
             accept_bundle: false,
+            bundle_accept_after_polls: None,
             resume_bundle: false,
             abort_bundle: None,
             drop_after_bundle_chunks: None,
@@ -242,6 +245,7 @@ impl Transport for FakeHome {
             in_flight: 0,
             conflict_sent: false,
             bundle_chunks: 0,
+            delayed_accept: None,
         }))
     }
 }
@@ -257,6 +261,7 @@ struct FakeStream {
     in_flight: u64,
     conflict_sent: bool,
     bundle_chunks: usize,
+    delayed_accept: Option<(RunId, u64, usize)>,
 }
 
 impl FakeStream {
@@ -308,6 +313,27 @@ impl FakeStream {
         });
     }
 
+    fn accept_bundle(&mut self, run_id: &RunId, epoch: u64) {
+        let offset = if self.plan.resume_bundle {
+            self.shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .bundle_received
+        } else {
+            0
+        };
+        self.outbound.push_back(AgentFrame::BundleAccept {
+            run_id: run_id.clone(),
+            epoch,
+            offset,
+        });
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bundle_offsets
+            .push((self.connection, offset));
+    }
+
     fn revoke(&mut self) {
         self.outbound.push_back(AgentFrame::Revoked {
             reason: "test complete".to_owned(),
@@ -328,6 +354,16 @@ impl FrameStream for FakeStream {
             .pop_front()
         {
             return Ok(FrameRead::Frame(frame));
+        }
+        if let Some((run_id, epoch, remaining)) = self.delayed_accept.take() {
+            if remaining == 0 {
+                self.accept_bundle(&run_id, epoch);
+                if let Some(frame) = self.outbound.pop_front() {
+                    return Ok(FrameRead::Frame(frame));
+                }
+            } else {
+                self.delayed_accept = Some((run_id, epoch, remaining - 1));
+            }
         }
         if self.closed {
             return Ok(FrameRead::Closed);
@@ -474,24 +510,12 @@ impl FrameStream for FakeStream {
                         reason: reason.clone(),
                     });
                 } else if self.plan.accept_bundle {
-                    let offset = if self.plan.resume_bundle {
-                        self.shared
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .bundle_received
-                    } else {
-                        0
-                    };
-                    self.outbound.push_back(AgentFrame::BundleAccept {
-                        run_id: run_id.clone(),
-                        epoch: *epoch,
-                        offset,
-                    });
-                    self.shared
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .bundle_offsets
-                        .push((self.connection, offset));
+                    match self.plan.bundle_accept_after_polls {
+                        Some(polls) => {
+                            self.delayed_accept = Some((run_id.clone(), *epoch, polls));
+                        }
+                        None => self.accept_bundle(run_id, *epoch),
+                    }
                 }
             }
             AgentFrame::BundleChunk { data, .. } => {
@@ -1635,6 +1659,84 @@ fn a_home_bundle_abort_fails_the_run_without_chunks() {
             .is_some_and(|text| text.starts_with("bundle_rejected:")),
         "the abort reason is kept: {:?}",
         summary.result_text
+    );
+}
+
+#[test]
+fn bundle_summary_waits_for_a_delayed_accept() {
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let repo = repo_dir.path().join("worktree");
+    let git = SystemGit::new();
+    std::fs::create_dir_all(&repo).expect("repo");
+    git_ok(&git, &repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "base"]);
+    let base = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+    git_ok(&git, &repo, &["checkout", "-B", &format!("job/{JOB}")]);
+    std::fs::write(repo.join("work.txt"), "work\n").expect("work file");
+    git_ok(&git, &repo, &["add", "-A"]);
+    git_ok(&git, &repo, &["commit", "-m", "job work"]);
+    let head = git_stdout(&git, &repo, &["rev-parse", "HEAD"]);
+
+    let home = FakeHome::new(vec![ConnPlan {
+        send_assignment: true,
+        accept_bundle: true,
+        // Several RUN_POLLs pass before the answer arrives; a summary sent on the first
+        // empty poll would overtake the transfer.
+        bundle_accept_after_polls: Some(3),
+        ..ConnPlan::default()
+    }]);
+    let mut assignment = assignment_with_lease(LEASE);
+    assignment.result_transport = ResultTransport::Bundle;
+    assignment.remote_url = String::new();
+    assignment.base_commit = base;
+    home.set_assignment(assignment);
+    let mut run_summary = summary();
+    run_summary.head_commit = Some(head);
+    run_summary.push_status = None;
+    let handler = Arc::new(FakeHandler::new(
+        home.clone(),
+        HandlerBehavior {
+            summary: run_summary,
+            worktree: Some(repo),
+            ..HandlerBehavior::default()
+        },
+    ));
+    let dir = tempfile::tempdir().expect("state dir");
+    state_dir(dir.path());
+    let mut client = agent_client(dir.path(), home.clone());
+
+    let outcome = run_client(&mut client, &handler);
+    assert!(matches!(outcome, ClientOutcome::Revoked { .. }), "{outcome:?}");
+
+    let frames = home.frames();
+    let start = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::BundleStart { .. }))
+        .expect("one BundleStart");
+    let first_chunk = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::BundleChunk { .. }))
+        .expect("the delayed accept still starts the chunks");
+    let end = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::BundleEnd { .. }))
+        .expect("one BundleEnd");
+    let turn_end = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::TurnEnd { .. }))
+        .expect("one terminal summary");
+    assert!(start < first_chunk, "a chunk follows the start");
+    assert!(first_chunk < end, "the end follows the chunks");
+    assert!(
+        end < turn_end,
+        "the terminal summary waits for the complete bundle, not the first RUN_POLL"
+    );
+    assert_eq!(
+        count_matching(&frames, |frame| matches!(frame, AgentFrame::TurnEnd { .. })),
+        1,
+        "only one terminal summary"
     );
 }
 
