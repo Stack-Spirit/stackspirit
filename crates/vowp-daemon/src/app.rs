@@ -39,7 +39,7 @@ use vowp_core::{AdapterRegistry, CoreError, Deps, SystemGit, SystemRunner};
 use vowp_graph::{JobEvent, transition};
 use vowp_protocol::api::{
     ApiError, ApiErrorBody, Board, BoardLimit, BoardRun, CostReport, CostRow as ApiCostRow, CostTotal, EventPage,
-    GateResultPage, Health, InboxAnswerRequest, InboxPage, JobAction, JobActionResponse, JobPage, MAX_LINEAGE,
+    GateResultPage, Health, InboxAnswerRequest, InboxPage, JobActionKind, JobActionResponse, JobPage, MAX_LINEAGE,
     NodePage, RunPage, SessionDetail, SessionPage, SessionSwitchRequest,
 };
 use vowp_protocol::{
@@ -294,7 +294,7 @@ impl ApiState {
     fn queue_job_action(
         &self,
         id: &JobId,
-        action: JobAction,
+        action: JobActionKind,
         reason: Option<&str>,
     ) -> Result<JobActionResponse, ApiFailure> {
         let store = self.open_writable()?;
@@ -303,7 +303,7 @@ impl ApiState {
             .map_err(|_| store_failure())?
             .ok_or_else(|| ApiFailure::not_found(format!("job {id} not found")))?;
         let (event, request) = match action {
-            JobAction::Retry => match job.state {
+            JobActionKind::Retry => match job.state {
                 JobState::Failed => (JobEvent::Retry, Request::RetryJob { job: id.clone() }),
                 JobState::Stalled => (JobEvent::KeeperRestart, Request::RetryJob { job: id.clone() }),
                 JobState::Parked => (JobEvent::Resolved, Request::ResolveJob { job: id.clone() }),
@@ -314,7 +314,7 @@ impl ApiState {
                     )));
                 }
             },
-            JobAction::Park => {
+            JobActionKind::Park => {
                 if job.state.is_terminal() {
                     return Err(ApiFailure::conflict(format!(
                         "job {id} is {} and cannot be parked",
@@ -329,7 +329,7 @@ impl ApiState {
                     },
                 )
             }
-            JobAction::Cancel => {
+            JobActionKind::Cancel => {
                 if job.state.is_terminal() {
                     return Err(ApiFailure::conflict(format!(
                         "job {id} is {} and cannot be cancelled",
@@ -338,13 +338,13 @@ impl ApiState {
                 }
                 (JobEvent::Cancel, Request::CancelJob { job: id.clone() })
             }
-            JobAction::Nudge => (
+            JobActionKind::Nudge => (
                 JobEvent::KeeperNudge { text: None },
                 Request::NudgeJob { job: id.clone() },
             ),
-            JobAction::Restart => (JobEvent::KeeperRestart, Request::RestartJob { job: id.clone() }),
-            JobAction::Replan => (JobEvent::KeeperReplan, Request::ReplanJob { job: id.clone() }),
-            JobAction::Fail => {
+            JobActionKind::Restart => (JobEvent::KeeperRestart, Request::RestartJob { job: id.clone() }),
+            JobActionKind::Replan => (JobEvent::KeeperReplan, Request::ReplanJob { job: id.clone() }),
+            JobActionKind::Fail => {
                 let reason = reason.ok_or_else(|| ApiFailure::invalid("reason is required"))?;
                 (
                     JobEvent::KeeperFail,
@@ -621,15 +621,15 @@ impl ApiState {
 ///
 /// The daemon reports a refused state as `job <id> is <state> and cannot be <participle>`,
 /// matching `vowp job retry|park|cancel|nudge|restart|replan|fail`.
-fn action_refusal(action: JobAction) -> &'static str {
+fn action_refusal(action: JobActionKind) -> &'static str {
     match action {
-        JobAction::Retry => "retried",
-        JobAction::Park => "parked",
-        JobAction::Cancel => "cancelled",
-        JobAction::Nudge => "nudged",
-        JobAction::Restart => "restarted",
-        JobAction::Replan => "replanned",
-        JobAction::Fail => "failed",
+        JobActionKind::Retry => "retried",
+        JobActionKind::Park => "parked",
+        JobActionKind::Cancel => "cancelled",
+        JobActionKind::Nudge => "nudged",
+        JobActionKind::Restart => "restarted",
+        JobActionKind::Replan => "replanned",
+        JobActionKind::Fail => "failed",
     }
 }
 
@@ -1005,7 +1005,7 @@ async fn retry_job(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Retry, Bytes::new()).await
+    job_action(state, id, headers, JobActionKind::Retry, Bytes::new()).await
 }
 
 /// Parks a non-terminal job by queueing the CLI's `park_job` request.
@@ -1019,7 +1019,7 @@ async fn park_job(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Park, body).await
+    job_action(state, id, headers, JobActionKind::Park, body).await
 }
 
 /// Cancels a non-terminal job by queueing the CLI's `cancel_job` request.
@@ -1030,7 +1030,7 @@ async fn cancel_job(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Cancel, Bytes::new()).await
+    job_action(state, id, headers, JobActionKind::Cancel, Bytes::new()).await
 }
 
 /// Nudges a stalled job by queueing the CLI's `nudge_job` request.
@@ -1044,7 +1044,7 @@ async fn nudge_job(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Nudge, Bytes::new()).await
+    job_action(state, id, headers, JobActionKind::Nudge, Bytes::new()).await
 }
 
 /// Restarts a stalled job by queueing the CLI's `restart_job` request.
@@ -1055,7 +1055,7 @@ async fn restart_job(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Restart, Bytes::new()).await
+    job_action(state, id, headers, JobActionKind::Restart, Bytes::new()).await
 }
 
 /// Replans a stalled, parked or failed job by queueing the CLI's `replan_job` request.
@@ -1067,7 +1067,7 @@ async fn replan_job(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Replan, Bytes::new()).await
+    job_action(state, id, headers, JobActionKind::Replan, Bytes::new()).await
 }
 
 /// Fails a stalled job by queueing the CLI's `fail_job` request with a required reason.
@@ -1080,7 +1080,7 @@ async fn fail_job(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
-    job_action(state, id, headers, JobAction::Fail, body).await
+    job_action(state, id, headers, JobActionKind::Fail, body).await
 }
 
 /// Shared handler for the seven job actions: authorize, parse the id and optional reason,
@@ -1089,15 +1089,19 @@ async fn job_action(
     state: ApiState,
     id: String,
     headers: HeaderMap,
-    action: JobAction,
+    action: JobActionKind,
     body: Bytes,
 ) -> Result<(StatusCode, Json<JobActionResponse>), ApiFailure> {
     authorize(&state, &headers)?;
     let job = JobId::parse(&id).map_err(|_| ApiFailure::invalid("invalid job id"))?;
     let reason = match action {
-        JobAction::Park => Some(park_reason(&body)?),
-        JobAction::Fail => Some(fail_reason(&body)?),
-        JobAction::Retry | JobAction::Cancel | JobAction::Nudge | JobAction::Restart | JobAction::Replan => None,
+        JobActionKind::Park => Some(park_reason(&body)?),
+        JobActionKind::Fail => Some(fail_reason(&body)?),
+        JobActionKind::Retry
+        | JobActionKind::Cancel
+        | JobActionKind::Nudge
+        | JobActionKind::Restart
+        | JobActionKind::Replan => None,
     };
     let response = blocking(move || state.queue_job_action(&job, action, reason.as_deref())).await?;
     Ok((StatusCode::ACCEPTED, Json(response)))

@@ -190,10 +190,6 @@ impl Fixture {
             JobAction::Retry => "retry",
             JobAction::Park => "park",
             JobAction::Cancel => "cancel",
-            JobAction::Nudge => "nudge",
-            JobAction::Restart => "restart",
-            JobAction::Replan => "replan",
-            JobAction::Fail => "fail",
         };
         format!("/api/v1/jobs/{job}/{suffix}")
     }
