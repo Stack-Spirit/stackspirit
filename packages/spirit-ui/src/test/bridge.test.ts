@@ -83,19 +83,3 @@ describe("MockBridge", () => {
     expect(raw?.capacity_warnings.map((warning) => warning.code)).toContain("truncated");
   });
 });
-
-describe("renderer import boundary", () => {
-  it("keeps @tauri-apps/api inside SpiritBridge's Tauri adapter", () => {
-    const sources = import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw",
-      import: "default",
-      eager: true,
-    }) as Record<string, string>;
-    const importers = Object.entries(sources)
-      .filter(([path]) => !path.includes(".test.") && !path.includes("/test/"))
-      .filter(([, source]) => source.includes("@tauri-apps/api"))
-      .map(([path]) => path);
-    expect(importers).toHaveLength(1);
-    expect(importers[0]?.endsWith("TauriBridge.ts")).toBe(true);
-  });
-});

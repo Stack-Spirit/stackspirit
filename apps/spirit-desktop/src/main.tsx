@@ -1,11 +1,14 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
-import { AppShell } from "./app/AppShell";
+import {
+  AppShell,
+  ErrorState,
+  toSpiritError,
+} from "@stackspirit/ui";
+import "@stackspirit/ui/styles.css";
+
 import { createBridge } from "./bridge";
-import { toSpiritError } from "./bridge/errors";
-import { ErrorState } from "./components";
-import "./styles.css";
 
 const container = document.getElementById("root");
 if (!container) throw new Error("missing #root");

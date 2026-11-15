@@ -13,14 +13,20 @@ export default defineConfig({
     host: "127.0.0.1",
   },
   envPrefix: ["VITE_"],
+  optimizeDeps: {
+    // @stackspirit/ui is a linked workspace package exported from TypeScript source.
+    // Vite compiles it with the app instead of pre-bundling it as a dependency.
+    exclude: ["@stackspirit/ui"],
+  },
   build: {
     outDir: "dist",
     sourcemap: true,
     target: "es2022",
   },
   test: {
-    environment: "jsdom",
-    setupFiles: ["./src/test/setup.ts"],
+    // The desktop suite only guards the renderer import boundary; shared UI and store
+    // tests live in packages/spirit-ui.
+    environment: "node",
     css: false,
     globals: false,
     include: ["src/**/*.test.{ts,tsx}"],

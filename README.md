@@ -17,6 +17,18 @@ supporting existing `opencode` or `claude-code` installations for power users.
 2. **Web App Second (`apps/spirit-web`)**: Reuses the `spirit-ui` frontend over an HTTP/SSE bridge.
 3. **CLI Third (`crates/spirit-cli`)**: Thin Rust `spirit` CLI over `crates/spirit-core`.
 
+## Repository layout
+
+| Path | Role |
+|---|---|
+| `crates/spirit-core` | Rust core: host profiles, outbound SSH, VOWP JSON parsing, view models, and engine supervision. |
+| `apps/spirit-desktop` | Tauri 2 shell. `src/main.tsx` creates a `SpiritBridge` and mounts the shared shell; `src/bridge/TauriBridge.ts` is the only renderer file allowed to import `@tauri-apps/api`. |
+| `packages/spirit-ui` | `@stackspirit/ui`: the reusable React cockpit (design-system primitives, views, store), the `SpiritBridge` contract, and `MockBridge`. It is exported from TypeScript source, so Vite and Vitest consume it without a separate build step. |
+| `apps/spirit-web` | Planned Web app reusing `@stackspirit/ui` over an HTTP/SSE bridge. |
+
+The root `npm` workspaces cover `apps/*` and `packages/*`. `npm test` runs the shared UI suite
+and then the desktop import-boundary suite; `npm run test:e2e` runs the desktop Playwright flows.
+
 ## StackSpirit Engine (Phase D4)
 
 The desktop ships a pinned `opencode` sidecar as the **StackSpirit Engine** and never asks the user

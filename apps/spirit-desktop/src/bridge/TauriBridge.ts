@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { SpiritBridge } from "./SpiritBridge";
-import { toSpiritError } from "./errors";
+import type { SpiritBridge } from "@stackspirit/ui";
+import { toSpiritError } from "@stackspirit/ui";
 import type {
   ActionResult,
   CapacityTargetView,
@@ -27,7 +27,7 @@ import type {
   RawDocument,
   SetTargetInput,
   StateEvent,
-} from "./wire";
+} from "@stackspirit/ui";
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
