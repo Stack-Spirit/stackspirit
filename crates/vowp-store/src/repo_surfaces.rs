@@ -45,6 +45,48 @@ pub struct SurfaceToken {
     pub last_used_at: Option<Timestamp>,
 }
 
+/// Home-side display facts for one surface's tokens.
+///
+/// Only the 12-character display prefix and the expiries are exposed. The token and its
+/// SHA-256 hash never leave the store. The agent-local `needs_pair` state is not a home
+/// fact and is deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceTokenView {
+    /// Display prefix of the newest active token.
+    pub prefix: Option<String>,
+    /// Expiry of the newest active token.
+    pub expires_at: Option<Timestamp>,
+    /// Latest expiry among older active tokens, while a rotation overlaps.
+    pub overlap_until: Option<Timestamp>,
+}
+
+impl SurfaceTokenView {
+    /// Builds the view from one surface's token rows, oldest first.
+    ///
+    /// An active token is unrevoked and either has no expiry or expires after `now`. The
+    /// newest active row supplies the prefix and `EXPIRES` value; an older active row
+    /// supplies the overlap marker. Rows that are revoked or already expired are ignored.
+    pub fn from_tokens(tokens: &[SurfaceToken], now: Timestamp) -> Self {
+        let active: Vec<&SurfaceToken> = tokens
+            .iter()
+            .filter(|token| token.revoked_at.is_none())
+            .filter(|token| token.expires_at.is_none_or(|expiry| expiry > now))
+            .collect();
+        let Some((newest, older)) = active.split_last() else {
+            return Self {
+                prefix: None,
+                expires_at: None,
+                overlap_until: None,
+            };
+        };
+        Self {
+            prefix: Some(newest.prefix.clone()),
+            expires_at: newest.expires_at,
+            overlap_until: older.iter().filter_map(|token| token.expires_at).max(),
+        }
+    }
+}
+
 /// Column list shared by every `surfaces` query.
 const SURFACE_COLUMNS: &str = "id, kind, node, holder, app, cwd, metadata_json, created_at, last_seen_at";
 
@@ -568,6 +610,15 @@ impl Store {
             tokens.push(surface_token_from_row(row?)?);
         }
         Ok(tokens)
+    }
+
+    /// Returns the display prefix, expiry and overlap for one surface's tokens.
+    ///
+    /// This is the read data behind `surface ls`; it never reads or returns the plaintext
+    /// token or its hash. A surface with no active token gets `None` for every field.
+    pub fn surface_token_view(&self, surface: &SurfaceId, now: Timestamp) -> Result<SurfaceTokenView, StoreError> {
+        let tokens = self.list_surface_tokens(surface)?;
+        Ok(SurfaceTokenView::from_tokens(&tokens, now))
     }
 
     /// Revokes one token at `at`; returns false when it was already revoked or is unknown.

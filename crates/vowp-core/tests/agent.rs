@@ -18,21 +18,22 @@ use support::fake_git::FakeGit;
 use tempfile::TempDir;
 use vowp_core::agent::gateway::{self, GatewayOptions, GatewayOutcome};
 use vowp_core::agent::{
-    AgentFrameSpool, EnrollRequest, SURFACE_TOKEN_OVERLAP, auth, create_pending, create_pending_surface, hash_code,
-    issue_surface_token, redeem, revoke, revoke_surface, rotate_surface_token,
+    AgentFrameSpool, EnrollRequest, RotationPolicy, SURFACE_TOKEN_OVERLAP, SURFACE_TOKEN_TTL, auth, create_pending,
+    create_pending_surface, hash_code, issue_surface_token, redeem, replace_pending_surface, revoke, revoke_surface,
+    rotate_surface_token, rotate_surface_with_policy, surface_list_row, verify_surface_token,
 };
 use vowp_core::{
     AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps, FixedRng, SystemGit, SystemRunner,
 };
 use vowp_protocol::{
     Actor, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId,
-    EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, MemoryLog, NewJob, NodeName,
+    EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, LedgerKind, MemoryLog, NewJob, NodeName,
     NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, Role,
     RunId, RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId,
     SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
-use vowp_store::{NodePath, NodePaths, StateChange, Store, hash_lease_token};
+use vowp_store::{LedgerFilter, NodePath, NodePaths, StateChange, Store, hash_lease_token};
 
 fn ts() -> Timestamp {
     Timestamp::parse("2026-11-14T10:00:00Z").expect("timestamp")
@@ -1112,7 +1113,8 @@ fn gateway_surface_pair_refuses_a_revoked_surface() {
         clock.now(),
     )
     .expect("pending surface");
-    revoke_surface(&store, &pending.surface.id, clock.now()).expect("revoke surface");
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+    revoke_surface(&store, &deps, &pending.surface.id, clock.now()).expect("revoke surface");
 
     let gateway = Gateway::start(home.path(), clock.clone());
     authenticate(&gateway, &name, &key);
@@ -1157,7 +1159,9 @@ fn surface_rotate_sends_surface_issued_on_the_live_connection() {
     let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
     let (surface, old_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
 
-    let rotated = rotate_surface_token(&store, &surface, clock.now()).expect("rotated token");
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+    let rotated =
+        rotate_surface_token(&store, &deps, &surface, SURFACE_TOKEN_OVERLAP, clock.now()).expect("rotated token");
     let spool = AgentFrameSpool::new(home.path());
     spool
         .queue(
@@ -1207,6 +1211,7 @@ fn surface_rotate_sends_surface_issued_on_the_live_connection() {
     assert_eq!(token, rotated.token);
     assert_eq!(scopes, rotated.scopes);
     assert_eq!(expires_at, clock.now().plus(vowp_core::agent::SURFACE_TOKEN_TTL));
+    wait_until_for(|| !frame_path.exists(), Duration::from_secs(2));
     assert!(!frame_path.exists(), "a sent frame is removed from the spool");
 
     let tokens = store.list_surface_tokens(&surface).expect("tokens");
@@ -1244,6 +1249,329 @@ fn surface_rotate_sends_surface_issued_on_the_live_connection() {
             .is_file(),
         "a frame for another node is never sent or removed"
     );
+}
+
+#[test]
+fn surface_rotate_wait_returns_when_the_frame_is_drained() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, _old_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+
+    let spool = AgentFrameSpool::new(home.path());
+    let drain = {
+        let spool = spool.clone();
+        let name = name.clone();
+        let request = surface.0.clone();
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if spool.read(&name, &request).expect("read queued frame").is_some() {
+                    spool.complete(&name, &request).expect("complete queued frame");
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the rotation frame was never queued");
+        })
+    };
+
+    let rotation = rotate_surface_with_policy(
+        &store,
+        &deps,
+        &surface,
+        RotationPolicy {
+            grace: SURFACE_TOKEN_OVERLAP,
+            wait: Some(Duration::from_secs(5)),
+        },
+        Timestamp::now(),
+    )
+    .expect("rotation waits for delivery");
+    assert!(rotation.delivered, "the helper returns as soon as the frame is drained");
+    drain.join().expect("drain thread");
+    assert!(
+        spool.read(&name, &surface.0).expect("read after drain").is_none(),
+        "the drained frame is gone"
+    );
+
+    // A frame that stays queued makes the wait return false after the timeout.
+    let queued = rotate_surface_with_policy(&store, &deps, &surface, RotationPolicy::default(), Timestamp::now())
+        .expect("rotation for an offline node");
+    assert!(!queued.delivered, "no wait means the frame is still queued");
+    let drained = spool
+        .wait(&name, &surface.0, Duration::from_millis(50))
+        .expect("short wait");
+    assert!(!drained, "a queued frame is not reported as delivered");
+}
+
+#[test]
+fn surface_rotate_writes_one_ledger_note_without_the_token() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, _old_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+
+    let rotated =
+        rotate_surface_token(&store, &deps, &surface, SURFACE_TOKEN_OVERLAP, clock.now()).expect("rotated token");
+    let notes = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::Note),
+            job_id: None,
+            since: None,
+            limit: None,
+        })
+        .expect("ledger rows");
+    assert_eq!(notes.len(), 1, "one rotation writes exactly one ledger note");
+    let note = &notes[0];
+    assert_eq!(note.kind, LedgerKind::Note);
+    assert_eq!(note.summary, format!("surface {surface} rotated"));
+    assert_eq!(note.detail["action"].as_str(), Some("rotate"));
+    assert_eq!(note.detail["surface"].as_str(), Some(surface.0.as_str()));
+    assert_eq!(note.detail["node"].as_str(), Some(name.as_str()));
+    assert_eq!(note.detail["prefix"].as_str(), Some(rotated.prefix.as_str()));
+    assert_eq!(
+        note.detail["expires_at"].as_str(),
+        Some(rotated.expires_at.as_rfc3339().as_str())
+    );
+    assert_eq!(
+        note.detail["old_expires_at"].as_str(),
+        Some(rotated.old_expires_at.as_rfc3339().as_str())
+    );
+    let detail = note.detail.to_string();
+    assert!(
+        !detail.contains(&rotated.token),
+        "the ledger note never carries the token"
+    );
+    assert!(
+        !detail.contains(&hash_code(&rotated.token)),
+        "the ledger note never carries the token hash"
+    );
+    assert!(
+        !detail.contains(home.path().to_str().expect("home path")),
+        "the ledger note never carries an absolute path"
+    );
+}
+
+#[test]
+fn surface_revoke_writes_one_ledger_note_without_the_token() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+
+    let revoked = revoke_surface(&store, &deps, &surface, clock.now()).expect("revoked surface");
+    assert_eq!(revoked, 1);
+    let notes = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::Note),
+            job_id: None,
+            since: None,
+            limit: None,
+        })
+        .expect("ledger rows");
+    assert_eq!(notes.len(), 1, "one revoke writes exactly one ledger note");
+    let note = &notes[0];
+    assert_eq!(note.kind, LedgerKind::Note);
+    assert_eq!(note.summary, format!("surface {surface} revoked"));
+    assert_eq!(note.detail["action"].as_str(), Some("revoke"));
+    assert_eq!(note.detail["surface"].as_str(), Some(surface.0.as_str()));
+    assert_eq!(note.detail["node"].as_str(), Some(name.as_str()));
+    let random_part = token.strip_prefix("vowp_surf_").expect("token scheme");
+    let prefix: String = random_part.chars().take(12).collect();
+    assert_eq!(note.detail["prefix"].as_str(), Some(prefix.as_str()));
+    assert!(
+        note.detail["expires_at"].is_string(),
+        "the revoke note keeps the active expiry"
+    );
+    let detail = note.detail.to_string();
+    assert!(!detail.contains(&token), "the ledger note never carries the token");
+    assert!(
+        !detail.contains(&hash_code(&token)),
+        "the ledger note never carries the token hash"
+    );
+    assert!(
+        !detail.contains(home.path().to_str().expect("home path")),
+        "the ledger note never carries an absolute path"
+    );
+    assert!(
+        verify_surface_token(&store, &token, clock.now()).is_err(),
+        "the revoked token is refused"
+    );
+}
+
+#[test]
+fn surface_ls_prints_the_prefix_and_expiry_but_never_the_token() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let pending = create_pending_surface(
+        &store,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("pending surface");
+    let issued = issue_surface_token(
+        &store,
+        &name,
+        &pending.surface.id,
+        &session,
+        "opencode",
+        &pending.code,
+        clock.now(),
+    )
+    .expect("issued token");
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+
+    let row = surface_list_row(&store, &deps, &pending.surface.id, clock.now())
+        .expect("surface row")
+        .expect("surface exists");
+    let random_part = issued.token.strip_prefix("vowp_surf_").expect("token scheme");
+    let expected_prefix: String = random_part.chars().take(12).collect();
+    assert_eq!(row.prefix.as_deref(), Some(expected_prefix.as_str()));
+    assert_eq!(row.expires_at, Some(clock.now().plus(SURFACE_TOKEN_TTL)));
+    assert!(row.overlap_until.is_none());
+    assert!(!row.pending);
+    let json = serde_json::to_string(&row).expect("surface row JSON");
+    assert!(json.contains("\"prefix\""), "{json}");
+    assert!(json.contains("\"expires_at\""), "{json}");
+    assert!(!json.contains(&issued.token), "surface ls never carries the token");
+    assert!(
+        !json.contains(&hash_code(&issued.token)),
+        "surface ls never carries the token hash"
+    );
+    assert!(
+        !json.contains("needs_pair"),
+        "needs_pair is agent state, not a home field"
+    );
+
+    let rotation = rotate_surface_with_policy(
+        &store,
+        &deps,
+        &pending.surface.id,
+        RotationPolicy::default(),
+        clock.now(),
+    )
+    .expect("queued rotation");
+    let row = surface_list_row(&store, &deps, &pending.surface.id, clock.now())
+        .expect("surface row")
+        .expect("surface exists");
+    assert!(row.pending, "an undelivered rotation is pending");
+    assert_eq!(row.prefix.as_deref(), Some(rotation.rotated.prefix.as_str()));
+    assert_eq!(row.expires_at, Some(rotation.rotated.expires_at));
+    assert_eq!(row.overlap_until, Some(rotation.old_expires_at));
+    assert_eq!(row.queued_at, Some(clock.now()));
+    assert_eq!(row.delivery_deadline, Some(rotation.rotated.expires_at));
+    let json = serde_json::to_string(&row).expect("surface row JSON");
+    assert!(
+        !json.contains(&rotation.rotated.token),
+        "surface ls never carries the token"
+    );
+    assert!(!json.contains(&issued.token), "surface ls never carries the old token");
+    assert!(
+        !json.contains(&hash_code(&rotation.rotated.token)),
+        "surface ls never carries the token hash"
+    );
+    assert!(
+        !json.contains("needs_pair"),
+        "needs_pair is agent state, not a home field"
+    );
+}
+
+#[test]
+fn surface_pair_replace_revokes_the_old_surface_and_queues_no_stale_frame() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = seed_session(&store, &name, "vowp", SESSION, clock.now());
+    let (surface, old_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let deps = test_deps(home.path(), clock.clone(), Arc::new(MemoryLog::new()));
+    let rotation = rotate_surface_with_policy(&store, &deps, &surface, RotationPolicy::default(), clock.now())
+        .expect("queued rotation");
+    let spool = AgentFrameSpool::new(home.path());
+    let queued = spool
+        .read(&name, &surface.0)
+        .expect("read queued frame")
+        .expect("the old surface has a queued frame");
+    assert_eq!(queued.delivery_deadline(), Some(rotation.rotated.expires_at));
+
+    let pending = replace_pending_surface(
+        &store,
+        &deps,
+        &surface,
+        &name,
+        &session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        clock.now(),
+    )
+    .expect("replacement surface");
+    assert_eq!(pending.surface.state, SurfaceState::Pending);
+    assert_ne!(pending.surface.id, surface);
+    assert_eq!(pending.surface.node, name);
+    assert_eq!(pending.surface.metadata["session"].as_str(), Some(session.as_str()));
+
+    let old = store
+        .surface_by_id(&surface)
+        .expect("old surface lookup")
+        .expect("old surface row");
+    assert_eq!(old.state, SurfaceState::Revoked);
+    assert!(
+        store
+            .list_surface_tokens(&surface)
+            .expect("old tokens")
+            .iter()
+            .all(|token| token.revoked_at.is_some()),
+        "every old token is revoked"
+    );
+    assert!(
+        verify_surface_token(&store, &old_token, clock.now()).is_err(),
+        "the old token is refused immediately"
+    );
+    assert!(
+        spool.read(&name, &surface.0).expect("read after replace").is_none(),
+        "the replace removes the old surface's queued frame"
+    );
+    assert!(
+        spool.pending(&name).expect("node queue").is_empty(),
+        "the pending replacement has no queued token"
+    );
+
+    let issued = issue_surface_token(
+        &store,
+        &name,
+        &pending.surface.id,
+        &session,
+        "opencode",
+        &pending.code,
+        clock.now(),
+    )
+    .expect("replacement pairing");
+    assert_eq!(issued.surface_id, pending.surface.id);
 }
 
 #[test]

@@ -13,14 +13,18 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
 
+use serde::Serialize;
 use vowp_protocol::{
-    NodeName, NodeStatus, ProjectName, SessionId, Surface, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope,
-    SurfaceState, Timestamp,
+    AgentFrame, LedgerEntry, LedgerKind, NodeName, NodeStatus, ProjectName, SessionId, Surface, SurfaceId, SurfaceInfo,
+    SurfaceKind, SurfaceScope, SurfaceState, Timestamp,
 };
+use vowp_store::repo_surfaces::SurfaceTokenView;
 use vowp_store::{EnrollmentCode, EnrollmentKind, Store, StoreError, SurfaceToken};
 
 use super::code;
-use crate::CoreError;
+use super::spool::AgentFrameSpool;
+use crate::ledger::Ledger;
+use crate::{CoreError, Deps};
 
 /// Lifetime of a one-time surface pairing code.
 pub const SURFACE_CODE_TTL: Duration = code::ENROLLMENT_CODE_TTL;
@@ -30,6 +34,9 @@ pub const SURFACE_TOKEN_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How long an old surface token keeps working after a rotation (10 minutes).
 pub const SURFACE_TOKEN_OVERLAP: Duration = Duration::from_secs(10 * 60);
+
+/// Longest grace a rotation may grant the old token (24 hours).
+pub const SURFACE_TOKEN_MAX_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Scheme carried by every surface token.
 const TOKEN_SCHEME: &str = "vowp_surf_";
@@ -157,6 +164,72 @@ impl fmt::Debug for RotatedSurface {
     }
 }
 
+/// The `--grace` and `--wait` values for one rotation.
+///
+/// The CLI parses the flags; this is the home policy the flags select. The default is the
+/// shipped ten-minute overlap and no wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationPolicy {
+    /// How long the old token keeps working; capped at [`SURFACE_TOKEN_MAX_GRACE`].
+    pub grace: Duration,
+    /// How long to wait for the node to drain the queued frame; `None` does not wait.
+    pub wait: Option<Duration>,
+}
+
+impl RotationPolicy {
+    /// Returns the grace actually used: the request capped by the design maximum.
+    pub fn effective_grace(&self) -> Duration {
+        self.grace.min(SURFACE_TOKEN_MAX_GRACE)
+    }
+}
+
+impl Default for RotationPolicy {
+    fn default() -> Self {
+        Self {
+            grace: SURFACE_TOKEN_OVERLAP,
+            wait: None,
+        }
+    }
+}
+
+/// The result of one rotation and its delivery attempt.
+#[derive(Debug, Clone)]
+pub struct SurfaceRotation {
+    /// Rotation result, including the replacement prefix and both expiries.
+    pub rotated: RotatedSurface,
+    /// When the replacement frame was queued.
+    pub queued_at: Timestamp,
+    /// Effective expiry of the old tokens (the overlap deadline).
+    pub old_expires_at: Timestamp,
+    /// Whether the queued frame was drained before the wait ended.
+    pub delivered: bool,
+}
+
+/// The home-side read row for one `surface ls` entry.
+///
+/// It carries the display prefix and expiries, never the token or its hash, and it has no
+/// agent-local `needs_pair` field. A queued rotation is reported as `pending` together
+/// with its queue time and delivery deadline.
+#[derive(Debug, Clone, Serialize)]
+pub struct SurfaceListRow {
+    /// Surface row with its lifecycle state.
+    pub surface: SurfaceInfo,
+    /// Scopes granted by the surface's tokens.
+    pub scopes: Vec<SurfaceScope>,
+    /// Display prefix of the newest active token.
+    pub prefix: Option<String>,
+    /// Expiry of the newest active token.
+    pub expires_at: Option<Timestamp>,
+    /// Latest expiry among older active tokens, while a rotation overlaps.
+    pub overlap_until: Option<Timestamp>,
+    /// Whether a rotation frame is still queued for the node.
+    pub pending: bool,
+    /// When the queued rotation was written.
+    pub queued_at: Option<Timestamp>,
+    /// When the queued replacement token expires (the delivery deadline).
+    pub delivery_deadline: Option<Timestamp>,
+}
+
 /// Creates a `pending` surface and its one-time pairing code.
 ///
 /// The node must exist and not be revoked, and the session must exist. The surface stores
@@ -181,6 +254,29 @@ pub fn create_pending_surface(
     }
     store.require_session(session)?;
 
+    let (surface, info) = new_pending_surface(node, session, kind, app, now);
+    let generated = store
+        .transaction(|tx| {
+            tx.insert_pending_surface(&surface)?;
+            insert_surface_code(tx, node, &surface.id, now)
+        })
+        .map_err(map_pair_error)?;
+    Ok(PendingSurface {
+        surface: info,
+        code: generated.code,
+        code_hash: generated.code_hash,
+        expires_at: generated.expires_at,
+    })
+}
+
+/// Builds the pending surface row and its read model.
+fn new_pending_surface(
+    node: &NodeName,
+    session: &SessionId,
+    kind: SurfaceKind,
+    app: Option<&str>,
+    now: Timestamp,
+) -> (Surface, SurfaceInfo) {
     let surface = Surface {
         id: SurfaceId::new(),
         kind,
@@ -205,18 +301,7 @@ pub fn create_pending_surface(
         last_seen_at: surface.last_seen_at,
         revoked_at: None,
     };
-    let generated = store
-        .transaction(|tx| {
-            tx.insert_pending_surface(&surface)?;
-            insert_surface_code(tx, node, &surface.id, now)
-        })
-        .map_err(map_pair_error)?;
-    Ok(PendingSurface {
-        surface: info,
-        code: generated.code,
-        code_hash: generated.code_hash,
-        expires_at: generated.expires_at,
-    })
+    (surface, info)
 }
 
 /// Creates a one-time pairing code for an existing `pending` surface.
@@ -337,25 +422,29 @@ pub fn issue_surface_token(
         .map_err(map_pair_error)
 }
 
-/// Rotates one attached surface's token, keeping the old tokens for the overlap window.
+/// Rotates one attached surface's token, keeping the old tokens for the grace window.
 ///
 /// The replacement token has the same scopes as the surface's most recent token and the
-/// normal 30-day TTL. Every other active token is shortened to `now + 10 minutes`, never
-/// extended; an older token that already expires sooner keeps its earlier expiry. The
-/// plaintext replacement token is returned once; only its hash, prefix and scopes are
-/// stored. A missing surface is [`CoreError::NotFound`]; a pending or revoked surface is a
-/// typed refusal.
+/// normal 30-day TTL. Every other active token is shortened to `now + grace`, never
+/// extended; an older token that already expires sooner keeps its earlier expiry. `grace`
+/// is capped at [`SURFACE_TOKEN_MAX_GRACE`]; pass [`SURFACE_TOKEN_OVERLAP`] for the default.
+/// The plaintext replacement token is returned once; only its hash, prefix and scopes are
+/// stored, and one `node_ledger` note records the rotation without the token. A missing
+/// surface is [`CoreError::NotFound`]; a pending or revoked surface or a node that is not
+/// active is a typed refusal.
 pub fn rotate_surface_token(
     store: &Store,
+    deps: &Deps,
     surface_id: &SurfaceId,
+    grace: Duration,
     now: Timestamp,
 ) -> Result<RotatedSurface, CoreError> {
     let (token, token_hash, prefix) = new_token()?;
     let token_id = ulid::Ulid::generate().to_string();
     let expires_at = now.plus(SURFACE_TOKEN_TTL);
-    let overlap_expires_at = now.plus(SURFACE_TOKEN_OVERLAP);
+    let overlap_expires_at = now.plus(grace.min(SURFACE_TOKEN_MAX_GRACE));
 
-    store
+    let rotated = store
         .transaction(|tx| {
             let Some(surface) = tx.surface_by_id(surface_id)? else {
                 return Err(StoreError::NotFound {
@@ -371,6 +460,15 @@ pub fn rotate_surface_token(
                     ));
                 }
                 SurfaceState::Revoked => return Err(StoreError::Conflict("surface was revoked".to_owned())),
+            }
+            let Some(card) = tx.node_card(&surface.node, now)? else {
+                return Err(StoreError::NotFound {
+                    what: "node",
+                    id: surface.node.as_str().to_owned(),
+                });
+            };
+            if card.status != NodeStatus::Active {
+                return Err(StoreError::Conflict(format!("node {} is not active", surface.node)));
             }
 
             let tokens = tx.list_surface_tokens(surface_id)?;
@@ -422,7 +520,51 @@ pub fn rotate_surface_token(
                 node,
             })
         })
-        .map_err(map_pair_error)
+        .map_err(map_pair_error)?;
+
+    record_surface_rotation(store, deps, &rotated, now)?;
+    Ok(rotated)
+}
+
+/// Rotates one surface, queues its replacement and optionally waits for delivery.
+///
+/// This is the library half of `surface rotate --grace/--wait`: the CLI parses the values
+/// and this function applies the cap, writes the frame envelope with `queued_at` and the
+/// effective `overlap_until`, and reports whether the frame was drained. An offline node
+/// is not an error; the frame stays queued for its next authenticated connection.
+pub fn rotate_surface_with_policy(
+    store: &Store,
+    deps: &Deps,
+    surface_id: &SurfaceId,
+    policy: RotationPolicy,
+    now: Timestamp,
+) -> Result<SurfaceRotation, CoreError> {
+    let rotated = rotate_surface_token(store, deps, surface_id, policy.effective_grace(), now)?;
+    let frame = AgentFrame::SurfaceIssued {
+        surface_id: surface_id.clone(),
+        token: rotated.token.clone(),
+        scopes: rotated.scopes.clone(),
+        expires_at: rotated.expires_at,
+    };
+    let spool = AgentFrameSpool::new(deps.paths.root());
+    spool.queue_rotation(
+        &rotated.node,
+        surface_id.0.as_str(),
+        &frame,
+        now,
+        rotated.old_expires_at,
+    )?;
+    let delivered = match policy.wait {
+        Some(timeout) => spool.wait(&rotated.node, surface_id.0.as_str(), timeout)?,
+        None => spool.read(&rotated.node, surface_id.0.as_str())?.is_none(),
+    };
+    let old_expires_at = rotated.old_expires_at;
+    Ok(SurfaceRotation {
+        rotated,
+        queued_at: now,
+        old_expires_at,
+        delivered,
+    })
 }
 
 /// Verifies a presented surface token at `now` and records its use.
@@ -469,6 +611,9 @@ pub fn verify_surface_token(store: &Store, token: &str, now: Timestamp) -> Resul
 }
 
 /// Revokes one surface token row; an unknown or already-revoked id is a typed refusal.
+///
+/// This is the token-row primitive. The audited `surface revoke` path is
+/// [`revoke_surface`], which writes the single `node_ledger` note for the surface.
 pub fn revoke_surface_token(store: &Store, id: &str, now: Timestamp) -> Result<(), CoreError> {
     if id.is_empty() {
         return Err(CoreError::Invalid("surface token id is empty".to_owned()));
@@ -482,22 +627,224 @@ pub fn revoke_surface_token(store: &Store, id: &str, now: Timestamp) -> Result<(
     }
 }
 
-/// Revokes every active token of `surface_id` and marks the surface revoked.
+/// Revokes every active token of `surface_id`, marks the surface revoked and records one note.
 ///
 /// Returns the number of token rows changed. The next surface frame is refused by
-/// [`verify_surface_token`] and by the gateway's `SurfaceRevoked` answer.
-pub fn revoke_surface(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError> {
-    if store.surface_by_id(surface_id)?.is_none() {
+/// [`verify_surface_token`] and by the gateway's `SurfaceRevoked` answer. A queued rotation
+/// for the surface is removed so it cannot be delivered after the revoke. The ledger note
+/// has the action, surface id, node, display prefix and expiry, never the token or a path.
+pub fn revoke_surface(store: &Store, deps: &Deps, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError> {
+    let Some(surface) = store.surface_by_id(surface_id)? else {
         return Err(CoreError::NotFound(format!("surface {surface_id}")));
-    }
+    };
+    let tokens = store.list_surface_tokens(surface_id)?;
     let mut revoked = 0_u64;
-    for token in store.list_surface_tokens(surface_id)? {
+    for token in &tokens {
         if token.revoked_at.is_none() && store.revoke_surface_token(&token.id, now)? {
             revoked += 1;
         }
     }
     store.set_surface_state(surface_id, SurfaceState::Revoked, now)?;
+    record_surface_revocation(store, deps, &surface, &tokens, now)?;
+    AgentFrameSpool::new(deps.paths.root()).complete(&surface.node, surface_id.0.as_str())?;
     Ok(revoked)
+}
+
+/// Revokes `replace` and creates one replacement `pending` surface in a single transaction.
+///
+/// The old surface must belong to the same node and session and must not already be
+/// revoked. Its queued rotation frame is removed after the transaction, so the revoked
+/// surface cannot receive a stale replacement token; the old token is refused immediately.
+/// The new surface is pending with a fresh one-time code. No token is issued or queued until
+/// the agent redeems that code.
+#[allow(clippy::too_many_arguments)]
+pub fn replace_pending_surface(
+    store: &Store,
+    deps: &Deps,
+    replace: &SurfaceId,
+    node: &NodeName,
+    session: &SessionId,
+    kind: SurfaceKind,
+    app: Option<&str>,
+    now: Timestamp,
+) -> Result<PendingSurface, CoreError> {
+    if let Some(app) = app {
+        validate_app(app)?;
+    }
+    let (surface, info) = new_pending_surface(node, session, kind, app, now);
+    let (old, old_tokens, generated) = store
+        .transaction(|tx| {
+            let Some(card) = tx.node_card(node, now)? else {
+                return Err(StoreError::NotFound {
+                    what: "node",
+                    id: node.as_str().to_owned(),
+                });
+            };
+            if card.status == NodeStatus::Revoked {
+                return Err(StoreError::Conflict(format!("node {node} is revoked")));
+            }
+            if card.status != NodeStatus::Active {
+                return Err(StoreError::Conflict(format!("node {node} is not active")));
+            }
+            tx.require_session(session)?;
+
+            let Some(old) = tx.surface_by_id(replace)? else {
+                return Err(StoreError::NotFound {
+                    what: "surface",
+                    id: replace.0.clone(),
+                });
+            };
+            if old.node != *node {
+                return Err(StoreError::Conflict("surface belongs to another node".to_owned()));
+            }
+            if old.state == SurfaceState::Revoked {
+                return Err(StoreError::Conflict("surface was revoked".to_owned()));
+            }
+            match old.metadata.get(SESSION_METADATA_KEY) {
+                Some(serde_json::Value::String(bound)) if bound == session.as_str() => {}
+                Some(_) => {
+                    return Err(StoreError::Conflict("surface is bound to another session".to_owned()));
+                }
+                None => return Err(StoreError::Conflict("surface is not bound to a session".to_owned())),
+            }
+
+            let tokens = tx.list_surface_tokens(replace)?;
+            for token in &tokens {
+                if token.revoked_at.is_none() {
+                    tx.revoke_surface_token(&token.id, now)?;
+                }
+            }
+            tx.set_surface_state(replace, SurfaceState::Revoked, now)?;
+            tx.insert_pending_surface(&surface)?;
+            let generated = insert_surface_code(tx, node, &surface.id, now)?;
+            Ok((old, tokens, generated))
+        })
+        .map_err(map_pair_error)?;
+
+    record_surface_revocation(store, deps, &old, &old_tokens, now)?;
+    AgentFrameSpool::new(deps.paths.root()).complete(node, replace.0.as_str())?;
+    Ok(PendingSurface {
+        surface: info,
+        code: generated.code,
+        code_hash: generated.code_hash,
+        expires_at: generated.expires_at,
+    })
+}
+
+/// Builds the home-side read row for one `surface ls` entry.
+///
+/// The row carries the display prefix and expiries from [`Store::surface_token_view`] and
+/// the pending rotation times from the frame envelope. It never carries the token or its
+/// hash, and the agent-local `needs_pair` state is not part of the home document.
+pub fn surface_list_row(
+    store: &Store,
+    deps: &Deps,
+    surface_id: &SurfaceId,
+    now: Timestamp,
+) -> Result<Option<SurfaceListRow>, CoreError> {
+    let Some(surface) = store.surface_by_id(surface_id)? else {
+        return Ok(None);
+    };
+    let tokens = store.list_surface_tokens(surface_id)?;
+    let view = SurfaceTokenView::from_tokens(&tokens, now);
+    let mut scopes: Vec<SurfaceScope> = Vec::new();
+    for scope in tokens.iter().flat_map(|token| token.scopes.iter()) {
+        if !scopes.contains(scope) {
+            scopes.push(scope.clone());
+        }
+    }
+    let queued = AgentFrameSpool::new(deps.paths.root())
+        .read(&surface.node, surface_id.0.as_str())?
+        .filter(|queued| match &queued.frame {
+            AgentFrame::SurfaceIssued {
+                surface_id: queued_surface,
+                ..
+            } => queued_surface == surface_id,
+            _ => false,
+        });
+    let (pending, queued_at, delivery_deadline) = match queued {
+        Some(queued) => (true, queued.queued_at, queued.delivery_deadline()),
+        None => (false, None, None),
+    };
+    Ok(Some(SurfaceListRow {
+        surface,
+        scopes,
+        prefix: view.prefix,
+        expires_at: view.expires_at,
+        overlap_until: view.overlap_until,
+        pending,
+        queued_at,
+        delivery_deadline,
+    }))
+}
+
+/// Appends the one `node_ledger` note for a rotation.
+fn record_surface_rotation(
+    store: &Store,
+    deps: &Deps,
+    rotated: &RotatedSurface,
+    now: Timestamp,
+) -> Result<(), CoreError> {
+    let entry = LedgerEntry {
+        id: None,
+        ts: now,
+        kind: LedgerKind::Note,
+        project: None,
+        job_id: None,
+        run_id: None,
+        session_id: None,
+        role: None,
+        provider: None,
+        harness: None,
+        model: None,
+        cost: None,
+        summary: format!("surface {} rotated", rotated.surface.id),
+        detail: serde_json::json!({
+            "action": "rotate",
+            "surface": rotated.surface.id.0.as_str(),
+            "node": rotated.node.as_str(),
+            "prefix": rotated.prefix,
+            "expires_at": rotated.expires_at.as_rfc3339(),
+            "old_expires_at": rotated.old_expires_at.as_rfc3339(),
+        }),
+    };
+    Ledger::new(deps.clone()).record(store, entry)?;
+    Ok(())
+}
+
+/// Appends the one `node_ledger` note for a surface revoke.
+fn record_surface_revocation(
+    store: &Store,
+    deps: &Deps,
+    surface: &SurfaceInfo,
+    tokens: &[SurfaceToken],
+    now: Timestamp,
+) -> Result<(), CoreError> {
+    let view = SurfaceTokenView::from_tokens(tokens, now);
+    let entry = LedgerEntry {
+        id: None,
+        ts: now,
+        kind: LedgerKind::Note,
+        project: None,
+        job_id: None,
+        run_id: None,
+        session_id: None,
+        role: None,
+        provider: None,
+        harness: None,
+        model: None,
+        cost: None,
+        summary: format!("surface {} revoked", surface.id),
+        detail: serde_json::json!({
+            "action": "revoke",
+            "surface": surface.id.0.as_str(),
+            "node": surface.node.as_str(),
+            "prefix": view.prefix,
+            "expires_at": view.expires_at.map(|expiry| expiry.as_rfc3339()),
+        }),
+    };
+    Ledger::new(deps.clone()).record(store, entry)?;
+    Ok(())
 }
 
 /// Builds the default token scopes for one session.
@@ -656,12 +1003,18 @@ fn validate_app(app: &str) -> Result<(), CoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
     use vowp_protocol::{
-        ProjectName, Session, SessionId, SessionRole, SessionState, SurfaceKind, SurfaceState, Timestamp,
+        FakeClock, MemoryLog, ProjectName, Session, SessionId, SessionRole, SessionState, SurfaceKind, SurfaceState,
+        Timestamp, VowpConfig,
     };
+    use vowp_tmux::fake::FakeWindows;
 
     use super::*;
     use crate::agent::code::hash_code;
+    use crate::{AdapterRegistry, CommandRunner, FixedRng, SystemGit, SystemRunner};
 
     const SESSION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const OTHER_SESSION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -680,6 +1033,25 @@ mod tests {
 
     fn store() -> Store {
         Store::open_memory().expect("store")
+    }
+
+    /// Builds injected dependencies on a temporary home for the ledger and spool paths.
+    fn test_deps() -> (TempDir, Deps) {
+        let root = tempfile::tempdir().expect("temp home");
+        let cmd: Arc<dyn CommandRunner> = Arc::new(SystemRunner);
+        let deps = Deps {
+            paths: vowp_store::NodePaths::new(root.path()),
+            config: Arc::new(VowpConfig::with_defaults_for_tests()),
+            node: node("home-1"),
+            clock: Arc::new(FakeClock::at(ts())),
+            log: Arc::new(MemoryLog::new()),
+            adapters: Arc::new(AdapterRegistry::new()),
+            windows: Arc::new(FakeWindows::new()),
+            git: Arc::new(SystemGit::new(Arc::clone(&cmd))),
+            cmd,
+            rng: Arc::new(FixedRng(0)),
+        };
+        (root, deps)
     }
 
     fn seed_node(store: &Store, node: &NodeName, now: Timestamp) {
@@ -1012,6 +1384,7 @@ mod tests {
     #[test]
     fn surface_token_verify_rejects_revoked_and_expired() {
         let store = store();
+        let (_root, deps) = test_deps();
         let now = ts();
         let node = node("mac-studio");
         seed_node(&store, &node, now);
@@ -1057,7 +1430,7 @@ mod tests {
         let third_token = issue_surface_token(&store, &node, &third.surface.id, &session, "opencode", &third.code, now)
             .expect("issued token");
         assert_eq!(
-            revoke_surface(&store, &third.surface.id, now).expect("revoke surface"),
+            revoke_surface(&store, &deps, &third.surface.id, now).expect("revoke surface"),
             1
         );
         let error = verify_surface_token(&store, &third_token.token, now).expect_err("revoked surface");
@@ -1085,6 +1458,7 @@ mod tests {
     #[test]
     fn surface_token_rotation_keeps_the_old_token_for_the_overlap() {
         let store = store();
+        let (_root, deps) = test_deps();
         let now = ts();
         let node = node("mac-studio");
         seed_node(&store, &node, now);
@@ -1101,7 +1475,8 @@ mod tests {
         )
         .expect("issued token");
 
-        let rotated = rotate_surface_token(&store, &pending.surface.id, now).expect("rotated token");
+        let rotated = rotate_surface_token(&store, &deps, &pending.surface.id, SURFACE_TOKEN_OVERLAP, now)
+            .expect("rotated token");
         assert_eq!(rotated.surface.id, pending.surface.id);
         assert_eq!(rotated.node, node);
         assert_eq!(rotated.scopes, old.scopes);
@@ -1163,13 +1538,15 @@ mod tests {
     #[test]
     fn surface_rotate_refuses_pending_and_revoked() {
         let store = store();
+        let (_root, deps) = test_deps();
         let now = ts();
         let node = node("mac-studio");
         seed_node(&store, &node, now);
         let session = seed_session(&store, &node, SESSION, "vowp", now);
 
         let pending = seed_pending(&store, &node, &session, "opencode", now);
-        let error = rotate_surface_token(&store, &pending.surface.id, now).expect_err("pending surface");
+        let error = rotate_surface_token(&store, &deps, &pending.surface.id, SURFACE_TOKEN_OVERLAP, now)
+            .expect_err("pending surface");
         assert!(matches!(error, CoreError::Refused(_)));
         assert!(
             store
@@ -1189,8 +1566,9 @@ mod tests {
             now,
         )
         .expect("issued token");
-        revoke_surface(&store, &attached.surface.id, now).expect("revoke surface");
-        let error = rotate_surface_token(&store, &attached.surface.id, now).expect_err("revoked surface");
+        revoke_surface(&store, &deps, &attached.surface.id, now).expect("revoke surface");
+        let error = rotate_surface_token(&store, &deps, &attached.surface.id, SURFACE_TOKEN_OVERLAP, now)
+            .expect_err("revoked surface");
         assert!(matches!(error, CoreError::Refused(_)));
         let tokens = store.list_surface_tokens(&attached.surface.id).expect("tokens");
         assert_eq!(tokens.len(), 1, "a refused rotation mints no token");
@@ -1202,7 +1580,7 @@ mod tests {
 
         let unknown = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAZ".to_owned());
         assert!(matches!(
-            rotate_surface_token(&store, &unknown, now).expect_err("unknown surface"),
+            rotate_surface_token(&store, &deps, &unknown, SURFACE_TOKEN_OVERLAP, now).expect_err("unknown surface"),
             CoreError::NotFound(_)
         ));
     }
@@ -1210,6 +1588,7 @@ mod tests {
     #[test]
     fn surface_rotation_never_extends_a_shorter_expiry() {
         let store = store();
+        let (_root, deps) = test_deps();
         let now = ts();
         let node = node("mac-studio");
         seed_node(&store, &node, now);
@@ -1241,7 +1620,8 @@ mod tests {
             })
             .expect("short-lived token");
 
-        let rotated = rotate_surface_token(&store, &pending.surface.id, now).expect("rotated token");
+        let rotated = rotate_surface_token(&store, &deps, &pending.surface.id, SURFACE_TOKEN_OVERLAP, now)
+            .expect("rotated token");
         assert_eq!(rotated.old_expires_at, near_expiry);
         let short = store
             .list_surface_tokens(&pending.surface.id)
@@ -1257,5 +1637,104 @@ mod tests {
             .find(|token| token.token_hash == hash_code(&issued.token))
             .expect("old token row");
         assert_eq!(old.expires_at, Some(now.plus(SURFACE_TOKEN_OVERLAP)));
+    }
+
+    #[test]
+    fn surface_rotate_grace_extends_the_old_token_but_never_past_the_cap() {
+        let store = store();
+        let (_root, deps) = test_deps();
+        let now = ts();
+        let node = node("mac-studio");
+        seed_node(&store, &node, now);
+        let session = seed_session(&store, &node, SESSION, "vowp", now);
+
+        // A two-hour grace keeps the old token for two hours.
+        let two_hours = Duration::from_secs(2 * 60 * 60);
+        let pending = seed_pending(&store, &node, &session, "opencode", now);
+        let issued = issue_surface_token(
+            &store,
+            &node,
+            &pending.surface.id,
+            &session,
+            "opencode",
+            &pending.code,
+            now,
+        )
+        .expect("issued token");
+        let rotation = rotate_surface_with_policy(
+            &store,
+            &deps,
+            &pending.surface.id,
+            RotationPolicy {
+                grace: two_hours,
+                wait: None,
+            },
+            now,
+        )
+        .expect("rotated with a two-hour grace");
+        assert_eq!(rotation.old_expires_at, now.plus(two_hours));
+        assert_eq!(rotation.rotated.old_expires_at, now.plus(two_hours));
+        assert!(!rotation.delivered, "no wait means no drained frame");
+        let old = store
+            .list_surface_tokens(&pending.surface.id)
+            .expect("tokens")
+            .into_iter()
+            .find(|token| token.token_hash == hash_code(&issued.token))
+            .expect("old token row");
+        assert_eq!(old.expires_at, Some(now.plus(two_hours)));
+        assert!(
+            verify_surface_token(&store, &issued.token, now.plus(two_hours).minus(Duration::from_secs(1))).is_ok(),
+            "the old token works inside the grace"
+        );
+        assert!(
+            verify_surface_token(&store, &issued.token, now.plus(two_hours)).is_err(),
+            "the old token dies at the grace"
+        );
+
+        // A two-day grace is capped at the design maximum of 24 hours.
+        let pending = seed_pending(&store, &node, &session, "opencode", now);
+        let issued = issue_surface_token(
+            &store,
+            &node,
+            &pending.surface.id,
+            &session,
+            "opencode",
+            &pending.code,
+            now,
+        )
+        .expect("issued token");
+        let rotation = rotate_surface_with_policy(
+            &store,
+            &deps,
+            &pending.surface.id,
+            RotationPolicy {
+                grace: Duration::from_secs(48 * 60 * 60),
+                wait: None,
+            },
+            now,
+        )
+        .expect("rotated with a capped grace");
+        assert_eq!(rotation.old_expires_at, now.plus(SURFACE_TOKEN_MAX_GRACE));
+        assert_eq!(rotation.rotated.old_expires_at, now.plus(SURFACE_TOKEN_MAX_GRACE));
+        let old = store
+            .list_surface_tokens(&pending.surface.id)
+            .expect("tokens")
+            .into_iter()
+            .find(|token| token.token_hash == hash_code(&issued.token))
+            .expect("old token row");
+        assert_eq!(old.expires_at, Some(now.plus(SURFACE_TOKEN_MAX_GRACE)));
+        assert!(
+            verify_surface_token(
+                &store,
+                &issued.token,
+                now.plus(SURFACE_TOKEN_MAX_GRACE).minus(Duration::from_secs(1))
+            )
+            .is_ok(),
+            "the old token works inside the capped grace"
+        );
+        assert!(
+            verify_surface_token(&store, &issued.token, now.plus(SURFACE_TOKEN_MAX_GRACE)).is_err(),
+            "the old token never outlives the cap"
+        );
     }
 }

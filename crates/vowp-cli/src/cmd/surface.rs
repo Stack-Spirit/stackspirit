@@ -17,11 +17,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use serde::Serialize;
-use vowp_core::agent::pair::{create_pending_surface, revoke_surface, rotate_surface_token};
-use vowp_core::agent::spool::AgentFrameSpool;
+use vowp_core::agent::pair::{RotationPolicy, create_pending_surface, revoke_surface, rotate_surface_with_policy};
 use vowp_protocol::{
-    AgentFrame, NodeName, NodePresence, SessionId, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState,
-    Timestamp,
+    NodeName, NodePresence, SessionId, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState, Timestamp,
 };
 use vowp_store::{Store, SurfaceToken};
 
@@ -145,7 +143,7 @@ fn revoke(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRevokeArgs) -> Result
         )));
     }
     let store = ctx.fleet_store()?;
-    let revoked = revoke_surface(&store, &id, ctx.clock().now())?;
+    let revoked = revoke_surface(&store, ctx.deps(), &id, ctx.clock().now())?;
     append_index(ctx, &id)?;
     if ctx.json() {
         print_json(
@@ -194,18 +192,8 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
     }
 
     let now = ctx.clock().now();
-    let rotated = rotate_surface_token(&store, &id, now)?;
-    let spool = AgentFrameSpool::new(ctx.paths().root());
-    spool.queue(
-        &rotated.node,
-        id.0.as_str(),
-        &AgentFrame::SurfaceIssued {
-            surface_id: id.clone(),
-            token: rotated.token.clone(),
-            scopes: rotated.scopes.clone(),
-            expires_at: rotated.expires_at,
-        },
-    )?;
+    let rotation = rotate_surface_with_policy(&store, ctx.deps(), &id, RotationPolicy::default(), now)?;
+    let rotated = &rotation.rotated;
     append_index(ctx, &id)?;
 
     let offline = node_is_offline(&store, &rotated.node, now)?;
@@ -441,10 +429,15 @@ struct SurfaceRotateOutput {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use vowp_protocol::{NodeStatus, ProjectName, Session, SessionRole, SessionState};
+    use vowp_core::{AdapterRegistry, CommandRunner, Deps, FixedRng, SystemGit, SystemRunner};
+    use vowp_protocol::{
+        AgentFrame, MemoryLog, NodeStatus, ProjectName, Session, SessionRole, SessionState, SystemClock, VowpConfig,
+    };
     use vowp_store::NodePaths;
+    use vowp_tmux::fake::FakeWindows;
 
     use super::*;
     use crate::BufferIo;
@@ -522,6 +515,23 @@ mod tests {
         }
     }
 
+    /// Builds the injected dependencies for the in-file test call sites.
+    fn test_deps(env: &RotateEnv) -> Deps {
+        let cmd: Arc<dyn CommandRunner> = Arc::new(SystemRunner);
+        Deps {
+            paths: NodePaths::new(&env.home),
+            config: Arc::new(VowpConfig::with_defaults_for_tests()),
+            node: NodeName::parse("home-1").expect("home node"),
+            clock: Arc::new(SystemClock),
+            log: Arc::new(MemoryLog::new()),
+            adapters: Arc::new(AdapterRegistry::new()),
+            windows: Arc::new(FakeWindows::new()),
+            git: Arc::new(SystemGit::new(Arc::clone(&cmd))),
+            cmd,
+            rng: Arc::new(FixedRng(0)),
+        }
+    }
+
     fn run_rotate(env: &RotateEnv, json: bool) -> (i32, String, String) {
         let mut args = vec!["vowp".to_owned()];
         if json {
@@ -558,9 +568,32 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(dir_mode, 0o700, "the frame directory must be private");
+
         let bytes = fs::read(&path).expect("queued frame bytes");
-        let frame: AgentFrame = serde_json::from_slice(&bytes).expect("queued agent frame");
-        match frame {
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).expect("queued frame envelope");
+        assert!(envelope.get("queued_at").is_some(), "the envelope carries queued_at");
+        assert!(
+            envelope.get("overlap_until").is_some(),
+            "the envelope carries the overlap deadline"
+        );
+        assert!(envelope.get("frame").is_some(), "the frame is inside the envelope");
+        assert!(
+            envelope.get("token").is_none(),
+            "the token is inside the frame, not at the envelope top level"
+        );
+
+        let spool = vowp_core::agent::AgentFrameSpool::new(&env.home);
+        let queued = spool
+            .read(&env.node, &env.surface.0)
+            .expect("read queued frame")
+            .expect("queued frame");
+        assert!(queued.queued_at.is_some(), "the rotation records its queue time");
+        assert!(
+            queued.overlap_until.is_some(),
+            "the rotation records the old-token deadline"
+        );
+        let delivery_deadline = queued.delivery_deadline();
+        match queued.frame {
             AgentFrame::SurfaceIssued {
                 surface_id,
                 token,
@@ -573,6 +606,11 @@ mod tests {
                 assert!(
                     token.starts_with("vowp_surf_"),
                     "the queued frame carries the new token"
+                );
+                assert_eq!(
+                    delivery_deadline,
+                    Some(expires_at),
+                    "the replacement expiry is the delivery deadline"
                 );
                 (token, expires_at)
             }
@@ -709,7 +747,7 @@ mod tests {
             io.stderr()
         );
 
-        revoke_surface(&store, &env.surface, now).expect("revoke surface");
+        revoke_surface(&store, &test_deps(&env), &env.surface, now).expect("revoke surface");
         let args = vec![
             "vowp".to_owned(),
             "--home".to_owned(),
