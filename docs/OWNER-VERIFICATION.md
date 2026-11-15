@@ -502,18 +502,24 @@ disposable item exists, record `N/A (no disposable inbox item)` rather than inve
 
 **F8. Read session metadata without claiming a live terminal.**
 
-- Do: select a running worker card or a job card, open the job drawer, and read
-  **Executor and session**. The worker card also shows a short session id when VOWP
-  reports one.
-- Expected: the raw executor and display string are shown when present; otherwise
-  “No executor recorded (shell, gate or merge run).” **Session:** shows the id or
+- Do, drawer check: click a **job card** in a lane (for example the **Running** lane). Job
+  cards are buttons; clicking one opens the **Job drawer**. Read **Executor and session**.
+  Worker cards in **Running workers** are display-only and do not open the drawer, so use
+  a job card for this check.
+- Expected in the drawer: the raw executor and display string are shown when present;
+  otherwise “No executor recorded (shell, gate or merge run).” **Session:** shows the id or
   **not reported**. There is no live terminal and no log streaming.
+- Do, worker-card check (separate): find the same job in **Running workers**. When VOWP
+  reports a session id, the card footer shows the first 10 characters of it, with the
+  full id in the tooltip; when VOWP omits it, the card shows no session id at all. The
+  card is a read-only label, not a control.
 - This build exposes session metadata in the job drawer and worker card; it does **not**
   ship a standalone sessions drawer from `docs/PLAN.md` §8.6. Do not record a standalone
   sessions drawer as verified. The `.asif.zip sessions` gate card in §4.5 covers the
   gated session-package surface.
-- Evidence: redacted screenshot of the **Executor and session** section; record whether a
-  session id was present.
+- Evidence: redacted screenshots of the drawer's **Executor and session** section and of
+  the matching worker card footer; record separately whether a session id was present in
+  each.
 
 ### 3.7 Disconnect, dimmed state, and stale state
 
@@ -861,7 +867,12 @@ app-private entry but connection works → fail (the app is not using the privat
 
   ```sh
   : "${CANARY:?Set CANARY with the S1 canary first; do not grep with an empty pattern}"
-  for f in hosts.json engine.json keychain-index.json; do
+  jq -r 'keys | join(",")' "$SPIRIT_APP_DATA/hosts.json" 2>/dev/null || echo 'not present'
+  jq -r '.hosts[0] | keys | join(",")' \
+    "$SPIRIT_APP_DATA/hosts.json" 2>/dev/null || echo 'no host profile saved'
+  jq -r '.hosts[0].host_key | keys | join(",")' \
+    "$SPIRIT_APP_DATA/hosts.json" 2>/dev/null || echo 'no host-key pin'
+  for f in engine.json keychain-index.json; do
     printf '%s: ' "$f"
     jq -r 'if type == "array" then join(",") else keys | join(",") end' \
       "$SPIRIT_APP_DATA/$f" 2>/dev/null || echo 'not present'
@@ -869,11 +880,19 @@ app-private entry but connection works → fail (the app is not using the privat
   grep -RIIn -F "$CANARY" "$SPIRIT_APP_DATA" || true
   ```
 
-- Expected: `hosts.json` contains host profile metadata and a host-key pin (algorithm,
-  fingerprint, pinned time), never a private key. `engine.json` contains the engine choice,
-  selected model id, and onboarding flag, never a key. `keychain-index.json` contains
-  provider names only. `known_hosts` contains public host keys, not private keys. The
-  canary grep returns no match.
+- Expected: `hosts.json` prints the top-level keys `hosts,schema_version`, then the first
+  profile's field names, sorted by `jq`:
+
+  ```text
+  created_at,default_project,host_key,id,identity_file,label,last_connected_at,ssh,updated_at,vowp_home
+  ```
+
+  and then the pin's field names `algorithm,pinned_at,sha256`. A field you left empty is
+  `null` but is still named. The profile holds a host-key pin, never a private key, and
+  none of the three files has a `secret`, `token`, or `api_key` key. `engine.json` contains
+  the engine choice, selected model id, and onboarding flag, never a key.
+  `keychain-index.json` contains provider names only. `known_hosts` contains public host
+  keys, not private keys. The canary grep returns no match.
 - Evidence: field-name output (values redacted) and the no-match result.
 
 Failure recovery: any `secret`, `api_key`, `token`, or key-like value in a profile → fail;
