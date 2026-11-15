@@ -280,10 +280,11 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
                     : "no local retry countdown is scheduled in this state."}
                 </div>
               ) : null}
-              {fleet.status?.polling_only ? (
+              {fleet.status?.polling_only ||
+              fleet.status?.stream_state === "reconnecting" ? (
                 <div className="notice notice--warn" role="status">
-                  The board stream is unavailable; polling every 5 seconds. Data is still read
-                  from the daemon, not from a cache or mock.
+                  The board stream is unavailable; the 5 second polling fallback is active.
+                  Data is still read from the daemon, not from a cache or mock.
                 </div>
               ) : null}
 
