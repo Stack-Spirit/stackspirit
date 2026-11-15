@@ -1,15 +1,16 @@
 # Roadmap
 
-Status: current for 0.3.0; a planning note for contributors.
+Status: current for the 0.3.0 release and the v0.4 slices merged after it; a planning note for
+contributors.
 
 This page records what the current tree ships, the v0.4 local-orchestrator work in progress and the
-open candidates. It promises no dates. The authoritative proof for every claim is the linked document
-or the code itself.
+open candidates. It promises no dates. The authoritative proof for every claim is the linked document,
+file or test, or the code itself.
 
 The v0.1 public release is **v0.1.0**, v0.2 is **v0.2.0** and v0.3 is **v0.3.0**, shipped on
-2026-11-12. The v0.4 local-orchestrator design was accepted on 2026-11-13; Phase 0 is in progress and
-no 0.4 release date is promised. The slices that merged after the 0.3.0 tag are recorded separately
-below.
+2026-11-12. The v0.4 local-orchestrator design is accepted; Phase 0, Phase 1 and Phase 2 are shipped,
+Phase 3 is in progress and Phase 4 is not started. No 0.4 release or date is promised. The slices that
+merged after the 0.3.0 tag are recorded separately below.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the normative v0.2 specification is
@@ -100,9 +101,11 @@ These five slices are on `main` and in the current tree. They are not in the 0.3
 - **Daemon job actions.** Token-gated `POST /api/v1/jobs/{id}/retry`, `/park` and `/cancel` validate
   the current state with the graph transition rules and queue one existing request; the handler never
   changes a job row. See [`design/v0.3/http-api.md`](design/v0.3/http-api.md).
-- **`/jobs` page.** The daemon serves `/jobs` with a job table and token-gated retry, park and cancel
-  controls. Job detail, SSE for the list and the keeper job actions remain later work. See
-  [`design/v0.3/web-window.md`](design/v0.3/web-window.md).
+- **`/jobs` page and job detail.** The daemon serves `/jobs` with a job table and token-gated retry,
+  park and cancel controls, and a read-only `/jobs/{id}` detail page with the job's runs and gates.
+  SSE for the list and the keeper job actions remain later work. See
+  [`design/v0.3/web-window.md`](design/v0.3/web-window.md) and
+  [`design/v0.3/http-api.md`](design/v0.3/http-api.md).
 - **Supervisor-log redaction.** Every supervisor log message is redacted before the line is appended.
   The redactor is loaded once at supervisor start; an unavailable redactor writes a fixed marker
   instead of the message. See [`security.md`](security.md#redaction).
@@ -114,46 +117,77 @@ These five slices are on `main` and in the current tree. They are not in the 0.3
 ## v0.4 — local orchestrator
 
 The v0.4 design is accepted: [`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md)
-records the 2026-11-13 decision. In one sentence: the Mac runs a local surface and an outbound-only
-local node, the home stays the only writer and the only home, the MVP transport is SSH stdio, results
-return by the node pushing `job/<id>` with its own git credentials, the local `vowp chat` path is
-proved first, and offload is opt-in with home-only secret values staying home.
+records the decision. In one sentence: the Mac runs a local surface and an outbound-only local node,
+the home stays the only writer and the only home, the MVP transport is SSH stdio, results return by
+the node pushing `job/<id>` with its own git credentials, the local `vowp chat` path is proved first,
+and offload is opt-in with home-only secret values staying home.
 
-Phase 0 is in progress. `vowp job ls --all --project vowp` on 2026-11-13 showed these live states:
+The accepted phases and their state in this tree:
 
-| Job | Live state | Purpose |
+| Phase | Scope | Status |
 |---|---|---|
-| `v4-local-0-protocol` | fixing | Protocol frames, `PathRef` and node identity types. |
-| `v4-local-0-store` | pending | Enrollment, credential and path-map store. |
-| `v4-local-0-agent-client` | pending | Agent key, enrollment client and status report. |
-| `v4-local-0-gateway` | pending | SSH gateway and node enrollment, revocation and show on the home. |
+| 0 | Protocol frames, node identity, enrollment, SSH gateway and presence | shipped |
+| 1 | Local `vowp chat`: surface pairing, leases, turn ingest, spool replay and takeover | shipped |
+| 2 | Offload executor: placement policy, path map, isolated worktree, events, result push and home verification | shipped; offload is opt-in and off by default |
+| 3 | Local opencode surface: app frames, agent socket, opencode bridge, MCP proxy, orchestrator materialization and local cache | in progress |
+| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | not started |
 
-The same list carries the v0.4 framework jobs that must land first:
+Phase 0 is proved by the wire types in
+[`crates/vowp-protocol/src/agent.rs`](../crates/vowp-protocol/src/agent.rs), the enrollment, key
+authentication and gateway in
+[`crates/vowp-core/src/agent/gateway.rs`](../crates/vowp-core/src/agent/gateway.rs), the node and
+enrollment records in [`crates/vowp-store/src/agent.rs`](../crates/vowp-store/src/agent.rs) and the
+gateway tests in [`crates/vowp-core/tests/agent.rs`](../crates/vowp-core/tests/agent.rs).
 
-| Job | Live state | Purpose |
+Phase 1 is proved by the surface lease implementation in
+[`crates/vowp-core/src/surface/lease.rs`](../crates/vowp-core/src/surface/lease.rs), the local chat
+path in [`crates/vowp-cli/src/chat/mod.rs`](../crates/vowp-cli/src/chat/mod.rs), the pairing test
+[`crates/vowp-agent/tests/surface_pair.rs`](../crates/vowp-agent/tests/surface_pair.rs) and the lease
+tests in [`crates/vowp-core/tests/surface_lease.rs`](../crates/vowp-core/tests/surface_lease.rs).
+
+Phase 2 is proved by [`crates/vowp-core/src/offload/mod.rs`](../crates/vowp-core/src/offload/mod.rs)
+and [`crates/vowp-core/src/offload/policy.rs`](../crates/vowp-core/src/offload/policy.rs), the
+executor and worktree in [`crates/vowp-agent/src/executor.rs`](../crates/vowp-agent/src/executor.rs)
+and [`crates/vowp-agent/src/worktree.rs`](../crates/vowp-agent/src/worktree.rs), and the Phase 2 exit
+test [`crates/vowp-core/tests/offload_e2e.rs`](../crates/vowp-core/tests/offload_e2e.rs). Offload is
+off by default: the `[offload]` table in
+[`crates/vowp-protocol/src/config.rs`](../crates/vowp-protocol/src/config.rs) defaults `enabled` to
+false, every job stays on the home until the owner enables offload and a project opts in, and
+[`crates/vowp-protocol/tests/config.rs`](../crates/vowp-protocol/tests/config.rs) pins that default.
+
+Phase 3 is in progress. These slices are merged in this tree:
+
+| Slice | What is in the tree | Proof |
 |---|---|---|
-| `v4-c1-live-limits` | done | Make the global admission target the only default limit, keep provider caps optional and reload both without a supervisor restart. |
-| `v4-c2-merge-local-base` | done | Rebase the merge queue onto the local default branch. |
-| `v4-c4-planner-dispatch` | done | Dispatch ready planner and keeper jobs. |
-| `v4-c5-live-upgrade-drain` | pending | Defer store migrations while an older supervisor runs, add `down --drain` and `up --replace` rolling handoff, and allow selective project/daemon restart without stopping the whole node ([`design/v0.4/live-upgrade-and-drain.md`](design/v0.4/live-upgrade-and-drain.md)). |
+| App frames | Attach/detach, native event, turn and MCP tool frames; the home assigns the sequence and deduplicates native ids. | [`crates/vowp-protocol/src/agent.rs`](../crates/vowp-protocol/src/agent.rs), [`crates/vowp-protocol/tests/surface.rs`](../crates/vowp-protocol/tests/surface.rs) |
+| Agent socket | A mode-0600 `agent.sock` forwards attach/detach and tool calls over the one outbound connection and correlates results by request id. | [`crates/vowp-agent/src/socket.rs`](../crates/vowp-agent/src/socket.rs), [`crates/vowp-agent/tests/socket.rs`](../crates/vowp-agent/tests/socket.rs) |
+| opencode bridge | Follows the local opencode event stream, maps completed events, backfills from a cursor, normalizes paths and redacts injected values before spooling. | [`crates/vowp-agent/src/bridge.rs`](../crates/vowp-agent/src/bridge.rs), [`crates/vowp-agent/tests/bridge.rs`](../crates/vowp-agent/tests/bridge.rs) |
+| MCP proxy | A local stdio MCP server answers initialize, list and ping locally and forwards tool calls through the agent socket; home-only tools are refused. | [`crates/vowp-cli/src/mcp/proxy.rs`](../crates/vowp-cli/src/mcp/proxy.rs), [`crates/vowp-cli/tests/mcp.rs`](../crates/vowp-cli/tests/mcp.rs) |
+| Home orchestrator record and command drain | The home records a node-bound orchestrator, queues typed start, resume and stop commands durably, and the live gateway drains them and applies correlated results; disconnect and reconnect update the record. | [`crates/vowp-core/src/surface/orchestrator.rs`](../crates/vowp-core/src/surface/orchestrator.rs), [`crates/vowp-core/src/agent/gateway.rs`](../crates/vowp-core/src/agent/gateway.rs), [`crates/vowp-cli/tests/orchestrator.rs`](../crates/vowp-cli/tests/orchestrator.rs) |
+| Agent-side orchestrator host | The agent materializes a private per-orchestrator config, starts the app in its own process group, attaches the paired surface, and keeps the host across a home disconnect; stop signals only that host group. | [`crates/vowp-agent/src/orchestrator.rs`](../crates/vowp-agent/src/orchestrator.rs), [`crates/vowp-agent/tests/orchestrator.rs`](../crates/vowp-agent/tests/orchestrator.rs) |
+| Offline read cache | A bounded private cache under `<state_dir>/cache` answers the six read-only MCP tools with an `as of` line when the home is offline or the reply times out; writes never use it and a revoked surface clears its entries. | [`crates/vowp-agent/src/cache.rs`](../crates/vowp-agent/src/cache.rs), [`crates/vowp-agent/tests/cache.rs`](../crates/vowp-agent/tests/cache.rs) |
+| Job detail page | The daemon serves a read-only job detail API with runs and gates, and the `/jobs/{id}` page renders them. | [`crates/vowp-daemon/src/app.rs`](../crates/vowp-daemon/src/app.rs), [`crates/vowp-daemon/tests/job_detail.rs`](../crates/vowp-daemon/tests/job_detail.rs) |
 
-The protocol job is fixing; the store, agent-client and gateway jobs are pending, so the gateway and
-every later local-orchestrator phase are not started. The `/jobs` page from the 0.3 wave is merged;
-its job detail, list stream and keeper actions remain later work. No 0.4 release date is promised.
+Phase 3 remains in progress; no 0.4 release or date is promised.
+
+Phase 4 has not started: WSS ingress, launchd, token rotation UX, bundle result, separate user,
+metrics and docs.
 
 ## Open follow-ups
 
-These are candidates drawn from the current code and the 0.3.0 known limitations. They are not
-commitments, no release is promised, and a design note is linked only where one exists.
+These follow-ups are drawn from the current code and the 0.3.0 known limitations. One has shipped;
+the rest are candidates or design work. They are not commitments, no release is promised, and a
+design note is linked only where one exists.
 
 | Follow-up | Status | Design note or current limit |
 |---|---|---|
 | ACP streaming chunk events and a permission flow | design | [`design/v0.2/acp-adapter.md`](design/v0.2/acp-adapter.md), [`0.3.0` known limitations](release/0.3.0.md#acp-adapter) |
 | Live updates for the cost, inbox and nodes pages (they poll every five seconds) | candidate | [`design/v0.3/web-window.md`](design/v0.3/web-window.md) |
 | Node add, remove and probe writes through the API (the nodes route is read-only) | candidate | [`design/v0.3/http-api.md`](design/v0.3/http-api.md) |
-| Job detail, SSE for the jobs list and the keeper job actions | design | [`design/v0.3/web-window.md`](design/v0.3/web-window.md), [`design/v0.3/http-api.md`](design/v0.3/http-api.md) |
+| Job detail page (`/jobs/{id}`) and its runs and gates | shipped | [`design/v0.3/web-window.md`](design/v0.3/web-window.md), [`design/v0.3/http-api.md`](design/v0.3/http-api.md) |
+| SSE for the jobs list and the keeper job actions (nudge, restart, replan and fail) | design | [`design/v0.3/web-window.md`](design/v0.3/web-window.md), [`design/v0.3/http-api.md`](design/v0.3/http-api.md) |
 | A browser chat turn (needs a run queue and cancellation) | design | [`design/v0.3/web-window.md`](design/v0.3/web-window.md) |
-| A full-directory push and a bidirectional `session sync` | design | [`design/v0.2/cross-node-sync.md`](design/v0.2/cross-node-sync.md) |
+| A full-directory push (the `--full` form of `session push`) and a bidirectional `session sync` | design | [`design/v0.2/cross-node-sync.md`](design/v0.2/cross-node-sync.md) |
 | Multi-user accounts, quotas, roles and audit | open | — |
 | VPS metrics history and alerts | open | — |
 | Parallel fan-out with a bounded budget | open | — |
