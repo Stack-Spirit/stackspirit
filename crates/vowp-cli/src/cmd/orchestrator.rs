@@ -395,3 +395,10 @@ fn app_name(app: OrchestratorApp) -> &'static str {
         OrchestratorApp::Chat => "chat",
     }
 }
+
+// The package root is the workspace root, so Cargo does not auto-discover the
+// `crates/vowp-cli/tests/` directory. Compile the owned integration-style suite as a
+// library test instead; the shared root `Cargo.toml` stays untouched.
+#[cfg(test)]
+#[path = "../../tests/orchestrator.rs"]
+mod integration_tests;

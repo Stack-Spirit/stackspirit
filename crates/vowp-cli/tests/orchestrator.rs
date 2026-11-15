@@ -5,8 +5,9 @@
 //! Claude, or read the real home. The `chat` app has no host and is exercised through the
 //! real CLI and its project-local state.
 
-// This file is the `orchestrator` integration test target declared in the root
-// `Cargo.toml` (the `vowp-cli` package root is the workspace root).
+// This file is compiled as a `vowp-cli` library test module through the owned
+// `src/cmd/orchestrator.rs`; the workspace package root has no auto-discovered
+// `tests/` directory, and the job may not edit the shared root `Cargo.toml`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ use vowp_core::surface::mirror::MirrorCursor;
 use vowp_core::surface::native::{AppHandle, AppHost, HostHealth, HostRequest, TranscriptBatch, TranscriptEntry};
 use vowp_core::surface::orchestrator::{NewOrchestrator, Orchestrator, OrchestratorTransport};
 
-use vowp_cli::{BufferIo, Ctx, Global};
+use crate::{BufferIo, Ctx, Global};
 
 /// A temporary node home and project, with no tmux and no real harness.
 struct TestEnv {
@@ -113,7 +114,7 @@ impl TestEnv {
         ];
         full.extend(args.iter().map(|value| (*value).to_owned()));
         let mut io = BufferIo::new("");
-        let code = vowp_cli::run(full, &mut io);
+        let code = crate::run(full, &mut io);
         (code, io.stdout(), io.stderr())
     }
 
