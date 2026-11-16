@@ -6,6 +6,7 @@ import type {
   LocalAgentStatus,
   ModelChoice,
 } from "../bridge/wire";
+import type { Tone } from "./connection";
 
 /** The Phase 3 capability set named by VOWP-CONTRACT.md §11.3. */
 export const PHASE3_MILESTONES = [
@@ -241,6 +242,71 @@ export function localAgentLabel(agent: LocalAgentStatus): string {
 
 export type GateAction = "local_orchestrator" | "asif_export" | "asif_import";
 
+/** The honest local session states shown by the D6 Engine panel. */
+export function localSessionStateLabel(state: string): string {
+  switch (state) {
+    case "active":
+      return "Active";
+    case "idle":
+      return "Idle";
+    case "running":
+      return "Running";
+    case "blocked":
+      return "Blocked";
+    case "switching":
+      return "Switching";
+    case "closed":
+      return "Closed";
+    case "pending":
+      return "Pending pairing";
+    case "disconnected":
+      return "Disconnected";
+    case "degraded":
+      return "Degraded";
+    case "reconnecting":
+      return "Reconnecting";
+    case "revoked":
+      return "Revoked";
+    case "superseded":
+      return "Superseded";
+    case "stopped":
+      return "Stopped";
+    default:
+      return "Unknown";
+  }
+}
+
+/** The badge tone for one honest local session state. */
+export function localSessionStateTone(state: string): Tone {
+  switch (state) {
+    case "active":
+    case "running":
+      return "ok";
+    case "idle":
+      return "info";
+    case "blocked":
+    case "switching":
+    case "pending":
+    case "degraded":
+    case "reconnecting":
+      return "warn";
+    case "revoked":
+    case "superseded":
+    case "disconnected":
+    case "stopped":
+    case "closed":
+      return "danger";
+    default:
+      return "unknown";
+  }
+}
+
+/** The local-orchestrator prerequisite copy, including the exact missing labels. */
+export function localOrchestratorReason(gates: GateSnapshot | null): string {
+  if (!gates) return "Probe the VOWP home to check local orchestrator support.";
+  return gateActionReason(gates, "local_orchestrator");
+}
+
 export function gateActionEnabled(
   gates: GateSnapshot | null,
   action: GateAction,
@@ -278,11 +344,11 @@ export function gateActionReason(
     if (gate.state === "unknown") {
       return "Probe the VOWP home to check local orchestrator support.";
     }
-    if (!gates.features.local_orchestrator_actions) {
-      return GATE_NOT_IMPLEMENTED_LOCAL;
-    }
     if (gates.local_agent.state !== "connected") {
       return "The local VOWP agent is not connected. Enroll it on this Mac first.";
+    }
+    if (!gates.features.local_orchestrator_actions) {
+      return GATE_NOT_IMPLEMENTED_LOCAL;
     }
     return "";
   }

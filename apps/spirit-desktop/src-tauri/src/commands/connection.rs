@@ -46,12 +46,15 @@ pub async fn connect_host(
     let client = state.client_for(&host);
     state.set_client(Some(client.clone()));
     state.set_active_host(Some(host.clone()));
+    state.clear_local_orchestrator_state().await;
 
     let result = manager.connect(client.as_ref(), id.clone()).await;
     let snapshot = match result {
         Ok(snapshot) => snapshot,
         Err(error) => {
             state.set_client(None);
+            state.set_active_host(None);
+            state.clear_local_orchestrator_state().await;
             // `ssh` reports a generic host-key failure. Re-scan the host so the UI can
             // show both fingerprints, but only when the pin itself no longer matches.
             if error.code == SpiritErrorCode::HostKeyMismatch {
@@ -92,6 +95,7 @@ pub async fn disconnect_host(
     let snapshot = manager.disconnect();
     state.set_client(None);
     state.set_active_host(None);
+    state.clear_local_orchestrator_state().await;
     Ok(snapshot)
 }
 

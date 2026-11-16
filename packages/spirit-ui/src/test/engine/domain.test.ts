@@ -150,14 +150,19 @@ describe("engine domain helpers", () => {
     expect(gateActionEnabled(asif, "asif_import")).toBe(true);
 
     const local = readyLocalGates();
+    local.local_agent.state = "connected";
+    local.local_agent.node = "mac-studio";
+    local.local_agent.protocol = "vowp-agent/1";
     expect(gateActionReason(local, "local_orchestrator")).toBe(
       GATE_NOT_IMPLEMENTED_LOCAL,
     );
     local.features.local_orchestrator_actions = true;
-    local.local_agent.state = "connected";
     expect(gateActionEnabled(local, "local_orchestrator")).toBe(true);
     local.local_agent.state = "not_installed";
     expect(gateActionEnabled(local, "local_orchestrator")).toBe(false);
+    expect(gateActionReason(local, "local_orchestrator")).toContain(
+      "local VOWP agent is not connected",
+    );
   });
 
   it("waiting gates name the exact missing milestone", () => {

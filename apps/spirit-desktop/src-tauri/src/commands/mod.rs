@@ -6,3 +6,4 @@ pub mod engine;
 pub mod fleet;
 pub mod gates;
 pub mod hosts;
+pub mod local_orchestrator;

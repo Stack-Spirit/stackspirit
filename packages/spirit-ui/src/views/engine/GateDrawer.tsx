@@ -130,9 +130,12 @@ export function GateDrawer({ kind, gates, open, onClose }: GateDrawerProps) {
           <h3 className="panel__title">StackSpirit action</h3>
           <p className="muted small">
             {kind === "local"
-              ? gates?.features.local_orchestrator_actions
+              ? gates && gateActionEnabled(gates, "local_orchestrator")
                 ? "Enabled in this build."
-                : "Not implemented in this build. The action stays disabled even when VOWP is ready."
+                : gates?.local_orchestrator.state === "ready" &&
+                    gates.local_agent.state === "connected"
+                  ? "Not implemented in this build. The action stays disabled even when VOWP is ready."
+                  : "Disabled until the local-orchestrator gate is Ready and the local VOWP agent is connected."
               : gates?.features.asif_actions
                 ? "Enabled in this build."
                 : "Not implemented in this build. Export and import stay disabled even when VOWP is ready."}

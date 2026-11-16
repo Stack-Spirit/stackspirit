@@ -16,7 +16,7 @@ use spirit_core::error::SpiritError;
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
 use spirit_core::ssh::{CommandRunner, SshOptions, SystemCommandRunner};
 use spirit_core::time::Timestamp;
-use spirit_core::vowp::{SshVowpClient, VowpClient};
+use spirit_core::vowp::{CommandLocalAgent, LocalAgentClient, SshVowpClient, VowpClient};
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 use crate::error::CommandResult;
@@ -26,12 +26,19 @@ const KEYCHAIN_SERVICE: &str = "com.stackspirit.desktop";
 /// True only in the D5 build, which ships the ASIF export/import actions.
 pub(crate) const ASIF_ACTIONS_ENABLED: bool = cfg!(feature = "d5");
 
-/// The feature flags this build advertises. D5 flips exactly the ASIF switch; local
-/// orchestrator actions remain off until D6.
+/// True in the D6 build, which ships the local-orchestrator actions.
+///
+/// This is the build capability only. The published flag is still derived from the
+/// three-part enable rule in `spirit-core`: the flag is on exactly when the
+/// `LocalOrchestratorGate` is `Ready` **and** the local agent is `connected`.
+pub(crate) const LOCAL_ORCHESTRATOR_ACTIONS_ENABLED: bool = true;
+
+/// The feature flags this build advertises. D5 flips the ASIF switch; the D6 build
+/// flips the local-orchestrator switch only for a `Ready` gate and a connected agent.
 pub(crate) fn build_gate_features() -> GateFeatureFlags {
     GateFeatureFlags {
         asif_actions: ASIF_ACTIONS_ENABLED,
-        local_orchestrator_actions: false,
+        local_orchestrator_actions: LOCAL_ORCHESTRATOR_ACTIONS_ENABLED,
     }
 }
 
@@ -64,6 +71,7 @@ pub struct AppState {
     engine_catalog: ModelCatalog,
     engine_preferences: Arc<dyn EnginePreferencesStore>,
     engine_keychain: Arc<dyn Keychain>,
+    local_agent: Arc<dyn LocalAgentClient>,
     gate_cache: HostGateCache,
     connection: ConnectionManager,
 }
@@ -88,6 +96,11 @@ impl AppState {
         let keychain: Arc<dyn Keychain> = Arc::new(
             OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
         );
+
+        // The Mac-side agent is always local: it runs `vowp agent ...` with the local
+        // command runner and never over SSH.
+        let local_agent: Arc<dyn LocalAgentClient> =
+            Arc::new(CommandLocalAgent::new(Arc::new(SystemCommandRunner)));
 
         // The bundled choice resolves only the sidecar next to the application binary or
         // in its resource directory. It never consults PATH. Stored BYOK keys are read
@@ -115,6 +128,7 @@ impl AppState {
                 engine_catalog: bundled_catalog(),
                 engine_preferences: Arc::new(preferences),
                 engine_keychain: keychain,
+                local_agent,
                 gate_cache: HostGateCache::new(),
                 connection,
             },
@@ -152,6 +166,21 @@ impl AppState {
 
     pub(crate) fn engine_keychain(&self) -> &dyn Keychain {
         self.engine_keychain.as_ref()
+    }
+
+    /// Returns the Mac-side local agent client. It never uses SSH.
+    pub(crate) fn local_agent(&self) -> Arc<dyn LocalAgentClient> {
+        self.local_agent.clone()
+    }
+
+    /// Forgets node and path-map evidence that belonged to the previous connection.
+    ///
+    /// A new host can have a node with the same name; the D6 guard must never
+    /// authorize an action from a card or path map read through another connection.
+    pub(crate) async fn clear_local_orchestrator_state(&self) {
+        let core = self.core().await;
+        core.clear_local_node_card();
+        core.set_local_agent_paths(&[]);
     }
 
     pub(crate) fn gate_cache(&self) -> &HostGateCache {

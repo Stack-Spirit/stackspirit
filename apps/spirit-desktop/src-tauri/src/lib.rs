@@ -57,6 +57,20 @@ pub fn run() {
             commands::asif::probe_gates_with_build_flags,
             commands::asif::asif_export,
             commands::asif::asif_import,
+            commands::local_orchestrator::local_orchestrator_overview,
+            commands::local_orchestrator::local_agent_status,
+            commands::local_orchestrator::local_agent_pair,
+            commands::local_orchestrator::local_agent_paths,
+            commands::local_orchestrator::local_agent_path_add,
+            commands::local_orchestrator::local_agent_path_remove,
+            commands::local_orchestrator::local_surface_pair,
+            commands::local_orchestrator::local_surface_list,
+            commands::local_orchestrator::local_surface_rotate,
+            commands::local_orchestrator::local_surface_revoke,
+            commands::local_orchestrator::local_orchestrator_new,
+            commands::local_orchestrator::local_orchestrator_list,
+            commands::local_orchestrator::local_orchestrator_stop,
+            commands::local_orchestrator::local_orchestrator_resume,
         ])
         .run(tauri::generate_context!())
         .expect("error while running StackSpirit");

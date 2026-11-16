@@ -110,7 +110,13 @@ describe("VOWP capability gate cards", () => {
   });
 
   it("gate_ready_fixture_still_disables_unimplemented_action", () => {
-    renderEngine(engineWith(), { gates: readyLocalGates() });
+    const gates = readyLocalGates();
+    // The flag-off copy belongs to a build that has no D6 action even though the gate
+    // and the local agent are healthy. A disconnected agent has its own prerequisite.
+    gates.local_agent.state = "connected";
+    gates.local_agent.node = "mac-studio";
+    gates.local_agent.protocol = "vowp-agent/1";
+    renderEngine(engineWith(), { gates });
     const local = screen.getByTestId("gate-card-local");
     expect(within(local).getByText("Ready")).toBeInTheDocument();
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();

@@ -14,6 +14,8 @@ export interface GateCardProps {
   kind: "local" | "asif";
   gates: GateSnapshot;
   onDetails: () => void;
+  /** Opens the Engine local-orchestrator panel when the D6 action is enabled. */
+  onRunLocally?: () => void;
 }
 
 function localDetail(gates: GateSnapshot): string | null {
@@ -44,7 +46,7 @@ function asifDetail(gates: GateSnapshot): string | null {
   return null;
 }
 
-export function GateCard({ kind, gates, onDetails }: GateCardProps) {
+export function GateCard({ kind, gates, onDetails, onRunLocally }: GateCardProps) {
   const openSessions = useFleetStore((state) => state.openSessions);
   const local = gates.local_orchestrator;
   const asif = gates.asif;
@@ -100,6 +102,7 @@ export function GateCard({ kind, gates, onDetails }: GateCardProps) {
               size="sm"
               disabled={!localEnabled}
               title={localEnabled ? undefined : gateActionReason(gates, "local_orchestrator")}
+              onClick={localEnabled ? onRunLocally : undefined}
             >
               Run locally
             </Button>

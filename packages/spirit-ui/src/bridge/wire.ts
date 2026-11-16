@@ -242,6 +242,213 @@ export interface GateSnapshot {
   features: { asif_actions: boolean; local_orchestrator_actions: boolean };
 }
 
+/** The honest local session/surface state shown by the D6 Engine panel. */
+export type LocalSessionState =
+  | "active"
+  | "idle"
+  | "running"
+  | "blocked"
+  | "switching"
+  | "closed"
+  | "pending"
+  | "disconnected"
+  | "degraded"
+  | "reconnecting"
+  | "revoked"
+  | "superseded"
+  | "stopped"
+  | "unknown";
+
+/** One local surface stored by the Mac agent; never the token or its file. */
+export interface LocalAgentSurfaceView {
+  surface: string;
+  prefix: string | null;
+  expires_at: Timestamp | null;
+  state: string;
+}
+
+/** The safe Mac agent status view, including local cache counters. */
+export interface LocalAgentView {
+  state: string;
+  node: string | null;
+  protocol: string | null;
+  last_heartbeat: Timestamp | null;
+  last_error: string | null;
+  cache_entries: number;
+  cache_bytes: number;
+  cache_oldest_at: Timestamp | null;
+  surfaces: LocalAgentSurfaceView[];
+}
+
+/** One home surface with its honest node/agent/lease/session state. */
+export interface LocalSurfaceView {
+  surface_id: string;
+  node: string;
+  protocol: string | null;
+  agent_status: string;
+  lease_holder: string | null;
+  session_state: LocalSessionState;
+  kind: string;
+  state: string;
+  expires_at: Timestamp | null;
+  expired: boolean;
+  rotation_pending: boolean;
+  can_write: boolean;
+}
+
+/** One local orchestrator with the node, protocol, agent and lease state. */
+export interface LocalOrchestratorView {
+  name: string;
+  session_id: string;
+  project: string | null;
+  app: string;
+  state: string;
+  node: string | null;
+  protocol: string | null;
+  agent_status: string;
+  lease_holder: string | null;
+  session_state: LocalSessionState;
+  join: JoinView;
+}
+
+/** A safe Mac path-map summary. The absolute Mac root is deliberately absent. */
+export interface AgentPathView {
+  project: string;
+  path_ref: string;
+  worktree_root_configured: boolean;
+  allow: string[];
+  valid: boolean;
+  invalid_reason: string | null;
+}
+
+/** The redacted `vowp node show --json` fields the D6 UI displays. */
+export interface NodeCardView {
+  name: string;
+  kind: string;
+  status: string;
+  presence: string;
+  labels: string[];
+  runs: number;
+  mapped: string[];
+  agent_version: string | null;
+  protocol: string | null;
+  last_error: string | null;
+}
+
+/** The safe local read model behind the Engine local-orchestrator panel. */
+export interface LocalOrchestratorOverview {
+  agent: LocalAgentView;
+  node: NodeCardView | null;
+  surfaces: LocalSurfaceView[];
+  orchestrators: LocalOrchestratorView[];
+  paths: AgentPathView[];
+  paths_error: string | null;
+}
+
+/** One home surface row from `vowp surface ls --json`. */
+export interface SurfaceEntryView {
+  id: string;
+  node: string;
+  kind: string;
+  state: string;
+  scopes: string[];
+  prefix: string | null;
+  expires_at: Timestamp | null;
+  overlap_until: Timestamp | null;
+  expired: boolean;
+  pending: boolean;
+  queued_at: Timestamp | null;
+  delivery_deadline: Timestamp | null;
+}
+
+/** A requested home surface pairing. */
+export interface SurfacePairInput {
+  session: string;
+  node: string;
+  kind: "opencode" | "chat";
+  app?: string | null;
+  replace?: string | null;
+}
+
+/** Safe pairing fields; the one-time code is returned separately. */
+export interface SurfacePairingView {
+  surface: string;
+  node: string;
+  session: string;
+  kind: string;
+  app: string | null;
+  expires_at: Timestamp;
+  command: string;
+  replaced: string | null;
+}
+
+/**
+ * The direct result of a home pairing. `code` is a one-time credential: the renderer
+ * may show it once for the owner to copy and must never log or persist it.
+ */
+export interface SurfacePairResult {
+  pairing: SurfacePairingView;
+  code: string;
+}
+
+/** A requested Mac-side surface pairing. */
+export interface AgentPairInput {
+  code: string;
+  surface: string;
+  session: string;
+  app?: string | null;
+}
+
+/** A paired Mac surface, without the token or its file path. */
+export interface AgentPairing {
+  surface_id: string;
+  scopes: string[];
+  expires_at: Timestamp;
+}
+
+/** A requested surface token rotation. */
+export interface SurfaceRotateInput {
+  surface: string;
+  node?: string | null;
+  wait?: string | null;
+  grace?: string | null;
+}
+
+/** The `vowp surface rotate --json` result; the token itself is never on the wire. */
+export interface SurfaceRotateResult {
+  surface: string;
+  node: string;
+  prefix: string;
+  expires_at: Timestamp;
+  old_expires_at: Timestamp;
+  pending: boolean;
+  queued_at: Timestamp | null;
+}
+
+/** The `vowp surface revoke --json` result. */
+export interface SurfaceRevokeResult {
+  surface: string;
+  status: string;
+  tokens_revoked: number;
+}
+
+/** A requested `vowp orchestrator new` local app host. */
+export interface OrchestratorNewInput {
+  node: string;
+  app: "opencode" | "claude_code" | "chat";
+  project?: string | null;
+  name?: string | null;
+  force?: boolean;
+}
+
+/** A requested Mac path-map row. `projectRoot` stays on the Mac. */
+export interface AgentPathAddInput {
+  projectRoot: string;
+  name: string;
+  worktreeRoot?: string | null;
+  allow?: string[];
+}
+
 export type WireWarningCode =
   | "unknown_enum"
   | "missing_optional"

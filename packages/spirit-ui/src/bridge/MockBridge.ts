@@ -1,6 +1,10 @@
 import type { SpiritBridge } from "./SpiritBridge";
 import type {
   ActionResult,
+  AgentPairInput,
+  AgentPairing,
+  AgentPathAddInput,
+  AgentPathView,
   AsifExportOptions,
   AsifExportResult,
   AsifGate,
@@ -32,15 +36,29 @@ import type {
   JobRunView,
   KeyStatus,
   LatencyStats,
+  LocalAgentSurfaceView,
+  LocalAgentView,
   LocalOrchestratorGate,
+  LocalOrchestratorOverview,
+  LocalOrchestratorView,
+  LocalSurfaceView,
   ModelChoice,
   NewHostProfile,
+  NodeCardView,
+  OrchestratorNewInput,
+  OrchestratorView,
   ProjectView,
   RawDocument,
   SessionCardView,
   SetTargetInput,
   SpiritErrorDto,
   StateEvent,
+  SurfaceEntryView,
+  SurfacePairInput,
+  SurfacePairResult,
+  SurfaceRevokeResult,
+  SurfaceRotateInput,
+  SurfaceRotateResult,
   TargetView,
   WireWarning,
   WorkerCardView,
@@ -75,6 +93,10 @@ export const MOCK_SCENARIOS = [
   "asif-strict-refusal",
   "asif-conflict",
   "job-detail-error",
+  "gate-d6-waiting",
+  "gate-d6-incompatible",
+  "gate-d6-ready",
+  "gate-d6-revoked",
 ] as const;
 
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
@@ -108,6 +130,14 @@ interface MockOptions {
   hosts?: HostProfile[];
 }
 
+interface MockLocalState {
+  agent: LocalAgentView;
+  node: NodeCardView | null;
+  surfaces: LocalSurfaceView[];
+  orchestrators: LocalOrchestratorView[];
+  paths: AgentPathView[];
+}
+
 /** One recorded job action including the park reason the UI supplied. */
 export interface MockJobAction extends ActionResult {
   reason: string | null;
@@ -123,6 +153,32 @@ export interface MockAsifCall {
 }
 
 const ASIF_IMPORTED_SESSION = "01JCF5WQ8ZK3M2V7N4P6R8T0AF";
+
+/** The D6 preview session, surface and node names. None of these is a credential. */
+const LOCAL_SESSION_ID = "01JCF5WQ8ZK3M2V7N4P6R8T0AE";
+const LOCAL_SURFACE_ID = "01J9Z00000000000000000000A";
+const LOCAL_REVOKED_SURFACE_ID = "01J9Z00000000000000000000B";
+const LOCAL_NODE = "mac-studio";
+const LOCAL_PAIRING_CODE = "pairing-code-placeholder";
+
+/** One recorded D6 call. Preview-only; it never touches a real host or agent. */
+export interface MockLocalCall {
+  action:
+    | "agent_pair"
+    | "agent_path_add"
+    | "agent_path_remove"
+    | "surface_pair"
+    | "surface_list"
+    | "surface_rotate"
+    | "surface_revoke"
+    | "orchestrator_new"
+    | "orchestrator_list"
+    | "orchestrator_stop"
+    | "orchestrator_resume";
+  name: string | null;
+}
+
+type MockLocalGateMode = "unknown" | "waiting" | "incompatible" | "ready" | "revoked";
 
 type MockGateMode = "unknown" | "waiting" | "ready" | "ready-export-only";
 
@@ -182,6 +238,8 @@ export class MockBridge implements SpiritBridge {
   private backendDown: boolean;
   private actions: MockJobAction[] = [];
   private asifCalls: MockAsifCall[] = [];
+  private localCalls: MockLocalCall[] = [];
+  private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
 
@@ -224,7 +282,10 @@ export class MockBridge implements SpiritBridge {
         verified_at: now,
       },
     ];
-    const readyEngine = this.scenario === "engine-ready" || this.scenario === "fresh";
+    const readyEngine =
+      this.scenario === "engine-ready" ||
+      this.scenario === "fresh" ||
+      this.scenario.startsWith("gate-d6-");
     this.engineStatus = {
       choice: { type: "bundled" },
       state: readyEngine ? { state: "ready" } : { state: "stopped" },
@@ -237,6 +298,7 @@ export class MockBridge implements SpiritBridge {
       last_error: null,
     };
     this.gateSnapshot = this.makeGates(this.gateMode(false));
+    this.localState = this.makeLocalState();
     this.inboxItems = this.makeInbox();
   }
 
@@ -682,6 +744,7 @@ export class MockBridge implements SpiritBridge {
     get: async (): Promise<GateSnapshot> => clone(this.gateSnapshot),
     probe: async (): Promise<GateSnapshot> => {
       this.gateSnapshot = this.makeGates(this.gateMode(true), this.now());
+      this.localState = this.makeLocalState();
       this.emit({ kind: "gates", revision: this.nextRevision(), gates: clone(this.gateSnapshot) });
       return clone(this.gateSnapshot);
     },
@@ -770,12 +833,285 @@ export class MockBridge implements SpiritBridge {
     },
   };
 
+  localOrchestratorsApi = {
+    overview: async (): Promise<LocalOrchestratorOverview> => {
+      this.requireConnectedHost();
+      return clone({
+        agent: this.localState.agent,
+        node: this.localState.node,
+        surfaces: this.localState.surfaces,
+        orchestrators: this.localState.orchestrators,
+        paths: this.localState.paths,
+        paths_error: null,
+      });
+    },
+    agentStatus: async (): Promise<LocalAgentView> => clone(this.localState.agent),
+    agentPair: async (input: AgentPairInput): Promise<AgentPairing> => {
+      this.validateAgentPair(input);
+      this.requireLocalAction("agent_pair");
+      this.recordLocal("agent_pair", input.surface);
+      const surface = this.localState.surfaces.find(
+        (candidate) => candidate.surface_id === input.surface,
+      );
+      if (!surface) {
+        throw errorDto("not_found", `Surface ${input.surface} was not found.`);
+      }
+      const paired: LocalSurfaceView = {
+        ...surface,
+        state: "attached",
+        agent_status: "connected",
+        session_state: "active",
+        can_write: true,
+      };
+      const agentSurfaces: LocalAgentSurfaceView[] = [
+        ...this.localState.agent.surfaces.filter((row) => row.surface !== input.surface),
+        {
+          surface: input.surface,
+          prefix: "vowp_surf_ab",
+          expires_at: iso(this.nowMs + 30 * 24 * 3_600_000),
+          state: "paired",
+        },
+      ];
+      this.localState = {
+        ...this.localState,
+        agent: { ...this.localState.agent, surfaces: agentSurfaces },
+        surfaces: this.localState.surfaces.map((row) =>
+          row.surface_id === input.surface ? paired : row,
+        ),
+      };
+      return {
+        surface_id: input.surface,
+        scopes: [`session.read:${input.session}`, `session.write:${input.session}`],
+        expires_at: iso(this.nowMs + 30 * 24 * 3_600_000),
+      };
+    },
+    agentPaths: async (): Promise<AgentPathView[]> => clone(this.localState.paths),
+    agentPathAdd: async (input: AgentPathAddInput): Promise<AgentPathView> => {
+      this.validatePathAdd(input);
+      this.recordLocal("agent_path_add", input.name);
+      const view: AgentPathView = {
+        project: input.name,
+        path_ref: `project:${input.name}`,
+        worktree_root_configured: Boolean(input.worktreeRoot),
+        allow: [...(input.allow ?? [])],
+        valid: true,
+        invalid_reason: null,
+      };
+      this.localState = {
+        ...this.localState,
+        paths: [...this.localState.paths.filter((row) => row.project !== input.name), view],
+      };
+      return clone(view);
+    },
+    agentPathRemove: async (project: string): Promise<void> => {
+      this.validateProject(project);
+      this.recordLocal("agent_path_remove", project);
+      this.localState = {
+        ...this.localState,
+        paths: this.localState.paths.filter((row) => row.project !== project),
+      };
+    },
+    surfacePair: async (input: SurfacePairInput): Promise<SurfacePairResult> => {
+      this.validateSurfacePair(input);
+      this.requireLocalAction("surface_pair");
+      this.recordLocal("surface_pair", input.node);
+      const surfaceId = `01J9Z${String(100 + this.localState.surfaces.length).padStart(21, "0")}`;
+      const surface: LocalSurfaceView = {
+        surface_id: surfaceId,
+        node: input.node,
+        protocol: "vowp-agent/1",
+        agent_status: this.localState.agent.state,
+        lease_holder: null,
+        session_state: "pending",
+        kind: input.kind,
+        state: "pending",
+        expires_at: iso(this.nowMs + 10 * 60_000),
+        expired: false,
+        rotation_pending: false,
+        can_write: false,
+      };
+      this.localState = {
+        ...this.localState,
+        surfaces: [...this.localState.surfaces, surface],
+      };
+      const command = [
+        "vowp agent pair --code-file -",
+        `--surface ${surfaceId}`,
+        `--session ${input.session}`,
+        input.app ? `--app ${input.app}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      return {
+        pairing: {
+          surface: surfaceId,
+          node: input.node,
+          session: input.session,
+          kind: input.kind,
+          app: input.app ?? null,
+          expires_at: iso(this.nowMs + 10 * 60_000),
+          command,
+          replaced: input.replace ?? null,
+        },
+        code: LOCAL_PAIRING_CODE,
+      };
+    },
+    surfaceList: async (node?: string | null): Promise<SurfaceEntryView[]> => {
+      this.requireConnectedHost();
+      this.recordLocal("surface_list", node ?? null);
+      return clone(
+        this.localState.surfaces
+          .filter((surface) => !node || surface.node === node)
+          .map((surface) => this.toSurfaceEntry(surface)),
+      );
+    },
+    surfaceRotate: async (input: SurfaceRotateInput): Promise<SurfaceRotateResult> => {
+      this.validateSurfaceRotate(input);
+      this.requireConnectedHost();
+      this.requireLocalAction("surface_rotate");
+      this.recordLocal("surface_rotate", input.surface);
+      const surface = this.localState.surfaces.find(
+        (candidate) => candidate.surface_id === input.surface,
+      );
+      if (!surface) {
+        throw errorDto("not_found", `Surface ${input.surface} was not found.`);
+      }
+      this.localState = {
+        ...this.localState,
+        surfaces: this.localState.surfaces.map((row) =>
+          row.surface_id === input.surface ? { ...row, rotation_pending: true } : row,
+        ),
+      };
+      return {
+        surface: input.surface,
+        node: surface.node,
+        prefix: "vowp_surf_cd",
+        expires_at: iso(this.nowMs + 30 * 24 * 3_600_000),
+        old_expires_at: iso(this.nowMs + 10 * 60_000),
+        pending: true,
+        queued_at: this.now(),
+      };
+    },
+    surfaceRevoke: async (surface: string): Promise<SurfaceRevokeResult> => {
+      this.validateSurfaceId(surface);
+      this.requireConnectedHost();
+      this.recordLocal("surface_revoke", surface);
+      const known = this.localState.surfaces.some((row) => row.surface_id === surface);
+      if (!known) {
+        throw errorDto("not_found", `Surface ${surface} was not found.`);
+      }
+      this.localState = {
+        ...this.localState,
+        surfaces: this.localState.surfaces.map((row) =>
+          row.surface_id === surface
+            ? {
+                ...row,
+                state: "revoked",
+                session_state: "revoked",
+                can_write: false,
+                expired: true,
+              }
+            : row,
+        ),
+      };
+      return { surface, status: "revoked", tokens_revoked: 1 };
+    },
+    orchestratorNew: async (input: OrchestratorNewInput): Promise<OrchestratorView> => {
+      this.validateOrchestratorNew(input);
+      this.requireLocalAction("orchestrator_new");
+      this.recordLocal("orchestrator_new", input.name ?? input.node);
+      const name = input.name ?? `local-${this.localState.orchestrators.length + 1}`;
+      const existing = this.localState.orchestrators.find((row) => row.name === name);
+      if (existing && !input.force) {
+        throw errorDto("conflict", `Orchestrator ${name} already exists.`);
+      }
+      const view: LocalOrchestratorView = {
+        name,
+        session_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AG",
+        project: input.project ?? null,
+        app: input.app,
+        state: "running",
+        node: input.node,
+        protocol: "vowp-agent/1",
+        agent_status: this.localState.agent.state,
+        lease_holder: "StackSpirit Desktop",
+        session_state: "running",
+        join: this.localJoin("01JCF5WQ8ZK3M2V7N4P6R8T0AG"),
+      };
+      this.localState = {
+        ...this.localState,
+        orchestrators: [
+          ...this.localState.orchestrators.filter((row) => row.name !== name),
+          view,
+        ],
+      };
+      return clone(this.toOrchestrator(view));
+    },
+    orchestratorList: async (): Promise<OrchestratorView[]> => {
+      this.requireConnectedHost();
+      this.recordLocal("orchestrator_list", null);
+      return clone(this.localState.orchestrators.map((row) => this.toOrchestrator(row)));
+    },
+    orchestratorStop: async (name: string): Promise<OrchestratorView> => {
+      this.requireConnectedHost();
+      this.validateOrchestratorName(name);
+      this.recordLocal("orchestrator_stop", name);
+      const orchestrator = this.localState.orchestrators.find((row) => row.name === name);
+      if (!orchestrator) {
+        throw errorDto("not_found", `Orchestrator ${name} was not found.`);
+      }
+      const stopped: LocalOrchestratorView = {
+        ...orchestrator,
+        state: "stopped",
+        session_state: "stopped",
+        lease_holder: null,
+      };
+      this.localState = {
+        ...this.localState,
+        orchestrators: this.localState.orchestrators.map((row) =>
+          row.name === name ? stopped : row,
+        ),
+      };
+      return clone(this.toOrchestrator(stopped));
+    },
+    orchestratorResume: async (
+      name: string,
+      project?: string | null,
+      node?: string | null,
+    ): Promise<OrchestratorView> => {
+      this.validateOrchestratorName(name);
+      this.requireConnectedHost();
+      if (project) this.validateProject(project);
+      if (node) this.validateNode(node);
+      this.requireLocalAction("orchestrator_resume");
+      this.recordLocal("orchestrator_resume", name);
+      const orchestrator = this.localState.orchestrators.find((row) => row.name === name);
+      if (!orchestrator) {
+        throw errorDto("not_found", `Orchestrator ${name} was not found.`);
+      }
+      const running: LocalOrchestratorView = {
+        ...orchestrator,
+        state: "running",
+        session_state: "running",
+        lease_holder: "StackSpirit Desktop",
+      };
+      this.localState = {
+        ...this.localState,
+        orchestrators: this.localState.orchestrators.map((row) =>
+          row.name === name ? running : row,
+        ),
+      };
+      return clone(this.toOrchestrator(running));
+    },
+  };
+
   hosts = this.hostsApi;
   connection = this.connectionApi;
   fleet = this.fleetApi;
   engine = this.engineApi;
   gates = this.gatesApi;
   sessions = this.sessionsApi;
+  localOrchestrators = this.localOrchestratorsApi;
 
   /** Test hook: recorded job actions. */
   recordedActions(): MockJobAction[] {
@@ -843,6 +1179,453 @@ export class MockBridge implements SpiritBridge {
         throw errorDto("invalid_input", "local ASIF package path: must be a non-empty string");
       }
     }
+  }
+
+  /** Test hook: recorded D6 calls in order. */
+  recordedLocalCalls(): MockLocalCall[] {
+    return clone(this.localCalls);
+  }
+
+  private recordLocal(action: MockLocalCall["action"], name: string | null): void {
+    this.localCalls = [...this.localCalls, { action, name }];
+  }
+
+  private requireConnectedHost(): void {
+    if (this.connectionState.state !== "connected") {
+      throw errorDto(
+        "conflict",
+        "Connect to a host before using local orchestrator actions.",
+        "Connect a host first.",
+      );
+    }
+  }
+
+  /**
+   * Mirrors the backend three-part guard: the gate must be Ready, the local agent must
+   * be connected and the build must advertise the D6 action flag. A stale renderer is
+   * never authority, so every mutation re-checks this method.
+   */
+  private requireLocalAction(action: string): void {
+    if (gateActionEnabled(this.gateSnapshot, "local_orchestrator")) return;
+    throw errorDto(
+      "gate",
+      gateActionReason(this.gateSnapshot, "local_orchestrator") ||
+        `Local orchestrator action ${action} is unavailable.`,
+      "Re-probe the local orchestrator gate and resolve the named prerequisite.",
+    );
+  }
+
+  private validateUlid(value: string, field: string): void {
+    if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(value)) {
+      throw errorDto("invalid_input", `${field}: must be a 26-character ULID`);
+    }
+  }
+
+  private validateNode(node: string): void {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(node) || node.startsWith("-")) {
+      throw errorDto("invalid_input", "node: use 1-64 letters, digits, '.', '-' or '_'");
+    }
+  }
+
+  private validateProject(project: string): void {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(project) || project.startsWith("-")) {
+      throw errorDto("invalid_input", "project: use 1-64 letters, digits, '.', '-' or '_'");
+    }
+  }
+
+  private validateApp(app: string, field: string): void {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(app) || app.startsWith("-")) {
+      throw errorDto(
+        "invalid_input",
+        `${field}: use 1-64 letters, digits, '.', '-' or '_'`,
+      );
+    }
+  }
+
+  private validateSurfaceId(surface: string): void {
+    if (!/^[0-9A-Za-z]{26}$/.test(surface)) {
+      throw errorDto("invalid_input", "surface id: expected a 26-character ULID");
+    }
+  }
+
+  private validateDuration(value: string, field: string): void {
+    if (!/^\d{1,8}[smhdw]$/.test(value)) {
+      throw errorDto(
+        "invalid_input",
+        `${field}: use a duration such as 30m, 10h or 7d`,
+      );
+    }
+  }
+
+  private validateOrchestratorName(name: string): void {
+    if (
+      name.length === 0 ||
+      name.length > 64 ||
+      name.startsWith("-") ||
+      name === "." ||
+      name === ".." ||
+      !/^[A-Za-z0-9._-]+$/.test(name)
+    ) {
+      throw errorDto(
+        "invalid_input",
+        "orchestrator name: use 1-64 letters, digits, '.', '-' or '_'",
+      );
+    }
+  }
+
+  private validateAgentPair(input: AgentPairInput): void {
+    if (
+      typeof input.code !== "string" ||
+      input.code.trim().length === 0 ||
+      input.code.length > 4096 ||
+      /[\r\n\0]/.test(input.code)
+    ) {
+      throw errorDto("invalid_input", "pairing code: must be a non-empty single line");
+    }
+    this.validateSurfaceId(input.surface);
+    this.validateUlid(input.session, "session id");
+    if (input.app !== undefined && input.app !== null) {
+      this.validateApp(input.app, "surface app");
+    }
+  }
+
+  private validateSurfacePair(input: SurfacePairInput): void {
+    this.requireConnectedHost();
+    this.validateUlid(input.session, "session id");
+    this.validateNode(input.node);
+    if (input.kind !== "opencode" && input.kind !== "chat") {
+      throw errorDto("invalid_input", "surface kind: use `opencode` or `chat`");
+    }
+    if (input.app !== undefined && input.app !== null) {
+      this.validateApp(input.app, "surface app");
+    }
+    if (input.replace !== undefined && input.replace !== null) {
+      this.validateSurfaceId(input.replace);
+    }
+  }
+
+  private validateSurfaceRotate(input: SurfaceRotateInput): void {
+    this.validateSurfaceId(input.surface);
+    if (input.node !== undefined && input.node !== null) this.validateNode(input.node);
+    if (input.wait !== undefined && input.wait !== null) {
+      this.validateDuration(input.wait, "--wait");
+    }
+    if (input.grace !== undefined && input.grace !== null) {
+      this.validateDuration(input.grace, "--grace");
+    }
+  }
+
+  private validateOrchestratorNew(input: OrchestratorNewInput): void {
+    this.requireConnectedHost();
+    this.validateNode(input.node);
+    if (!["opencode", "claude_code", "chat"].includes(input.app)) {
+      throw errorDto(
+        "invalid_input",
+        "orchestrator app: use `opencode`, `claude_code` or `chat`",
+      );
+    }
+    if (input.project !== undefined && input.project !== null) {
+      this.validateProject(input.project);
+    }
+    if (input.name !== undefined && input.name !== null) {
+      this.validateOrchestratorName(input.name);
+    }
+  }
+
+  private validatePathAdd(input: AgentPathAddInput): void {
+    if (
+      typeof input.projectRoot !== "string" ||
+      !input.projectRoot.startsWith("/") ||
+      input.projectRoot.length < 2 ||
+      input.projectRoot.includes("\0")
+    ) {
+      throw errorDto("invalid_input", "project root: must be an absolute local path");
+    }
+    this.validateProject(input.name);
+    if (input.worktreeRoot !== undefined && input.worktreeRoot !== null) {
+      if (!input.worktreeRoot.startsWith("/") || input.worktreeRoot.length < 2) {
+        throw errorDto("invalid_input", "worktree root: must be an absolute local path");
+      }
+    }
+    for (const allowed of input.allow ?? []) {
+      if (
+        allowed.length === 0 ||
+        allowed.startsWith("/") ||
+        allowed.includes("\\") ||
+        allowed.split("/").includes("..")
+      ) {
+        throw errorDto(
+          "invalid_input",
+          "allow: must be a relative path below the project root",
+        );
+      }
+    }
+  }
+
+  private localJoin(sessionId: string) {
+    return {
+      desktop: "Open the local opencode app",
+      phone: "Join from the phone surface",
+      chat: `vowp chat --agent --session ${sessionId}`,
+    };
+  }
+
+  private toSurfaceEntry(surface: LocalSurfaceView): SurfaceEntryView {
+    return {
+      id: surface.surface_id,
+      node: surface.node,
+      kind: surface.kind,
+      state: surface.state,
+      scopes: [],
+      prefix: surface.can_write ? "vowp_surf_ab" : null,
+      expires_at: surface.expires_at,
+      overlap_until: null,
+      expired: surface.expired,
+      pending: surface.rotation_pending,
+      queued_at: null,
+      delivery_deadline: null,
+    };
+  }
+
+  private toOrchestrator(view: LocalOrchestratorView): OrchestratorView {
+    return {
+      name: view.name,
+      session_id: view.session_id,
+      project: view.project,
+      app: view.app,
+      state: view.state,
+      node: view.node,
+      join: view.join,
+    };
+  }
+
+  private localGateMode(): MockLocalGateMode {
+    switch (this.scenario) {
+      case "gate-d6-waiting":
+        return "waiting";
+      case "gate-d6-incompatible":
+        return "incompatible";
+      case "gate-d6-ready":
+        return "ready";
+      case "gate-d6-revoked":
+        return "revoked";
+      case "gates-ready":
+      case "gate-asif-ready":
+      case "gate-asif-ready-export-only":
+      case "asif-export-losses":
+      case "asif-import-warnings":
+      case "asif-strict-refusal":
+      case "asif-conflict":
+        return "ready";
+      case "gate-asif-waiting":
+        return "waiting";
+      default:
+        return "unknown";
+    }
+  }
+
+  private makeLocalState(): MockLocalState {
+    const gate = this.gateSnapshot.local_orchestrator;
+    const agentState = this.gateSnapshot.local_agent.state;
+    const emptyAgent: LocalAgentView = {
+      state: "not_installed",
+      node: null,
+      protocol: null,
+      last_heartbeat: null,
+      last_error: null,
+      cache_entries: 0,
+      cache_bytes: 0,
+      cache_oldest_at: null,
+      surfaces: [],
+    };
+    if (gate.state !== "ready" && agentState !== "revoked") {
+      return {
+        agent:
+          agentState === "not_enrolled"
+            ? { ...emptyAgent, state: "not_enrolled" }
+            : agentState === "incompatible"
+              ? {
+                  ...emptyAgent,
+                  state: "incompatible",
+                  node: LOCAL_NODE,
+                  protocol: "vowp-agent/0",
+                  last_error: "protocol incompatible: detected vowp-agent/0, required vowp-agent/1",
+                }
+              : emptyAgent,
+        node: null,
+        surfaces: [],
+        orchestrators: [],
+        paths: [],
+      };
+    }
+
+    const now = this.now();
+    const expiresAt = iso(this.nowMs + 30 * 24 * 3_600_000);
+    const agent: LocalAgentView = {
+      state: gate.state === "ready" ? "connected" : "revoked",
+      node: LOCAL_NODE,
+      protocol: "vowp-agent/1",
+      last_heartbeat: now,
+      last_error:
+        gate.state === "ready" ? null : "the node credential was revoked; reconnect after enrolling it again",
+      cache_entries: 12,
+      cache_bytes: 4096,
+      cache_oldest_at: iso(this.nowMs - 2 * 3_600_000),
+      surfaces: [
+        {
+          surface: LOCAL_SURFACE_ID,
+          prefix: "vowp_surf_ab",
+          expires_at: expiresAt,
+          state: "paired",
+        },
+        {
+          surface: LOCAL_REVOKED_SURFACE_ID,
+          prefix: null,
+          expires_at: null,
+          state: "revoked",
+        },
+      ],
+    };
+    const node: NodeCardView = {
+      name: LOCAL_NODE,
+      kind: "agent",
+      status: gate.state === "ready" ? "active" : "revoked",
+      presence: gate.state === "ready" ? "online" : "revoked",
+      labels: ["local"],
+      runs: 1,
+      mapped: ["vowp"],
+      agent_version: "0.4.0-mock",
+      protocol: "vowp-agent/1",
+      last_error: gate.state === "ready" ? null : "node credential revoked",
+    };
+    const usable = gate.state === "ready";
+    const surfaces: LocalSurfaceView[] = [
+      {
+        surface_id: LOCAL_SURFACE_ID,
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: usable ? "StackSpirit Desktop" : null,
+        session_state: usable ? "active" : "revoked",
+        kind: "opencode",
+        state: usable ? "attached" : "revoked",
+        expires_at: expiresAt,
+        expired: !usable,
+        rotation_pending: false,
+        can_write: usable,
+      },
+      {
+        surface_id: LOCAL_REVOKED_SURFACE_ID,
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: null,
+        session_state: "revoked",
+        kind: "opencode",
+        state: "revoked",
+        expires_at: null,
+        expired: true,
+        rotation_pending: false,
+        can_write: false,
+      },
+      {
+        surface_id: "01J9Z00000000000000000000D",
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: null,
+        session_state: usable ? "superseded" : "revoked",
+        kind: "chat",
+        state: usable ? "attached" : "revoked",
+        expires_at: expiresAt,
+        expired: !usable,
+        rotation_pending: false,
+        can_write: false,
+      },
+      {
+        surface_id: "01J9Z00000000000000000000E",
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: null,
+        session_state: usable ? "degraded" : "revoked",
+        kind: "opencode",
+        state: usable ? "attached" : "revoked",
+        expires_at: expiresAt,
+        expired: !usable,
+        rotation_pending: false,
+        can_write: false,
+      },
+    ];
+    const orchestrators: LocalOrchestratorView[] = [
+      {
+        name: "vowp-local",
+        session_id: LOCAL_SESSION_ID,
+        project: "vowp",
+        app: "opencode",
+        state: gate.state === "ready" ? "running" : "node_offline",
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: gate.state === "ready" ? "StackSpirit Desktop" : null,
+        session_state: gate.state === "ready" ? "running" : "revoked",
+        join: this.localJoin(LOCAL_SESSION_ID),      },
+      {
+        name: "chat-local",
+        session_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AH",
+        project: null,
+        app: "chat",
+        state: "stopped",
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: null,
+        session_state: "stopped",
+        join: this.localJoin("01JCF5WQ8ZK3M2V7N4P6R8T0AH"),
+      },
+      {
+        name: "docs-local",
+        session_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AJ",
+        project: "vowp",
+        app: "opencode",
+        state: "degraded",
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: null,
+        session_state: "degraded",
+        join: this.localJoin("01JCF5WQ8ZK3M2V7N4P6R8T0AJ"),
+      },
+      {
+        name: "phone-local",
+        session_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AK",
+        project: "vowp",
+        app: "chat",
+        state: "reconnecting",
+        node: LOCAL_NODE,
+        protocol: "vowp-agent/1",
+        agent_status: agent.state,
+        lease_holder: null,
+        session_state: "reconnecting",
+        join: this.localJoin("01JCF5WQ8ZK3M2V7N4P6R8T0AK"),
+      },
+    ];
+    return {
+      agent,
+      node,
+      surfaces,
+      orchestrators,
+      paths: [
+        {
+          project: "vowp",
+          path_ref: "project:vowp",
+          worktree_root_configured: true,
+          allow: ["src"],
+          valid: true,
+          invalid_reason: null,
+        },
+      ],
+    };
   }
 
   private makeHost(label: string, host: string, now: string): HostProfile {
@@ -1711,36 +2494,81 @@ export class MockBridge implements SpiritBridge {
   }
 
   private makeGates(mode: MockGateMode, now = iso(this.nowMs)): GateSnapshot {
-    const localReady = mode === "ready" || mode === "ready-export-only";
-    const localOrchestrator: LocalOrchestratorGate = localReady
-      ? {
-          state: "ready",
-          agent_protocol: "vowp-agent/1",
-          node: "macbook",
-          capabilities: [
-            "node_card",
-            "offload_status",
-            "surface_start",
-            "surface_attach",
-            "mcp_agent_socket",
-            "orchestrator_new_node",
-            "orchestrator_read",
-          ],
-          evidence: ["synthetic preview evidence"],
-        }
-      : mode === "waiting"
+    const d6 = this.localGateMode();
+    const localMode: MockLocalGateMode =
+      mode === "unknown"
+        ? "unknown"
+        : d6 !== "unknown"
+          ? d6
+          : mode === "ready" || mode === "ready-export-only"
+            ? "ready"
+            : "waiting";
+    const localReady = localMode === "ready";
+    const localOrchestrator: LocalOrchestratorGate =
+      localReady
         ? {
-            state: "waiting_for_vowp_phase3",
-            missing: [
-              "local opencode app host",
-              "surface bridge",
-              "MCP proxy",
-              "orchestrator materialization",
+            state: "ready",
+            agent_protocol: "vowp-agent/1",
+            node: LOCAL_NODE,
+            capabilities: [
+              "node_card",
+              "offload_status",
+              "surface_pair",
+              "surface_list",
+              "surface_revoke",
+              "surface_rotate",
+              "mcp_agent_socket",
+              "orchestrator_new_node",
+              "orchestrator_lifecycle",
+              "orchestrator_read",
+              "local_agent_connected",
+              "local_surface_pair",
+              "local_agent_run",
+              "backfill",
+              "local_path_map",
+              "local_cache",
             ],
-            detected_version: "0.4.0-mock",
-            evidence: ["vowp agent surface start --help: exit 2"],
+            evidence: ["synthetic preview capability evidence"],
           }
-        : { state: "unknown" };
+        : localMode === "incompatible"
+          ? {
+              state: "incompatible",
+              detected: "vowp-agent/0",
+              required: "vowp-agent/1",
+              evidence: ["vowp agent status --json: protocol vowp-agent/0"],
+            }
+          : localMode === "waiting" || localMode === "revoked"
+            ? {
+                state: "waiting_for_vowp_phase3",
+                missing:
+                  localMode === "revoked"
+                    ? ["local agent connection"]
+                    : [
+                        "no active local agent node",
+                        "local agent connection",
+                        "surface rotation",
+                        "orchestrator materialization",
+                      ],
+                detected_version: "0.4.0-mock",
+                evidence:
+                  localMode === "revoked"
+                    ? ["vowp agent status --json: revoked"]
+                    : [
+                        "vowp node show --json: kind=home status=active presence=offline",
+                        "vowp agent status --json: not_enrolled",
+                      ],
+              }
+            : { state: "unknown" };
+    const agentState =
+      localReady
+        ? "connected"
+        : localMode === "incompatible"
+          ? "incompatible"
+          : localMode === "revoked"
+            ? "revoked"
+            : localMode === "waiting"
+              ? "not_enrolled"
+              : "not_installed";
     const asif: AsifGate =
       mode === "ready" || mode === "ready-export-only"
         ? {
@@ -1763,17 +2591,31 @@ export class MockBridge implements SpiritBridge {
       local_orchestrator: localOrchestrator,
       asif,
       local_agent: {
-        state: localReady ? "connected" : "not_installed",
-        node: localReady ? "macbook" : null,
-        protocol: localReady ? "vowp-agent/1" : null,
-        last_heartbeat: null,
-        last_error: null,
+        state: agentState,
+        node: localReady ? LOCAL_NODE : agentState === "not_installed" ? null : LOCAL_NODE,
+        protocol:
+          localReady || agentState === "revoked"
+            ? "vowp-agent/1"
+            : agentState === "incompatible"
+              ? "vowp-agent/0"
+              : null,
+        last_heartbeat: localReady ? now : null,
+        last_error:
+          agentState === "revoked"
+            ? "the node credential was revoked"
+            : agentState === "incompatible"
+              ? "protocol incompatible: detected vowp-agent/0, required vowp-agent/1"
+              : null,
       },
-      // The D5 preview build ships the flag; a waiting or partial gate still disables
-      // the missing action through `gateActionEnabled`.
-      features: { asif_actions: true, local_orchestrator_actions: false },
+      // The D6 build advertises the action, but the flag is on exactly for Ready plus a
+      // connected local agent. A waiting or incompatible gate keeps the action disabled.
+      features: {
+        asif_actions: true,
+        local_orchestrator_actions: localReady && agentState === "connected",
+      },
     };
   }
+
 
   private makeRawDocument(): RawDocument {
     const warnings: WireWarning[] =

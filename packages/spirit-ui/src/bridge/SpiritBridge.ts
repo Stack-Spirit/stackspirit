@@ -1,5 +1,9 @@
 import type {
   ActionResult,
+  AgentPairInput,
+  AgentPairing,
+  AgentPathAddInput,
+  AgentPathView,
   AsifExportOptions,
   AsifExportResult,
   AsifImportOptions,
@@ -24,12 +28,22 @@ import type {
   JobAction,
   JobDetailView,
   KeyStatus,
+  LocalAgentView,
+  LocalOrchestratorOverview,
   ModelChoice,
   NewHostProfile,
+  OrchestratorNewInput,
+  OrchestratorView,
   RawDocument,
   SessionCardView,
   SetTargetInput,
   StateEvent,
+  SurfaceEntryView,
+  SurfacePairInput,
+  SurfacePairResult,
+  SurfaceRevokeResult,
+  SurfaceRotateInput,
+  SurfaceRotateResult,
   WebBridgeStatus,
   WebFleetView,
 } from "./wire";
@@ -150,5 +164,52 @@ export interface SpiritBridge {
      * open dialog unless `options.path` is supplied. `null` means the user cancelled.
      */
     importAsif(options: AsifImportOptions): Promise<AsifImportResult | null>;
+  };
+
+  /**
+   * Optional D6 local-orchestrator surface. Present on the desktop and preview bridges;
+   * the read-only Web bridge omits it.
+   *
+   * Read methods stay available while the gate is `Waiting` so the owner can see which
+   * prerequisite is missing. Start/stop/resume/rotate/pair actions require the
+   * `LocalOrchestratorGate` to be `ready`, `features.local_orchestrator_actions` to be
+   * true and the local agent to be `connected`; the backend re-checks all three on every
+   * call. Explicit cleanup (`revoke`, `stop`) remains available while the gate is
+   * waiting. The renderer never receives an absolute Mac path, a surface token, a token
+   * file or a key fingerprint.
+   */
+  localOrchestrators?: {
+    /** Safe agent status, node card, surfaces, orchestrators and path maps. */
+    overview(): Promise<LocalOrchestratorOverview>;
+    /** Reads `vowp agent status --json` on this Mac. */
+    agentStatus(): Promise<LocalAgentView>;
+    /** Redeems a one-time pairing code on this Mac. */
+    agentPair(input: AgentPairInput): Promise<AgentPairing>;
+    /** Reads the Mac path map and records its validity for the action guard. */
+    agentPaths(): Promise<AgentPathView[]>;
+    /** Adds or updates one Mac path-map row. */
+    agentPathAdd(input: AgentPathAddInput): Promise<AgentPathView>;
+    /** Removes one Mac path-map row. */
+    agentPathRemove(project: string): Promise<void>;
+    /** Creates a pending home surface and returns its one-time pairing code. */
+    surfacePair(input: SurfacePairInput): Promise<SurfacePairResult>;
+    /** Lists home surfaces; available while the gate is waiting. */
+    surfaceList(node?: string | null): Promise<SurfaceEntryView[]>;
+    /** Rotates one surface token. */
+    surfaceRotate(input: SurfaceRotateInput): Promise<SurfaceRotateResult>;
+    /** Revokes one surface and every token it holds. */
+    surfaceRevoke(surface: string): Promise<SurfaceRevokeResult>;
+    /** Creates a local app host through `vowp orchestrator new --node ...`. */
+    orchestratorNew(input: OrchestratorNewInput): Promise<OrchestratorView>;
+    /** Lists orchestrators; available while the gate is waiting. */
+    orchestratorList(): Promise<OrchestratorView[]>;
+    /** Stops a local app host; explicit cleanup remains available when gated off. */
+    orchestratorStop(name: string): Promise<OrchestratorView>;
+    /** Resumes a local app host after re-checking every D6 prerequisite. */
+    orchestratorResume(
+      name: string,
+      project?: string | null,
+      node?: string | null,
+    ): Promise<OrchestratorView>;
   };
 }

@@ -1,9 +1,13 @@
 # StackSpirit D6 readiness — local orchestrators (gated)
 
-**Status: D6 remains gated and is not implemented or enabled.**
-`features.local_orchestrator_actions` is `false` in this build. The Engine view can show the
-local-orchestrator gate, its evidence, and the exact missing capabilities; it has no create or
-attach action.
+**Status: D6 is implemented behind the `Ready` + connected gate in this build.**
+The D6 desktop build advertises `features.local_orchestrator_actions`, but the published
+flag is derived by `spirit-core` and is true only when `LocalOrchestratorGate` is `Ready`,
+the local agent is `connected`, and the build flag is on. The Engine view can pair,
+create, inspect, stop, resume, rotate, and revoke a local orchestrator/surface; every
+action re-checks the gate, agent, node, protocol and path map on the backend. **Live
+execution is still owner-gated**: the installed CLI and the local agent do not yet satisfy
+§1–§3 on this machine.
 
 The **merged VOWP source** contains the Phase 3/4 local-orchestrator CLI surface:
 `vowp surface pair|ls|revoke|rotate`, `vowp agent enroll|paths|pair|run|status|service|doctor`,
@@ -20,6 +24,9 @@ home-side `vowp orchestrator new --node <node> --app opencode`; the Mac agent ma
 
 - **Evidence date:** 2026-11-16.
 - **Job:** `ss-20-d6-contract-reconcile`; this document is one of the tracked paths changed.
+  The D6 status and §4 implementation notes are refreshed by `ss-21-d6-bridge-ui`.
+  The §1–§3 command evidence below is unchanged owner-setup evidence; no owner write was
+  performed by either job.
 - **VOWP source under test:** merge `121f319` (`v4-local-4f-cli-surface`), follow-up
   `d523314`; source version still reports `0.3.0`.
 - **VOWP CLI installed under test:** `vowp 0.3.0`.
@@ -126,7 +133,8 @@ local-agent half runs on the Mac with the local `CommandRunner`, never over SSH.
 must pass.** `LocalAgentStatus` is displayed separately so the owner can see why the Mac half
 fails, but a local agent that is not installed, not enrolled, or not `connected` leaves the gate
 `Waiting`, never `Ready`. `local_orchestrator_enabled()` additionally requires
-`features.local_orchestrator_actions`, which is `false` in this build.
+`features.local_orchestrator_actions`, which this D6 build advertises. The published flag is
+still false unless the gate is `Ready` and the local agent is `connected`.
 
 | # | Requirement | Exact probe | Pass condition | Current result (2026-11-16) |
 |---:|---|---|---|---|
@@ -189,6 +197,10 @@ local_orchestrator_enabled =
     && local_agent.state == connected
 ```
 
+`SpiritCore::set_gates` derives the published flag from this expression. The desktop
+command boundary overlays the build's flags and then enforces the same expression, so a
+stale renderer cannot enable a D6 action by itself.
+
 ### 2.2 Probe caveats that must stay visible
 
 These are not optional footnotes; each one can make a naive probe report the wrong thing.
@@ -222,9 +234,9 @@ These are not optional footnotes; each one can make a naive probe report the wro
    `connected` and the local `agent pair|run|paths` helps and cache fields are present. A
    stopped, revoked, superseded, reconnecting, not-installed, or not-enrolled agent never
    produces a `Ready` gate.
-7. **A synthetic `gate-phase3-ready` fixture is not live evidence.** The fixture proves only
-   that the disabled-action copy and capability list render. It must never be cited as a live
-   orchestrator.
+7. **A synthetic `gate-phase3-ready` fixture is not live evidence.** The fixture proves that
+   the gate card, capability list and disabled-action copy render. A separate D6 MockBridge
+   scenario proves the enabled flow; neither is a live orchestrator.
 8. **The installed `surface pair` lacks `--replace`.** The merged source has the one-command
    replacement form, but the installed build does not. A missing flag is a missing capability;
    it keeps the gate `Waiting` and does not justify falling back to the stale
@@ -371,7 +383,7 @@ redacted safe message. `agent paths ls` exits 0; do not record absolute paths. `
 2. Open **Engine** and use **Re-probe** on the **Local orchestrator** gate. The gate is scoped
    to the current connection; do not trust a snapshot from before the connection.
 3. Confirm `LocalAgentStatus` is `connected` and `LocalOrchestratorGate` is `Ready`.
-4. Confirm the feature flag is still false. The expected post-owner-setup state is:
+4. Confirm the derived feature flag is on. The expected post-owner-setup state is:
 
    - `local_orchestrator.state = "ready"`
    - `agent_protocol = "vowp-agent/1"`
@@ -382,9 +394,13 @@ redacted safe message. `agent paths ls` exits 0; do not record absolute paths. `
      `local_agent_connected`, `local_surface_pair`, `local_agent_run`, `backfill`,
      `local_path_map`, `local_cache`
    - `local_agent.state = "connected"`
-   - `features.local_orchestrator_actions = false`
-   - the **Run locally** action remains disabled with: “VOWP is ready; local orchestrator
-     execution is not implemented in this build.”
+   - `features.local_orchestrator_actions = true` (derived from the three-part rule)
+   - the **Run locally** action is enabled and the Local orchestrators panel shows the node,
+     protocol, agent, lease holder and honest session states.
+
+   Do not create or stop an orchestrator merely to prove the UI during this read-only
+   step. A live action is owner-initiated and must still be refused if the gate, agent,
+   node, protocol or path map changes.
 
 5. If the gate is `WaitingForVowpPhase3`, `Incompatible`, or `Unreachable`, record the exact
    `missing`, `detected`, `required`, and `evidence` fields. Do not edit code, add a force
@@ -409,31 +425,37 @@ The final committed evidence must contain no real host, hostname, key, token, on
 home path, session id, or surface id. Use `<node>`, `<project>`, `<home-ssh-target>`, and
 `<timestamp>` placeholders when a value is needed for shape only.
 
-## 4. What StackSpirit will build when D6 is ready
+## 4. What StackSpirit ships when D6 is ready
 
-D6 is the local-orchestrator phase from `PLAN.md` §9.8. It is not implemented in this build. When
-the gate is `Ready` **and** `features.local_orchestrator_actions` is enabled, the planned scope is:
+D6 is the local-orchestrator phase from `PLAN.md` §9.8. It is implemented in this build
+behind the `Ready` + `connected` gate. When the gate is `Ready` **and**
+`features.local_orchestrator_actions` is enabled, the Engine view and bridge expose:
 
-- **Create and pair.** The Engine view can create or attach a local orchestrator through
-  VOWP's own commands: home-side `vowp surface pair`, Mac-side `vowp agent pair`, and
-  `vowp orchestrator new --node <node> --app opencode` for the app host. `surface ls` /
-  `surface rotate` / `surface revoke` own the surface token lifecycle; `orchestrator ls` /
-  `stop` / `resume` own the read model and lifecycle. `vowp mcp --agent-socket` is the MCP
-  proxy, and `vowp chat --agent --session <id>` is the chat surface. StackSpirit does not
-  implement a parallel supervisor or a second session writer. There is no
-  `vowp agent surface start` / `attach` / `detach` call in this build.
+- **Create and pair.** The Engine view creates or attaches a local orchestrator through
+  VOWP's own commands: home-side `vowp surface pair` (`local_surface_pair`), Mac-side
+  `vowp agent pair` (`local_agent_pair`), and `vowp orchestrator new --node <node> --app
+  opencode` (`local_orchestrator_new`). `surface ls` / `surface rotate` / `surface revoke`
+  own the surface token lifecycle (`local_surface_list`, `local_surface_rotate`,
+  `local_surface_revoke`); `orchestrator ls` / `stop` / `resume` own the read model and
+  lifecycle (`local_orchestrator_list`, `local_orchestrator_stop`,
+  `local_orchestrator_resume`). `local_orchestrator_overview` combines the safe Mac agent
+  status, the validated node card, path maps, surfaces and orchestrators.
+  `vowp mcp --agent-socket` is the MCP proxy, and `vowp chat --agent --session <id>` is the
+  chat surface. StackSpirit does not implement a parallel supervisor or a second session
+  writer. There is no `vowp agent surface start` / `attach` / `detach` call in this build.
 - **Surface ownership.** The local surface uses the StackSpirit Engine or the selected external
   harness. VOWP owns the canonical orchestrator record, session log, lease, and backfill.
   StackSpirit displays VOWP's state; it does not invent a running state.
-- **Honest display.** The app shows the node, protocol, agent status, lease holder, and session
-  state. Disconnected, degraded, reconnecting, revoked, superseded, and stopped states are
-  visible and explain what is unavailable.
-- **Feature-flag behavior.** `local_orchestrator_actions` is `false` now and is flipped only by
-  the D6 build job after this checklist passes. The enable rule is the three-part
-  `local_orchestrator_enabled()` expression in §2.1. A `Ready` gate with the flag off still
-  shows “VOWP is ready; local orchestrator execution is not implemented in this build.” The
-  backend must re-check the gate, connection, and flag on every D6 action; a stale renderer is
-  not authority.
+- **Honest display.** The Engine panel shows the node, protocol, agent status, lease holder,
+  and session state. Disconnected, degraded, reconnecting, revoked, superseded, and stopped
+  states are visible and explain what is unavailable. A surface that is revoked, expired or
+  not paired is shown read-only; `can_write` also requires the lease and an online node.
+- **Feature-flag behavior.** The D6 desktop build advertises
+  `features.local_orchestrator_actions`; `SpiritCore::set_gates` derives the published value
+  from the three-part `local_orchestrator_enabled()` expression in §2.1. An older build with
+  the flag off still shows “VOWP is ready; local orchestrator execution is not implemented in
+  this build.” The backend re-checks the gate, connection, agent and flag on every D6 action;
+  a stale renderer is not authority. There is no hidden force switch.
 - **No fake and no version-only.** `vowp --version`, a synthetic `gate-phase3-ready` fixture, an
   `orchestrator ls` exit 0, or a `vowp node ls` exit 0 cannot make the gate `Ready` by
   themselves. The Phase 2 offload read, the home surface/orchestrator command probes, and the
@@ -456,11 +478,35 @@ the gate is `Ready` **and** `features.local_orchestrator_actions` is enabled, th
 | Revocation is honest | A revoked node fails the next handshake; StackSpirit stops and explains. It does not retry with the old credential or claim a live surface. |
 | Provider names only | VOWP receives provider/model names and environment names, never provider key values. |
 
+### 4.2 Implementation status in this build
+
+`ss-21-d6-bridge-ui` wires the `ss-20-d6-core` backend through Tauri, the shared bridge and
+the Engine view. The implementation is deliberately a thin adapter: no VOWP rule, probe,
+guard, secret or path handling moved out of `spirit-core`.
+
+| Layer | What is implemented |
+|---|---|
+| Tauri commands | `local_orchestrator_overview`, `local_agent_status`, `local_agent_pair`, `local_agent_paths`, `local_agent_path_add`, `local_agent_path_remove`, `local_surface_pair`, `local_surface_list`, `local_surface_rotate`, `local_surface_revoke`, `local_orchestrator_new`, `local_orchestrator_list`, `local_orchestrator_stop`, `local_orchestrator_resume` are registered in `lib.rs` and call `SpiritCore`. |
+| Bridge | `SpiritBridge.localOrchestrators` is optional. `TauriBridge` remains the only renderer file importing `@tauri-apps/api`; `MockBridge` provides deterministic preview flows; the read-only Web bridge omits the surface and gets no local-orchestrator mutations. |
+| Engine view | A **Local orchestrators** panel shows the gate, node, protocol, agent, lease holder, honest session states, Mac path maps, surfaces and orchestrators. Create, pair, stop, resume, rotate and revoke are enabled only when the gate is `Ready`, the local agent is `connected` and the action flag is on. Revoke and stop remain available as explicit cleanup while the gate is waiting. |
+| Refusals | Every action surfaces the backend's exact prerequisite (`local_orchestrator_gate`, `local_agent_connection`, `agent_protocol`, `node_status`, `node_presence`, `local_path_map`, `local_orchestrator_actions`) in the panel. The renderer never retries with an old credential and has no force switch. |
+| Pairing secret | The one-time pairing code is returned only by the direct `local_surface_pair` result so the owner can copy it once or redeem it locally. It is not in a view, an event, or a log; the preview fixture uses a placeholder, never a real code. |
+| Tests | Vitest covers MockBridge refusals, cleanup, create/pair/rotate/revoke/stop/resume and the gated-off/Ready Engine panel. Playwright covers `Waiting`, `Incompatible` and `Ready` MockBridge flows, including the honest session states and WCAG 2.2 AA. |
+
+Live execution remains blocked on the owner setup in §3: the installed `vowp` CLI is still
+stale, no active local-agent node exists, and the local agent is not enrolled. The UI and
+backend behave honestly in that state by keeping the gate `Waiting` and every start action
+disabled.
+
 ## 5. What not to do now
 
-- **Do not enable D6.** Leave `features.local_orchestrator_actions = false`. Do not flip a build
-  feature, add a hidden force switch, or enable a **Run locally** control.
-- **Do not implement D6 actions in this job.** This document is readiness only.
+- **Do not fake enablement.** Never set `features.local_orchestrator_actions` by hand, add
+  a hidden force switch, or enable a **Run locally** control from a stale renderer. The
+  published flag is derived by `SpiritCore::set_gates` from the gate and agent state.
+- **Do not bypass the gate.** The D6 actions are implemented, but every one must still
+  refuse on a `Waiting`/`Incompatible`/`Unreachable` gate, a non-connected local agent, an
+  incompatible protocol, a revoked node, or an invalid path map. The refusal names the
+  prerequisite and offers no force path.
 - **Do not run `vowp agent enroll`, `vowp agent run`, `vowp node enroll`, or
   `vowp agent paths add` as part of this job.** Those are owner actions after the VOWP build
   lands; they write local/agent state.
@@ -486,10 +532,13 @@ the gate is `Ready` **and** `features.local_orchestrator_actions` is enabled, th
 ## 6. Unblock checklist
 
 Keep this table current. If the installed CLI changes, re-run §1 and update the evidence rows and
-this table. An owner action is not “done” until the named probe has the stated result.
+this table. An owner action is not “done” until the named probe has the stated result. The
+StackSpirit D6 code is implemented in this build; these rows unblock **live owner execution**,
+not the UI.
 
 | Missing or unproven | Action (owner or StackSpirit) | Exact probe that proves it | Current (2026-11-16) |
 |---|---|---|---|
+| D6 Desktop actions and honest Engine panel | Implemented in `ss-21-d6-bridge-ui`; no owner action. | `npm test`, `npm run test:e2e`, `cargo test -p spirit-core --features fixtures`, `cargo clippy -p spirit-core --all-targets -- -D warnings` | Implemented behind the `Ready` + `connected` gate; gated-off and Ready MockBridge flows covered. |
 | Install the Phase 4 CLI build | `v4-local-4f-cli-surface` is done in source; install that build on the home and Mac. Do not substitute the source checkout. | `vowp --project <vowp-project> job show v4-local-4f-cli-surface --json` → `state: done`; record `vowp --version` | Job `done`; installed binary is still `0.3.0` |
 | Surface lifecycle `surface rotate` and `surface pair --replace` | Install the build above on the home. | `vowp surface rotate --help` → exit 0 with `--wait`/`--grace`; `vowp surface pair --help` → `--replace` present | `rotate` exit 2; `pair` has no `--replace` |
 | Active local-agent node with protocol `vowp-agent/1` | On the home, create the pending node; on the Mac, enroll with the private code file, map paths, and run one agent. | `vowp --project <project> node show <node> --json` → `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version` present | Only `kind: home`, `status: active`, `presence: offline`, `protocol: null` |
@@ -500,9 +549,11 @@ this table. An owner action is not “done” until the named probe has the stat
 | Orchestrator card carries the local `node` for display (optional) | Only after a local orchestrator exists, verify the build's card. The gate node comes from `node show`; this is not a reason to fake `Ready`. | `vowp --project <project> orchestrator ls --json` → exit 0 and the local card has `node: <node>` | Exit 0; 4 cards, 0 with a `node` field on the installed build |
 | Optional `agent service` / `agent doctor` | Install the merged build if the owner wants service mode or diagnostics. Foreground `agent run` does not need them. | `vowp agent service --help` and `vowp agent doctor --help` → exit 0 | Both exit 2 on the installed build; merged source has both |
 
-A `Ready` gate alone is not the finish line. The D6 build must also prove that the flag-off copy
+A `Ready` gate alone is not the finish line. The D6 build proves that the flag-off copy
 is unchanged, the local agent’s non-connected states leave the gate `Waiting`, the path-map
 validation refuses a bad root, and no home secret or absolute path appears in shared state.
+The Playwright suite covers the `Waiting`, `Incompatible` and `Ready` MockBridge flows; the
+Vitest suite covers the backend-style refusals and the honest Engine panel.
 
 ## 7. References
 
@@ -512,7 +563,7 @@ StackSpirit:
   capability labels, security invariants, and the known contract gaps.
 - [`docs/PLAN.md`](PLAN.md) §9.8 — D6 local-orchestrator scope; §8.5.7 — gate cards and feature
   flags; §9.1 — D6 is gated on VOWP Phase 2/3/4.
-- [`docs/RELEASE-D5-ASIF.md`](RELEASE-D5-ASIF.md) §7.1 — D6 remains gated after D5.
+- [`docs/RELEASE-D5-ASIF.md`](RELEASE-D5-ASIF.md) §7.1 — D6 remained gated after D5; the D6 build now implements it behind the gate.
 - [`docs/RELEASE-DESKTOP-MVP.md`](RELEASE-DESKTOP-MVP.md) §4 and §8 — D6 limitation and the
   D1–D4 feature-flag statement.
 - [`docs/OWNER-VERIFICATION.md`](OWNER-VERIFICATION.md) — owner-run evidence template and sign-off
@@ -550,7 +601,20 @@ StackSpirit source used for the gate contract:
 - `crates/spirit-core/src/engine/gate.rs` — `LocalOrchestratorGate`, `LocalAgentStatus`,
   `GateFeatureFlags`, the probe algorithm, the home `surface`/`orchestrator` help checks, and
   the Mac-side cache/pair/run/paths checks.
-- `apps/spirit-desktop/src-tauri/src/state.rs` and `commands/gates.rs` — the D4/D5 feature flags
-  and gate probing entry points.
+- `crates/spirit-core/src/engine/local.rs` and `crates/spirit-core/src/service.rs` — the D6
+  action guard, the derived feature flag and the action facade.
+- `apps/spirit-desktop/src-tauri/src/commands/local_orchestrator.rs` and `lib.rs` — the Tauri
+  command adapters and their handler registration.
+- `apps/spirit-desktop/src/bridge/TauriBridge.ts` — the only renderer file importing
+  `@tauri-apps/api`; it routes every D6 call to a command.
+- `packages/spirit-ui/src/bridge/SpiritBridge.ts`, `wire.ts`, `MockBridge.ts` — the optional D6
+  bridge surface, safe DTOs and the preview fixtures.
+- `packages/spirit-ui/src/views/engine/LocalOrchestratorPanel.tsx` — the honest Engine panel
+  with create/pair/stop/resume/rotate/revoke actions and prerequisite refusals.
+- `packages/spirit-ui/src/test/engine/localOrchestrator.test.tsx` and
+  `apps/spirit-desktop/e2e/local-orchestrator-*.spec.ts` — the D6 Vitest and Playwright
+  coverage.
+- `apps/spirit-desktop/src-tauri/src/state.rs` and `commands/gates.rs` — the build feature
+  flags and gate probing entry points.
 - `packages/spirit-ui/src/domain/engine.ts` and `views/engine/GateCard.tsx` — the flag-off copy
   and the disabled-action rendering.

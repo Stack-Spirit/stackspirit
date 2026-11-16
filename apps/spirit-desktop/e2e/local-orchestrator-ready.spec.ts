@@ -1,0 +1,161 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+
+import AxeBuilder from "@axe-core/playwright";
+import { expect, test, type Page } from "@playwright/test";
+
+const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
+const READY_PORT = 1428;
+const READY_URL = `http://127.0.0.1:${READY_PORT}`;
+const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+let server: ChildProcess | null = null;
+let serverLog = "";
+
+async function expectNoWcagViolations(page: Page) {
+  const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
+  expect(results.violations).toEqual([]);
+}
+
+async function waitForServer(url: string): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    if (server && server.exitCode !== null) {
+      throw new Error(`Vite exited before serving ${url}:\n${serverLog.slice(-4000)}`);
+    }
+    try {
+      const response = await fetch(url);
+      if (response.ok) return;
+    } catch {
+      // The dev server socket is not open yet.
+    }
+    await delay(200);
+  }
+  throw new Error(`Vite did not serve ${url}:\n${serverLog.slice(-4000)}`);
+}
+
+test.beforeAll(async () => {
+  server = spawn(
+    process.platform === "win32" ? "npm.cmd" : "npm",
+    ["run", "dev", "--", "--port", String(READY_PORT), "--strictPort"],
+    {
+      cwd: APP_ROOT,
+      env: {
+        ...process.env,
+        VITE_SPIRIT_MOCK: "1",
+        VITE_SPIRIT_MOCK_SCENARIO: "gate-d6-ready",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  server.stdout?.on("data", (chunk: Buffer) => {
+    serverLog += chunk.toString();
+  });
+  server.stderr?.on("data", (chunk: Buffer) => {
+    serverLog += chunk.toString();
+  });
+  await waitForServer(READY_URL);
+});
+
+test.afterAll(async () => {
+  if (!server || server.exitCode !== null) return;
+  server.kill("SIGTERM");
+  await new Promise<void>((resolveExit) => {
+    server?.once("exit", () => resolveExit());
+    setTimeout(resolveExit, 5_000);
+  });
+});
+
+test("Ready local orchestrator flow stays honest and gated by the connected agent", async ({
+  page,
+}) => {
+  await page.goto(READY_URL);
+  await expect(page.getByText("Preview data").first()).toBeVisible();
+  await page.getByTestId("topbar-connect").click();
+  await expect(page.getByTestId("topbar-connect")).toHaveText("Disconnect");
+
+  await page
+    .getByRole("navigation", { name: "Primary views" })
+    .getByRole("button", { name: "Engine" })
+    .click();
+  await expect(page.getByRole("heading", { name: "Engine", level: 1 })).toBeVisible();
+
+  const gateCard = page.getByTestId("gate-card-local");
+  await expect(gateCard.getByText("Ready", { exact: true })).toBeVisible();
+  await expect(gateCard.getByRole("button", { name: "Run locally" })).toBeEnabled();
+
+  const panel = page.getByTestId("local-orchestrator-panel");
+  await expect(panel.getByText("mac-studio").first()).toBeVisible();
+  await expect(panel.getByText("vowp-agent/1").first()).toBeVisible();
+  await expect(page.getByTestId("local-orchestrator-row-vowp-local")).toContainText(
+    "StackSpirit Desktop",
+  );
+  await expect(page.getByTestId("local-orchestrator-row-chat-local")).toContainText(
+    "Stopped",
+  );
+  await expect(page.getByTestId("local-orchestrator-row-docs-local")).toContainText(
+    "Degraded",
+  );
+  await expect(page.getByTestId("local-orchestrator-row-phone-local")).toContainText(
+    "Reconnecting",
+  );
+  await expect(
+    page.getByTestId("local-surface-row-01J9Z00000000000000000000B"),
+  ).toContainText("Revoked");
+  await expect(
+    page.getByTestId("local-surface-row-01J9Z00000000000000000000D"),
+  ).toContainText("Superseded");
+  await expectNoWcagViolations(page);
+
+  // Create an orchestrator through the enabled Engine action.
+  await gateCard.getByRole("button", { name: "Run locally" }).click();
+  const create = page.getByRole("dialog", { name: "Create local orchestrator" });
+  await expect(create).toBeVisible();
+  await create.getByRole("textbox", { name: "Project" }).fill("vowp");
+  await create.getByRole("textbox", { name: "Name" }).fill("browser-local");
+  await create.getByTestId("local-orchestrator-create-submit").click();
+  await expect(page.getByTestId("local-orchestrator-row-browser-local")).toContainText(
+    "Running",
+  );
+  await expectNoWcagViolations(page);
+
+  // Pair a surface, show the one-time code, then redeem it locally.
+  await panel.getByTestId("local-orchestrator-pair").click();
+  const pair = page.getByRole("dialog", { name: "Pair a local surface" });
+  await expect(pair).toBeVisible();
+  await pair.getByLabel("Session id").fill("01JCF5WQ8ZK3M2V7N4P6R8T0AE");
+  await pair.getByTestId("local-surface-pair-submit").click();
+  const pairing = pair.getByTestId("local-pairing-result");
+  await expect(pairing.getByTestId("local-pairing-code")).toHaveText(
+    "pairing-code-placeholder",
+  );
+  await expect(pairing.getByTestId("local-pairing-command")).toContainText(
+    "vowp agent pair --code-file -",
+  );
+  const pendingSurface = page
+    .locator('[data-testid^="local-surface-row-"]')
+    .filter({ hasText: "Pending pairing" });
+  await expect(pendingSurface).toBeVisible();
+  const pendingSurfaceTestId = await pendingSurface.getAttribute("data-testid");
+  if (!pendingSurfaceTestId) throw new Error("pending surface row has no test id");
+  await pairing.getByTestId("local-pairing-agent").click();
+  await expect(pair).toHaveCount(0);
+  await expect(page.getByTestId(pendingSurfaceTestId)).toContainText("Active");
+
+  // Stop/resume an orchestrator and rotate/revoke a surface.
+  const running = page.getByTestId("local-orchestrator-row-vowp-local");
+  await running.getByTestId("local-orchestrator-stop-vowp-local").click();
+  await expect(running).toContainText("Stopped");
+  await running.getByTestId("local-orchestrator-resume-vowp-local").click();
+  await expect(running).toContainText("Running");
+
+  const surface = page.getByTestId("local-surface-row-01J9Z00000000000000000000A");
+  await surface.getByTestId("local-surface-rotate-01J9Z00000000000000000000A").click();
+  await expect(surface).toContainText("Rotation queued");
+  await surface.getByTestId("local-surface-revoke-01J9Z00000000000000000000A").click();
+  await expect(surface).toContainText("Revoked");
+  await expect(surface).toContainText("Read-only");
+  await expectNoWcagViolations(page);
+});

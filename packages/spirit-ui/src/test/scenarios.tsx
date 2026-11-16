@@ -15,6 +15,10 @@ export const SCENARIOS: Array<{ id: MockScenario; label: string }> = [
   { id: "connect-failure", label: "SSH auth failure" },
   { id: "stale-after-3", label: "Stale after three polls" },
   { id: "gates-ready", label: "Synthetic gates ready" },
+  { id: "gate-d6-waiting", label: "D6 · gate waiting" },
+  { id: "gate-d6-incompatible", label: "D6 · incompatible agent" },
+  { id: "gate-d6-ready", label: "D6 · ready local orchestrator" },
+  { id: "gate-d6-revoked", label: "D6 · revoked local agent" },
 ];
 
 export function scenarioBridge(scenario: MockScenario, now?: string): MockBridge {

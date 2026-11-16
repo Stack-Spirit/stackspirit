@@ -5,6 +5,10 @@ import type { SpiritBridge } from "@stackspirit/ui";
 import { toSpiritError } from "@stackspirit/ui";
 import type {
   ActionResult,
+  AgentPairInput,
+  AgentPairing,
+  AgentPathAddInput,
+  AgentPathView,
   AsifExportOptions,
   AsifExportResult,
   AsifImportOptions,
@@ -26,12 +30,22 @@ import type {
   InboxItemView,
   JobAction,
   KeyStatus,
+  LocalAgentView,
+  LocalOrchestratorOverview,
   ModelChoice,
   NewHostProfile,
+  OrchestratorNewInput,
+  OrchestratorView,
   RawDocument,
   SessionCardView,
   SetTargetInput,
   StateEvent,
+  SurfaceEntryView,
+  SurfacePairInput,
+  SurfacePairResult,
+  SurfaceRevokeResult,
+  SurfaceRotateInput,
+  SurfaceRotateResult,
 } from "@stackspirit/ui";
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -141,5 +155,42 @@ export class TauriBridge implements SpiritBridge {
       call("asif_export", { sessionId, options }),
     importAsif: (options: AsifImportOptions): Promise<AsifImportResult | null> =>
       call("asif_import", { options }),
+  };
+
+  localOrchestrators = {
+    overview: (): Promise<LocalOrchestratorOverview> =>
+      call("local_orchestrator_overview"),
+    agentStatus: (): Promise<LocalAgentView> => call("local_agent_status"),
+    agentPair: (input: AgentPairInput): Promise<AgentPairing> =>
+      call("local_agent_pair", { input }),
+    agentPaths: (): Promise<AgentPathView[]> => call("local_agent_paths"),
+    agentPathAdd: (input: AgentPathAddInput): Promise<AgentPathView> =>
+      call("local_agent_path_add", { input }),
+    agentPathRemove: async (project: string): Promise<void> => {
+      await call<void>("local_agent_path_remove", { project });
+    },
+    surfacePair: (input: SurfacePairInput): Promise<SurfacePairResult> =>
+      call("local_surface_pair", { input }),
+    surfaceList: (node?: string | null): Promise<SurfaceEntryView[]> =>
+      call("local_surface_list", { node: node ?? null }),
+    surfaceRotate: (input: SurfaceRotateInput): Promise<SurfaceRotateResult> =>
+      call("local_surface_rotate", { input }),
+    surfaceRevoke: (surface: string): Promise<SurfaceRevokeResult> =>
+      call("local_surface_revoke", { surface }),
+    orchestratorNew: (input: OrchestratorNewInput): Promise<OrchestratorView> =>
+      call("local_orchestrator_new", { input }),
+    orchestratorList: (): Promise<OrchestratorView[]> => call("local_orchestrator_list"),
+    orchestratorStop: (name: string): Promise<OrchestratorView> =>
+      call("local_orchestrator_stop", { name }),
+    orchestratorResume: (
+      name: string,
+      project?: string | null,
+      node?: string | null,
+    ): Promise<OrchestratorView> =>
+      call("local_orchestrator_resume", {
+        name,
+        project: project ?? null,
+        node: node ?? null,
+      }),
   };
 }

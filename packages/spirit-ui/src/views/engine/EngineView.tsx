@@ -30,6 +30,7 @@ import { EngineStatusCard } from "./EngineStatusCard";
 import { ExternalHarnessPicker } from "./ExternalHarnessPicker";
 import { GateCard } from "./GateCard";
 import { GateDrawer } from "./GateDrawer";
+import { LocalOrchestratorPanel } from "./LocalOrchestratorPanel";
 import { ModelPicker } from "./ModelPicker";
 import "./engine.css";
 
@@ -63,6 +64,7 @@ export function EngineView() {
   const [initialStep, setInitialStep] = useState<1 | 2>(1);
   const [gateDetails, setGateDetails] = useState<GateDetails>(null);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [createLocalSignal, setCreateLocalSignal] = useState(0);
   const autoProbedHost = useRef<string | null>(null);
   // Gate probes require a live VOWP command path. A stale snapshot can still be read
   // elsewhere, but probe_gates refuses to run on it, so the controls must match.
@@ -143,7 +145,6 @@ export function EngineView() {
     if (connection.state !== "connected" || !connection.host_id) return;
     const key = `${connection.host_id}:${connection.since ?? ""}`;
     if (autoProbedHost.current === key) return;
-    autoProbedHost.current = key;
     // Only a snapshot already scoped to this connection counts as cached. A snapshot
     // from the previous connection never suppresses the probe for a new host.
     if (
@@ -155,6 +156,10 @@ export function EngineView() {
       return;
     }
     const handle = window.setTimeout(() => {
+      // Mark only when the probe is actually about to run. React StrictMode runs an
+      // effect, cleans it up, then runs it again; setting this before the timeout would
+      // make the second run skip the only scheduled probe.
+      autoProbedHost.current = key;
       void scopeProbe();
     }, 0);
     return () => window.clearTimeout(handle);
@@ -454,6 +459,7 @@ export function EngineView() {
                   kind="local"
                   gates={visibleGates}
                   onDetails={() => setGateDetails("local")}
+                  onRunLocally={() => setCreateLocalSignal((signal) => signal + 1)}
                 />
                 <GateCard
                   kind="asif"
@@ -477,9 +483,19 @@ export function EngineView() {
             <p className="muted small">
               A Ready gate still says not implemented in this build while its StackSpirit
               action flag is false. D5 export and import live only in the Sessions drawer
-              and stay disabled until VOWP proves that direction. D6 remains gated.
+              and stay disabled until VOWP proves that direction. D6 local-orchestrator
+              actions are enabled only while the gate is Ready and the local agent is
+              connected.
             </p>
           </Panel>
+
+          <LocalOrchestratorPanel
+            key={createLocalSignal}
+            bridge={bridge}
+            gates={visibleGates}
+            live={liveConnection}
+            createSignal={createLocalSignal}
+          />
 
           <Panel title="About" data-testid="engine-about">
             <p className="muted small">

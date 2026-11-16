@@ -469,20 +469,23 @@ async fn choose_import_path(app: &AppHandle) -> Result<Option<PathBuf>, SpiritEr
 /// name stays `gates_get`, which is what the desktop bridge calls.
 #[tauri::command(rename = "gates_get")]
 pub async fn gates_get_with_build_flags(state: State<'_, AppState>) -> CommandResult<GateSnapshot> {
-    let snapshot =
+    let mut snapshot =
         with_build_gate_features(crate::commands::gates::gates_get(state.clone()).await?);
+    snapshot.enforce_local_orchestrator_flag();
     state.core().await.set_gates(snapshot.clone());
     Ok(snapshot)
 }
 
-/// Applies the D5 build flags after a full gate probe. A waiting, incompatible,
-/// unreachable, or partial gate keeps its missing action disabled.
+/// Applies the D5/D6 build flags after a full gate probe. A waiting, incompatible,
+/// unreachable, or partial gate keeps its missing action disabled, and the D6 flag is
+/// on exactly for `Ready` plus a connected local agent.
 #[tauri::command(rename = "probe_gates")]
 pub async fn probe_gates_with_build_flags(
     state: State<'_, AppState>,
 ) -> CommandResult<GateSnapshot> {
-    let snapshot =
+    let mut snapshot =
         with_build_gate_features(crate::commands::gates::probe_gates(state.clone()).await?);
+    snapshot.enforce_local_orchestrator_flag();
     state.core().await.set_gates(snapshot.clone());
     Ok(snapshot)
 }
@@ -849,17 +852,24 @@ mod tests {
     }
 
     #[test]
-    fn the_d5_flag_is_the_cargo_feature_and_never_enables_d6() {
+    fn the_build_advertises_d5_and_the_d6_actions_but_readiness_gates_d6() {
         let features = crate::state::build_gate_features();
         assert_eq!(
             features.asif_actions,
             cfg!(feature = "d5"),
             "the ASIF flag must come from the D5 build feature"
         );
-        assert!(!features.local_orchestrator_actions);
+        assert!(
+            features.local_orchestrator_actions,
+            "the D6 build advertises its actions"
+        );
 
         let snapshot = with_build_gate_features(GateSnapshot::default());
         assert_eq!(snapshot.features, features);
+        assert!(
+            !snapshot.local_orchestrator_enabled(),
+            "an unprobed gate must never enable a D6 action"
+        );
         assert_eq!(crate::state::default_gate_snapshot().features, features);
     }
 }
