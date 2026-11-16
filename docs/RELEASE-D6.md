@@ -135,8 +135,11 @@ nodes, are non-writable even if a lease token is still present.
 `vowp --version`, a `vowp node ls` exit 0, an `orchestrator ls` exit 0, a `gate-phase3-ready`
 fixture, or a MockBridge `Ready` scenario cannot make the gate `Ready` by themselves. The gate
 cache is per host connection and expires; a disconnect, a later failed probe, or a connection
-change downgrades the gate immediately. A cached `Ready` is re-probed before a destructive
-action. The UI never shows a bare green state without a successful probe.
+change downgrades the gate immediately. The action guard re-checks the last probe snapshot; it
+does not re-probe automatically before a start or destructive action. The snapshot is refreshed
+on connect, on a host/connection change, or by an explicit **Probe gates**, and a cached `Ready`
+can authorize an action only until that snapshot expires or is invalidated. The UI never shows a
+bare green state without a successful probe.
 
 ## 3. Current live state (2026-11-16)
 
@@ -188,8 +191,8 @@ node reads, and the never-version-only/never-home-only rules.
 
 | Check | Evidence | Status |
 |---|---|---|
-| D6 Playwright/axe, gated flows | `apps/spirit-desktop/e2e/local-orchestrator-gated.spec.ts` (Waiting and Incompatible; 3 axe checks) | **committed at `133fd25`/`1f82340`; not re-run here** |
-| D6 Playwright/axe, Ready flow | `apps/spirit-desktop/e2e/local-orchestrator-ready.spec.ts` (honest Ready flow; 4 axe checks) | **committed at `133fd25`/`1f82340`; not re-run here** |
+| D6 Playwright/axe, gated flows | `apps/spirit-desktop/e2e/local-orchestrator-gated.spec.ts` (Waiting and Incompatible; 2 axe checks) | **committed at `133fd25`/`1f82340`; not re-run here** |
+| D6 Playwright/axe, Ready flow | `apps/spirit-desktop/e2e/local-orchestrator-ready.spec.ts` (honest Ready flow; 3 axe checks) | **committed at `133fd25`/`1f82340`; not re-run here** |
 | Full desktop e2e and Web regression | `npm run test:e2e` | **not re-run here** |
 | Tauri host tests | `cargo test -p spirit-desktop` / `scripts/desktop-build-container.sh check` | **not re-run here** |
 | Live VOWP/agent/desktop smoke | Real home + Mac + enrolled agent + real surface | **owner-run/pending** |
@@ -286,7 +289,7 @@ committed evidence. This job performed none of the write steps above.
   labels, probe algorithm, and security invariants; §11.4–§11.6 — gate serialization, cache, and
   UI rules.
 - [`docs/PLAN.md`](PLAN.md) §9.8 — D6 scope and its VOWP Phase 2/3/4 prerequisites.
-- [`docs/RELEASE-D5-ASIF.md`](RELEASE-D5-ASIF.md) §7.1 — D5's statement that D6 remained gated;
+- [`docs/RELEASE-D5-ASIF.md`](RELEASE-D5-ASIF.md) §7 item 1 — D5's statement that D6 remained gated;
   this note records the D6 code landing behind the same gate.
 - [`docs/RELEASE-DESKTOP-MVP.md`](RELEASE-DESKTOP-MVP.md) — the D1–D4 release baseline and the
   original D6 limitation.
