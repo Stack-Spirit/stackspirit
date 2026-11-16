@@ -900,6 +900,17 @@ fn orchestrator_resume_refreshes_the_app_files_atomically() {
     fs::set_permissions(&agents_path, fs::Permissions::from_mode(0o644)).expect("stale mode");
     fs::remove_file(dir.join("opencode.json")).expect("remove opencode config");
     fs::write(dir.join("orchestrator.json"), "{}").expect("stale record");
+    // Keep the stale inode open across the resume. A resume rewrites this file more than
+    // once through temporary files, and the kernel may hand a just-freed inode number to
+    // the next temporary file; without a live reference the final inode could cycle back
+    // to `first_inode` even though every write was a rename. Holding the handle keeps the
+    // old inode allocated, so an in-place rewrite would still show `first_inode` below.
+    let stale = fs::File::open(&agents_path).expect("hold the stale instructions");
+    assert_eq!(
+        inode(&agents_path),
+        first_inode,
+        "the stale write kept the original inode"
+    );
     bind(&state, "refresh", SURFACE_TWO, SESSION_TWO, &working, &script, &count);
 
     let resumed = host.start(&resume_command("refresh"), None, &mut link);
@@ -914,6 +925,7 @@ fn orchestrator_resume_refreshes_the_app_files_atomically() {
         first_inode,
         "the refresh replaces the file atomically"
     );
+    drop(stale);
     for name in ["AGENTS.md", "opencode.json", "orchestrator.json"] {
         assert_private_file(&dir.join(name));
     }
