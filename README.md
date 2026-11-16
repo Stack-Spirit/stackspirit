@@ -58,6 +58,9 @@ and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web
   shipped core/bridge/Sessions UI, capability-probe evidence, the local CLI round trip, the
   pending owner-run live smoke, and the `ss-13-asif-core`, `ss-14-asif-bridge`, and
   `ss-15-asif-ui` evidence status.
+- [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md) — D6 local-orchestrator release and closeout note:
+  shipped core/bridge/Engine UI, the `LocalOrchestratorGate` capability gate, the D6 core,
+  bridge, and panel test evidence, and the pending owner-run live setup and smoke.
 - [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) — non-root Linux Docker build container for the Tauri
   host and desktop UI gates.
 - [`docs/OWNER-VERIFICATION.md`](docs/OWNER-VERIFICATION.md) — owner-run macOS/Linux/Windows
@@ -112,17 +115,20 @@ script before packaging, because Tauri's `bundle.externalBin` expects the sideca
 
 The Engine view ends with two honest VOWP gate cards:
 
-- **Local orchestrator** — gated on VOWP Phase 2 (`v4-local-2e/2f/2g`) and Phase 3
-  (`v4-local-3*`: local app host, bridge, MCP proxy, orchestrator materialization, backfill,
-  local cache).
+- **Local orchestrator** — shipped in D6 for the desktop behind the live
+  `LocalOrchestratorGate`; the probe covers the VOWP Phase 2 offload read and the Phase 3/4
+  local-node CLI surface.
 - **.asif.zip sessions** — shipped in D5 for the desktop. The read-only probe must prove
   export and import independently; a partial Ready gate enables only the proven direction.
 
 The probes read VOWP command surfaces and exit codes; a version string alone never makes a gate
-Ready. The D5 desktop build enables `features.asif_actions` (the `d5` Cargo feature is on by
-default), while `features.local_orchestrator_actions` stays false until D6. A Ready
-local-orchestrator gate therefore still shows **not implemented in this build** with the evidence
-and exact missing milestones in a Details drawer.
+Ready. The desktop build enables `features.asif_actions` (the `d5` Cargo feature is on by
+default). D6 is implemented in the core, bridge, and Engine UI: actions enable only when
+`features.local_orchestrator_actions` is on, `LocalOrchestratorGate` is `Ready`, and the local
+agent is `connected`, with the node, protocol, and path-map prerequisites re-checked by the
+backend. On this host the live gate remains **Waiting** because the installed VOWP CLI is `0.3.0`
+and the local agent is not enrolled; live execution remains owner-gated, and no live desktop
+smoke has been recorded.
 
 ## Sessions and ASIF (Phase D5)
 
@@ -157,9 +163,10 @@ contracts and milestones in `/home/dev/vowp`:
   import are enabled independently only after the read-only probe proves them; see
   [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md). No live host/desktop smoke has been
   recorded by the owner.
-- **Gated on VOWP Phase 2 (`v4-local-2e/2f/2g`) and Phase 3 (`v4-local-3*` in
-  `/home/dev/vowp`):** Running global and project orchestrators locally on the user's machine
-  with live VOWP session lease/backfill (Phase D6).
+- **Shipped in D6 behind the live gate:** The merged VOWP source has the Phase 3/4
+  local-orchestrator CLI surface, but the installed build is still stale, the local agent is not
+  enrolled, and D6 live execution and the owner-run smoke remain pending. See
+  [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md).
 
 ## Development gates
 
