@@ -843,9 +843,19 @@ differs.
       <home-ssh-target> vowp agent gateway --stdio
   ```
 
-- The gateway connects to `~/.vowp/agent.sock` (0600) and forwards bytes. It has no DB access and
-  no shell. Phase 4 moves the socket to a system path owned by the supervisor, with a group the
-  low-privilege gateway user can access.
+- The remote command is exactly `vowp agent gateway --stdio`; the client adds no `--project`,
+  and the SSH session starts in the home user's `$HOME`. The gateway therefore opens the home's
+  global store (`~/.vowp/vowp.db`) directly, without requiring `--project` or a project cwd, and
+  works on a home with zero, one or several registered projects. Node cards, credentials,
+  sessions, leases, surface tokens and offload assignments are global. Session-bound work (chat
+  and paired surfaces) resolves the session row's `project` binding (`_node` for a project-less
+  session), and offload work resolves the assignment's `project`; the run, job, gate and ledger
+  rows are then read from and written to that project's database. An explicit `--project` or a
+  cwd inside a registered checkout still selects that project's context.
+- The gateway runs as the home user with the same store access as any other home command. It
+  has no shell and no project checkout of its own. Phase 4 may move it behind a low-privilege
+  supervisor socket owned by a dedicated user and group; that is future work, not current
+  behavior.
 - Handshake: `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`; then `Resume` for the
   node's runs and surfaces.
 - One active connection per node. A second connection supersedes the first; the old connection
@@ -1393,12 +1403,14 @@ shell history.
 ### 12.3 Hidden gateway
 
 ```sh
-vowp agent gateway --stdio --socket <path>
+vowp agent gateway --stdio
 ```
 
-It is the SSH command (pinned with a forced command in the hardened setup). It forwards frames,
-has no DB access, no shell and no local files other than its socket. It exits on EOF or protocol
-error. `vowp agent gateway --check` is for `doctor`.
+It is the SSH command (pinned with a forced command in the hardened setup). It reads frames on
+stdin and writes frames on stdout, opens the home's global store and resolves each project's
+store from the session or assignment binding. It has no shell and no project checkout of its own.
+It exits on EOF or protocol error; `vowp agent gateway --listen <addr>` serves the same frames on
+a loopback WebSocket. A `--check` diagnostic for `doctor` is planned.
 
 ### 12.4 JSON shapes and exit codes
 

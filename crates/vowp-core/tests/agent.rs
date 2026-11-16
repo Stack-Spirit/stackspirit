@@ -171,6 +171,93 @@ fn activate(root: &Path, clock: &Arc<FakeClock>, name: &NodeName, key: &SigningK
     redeem(&store, &request, clock.now()).expect("redeem code");
 }
 
+/// Registers the reserved `_node` project and every named project, creating their databases.
+///
+/// This is the registry state a multi-project home has after `vowp init` and
+/// `vowp project add`.
+fn register_projects(root: &Path, clock: &Arc<FakeClock>, projects: &[&str]) {
+    let paths = NodePaths::new(root);
+    let store = Store::open_global(&paths)
+        .expect("global store")
+        .with_clock(clock.clone());
+    let now = clock.now();
+    let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT).expect("node project");
+    if store.project(&node_project).expect("node project lookup").is_none() {
+        store
+            .upsert_project(&Project {
+                name: node_project.clone(),
+                path: paths.root().display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            })
+            .expect("node project row");
+    }
+    Store::create_project_db(&paths, &node_project).expect("node project database");
+    for name in projects {
+        let project = ProjectName::parse(name).expect("project slug");
+        let checkout = root.join(format!("{name}-checkout"));
+        std::fs::create_dir_all(&checkout).expect("project checkout");
+        let mut config = VowpConfig::with_defaults_for_tests();
+        config.project.name = project.clone();
+        config.project.path = Some(checkout.display().to_string());
+        std::fs::write(
+            checkout.join("vowp.toml"),
+            toml::to_string_pretty(&config).expect("config serialises"),
+        )
+        .expect("vowp.toml");
+        store
+            .upsert_project(&Project {
+                name: project.clone(),
+                path: checkout.display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::to_value(&config).expect("config json"),
+                created_at: now,
+                updated_at: now,
+            })
+            .expect("project row");
+        Store::create_project_db(&paths, &project).expect("project database");
+    }
+}
+
+/// Creates a session row for one project and an empty log file.
+fn session_in(
+    root: &Path,
+    store: &Store,
+    node: &NodeName,
+    project: Option<&str>,
+    id: &str,
+    clock: &Arc<FakeClock>,
+) -> SessionId {
+    let id = SessionId::parse(id).expect("session id");
+    let now = clock.now();
+    store
+        .upsert_session(&Session {
+            id: id.clone(),
+            project: project.map(|name| ProjectName::parse(name).expect("project")),
+            job_id: None,
+            role: Some(SessionRole::User),
+            title: "multi-project chat".to_owned(),
+            parent_session_id: None,
+            node: node.clone(),
+            cwd: "/tmp/vowp".to_owned(),
+            state: SessionState::Idle,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("session");
+    let log = SessionLog::create(&NodePaths::new(root), &id, clock.clone()).expect("session log");
+    log.sync().expect("sync empty log");
+    id
+}
+
 /// One controllable in-memory reader.
 #[derive(Clone)]
 struct TestReader {
@@ -289,6 +376,14 @@ impl Gateway {
 
     fn start_with_deps(root: &Path, clock: Arc<FakeClock>, log: Arc<MemoryLog>, deps: Deps) -> Self {
         let store = deps.open_store().expect("bound store");
+        Self::start_with_store(root, clock, log, deps, store)
+    }
+
+    /// Starts one connection over an explicit store handle.
+    ///
+    /// The multi-project tests serve `Store::open_global` while one project still owns the
+    /// run and job rows.
+    fn start_with_store(root: &Path, clock: Arc<FakeClock>, log: Arc<MemoryLog>, deps: Deps, store: Store) -> Self {
         let input = TestReader::new();
         let output = TestWriter::default();
         let reader = BufReader::new(input.clone());
@@ -308,6 +403,16 @@ impl Gateway {
             root: root.to_path_buf(),
             handle: Some(handle),
         }
+    }
+
+    /// Starts one connection over the home's global store.
+    fn start_global(root: &Path, clock: Arc<FakeClock>) -> Self {
+        let log = Arc::new(MemoryLog::new());
+        let deps = test_deps(root, clock.clone(), log.clone());
+        let store = Store::open_global(&NodePaths::new(root))
+            .expect("global store")
+            .with_clock(clock.clone());
+        Self::start_with_store(root, clock, log, deps, store)
     }
 
     fn store(&self) -> Store {
@@ -2115,6 +2220,155 @@ fn local_chat_turn_appends_to_the_home_log() {
         let text = serde_json::to_string(event).expect("event JSON");
         assert!(!text.contains("/Users/"), "no Mac absolute path: {text}");
     }
+}
+
+#[test]
+fn gateway_serves_a_multi_project_home_from_the_global_store() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &["alpha", "beta"]);
+    activate(home.path(), &clock, &name, &key);
+    let paths = NodePaths::new(home.path());
+
+    // The gateway is started the way an SSH command on a multi-project home starts it:
+    // the global store, no selected project, and node-level deps.
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let capacity = AgentCapacity {
+        cpu_cores: 8,
+        load1: 0.1,
+        mem_total_bytes: 16 * 1024 * 1024 * 1024,
+        mem_free_bytes: 8 * 1024 * 1024 * 1024,
+        disk_free_bytes: 100 * 1024 * 1024 * 1024,
+        busy_slots: 0,
+        max_slots: 4,
+        on_battery: Some(false),
+        thermal_state: Some("nominal".to_owned()),
+    };
+    gateway.send(&AgentFrame::Heartbeat {
+        at: clock.now(),
+        capacity,
+        pending_spool_bytes: 0,
+    });
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect(|frame| matches!(frame, AgentFrame::Pong));
+
+    let global = Store::open_global(&paths).expect("global store");
+    let card = global.node_card(&name, clock.now()).expect("card").expect("node");
+    assert_eq!(card.status, NodeStatus::Active);
+    assert_eq!(card.presence, NodePresence::Online);
+
+    // A paired surface attached to beta's session begins a chat turn. Its run row must
+    // land in beta's database, not in the global handle and not in alpha.
+    let beta = ProjectName::parse("beta").expect("beta slug");
+    let beta_store = Store::open_with_project(&paths, &beta).expect("beta store");
+    let session = session_in(home.path(), &beta_store, &name, Some("beta"), SESSION, &clock);
+    let (surface, surface_token) = pair_surface(&beta_store, &name, &session, "chat", clock.now());
+    gateway.send(&acquire_frame(&surface, &session, &surface_token, LeaseMode::Acquire));
+    let (lease_token, _, _) = expect_grant(&gateway, 0);
+    let start = gateway.frame_count();
+    gateway.send(&turn_begin_frame(
+        &surface,
+        &session,
+        &lease_token,
+        PathRef::parse("project:beta").expect("path ref"),
+    ));
+    let (run, granted_session, granted_lease, _) = expect_turn_grant(&gateway, start);
+    assert_eq!(granted_session, session);
+    assert_eq!(granted_lease, lease_token);
+
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease_token),
+    });
+    let event = assistant_event(&EventId::new(), "served from beta");
+    let start = gateway.frame_count();
+    gateway.send(&event_line(&run, event));
+    let (_, _, _, duplicate, _, error) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(error.is_none());
+    let start = gateway.frame_count();
+    gateway.send(&turn_end_frame(&run));
+    let (_, _, _, duplicate, _, error) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(error.is_none());
+
+    let run_row = beta_store.require_run(&run).expect("run row in beta");
+    assert_eq!(run_row.outcome, Some(RunOutcome::Ok));
+    assert_eq!(run_row.session_id.as_ref(), Some(&session));
+    let alpha = ProjectName::parse("alpha").expect("alpha slug");
+    let alpha_store = Store::open_with_project(&paths, &alpha).expect("alpha store");
+    assert!(
+        alpha_store.run(&run).expect("alpha run lookup").is_none(),
+        "the run must not land in another project's database"
+    );
+
+    assert_eq!(
+        gateway.finish().expect("gateway"),
+        GatewayOutcome::Closed {
+            node: Some(name.clone())
+        }
+    );
+}
+
+#[test]
+fn gateway_serves_a_project_less_session_in_the_node_store() {
+    let key = signing_key();
+    let name = node_name("mac-studio");
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &["alpha", "beta"]);
+    activate(home.path(), &clock, &name, &key);
+    let paths = NodePaths::new(home.path());
+    let global = Store::open_global(&paths)
+        .expect("global store")
+        .with_clock(clock.clone());
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let session = session_in(home.path(), &global, &name, None, SESSION, &clock);
+    let (surface, surface_token) = pair_surface(&global, &name, &session, "chat", clock.now());
+    gateway.send(&acquire_frame(&surface, &session, &surface_token, LeaseMode::Acquire));
+    let (lease_token, _, _) = expect_grant(&gateway, 0);
+    let start = gateway.frame_count();
+    gateway.send(&turn_begin_frame(
+        &surface,
+        &session,
+        &lease_token,
+        PathRef::parse("project:alpha").expect("path ref"),
+    ));
+    let (run, _, _, _) = expect_turn_grant(&gateway, start);
+    gateway.send(&AgentFrame::RemoteLine {
+        run_id: run.clone(),
+        epoch: 1,
+        line: hello_line(&session, &run, &lease_token),
+    });
+    let start = gateway.frame_count();
+    gateway.send(&event_line(
+        &run,
+        assistant_event(&EventId::new(), "global orchestrator"),
+    ));
+    let (_, _, _, duplicate, _, error) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(error.is_none());
+    let start = gateway.frame_count();
+    gateway.send(&turn_end_frame(&run));
+    let (_, _, _, duplicate, _, error) = expect_ack(&gateway, start);
+    assert!(!duplicate);
+    assert!(error.is_none());
+
+    let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT).expect("node project");
+    let node_store = Store::open_with_project(&paths, &node_project).expect("node store");
+    let run_row = node_store.require_run(&run).expect("run row in _node");
+    assert_eq!(run_row.outcome, Some(RunOutcome::Ok));
+    let alpha = ProjectName::parse("alpha").expect("alpha slug");
+    let alpha_store = Store::open_with_project(&paths, &alpha).expect("alpha store");
+    assert!(alpha_store.run(&run).expect("alpha run lookup").is_none());
+
+    gateway.finish().expect("gateway");
 }
 
 #[test]

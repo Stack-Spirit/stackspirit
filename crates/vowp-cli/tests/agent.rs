@@ -14,11 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use ed25519_dalek::{Signer, SigningKey};
 use tempfile::TempDir;
 use vowp_agent::{
     AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, Cache, ConnectionState, FrameRead, FrameStream,
-    NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, ServiceError, Transport,
-    TransportConfig, WssTlsMode,
+    NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, ServiceError, SshTransport,
+    Transport, TransportConfig, WssTlsMode,
 };
 use vowp_cli::BufferIo;
 use vowp_cli::agent_exec::CoreRunHandler;
@@ -27,12 +28,12 @@ use vowp_cli::cmd::agent::{enrollment_transport_config, service_error_exit_code}
 use vowp_cli::node_ctx::ControlConfig;
 use vowp_core::agent::pair::{issue_surface_token, verify_surface_token};
 use vowp_protocol::{
-    AGENT_PROTOCOL, AgentFrame, AgentPathMap, AgentRole, AssignmentPayload, Executor, JobId, NodeKind, NodeName,
-    NodeStatus, PathRef, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, RunId, RunOutcome, RunPurpose,
-    RunRejectReason, SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId, SurfaceState,
-    Timestamp, TurnSummary,
+    AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, AssignmentPayload,
+    ErrorKind, Executor, JobId, NodeKind, NodeName, NodeStatus, PathRef, Project, ProjectName, RemoteEvent, RemoteLine,
+    RemoteRunState, RunId, RunOutcome, RunPurpose, RunRejectReason, SecretName, Session, SessionId, SessionRole,
+    SessionState, StopReason, SurfaceId, SurfaceState, Timestamp, TurnSummary, VowpConfig,
 };
-use vowp_store::{NodeCredential, NodePath};
+use vowp_store::{NodeCredential, NodePath, NodePaths, Store};
 
 mod common;
 
@@ -214,6 +215,258 @@ fn checkout_map(home: &Path, directory: &str, project: &str) -> (PathBuf, AgentP
         allow: Vec::new(),
     };
     (root, map)
+}
+
+// ---------------------------------------------------------------------------
+// Gateway stdio fixtures: a real process over stdin/stdout
+// ---------------------------------------------------------------------------
+
+/// One isolated unix home whose `$HOME/.vowp` is an initialised node home.
+struct GatewayHome {
+    unix_home: TempDir,
+}
+
+impl GatewayHome {
+    /// Creates the home with the reserved `_node` project and the named real projects.
+    fn new(projects: &[&str]) -> Self {
+        let unix_home = TempDir::new().expect("temp home");
+        let paths = NodePaths::new(unix_home.path().join(".vowp"));
+        let store = Store::open(&paths).expect("store opens");
+        let now = store.clock().now();
+        let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT).expect("node project");
+        if store.project(&node_project).expect("node project lookup").is_none() {
+            store
+                .upsert_project(&Project {
+                    name: node_project.clone(),
+                    path: paths.root().display().to_string(),
+                    remote_url: None,
+                    default_branch: "main".to_owned(),
+                    config: serde_json::json!({}),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .expect("node project row");
+        }
+        Store::create_project_db(&paths, &node_project).expect("node project database");
+        for name in projects {
+            let project = ProjectName::parse(name).expect("project slug");
+            let checkout = unix_home.path().join(format!("{name}-checkout"));
+            std::fs::create_dir_all(&checkout).expect("project checkout");
+            let mut config = VowpConfig::with_defaults_for_tests();
+            config.project.name = project.clone();
+            config.project.path = Some(checkout.display().to_string());
+            std::fs::write(
+                checkout.join("vowp.toml"),
+                toml::to_string_pretty(&config).expect("config serialises"),
+            )
+            .expect("vowp.toml");
+            store
+                .upsert_project(&Project {
+                    name: project,
+                    path: checkout.display().to_string(),
+                    remote_url: None,
+                    default_branch: "main".to_owned(),
+                    config: serde_json::to_value(&config).expect("config json"),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .expect("project row");
+        }
+        Self { unix_home }
+    }
+
+    fn home(&self) -> &Path {
+        self.unix_home.path()
+    }
+
+    fn paths(&self) -> NodePaths {
+        NodePaths::new(self.home().join(".vowp"))
+    }
+
+    fn checkout(&self, name: &str) -> PathBuf {
+        self.home().join(format!("{name}-checkout"))
+    }
+
+    fn store(&self) -> Store {
+        Store::open(&self.paths()).expect("store opens")
+    }
+}
+
+/// Spawns the real `vowp agent gateway --stdio` with `$HOME` and a non-project cwd.
+fn spawn_gateway_stdio(home: &Path, cwd: &Path) -> Child {
+    ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .args(["agent", "gateway", "--stdio"])
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("NO_COLOR", "1")
+        .env_remove("VOWP_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .env_remove("VOWP_AGENT_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn agent gateway")
+}
+
+/// Writes one agent frame as a JSON line.
+fn write_agent_frame(stdin: &mut impl Write, frame: &AgentFrame) {
+    let text = serde_json::to_string(frame).expect("frame JSON");
+    writeln!(stdin, "{text}").expect("write agent frame");
+    stdin.flush().expect("flush agent frame");
+}
+
+/// Reads one agent frame line.
+fn read_agent_frame(reader: &mut impl BufRead) -> AgentFrame {
+    let mut line = String::new();
+    let read = reader.read_line(&mut line).expect("read agent frame");
+    assert!(read > 0, "the gateway closed before the next frame");
+    serde_json::from_str(line.trim()).unwrap_or_else(|error| panic!("invalid agent frame {line:?}: {error}"))
+}
+
+/// Returns the hex Ed25519 signature over the handshake payload.
+fn signature_hex(key: &SigningKey, nonce: &str, home: &str, connection: &str) -> String {
+    key.sign(&vowp_core::agent::auth::handshake_payload(nonce, home, connection))
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Returns the lowercase hex public key.
+fn public_hex(key: &SigningKey) -> String {
+    key.verifying_key()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Names-only capabilities that map one project.
+fn gateway_capabilities(project: &ProjectName) -> AgentCapabilities {
+    AgentCapabilities {
+        os: "linux".to_owned(),
+        arch: "x86_64".to_owned(),
+        agent_version: "0.3.0".to_owned(),
+        harnesses: BTreeMap::from([("opencode".to_owned(), "1.0.0".to_owned())]),
+        git_version: Some("git version 2.47.0".to_owned()),
+        labels: vec!["linux".to_owned()],
+        secret_names: Vec::new(),
+        projects: vec![project.clone()],
+    }
+}
+
+/// One idle node capacity snapshot.
+fn gateway_capacity() -> AgentCapacity {
+    AgentCapacity {
+        cpu_cores: 8,
+        load1: 0.1,
+        mem_total_bytes: 16 * 1024 * 1024 * 1024,
+        mem_free_bytes: 8 * 1024 * 1024 * 1024,
+        disk_free_bytes: 100 * 1024 * 1024 * 1024,
+        busy_slots: 0,
+        max_slots: 4,
+        on_battery: Some(false),
+        thermal_state: Some("nominal".to_owned()),
+    }
+}
+
+/// Redeems one enrollment code on its own connection.
+///
+/// `serve` handles exactly one connection: an `Enroll` is answered with `Enrolled` and the
+/// gateway exits, then the agent reconnects for the handshake. The test does the same.
+fn enroll_node(gateway_home: &GatewayHome, node: &NodeName, key: &SigningKey, project: &ProjectName) {
+    let store = gateway_home.store();
+    let pending =
+        vowp_core::agent::create_pending(&store, node, &["linux".to_owned()], Timestamp::now()).expect("pending node");
+    let mut child = spawn_gateway_stdio(gateway_home.home(), gateway_home.home());
+    let mut stdin = child.stdin.take().expect("gateway stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("gateway stdout"));
+    write_agent_frame(
+        &mut stdin,
+        &AgentFrame::Enroll {
+            code: pending.code,
+            public_key: public_hex(key),
+            agent_version: "0.3.0".to_owned(),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            labels: vec!["linux".to_owned()],
+            capabilities: gateway_capabilities(project),
+            paths: Vec::new(),
+        },
+    );
+    match read_agent_frame(&mut stdout) {
+        AgentFrame::Enrolled { node: enrolled, .. } => assert_eq!(enrolled, *node),
+        other => panic!("expected Enrolled, got {other:?}"),
+    }
+    drop(stdin);
+    let status = wait_for_exit(&mut child, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(0), "an enrollment connection exits 0");
+}
+
+/// Opens a new gateway connection and completes the AgentHello challenge.
+fn handshake_node(
+    gateway_home: &GatewayHome,
+    node: &NodeName,
+    key: &SigningKey,
+    project: &ProjectName,
+) -> (Child, std::process::ChildStdin, BufReader<std::process::ChildStdout>) {
+    let mut child = spawn_gateway_stdio(gateway_home.home(), gateway_home.home());
+    let mut stdin = child.stdin.take().expect("gateway stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("gateway stdout"));
+    write_agent_frame(
+        &mut stdin,
+        &AgentFrame::AgentHello {
+            node: node.clone(),
+            key_id: public_hex(key),
+            agent_version: "0.3.0".to_owned(),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            labels: vec!["linux".to_owned()],
+            capabilities: gateway_capabilities(project),
+        },
+    );
+    let AgentFrame::HomeChallenge {
+        nonce,
+        home_id,
+        connection_id,
+        ..
+    } = read_agent_frame(&mut stdout)
+    else {
+        panic!("expected HomeChallenge");
+    };
+    write_agent_frame(
+        &mut stdin,
+        &AgentFrame::AgentAuth {
+            signature: signature_hex(key, &nonce, &home_id, &connection_id),
+        },
+    );
+    match read_agent_frame(&mut stdout) {
+        AgentFrame::HomeWelcome { .. } => {}
+        other => panic!("expected HomeWelcome, got {other:?}"),
+    }
+    (child, stdin, stdout)
+}
+
+/// Waits for the child to exit, failing after `timeout`.
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll gateway") {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "the gateway did not exit in time");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Reads everything the child wrote to stderr after it exited.
+fn child_stderr(child: &mut Child) -> String {
+    let mut text = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut text);
+    }
+    text
 }
 
 #[test]
@@ -1808,6 +2061,116 @@ fn agent_gateway_refuses_a_non_loopback_bind() {
     let (code, _stdout, stderr) = run_binary(home.path(), &["agent", "gateway", "--listen", "0.0.0.0:0"]);
     assert_eq!(code, 5, "a public bind is refused: {stderr}");
     assert!(stderr.contains("loopback"), "{stderr}");
+}
+
+#[test]
+fn agent_gateway_stdio_enrolls_and_handshakes_on_a_multi_project_home() {
+    let home = GatewayHome::new(&["alpha", "beta"]);
+    let node = NodeName::parse("mac-studio").expect("node slug");
+    let key = SigningKey::from_bytes(&[21u8; 32]);
+    let alpha = ProjectName::parse("alpha").expect("alpha project");
+
+    // The SSH forced command runs from `$HOME` with no `--project`: no checkout is the cwd.
+    enroll_node(&home, &node, &key, &alpha);
+    let (mut child, mut stdin, mut stdout) = handshake_node(&home, &node, &key, &alpha);
+    write_agent_frame(
+        &mut stdin,
+        &AgentFrame::Heartbeat {
+            at: Timestamp::now(),
+            capacity: gateway_capacity(),
+            pending_spool_bytes: 0,
+        },
+    );
+    write_agent_frame(&mut stdin, &AgentFrame::Ping);
+    match read_agent_frame(&mut stdout) {
+        AgentFrame::Pong => {}
+        other => panic!("expected Pong, got {other:?}"),
+    }
+
+    let checkout = home.checkout("alpha");
+    let (code, stdout_text, stderr) = run_binary(
+        home.home(),
+        &[
+            "--json",
+            "--project",
+            checkout.to_str().expect("utf-8 checkout"),
+            "node",
+            "show",
+            "mac-studio",
+        ],
+    );
+    assert_eq!(code, 0, "node show failed: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout_text).expect("node show JSON");
+    assert_eq!(value["status"], "active", "{value}");
+    assert_eq!(value["presence"], "online", "{value}");
+
+    drop(stdin);
+    let status = wait_for_exit(&mut child, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(0), "EOF exits 0");
+    let stderr = child_stderr(&mut child);
+    assert!(!stderr.contains("no project selected"), "{stderr}");
+    assert!(stderr.is_empty(), "a clean EOF writes no stderr: {stderr}");
+}
+
+#[test]
+fn agent_gateway_stdio_exits_zero_on_eof_for_zero_single_and_multi_project_homes() {
+    for projects in [&[][..], &["alpha"][..], &["alpha", "beta"][..]] {
+        let home = GatewayHome::new(projects);
+        let mut child = spawn_gateway_stdio(home.home(), home.home());
+        drop(child.stdin.take());
+        let status = wait_for_exit(&mut child, Duration::from_secs(10));
+        assert_eq!(status.code(), Some(0), "projects {projects:?} must serve EOF");
+        let stderr = child_stderr(&mut child);
+        assert!(stderr.is_empty(), "projects {projects:?}: {stderr}");
+    }
+}
+
+#[test]
+fn agent_gateway_stdio_refuses_an_unknown_node_with_a_protocol_frame() {
+    let home = GatewayHome::new(&["alpha"]);
+    let node = NodeName::parse("ghost").expect("node slug");
+    let key = SigningKey::from_bytes(&[22u8; 32]);
+    let alpha = ProjectName::parse("alpha").expect("alpha project");
+    let mut child = spawn_gateway_stdio(home.home(), home.home());
+    let mut stdin = child.stdin.take().expect("gateway stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("gateway stdout"));
+
+    write_agent_frame(
+        &mut stdin,
+        &AgentFrame::AgentHello {
+            node: node.clone(),
+            key_id: public_hex(&key),
+            agent_version: "0.3.0".to_owned(),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            labels: vec!["linux".to_owned()],
+            capabilities: gateway_capabilities(&alpha),
+        },
+    );
+    let AgentFrame::Error { kind, message, .. } = read_agent_frame(&mut stdout) else {
+        panic!("expected an Error frame");
+    };
+    assert_eq!(kind, ErrorKind::NotFound);
+    assert!(message.contains("unknown node"), "{message}");
+    assert!(!message.contains("no project selected"), "{message}");
+
+    drop(stdin);
+    let status = wait_for_exit(&mut child, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(0), "the refused connection closes cleanly");
+}
+
+#[test]
+fn agent_enroll_ssh_argv_is_unchanged() {
+    let argv = SshTransport::new("home.example").argv();
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some("vowp agent gateway --stdio"),
+        "the client keeps its hard-coded SSH command: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--project"),
+        "the SSH command never needs a project: {argv:?}"
+    );
 }
 
 /// One spawned `agent gateway --listen` process, killed if the test panics.

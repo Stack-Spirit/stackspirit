@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Executor, ExecutorRef, IngestAck, Lease, LeaseMode,
-    LedgerEntry, LedgerKind, Level, NodeName, NodeStatus, RemoteLine, RunId, RunPurpose, SessionId, SurfaceId,
-    SurfaceInfo, SurfaceKind, SurfaceState, Timestamp, TurnSummary,
+    LedgerEntry, LedgerKind, Level, NodeName, NodeStatus, ProjectName, RemoteLine, RunId, RunPurpose, SessionId,
+    SurfaceId, SurfaceInfo, SurfaceKind, SurfaceState, Timestamp, TurnSummary,
 };
 use vowp_store::{NodeCredential, Store};
 
@@ -71,6 +71,75 @@ impl GatewayOptions {
     }
 }
 
+/// Per-project store handles for one gateway connection.
+///
+/// Node cards, credentials, sessions, leases, surface tokens and assignments are global,
+/// but a project's runs, jobs and gate results live in that project's database. A gateway
+/// serving a multi-project home opens one bound handle per registered project so a session
+/// or assignment resolves its own database. An in-memory test store has no node paths and
+/// keeps the caller's handle, which preserves the single-database test seam.
+struct ProjectStores {
+    bound: BTreeMap<ProjectName, Store>,
+}
+
+impl ProjectStores {
+    /// Opens every registered project's database for this connection.
+    fn open(deps: &Deps, store: &Store) -> Self {
+        let mut bound = BTreeMap::new();
+        let Some(paths) = store.paths() else {
+            return Self { bound };
+        };
+        let Ok(mut projects) = store.list_projects() else {
+            return Self { bound };
+        };
+        let node = node_project();
+        if !projects.iter().any(|project| project.name == node) {
+            // An unbound session writes its runs to the reserved `_node` project. `init`
+            // creates the row and database; a migrated or hand-built home may lack them.
+            let now = deps.clock.now();
+            let _ = store.upsert_project(&vowp_protocol::Project {
+                name: node.clone(),
+                path: paths.root().display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            });
+            if let Ok(project) = store.require_project(&node) {
+                projects.push(project);
+            }
+        }
+        for project in projects {
+            if project.name == node {
+                let _ = Store::create_project_db(paths, &project.name);
+            }
+            if let Ok(handle) = Store::open_with_project(paths, &project.name) {
+                bound.insert(project.name.clone(), handle.with_clock(deps.clock.clone()));
+            }
+        }
+        Self { bound }
+    }
+
+    /// Returns the handle bound to `project`, or the caller's handle when it cannot be
+    /// resolved (an in-memory test store or a project whose database is missing).
+    ///
+    /// A `None` project is a project-less session: its runs belong to the reserved `_node`
+    /// project, exactly as `sessions_for_reconcile` treats them.
+    fn for_project<'a>(&'a self, store: &'a Store, project: Option<&ProjectName>) -> &'a Store {
+        match project {
+            Some(project) => self.bound.get(project).unwrap_or(store),
+            None => self.bound.get(&node_project()).unwrap_or(store),
+        }
+    }
+}
+
+/// Returns the reserved project name owned by the home node.
+fn node_project() -> ProjectName {
+    ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)
+        .expect("invariant: the reserved node project name is a valid project slug")
+}
+
 /// How one gateway connection ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayOutcome {
@@ -108,6 +177,7 @@ pub fn serve_with_options(
     options: GatewayOptions,
 ) -> Result<GatewayOutcome, CoreError> {
     let incoming = spawn_reader(reader, options.max_frame_bytes);
+    let projects = ProjectStores::open(deps, store);
     let deadline = Instant::now() + options.handshake_timeout;
     let Some(first) = read_frame(&incoming, Some(deadline), &mut writer, options.max_frame_bytes)? else {
         return Ok(GatewayOutcome::Closed { node: None });
@@ -166,7 +236,7 @@ pub fn serve_with_options(
             let Some(session) = authenticate(store, deps, hello, &incoming, &mut writer, deadline, &options)? else {
                 return Ok(GatewayOutcome::Closed { node: None });
             };
-            run_connection(store, deps, session, &incoming, &mut writer, &options)
+            run_connection(&projects, store, deps, session, &incoming, &mut writer, &options)
         }
         _ => {
             send_error(
@@ -301,6 +371,7 @@ fn authenticate(
 
 /// Handles frames after the handshake until the peer closes or is revoked.
 fn run_connection(
+    projects: &ProjectStores,
     store: &Store,
     deps: &Deps,
     session: Session,
@@ -310,7 +381,7 @@ fn run_connection(
 ) -> Result<GatewayOutcome, CoreError> {
     let node = session.node.clone();
     let connection_id = session.connection_id.clone();
-    let result = run_connection_inner(store, deps, session, incoming, writer, options);
+    let result = run_connection_inner(projects, store, deps, session, incoming, writer, options);
     let was_current = connection_is_current(store, &node, &connection_id);
     unregister_connection(store, &node, &connection_id);
     // A superseded connection must not disturb the runs the new connection owns. A current
@@ -330,6 +401,7 @@ fn run_connection(
 
 /// The body of one authenticated connection.
 fn run_connection_inner(
+    projects: &ProjectStores,
     store: &Store,
     deps: &Deps,
     session: Session,
@@ -756,6 +828,7 @@ fn run_connection_inner(
                     continue;
                 }
                 match begin_agent_turn(
+                    projects,
                     store,
                     deps,
                     &session.node,
@@ -804,8 +877,17 @@ fn run_connection_inner(
                         ..
                     } = &line
                     {
-                        match resume_run_stream(store, deps, &session.node, &run_id, hello_run, session_id, lease, now)
-                        {
+                        match resume_run_stream(
+                            projects,
+                            store,
+                            deps,
+                            &session.node,
+                            &run_id,
+                            hello_run,
+                            session_id,
+                            lease,
+                            now,
+                        ) {
                             Ok(stream) => {
                                 chats.insert(run_id.clone(), stream);
                             }
@@ -1071,6 +1153,7 @@ struct StartedTurn<'a> {
 /// offload assignment. The `Hello` must prove the run is still the live one in both cases.
 #[allow(clippy::too_many_arguments)]
 fn resume_run_stream<'a>(
+    projects: &'a ProjectStores,
     store: &'a Store,
     deps: &'a Deps,
     node: &NodeName,
@@ -1089,17 +1172,19 @@ fn resume_run_stream<'a>(
         )));
     }
     if current.surface_kind == SurfaceKind::Agent && current.surface_id.is_none() {
-        return resume_offload_stream(store, deps, node, run_id, hello_run, session, lease);
+        return resume_offload_stream(projects, store, deps, node, run_id, hello_run, session, lease);
     }
-    resume_chat_stream(store, deps, node, run_id, hello_run, session, lease, now)
+    resume_chat_stream(projects, store, deps, node, run_id, hello_run, session, lease, now)
 }
 
 /// Opens the ingest stream of an offloaded run from its agent-kind run lease.
 ///
 /// An offload run has no paired surface. The durable assignment is the proof that this
-/// node owns the run; the lease token is still verified against its hash before any event
-/// is appended.
+/// node owns the run; it also names the project whose database holds the run row. The
+/// lease token is still verified against its hash before any event is appended.
+#[allow(clippy::too_many_arguments)]
 fn resume_offload_stream<'a>(
+    projects: &'a ProjectStores,
     store: &'a Store,
     deps: &'a Deps,
     node: &NodeName,
@@ -1113,7 +1198,15 @@ fn resume_offload_stream<'a>(
             "hello names run {hello_run}, expected {run_id}"
         )));
     }
-    let run = store.require_run(run_id)?;
+    let Some(assignment) = store.assignments_for_run(run_id)?.into_iter().find(|assignment| {
+        assignment.node == *node && assignment.session_id == *session && assignment.state.is_active()
+    }) else {
+        return Err(CoreError::Refused(format!(
+            "run {run_id} has no live offload assignment on node {node}"
+        )));
+    };
+    let project_store = projects.for_project(store, Some(&assignment.project));
+    let run = project_store.require_run(run_id)?;
     if run.session_id.as_ref() != Some(session) {
         return Err(CoreError::Refused(format!(
             "run {run_id} does not belong to session {session}"
@@ -1135,18 +1228,10 @@ fn resume_offload_stream<'a>(
             session_row.node
         )));
     }
-    let assigned = store.assignments_for_run(run_id)?.into_iter().any(|assignment| {
-        assignment.node == *node && assignment.session_id == *session && assignment.state.is_active()
-    });
-    if !assigned {
-        return Err(CoreError::Refused(format!(
-            "run {run_id} has no live offload assignment on node {node}"
-        )));
-    }
     crate::surface::check_lease_with(store, session, Some(lease))?;
     let ingest = IngestSession::begin(
         deps,
-        store,
+        project_store,
         &IngestGrant {
             session: session.clone(),
             lease: lease.to_owned(),
@@ -1170,6 +1255,7 @@ fn resume_offload_stream<'a>(
 /// paired, attached surface. The caller then feeds the `Hello` through `IngestSession`.
 #[allow(clippy::too_many_arguments)]
 fn resume_chat_stream<'a>(
+    projects: &'a ProjectStores,
     store: &'a Store,
     deps: &'a Deps,
     node: &NodeName,
@@ -1184,7 +1270,9 @@ fn resume_chat_stream<'a>(
             "hello names run {hello_run}, expected {run_id}"
         )));
     }
-    let run = store.require_run(run_id)?;
+    let session_row = store.require_session(session)?;
+    let project_store = projects.for_project(store, session_row.project.as_ref());
+    let run = project_store.require_run(run_id)?;
     if run.session_id.as_ref() != Some(session) {
         return Err(CoreError::Refused(format!(
             "run {run_id} does not belong to session {session}"
@@ -1199,7 +1287,6 @@ fn resume_chat_stream<'a>(
     if run.ended_at.is_some() {
         return Err(CoreError::Refused(format!("run {run_id} has already ended")));
     }
-    let session_row = store.require_session(session)?;
     if session_row.node != *node {
         return Err(CoreError::Refused(format!(
             "session {session} belongs to node {}, not {node}",
@@ -1222,7 +1309,7 @@ fn resume_chat_stream<'a>(
     crate::surface::check_lease_with(store, session, Some(lease))?;
     let ingest = IngestSession::begin(
         deps,
-        store,
+        project_store,
         &IngestGrant {
             session: session.clone(),
             lease: lease.to_owned(),
@@ -1241,6 +1328,7 @@ fn resume_chat_stream<'a>(
 /// Validates a `TurnBegin`, writes the framing events and opens its ingest stream.
 #[allow(clippy::too_many_arguments)]
 fn begin_agent_turn<'a>(
+    projects: &'a ProjectStores,
     store: &'a Store,
     deps: &'a Deps,
     node: &NodeName,
@@ -1268,8 +1356,11 @@ fn begin_agent_turn<'a>(
     }
     crate::surface::check_lease_with(store, session, Some(lease))?;
     let row = store.require_session(session)?;
-    if let Some(project) = cwd_ref_project(cwd_ref)
-        && row.project.as_ref() != Some(project)
+    let project_store = projects.for_project(store, row.project.as_ref());
+    // A project-bound session must name its own project. A project-less (global
+    // orchestrator) session has no project to contradict, and its run belongs to `_node`.
+    if let (Some(project), Some(session_project)) = (cwd_ref_project(cwd_ref), row.project.as_ref())
+        && session_project != project
     {
         return Err(CoreError::Refused(format!(
             "cwd ref is for project {project}, but session {session} belongs to another project"
@@ -1285,7 +1376,7 @@ fn begin_agent_turn<'a>(
     let executor = Executor::parse(executor)?;
     let grant = crate::session::remote::begin_turn(
         deps,
-        store,
+        project_store,
         &BeginTurn {
             session: session.clone(),
             lease: lease.to_owned(),
@@ -1306,7 +1397,7 @@ fn begin_agent_turn<'a>(
         epoch: 0,
         ingest: IngestSession::begin(
             deps,
-            store,
+            project_store,
             &IngestGrant {
                 session: session.clone(),
                 lease: grant.lease_token.clone(),

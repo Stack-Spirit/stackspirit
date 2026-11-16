@@ -197,6 +197,7 @@ impl Home {
                 updated_at: ts(),
             })
             .expect("project row");
+        Store::create_project_db(&deps.paths, &project).expect("project database");
 
         let key = signing_key();
         let pending = create_pending(&store, &node, &["linux".to_owned()], ts()).expect("pending node");
@@ -278,7 +279,26 @@ impl Home {
 
     /// Starts one gateway connection and completes the authenticated handshake.
     fn connect(&self) -> GatewayHarness {
-        let harness = GatewayHarness::start(self.deps.clone());
+        self.connect_with_store(None)
+    }
+
+    /// Starts one gateway connection over the home's global store.
+    ///
+    /// This is how `vowp agent gateway --stdio` runs from `$HOME` on a multi-project
+    /// home: no project is bound at the top level, and each session/assignment names its
+    /// own project.
+    fn connect_global(&self) -> GatewayHarness {
+        let store = Store::open_global(&self.deps.paths)
+            .expect("global store")
+            .with_clock(self.clock.clone());
+        self.connect_with_store(Some(store))
+    }
+
+    fn connect_with_store(&self, store: Option<Store>) -> GatewayHarness {
+        let harness = match store {
+            Some(store) => GatewayHarness::start_with_store(self.deps.clone(), store),
+            None => GatewayHarness::start(self.deps.clone()),
+        };
         harness.send(&AgentFrame::AgentHello {
             node: self.node.clone(),
             key_id: public_hex(&self.key),
@@ -302,6 +322,39 @@ impl Home {
         });
         harness.expect(|frame| matches!(frame, AgentFrame::HomeWelcome { .. }));
         harness
+    }
+
+    /// Registers one more project with no jobs, as a second checkout on the home would be.
+    fn add_project(&self, name: &str) -> ProjectName {
+        let project = ProjectName::parse(name).expect("project slug");
+        let checkout = self.root.join(format!("{name}-checkout"));
+        fs::create_dir_all(&checkout).expect("second checkout");
+        let mut config = VowpConfig::with_defaults_for_tests();
+        config.project.name = project.clone();
+        config.project.path = Some(checkout.display().to_string());
+        // Offload stays off: this project exists only to make the home multi-project.
+        config.offload.enabled = false;
+        fs::write(
+            checkout.join("vowp.toml"),
+            toml::to_string_pretty(&config).expect("second config"),
+        )
+        .expect("second vowp.toml");
+        let global = Store::open_global(&self.deps.paths)
+            .expect("global store")
+            .with_clock(self.clock.clone());
+        global
+            .upsert_project(&Project {
+                name: project.clone(),
+                path: checkout.display().to_string(),
+                remote_url: None,
+                default_branch: "main".to_owned(),
+                config: serde_json::to_value(&config).expect("second config json"),
+                created_at: ts(),
+                updated_at: ts(),
+            })
+            .expect("second project row");
+        Store::create_project_db(&self.deps.paths, &project).expect("second project database");
+        project
     }
 
     /// Sends one heartbeat so dispatch sees fresh capacity.
@@ -719,6 +772,11 @@ struct GatewayHarness {
 impl GatewayHarness {
     fn start(deps: Deps) -> Self {
         let store = deps.open_store().expect("gateway store");
+        Self::start_with_store(deps, store)
+    }
+
+    /// Starts one connection over an explicit store handle.
+    fn start_with_store(deps: Deps, store: Store) -> Self {
         let input = TestReader::new();
         let output = TestWriter::default();
         let reader = BufReader::new(input.clone());
@@ -782,11 +840,8 @@ impl GatewayHarness {
     }
 }
 
-#[test]
-fn fake_gateway_full_turn_and_job_end_to_end() {
-    let home = Home::new(HomeOptions::default());
-    let gateway = home.connect();
-
+/// Runs the full offload turn, accepts, pushes, returns and gates one job.
+fn assert_full_turn(home: &Home, gateway: GatewayHarness) {
     // The heartbeat is what carries fresh capacity into the real claim pass.
     gateway.send(&AgentFrame::Heartbeat {
         at: ts(),
@@ -963,16 +1018,25 @@ fn fake_gateway_full_turn_and_job_end_to_end() {
     let outcome = gateway.shutdown();
     assert!(matches!(outcome, GatewayOutcome::Closed { .. }));
     assert!(home.root.join("node").is_dir());
-    drop(home);
 }
 
 #[test]
-fn fake_gateway_bundle_result_end_to_end() {
-    let home = Home::new(HomeOptions {
-        result_transport: ResultTransport::Bundle,
-        ..HomeOptions::default()
-    });
+fn fake_gateway_full_turn_and_job_end_to_end() {
+    let home = Home::new(HomeOptions::default());
     let gateway = home.connect();
+    assert_full_turn(&home, gateway);
+}
+
+#[test]
+fn fake_gateway_full_turn_from_a_global_store_on_a_multi_project_home() {
+    let home = Home::new(HomeOptions::default());
+    home.add_project("beta");
+    let gateway = home.connect_global();
+    assert_full_turn(&home, gateway);
+}
+
+/// Runs a bundle result end to end and asserts the home imported the verified head.
+fn assert_bundle_result(home: &Home, gateway: GatewayHarness) {
     home.heartbeat(&gateway);
     let (assignment, lease, _) = home.expect_assign(&gateway, 0);
     assert_eq!(assignment.result_transport, ResultTransport::Bundle);
@@ -1076,7 +1140,27 @@ fn fake_gateway_bundle_result_end_to_end() {
 
     let outcome = gateway.shutdown();
     assert!(matches!(outcome, GatewayOutcome::Closed { .. }));
-    drop(home);
+}
+
+#[test]
+fn fake_gateway_bundle_result_end_to_end() {
+    let home = Home::new(HomeOptions {
+        result_transport: ResultTransport::Bundle,
+        ..HomeOptions::default()
+    });
+    let gateway = home.connect();
+    assert_bundle_result(&home, gateway);
+}
+
+#[test]
+fn fake_gateway_bundle_result_from_a_global_store_on_a_multi_project_home() {
+    let home = Home::new(HomeOptions {
+        result_transport: ResultTransport::Bundle,
+        ..HomeOptions::default()
+    });
+    home.add_project("beta");
+    let gateway = home.connect_global();
+    assert_bundle_result(&home, gateway);
 }
 
 #[test]

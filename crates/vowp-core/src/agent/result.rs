@@ -42,14 +42,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vowp_graph::{JobEvent, TransitionBounds};
 use vowp_protocol::{
-    Evidence, Gate, JobState, LedgerEntry, LedgerKind, Level, ResultTransport, Run, RunId, RunOutcome, Timestamp,
+    Evidence, Gate, JobState, LedgerEntry, LedgerKind, Level, ProjectName, ResultTransport, Run, RunId, RunOutcome,
+    Timestamp,
 };
 use vowp_store::repo_offload::{AgentAssignment, AgentAssignmentState};
 use vowp_store::{StateChange, Store};
 
 use super::dispatch;
 use crate::CoreError;
-use crate::deps::{CommandSpec, Deps};
+use crate::deps::{AdapterRegistry, CommandSpec, Deps};
 use crate::gates::{GateCtx, GateRunner};
 use crate::ledger::Ledger;
 
@@ -136,6 +137,44 @@ fn save(store: &Store, run: &RunId, record: &AgentRunResult) -> Result<(), CoreE
         .map_err(|error| CoreError::Command(format!("cannot encode agent result record: {error}")))?;
     store.kv_set(&result_key(run), &text)?;
     Ok(())
+}
+
+/// Opens the store bound to `project`, unless the caller's handle already is.
+///
+/// The gateway may serve a multi-project home with the global database; a run's `runs`,
+/// `jobs`, `gate_results` and ledger rows live in the owning project's database. An
+/// in-memory test store has no node paths and keeps the caller's handle.
+fn project_store(deps: &Deps, store: &Store, project: &ProjectName) -> Result<Option<Store>, CoreError> {
+    if store.bound_project() == Some(project) {
+        return Ok(None);
+    }
+    let Some(paths) = store.paths() else {
+        return Ok(None);
+    };
+    Store::create_project_db(paths, project)?;
+    Ok(Some(
+        Store::open_with_project(paths, project)?.with_clock(deps.clock.clone()),
+    ))
+}
+
+/// Builds the project-scoped dependencies result handling must use.
+///
+/// A gateway on a multi-project home has no single selected project, so the node-level
+/// config cannot name the checkout, remote or gate defaults. The checkout's `vowp.toml`
+/// is authoritative, exactly as the supervisor builds a project's `Deps`.
+fn project_deps(deps: &Deps, project: &vowp_protocol::Project) -> Deps {
+    let mut config = dispatch::project_config(&deps.config_now(), project);
+    if config.project.path.is_none() {
+        config.project.path = Some(project.path.clone());
+    }
+    config.project.name = project.name.clone();
+    let adapters = AdapterRegistry::from_config(&config)
+        .map(Arc::new)
+        .unwrap_or_else(|_| deps.adapters.clone());
+    let mut project_deps = deps.clone();
+    project_deps.config = Arc::new(config);
+    project_deps.adapters = adapters;
+    project_deps
 }
 
 /// Records the transport facts of one `RunState` frame.
@@ -452,7 +491,10 @@ pub fn finish_bundle(
             &record.detail,
         )
         .map_err(|_| "bundle_failed: the run lease could not be renewed".to_owned())?;
-    store
+    let owned = project_store(deps, store, &assignment.project)
+        .map_err(|_| "bundle_failed: the project database could not be opened".to_owned())?;
+    let project_store = owned.as_ref().unwrap_or(store);
+    project_store
         .set_job_state(
             &assignment.payload.job,
             JobState::Running,
@@ -670,6 +712,10 @@ pub fn settle_terminal(
         )));
     }
     let project = store.require_project(&assignment.project)?;
+    let project_deps = project_deps(deps, &project);
+    let owned = project_store(&project_deps, store, &assignment.project)?;
+    let project_store = owned.as_ref().unwrap_or(store);
+    let deps = &project_deps;
     let mut record = load(store, &run.id)?.unwrap_or_default();
     record.transport = transport_name(&assignment);
     record.base_commit = assignment.payload.base_commit.clone();
@@ -691,7 +737,7 @@ pub fn settle_terminal(
                         "git_push_failed: the assignment did not name a push remote",
                     );
                 } else {
-                    match return_pushed(deps, store, run, &assignment, reported.as_deref(), &project) {
+                    match return_pushed(deps, project_store, run, &assignment, reported.as_deref(), &project) {
                         Ok(returned) => {
                             accepted = true;
                             record.head_commit = Some(returned.head.clone());
@@ -723,7 +769,15 @@ pub fn settle_terminal(
                         "bundle_failed: the run ended without a complete bundle",
                     );
                 } else {
-                    match return_bundled(deps, store, run, &assignment, &project, &record, reported.as_deref()) {
+                    match return_bundled(
+                        deps,
+                        project_store,
+                        run,
+                        &assignment,
+                        &project,
+                        &record,
+                        reported.as_deref(),
+                    ) {
                         Ok(returned) => {
                             accepted = true;
                             record.head_commit = Some(returned.head.clone());
@@ -769,16 +823,17 @@ pub fn settle_terminal(
     }
     save(store, &run.id, &record)?;
 
-    let job = store.require_job(&assignment.payload.job)?;
-    dispatch::clear_waiting(store, &job.id)?;
+    let job = project_store.require_job(&assignment.payload.job)?;
+    dispatch::clear_waiting(project_store, &job.id)?;
     if accepted {
         if job.state == JobState::Running {
             let bounds = TransitionBounds::default();
-            let applied = crate::loops::apply_event(store, &job.id, &JobEvent::ReportReady, bounds, None, None)?;
+            let applied =
+                crate::loops::apply_event(project_store, &job.id, &JobEvent::ReportReady, bounds, None, None)?;
             let _ = applied.effects;
         }
     } else if job.state == JobState::Running {
-        store.set_job_state(
+        project_store.set_job_state(
             &job.id,
             JobState::Ready,
             &StateChange {
@@ -792,7 +847,7 @@ pub fn settle_terminal(
     dispatch::release_run_lease(store, &assignment.session_id)?;
     // A missing audit row must not turn an accepted result into a failed run; the run row
     // still carries the same facts.
-    if let Err(error) = record_ledger(deps, store, run, &assignment, &record, accepted) {
+    if let Err(error) = record_ledger(deps, project_store, run, &assignment, &record, accepted) {
         deps.log.log(
             Level::Warn,
             "result",

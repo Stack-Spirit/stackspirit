@@ -111,9 +111,6 @@ pub struct ResumeOutcome {
 /// model and returned in [`EnqueueReport::waiting`].
 pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<EnqueueReport, CoreError> {
     let config = deps.config_now();
-    if !config.offload.enabled {
-        return Ok(EnqueueReport::default());
-    }
     let paths = store
         .paths()
         .ok_or_else(|| CoreError::Invalid("offload dispatch needs a file-backed store".to_owned()))?;
@@ -127,6 +124,12 @@ pub fn enqueue_ready_jobs(deps: &Deps, store: &Store, now: Timestamp) -> Result<
         }
         let project = store.require_project(&entry.name)?;
         let project_config = project_config(&config, &project);
+        // A gateway on a multi-project home runs with the node-level config, so
+        // `offload.enabled` is a per-project decision here. A disabled project's ready
+        // jobs are the L2 loop's work, not a waiting reason.
+        if !project_config.offload.enabled {
+            continue;
+        }
         let project_policy = project_config.offload.project_policy(&entry.name);
         let project_store = Store::open_with_project(paths, &entry.name)?.with_clock(deps.clock.clone());
         let jobs = project_store.list_jobs(&JobFilter {
@@ -1200,7 +1203,7 @@ fn effective_placement(store: &Store, job: &Job, config: &VowpConfig) -> Result<
 }
 
 /// Returns the project config from its checkout, then the registry, then the live config.
-fn project_config(live: &VowpConfig, project: &vowp_protocol::Project) -> VowpConfig {
+pub(crate) fn project_config(live: &VowpConfig, project: &vowp_protocol::Project) -> VowpConfig {
     if project.name == live.project.name {
         return live.clone();
     }

@@ -3,7 +3,7 @@
 //! Spec: `docs/design/v0.4/local-orchestrator.md` §4.2, §8.2–§8.5, §12.2–§12.3 and
 //! `docs/design/cli.md` §12. The Mac commands use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
 //! open a project store or `vowp-core`; the hidden `agent gateway` command is the home-side
-//! exception and opens the store through [`Ctx`].
+//! exception and opens the home store through the node context.
 
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -23,9 +23,12 @@ use vowp_agent::{
     fingerprint_of, is_fingerprint, load_public, pending_spool_bytes, surface_statuses, surface_token_expiry,
     transport_for_config, validate_enrollment_code,
 };
+use vowp_core::Deps;
 use vowp_core::agent::gateway;
-use vowp_protocol::{AGENT_PROTOCOL, AgentPathMap, AgentRole, ErrorKind, ProjectName, SessionId, SurfaceId, Timestamp};
-use vowp_store::Store;
+use vowp_protocol::{
+    AGENT_PROTOCOL, AgentPathMap, AgentRole, ErrorKind, Project, ProjectName, SessionId, SurfaceId, Timestamp,
+};
+use vowp_store::{NodePaths, Store};
 
 use crate::agent_exec::CoreRunHandler;
 use crate::cli::{
@@ -69,17 +72,75 @@ fn gateway(global: &Global, io: &mut dyn IoStreams, args: &AgentGatewayArgs) -> 
 }
 
 /// Serves one agent connection over the home's stdin/stdout (the SSH forced command).
+///
+/// The client hard-codes `vowp agent gateway --stdio`, so the remote cwd is `$HOME`. A home
+/// with zero or several projects has no single project to bind there; the global store and
+/// node-level deps then serve every project, and the gateway resolves each session's or
+/// assignment's project from its durable binding.
 fn gateway_stdio(global: &Global, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let ctx = Ctx::build(global, io)?;
-    if ctx.role() != NodeRole::Home {
-        return Err(CliError::Guard(
-            "the gateway needs the home store; run it on the home machine".to_owned(),
-        ));
+    let node = node_ctx::NodeCtx::discover(global)?;
+    match node.role() {
+        NodeRole::Home => {}
+        NodeRole::Control => {
+            return Err(CliError::Guard(
+                "the gateway needs the home store; run it on the home machine".to_owned(),
+            ));
+        }
+        NodeRole::Uninitialised => {
+            return Err(CliError::NotFound(
+                "vowp home is not initialised; run `vowp init`".to_owned(),
+            ));
+        }
     }
-    let store = ctx.store()?;
+    let paths = node.require_home()?.clone();
+    crate::ctx::require_initialised_home(&paths)?;
+    let (store, deps) = gateway_context(global, io, &paths)?;
     // Frames are the only stdout output; the CLI prints any error to stderr.
-    gateway::serve(&store, ctx.deps(), BufReader::new(std::io::stdin()), std::io::stdout())?;
+    gateway::serve(&store, &deps, BufReader::new(std::io::stdin()), std::io::stdout())?;
     Ok(0)
+}
+
+/// Opens the store and dependencies one gateway invocation serves with.
+///
+/// An explicit `--project` or a cwd inside a registered checkout keeps the project-scoped
+/// context. Everywhere else — notably `$HOME` on a home with zero or several projects —
+/// the home's global store and node-level deps are used instead of failing with "no
+/// project selected".
+fn gateway_context(global: &Global, io: &mut dyn IoStreams, paths: &NodePaths) -> Result<(Store, Deps), CliError> {
+    match Ctx::build(global, io) {
+        Ok(ctx) if ctx.project_selected() => return Ok((ctx.store()?, ctx.deps().clone())),
+        Ok(_) => {}
+        // Without an explicit project the gateway does not need a selected checkout. A
+        // broken or missing project config, or "several projects", falls back to the
+        // home's global store; the per-session project store is resolved later.
+        Err(_) if global.project.is_none() => {}
+        Err(error) => return Err(error),
+    }
+    ensure_node_project(paths)?;
+    Ok((Store::open_global(paths)?, node_ctx::home_deps(paths)?))
+}
+
+/// Ensures the reserved `_node` project row and database exist.
+///
+/// An unbound session (for example an orchestrator chat turn) writes its runs there. A
+/// home created by `vowp init` already has both; a migrated or hand-built home may not.
+fn ensure_node_project(paths: &NodePaths) -> Result<(), CliError> {
+    let node_project = ProjectName::parse(vowp_store::RESERVED_NODE_PROJECT)?;
+    let store = Store::open_global(paths)?;
+    if store.project(&node_project)?.is_none() {
+        let now = store.clock().now();
+        store.upsert_project(&Project {
+            name: node_project.clone(),
+            path: paths.root().display().to_string(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })?;
+    }
+    Store::create_project_db(paths, &node_project)?;
+    Ok(())
 }
 
 /// Serves one gateway connection per WebSocket on a loopback address.
@@ -102,6 +163,7 @@ fn gateway_listen(global: &Global, io: &mut dyn IoStreams, listen: &str) -> Resu
     let node = node_ctx::NodeCtx::discover(global)?;
     let paths = node.require_home()?.clone();
     crate::ctx::require_initialised_home(&paths)?;
+    ensure_node_project(&paths)?;
     // Honour the node's `[ingress.wss]` limits when it has them; `--listen` overrides only
     // the address, so a one-off test or an explicit `up` flag cannot widen the deployment.
     let mut ingress_config = vowp_protocol::WssIngressConfig::default();
