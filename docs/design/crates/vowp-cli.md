@@ -77,7 +77,11 @@ pub mod remote {
 and before the generic `--node` redirect: they use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
 open a project store. `agent run` and `chat --agent` build adapters through
 `vowp_core::AdapterRegistry`; neither opens a database. The hidden `agent gateway` command is the
-home-side exception: it builds a `Ctx`, requires the home role and opens `Ctx::store()`.
+home-side exception: it discovers the node with `node_ctx::NodeCtx::discover` and requires the home
+role. An explicit `--project` or a cwd inside a registered checkout builds the project-scoped `Ctx`
+and opens `Ctx::store()`; everywhere else it ensures the reserved `_node` project and opens the
+home's global store with `Store::open_global` and `node_ctx::home_deps`. The gateway resolves each
+session's or offload assignment's project store per connection.
 
 - `agent enroll --target <ssh-target> --code-file <path|->` reads `-` from the `IoStreams` stdin,
   trims the line, validates the 52-character code shape and passes it only to
@@ -113,10 +117,12 @@ home-side exception: it builds a `Ctx`, requires the home role and opens `Ctx::s
 - `agent gateway --listen <addr>` (hidden) serves the optional WSS listener on a loopback address
   with the `/agent/v1` route and the `vowp-agent/1` subprotocol. `vowp up` starts it from
   `[ingress.wss]`; the listener never terminates TLS.
-- `agent gateway --stdio` (hidden) is the home side: it requires `--stdio`, builds a `Ctx`, refuses
-  any role but home with exit 5, opens `Ctx::store()` and calls
-  `vowp_core::agent::gateway::serve`. Stdout carries JSON frames only; errors go to stderr. Phase 0
-  has no `--socket`.
+- `agent gateway --stdio` (hidden) is the home side: it requires `--stdio`, discovers the node,
+  refuses any role but home with exit 5 and an uninitialised home with exit 3, and calls
+  `vowp_core::agent::gateway::serve`. Only an explicit `--project` or a cwd inside a registered
+  checkout builds the project-scoped `Ctx` and opens `Ctx::store()`; otherwise it ensures the
+  reserved `_node` project row and database and opens the global store with `node_ctx::home_deps`.
+  Stdout carries JSON frames only; errors go to stderr. Phase 0 has no `--socket`.
 
 `AgentStatus` is CLI-local (it is not an exported protocol schema), has no token or secret field,
 and serialises as:

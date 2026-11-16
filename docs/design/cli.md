@@ -770,8 +770,17 @@ locations) and file contents are never read. It exits 0 when no check failed and
 token, a key, a path map or a secret value.
 
 ### `vowp agent gateway --stdio` (hidden, home)
-The home side of the SSH stdio transport. It requires `--stdio`, refuses any role but home
-with exit 5, opens the store through `Ctx::store()` and calls `vowp_core::agent::gateway::serve`.
+The home side of the SSH stdio transport. It requires `--stdio`, discovers the node with
+`node_ctx::NodeCtx::discover` and calls `vowp_core::agent::gateway::serve`. A control machine is
+refused with exit 5 ("the gateway needs the home store; run it on the home machine") and an
+uninitialised home with exit 3 ("vowp home is not initialised; run `vowp init`"). An explicit
+`--project` or a cwd inside a registered checkout builds the project-scoped `Ctx` and opens
+`Ctx::store()` with that project's deps. Everywhere else — notably `$HOME` with zero, one or
+several projects — it ensures the reserved `_node` project row and database, opens the home's
+global store with `Store::open_global`, and uses the node-level `node_ctx::home_deps`. The gateway
+then resolves each session's `sessions.project` binding (`_node` for a project-less session) and
+each offload assignment's `agent_assignments.project` binding to that project's store, so run
+ingest, result return and bundle settlement use the owning project's database.
 Stdout carries only newline-delimited `AgentFrame` JSON; errors go to stderr. The first frame is
 `Enroll` or `AgentHello`; enrollment returns `Enrolled` and closes, and the agent reconnects for
 `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`. Then `Heartbeat` updates presence and
@@ -780,12 +789,14 @@ capacity, `Ping` is answered with `Pong`, and a revoked or unknown node gets `Re
 10 seconds. It never logs the code, the signature, the public-key value or a path map.
 
 `vowp agent gateway --listen <addr>` is the hidden WSS listener. It requires a loopback socket
-address and honors `[ingress.wss]` for the path, connection cap, frame cap and handshake timeout;
-the path must be `/agent/v1`. Every accepted WebSocket opens one `gateway::serve` on its own
-thread. `vowp up` starts this child when `[ingress.wss].enabled = true` and stops it on shutdown;
-a missing or unstartable listener warns and leaves the supervisor running. The listener is plain
-`ws://` on loopback; TLS and the public port belong to the owner's reverse proxy. Stdout prints
-one `gateway: listening on ws://<addr>/agent/v1` line; frames are never printed.
+address and ensures the reserved `_node` project before accepting connections. It honors
+`[ingress.wss]` for the path, connection cap, frame cap and handshake timeout; the path must be
+`/agent/v1`. Every accepted WebSocket opens one `gateway::serve` on its own thread, with the home's
+global store and node-level deps. `vowp up` starts this child when `[ingress.wss].enabled = true`
+and stops it on shutdown; a missing or unstartable listener warns and leaves the supervisor
+running. The listener is plain `ws://` on loopback; TLS and the public port belong to the owner's
+reverse proxy. Stdout prints one `gateway: listening on ws://<addr>/agent/v1` line; frames are
+never printed.
 
 ## 13. Home surface pairing (v0.4 Phase 1)
 
