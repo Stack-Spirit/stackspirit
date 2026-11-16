@@ -104,14 +104,14 @@ installed binary is not D6-ready.
 ### 1.4 VOWP Phase 4 job evidence
 
 These are read-only VOWP supervisor reads, not capability probes. They show the CLI release
-job landed in source while the docs release is still running.
+job landed in source while the docs release is still in review.
 
 | Exact command | Exit | Parsed result | Meaning |
 |---|---:|---|---|
 | `vowp --project <vowp-project> job show v4-local-4f-cli-surface --json` | 0 | `state: done` | The Phase 4 CLI surface job is merged. |
 | `vowp --project <vowp-project> job show v4-local-4d-bundle-result --json` | 0 | `state: done` | The bundle-result dependency is merged. |
-| `vowp --project <vowp-project> job show v4-local-4g-hardening-docs --json` | 0 | `state: running` | The docs/release gate follows the CLI surface and is still running. |
-| `vowp --project <vowp-project> job ls --all --json` | 0 | `v4-local-4b-node-runtime`, `v4-local-4c-rotation-ux`, `v4-local-4d-bundle-result`, `v4-local-4e-metrics-history`, and `v4-local-4f-cli-surface` are `done`; `v4-local-4g-hardening-docs` is `running` | The Phase 4 CLI chain is complete; only docs/release remains. |
+| `vowp --project <vowp-project> job show v4-local-4g-hardening-docs --json` | 0 | `state: reviewing` | The docs/release gate follows the CLI surface and is in review. |
+| `vowp --project <vowp-project> job ls --all --json` | 0 | `v4-local-4b-node-runtime`, `v4-local-4c-rotation-ux`, `v4-local-4d-bundle-result`, `v4-local-4e-metrics-history`, and `v4-local-4f-cli-surface` are `done`; `v4-local-4g-hardening-docs` is `reviewing` | The Phase 4 CLI chain is complete; only docs/release remains in review. |
 
 **Conclusion of §1:** the **merged source** is D6-capable at the CLI surface, but the
 **installed** VOWP CLI is not: it lacks `surface rotate`, `agent service|doctor`, the

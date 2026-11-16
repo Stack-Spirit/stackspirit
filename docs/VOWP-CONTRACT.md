@@ -1510,10 +1510,10 @@ Agent frames used by the commands:
 | Command | Frames |
 |---|---|
 | `vowp surface pair` (home) | Creates a `pending` surface and a one-time code; no agent frame until the Mac redeems it. |
-| `vowp surface ls` (home) | Read-only `SurfaceInfo` list; no agent frame. |
+| `vowp surface ls` (home) | Read-only `SurfaceEntry[]` rows (id, node, kind, state, scopes, prefix, expiry, overlap, pending); no agent frame. |
 | `vowp agent pair` (Mac) | `AgentFrame::SurfacePair { code, surface_id, session, app }`; the home replies `SurfaceIssued { surface_id, token, scopes, expires_at }`. |
 | `vowp surface rotate` (home) | Queues an `AgentFrame::SurfaceIssued` with the replacement token; the old token stays valid for the ten-minute overlap. |
-| `vowp surface revoke` (home) | Queues `AgentFrame::SurfaceRevoked { surface_id, reason }`. |
+| `vowp surface revoke` (home) | Revokes every active token, marks the surface `revoked`, and removes any queued rotation; no agent frame is queued. A later pairing attempt for the revoked surface gets `AgentFrame::SurfaceRevoked { surface_id, reason }` from the gateway. |
 | `vowp agent run` (Mac) | `SurfaceAttach`, `SurfaceEvent`, `SurfaceTurn`, `SurfaceDetach`, `LeaseAcquire`, `LeaseHeartbeat`, `LeaseRelease`. |
 | `vowp mcp --agent-socket` (Mac) | `AgentFrame::ToolCall` to the home and `ToolResult` back. |
 | `vowp orchestrator new --node` / `vowp orchestrator stop` / `vowp orchestrator resume` (home) | `vowp orchestrator new --node` sends `AgentFrame::OrchestratorCommand(Start)`; `stop`/`resume` send `Stop`/`Resume`; the agent replies `OrchestratorResult`. `--node` has the local-node meaning only on `new`; on `stop`/`resume` it remains the global SSH selector. |
@@ -1536,8 +1536,8 @@ Protocol facts that are frozen enough to check:
 `vowp node ls --json` returns the unchanged v0.3 `Node` shape:
 `name`, `ssh_target`, `is_local`, `capabilities`, `last_seen_at`, `created_at`. It has
 **no `kind` or `status`**. `vowp node show <name> --json` returns the redacted `NodeCard`
-from `vowp-protocol::agent`; it may contain local paths and is owner-only, so its raw body
-is never copied into shared state or gate evidence:
+from `vowp-protocol::agent`; it is a redacted summary that never carries a path or secret
+name. Its raw body is still never copied into shared state or gate evidence:
 
 | `NodeCard` field | Type | Null? | Meaning |
 |---|---|---|---|
