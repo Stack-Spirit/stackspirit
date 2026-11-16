@@ -135,11 +135,8 @@ nodes, are non-writable even if a lease token is still present.
 `vowp --version`, a `vowp node ls` exit 0, an `orchestrator ls` exit 0, a `gate-phase3-ready`
 fixture, or a MockBridge `Ready` scenario cannot make the gate `Ready` by themselves. The gate
 cache is per host connection and expires; a disconnect, a later failed probe, or a connection
-change downgrades the gate immediately. The action guard re-checks the last probe snapshot; it
-does not re-probe automatically before a start or destructive action. The snapshot is refreshed
-on connect, on a host/connection change, or by an explicit **Probe gates**, and a cached `Ready`
-can authorize an action only until that snapshot expires or is invalidated. The UI never shows a
-bare green state without a successful probe.
+change downgrades it immediately. Actions re-check the cached snapshot without a new probe, so a
+cached `Ready` lasts until expiry or invalidation and refreshes on connect or **Probe gates**; the UI requires a successful probe.
 
 ## 3. Current live state (2026-11-16)
 
