@@ -21,10 +21,11 @@ crates/vowp-core/src/
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
   agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs spool.rs dispatch.rs result.rs
+  capacity/       mod.rs sampler.rs history.rs admit.rs advisor.rs brakes.rs estimates.rs fair.rs scope.rs targets.rs usage.rs
   surface/        mod.rs lease.rs native.rs orchestrator.rs mirror.rs opencode_host.rs claude_remote.rs
                   takeover.rs follow.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs,
-                  agent.rs, offload_dispatch.rs, offload_result.rs, offload_e2e.rs
+                  agent.rs, offload_dispatch.rs, offload_result.rs, offload_e2e.rs, capacity_measure.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
 
@@ -473,8 +474,9 @@ Tests (temp git repos; deploy/bank/probe are fake shell scripts writing to temp 
 Spec: `docs/design/v0.4/local-orchestrator.md` §4.1–§4.6, §6.3, §7.1–§7.5, §8.2–§8.3, §9
 and §12.1. The gateway runs as a home command with the same store access as `session ingest`;
 Phase 1 adds the surface-token pairing service and the lease backend on the same authenticated
-connection, and Phase 2 adds the offload dispatcher and result return. The separate
-low-privilege gateway behind the supervisor socket is Phase 4.
+connection, Phase 2 adds the offload dispatcher and result return, and Phase 4 adds the rotation
+policy, the durable envelope and the bundle result. The WSS listener in `vowp-agent` calls the
+same `gateway::serve`, so the home has one frame path for SSH stdio and WSS.
 
 ```rust
 pub mod agent {
@@ -505,6 +507,14 @@ pub mod agent {
         pub const SURFACE_CODE_TTL: Duration;                       // 10 minutes
         pub const SURFACE_TOKEN_TTL: Duration;                      // 30 days
         pub const SURFACE_TOKEN_OVERLAP: Duration;                  // 10 minutes
+        pub const SURFACE_TOKEN_MAX_GRACE: Duration;                // 24 hours
+        pub struct RotationPolicy { pub grace: Duration, pub wait: Option<Duration> }
+        pub struct SurfaceRotation { pub rotated: RotatedSurface, pub queued_at: Timestamp,
+                                     pub old_expires_at: Timestamp, pub delivered: bool }
+        pub struct SurfaceListRow { pub surface: SurfaceInfo, pub scopes: Vec<SurfaceScope>,
+                                    pub prefix: Option<String>, pub expires_at: Option<Timestamp>,
+                                    pub overlap_until: Option<Timestamp>, pub pending: bool,
+                                    pub queued_at: Option<Timestamp>, pub delivery_deadline: Option<Timestamp> }
         pub struct NewSurfaceCode { pub code: String, pub code_hash: String, pub expires_at: Timestamp }
         pub struct PendingSurface { pub surface: SurfaceInfo, pub code: String, pub code_hash: String, pub expires_at: Timestamp }
         pub struct IssuedSurface { pub surface_id: SurfaceId, pub token: String, pub scopes: Vec<SurfaceScope>, pub expires_at: Timestamp }
@@ -513,18 +523,24 @@ pub mod agent {
         pub fn create_pending_surface(store: &Store, node: &NodeName, session: &SessionId, kind: SurfaceKind, app: Option<&str>, now: Timestamp) -> Result<PendingSurface, CoreError>;
         pub fn new_surface_code(store: &Store, node: &NodeName, surface_id: &SurfaceId, now: Timestamp) -> Result<NewSurfaceCode, CoreError>;
         pub fn issue_surface_token(store: &Store, node: &NodeName, surface_id: &SurfaceId, session: &SessionId, app: &str, code: &str, now: Timestamp) -> Result<IssuedSurface, CoreError>;
-        pub fn rotate_surface_token(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<RotatedSurface, CoreError>;
+        pub fn rotate_surface_token(store: &Store, deps: &Deps, surface_id: &SurfaceId, grace: Duration, now: Timestamp) -> Result<RotatedSurface, CoreError>;
+        pub fn rotate_surface_with_policy(store: &Store, deps: &Deps, surface_id: &SurfaceId, policy: RotationPolicy, now: Timestamp) -> Result<SurfaceRotation, CoreError>;
+        pub fn replace_pending_surface(store: &Store, deps: &Deps, replace: &SurfaceId, node: &NodeName, session: &SessionId, kind: SurfaceKind, app: Option<&str>, now: Timestamp) -> Result<PendingSurface, CoreError>;
         pub fn verify_surface_token(store: &Store, token: &str, now: Timestamp) -> Result<VerifiedSurface, CoreError>;
         pub fn revoke_surface_token(store: &Store, id: &str, now: Timestamp) -> Result<(), CoreError>;
-        pub fn revoke_surface(store: &Store, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError>;
+        pub fn revoke_surface(store: &Store, deps: &Deps, surface_id: &SurfaceId, now: Timestamp) -> Result<u64, CoreError>;
     }
     pub mod spool {
-        pub struct QueuedAgentFrame { pub request_id: String, pub frame: AgentFrame }
+        pub struct QueuedAgentFrame { pub request_id: String, pub queued_at: Option<Timestamp>,
+                                      pub overlap_until: Option<Timestamp>, pub frame: AgentFrame }
         pub struct AgentFrameSpool { /* home root */ }
         pub fn new(root: impl Into<PathBuf>) -> AgentFrameSpool;
         pub fn queue(&self, node: &NodeName, request_id: &str, frame: &AgentFrame) -> Result<(), CoreError>;
+        pub fn queue_rotation(&self, node: &NodeName, request_id: &str, frame: &AgentFrame, queued_at: Timestamp, overlap_until: Timestamp) -> Result<(), CoreError>;
         pub fn pending(&self, node: &NodeName) -> Result<Vec<QueuedAgentFrame>, CoreError>;
         pub fn remove(&self, node: &NodeName, request_id: &str) -> Result<(), CoreError>;
+        pub fn complete(&self, node: &NodeName, request_id: &str) -> Result<(), CoreError>;
+        pub fn wait(&self, node: &NodeName, request_id: &str, timeout: Duration) -> Result<bool, CoreError>;
     }
     pub mod lease_control {                                         // crate::surface::lease
         pub const HEARTBEAT_INTERVAL: Duration;                     // 5 seconds
@@ -594,22 +610,37 @@ Behaviour:
   is already revoked the answer is `SurfaceRevoked`. Those refusals keep the authenticated
   connection open so the agent can retry with a fresh code; an internal store failure closes it.
   The success log line carries only the surface id and session id, never the code or token.
-- `rotate_surface_token` runs one immediate transaction over an `attached` surface. It copies
-  the scopes of the surface's most recent token, mints a fresh 30-day token with the same
-  `vowp_surf_` format and inserts only its hash and 12-character prefix. Every other active
-  token is shortened to `now + SURFACE_TOKEN_OVERLAP` (ten minutes) through a conditional
-  `UPDATE` that never extends an expiry; a token that already expires sooner keeps its earlier
-  time. `old_expires_at` is the earliest resulting expiry, or the end of the overlap window when
-  the surface has no other active token. A pending or revoked surface is refused; an unknown id
-  is not found. After the overlap `verify_surface_token` refuses the old token by its ordinary
-  expiry check and accepts the new one.
+- `rotate_surface_token` runs one immediate transaction over an `attached` surface and takes
+  `&Deps` so it can append the rotation ledger note. It copies the scopes of the surface's most
+  recent token, mints a fresh 30-day token with the same `vowp_surf_` format and inserts only its
+  hash and 12-character prefix. Every other active token is shortened to `now + grace` through a
+  conditional `UPDATE` that never extends an expiry; a token that already expires sooner keeps
+  its earlier time. The grace is capped at `SURFACE_TOKEN_MAX_GRACE` (24 hours); the default is
+  the ten-minute `SURFACE_TOKEN_OVERLAP`. `old_expires_at` is the earliest resulting expiry, or
+  the end of the grace window when the surface has no other active token. A pending, revoked or
+  unknown surface is a typed refusal. The plaintext replacement token is returned once; only its
+  hash and prefix are stored. One `node_ledger` `note` records the action, surface, node, prefix
+  and the two expiries, never the token or a path.
+- `rotate_surface_with_policy` adds the delivery half used by `surface rotate --wait/--grace`: it
+  calls the rotation, queues `SurfaceIssued` through `AgentFrameSpool::queue_rotation` with
+  `queued_at` and the effective `overlap_until`, and waits for the frame to be drained when a
+  timeout is present. The replacement token's `expires_at` is the delivery deadline; `wait`
+  stops early when that deadline has passed. An offline node is not an error: the frame stays on
+  disk for the next authenticated connection.
 - The gateway also drains `agent-frames/<node>/<request>.json` at the top of the same connection
-  loop that drains orchestrator commands. The `AgentFrameSpool` writes one `AgentFrame` per file
-  through a 0600 temporary file and a rename in a 0700 directory, sends only its authenticated
-  node's directory and removes each file after the write succeeds. A failed or absent connection
-  leaves the frame for the next authenticated connection; a frame for another node is never read.
-  `vowp surface rotate` queues `SurfaceIssued` under the surface id, so a second rotation before
-  delivery replaces the older token rather than leaving two plaintext tokens on disk.
+  loop that drains orchestrator commands. The `AgentFrameSpool` writes one envelope
+  `{"queued_at": …, "overlap_until": …, "frame": {…}}` through a 0600 temporary file and a rename
+  in a 0700 directory, sends only its authenticated node's directory and removes each file after
+  the write succeeds. A bare `AgentFrame` written by the earlier rotation slice still reads as an
+  envelope with both times absent. A failed or absent connection leaves the frame for the next
+  authenticated connection; a frame for another node is never read. `vowp surface rotate` queues
+  `SurfaceIssued` under the surface id, so a second rotation before delivery replaces the older
+  token rather than leaving two plaintext tokens on disk.
+- `replace_pending_surface` revokes the old surface, creates the replacement `pending` surface
+  and its fresh code in one transaction, and removes the old surface's queued rotation after the
+  transaction commits. The old surface must belong to the same node and session and must not
+  already be revoked; the old token is refused immediately. No token is issued until the agent
+  redeems the new code.
 - `LeaseAcquire { surface, session, surface_token, mode }` first verifies the surface token
   against `surface_tokens`, requires the surface row to be `attached`, on the connection node,
   paired for this session and scoped `session.write:<id>`. It then runs one immediate
@@ -780,6 +811,7 @@ pub mod result {
 
     pub struct AgentRunResult { pub transport: String, pub base_commit: String,
                                 pub head_commit: Option<String>, pub spool_bytes: u64,
+                                pub bundle_bytes: Option<u64>, pub bundle_sha256: Option<String>,
                                 pub status: String, pub detail: String }
     pub struct Settled { pub outcome: vowp_protocol::RunOutcome, pub detail: String }
 
@@ -820,8 +852,9 @@ pub mod result {
   with `result_gate_failed`, leaves the job `ready`, and never enqueues a merge. Gate evidence
   contains repo-relative paths and rule names only; matched secret text is never stored.
 - **Hand-off.** On success the run detail ends with
-  `result: transport=push base=<sha> head=<sha>`; the same facts live in the `agent-result`
-  record because the run row has no dedicated transport/base/head columns yet. The job gets the
+  `result: transport=<push|bundle> base=<sha> head=<sha>`; the same facts live in the
+  `agent-result` record because the run row has no dedicated transport/base/head columns yet. A
+  bundle result also records `bundle_bytes` and `bundle_sha256`. The job gets the
   staging branch and worktree, moves `running -> gating` through the normal `ReportReady` state
   event, and the existing supervisor gate runner and merge queue continue from there. Result
   return never merges, tags, deploys, pushes the default branch or rewrites the merge queue.
@@ -837,9 +870,47 @@ pub mod result {
   the cost/capacity rows with the settled outcome. A summary for a run without a live
   assignment (a local chat turn) is untouched.
 
-Tests (`tests/offload_result.rs`, temporary bare remote, project clone, agent clone and fake
-summary through the real ingest state machine, no network or harness):
-`offloaded_run_pushes_the_job_branch_and_the_home_verifies_the_head`,
+**Bundle return.** A bundle assignment is handled by the same terminal path with
+`assignment.result_transport = "bundle"`. The gateway's `BundleStart`/`BundleChunk`/`BundleEnd`
+arms write one staging file below `<home>/tmp/agent-bundles/<run>/`, 0600 in a 0700 directory,
+while hashing and enforcing the 256 MiB cap and the five-minute deadline. A resume start with the
+same `(run_id, epoch, sha256, bytes)` returns `BundleAccept { offset }`; a gap, overlap, oversized
+chunk or digest mismatch aborts the transfer. `bundle_failed` covers the transfer and file
+failures; `bundle_rejected` covers well-formed bytes that are not the assigned result.
+
+After `BundleEnd` the home:
+
+1. removes the file and fails `bundle_failed` on a size or sha256 mismatch;
+2. runs `git bundle verify` in the project repository and requires `git bundle list-heads` to name
+   exactly `refs/heads/job/<id>` at the reported head (`bundle_rejected` otherwise);
+3. fetches only that ref into a private staging bare repository that already has the assigned
+   base, checks the fetched head equals the reported head and descends from the base, and only
+   then imports the verified objects into the project repository as `refs/vowp/jobs/<id>`
+   (`bundle_rejected` on any mismatch);
+4. points `job/<id>` at the verified head, creates the staging worktree and runs the same
+   `owns_respected` and `secret_scan` gates as the push path.
+
+The result record carries `transport = "bundle"`, `base_commit`, `head_commit`, `bundle_bytes`
+and `bundle_sha256`; it is path-free and contains no token or secret. A failure in steps 1–3
+leaves no project ref and removes the staging file after settle. A gate failure after step 4
+leaves both the inspection `refs/vowp/jobs/<id>` and the local `job/<id>` branch in place: the
+branch stays for inspection so a retry can move it to the next bundled head, only the staging
+worktree is removed, and nothing merges. A summary that arrives before a complete bundle is a
+`bundle_failed` run, not a success. The run stays `finishing` from
+`BundleEnd` until the bundle result is settled.
+
+Tests added by the bundle slice in `tests/offload_result.rs`:
+`offloaded_run_returns_a_bundle_without_push_access`,
+`bundle_result_is_verified_by_size_sha256_and_bundle_verify`,
+`bundle_result_rejects_a_foreign_ref_or_head`,
+`bundle_result_rejects_a_base_that_is_not_a_prerequisite`,
+`bundle_result_resumes_after_a_disconnect`,
+`bundle_result_over_the_cap_removes_the_staging_file` and
+`bundle_result_manifest_and_run_row_carry_no_absolute_path_or_secret`.
+
+The push path keeps its own tests (`tests/offload_result.rs`, temporary bare remote, project
+clone, agent clone and fake summary through the real ingest state machine, no network or
+harness): `offloaded_run_pushes_the_job_branch_and_the_home_verifies_the_head`,
 `offload_fails_cleanly_when_the_push_fails`,
 `offload_fails_when_no_pushed_head_is_reported`,
 `home_rejects_a_reported_head_that_is_not_the_fetched_head`,
@@ -879,10 +950,12 @@ without a merge. The reconnect test also covers the dispatcher rule that a `RunA
 `disconnected` assignment returns it to `running` while a fenced or finished assignment is refused;
 the real agent sends that frame after `Resume`.
 
-What remains Phase 3/4: the fake node stands in for `vowp-agent`'s `WorktreeManager` and
-`CoreRunHandler` (their own tests cover creation, reuse and push), the gateway is the in-process
-stdio server rather than the SSH forced command, and the suite stops at `gating` rather than running
-the merge queue. The WSS transport, bundle result, launchd and a separate node user are not built.
+The fake node still stands in for `vowp-agent`'s `WorktreeManager` and `CoreRunHandler` (their
+own tests cover creation, reuse, push and bundle chunking), the gateway is the in-process stdio
+server rather than the SSH forced command, and the suite stops at `gating` rather than running
+the merge queue. The WSS listener, the bundle result and the launchd/systemd-user service have
+their own named tests in `vowp-agent` and `vowp-core`; the soak that exercises them together is a
+phase-exit activity, not part of this suite.
 
 ### 9.4 Orchestrators on a local node (`surface/orchestrator.rs`)
 
@@ -960,7 +1033,61 @@ Named tests (in `crates/vowp-cli/tests/orchestrator.rs`): `orchestrator_new_with
 `orchestrator_card_contains_no_path_or_secret`. All use a temporary home, a fake app host or
 a fake command transport, and no real tmux, app, network or home directory.
 
-## 10. `offload` — pure offload eligibility (v0.4 Phase 2)
+## 10. Capacity history (v0.4 Phase 4)
+
+Spec: `docs/design/v0.4/hardening.md` §7. `capacity/history.rs` is the write and read half of the
+bounded metrics history. It never samples the host itself and never invents a point.
+
+```rust
+pub const ROLLUP_BUCKET_SECS: u64;       // 300
+pub const RAW_RETENTION_SECS: u64;       // 48 * 60 * 60
+pub const ROLLUP_RETENTION_SECS: u64;    // 30 * 24 * 60 * 60
+
+pub enum HistoryBucket { FiveMinutes, OneHour, OneDay }
+impl HistoryBucket {
+    pub fn secs(self) -> u64;            // 300, 3600, 86400
+    pub fn label(self) -> &'static str;  // "5m", "1h", "1d"
+    pub fn parse(text: &str) -> Option<HistoryBucket>;
+}
+
+pub fn record_rollup(store: &Store, now: Timestamp) -> Result<bool, CoreError>;
+pub fn read(store: &Store, now: Timestamp, since: Option<Timestamp>, bucket: HistoryBucket)
+    -> Result<CapacityHistory, CoreError>;
+```
+
+- The machine tick calls `record_rollup` after the host sample. It aggregates the **previous
+  completed** 5-minute bucket from `host_samples` and writes one `capacity_rollups` row with
+  `INSERT … ON CONFLICT(bucket, bucket_secs) DO UPDATE`, so a repeated tick, a restarted
+  supervisor or a deferred migration cannot duplicate or lose a bucket. A bucket with no raw
+  samples is skipped, not written as zero.
+- `source` is `proc` when every raw sample in the bucket is `proc`, `fallback` when every sample
+  is `fallback`, and `mixed` otherwise. The raw rows keep their own source.
+- Raw `host_samples` are pruned after 48 hours and rollups after 30 days; the bucket containing
+  `now` is never deleted. A gap is a gap, not a zero. The row budget is about 34,560 raw rows and
+  8,640 rollups (roughly 7 MiB with the indexes).
+- `read` clamps `since` to the retained 30-day window, reads only the stored 5-minute rows and
+  aggregates `1h` and `1d` at read time, weighting means by `samples` and taking the min/max
+  extrema of the constituent points. It returns `CapacityHistory` with `generated_at`, `since`,
+  `until`, `bucket_secs`, `retention_secs` and ascending `points`; an empty range is an empty
+  `points` array, not a fabricated row.
+- The read path is read-only: `vowp capacity history` opens the home with
+  `Store::open_read_only`, writes no target, advice, ledger or rollup row and is safe while the
+  supervisor runs. Cost remains the existing ledger; the command's footer points at
+  `vowp cost --by day` instead of duplicating it.
+
+Named tests: `capacity_history_buckets_raw_samples_into_five_minute_points`,
+`capacity_history_is_idempotent_across_a_repeated_tick`,
+`capacity_history_keeps_thirty_days_and_prunes_the_rest`,
+`capacity_history_clamps_since_to_the_retained_window`,
+`capacity_history_read_time_buckets_weight_by_samples` and
+`capacity_history_is_read_only_and_writes_no_ledger_row` in
+`crates/vowp-core/tests/capacity_measure.rs`; `capacity_history_aggregates_read_time_hour_buckets`
+and `capacity_history_is_read_only` in `crates/vowp-cli/tests/capacity.rs`;
+`capacity_history_json_matches_the_exported_schema` in
+`crates/vowp-protocol/tests/schema.rs`; the schema migration test is
+`capacity_rollups_migrates_v6_to_v7_with_a_backup` in `crates/vowp-store/tests/migrate.rs`.
+
+## 11. `offload` — pure offload eligibility (v0.4 Phase 2)
 
 Spec: `docs/design/v0.4/local-orchestrator.md` §6.6, §6.7 and §7.1–§7.5. This module decides only:
 it opens no store, starts no process, reads no clock and touches no filesystem. The home passes
@@ -1025,5 +1152,5 @@ Tests (`tests/offload.rs`, values only, no store, tmux or network):
 `no_eligible_node_is_a_waiting_reason_not_a_failure` and
 `missing_origin_or_base_facts_are_refusals`.
 
-## 11. Out of scope (v0.2)
+## 12. Out of scope (v0.2)
 HTTP+SSE daemon, ACP, cross-node live sync, IANA timezone schedules, notification hooks (ntfy), automatic price-table download.

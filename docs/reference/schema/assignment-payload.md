@@ -26,6 +26,21 @@ Exported by `vowp schema AssignmentPayload` and generated from the protocol type
       "description": "Project name slug, for example `vowp`.\n\n`_node` is the reserved project that owns project-less session runs.",
       "type": "string"
     },
+    "ResultTransport": {
+      "description": "How a remote run returns its result.",
+      "oneOf": [
+        {
+          "const": "push",
+          "description": "Push the job branch from the node; the home fetches and verifies it.",
+          "type": "string"
+        },
+        {
+          "const": "bundle",
+          "description": "Return a `base..head` git bundle over the agent connection; the home verifies it\nand imports only the verified head.",
+          "type": "string"
+        }
+      ]
+    },
     "RunId": {
       "description": "Run id: 26-character ULID.",
       "type": "string"
@@ -162,8 +177,13 @@ Exported by `vowp schema AssignmentPayload` and generated from the protocol type
       "type": "string"
     },
     "remote_url": {
-      "description": "The home project's remote URL, compared with credentials stripped.\n\nThe agent compares its push URL (not the fetch URL) with this value and refuses a\nmismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the\nagent never logs the raw value.",
+      "description": "The home project's remote URL, compared with credentials stripped.\n\nThe agent compares its push URL (not the fetch URL) with this value and refuses a\nmismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the\nagent never logs the raw value. A bundle assignment carries an empty value: it needs\nno git credential and must not push.",
       "type": "string"
+    },
+    "result_transport": {
+      "$ref": "#/$defs/ResultTransport",
+      "default": "push",
+      "description": "How the run returns its result: `push` or `bundle`.\n\nThe assignment's value wins for the whole run; the agent and the home never fall\nback to the other transport. An older literal without this field parses as `push`."
     },
     "run_id": {
       "$ref": "#/$defs/RunId",

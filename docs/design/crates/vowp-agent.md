@@ -1,12 +1,14 @@
 # crate `vowp-agent` — Mac-side v0.4 agent client
 
-Phase 0/1/3 client for a local node: local config, the ed25519 node key, the SSH stdio
-transport, surface pairing, the mode-0600 local agent socket, the opencode SSE bridge, the
-local orchestrator host, the `vowp-protocol` frame client and the run-assignment transport
-loop. It depends on `vowp-protocol` only; it never opens a store, a database or
-`vowp-core`, and it never dials a home except through the injected transport.
+Phase 0/1/3 client for a local node: local config, the ed25519 node key, the SSH stdio and WSS
+transports, surface pairing and local surface state, the launchd/systemd-user service, the
+mode-0600 local agent socket, the opencode SSE bridge, the local orchestrator host, the
+`vowp-protocol` frame client, the run-assignment transport loop and the bundle result client. It
+depends on `vowp-protocol` only; it never opens a store, a database or `vowp-core`, and it never
+dials a home except through the injected transport.
 Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §4.6, §5.3,
-§5.6–§5.7, §6.3–§6.5, §8.2–§8.5, §9 and §12.2.
+§5.6–§5.7, §6.3–§6.5, §8.2–§8.5, §9 and §12.2, and
+[`../v0.4/hardening.md`](../v0.4/hardening.md) §2–§6.
 
 ## 1. Module layout
 
@@ -14,11 +16,15 @@ Spec: [`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §4.2, §
 crates/vowp-agent/
   Cargo.toml
   src/lib.rs        re-exports; #![forbid(unsafe_code)], #![warn(missing_docs)]
-  src/config.rs     AgentConfig, TransportConfig, default state dir, surface paths, 0600/0644 file helpers
+  src/config.rs     AgentConfig, TransportConfig (SSH and WSS), default state dir, surface paths, 0600/0644 file helpers
   src/key.rs        NodeKey, handshake_payload, fingerprints
   src/transport.rs  Transport + FrameStream traits, SshTransport, 1 MiB JSON-line framing
+  src/wss.rs        WssTransport, WssListener, WssIngress, TLS policy, one text message per frame
+  src/service.rs    launchd/systemd-user unit render, install/uninstall/status, run marker, drain
+  src/isolation.rs  root, owner and mode checks for the state, log and unit directories
+  src/surface_state.rs  local paired/needs_pair/revoked state, prefix and recovery commands
   src/client.rs     AgentClient, AgentClock, Backoff, RunOptions, RunOutcome, SurfacePairRequest
-  src/executor.rs   RunHandler, RunSink, AcceptedRun, HandlerReject, RunSummary, spool/ack/replay loop
+  src/executor.rs   RunHandler, RunSink, AcceptedRun, HandlerReject, RunSummary, spool/ack/replay and bundle chunks
   src/chat.rs       ChatClient, ChatTurnRequest, ChatTurnStatus, lease/turn/replay loop
   src/bridge.rs     OpencodeBridge, SSE mapping, mirror cursor, path/redaction, attachment bytes
   src/orchestrator.rs OrchestratorHost, local config, app process group, pid/state and attach seam
@@ -26,7 +32,9 @@ crates/vowp-agent/
   src/cache.rs      the bounded read cache used when the home is unreachable
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
-  src/worktree.rs   PathMap, WorktreeManager, Worktree, push/cleanup and the disk guard
+  src/worktree.rs   PathMap, WorktreeManager, Worktree, JobBundle, push/cleanup and the disk guard
+  tests/service.rs  temp HOME/XDG, fake service manager, unit text, drain and isolation
+  tests/transport.rs in-memory and loopback TLS frames, route policy and fingerprint changes
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
   tests/config.rs   path-map persistence, validation, enrollment and update frames
   tests/bridge.rs   fake SSE server on 127.0.0.1:0, recorded events and a fake home
@@ -45,9 +53,11 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 
 | File | Mode | Contents |
 |---|---|---|
-| `agent.json` | 0600 | `home`, `node`, `state_dir`, `transport = { kind = "ssh", target }`, and the `path_maps` array |
+| `agent.json` | 0600 | `home`, `node`, `state_dir`, `transport = { kind = "ssh", target }` or `{ kind = "wss", url, tls, fingerprint }`, and the `path_maps` array |
 | `node.key` | 0600 | the 32-byte ed25519 secret as lowercase hex |
 | `node.pub` | 0644 | the 32-byte public key as lowercase hex |
+| `run` | 0600 | launchd restart marker written by `agent run --service`; removed after `Revoked`/`Superseded` |
+| `logs/agent.log` | 0600 | service stdout/stderr; contains no token, code or key by construction |
 | `status.json` | 0600 | the last `AgentStatus` document |
 | `agent.sock` | 0600 | the local agent socket bound by `vowp agent run`; removed on clean exit |
 | `cache/` | 0700 | read-cache root, walked for the counts in `vowp agent status` |
@@ -71,6 +81,7 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `spool/<session>/<run>/events.jsonl` | 0600 | every sent event and the terminal summary, fsynced before send |
 | `spool/<session>/<run>/acked.json` | 0600 | event id to home sequence, plus `summary` after the terminal ack |
 | `spool/<session>/<run>/quarantine.json` | 0600 | reason a conflicting event id stopped the run's stream |
+| `run-bundles/<run>/result.gitbundle` | git default in a 0700 dir | one `base..job/<id>` git bundle for a bundle-mode run, sent in chunks and removed after the transfer |
 
 The state directory is created 0700. Private files are created with `OpenOptionsExt::mode(0o600)`
 and their mode is set again after writing, so an existing wider file is tightened. The private key
@@ -82,7 +93,8 @@ and the enrollment code are never logged, echoed, put in argv or written to `sta
 ```rust
 pub struct AgentConfig { pub home: String, pub node: NodeName, pub state_dir: PathBuf,
                          pub transport: TransportConfig, pub path_maps: Vec<AgentPathMap> }
-pub enum TransportConfig { Ssh { target: String } }
+pub enum TransportConfig { Ssh { target: String }, Wss { url: String, tls: WssTlsMode, fingerprint: Option<String> } }
+pub enum WssTlsMode { System, Pin }
 pub const DEFAULT_WORKTREE_DIR: &str;                               // ".vowp/worktrees"
 
 impl AgentConfig {
@@ -118,6 +130,54 @@ impl NodeKey {
 pub fn handshake_payload(nonce: &str, home_id: &str, connection_id: &str) -> Vec<u8>; // nonce\nhome_id\nconnection_id
 pub fn load_public(state_dir: &Path) -> Result<VerifyingKey, AgentError>;
 pub fn fingerprint_of(key: &VerifyingKey) -> String;
+
+pub mod wss {
+    pub const WSS_PATH: &str;                  // "/agent/v1"
+    pub const WSS_SUBPROTOCOL: &str;           // "vowp-agent/1"
+    pub struct WssUrl { pub host: String, pub port: u16, pub path: String }
+    pub struct WssTransport { /* url, tls, frame cap, handshake timeout, last fingerprint */ }
+    pub struct WssIngress { pub listen: SocketAddr, pub path: String, pub max_connections: usize,
+                            pub max_frame_bytes: usize, pub handshake_timeout: Duration }
+    pub enum WssTls { System { expected: Option<String> }, Pin { fingerprint: String } }
+    pub struct WssListener { /* loopback listener */ }
+    pub fn certificate_fingerprint(der: &[u8]) -> String;
+    pub fn is_fingerprint(value: &str) -> bool;
+}
+
+pub mod service {
+    pub const LAUNCHD_LABEL: &str;             // "dev.vowp.agent"
+    pub const SYSTEMD_UNIT: &str;              // "vowp-agent.service"
+    pub const RUN_MARKER: &str;                // "run"
+    pub enum ServicePlatform { Launchd, SystemdUser }
+    pub struct ServiceSpec { /* binary, state_dir, home, xdg_config_home, path_env, uid */ }
+    pub struct ServiceStatus { /* unit_path, available, loaded, pid, last_exit */ }
+    pub fn install(spec: &ServiceSpec, options: &InstallOptions, manager: &dyn ServiceManager) -> Result<InstallReport, ServiceError>;
+    pub fn uninstall(spec: &ServiceSpec, manager: &dyn ServiceManager) -> Result<UninstallReport, ServiceError>;
+    pub fn status(spec: &ServiceSpec, manager: &dyn ServiceManager) -> Result<ServiceStatus, ServiceError>;
+    pub fn prepare_service_run(state_dir: &Path) -> Result<PathBuf, AgentError>;
+}
+
+pub mod isolation {
+    pub const STATE_DIR_MODE: u32;             // 0o700
+    pub const PRIVATE_FILE_MODE: u32;          // 0o600
+    pub enum IsolationError { ForeignOwner { .. }, LooseMode { .. }, LooseFile { .. }, Symlink { .. },
+                              NotADirectory { .. }, Missing(String), Root, Io(..), Config(String) }
+    pub fn current_uid() -> Result<u32, IsolationError>;
+    pub fn ensure_not_root(uid: u32) -> Result<(), IsolationError>;
+    pub fn ensure_state_dir(path: &Path, uid: u32) -> Result<(), IsolationError>;
+    pub fn check_state_dir(path: &Path, uid: u32) -> Result<(), IsolationError>;
+}
+
+pub mod surface_state {
+    pub const SURFACE_PREFIX_CHARS: usize;     // 12
+    pub enum SurfaceState { Paired, NeedsPair, Revoked }
+    pub struct SurfaceStatus { pub surface: SurfaceId, pub prefix: Option<String>,
+                               pub expires_at: Option<Timestamp>, pub state: SurfaceState }
+    pub struct SurfaceRefusal { pub surface: SurfaceId, pub state: SurfaceState, pub message: String }
+    pub fn surface_statuses(state_dir: &Path) -> Vec<SurfaceStatus>;
+    pub fn mark_needs_pair(state_dir: &Path, surface: &SurfaceId, reason: &str) -> Result<SurfaceRefusal, AgentError>;
+    pub fn recovery_commands(surface: &SurfaceId, node: Option<&NodeName>, session: Option<&SessionId>) -> String;
+}
 
 pub enum FrameRead { Frame(AgentFrame), Timeout, Closed }
 pub trait FrameStream: Send {
@@ -904,6 +964,53 @@ carries names only), and the driver never puts an absolute local path in a frame
 reported as path-free strings. A handler must redact its own event payloads and result text; the
 home's redaction and `secret_scan` gate remain the backstop.
 
+### Service install and run mode
+
+`service::ServiceSpec` resolves the current user's unit path: `~/Library/LaunchAgents/dev.vowp.agent.plist`
+on macOS, `$XDG_CONFIG_HOME/systemd/user/vowp-agent.service` (else
+`~/.config/systemd/user/`) on Linux. `install` renders one unit, validates the user and paths,
+writes it 0600 through a private temporary file and a rename, and returns the commands it would
+run. It calls the manager only with `--now`; a foreign file at the unit path is refused unless
+`--force`. `uninstall` stops the unit, removes only a file carrying the generated marker, and
+keeps the state directory and every token. `status` reads the manager's `launchctl print` or
+`systemctl --user show` output and reports `available`, `loaded`, `pid` and `last_exit`; a
+missing manager is `available = false`, not an error.
+
+`agent run --service` uses `prepare_service_run`: it checks the state directory and the root rule,
+then writes the 0600 `run` marker. A drain on SIGTERM keeps the marker so the manager may start
+the agent again; a terminal `Revoked` or `Superseded` removes it. The `ServiceRunOutcome` is
+`Drained` or `Terminal(RunOutcome)`. The CLI maps a revocation to exit 5 and a superseded
+connection to exit 4, which the systemd unit excludes from restart.
+
+`isolation` is the shared predicate layer. `current_uid` reads the real uid, `ensure_not_root`
+refuses uid 0, and `ensure_state_dir` creates the state root 0700 and then checks it;
+`check_state_dir` refuses a symlink, a non-directory, another owner, or any group/world mode bit.
+`check_private_file` and `ensure_log_dir` apply the same rule to files and the log directory. The
+checks use `std::os::unix::fs::MetadataExt` and never follow a symlink out of the state root.
+
+### Local surface state
+
+`surface_state` is the agent-local view of pairing. `SurfaceState` is `Paired`, `NeedsPair` or
+`Revoked`; the state is a small file below `surfaces/<id>/`, next to the 0600 token. A refused
+token calls `mark_needs_pair`, which writes the state, returns a `SurfaceRefusal` naming the
+surface and the reason, and `recovery_commands` produces the exact `surface revoke`, `surface
+pair` and `agent pair` lines. The refusal path drops the surface's cached reads, releases a lease
+if held and stops the app host it started; it does not delete the dead token, so the failure stays
+inspectable. `surface_statuses` reads the directory for `agent status` and `agent doctor`;
+`token_prefix` returns the 12 scheme-stripped characters and never the token. A revoked surface
+deletes its token through the existing `SurfaceRevoked` path.
+
+### Bundle result client
+
+A bundle assignment creates one `base..job/<id>` git bundle through
+`worktree::create_job_bundle` in `<state_dir>/run-bundles/<run>/result.gitbundle` (the directory
+is 0700). The executor sends `BundleStart`, waits for `BundleAccept`, sends lowercase-hex
+`BundleChunk` messages of at most `MAX_BUNDLE_CHUNK_BYTES` raw bytes, then `BundleEnd`; it resumes
+at the home's offset after a disconnect. A `BundleAbort` or a local read failure removes the file
+and turns the terminal summary into a `bundle_failed` error. The transfer never pushes, never
+needs a git credential and never falls back to push. The home side is in
+[`vowp-core.md`](vowp-core.md#92-result-return-agentresultrs).
+
 ## 5. Transport
 
 `SshTransport::argv` is exactly the documented command:
@@ -917,6 +1024,27 @@ line on a reader thread, refuses a frame over 1 MiB, and sends each frame as one
 `\n`. Stderr is drained into a 4 KiB tail for transport errors and never includes a frame or a
 secret. Dropping the stream kills the ssh child. Tests implement `Transport`/`FrameStream` in
 memory and never spawn ssh, a socket or the network.
+
+`WssTransport` is the optional second transport. `WssUrl::parse` accepts only
+`wss://host[:port]/agent/v1` with no query, fragment or user-info; the default port is 443.
+`WssTls::System { expected }` uses the platform trust roots and hostname verification and records
+the leaf fingerprint observed on the last connection; `WssTls::Pin { fingerprint }` requires
+`sha256:<64 lowercase hex>` and refuses any other leaf. The client is built with rustls
+`TLS13` only. One WebSocket **text** message carries one `AgentFrame` with no trailing newline;
+the line adapter adds the newline back for the unchanged gateway reader. Binary messages are
+refused, and a message over the 1 MiB cap is a typed `FrameTooLarge` error.
+
+`WssListener` is the home-side loopback listener. `WssIngress::from_config` validates the
+`[ingress.wss]` table before `bind`: the address must be loopback, the path must be exactly
+`/agent/v1`, `max_connections` at least 1, `max_frame_bytes` between 1 and 16 MiB, and the
+handshake timeout at least one second. `accept` reads the HTTP head, answers `404` for another
+path, `426` when the request is not a WebSocket upgrade, and `400` when the
+`Sec-WebSocket-Protocol` offer is not `vowp-agent/1`, then performs the subprotocol handshake. It
+serves one `gateway::serve` per accepted connection, so frame types, enrollment, the node-key
+challenge, heartbeats, surface pairing, leases and fencing are the same code as stdio. It never
+terminates TLS and holds no certificate or proxy key. The `vowp up` child start and the
+`vowp agent gateway --listen` command are covered in
+[`vowp-cli.md`](vowp-cli.md#3-agent-commands-cmdagentrs).
 
 ## 6. Errors
 
@@ -1029,6 +1157,25 @@ private directory and stops the fake app. The app-files slice adds
 environment and reads `opencode.json` and `AGENTS.md` from `OPENCODE_CONFIG_DIR`, so the tests
 prove the files are readable by the process opencode would start, not only present on disk.
 
+The phase-4 hardening slice adds five loopback transport tests in `tests/transport.rs`, with a
+loopback TLS proxy and an in-memory home: `wss_carries_the_same_frames_as_stdio`,
+`wss_rejects_a_replayed_nonce_and_a_bad_signature`,
+`wss_refuses_a_changed_fingerprint_without_confirmation`,
+`wss_listener_refuses_a_non_loopback_bind` and `wss_route_refuses_every_path_but_agent_v1`.
+Separately, `wss_url_accepts_the_documented_shape_and_rejects_every_other` is a unit test in
+`src/wss.rs`, not in `tests/transport.rs`. In `tests/service.rs`, with a
+temp `HOME`/`XDG_CONFIG_HOME` and a fake manager:
+`agent_service_install_writes_the_launchd_plist_under_a_temp_home`,
+`agent_service_install_writes_the_systemd_user_unit_under_a_temp_xdg_config`,
+`agent_service_install_never_calls_the_manager_without_now`,
+`agent_service_uninstall_removes_only_its_own_unit`,
+`agent_service_drain_flushes_the_spool_and_releases_the_lease`,
+`agent_service_refuses_a_foreign_owner_or_loose_state_dir` and
+`agent_refuses_to_run_as_root`. In `tests/surface_pair.rs`:
+`agent_marks_a_refused_surface_needs_pair_and_stops_retrying`. The bundle path is covered by
+`bundle_result_is_chunked_and_resumed_after_a_disconnect` in `tests/executor.rs` and the
+home-side names in [`vowp-core.md`](vowp-core.md#92-result-return-agentresultrs).
+
 ## 8. Worktrees, path maps and result return
 
 `src/worktree.rs` is the §6.4–§6.5 foundation the executor calls after `AssignRun`. It adds no
@@ -1133,16 +1280,16 @@ remote cases to the protocol's `RunRejectReason` vocabulary. There is no `unwrap
 
 ## 9. Out of scope
 
-The home-side gateway, store methods, node enrollment codes, node commands, runs, leases,
-offload, home-side path-map storage and `vowp node paths`, launchd and WSS ingress are separate
-jobs. Phase 0 `vowp agent run`
-stays in the foreground; `--role` is accepted and carried in `RunOptions`, and the run-assignment
-frame loop is `run_with_handler` with an injected handler. `vowp agent surface
-start|attach|detach` is a later v0.4 slice; this crate supplies the orchestrator host it can call.
-This crate
-serves the local agent socket that a later `vowp mcp --agent-socket … --surface …` will use;
-the CLI command and the CLI-side socket client remain later jobs. The
-real harness runner
-(adapter selection, worktree creation, environment resolution and result push) that implements
-`RunHandler` is the next executor job; this slice supplies the transport, spool and replay half
-and tests it with a fake handler.
+The home-side gateway, store methods, node enrollment codes, node commands, runs, leases and
+offload are separate crates or jobs. The WSS transport and listener are in this crate; TLS
+termination, the reverse proxy, ACME and certificate storage are the owner's, not VOWP's. Windows
+service support, a root `LaunchDaemon`, a system-wide systemd unit, a hosted relay and installing
+for another user are out of scope. `vowp agent run` supports the foreground and service modes;
+`--role` is carried in `RunOptions`. `vowp agent surface start|attach|detach` is a later v0.4
+slice; this crate supplies the orchestrator host it can call. This crate serves the local agent
+socket that the shipped `vowp mcp --agent-socket … --surface …` proxy uses; the CLI command and
+its socket client are implemented in `crates/vowp-cli/src/mcp/proxy.rs` with 23 passing tests.
+The real harness runner (adapter selection, worktree creation,
+environment resolution and result push or bundle) lives in `vowp-cli`'s `CoreRunHandler`; this
+crate supplies the transport, spool, replay and bundle chunking and tests them with a fake
+handler.

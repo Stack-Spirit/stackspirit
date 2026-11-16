@@ -800,7 +800,7 @@ Exported by `vowp schema VowpConfig` and generated from the protocol types in
     },
     "OffloadConfig": {
       "additionalProperties": false,
-      "description": "Offload settings from `[offload]`.\n\nDefaults disabled: every job stays on the home until the owner enables offload and a\nproject opts in with a placement. Validation rejects a zero fleet or disk cap, a\n`node:<name>` fleet default and the Phase 4 `bundle` transport.",
+      "description": "Offload settings from `[offload]`.\n\nDefaults disabled: every job stays on the home until the owner enables offload and a\nproject opts in with a placement. Validation rejects a zero fleet or disk cap and a\n`node:<name>` fleet default. `result_transport` is `push` by default and `bundle` is the\nread-only-node alternative; the two are mutually exclusive per assignment.",
       "properties": {
         "default": {
           "$ref": "#/$defs/Placement",
@@ -1233,7 +1233,7 @@ Exported by `vowp schema VowpConfig` and generated from the protocol types in
         },
         {
           "const": "bundle",
-          "description": "Return a bundle over the agent connection. Phase 4; refused by validation.",
+          "description": "Return a `base..head` git bundle over the agent connection; the home verifies it\nand imports only the verified head.",
           "type": "string"
         }
       ]

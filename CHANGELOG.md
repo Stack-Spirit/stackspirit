@@ -50,6 +50,34 @@ conformance, an exact or lossless round trip, portable continuation or native-ha
 The adapter is pinned as a git dependency for now; that is the release blocker recorded in
 [`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md) §4.3, not a pass.
 
+**Phase-4 hardening: agent nodes, WSS, rotation, bundles and capacity history**
+
+- `vowp agent enroll --wss <url>` (with optional `--tls-fingerprint`) stores the optional WSS
+  transport. The home's `[ingress.wss]` table starts a loopback WebSocket listener behind the
+  owner's TLS reverse proxy; `vowp up` starts and stops the hidden `agent gateway --listen`
+  child. TLS, ACME and the public port stay outside VOWP.
+- `vowp agent service install|uninstall|status` writes or removes exactly one 0600 launchd
+  `LaunchAgent` or systemd user unit for the current user. `agent run --service` writes the
+  launchd restart marker and drains the spool and leases on SIGTERM. `agent doctor` reports
+  state-directory, service, surface and copied-login warnings by name only.
+- Surface rotation gains `--wait` and `--grace` (default ten minutes, capped at 24 hours), a
+  durable `queued_at`/`overlap_until` envelope, `PREFIX`/`OVERLAP` columns, a `surfaces` status
+  array and the `needs_pair` state. `surface pair --replace` revokes the old surface and creates
+  its replacement in one transaction. Rotation and revocation write one token-free ledger note.
+- `[offload] result_transport = "bundle"` is legal and returns a verified `base..head` git bundle
+  over the authenticated agent channel. The five bundle frames and
+  `AssignmentPayload.result_transport` are exported; the home verifies size/sha256,
+  `git bundle verify`, one job ref and base ancestry before the gates or any project ref. Push
+  stays the default and neither transport falls back.
+- Global schema v7 adds `capacity_rollups` with a v6-to-v7 migration and backup.
+  `vowp capacity history [--since] [--bucket 5m|1h|1d]` reads the bounded history read-only; raw
+  samples are kept 48 hours and rollups 30 days. Cost remains `vowp cost --by day`.
+- The separate-user shape, service limits, WSS trust boundary, rotation storage and bundle
+  verification are documented in [`docs/security.md`](docs/security.md), with the operator path
+  in [`docs/guides/agent-node.md`](docs/guides/agent-node.md) and the design/status pages updated.
+  The seven-day soak, rollback drill and security-review sign-off remain phase-exit evidence and
+  are not claimed here.
+
 ### Changed
 
 - The default fix loop is now two rounds (`max_attempts = 2`). The verifier's findings are

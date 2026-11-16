@@ -264,8 +264,13 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
           "type": "string"
         },
         "remote_url": {
-          "description": "The home project's remote URL, compared with credentials stripped.\n\nThe agent compares its push URL (not the fetch URL) with this value and refuses a\nmismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the\nagent never logs the raw value.",
+          "description": "The home project's remote URL, compared with credentials stripped.\n\nThe agent compares its push URL (not the fetch URL) with this value and refuses a\nmismatch as `remote_mismatch`. The home strips URL userinfo before storing it, and the\nagent never logs the raw value. A bundle assignment carries an empty value: it needs\nno git credential and must not push.",
           "type": "string"
+        },
+        "result_transport": {
+          "$ref": "#/$defs/ResultTransport",
+          "default": "push",
+          "description": "How the run returns its result: `push` or `bundle`.\n\nThe assignment's value wins for the whole run; the agent and the home never fall\nback to the other transport. An older literal without this field parses as `push`."
         },
         "run_id": {
           "$ref": "#/$defs/RunId",
@@ -1256,6 +1261,21 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
         "source"
       ],
       "type": "object"
+    },
+    "ResultTransport": {
+      "description": "How a remote run returns its result.",
+      "oneOf": [
+        {
+          "const": "push",
+          "description": "Push the job branch from the node; the home fetches and verifies it.",
+          "type": "string"
+        },
+        {
+          "const": "bundle",
+          "description": "Return a `base..head` git bundle over the agent connection; the home verifies it\nand imports only the verified head.",
+          "type": "string"
+        }
+      ]
     },
     "RunId": {
       "description": "Run id: 26-character ULID.",
@@ -2887,6 +2907,194 @@ Exported by `vowp schema AgentFrame` and generated from the protocol types in
       "required": [
         "type",
         "run_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: announce one `base..head` git bundle before its chunks.\n\nThe bundle holds exactly `refs/heads/job/<id>` (`branch`) with `base` as its\nprerequisite. `bytes` is the transfer size and `sha256` its lowercase hex digest;\nboth are re-checked at [`Self::BundleEnd`].",
+      "properties": {
+        "base": {
+          "description": "Assigned base commit; the bundle's prerequisite.",
+          "type": "string"
+        },
+        "branch": {
+          "description": "The bundle's single branch, `job/<id>`.",
+          "type": "string"
+        },
+        "bytes": {
+          "description": "Bundle size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head": {
+          "description": "Committed head the bundle returns.",
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the bundle belongs to."
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the bundle file.",
+          "type": "string"
+        },
+        "type": {
+          "const": "bundle_start",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "base",
+        "head",
+        "branch",
+        "bytes",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Home -> agent: the transfer may continue from `offset`.\n\nA start with the same run, epoch, digest and size resumes at the stored length; a\nfresh transfer is `offset = 0`.",
+      "properties": {
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Bytes already stored by the home.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the bundle belongs to."
+        },
+        "type": {
+          "const": "bundle_accept",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "offset"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: one chunk of the bundle at `offset`.\n\n`data` is lowercase hex and at most [`MAX_BUNDLE_CHUNK_BYTES`] raw bytes. A chunk's\n`offset` must equal the bytes already stored; a gap, overlap or oversized chunk\naborts the bundle.",
+      "properties": {
+        "data": {
+          "description": "Lowercase hex chunk data.",
+          "type": "string"
+        },
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Byte offset this chunk starts at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the bundle belongs to."
+        },
+        "type": {
+          "const": "bundle_chunk",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "offset",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Agent -> home: the last chunk was sent; verify size and digest.",
+      "properties": {
+        "bytes": {
+          "description": "Bundle size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the bundle belongs to."
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the bundle file.",
+          "type": "string"
+        },
+        "type": {
+          "const": "bundle_end",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
+        "bytes",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Either direction: the transfer is refused or cannot continue.",
+      "properties": {
+        "epoch": {
+          "description": "Run epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Stable, path-free reason.",
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Run the bundle belongs to."
+        },
+        "type": {
+          "const": "bundle_abort",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "run_id",
+        "epoch",
         "reason"
       ],
       "type": "object"

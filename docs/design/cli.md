@@ -345,6 +345,7 @@ vowp capacity show
 vowp capacity report [--since <dur|date>] [--limit <n>]
 vowp capacity set [--target <n>] [--mode auto|fixed] [--override] [--reason <text>] [--by <actor>]
 vowp capacity reload [--check]
+vowp capacity history [--since <dur|date>] [--bucket 5m|1h|1d]
 ```
 
 `show`/`report` return `CapacityReport`: the latest host sample (or none), the owner target and
@@ -363,6 +364,18 @@ apply the on-disk config and prints the effective values; with no live superviso
 prints a `vowp up` hint. Both forms are read-only for `vowp.toml` and never restart the supervisor
 or stop a run. An invalid file is refused with exit 1; the supervisor keeps the previous config,
 logs the path and error and opens a node-inbox notice.
+
+`history` reads the stored 5-minute `capacity_rollups` from the home's global database. `--since`
+defaults to 24 hours and accepts a duration or `YYYY-MM-DD`; `--bucket` defaults to `5m` and also
+accepts `1h` or `1d` as read-time aggregations weighted by `samples`. It opens the store with
+`Store::open_read_only`, writes no target, advice, ledger or rollup row and is safe while the
+supervisor runs. A `--since` before the retained 30-day window is clamped and a note is printed;
+an unknown bucket is exit 2. Human output is one row per point
+(`AT SAMPLES MEM_MIN/AVG/MAX LOAD1 DISK_MIN SOURCE`), a `window:` footer with the effective
+`since`, `bucket_secs` and `retention_secs`, and a cost footer naming `vowp cost --by day`; an
+empty range prints `history: no rollups in the window`. `--json` prints `CapacityHistory`
+(`generated_at`, `since`, `until`, `bucket_secs`, `retention_secs`, `points`). Raw samples are kept
+48 hours and rollups 30 days; a missing bucket is a gap, not a zero.
 
 ### 6.4 `vowp control` and `vowp tunnel`
 
@@ -604,7 +617,7 @@ and `agent paths add|rm|ls` manage the local project path map the offload execut
 store. Crate APIs: [`crates/vowp-agent.md`](crates/vowp-agent.md) and
 [`crates/vowp-core.md`](crates/vowp-core.md) §9.
 
-### `vowp agent enroll --target <ssh-target> --code-file <path|-> [--project <PATH>]... [--worktree-root <PATH>]`
+### `vowp agent enroll [--target <ssh-target> | --wss <URL>] --code-file <path|-> [--project <PATH>]... [--worktree-root <PATH>] [--tls-fingerprint <sha256:hex>]`
 Generates `~/.vowp-agent/node.key` (0600) and `node.pub` when absent, opens
 `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <ssh-target> vowp agent gateway --stdio`,
 sends `Enroll { code, public_key, …, paths }` and waits for `Enrolled`. Each repeatable
@@ -624,6 +637,14 @@ vowp agent enroll --target home.example --code-file - --project ~/src/vowp
 Human output is `enrolled node mac-studio in home home-1 (vowp-agent/1)`; `--json` prints
 `{"node":"mac-studio","home":"home-1","protocol":"vowp-agent/1","heartbeat_secs":10}`. The
 private key, public key and code are never printed.
+
+`--wss <URL>` stores a WSS transport instead of the SSH target; `--target` becomes optional because
+the proxy URL carries the route. The URL must be exactly `wss://host[:port]/agent/v1` with no
+query, fragment, user-info or other path. The default `tls = "system"` uses the system trust store
+and hostname verification and records the first observed leaf fingerprint in `agent.json`;
+`--tls-fingerprint sha256:<64 lowercase hex>` selects `tls = "pin"` and requires `--wss`. A pin or
+fingerprint mismatch is a guard (exit 5). Editing `agent.json` by hand is the fallback; no new
+credential is introduced.
 
 ### `vowp agent paths add --project <PATH> [--name <NAME>] [--worktree-root <PATH>] [--allow <REL>]...`
 Adds or updates one project without re-enrolling. The project name defaults to
@@ -658,14 +679,16 @@ output is `paired surface <id>; token stored at <path>; expires <rfc3339>`; `--j
 `PairedSurface` fields (`surface_id`, `scopes`, `expires_at`, `token_path`) and no token. A bad,
 expired or replayed code is a non-retryable refusal (exit 5); a missing enrollment is exit 3.
 
-### `vowp agent run [--foreground] [--role <role>]`
+### `vowp agent run [--foreground] [--role <role>] [--service]`
 Loads `agent.json` and `node.key`, connects, and sends a heartbeat every 10 seconds (the interval
 `HomeChallenge` names); each heartbeat rewrites `status.json` (0600). `Ping` is answered with
 `Pong`. `Revoked` stops with exit 5 and `Superseded` stops with exit 4. A dropped connection,
 EOF or retryable home error reconnects with exponential backoff (1, 2, 4 … 60 seconds, with
 jitter; a 60-second stable connection resets it). `--role` is `surface`, `executor` or `both`
-(default `both`). Phase 0 always runs in the foreground; `--foreground` is accepted, and a
-launchd service is Phase 4.
+(default `both`). `--foreground` is accepted and is the default. `--service` is the service-manager
+mode: it checks the state directory and root rule, writes the 0600 `run` marker, installs the
+SIGTERM/SIGINT drain flag and exits 0 after a clean drain. It is supported on Linux and macOS only
+(exit 5 elsewhere); `agent service install` puts it in the unit.
 
 ### `vowp agent status [--json]`
 Reads `status.json` and prints the last connection state, node, home, protocol, last heartbeat,
@@ -674,7 +697,11 @@ When projects are mapped, the human output adds a `paths:` block with each proje
 root and worktree root; `--json` adds a `paths` array of `AgentPathMap`. These absolute roots are
 owner-only output built from `agent.json`: `status.json` stays a names-and-counts cache and never
 contains them. Without an enrollment it exits 3 with the `vowp agent enroll` hint. It also exits
-0 when the last state is offline or stopped. `--json` prints:
+0 when the last state is offline or stopped. The local surface state adds a `surfaces:` block and
+a `surfaces` array; each entry is `{"surface","prefix","expires_at","state"}` where `state` is
+`paired`, `needs_pair` or `revoked`. The prefix is the first 12 scheme-stripped token characters;
+the token and its hash are never printed or written to `status.json`. A token expiring within
+seven days prints one warning to stderr. `--json` prints:
 
 ```json
 {
@@ -687,6 +714,14 @@ contains them. Without an enrollment it exits 3 with the `vowp agent enroll` hin
   "pending_spool_bytes": 42,
   "key_fingerprint": "sha256:0123456789abcdef",
   "surface_token_expires_at": null,
+  "surfaces": [
+    {
+      "surface": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "prefix": "AbCdEfGhIjKl",
+      "expires_at": "2026-12-16T10:00:00.000Z",
+      "state": "paired"
+    }
+  ],
   "paths": [
     {
       "project": "vowp",
@@ -702,16 +737,55 @@ contains them. Without an enrollment it exits 3 with the `vowp agent enroll` hin
 `superseded` or `stopped`. `AgentStatus` is a CLI-local document, not an exported protocol
 schema.
 
+### `vowp agent service install [--print] [--force] [--now]` · `uninstall [--yes]` · `status`
+
+`install` writes exactly one launchd `LaunchAgent` (`~/Library/LaunchAgents/dev.vowp.agent.plist`)
+or one systemd user unit (`$XDG_CONFIG_HOME/systemd/user/vowp-agent.service`, else
+`~/.config/systemd/user/vowp-agent.service`), 0600 and owned by the installing user. The unit text
+is `agent run --foreground --service` with `VOWP_AGENT_HOME` and the installing shell's `PATH`; it
+contains no token, code, key, provider value or absolute project path. `--print` writes nothing,
+invokes no manager and prints the unit and the commands; `--now` also runs the current user's
+manager commands. A foreign file at the unit path is exit 4 unless `--force`; an unsupported
+platform is exit 5 and a missing manager is exit 7. `install --json` prints
+`{"installed","unit","run_marker","linger"}` (the linger hint is omitted on macOS).
+
+`uninstall --yes` stops the unit and removes only a file carrying
+`generated by vowp agent service install`; it keeps `~/.vowp-agent` and every token. Without
+`--yes` it refuses. `--json` prints `{"removed","unit"}`.
+
+`status` prints the unit path, whether the manager has it loaded, the reported pid and the last
+exit status. `--json` prints `{"available","unit","state","loaded","pid","last_exit"}`, where
+`state` is `loaded`, `not_loaded` or `unavailable`; a missing manager is `available: false`, not
+an error. The manager is read with `launchctl print gui/<uid>/dev.vowp.agent` or `systemctl --user
+show vowp-agent.service --property=LoadState,ActiveState,MainPID,ExecMainStatus`.
+
+### `vowp agent doctor [--json]`
+
+Reports local warnings without failing on them: `state_dir`, `service`, `surfaces` and `logins`.
+It checks the state-directory owner and mode, the unit and run marker, `needs_pair`/expired/
+soon-expiring surface tokens and copied login material. Login material is reported by name only
+(`.ssh`, `.claude`, `.env`, `.git-credentials`, `auth.json`, and the two opencode `auth.json`
+locations) and file contents are never read. It exits 0 when no check failed and 1 on a failure;
+`--json` prints `{"ok","checks":[{"name","status","detail"}]}`. The detail never contains a
+token, a key, a path map or a secret value.
+
 ### `vowp agent gateway --stdio` (hidden, home)
-The Phase 0 home side of the SSH stdio transport. It requires `--stdio`, refuses any role but home
+The home side of the SSH stdio transport. It requires `--stdio`, refuses any role but home
 with exit 5, opens the store through `Ctx::store()` and calls `vowp_core::agent::gateway::serve`.
 Stdout carries only newline-delimited `AgentFrame` JSON; errors go to stderr. The first frame is
 `Enroll` or `AgentHello`; enrollment returns `Enrolled` and closes, and the agent reconnects for
 `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome`. Then `Heartbeat` updates presence and
 capacity, `Ping` is answered with `Pong`, and a revoked or unknown node gets `Revoked` or a typed
 `Error` before the connection closes. Frames are capped at 1 MiB and the handshake times out after
-10 seconds. Phase 0 has no `--socket`; the supervisor-socket gateway is Phase 4. It never logs the
-code, the signature, the public-key value or a path map.
+10 seconds. It never logs the code, the signature, the public-key value or a path map.
+
+`vowp agent gateway --listen <addr>` is the hidden WSS listener. It requires a loopback socket
+address and honors `[ingress.wss]` for the path, connection cap, frame cap and handshake timeout;
+the path must be `/agent/v1`. Every accepted WebSocket opens one `gateway::serve` on its own
+thread. `vowp up` starts this child when `[ingress.wss].enabled = true` and stops it on shutdown;
+a missing or unstartable listener warns and leaves the supervisor running. The listener is plain
+`ws://` on loopback; TLS and the public port belong to the owner's reverse proxy. Stdout prints
+one `gateway: listening on ws://<addr>/agent/v1` line; frames are never printed.
 
 ## 13. Home surface pairing (v0.4 Phase 1)
 
@@ -722,7 +796,7 @@ database. They use the global store (`surfaces`, `surface_tokens`, `enrollment_c
 once by `surface pair`, the token is written only by `agent pair` to its 0600 agent file, and
 neither appears in another command's output, a log or a JSON document.
 
-### `vowp surface pair --session <id> --node <name> --kind opencode|chat [--app <app>]`
+### `vowp surface pair --session <id> --node <name> --kind opencode|chat [--app <app>] [--replace <surface-id>]`
 
 Creates a `pending` surface bound to the session and a ten-minute one-time code, then prints the
 code once and the exact Mac command. `--node` is the node the surface runs on; it is not an SSH
@@ -758,21 +832,33 @@ session is exit 3. A revoked node is exit 5. A second pending surface for the sa
 kind and app is a conflict (exit 4); revoke it before pairing again. The plaintext code is never
 written to the home database, a file or the log; only its SHA-256 hash is stored.
 
+`--replace <surface-id>` revokes the old surface and creates the replacement pending surface in
+one transaction. The old surface must belong to the same node and session and must not already be
+revoked; its queued rotation frame is removed and its token is refused immediately. Human output
+starts with `revoked surface <old> and created its replacement`; `--json` adds
+`replaced: "<old>"` and otherwise has the fields above. No token is issued until the agent redeems
+the new code.
+
 ### `vowp surface ls [--node <name>] [--json]`
 
 Lists the surfaces this CLI created. Each row re-reads the surface's current node, kind and
-state from the store and the scopes and expiry of its token rows from `surface_tokens`:
+state from the store and the scopes, prefix and expiry of its token rows from `surface_tokens`:
 
 ```text
-ID                        NODE        KIND      STATE     SCOPES                          EXPIRES
-01ARZ…FAW                 mac-studio  opencode  pending   -                               -
+ID                        NODE        KIND      STATE     SCOPES                          PREFIX         EXPIRES          OVERLAP
+01ARZ…FAW                 mac-studio  opencode  pending   -                               -              -                -
 ```
 
 `--node <name>` filters by the surface's node. `--json` prints an array of
-`{"id","node","kind","state","scopes","expires_at"}`. A pending surface has no token, so its
-scopes are `[]` and its `expires_at` is `null`. A revoked surface stays listed with state
-`revoked`. No token, token hash or display prefix is ever printed. The id index is
-`<home>/surfaces.json` (0600) because the v4 store read model returns one surface by id; the
+`{"id","node","kind","state","scopes","prefix","expires_at","overlap_until","expired","pending","queued_at","delivery_deadline"}`.
+`queued_at` and `delivery_deadline` are omitted when absent; `prefix`, `expires_at` and
+`overlap_until` are `null` when there is no value. A pending surface has no token, so its scopes are
+`[]`, its `prefix` and `expires_at` are `null`, and `queued_at`/`delivery_deadline` are absent. A
+revoked surface stays listed with state `revoked`. A token whose expiry has passed shows
+`expired` in the `EXPIRES` cell while the surface's state stays `attached`. `PREFIX` is the newest
+active token's 12-character display prefix; `OVERLAP` is `-`, an old token's overlap deadline, or
+`PENDING <deadline>` for an undelivered rotation. No token or hash is ever printed. The id index
+is `<home>/surfaces.json` (0600) because the v4 store read model returns one surface by id; the
 ids are not secrets and the state/scopes/expiry always come from the store.
 
 ### `vowp surface revoke <id> [--yes]`
@@ -784,9 +870,31 @@ succeeds with zero tokens revoked. Human output is
 `revoked surface <id>; N token(s) revoked`; `--json` prints
 `{"surface":"…","status":"revoked","tokens_revoked":N}`. No token is printed.
 
-The reverse flow (the Mac asks and the home opens an approval inbox item), `surface rotate`, the
-live `SurfaceRevoked` push and the MCP proxy are later v0.4 slices. Leases and the Phase 1 local
-chat are implemented.
+### `vowp surface rotate <id> [--wait <duration>] [--grace <duration>]`
+
+Mints a fresh 30-day token with the surface's current scopes and shortens every other active
+token to `now + grace`; the default grace is ten minutes and `--grace` is capped at 24 hours. A
+token that already expires sooner keeps its earlier expiry. The replacement is queued as one
+`SurfaceIssued` envelope in `<home>/agent-frames/<node>/<surface>.json` (0600 in a 0700 directory)
+and drained by the gateway on the node's next authenticated connection. A second rotation before
+delivery replaces the file. Human output is `rotated surface <id> on <node>`, `prefix`, `expires`,
+`old token expires` and, while undelivered, `delivery: pending`; `--json` prints
+`{"surface","node","prefix","expires_at","old_expires_at","pending","queued_at"}`. The token is
+never printed. `--node <name>` names the surface's node, not an SSH target; a different node is
+exit 4.
+
+`--wait <duration>` polls the outbox until the frame is drained; if it is still queued, the command
+exits 7 with `rotation_pending`. Without `--wait` the shipped behavior stays: exit 0, the frame
+stays queued and an offline node writes
+`warning: node <n> is offline; the agent must re-pair before <old expiry>` to stderr. `--grace` is
+refused for a pending or revoked surface; a pending surface is exit 4, an unknown one exit 3 and a
+revoked one exit 5.
+
+The reverse approval flow (the Mac asks and the home opens an approval inbox item) remains a
+later v0.4 slice. The `vowp mcp` proxy is implemented: `vowp mcp --agent-socket <PATH> --surface
+<ID>` selects `crates/vowp-cli/src/mcp/proxy.rs`, and the 23 passing tests in
+`crates/vowp-cli/tests/mcp.rs` are recorded in the roadmap's merged Phase 3 table. Leases and
+the Phase 1 local chat are implemented.
 
 ## 14. Offload policy and status (v0.4 Phase 2)
 
@@ -801,8 +909,9 @@ not send `AssignRun`, create a worktree or start an agent.
 `pause_on_home_brake = false`, `require_clean_base = true`, `min_disk_bytes = 5368709120`.
 `[offload.projects.<name>]` carries `placement`, `home_only`, `allow_kinds`, `deny_kinds` and
 `allow_secrets`; `[offload.nodes.<name>]` carries `max_workers`, `allow_battery` and the required
-`labels`. Unknown keys are rejected and `result_transport = "bundle"` is refused with a message
-naming it as Phase 4.
+`labels`. Unknown keys are rejected. `result_transport = "bundle"` is legal in Phase 4; `push`
+stays the default, and an assignment's value wins for the whole run with no fallback in either
+direction. A bundle assignment carries an empty `remote_url` and needs no push access.
 
 A job's `--placement` is one of:
 

@@ -349,6 +349,20 @@ CREATE TABLE host_samples (
 ) STRICT;
 CREATE INDEX host_samples_at ON host_samples(at);
 
+CREATE TABLE capacity_rollups (         -- one 5-minute aggregate of host_samples; kept 30 days
+  bucket                  TEXT NOT NULL,      -- RFC 3339 UTC bucket start
+  bucket_secs             INTEGER NOT NULL,   -- 300 (5 minutes)
+  samples                 INTEGER NOT NULL,
+  mem_available_min_bytes INTEGER NOT NULL,
+  mem_available_avg_bytes INTEGER NOT NULL,
+  mem_available_max_bytes INTEGER NOT NULL,
+  load1_avg               REAL NOT NULL,
+  disk_free_home_min_bytes INTEGER NOT NULL,
+  source                  TEXT NOT NULL CHECK (source IN ('proc','fallback','mixed')),
+  PRIMARY KEY (bucket, bucket_secs)
+) STRICT;
+CREATE INDEX capacity_rollups_bucket ON capacity_rollups(bucket);
+
 CREATE TABLE run_usage (                -- one row per finished run (§6.1)
   run_id          TEXT PRIMARY KEY,
   project         TEXT NOT NULL,
@@ -433,4 +447,4 @@ CREATE TABLE secret_index (
   updated_at TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;

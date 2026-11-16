@@ -1,8 +1,18 @@
 # v0.4 — phase 4 hardening: optional WSS, a service, rotation, bundles, a separate user and metrics
 
-Status: **design; the phase-4 build has not started.** Token rotation is shipped: the
-`v4-local-4a-surface-rotate` slice is merged on `main`, and §4.1 describes its behavior. Every other
-command and module on this page is planned. Nothing here promises a release or a date.
+Status: **implemented in this tree; the phase-exit evidence is outstanding.** The four library
+slices and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the shipped
+behaviour. Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1
+describes them. The seven-day soak (§8.3), the rollback drill (§8.4) and the independent
+security-review sign-off are phase-exit activities recorded by the evidence slice, not claims in
+this page. No soak run or rollback result is claimed here. No release, tag or date is promised.
+
+This page began as the plan for the phase and keeps the design-time wording and markers in the
+sections below. Where a §2–§7 sentence calls a command or flag *(planned)*, the name is the design
+target; the shipped form is the one in [`../../reference/cli.md`](../../reference/cli.md) and
+[`../../guides/agent-node.md`](../../guides/agent-node.md). The known deviations from the plan
+are listed in the build-status section above, and every command shown in a guide exists in this
+tree or is marked *(planned)* there.
 
 The accepted [`local-orchestrator.md`](local-orchestrator.md) names the phase-4 scope in §14.1 —
 "WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics, docs" — but only
@@ -12,16 +22,47 @@ proves it. This page makes each item implementable: the goal, the wire/file/CLI 
 security property, the failure mode, the named hermetic tests, and an ordered set of slices whose
 concurrently runnable `owns` paths do not overlap.
 
-It is a plan. The only phase-4-adjacent code that exists is the rotation slice, now merged on
-`main`; this page marks that merge as the base and where the remaining work starts. The home stays
-the only writer, one log per session stays the rule, no credential is copied to a node, and no VOWP
-process opens a public listener by default.
+The home stays the only writer, one log per session stays the rule, no credential is copied to a
+node, and no VOWP process opens a public listener by default.
 
-Command markers: a command followed by *(planned)* does not exist at this page's base.
-`vowp surface rotate` is the one shipped command in this page's base tree, from
-`v4-local-4a-surface-rotate`; §4.1 describes it. The build slices in §9 are planned work; the
-command names they name are the targets the CLI slice implements, and no slice may claim one before
-its tests pass.
+Command markers: a command followed by *(planned)* is part of the original design target. The
+build slices in §9 are now merged; the shipped command tree, not this marker, is authoritative.
+`vowp surface rotate` shipped in `v4-local-4a-surface-rotate` and §4.1 describes its behavior.
+
+## Build status and known deviations
+
+The shipped tree contains:
+
+- WSS ingress: `[ingress.wss]`, `WssTransport`, the loopback `WssListener`, the hidden
+  `vowp agent gateway --listen` and the `vowp up` child start.
+- The launchd/systemd-user service: `agent service install|uninstall|status`, the `--service` run
+  mode, the `run` marker and the drain.
+- Rotation UX: `--wait`, `--grace`, the envelope with `queued_at`/`overlap_until`, the
+  prefix/overlap columns and the `needs_pair` state.
+- Bundle result: the five frames, the assignment `result_transport`, the node-side bundle and the
+  home staging/verification path.
+- The separate-user checks (`isolation.rs`), `agent doctor` and the documented ownership rules.
+- Metrics history: global schema v7 `capacity_rollups`, the rollup writer/pruner and
+  `vowp capacity history`.
+
+Known deviations from the text below:
+
+- The owner-confirmation command named by a changed system-mode certificate fingerprint
+  (`vowp agent trust`) is **not implemented**. The agent refuses the change; re-enrolling the node
+  is the shipped recovery. `tls = "pin"` remains the hard-pin mode.
+- `agent service status` has no command-specific `--json`; the global `--json` flag prints the
+  documented document.
+- `CapacityHistory` also carries `until` and `retention_secs`, and `vowp capacity history` has no
+  command-specific `--json` (the global flag applies). The document is described in
+  [`../types.md`](../types.md) §16.1 and [`crates/vowp-core.md`](../crates/vowp-core.md) §10.
+- A separate user is supported for a standard account, but the tree does not claim to refuse a
+  group-writable shared checkout as a runtime check; it documents such a checkout as unsupported.
+  The state-directory owner/mode and root checks are enforced.
+- The gateway does not discard a queued rotation whose replacement token expired before delivery.
+  It delivers the frame; the home refuses the expired token on first use and the owner re-pairs.
+  `--wait` still stops at the delivery deadline and reports `rotation_pending`.
+- The soak and the rollback drill are not run by this documentation slice; §8.3 and §8.4 remain
+  the evidence contract for the evidence slice.
 
 ## 1. Scope, invariants and vocabulary
 

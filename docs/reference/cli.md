@@ -114,6 +114,7 @@ python3 docs/reference/check-reference.py
 | [`vowp capacity report`](#vowp-capacity-report) | Show the report used by the advisor |
 | [`vowp capacity set`](#vowp-capacity-set) | Write one capacity target row |
 | [`vowp capacity reload`](#vowp-capacity-reload) | Validate or apply the on-disk provider caps and target without a restart |
+| [`vowp capacity history`](#vowp-capacity-history) | Read the bounded capacity rollup history |
 | [`vowp secret`](#vowp-secret) | Set, list, remove or request secrets |
 | [`vowp secret set`](#vowp-secret-set) | Store a secret through a hidden prompt |
 | [`vowp secret ls`](#vowp-secret-ls) | List secret names and their last four characters |
@@ -151,6 +152,11 @@ python3 docs/reference/check-reference.py
 | [`vowp agent pair`](#vowp-agent-pair) | Redeem a home surface pairing code and store the token |
 | [`vowp agent run`](#vowp-agent-run) | Run the agent client until revoked or superseded |
 | [`vowp agent status`](#vowp-agent-status) | Show the last local agent status |
+| [`vowp agent service`](#vowp-agent-service) | Install, remove or inspect the launchd or systemd-user service |
+| [`vowp agent service install`](#vowp-agent-service-install) | Write exactly one launchd plist or systemd user unit |
+| [`vowp agent service uninstall`](#vowp-agent-service-uninstall) | Stop the unit and remove only a VOWP-generated file |
+| [`vowp agent service status`](#vowp-agent-service-status) | Show the unit path and the manager's reported state |
+| [`vowp agent doctor`](#vowp-agent-doctor) | Report local agent warnings without failing on them |
 | [`vowp surface`](#vowp-surface) | Create, list or revoke a paired local surface; `--node` names the surface's node |
 | [`vowp surface pair`](#vowp-surface-pair) | Create a pending surface and print its one-time pairing code |
 | [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
@@ -2251,10 +2257,11 @@ Show, change or reload measured capacity
 Usage: vowp capacity [OPTIONS] <COMMAND>
 
 Commands:
-  show    Show the current capacity report
-  report  Show the report used by the advisor
-  set     Write one capacity target row
-  reload  Validate or apply the on-disk provider caps and target without a restart
+  show     Show the current capacity report
+  report   Show the report used by the advisor
+  set      Write one capacity target row
+  reload   Validate or apply the on-disk provider caps and target without a restart
+  history  Read the bounded capacity rollup history
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -2338,6 +2345,26 @@ Usage: vowp capacity reload [OPTIONS]
 Options:
       --check                Validate and print the on-disk values without writing or asking the supervisor
       --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp capacity history`
+
+```text
+Read the bounded capacity rollup history
+
+Usage: vowp capacity history [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --since <DUR|DATE>     Start of the window (duration or date); defaults to 24h
+      --bucket <5m|1h|1d>    Bucket width: `5m` (stored), `1h` or `1d` (read-time); defaults to 5m
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
@@ -2964,11 +2991,13 @@ Enroll, run or inspect the Mac-side agent
 Usage: vowp agent [OPTIONS] <COMMAND>
 
 Commands:
-  enroll  Enroll this Mac with a one-time code
-  paths   Add, remove or list the local project path map
-  pair    Redeem a home surface pairing code and store the token
-  run     Run the agent client until revoked or superseded
-  status  Show the last local agent status
+  enroll   Enroll this Mac with a one-time code
+  paths    Add, remove or list the local project path map
+  pair     Redeem a home surface pairing code and store the token
+  run      Run the agent client until revoked or superseded
+  status   Show the last local agent status
+  service  Install, remove or inspect the launchd or systemd-user service
+  doctor   Report local agent warnings without failing on them
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -2986,20 +3015,22 @@ Options:
 ```text
 Enroll this Mac with a one-time code
 
-Usage: vowp agent enroll [OPTIONS] --target <SSH-TARGET> --code-file <PATH|->
+Usage: vowp agent enroll [OPTIONS] --code-file <PATH|->
 
 Options:
-      --json                  Print one machine-readable JSON document on stdout
-      --target <SSH-TARGET>   ssh destination of the home
-      --code-file <PATH|->    File holding the one-time code, or `-` for stdin
-      --node <NAME>           Run the command on that node over ssh
-      --project <PATH>        Map a local project checkout; repeat for more projects
-      --home <DIR>            Node home (default `$VOWP_HOME`, else `~/.vowp`)
-      --worktree-root <PATH>  Worktree root for every --project; defaults to `<checkout>/.vowp/worktrees`
-      --no-color              Disable colour even when stdout is a terminal
-  -q, --quiet                 Suppress non-essential human output
-  -v, --verbose...            Increase log verbosity (`-v`, `-vv`)
-  -h, --help                  Print help
+      --json                          Print one machine-readable JSON document on stdout
+      --target <SSH-TARGET>           ssh destination of the home
+      --code-file <PATH|->            File holding the one-time code, or `-` for stdin
+      --node <NAME>                   Run the command on that node over ssh
+      --project <PATH>                Map a local project checkout; repeat for more projects
+      --home <DIR>                    Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --worktree-root <PATH>          Worktree root for every --project; defaults to `<checkout>/.vowp/worktrees`
+      --no-color                      Disable colour even when stdout is a terminal
+      --wss <URL>                     Reach the home through a WSS proxy URL instead of SSH
+  -q, --quiet                         Suppress non-essential human output
+      --tls-fingerprint <SHA256:HEX>  Hard-pin the proxy certificate (`sha256:<hex>`); only with --wss
+  -v, --verbose...                    Increase log verbosity (`-v`, `-vv`)
+  -h, --help                          Print help
 ```
 
 #### `vowp agent paths`
@@ -3120,6 +3151,7 @@ Options:
       --node <NAME>          Run the command on that node over ssh
       --role <ROLE>          Agent role: `surface`, `executor` or `both`
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --service              Run under the service manager: write the `run` marker and drain on SIGTERM
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
@@ -3133,6 +3165,105 @@ Options:
 Show the last local agent status
 
 Usage: vowp agent status [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp agent service`
+
+```text
+Install, remove or inspect the launchd or systemd-user service
+
+Usage: vowp agent service [OPTIONS] <COMMAND>
+
+Commands:
+  install    Write exactly one launchd plist or systemd user unit
+  uninstall  Stop the unit and remove only a VOWP-generated file
+  status     Show the unit path and the manager's reported state
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+##### `vowp agent service install`
+
+```text
+Write exactly one launchd plist or systemd user unit
+
+Usage: vowp agent service install [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --print                Print the unit text and commands without writing or invoking the manager
+      --force                Replace a file at the unit path that VOWP did not generate
+      --node <NAME>          Run the command on that node over ssh
+      --now                  Run the current-user manager commands after writing the unit
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+##### `vowp agent service uninstall`
+
+```text
+Stop the unit and remove only a VOWP-generated file
+
+Usage: vowp agent service uninstall [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --yes                  Remove the unit without asking for confirmation
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+##### `vowp agent service status`
+
+```text
+Show the unit path and the manager's reported state
+
+Usage: vowp agent service status [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp agent doctor`
+
+```text
+Report local agent warnings without failing on them
+
+Usage: vowp agent doctor [OPTIONS]
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -3179,17 +3310,18 @@ Create a pending surface and print its one-time pairing code
 Usage: vowp surface pair [OPTIONS] --session <ID> --kind <KIND>
 
 Options:
-      --json                 Print one machine-readable JSON document on stdout
-      --session <ID>         Session the surface will mirror
-      --kind <KIND>          Surface kind: `opencode` or `chat`
-      --node <NAME>          Run the command on that node over ssh
-      --app <APP>            Application name carried into the token scopes
-      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
-      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
-      --no-color             Disable colour even when stdout is a terminal
-  -q, --quiet                Suppress non-essential human output
-  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
-  -h, --help                 Print help
+      --json                  Print one machine-readable JSON document on stdout
+      --session <ID>          Session the surface will mirror
+      --kind <KIND>           Surface kind: `opencode` or `chat`
+      --node <NAME>           Run the command on that node over ssh
+      --app <APP>             Application name carried into the token scopes
+      --project <NAME|PATH>   Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>            Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --replace <SURFACE-ID>  Revoke this surface and create the replacement pending surface in one transaction
+      --no-color              Disable colour even when stdout is a terminal
+  -q, --quiet                 Suppress non-essential human output
+  -v, --verbose...            Increase log verbosity (`-v`, `-vv`)
+  -h, --help                  Print help
 
 For this command --node <name> names the node the surface runs on, not an SSH redirect.
 ```
@@ -3248,6 +3380,8 @@ Arguments:
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
+      --wait <DURATION>      Poll the outbox for this long and exit 7 with `rotation_pending` if still queued
+      --grace <DURATION>     Shorten the old tokens to `now + grace` instead of the ten-minute default (max 24 h)
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)

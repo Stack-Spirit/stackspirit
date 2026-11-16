@@ -8,9 +8,10 @@ open candidates. It promises no dates. The authoritative proof for every claim i
 file or test, or the code itself.
 
 The v0.1 public release is **v0.1.0**, v0.2 is **v0.2.0** and v0.3 is **v0.3.0**, shipped on
-2026-11-12. The v0.4 local-orchestrator design is accepted; Phase 0, Phase 1 and Phase 2 are shipped,
-Phase 3 is in progress, and Phase 4 has a design note but its build has not started. No 0.4 release
-or date is promised. The slices that merged after the 0.3.0 tag are recorded separately below.
+2026-11-12. The v0.4 local-orchestrator design is accepted; Phases 0–3 are shipped, and the
+phase-4 hardening build is implemented in the tree. Only the release evidence (the security
+review, the rollback drill and the seven-day soak) is pending. No 0.4 release or date is promised.
+The slices that merged after the 0.3.0 tag are recorded separately below.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the normative v0.2 specification is
@@ -129,8 +130,8 @@ The accepted phases and their state in this tree:
 | 0 | Protocol frames, node identity, enrollment, SSH gateway and presence | shipped |
 | 1 | Local `vowp chat`: surface pairing, leases, turn ingest, spool replay and takeover | shipped |
 | 2 | Offload executor: placement policy, path map, isolated worktree, events, result push and home verification | shipped; offload is opt-in and off by default |
-| 3 | Local opencode surface: app frames, agent socket, opencode bridge, MCP proxy, orchestrator materialization and local cache | in progress |
-| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | design; build not started |
+| 3 | Local opencode surface: app frames, agent socket, opencode bridge, MCP proxy, orchestrator materialization and local cache | shipped |
+| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | implemented; seven-day soak, rollback drill and security-review evidence outstanding |
 
 Phase 0 is proved by the wire types in
 [`crates/vowp-protocol/src/agent.rs`](../crates/vowp-protocol/src/agent.rs), the enrollment, key
@@ -155,7 +156,7 @@ off by default: the `[offload]` table in
 false, every job stays on the home until the owner enables offload and a project opts in, and
 [`crates/vowp-protocol/tests/config.rs`](../crates/vowp-protocol/tests/config.rs) pins that default.
 
-Phase 3 is in progress. These slices are merged in this tree:
+Phase 3 is shipped. These slices are merged in this tree:
 
 | Slice | What is in the tree | Proof |
 |---|---|---|
@@ -168,14 +169,17 @@ Phase 3 is in progress. These slices are merged in this tree:
 | Offline read cache | A bounded private cache under `<state_dir>/cache` answers the six read-only MCP tools with an `as of` line when the home is offline or the reply times out; writes never use it and a revoked surface clears its entries. | [`crates/vowp-agent/src/cache.rs`](../crates/vowp-agent/src/cache.rs), [`crates/vowp-agent/tests/cache.rs`](../crates/vowp-agent/tests/cache.rs) |
 | Job detail page | The daemon serves a read-only job detail API with runs and gates, and the `/jobs/{id}` page renders them. | [`crates/vowp-daemon/src/app.rs`](../crates/vowp-daemon/src/app.rs), [`crates/vowp-daemon/tests/job_detail.rs`](../crates/vowp-daemon/tests/job_detail.rs) |
 
-Phase 3 remains in progress; no 0.4 release or date is promised.
+Phase 3 is shipped; no 0.4 release or date is promised.
 
-Phase 4 has a design note and no build. [`design/v0.4/hardening.md`](design/v0.4/hardening.md)
+Phase 4 is implemented in this tree. [`design/v0.4/hardening.md`](design/v0.4/hardening.md)
 turns the phase scope — optional WSS ingress behind a loopback listener, launchd/systemd-user
 service install, rotation UX, bundle result, separate user, bounded metrics history and the
 security-review, soak and rollback gates — into one contract per item, with the named hermetic
-tests and an ordered slice list. None of that build is in this tree: WSS, the agent service, the
-bundle transport, the metrics rollups and the new commands are planned, and the accepted
+tests and the ordered slice list. The WSS transport and listener, the agent service, the rotation
+`--wait`/`--grace` path, the bundle result, the separate-user checks and the capacity history are
+in the tree, and [the agent-node guide](guides/agent-node.md) is the operator path. The seven-day
+soak, the rollback drill on a restored copy and the independent security-review sign-off are
+still phase-exit evidence; this page does not claim them or a release date. The accepted
 [`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md) remains the binding design
 for the phases that are shipped.
 
@@ -195,7 +199,7 @@ design note is linked only where one exists.
 | A browser chat turn (needs a run queue and cancellation) | design | [`design/v0.3/web-window.md`](design/v0.3/web-window.md) |
 | A full-directory push (the `--full` form of `session push`) and a bidirectional `session sync` | design | [`design/v0.2/cross-node-sync.md`](design/v0.2/cross-node-sync.md) |
 | Multi-user accounts, quotas, roles and audit | open | — |
-| VPS metrics history and alerts | design (history; alerts open) | [`design/v0.4/hardening.md`](design/v0.4/hardening.md) §7 |
+| VPS metrics history and alerts | history shipped; alerts open | [`design/v0.4/hardening.md`](design/v0.4/hardening.md) §7 |
 | Parallel fan-out with a bounded budget | open | — |
 | A hosted relay without SSH | open | — |
 | Shell completions for `vowp` | candidate | — |

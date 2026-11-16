@@ -26,10 +26,11 @@ crates/vowp-cli/
   src/cmd/session.rs  inbox.rs  cost.rs  node.rs  offload.rs  loops.rs  schedule.rs  maint.rs   (`maint` = reindex, backup, schema, version)
   src/cmd/session_asif.rs  (ASIF export/import facade: flags, temp files, remote stream)
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
-  src/cmd/capacity.rs  (`capacity show|report|set|reload`; the report adds effective provider
-                       caps and reload pending, and `reload` asks the supervisor or checks locally)
-  src/cmd/agent.rs    (`agent enroll|pair|run|status` plus hidden `agent gateway`; no store or project context for the Mac commands)
-  src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`)
+  src/cmd/capacity.rs  (`capacity show|report|set|reload|history`; the report adds effective
+                       provider caps and reload pending, `reload` asks the supervisor or checks
+                       locally, and `history` reads the bounded rollups read-only)
+  src/cmd/agent.rs    (`agent enroll|paths|pair|run|status|service|doctor` plus hidden `agent gateway`; no store or project context for the Mac commands)
+  src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`, including bundle chunking)
   src/cmd/surface.rs  (`surface pair|ls|rotate|revoke`; home-only global-store surface pairing)
   src/mcp/{mod,jsonrpc,tools,backend,proxy}.rs  (home stdio MCP server and Mac-side local proxy)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
@@ -71,7 +72,7 @@ pub mod remote {
 
 ## 3. Agent commands (`cmd/agent.rs`)
 
-`vowp agent` is the Phase 0 Mac-side client from
+`vowp agent` is the v0.4 Mac-side client from
 [`vowp-agent.md`](vowp-agent.md) and `cli.md` §12. The Mac commands are handled before `Ctx::build`
 and before the generic `--node` redirect: they use `~/.vowp-agent` (or `VOWP_AGENT_HOME`) and never
 open a project store. `agent run` and `chat --agent` build adapters through
@@ -96,7 +97,22 @@ home-side exception: it builds a `Ctx`, requires the home role and opens `Ctx::s
 - `agent status [--json]` loads `status.json`; without `agent.json` it exits 3 with the enrollment
   command in the message. It fills missing fields from `agent.json` and `node.pub`, recounts
   `spool/`, and prints the human lines `connection`, `node`, `home`, `protocol`, `last heartbeat`,
-  `pending spool`, `key`, optional `surface token expires` and optional `last error`.
+  `pending spool`, `key`, optional `surface token expires` and optional `last error`. The local
+  `surfaces` array adds `prefix` and `state` per surface and never a token.
+- `agent enroll ... [--wss <url>] [--tls-fingerprint <sha256:hex>]` stores a WSS transport instead
+  of SSH. The URL must be exactly `wss://host[:port]/agent/v1`; `--tls-fingerprint` requires
+  `--wss` and selects the `pin` TLS mode. The first system-mode connection records the leaf
+  fingerprint in `agent.json`. A TLS or handshake refusal maps to a guard (exit 5).
+- `agent service install|uninstall|status` renders or removes exactly one 0600 launchd/systemd-user
+  unit and reads the manager. `--print` writes nothing and calls no manager; `--now` runs the
+  current user's manager commands. A foreign unit is exit 4, an unsupported platform exit 5 and a
+  failed manager exit 7. The state directory and every token survive `uninstall`.
+- `agent run --service` checks the state directory and root rule, writes the launchd `run` marker,
+  and drains on SIGTERM/SIGINT. `agent doctor` reports local warnings by name only and never reads
+  a copied login file.
+- `agent gateway --listen <addr>` (hidden) serves the optional WSS listener on a loopback address
+  with the `/agent/v1` route and the `vowp-agent/1` subprotocol. `vowp up` starts it from
+  `[ingress.wss]`; the listener never terminates TLS.
 - `agent gateway --stdio` (hidden) is the home side: it requires `--stdio`, builds a `Ctx`, refuses
   any role but home with exit 5, opens `Ctx::store()` and calls
   `vowp_core::agent::gateway::serve`. Stdout carries JSON frames only; errors go to stderr. Phase 0
@@ -115,7 +131,11 @@ and serialises as:
   "last_error": null,
   "pending_spool_bytes": 42,
   "key_fingerprint": "sha256:0123456789abcdef",
-  "surface_token_expires_at": null
+  "surface_token_expires_at": null,
+  "surfaces": [
+    {"surface": "01ARZ3NDEKTSV4RRFFQ69G5FAW", "prefix": "AbCdEfGhIjKl",
+     "expires_at": "2026-12-16T10:00:00.000Z", "state": "paired"}
+  ]
 }
 ```
 
@@ -156,18 +176,20 @@ does not open a store. One handler lives for one agent connection.
   `project:<project>`; the agent state directory becomes `<agent-home>`. Rejection details,
   push failures and local error summaries carry no absolute path and no value.
 - **Result return and cleanup.** After the adapter exits the summary carries the exit code,
-  outcome, native id, cost, head commit and `PushStatus`. A non-empty `remote_url` causes
-  `Worktree::push_job(remote_url)`: only `refs/heads/job/<id>` is pushed, the push URL must
-  match the home project after credentials are stripped, no tag or default-branch push is
-  attempted, and a mismatch or git failure is `PushStatus::Failed` with the worktree kept for
-  inspection. An empty `remote_url` is `PushStatus::NotRequested`. `Cleanup` removes only the
-  job worktree and `job/<id>` branch through `WorktreeManager::cleanup`; it never touches the
-  main checkout or a directory VOWP did not create, and it waits briefly for a cancelled run to
-  leave the worktree.
+  outcome, native id, cost, head commit and `PushStatus`. A non-empty `remote_url` with
+  `result_transport = "push"` causes `Worktree::push_job(remote_url)`: only
+  `refs/heads/job/<id>` is pushed, the push URL must match the home project after credentials are
+  stripped, no tag or default-branch push is attempted, and a mismatch or git failure is
+  `PushStatus::Failed` with the worktree kept for inspection. An empty `remote_url` is
+  `PushStatus::NotRequested`. With `result_transport = "bundle"` the handler creates one
+  `base..job/<id>` bundle under `run-bundles/<run>/`, sends `BundleStart`/`BundleChunk`/`BundleEnd`
+  at the home's offset and never pushes or falls back. `Cleanup` removes only the job worktree and
+  `job/<id>` branch through `WorktreeManager::cleanup`; it never touches the main checkout or a
+  directory VOWP did not create, and it waits briefly for a cancelled run to leave the worktree.
 
-`agent status` is unchanged. The `status.json` snapshot carries the connection fields and no
-path map, secret name or secret value. The human view keeps its local-only `paths` block, and
-`--json` includes the same `paths`, exactly as before.
+`agent status` keeps its connection view and adds the local `surfaces` array; the `status.json`
+snapshot carries the connection fields and no path map, secret name or secret value. The human
+view keeps its local-only `paths` block, and `--json` includes the same `paths`, exactly as before.
 
 ### Surface commands (`cmd/surface.rs`)
 
@@ -176,38 +198,42 @@ because its `--node` flag names the surface's node rather than an SSH target. Th
 commands are home-only (a control machine exits 5) and open the global store through
 `Ctx::fleet_store()`, so no project selection is required.
 
-- `surface pair --session <id> --node <name> --kind opencode|chat [--app <app>]` calls
-  `vowp_core::agent::pair::create_pending_surface`: it validates the node, session and app,
-  inserts a `pending` surface bound to the session, and inserts a ten-minute `surface`
-  enrollment code whose plaintext is shown once. The command prints the code, the expiry and
-  the exact Mac command `vowp agent pair --code-file - --surface <id> --session <id>
-  [--app <app>]`; the code is never written to a file, the database or stderr. `--json` prints
-  `{"surface","node","session","kind","app","code","expires_at","command"}`. A missing
-  `--node`/`--session`, an unknown kind or an invalid id is exit 2; an unknown node or session
-  is exit 3; a duplicate pending surface for the same node/session/kind/app is exit 4; a
-  revoked node is exit 5 through `CoreError`.
+- `surface pair --session <id> --node <name> --kind opencode|chat [--app <app>] [--replace <old>]`
+  calls `create_pending_surface`, or `replace_pending_surface` when `--replace` names an old
+  surface. It validates the node, session and app, inserts a `pending` surface bound to the
+  session, and inserts a ten-minute `surface` enrollment code whose plaintext is shown once. The
+  command prints the code, the expiry and the exact Mac command `vowp agent pair --code-file -
+  --surface <id> --session <id> [--app <app>]`; the code is never written to a file, the database
+  or stderr. `--json` prints
+  `{"surface","node","session","kind","app","code","expires_at","command"}` plus `replaced` when
+  one was named. A missing `--node`/`--session`, an unknown kind or an invalid id is exit 2; an
+  unknown node or session is exit 3; a duplicate pending surface for the same
+  node/session/kind/app is exit 4; a revoked node is exit 5 through `CoreError`.
 - `surface ls [--node <name>]` lists the surface ids this CLI created, reading each surface's
-  current state from the store and each token's scopes/expiry from `surface_tokens`. Human
-  output is `ID NODE KIND STATE SCOPES EXPIRES`; `--json` prints an array of
-  `{"id","node","kind","state","scopes","expires_at"}`. It never prints a token or a token
-  hash. The id index is `<home>/surfaces.json` (0600): surface ids are not secrets, and the
-  v4 store read model has no list-all query, so the CLI records the ids it created.
+  current state from the store and each token's scopes, prefix and expiry from `surface_tokens`.
+  Human output is `ID NODE KIND STATE SCOPES PREFIX EXPIRES OVERLAP`; `--json` prints an array of
+  `{"id","node","kind","state","scopes","prefix","expires_at","overlap_until","expired","pending","queued_at","delivery_deadline"}`
+  (`queued_at` and `delivery_deadline` are omitted when absent; the other optional fields are
+  `null`). It never prints a token or a token hash. The id index is
+  `<home>/surfaces.json` (0600): surface ids are not secrets, and the v4 store read model has no
+  list-all query, so the CLI records the ids it created.
 - `surface revoke <id> [--yes]` calls `vowp_core::agent::pair::revoke_surface`, which revokes
-  every active token and marks the surface `revoked`. Without `--yes` it refuses with exit 5;
-  an unknown surface is exit 3. `--json` prints
+  every active token, removes a queued rotation and marks the surface `revoked`. Without `--yes`
+  it refuses with exit 5; an unknown surface is exit 3. `--json` prints
   `{"surface","status":"revoked","tokens_revoked":N}`. No token is printed.
-- `surface rotate <id> [--node <name>]` calls
-  `vowp_core::agent::pair::rotate_surface_token`, which mints a 30-day replacement token with
-  the surface's current scopes and shortens every other active token to `now + 10 minutes`
-  without extending a sooner expiry. The command queues one `AgentFrame::SurfaceIssued` in
-  `<home>/agent-frames/<node>/<surface>.json` for the gateway to drain; the token is never
-  printed. Human output is `rotated surface <id> on <node>`, `prefix`, `expires` and
-  `old token expires`; `--json` prints
-  `{"surface","node","prefix","expires_at","old_expires_at"}`. `--node` names the surface's node,
-  not an SSH target; a different node is exit 4. A pending surface is exit 4; an unknown surface
-  is exit 3; a revoked surface is exit 5. When the node is not online the rotation still succeeds
-  (exit 0), the frame stays queued for the next authenticated connection and the command writes
-  `warning: node <n> is offline; the agent must re-pair before <old expiry>` to stderr.
+- `surface rotate <id> [--node <name>] [--wait <duration>] [--grace <duration>]` calls
+  `rotate_surface_with_policy`, which mints a 30-day replacement token with the surface's current
+  scopes, shortens every other active token to `now + grace` without extending a sooner expiry,
+  queues one `SurfaceIssued` envelope in `<home>/agent-frames/<node>/<surface>.json` and waits if
+  asked. The default grace is ten minutes and the cap is 24 hours. The token is never printed.
+  Human output is `rotated surface <id> on <node>`, `prefix`, `expires`, `old token expires` and
+  `delivery: pending` while undelivered; `--json` prints
+  `{"surface","node","prefix","expires_at","old_expires_at","pending","queued_at"}`. `--node`
+  names the surface's node, not an SSH target; a different node is exit 4. `--wait` exits 7 with
+  `rotation_pending` when the frame is still queued. A pending surface is exit 4; an unknown
+  surface is exit 3; a revoked surface is exit 5. When the node is not online the rotation still
+  succeeds (exit 0), the frame stays queued for the next authenticated connection and the command
+  writes `warning: node <n> is offline; the agent must re-pair before <old expiry>` to stderr.
 
 ### Node enrollment commands (`cmd/node.rs`)
 
@@ -429,6 +455,23 @@ home with no database and a fake mode-0600 Unix socket. The local-orchestrator s
 `orchestrator_card_contains_no_path_or_secret` in `tests/orchestrator.rs`. They use a
 temporary home, a fake app host and a fake agent command stream; no real app, tmux, network
 or home directory is touched.
+
+The phase-4 CLI slice adds `agent_service_install_print_writes_nothing_and_names_the_manager`,
+`agent_service_install_without_home_exits_two`, `agent_service_unsupported_platform_is_exit_five`,
+`agent_service_status_reads_the_manager_and_reports_unavailable_json` and
+`agent_service_uninstall_removes_only_a_generated_unit_and_keeps_the_state` in `tests/agent.rs`;
+`surface_rotate_wait_reports_rotation_pending_with_exit_seven`,
+`surface_rotate_grace_is_capped_at_twenty_four_hours`,
+`surface_rotate_grace_refuses_pending_and_revoked_surfaces`,
+`surface_pair_replace_revokes_the_old_surface_and_clears_the_stale_frame` and the WSS enroll
+refusal cases in `tests/agent.rs`; and
+`capacity_history_aggregates_read_time_hour_buckets`,
+`capacity_history_clamps_since_to_the_retained_window_and_says_so`,
+`capacity_history_unknown_bucket_exits_two_with_the_accepted_values`,
+`capacity_history_is_read_only` and `capacity_history_json_is_the_capacity_history_document` in
+`tests/capacity.rs`. `agent_doctor_reports_warnings_by_name_only` is in `tests/doctor.rs`. They
+use temporary homes, fake manager commands, a fake gateway and real git where needed; no real
+launchd, systemd, network or home directory is touched.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

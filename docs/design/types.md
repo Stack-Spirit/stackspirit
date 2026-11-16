@@ -977,7 +977,7 @@ pub struct OffloadConfig {
     #[serde(default)] pub nodes: BTreeMap<NodeName, OffloadNodeConfig>,
 }
 #[serde(rename_all = "snake_case")]
-pub enum ResultTransport { #[default] Push, Bundle }   // Bundle is Phase 4 and validation refuses it
+pub enum ResultTransport { #[default] Push, Bundle }   // bundle is legal in Phase 4; push stays the default
 pub struct OffloadProjectConfig {
     #[serde(default)] pub placement: Option<Placement> /* None -> offload.default */,
     #[serde(default)] pub home_only: bool /* false */,
@@ -1008,8 +1008,8 @@ every job stays on the home until the owner enables it and a project opts in. Va
 - `max_remote_runs = 0` and `min_disk_bytes = 0`;
 - an empty `default`, and a `default` of `node:<name>` (only `home` or `any` may be a fleet
   default; a node is named by a per-job placement);
-- `result_transport = "bundle"` with a message naming it as Phase 4 and `"push"` as the supported
-  value, never a silent fallback;
+- `result_transport = "bundle"` is legal in Phase 4; `push` is the default and an assignment's
+  value wins for the whole run, with no fallback in either direction;
 - a project with `home_only = true` and an offload placement (`any` or `node:<name>`).
 
 Unknown keys inside any `[offload]` table are rejected by the same TOML path as every other config
@@ -1029,6 +1029,18 @@ pub struct NodeFile {
     #[serde(default)] pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)] pub harnesses: BTreeMap<String, HarnessConfig>,
     #[serde(default)] pub capsule: CapsuleConfig,
+    #[serde(default)] pub ingress: IngressConfig,
+}
+#[serde(deny_unknown_fields)]
+pub struct IngressConfig { #[serde(default)] pub wss: WssIngressConfig }
+#[serde(deny_unknown_fields)]
+pub struct WssIngressConfig {
+    #[serde(default)] pub enabled: bool,                 // false
+    #[serde(default = "127.0.0.1:8743")] pub listen: String,
+    #[serde(default = "/agent/v1")] pub path: String,
+    #[serde(default = "64")] pub max_connections: u32,
+    #[serde(default = "1048576")] pub max_frame_bytes: u64,
+    #[serde(default = "10")] pub handshake_timeout_secs: u64,
 }
 impl NodeFile { pub fn from_toml(s: &str) -> Result<Self, ProtocolError>; }
 impl VowpConfig {
@@ -1363,7 +1375,25 @@ pub struct CapacityReport {
     pub reserve_ram_bytes: u64, pub min_disk_bytes: u64,
     pub estimates: Vec<UsageEstimate>, pub waiting: Vec<WaitingJob>, pub limits: Vec<Limit>,
 }
+
+#[serde(rename_all = "snake_case")]
+pub enum HistorySource { Proc, Fallback, Mixed }
+pub struct CapacityMemory { pub min: u64, pub avg: u64, pub max: u64 }
+pub struct CapacityPoint {
+    pub at: Timestamp, pub samples: u32, pub mem_available: CapacityMemory,
+    pub load1_avg: f64, pub disk_free_home_min: u64, pub source: HistorySource,
+}
+pub struct CapacityHistory {
+    pub generated_at: Timestamp, pub since: Timestamp, pub until: Timestamp,
+    pub bucket_secs: u64, pub retention_secs: u64, pub points: Vec<CapacityPoint>,
+}
 ```
+
+`CapacityHistory` is the `vowp capacity history --json` document and an exported JSON Schema. A
+point is one 5-minute stored rollup, or one read-time `1h`/`1d` aggregation weighted by `samples`;
+an empty range is an empty `points` array, never a fabricated zero. A `fallback` source means the
+memory and load values are not a measurement. Raw `host_samples` are kept 48 hours and the
+rollups 30 days.
 
 ### 16.2 Surfaces, leases, remote execution and orchestrators (`surface`)
 
@@ -1703,6 +1733,12 @@ pub enum AgentFrame {
     Credit { run_id: RunId, count: u64 },
     TurnEnd { run_id: RunId, summary: TurnSummary },
     RunLost { run_id: RunId, reason: String },
+    BundleStart { run_id: RunId, epoch: u64, base: String, head: String,
+                  branch: String, bytes: u64, sha256: String },
+    BundleAccept { run_id: RunId, epoch: u64, offset: u64 },
+    BundleChunk { run_id: RunId, epoch: u64, offset: u64, data: String /* lowercase hex */ },
+    BundleEnd { run_id: RunId, epoch: u64, bytes: u64, sha256: String },
+    BundleAbort { run_id: RunId, epoch: u64, reason: String },
     AssignRun { assignment: AssignmentPayload, lease_token: String,
                 lease_expires_at: Timestamp },
     RunAccepted { assignment_id: String, run_id: RunId, epoch: u64 },
@@ -1736,7 +1772,10 @@ pub struct TurnSummary {
 owner-only `node_paths` row holds [`AgentPathMap`]; callers must never copy it into a card,
 snapshot or log. `AgentFrame` covers Phase 0, surface pairing, lease control, the Phase 1
 local-chat stream, the Phase 2 offload assignment/resume frames in §16.8, the Phase 3
-app-surface frames in §16.12 and the orchestrator node commands in §16.13.
+app-surface frames in §16.12, the orchestrator node commands in §16.13 and the Phase 4 bundle
+frames above. `BundleStart`/`BundleChunk`/`BundleEnd` are agent→home, `BundleAccept` is home→agent
+and `BundleAbort` may go either way; every one carries `run_id` and `epoch`, and
+`BundleChunk.data` is lowercase hex capped at 256 KiB raw bytes.
 `TurnBegin.cwd_ref` is a project-relative [`PathRef`]; the home never receives the Mac's
 absolute working directory. `RemoteLine` wraps the existing v0.2 event, heartbeat and summary
 line with a run id and epoch, and `IngestAck` carries the home-assigned sequence or a
@@ -1781,6 +1820,7 @@ pub struct AssignmentPayload {
     pub project: ProjectName, pub job: JobId, pub executor: Executor,
     pub purpose: RunPurpose, pub prompt: String, pub cwd_ref: PathRef,
     pub base_commit: String, pub remote: String, pub remote_url: String,
+    pub result_transport: ResultTransport, /* #[serde(default)] = push */
     pub env_names: Vec<String>, pub secret_names: Vec<SecretName>, pub epoch: u64,
     pub deadline: Option<Timestamp>, pub spool_cap_bytes: u64,
 }
@@ -1811,7 +1851,9 @@ pub struct SurfaceResumeResult {
 dispatcher choose the home or any eligible node, and `node:<name>` pins one node. The
 `+home` suffix is the explicit, opt-in `fallback = "home"`; there is no silent fallback to the
 home when a pinned node is ineligible. The node part is a `NodeName` slug and carries no
-whitespace, `/`, `:` or `+`.
+whitespace, `/`, `:` or `+`. `AssignmentPayload.result_transport` is `push` or `bundle`, defaults
+to `push` when absent, and wins for the whole run; a bundle assignment carries an empty
+`remote_url` because it needs no push access and no git credential.
 
 [`WaitingReason`] is the §7.5 vocabulary a ready job records instead of running, in the
 documented order. It is a first-class read-model value, not a log line.
