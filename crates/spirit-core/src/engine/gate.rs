@@ -18,6 +18,12 @@ use crate::time::Timestamp;
 const GATE_CACHE_TTL_SECS: u64 = 10 * 60;
 const NIL_ULID: &str = "00000000000000000000000000";
 
+/// The `orchestrator new` after-help sentence that proves the Phase 3 local-node meaning.
+/// The global SSH selector says only "Run the command on that node over ssh"; that string
+/// is never accepted as proof (D6-READINESS.md §2.2.2).
+const ORCHESTRATOR_NEW_LOCAL_NODE_TEXT: [&str; 2] =
+    ["names the node that runs the app", "not an SSH redirect"];
+
 /// The complete Phase 3 capability set named by `VOWP-CONTRACT.md` §11.3.
 pub const PHASE3_MILESTONES: [&str; 6] = [
     "local opencode app host",
@@ -366,6 +372,19 @@ fn base_argv(options: &GateProbeOptions, json: bool) -> Vec<String> {
     argv
 }
 
+/// Returns the active project as a safe token, or `None` when no usable project is known.
+///
+/// Node reads on a multi-project home need `--project`; a bare `vowp node ls` exits 2
+/// there. The token is never rewritten silently: an unsafe value is treated as unknown.
+fn project_token(options: &GateProbeOptions) -> Option<String> {
+    let project = options
+        .active_project
+        .as_deref()
+        .filter(|project| !project.is_empty())?;
+    let safe = safe_token(project, 64);
+    (safe == project).then_some(safe)
+}
+
 async fn run_remote(
     runner: &dyn CommandRunner,
     options: &GateProbeOptions,
@@ -642,12 +661,32 @@ pub async fn probe_local_orchestrator(
     evidence.push(format!("vowp --version: {version}"));
 
     let mut missing: Vec<String> = Vec::new();
+    let Some(project) = project_token(options) else {
+        evidence.push(
+            "vowp node ls --json: no usable active project; node reads not attempted".to_owned(),
+        );
+        return (
+            LocalOrchestratorGate::WaitingForVowpPhase3 {
+                missing: vec!["active project".to_owned()],
+                detected_version: Some(version),
+                evidence,
+            },
+            local_agent,
+        );
+    };
     let node_list_argv = {
         let mut argv = base_argv(options, true);
-        argv.extend(["node".to_owned(), "ls".to_owned()]);
+        argv.extend([
+            "--project".to_owned(),
+            project.clone(),
+            "node".to_owned(),
+            "ls".to_owned(),
+        ]);
         argv
     };
     let node_list = run_remote(runner, options, &node_list_argv).await;
+    // The v0.3 `Node` inventory row has no `kind`/`status`; only its name is used here.
+    // An active local agent is proven by `node show`, never inferred from this shape.
     let names: Vec<String> = match node_list {
         Ok(output) if output.success() => {
             evidence.push("vowp node ls --json: exit 0".to_owned());
@@ -681,10 +720,17 @@ pub async fn probe_local_orchestrator(
     }
 
     let mut active_agent: Option<NodeCardProbe> = None;
+    let mut active_agent_not_online = false;
     for name in names.iter().take(16) {
         let argv = {
             let mut argv = base_argv(options, true);
-            argv.extend(["node".to_owned(), "show".to_owned(), safe_token(name, 64)]);
+            argv.extend([
+                "--project".to_owned(),
+                project.clone(),
+                "node".to_owned(),
+                "show".to_owned(),
+                safe_token(name, 64),
+            ]);
             argv
         };
         let output = match run_remote(runner, options, &argv).await {
@@ -706,7 +752,13 @@ pub async fn probe_local_orchestrator(
             evidence.push("vowp node show --json: parse failed".to_owned());
             continue;
         };
-        if card.kind.is_none() || card.status.is_none() || card.presence.is_none() {
+        // A card without kind/status/presence cannot prove an active local agent.
+        // Absence is not an agent; the contract asks for `Incompatible` here.
+        let (Some(kind), Some(status), Some(presence)) = (
+            card.kind.as_deref(),
+            card.status.as_deref(),
+            card.presence.as_deref(),
+        ) else {
             return (
                 LocalOrchestratorGate::Incompatible {
                     detected: format!(
@@ -718,20 +770,29 @@ pub async fn probe_local_orchestrator(
                 },
                 local_agent,
             );
-        }
-        let kind = card.kind.as_deref().unwrap_or_default();
-        let status = card.status.as_deref().unwrap_or_default();
+        };
+        evidence.push(format!(
+            "vowp node show --json: kind={} status={} presence={}",
+            safe_token(kind, 16),
+            safe_token(status, 16),
+            safe_token(presence, 16)
+        ));
         if kind == "agent" && status == "active" {
-            evidence.push(format!(
-                "vowp node show {} --json: kind=agent status=active presence={}",
-                safe_token(name, 64),
-                safe_token(card.presence.as_deref().unwrap_or_default(), 32)
-            ));
-            active_agent = Some(card);
-            break;
+            if presence == "online" {
+                evidence.push(format!(
+                    "vowp node show {} --json: kind=agent status=active presence=online",
+                    safe_token(name, 64)
+                ));
+                active_agent = Some(card);
+                break;
+            }
+            active_agent_not_online = true;
         }
     }
     let Some(agent_card) = active_agent else {
+        if active_agent_not_online {
+            evidence.push("local agent node is not online".to_owned());
+        }
         missing.push("no active local agent node".to_owned());
         return (
             LocalOrchestratorGate::WaitingForVowpPhase3 {
@@ -742,11 +803,20 @@ pub async fn probe_local_orchestrator(
             local_agent,
         );
     };
-    if let Some(agent_version) = &agent_card.agent_version {
-        evidence.push(format!(
+    match agent_card
+        .agent_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+    {
+        Some(agent_version) => evidence.push(format!(
             "node agent version: {}",
             safe_token(agent_version, 40)
-        ));
+        )),
+        None => {
+            evidence.push("node agent version: not reported".to_owned());
+            missing.push("agent version not reported".to_owned());
+        }
     }
     let agent_protocol = agent_card.protocol.clone();
     match agent_protocol.as_deref() {
@@ -811,12 +881,6 @@ pub async fn probe_local_orchestrator(
             vec!["mcp", "--help"],
             Some("--agent-socket"),
         ),
-        (
-            "vowp orchestrator new --help",
-            "orchestrator materialization",
-            vec!["orchestrator", "new", "--help"],
-            Some("--node"),
-        ),
     ] {
         let argv = {
             let mut argv = base_argv(options, false);
@@ -848,9 +912,57 @@ pub async fn probe_local_orchestrator(
         }
     }
 
+    // The Phase 3 local-node meaning is an after-help sentence, not the presence of
+    // `--node`: the global SSH selector also advertises `--node`. Only the local-node
+    // text proves the D6 create command; ambiguous help stays `Waiting`.
+    let orchestrator_new_argv = {
+        let mut argv = base_argv(options, false);
+        argv.extend([
+            "orchestrator".to_owned(),
+            "new".to_owned(),
+            "--help".to_owned(),
+        ]);
+        argv
+    };
+    match run_remote(runner, options, &orchestrator_new_argv).await {
+        Ok(output) if output.success() => {
+            let text = output.stdout_text();
+            if ORCHESTRATOR_NEW_LOCAL_NODE_TEXT
+                .iter()
+                .all(|needle| text.contains(needle))
+            {
+                evidence
+                    .push("vowp orchestrator new --help: local-node meaning present".to_owned());
+            } else if text.contains("--node") {
+                evidence.push(
+                    "vowp orchestrator new --help: --node is only the global SSH selector"
+                        .to_owned(),
+                );
+                missing.push("orchestrator materialization".to_owned());
+            } else {
+                evidence.push("vowp orchestrator new --help: --node not advertised".to_owned());
+                missing.push("orchestrator materialization".to_owned());
+            }
+        }
+        Ok(output) => {
+            evidence.push(evidence_exit("vowp orchestrator new --help", &output));
+            missing.push("orchestrator materialization".to_owned());
+        }
+        Err(error) => {
+            return (
+                LocalOrchestratorGate::Unreachable {
+                    detail: safe_detail(&error),
+                },
+                local_agent,
+            );
+        }
+    }
+
     let node_paths_argv = {
         let mut argv = base_argv(options, true);
         argv.extend([
+            "--project".to_owned(),
+            project.clone(),
             "node".to_owned(),
             "paths".to_owned(),
             safe_token(agent_card.name.as_deref().unwrap_or_default(), 64),
@@ -862,7 +974,25 @@ pub async fn probe_local_orchestrator(
             evidence.push("vowp node paths --json: exit 0".to_owned());
         }
         Ok(output) => {
-            evidence.push(evidence_exit("vowp node paths --json", &output));
+            // The installed/contracted CLI may lack `node paths` entirely. That is a
+            // missing VOWP capability, not a false negative: say so and stay `Waiting`.
+            let text = output.stderr_text().to_ascii_lowercase();
+            let unsupported = [
+                "unrecognized subcommand",
+                "unknown command",
+                "invalid subcommand",
+                "unexpected argument",
+            ]
+            .iter()
+            .any(|needle| text.contains(needle));
+            if unsupported {
+                evidence.push(format!(
+                    "vowp node paths --json: exit {} (unsupported subcommand)",
+                    output.status
+                ));
+            } else {
+                evidence.push(evidence_exit("vowp node paths --json", &output));
+            }
             missing.push("local cache".to_owned());
         }
         Err(error) => {

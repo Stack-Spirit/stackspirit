@@ -1,0 +1,10 @@
+[
+  {
+    "name": "home-node",
+    "ssh_target": null,
+    "is_local": true,
+    "capabilities": [],
+    "last_seen_at": null,
+    "created_at": "2026-11-01T00:00:00.000Z"
+  }
+]

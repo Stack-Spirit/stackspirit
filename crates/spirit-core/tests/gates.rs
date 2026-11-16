@@ -13,6 +13,31 @@ use spirit_core::time::Timestamp;
 
 const GATE_PHASE3_READY: &str = include_str!("../fixtures/vowp/gate-phase3-ready.json");
 const GATE_ASIF_READY: &str = include_str!("../fixtures/vowp/gate-asif-ready.json");
+const GATE_NODE_LIST_V03: &str = include_str!("../fixtures/vowp/gate-node-list-v0.3.json");
+const GATE_NODE_SHOW_HOME_OFFLINE_V03: &str =
+    include_str!("../fixtures/vowp/gate-node-show-v0.3-home-offline.json");
+
+/// The installed `vowp orchestrator new --help` output (2026-11-16): `--node` appears only
+/// as the global SSH selector. `--project`/`--home` values are the CLI defaults, not a host.
+const ORCHESTRATOR_NEW_HELP_GLOBAL_NODE_ONLY: &str = "\
+Create and start an orchestrator
+
+Usage: vowp orchestrator new [OPTIONS] --app <APP>
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --name <NAME>          Orchestrator name; defaults to the project name, or `orchestrator`
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME>       Project to bind, when any
+      --app <APP>            App to run: `opencode`, `claude-code` or `chat`
+      --executor <EXECUTOR>  Executor to use
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --force                Replace an orchestrator with the same name
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+";
 
 struct Route {
     needles: Vec<&'static str>,
@@ -79,6 +104,11 @@ fn failed(status: i32, stderr: &str) -> CommandOutput {
     out(status, "", stderr)
 }
 
+/// The remote command an SSH spec would execute, already shell-quoted.
+fn remote_argv(spec: &CommandSpec) -> String {
+    spec.args.last().cloned().unwrap_or_default()
+}
+
 fn options() -> GateProbeOptions {
     GateProbeOptions {
         target: SshTarget::new("owner", "192.0.2.10", 22).unwrap(),
@@ -140,7 +170,9 @@ fn home_routes() -> Vec<Route> {
         },
         Route {
             needles: vec!["orchestrator", "new"],
-            output: ok("Usage: vowp orchestrator new --node <name>"),
+            output: ok(
+                "Create and start an orchestrator\n\nUsage: vowp orchestrator new [OPTIONS] --app <APP>\n\nOptions:\n      --node <NAME>          Run the command on that node over ssh\n\nFor `orchestrator new`, --node <name> names the node that runs the app, not an SSH redirect.",
+            ),
         },
         Route {
             needles: vec!["node", "paths"],
@@ -350,11 +382,190 @@ async fn phase3_probe_ready_only_with_offload_and_surface_capabilities() {
             assert!(capabilities.contains(&"mcp_agent_socket".to_owned()));
             assert!(capabilities.contains(&"orchestrator_new_node".to_owned()));
             assert!(evidence.iter().any(|line| line.contains("offload status")));
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("local-node meaning present"))
+            );
         }
         other => panic!("expected ready, got {other:?}"),
     }
     assert_eq!(local.state, LocalAgentState::Connected);
     assert!(runner.calls().len() >= 9);
+}
+
+#[tokio::test]
+async fn phase3_probe_passes_the_active_project_to_node_reads() {
+    let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    assert!(matches!(gate, LocalOrchestratorGate::Ready { .. }));
+    let calls = runner.calls();
+    for needle in ["'node' 'ls'", "'node' 'show'", "'node' 'paths'"] {
+        let command = calls
+            .iter()
+            .map(remote_argv)
+            .find(|command| command.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle} call"));
+        assert!(
+            command.contains("'--project' 'vowp'"),
+            "project not passed to {needle}: {command}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn phase3_probe_waits_without_a_project_and_skips_global_node_reads() {
+    let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
+    let mut no_project = options();
+    no_project.active_project = None;
+    let (gate, _) = probe_local_orchestrator(&runner, None, &no_project).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert_eq!(missing, vec!["active project".to_owned()]);
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("no usable active project"))
+            );
+            assert!(evidence.iter().any(|line| line.contains("not attempted")));
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
+    let calls = runner.calls();
+    assert!(
+        calls
+            .iter()
+            .all(|spec| !remote_argv(spec).contains("'node'")),
+        "a bare global node read must not run without a project: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn phase3_probe_waits_on_the_v0_3_offline_home_node() {
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles == ["node", "ls"] {
+            route.output = ok(GATE_NODE_LIST_V03);
+        }
+        if route.needles.contains(&"show") {
+            route.needles = vec!["node", "show"];
+            route.output = ok(GATE_NODE_SHOW_HOME_OFFLINE_V03);
+        }
+    }
+    let runner = RouteRunner::new(routes, failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert!(missing.contains(&"no active local agent node".to_owned()));
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("kind=home") && line.contains("presence=offline"))
+            );
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn phase3_probe_does_not_accept_an_offline_agent_or_a_missing_agent_version() {
+    let offline_agent = r#"{"name":"mac-studio","kind":"agent","status":"active","presence":"offline","agent_version":"0.4.0","protocol":"vowp-agent/1"}"#;
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles.contains(&"show") {
+            route.output = ok(offline_agent);
+        }
+    }
+    let runner = RouteRunner::new(routes, failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert!(missing.contains(&"no active local agent node".to_owned()));
+            assert!(evidence.iter().any(|line| line.contains("not online")));
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
+
+    let no_agent_version = r#"{"name":"mac-studio","kind":"agent","status":"active","presence":"online","agent_version":null,"protocol":"vowp-agent/1"}"#;
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles.contains(&"show") {
+            route.output = ok(no_agent_version);
+        }
+    }
+    let runner = RouteRunner::new(routes, failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert!(missing.contains(&"agent version not reported".to_owned()));
+            assert!(evidence.iter().any(|line| line.contains("not reported")));
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn phase3_probe_rejects_the_global_ssh_node_as_local_node_proof() {
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles == ["orchestrator", "new"] {
+            route.output = ok(ORCHESTRATOR_NEW_HELP_GLOBAL_NODE_ONLY);
+        }
+    }
+    let runner = RouteRunner::new(routes, failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert!(missing.contains(&"orchestrator materialization".to_owned()));
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("global SSH selector"))
+            );
+            assert!(
+                !evidence
+                    .iter()
+                    .any(|line| line.contains("local-node meaning present"))
+            );
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn phase3_probe_reports_missing_node_paths_as_missing_local_cache() {
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles == ["node", "paths"] {
+            route.output = failed(2, "error: unrecognized subcommand 'paths'");
+        }
+    }
+    let runner = RouteRunner::new(routes, failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert!(missing.contains(&"local cache".to_owned()));
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line == "vowp node paths --json: exit 2 (unsupported subcommand)")
+            );
+            assert!(!missing.contains(&"orchestrator materialization".to_owned()));
+        }
+        other => panic!("expected waiting, got {other:?}"),
+    }
 }
 
 #[tokio::test]
