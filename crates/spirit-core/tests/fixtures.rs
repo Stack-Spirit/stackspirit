@@ -50,6 +50,13 @@ fn gate_and_engine_fixtures_load() {
         waiting.local_orchestrator,
         spirit_core::engine::LocalOrchestratorGate::WaitingForVowpPhase3 { .. }
     ));
+    assert!(!waiting.features.local_orchestrator_actions);
+    assert!(!waiting.local_orchestrator_enabled());
+
+    let local_ready = gate_snapshot(Scenario::GatePhase3Ready).unwrap();
+    assert!(local_ready.features.local_orchestrator_actions);
+    assert!(local_ready.local_orchestrator_enabled());
+
     let ready = gate_snapshot(Scenario::GateAsifReady).unwrap();
     assert!(matches!(
         ready.asif,

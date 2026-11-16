@@ -13,6 +13,7 @@ pub mod executor;
 pub mod ids;
 pub mod inbox;
 pub mod limit;
+pub mod local;
 pub mod ops;
 pub mod session;
 pub mod snapshot;
@@ -37,6 +38,12 @@ pub use executor::ExecutorRef;
 pub use ids::{CapsuleId, EventId, InboxId, JobId, NodeName, ProjectName, RunId, SessionId};
 pub use inbox::InboxItem;
 pub use limit::Limit;
+pub use local::{
+    AGENT_PROTOCOL, AgentPairOutput, AgentPathAddRequest, AgentPathMap, AgentStatusDocument,
+    AgentSurfaceStatus, MAX_PATH_REF_LEN, NodeCard, OrchestratorNewRequest, PathRef,
+    SURFACE_ID_LEN, SurfaceEntry, SurfacePairOutput, SurfacePairRequest, SurfaceRevokeResult,
+    SurfaceRotateRequest, SurfaceRotateResult, ensure_duration_arg, ensure_surface_id,
+};
 pub use ops::{FleetQueueRow, JobAction, SetTargetInput};
 pub use session::{SessionSurfaceCard, SurfaceId, SurfaceRef};
 pub use snapshot::{

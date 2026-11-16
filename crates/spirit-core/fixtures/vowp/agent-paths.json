@@ -1,0 +1,8 @@
+[
+  {
+    "project": "vowp",
+    "local_root": "/Users/example/src/vowp",
+    "worktree_root": "/Users/example/.vowp-agent/worktrees",
+    "allow": ["src"]
+  }
+]

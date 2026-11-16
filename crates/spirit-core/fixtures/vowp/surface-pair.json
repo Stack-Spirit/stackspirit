@@ -1,0 +1,10 @@
+{
+  "surface": "01J9Z00000000000000000000C",
+  "node": "mac-studio",
+  "session": "01JCF5WQ8ZK3M2V7N4P6R8T0AE",
+  "kind": "opencode",
+  "app": "opencode",
+  "code": "pairing-code-placeholder",
+  "expires_at": "2026-11-16T12:10:00.000Z",
+  "command": "vowp agent pair --code-file - --surface 01J9Z00000000000000000000C --session 01JCF5WQ8ZK3M2V7N4P6R8T0AE --app opencode"
+}

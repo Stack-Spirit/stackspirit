@@ -1,0 +1,26 @@
+[
+  {
+    "id": "01J9Z00000000000000000000A",
+    "node": "mac-studio",
+    "kind": "opencode",
+    "state": "attached",
+    "scopes": ["session.read:01JCF5WQ8ZK3M2V7N4P6R8T0AE", "session.write:01JCF5WQ8ZK3M2V7N4P6R8T0AE"],
+    "prefix": "vowp_surf_ab",
+    "expires_at": "2026-12-14T12:00:00.000Z",
+    "overlap_until": null,
+    "expired": false,
+    "pending": false
+  },
+  {
+    "id": "01J9Z00000000000000000000B",
+    "node": "mac-studio",
+    "kind": "opencode",
+    "state": "revoked",
+    "scopes": [],
+    "prefix": null,
+    "expires_at": null,
+    "overlap_until": null,
+    "expired": true,
+    "pending": false
+  }
+]

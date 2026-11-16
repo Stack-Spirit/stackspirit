@@ -5,6 +5,7 @@ pub mod config;
 pub mod external;
 pub mod gate;
 pub mod keychain;
+pub mod local;
 pub mod process;
 pub mod runtime;
 pub mod supervisor;
@@ -21,13 +22,17 @@ pub use external::{ExternalHarness, HarnessProbe, PathHarnessProbe, scan_externa
 pub use gate::{
     ASIF_MILESTONES, AsifGate, GateCache, GateFeatureFlags, GateProbeOptions, GateSnapshot,
     HostGateCache, LocalAgentState, LocalAgentStatus, LocalOrchestratorGate, PHASE3_MILESTONES,
-    phase3_milestones, probe_asif, probe_local_orchestrator,
+    local_orchestrator_enabled, phase3_milestones, probe_asif, probe_local_orchestrator,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::OsKeychain;
 pub use keychain::{
     FakeKeychain, Keychain, KeychainError, KeychainErrorClass, ProviderKeyState, ProviderKeyStatus,
     SecretStore, SecretString, verify_provider_key,
+};
+pub use local::{
+    LocalNodeState, LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorPrerequisite,
+    LocalOrchestratorState, LocalPathMapStatus, local_orchestrator_action_enabled, refusal,
 };
 pub use process::{
     EngineBinaryLocator, EngineLogBuffer, ProcessEngineRuntime, current_target_triple,

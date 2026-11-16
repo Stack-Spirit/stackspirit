@@ -205,12 +205,32 @@ pub struct OrchestratorView {
     pub state: String,
     /// Join instructions.
     pub join: JoinView,
-    /// Reserved: the current contract has no node field, so this is always `None`.
+    /// Node that runs the app; absent for a home-hosted v0.2 orchestrator.
     pub node: Option<String>,
 }
 
+impl OrchestratorView {
+    /// Projects one `vowp orchestrator ls --json` card.
+    #[must_use]
+    pub fn from_card(card: &OrchestratorCard) -> Self {
+        Self {
+            name: card.name.clone(),
+            session_id: card.session_id.to_string(),
+            project: card.project.as_ref().map(ToString::to_string),
+            app: card.app.as_str().to_owned(),
+            state: card.state.clone(),
+            join: JoinView {
+                desktop: card.join.desktop.clone(),
+                phone: card.join.phone.clone(),
+                chat: card.join.chat.clone(),
+            },
+            node: card.node.as_ref().map(ToString::to_string),
+        }
+    }
+}
+
 /// The three join paths.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinView {
     /// Desktop command or steps.
     pub desktop: String,
@@ -247,7 +267,7 @@ impl FleetView {
         let orchestrators = snapshot
             .orchestrators
             .iter()
-            .map(orchestrator_view)
+            .map(OrchestratorView::from_card)
             .collect();
         let capacity = CapacityView::derive(
             &snapshot.capacity,
@@ -407,21 +427,5 @@ fn surface_view(surface: &SurfaceRef) -> SurfaceRefView {
         node: surface.node.as_str().to_owned(),
         acquired_at: surface.acquired_at,
         heartbeat_at: surface.heartbeat_at,
-    }
-}
-
-fn orchestrator_view(card: &OrchestratorCard) -> OrchestratorView {
-    OrchestratorView {
-        name: card.name.clone(),
-        session_id: card.session_id.to_string(),
-        project: card.project.as_ref().map(ToString::to_string),
-        app: card.app.as_str().to_owned(),
-        state: card.state.clone(),
-        join: JoinView {
-            desktop: card.join.desktop.clone(),
-            phone: card.join.phone.clone(),
-            chat: card.join.chat.clone(),
-        },
-        node: None,
     }
 }

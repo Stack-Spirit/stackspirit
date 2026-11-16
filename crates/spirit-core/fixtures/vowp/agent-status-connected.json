@@ -1,0 +1,30 @@
+{
+  "connection": "connected",
+  "node": "mac-studio",
+  "home": "home-1",
+  "protocol": "vowp-agent/1",
+  "last_heartbeat": "2026-11-16T12:00:00.000Z",
+  "last_error": null,
+  "pending_spool_bytes": 0,
+  "key_fingerprint": "sha256:0000000000000000",
+  "surface_token_expires_at": "2026-12-14T12:00:00.000Z",
+  "cache_entries": 12,
+  "cache_bytes": 4096,
+  "cache_oldest_at": "2026-11-16T10:00:00.000Z",
+  "surfaces": [
+    {
+      "surface": "01J9Z00000000000000000000A",
+      "prefix": "vowp_surf_ab",
+      "expires_at": "2026-12-14T12:00:00.000Z",
+      "state": "paired"
+    }
+  ],
+  "paths": [
+    {
+      "project": "vowp",
+      "local_root": "/Users/example/src/vowp",
+      "worktree_root": "/Users/example/.vowp-agent/worktrees",
+      "allow": ["src"]
+    }
+  ]
+}

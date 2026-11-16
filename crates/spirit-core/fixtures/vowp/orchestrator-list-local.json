@@ -1,0 +1,15 @@
+[
+  {
+    "name": "vowp-local",
+    "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AE",
+    "project": "vowp",
+    "app": "opencode",
+    "state": "running",
+    "node": "mac-studio",
+    "join": {
+      "desktop": "Open the local opencode app",
+      "phone": "Join from the phone surface",
+      "chat": "vowp chat --agent --session 01JCF5WQ8ZK3M2V7N4P6R8T0AE"
+    }
+  }
+]

@@ -1,0 +1,20 @@
+{
+  "connection": "revoked",
+  "node": "mac-studio",
+  "home": "home-1",
+  "protocol": "vowp-agent/1",
+  "last_heartbeat": "2026-11-16T11:00:00.000Z",
+  "last_error": "node credential revoked; surface token old-value",
+  "pending_spool_bytes": 0,
+  "cache_entries": 0,
+  "cache_bytes": 0,
+  "cache_oldest_at": null,
+  "surfaces": [
+    {
+      "surface": "01J9Z00000000000000000000B",
+      "prefix": null,
+      "expires_at": null,
+      "state": "revoked"
+    }
+  ]
+}

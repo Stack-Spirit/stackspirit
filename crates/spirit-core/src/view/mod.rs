@@ -7,6 +7,7 @@ pub mod executor;
 pub mod fleet;
 pub mod format;
 pub mod lanes;
+pub mod local;
 
 pub use capacity::{
     BrakeReasonView, BrakeView, CapacityView, CpuView, DiskView, EstimateQuery, EstimateView,
@@ -22,3 +23,7 @@ pub use format::{
     format_age_secs, format_bytes_gib, format_clock, format_percent, short_id, truncate_chars,
 };
 pub use lanes::{JobCardView, JobLanes, QUEUE_CAP, build_lanes};
+pub use local::{
+    AgentPathView, AgentSurfaceView, LocalAgentView, LocalOrchestratorView, LocalSessionState,
+    LocalSurfaceView,
+};

@@ -9,14 +9,15 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use spirit_core::engine::gate::{
-    AsifGate, GateCache, GateFeatureFlags, GateProbeOptions, GateSnapshot, LocalAgentState,
-    LocalOrchestratorGate, probe_asif, probe_local_orchestrator,
+    AsifGate, GateCache, GateProbeOptions, GateSnapshot, LocalAgentState, LocalOrchestratorGate,
+    probe_asif, probe_local_orchestrator,
 };
 use spirit_core::ssh::command::{CommandOutput, CommandSpec};
 use spirit_core::ssh::{CommandRunner, SshOptions, SshTarget};
 use spirit_core::time::Timestamp;
 
 const GATE_PHASE3_READY: &str = include_str!("../fixtures/vowp/gate-phase3-ready.json");
+const GATE_PHASE3_WAITING: &str = include_str!("../fixtures/vowp/gate-phase3-waiting.json");
 const GATE_ASIF_READY: &str = include_str!("../fixtures/vowp/gate-asif-ready.json");
 const GATE_NODE_LIST_V03: &str = include_str!("../fixtures/vowp/gate-node-list-v0.3.json");
 const GATE_NODE_SHOW_HOME_OFFLINE_V03: &str =
@@ -1166,14 +1167,21 @@ fn gates_gate_cache_expires_and_downgrades() {
 }
 
 #[test]
-fn gates_gate_ready_fixture_still_disables_unimplemented_action() {
-    let snapshot: GateSnapshot = serde_json::from_str(GATE_PHASE3_READY).unwrap();
+fn gates_ready_fixture_enables_d6_but_waiting_fixture_stays_disabled() {
+    let mut snapshot: GateSnapshot = serde_json::from_str(GATE_PHASE3_READY).unwrap();
+    snapshot.enforce_local_orchestrator_flag();
     assert!(matches!(
         snapshot.local_orchestrator,
         LocalOrchestratorGate::Ready { .. }
     ));
-    assert_eq!(snapshot.features, GateFeatureFlags::default());
-    assert!(!snapshot.local_orchestrator_enabled());
+    assert!(snapshot.features.local_orchestrator_actions);
+    assert!(snapshot.local_orchestrator_enabled());
+
+    let mut waiting: GateSnapshot = serde_json::from_str(GATE_PHASE3_WAITING).unwrap();
+    waiting.enforce_local_orchestrator_flag();
+    assert!(!waiting.features.local_orchestrator_actions);
+    assert!(!waiting.local_orchestrator_enabled());
+
     let asif: GateSnapshot = serde_json::from_str(GATE_ASIF_READY).unwrap();
     assert!(matches!(
         asif.asif,

@@ -196,6 +196,76 @@ tolerant_enum!(
 );
 
 tolerant_enum!(
+    /// Lifecycle state of a home surface row.
+    pub enum SurfaceLifecycleState {
+        Pending => "pending",
+        Attached => "attached",
+        Revoked => "revoked",
+    }
+);
+
+tolerant_enum!(
+    /// Local state of one paired surface on the Mac.
+    pub enum AgentSurfaceState {
+        Paired => "paired",
+        NeedsPair => "needs_pair",
+        Revoked => "revoked",
+    }
+);
+
+tolerant_enum!(
+    /// Connection state reported by `vowp agent status --json`.
+    ///
+    /// `not_installed` and `not_enrolled` are StackSpirit-side states for the two
+    /// failures that happen before VOWP can print a status document.
+    pub enum AgentConnectionState {
+        NotInstalled => "not_installed",
+        NotEnrolled => "not_enrolled",
+        Connecting => "connecting",
+        Connected => "connected",
+        Reconnecting => "reconnecting",
+        Revoked => "revoked",
+        Superseded => "superseded",
+        Stopped => "stopped",
+        Incompatible => "incompatible",
+    }
+);
+
+impl Default for AgentConnectionState {
+    fn default() -> Self {
+        Self::parse("unknown")
+    }
+}
+
+tolerant_enum!(
+    /// How a VOWP node is reached.
+    pub enum NodeKind {
+        Home => "home",
+        Ssh => "ssh",
+        Agent => "agent",
+    }
+);
+
+tolerant_enum!(
+    /// Enrollment state of a VOWP node.
+    pub enum NodeStatus {
+        Pending => "pending",
+        Active => "active",
+        Revoked => "revoked",
+    }
+);
+
+tolerant_enum!(
+    /// Computed presence of a VOWP node.
+    pub enum NodePresence {
+        Online => "online",
+        Degraded => "degraded",
+        Offline => "offline",
+        Revoked => "revoked",
+    }
+);
+
+tolerant_enum!(
     /// Why an inbox item exists.
     pub enum InboxKind {
         Question => "question",

@@ -288,7 +288,13 @@ pub fn gate_snapshot(scenario: Scenario) -> Result<GateSnapshot, SpiritError> {
             format!("scenario {} has no gate fixture", scenario.as_str()),
         )
     })?;
-    serde_json::from_str(json).map_err(|err| SpiritError::parse("gate snapshot", err))
+    let mut snapshot: GateSnapshot =
+        serde_json::from_str(json).map_err(|err| SpiritError::parse("gate snapshot", err))?;
+    // The D6 flag is derived, never copied from a fixture's stale value. A Ready gate
+    // with a connected local agent enables local actions; every other state keeps them
+    // off.
+    snapshot.enforce_local_orchestrator_flag();
+    Ok(snapshot)
 }
 
 /// The engine catalog fixture shape.

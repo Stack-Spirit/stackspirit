@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::connection::{ConnectionManager, ConnectionSnapshot, PollPolicy, SpiritEvent};
 use crate::engine::gate::GateSnapshot;
+use crate::engine::local::{
+    LocalNodeState, LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorState,
+};
 use crate::engine::{
     EngineChoice, EngineStatus, EngineSupervisor, Keychain, KeychainError, ModelChoice,
     SecretString,
@@ -15,9 +18,17 @@ use crate::engine::{
 use crate::error::{SpiritError, SpiritErrorCode};
 use crate::host::{HostId, HostKeyPin, HostProfile, HostProfilePatch, HostStore, NewHostProfile};
 use crate::time::{Clock, SystemClock, Timestamp};
-use crate::view::FleetView;
-use crate::vowp::{AsifExport, AsifExportOptions, AsifImportOptions, VowpClient};
-use crate::wire::{AsifImportResponse, ProjectName};
+use crate::view::local::{AgentPathView, LocalAgentView, LocalOrchestratorView, LocalSurfaceView};
+use crate::view::{FleetView, OrchestratorView};
+use crate::vowp::{
+    AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
+    LocalAgentClient, SurfacePairing, VowpClient,
+};
+use crate::wire::{
+    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, OrchestratorNewRequest,
+    ProjectName, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest,
+    SurfaceRotateResult, ensure_surface_id,
+};
 
 /// A provider-key state returned to the UI. It never carries the key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +49,7 @@ pub struct SpiritCore {
     keychain: Arc<dyn Keychain>,
     clock: Arc<dyn Clock>,
     gates: Mutex<GateSnapshot>,
+    local_orchestrator: Mutex<LocalOrchestratorState>,
 }
 
 impl std::fmt::Debug for SpiritCore {
@@ -60,6 +72,7 @@ impl SpiritCore {
             keychain: Arc::new(crate::engine::FakeKeychain::new()),
             clock: Arc::new(SystemClock),
             gates: Mutex::new(GateSnapshot::default()),
+            local_orchestrator: Mutex::new(LocalOrchestratorState::default()),
         }
     }
 
@@ -345,12 +358,333 @@ impl SpiritCore {
     }
 
     /// Stores and publishes a gate snapshot.
-    pub fn set_gates(&self, snapshot: GateSnapshot) {
+    ///
+    /// The D6 feature flag is derived here from the snapshot's own gate and local-agent
+    /// state, so a caller cannot publish `Ready` with a stale disabled flag or a Waiting
+    /// gate with a stale enabled one.
+    pub fn set_gates(&self, mut snapshot: GateSnapshot) {
+        snapshot.enforce_local_orchestrator_flag();
         *self
             .gates
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.clone();
         self.connection.publish_gates(snapshot);
+    }
+
+    /// Records the latest `vowp node show --json` card for the D6 guard.
+    ///
+    /// The card is redacted by VOWP and carries no path or secret. A later node read
+    /// replaces it immediately; a stale card must never enable a revoked node.
+    pub fn set_local_node_card(&self, card: &NodeCard) {
+        self.local_orchestrator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .node = Some(LocalNodeState::from_card(card));
+    }
+
+    /// Forgets the local node card, for example after a disconnect.
+    pub fn clear_local_node_card(&self) {
+        self.local_orchestrator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .node = None;
+    }
+
+    /// Re-reads one node card and records it for the D6 guard.
+    ///
+    /// `project` is required on a multi-project home, matching the gate probe's
+    /// `--project`-qualified `node show` read.
+    pub async fn refresh_local_node(
+        &self,
+        client: &dyn VowpClient,
+        project: Option<&str>,
+        node: &str,
+    ) -> Result<NodeCard, SpiritError> {
+        let card = client.node_card(project, node).await?;
+        self.set_local_node_card(&card);
+        Ok(card)
+    }
+
+    /// Records the Mac path map. Absolute roots stay in [`AgentPathMap`]; only the
+    /// path-free validity is kept for the guard.
+    pub fn set_local_agent_paths(&self, maps: &[AgentPathMap]) {
+        self.local_orchestrator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_path_maps(maps);
+    }
+
+    /// Returns a copy of the D6 local state.
+    #[must_use]
+    pub fn local_orchestrator_state(&self) -> LocalOrchestratorState {
+        self.local_orchestrator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Builds the backend guard for one D6 action.
+    ///
+    /// Pass the project an orchestrator will bind; surface actions pass `None`. The
+    /// guard re-reads the current gate snapshot and local state each time, so a stale
+    /// renderer cannot authorize a write.
+    #[must_use]
+    pub fn local_orchestrator_guard(&self, project: Option<&str>) -> LocalOrchestratorGuard {
+        let state = self.local_orchestrator_state();
+        LocalOrchestratorGuard::from_snapshot(&self.gates(), &state).for_project(&state, project)
+    }
+
+    /// Re-checks one D6 action without executing it.
+    pub fn ensure_local_orchestrator_action(
+        &self,
+        action: LocalOrchestratorAction,
+        project: Option<&str>,
+        node: Option<&str>,
+    ) -> Result<(), SpiritError> {
+        self.local_orchestrator_guard(project).ensure(action, node)
+    }
+
+    /// Creates a pending home surface with one-time pairing code.
+    ///
+    /// The code is returned in [`SurfacePairing`] only; it is never serialized or
+    /// logged. The backend re-checks the D6 guard before the command runs.
+    pub async fn surface_pair(
+        &self,
+        client: &dyn VowpClient,
+        request: SurfacePairRequest,
+    ) -> Result<SurfacePairing, SpiritError> {
+        request.validate()?;
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(None)
+            .ensure(LocalOrchestratorAction::SurfacePair, Some(&request.node))?;
+        client.surface_pair(request).await
+    }
+
+    /// Lists home surfaces. This read stays available while the gate is `Waiting`.
+    pub async fn surface_list(
+        &self,
+        client: &dyn VowpClient,
+        node: Option<&str>,
+    ) -> Result<Vec<SurfaceEntry>, SpiritError> {
+        self.require_connected_host()?;
+        client.surface_list(node).await
+    }
+
+    /// Rotates one surface token. The old token is only valid for VOWP's overlap.
+    pub async fn surface_rotate(
+        &self,
+        client: &dyn VowpClient,
+        request: SurfaceRotateRequest,
+    ) -> Result<SurfaceRotateResult, SpiritError> {
+        request.validate()?;
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(None).ensure(
+            LocalOrchestratorAction::SurfaceRotate,
+            request.node.as_deref(),
+        )?;
+        client.surface_rotate(request).await
+    }
+
+    /// Revokes one surface and every token it holds.
+    ///
+    /// Revocation is explicit cleanup, so it remains available when a node was revoked
+    /// or the gate is `Waiting`. StackSpirit never retries with the old credential.
+    pub async fn surface_revoke(
+        &self,
+        client: &dyn VowpClient,
+        surface: &str,
+    ) -> Result<SurfaceRevokeResult, SpiritError> {
+        ensure_surface_id(surface)?;
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(None)
+            .ensure(LocalOrchestratorAction::SurfaceRevoke, None)?;
+        client.surface_revoke(surface).await
+    }
+
+    /// Reads the Mac agent status through the local command runner.
+    pub async fn agent_status(
+        &self,
+        local: &dyn LocalAgentClient,
+    ) -> Result<LocalAgentView, SpiritError> {
+        let document = local.status().await?;
+        Ok(LocalAgentView::from_document(&document))
+    }
+
+    /// Redeems a home surface pairing code on the Mac.
+    pub async fn agent_pair(
+        &self,
+        local: &dyn LocalAgentClient,
+        request: AgentPairRequest,
+    ) -> Result<AgentPairing, SpiritError> {
+        request.validate()?;
+        self.local_orchestrator_guard(None)
+            .ensure(LocalOrchestratorAction::AgentPair, None)?;
+        local.pair(&request).await
+    }
+
+    /// Reads and records the Mac path map; only safe [`AgentPathView`] values return.
+    pub async fn agent_paths(
+        &self,
+        local: &dyn LocalAgentClient,
+    ) -> Result<Vec<AgentPathView>, SpiritError> {
+        let maps = local.paths().await?;
+        self.set_local_agent_paths(&maps);
+        Ok(maps.iter().map(AgentPathView::from_map).collect())
+    }
+
+    /// Adds or updates one Mac path-map row.
+    pub async fn agent_path_add(
+        &self,
+        local: &dyn LocalAgentClient,
+        request: AgentPathAddRequest,
+    ) -> Result<AgentPathView, SpiritError> {
+        request.validate()?;
+        let map = local.add_path(&request).await?;
+        self.local_orchestrator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_path_map(&map);
+        Ok(AgentPathView::from_map(&map))
+    }
+
+    /// Removes one Mac path-map row.
+    pub async fn agent_path_remove(
+        &self,
+        local: &dyn LocalAgentClient,
+        project: &str,
+    ) -> Result<(), SpiritError> {
+        let project = ProjectName::parse(project)?;
+        local.remove_path(&project).await?;
+        self.local_orchestrator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove_path_map(project.as_str());
+        Ok(())
+    }
+
+    /// Creates a local app host through `vowp orchestrator new --node ...`.
+    ///
+    /// The guard re-checks the gate, connected agent, protocol, node status and the
+    /// project path map before VOWP materializes anything.
+    pub async fn orchestrator_new(
+        &self,
+        client: &dyn VowpClient,
+        request: OrchestratorNewRequest,
+    ) -> Result<OrchestratorView, SpiritError> {
+        request.validate()?;
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(request.project.as_deref())
+            .ensure(
+                LocalOrchestratorAction::OrchestratorNew,
+                Some(request.node.as_str()),
+            )?;
+        let card = client.orchestrator_new(request).await?;
+        Ok(OrchestratorView::from_card(&card))
+    }
+
+    /// Lists orchestrators. This read stays available while the gate is `Waiting`.
+    pub async fn orchestrator_list(
+        &self,
+        client: &dyn VowpClient,
+    ) -> Result<Vec<OrchestratorView>, SpiritError> {
+        self.require_connected_host()?;
+        let cards = client.orchestrator_list().await?;
+        Ok(cards.iter().map(OrchestratorView::from_card).collect())
+    }
+
+    /// Stops a local app host. This explicit cleanup remains available while the gate is
+    /// `Waiting` or the node is offline.
+    pub async fn orchestrator_stop(
+        &self,
+        client: &dyn VowpClient,
+        name: &str,
+    ) -> Result<OrchestratorView, SpiritError> {
+        validate_orchestrator_name(name)?;
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(None)
+            .ensure(LocalOrchestratorAction::OrchestratorStop, None)?;
+        let card = client.orchestrator_stop(name).await?;
+        Ok(OrchestratorView::from_card(&card))
+    }
+
+    /// Resumes a local app host after re-checking every D6 prerequisite.
+    pub async fn orchestrator_resume(
+        &self,
+        client: &dyn VowpClient,
+        name: &str,
+        project: Option<&str>,
+        node: Option<&str>,
+    ) -> Result<OrchestratorView, SpiritError> {
+        validate_orchestrator_name(name)?;
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(project)
+            .ensure(LocalOrchestratorAction::OrchestratorResume, node)?;
+        let card = client.orchestrator_resume(name).await?;
+        Ok(OrchestratorView::from_card(&card))
+    }
+
+    /// Builds the honest local surface cards: node, protocol, agent status, lease
+    /// holder and session state, with revoked/expired surfaces marked non-writable.
+    pub async fn local_surface_views(
+        &self,
+        client: &dyn VowpClient,
+        local: &dyn LocalAgentClient,
+    ) -> Result<Vec<LocalSurfaceView>, SpiritError> {
+        let surfaces = self.surface_list(client, None).await?;
+        let agent = local.status().await?;
+        let state = self.local_orchestrator_state();
+        let fleet = self.fleet_view();
+        let now = self.clock.now();
+        Ok(surfaces
+            .iter()
+            .map(|surface| {
+                let session = fleet.as_ref().and_then(|fleet| {
+                    fleet.sessions.iter().find(|session| {
+                        session
+                            .active_surface
+                            .as_ref()
+                            .is_some_and(|holder| holder.surface_id == surface.id)
+                    })
+                });
+                LocalSurfaceView::from_parts(surface, &agent, state.node.as_ref(), session, now)
+            })
+            .collect())
+    }
+
+    /// Builds the honest local orchestrator cards with node, protocol, agent status,
+    /// lease holder and session state.
+    pub async fn local_orchestrator_views(
+        &self,
+        client: &dyn VowpClient,
+        local: &dyn LocalAgentClient,
+    ) -> Result<Vec<LocalOrchestratorView>, SpiritError> {
+        let cards = self.orchestrator_list(client).await?;
+        let agent = local.status().await?;
+        let state = self.local_orchestrator_state();
+        let fleet = self.fleet_view();
+        Ok(cards
+            .iter()
+            .map(|card| {
+                let session = fleet.as_ref().and_then(|fleet| {
+                    fleet
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == card.session_id)
+                });
+                LocalOrchestratorView::from_parts(card, &agent, state.node.as_ref(), session)
+            })
+            .collect())
+    }
+
+    fn require_connected_host(&self) -> Result<(), SpiritError> {
+        if self.connection.status().state == "connected" {
+            Ok(())
+        } else {
+            Err(
+                SpiritError::new(SpiritErrorCode::NotFound, "no host is connected")
+                    .with_hint("Connect a host before using local orchestrator actions."),
+            )
+        }
     }
 
     /// Scans host keys with the injected runner.
@@ -371,3 +705,24 @@ impl SpiritCore {
         crate::host::probe_host(runner, input).await
     }
 }
+
+fn validate_orchestrator_name(name: &str) -> Result<(), SpiritError> {
+    if name.is_empty()
+        || name.len() > 64
+        || name.starts_with('-')
+        || name == "."
+        || name == ".."
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(SpiritError::invalid_input(
+            "orchestrator name",
+            "use 1-64 letters, digits, '.', '-' or '_'",
+        ));
+    }
+    Ok(())
+}
+
+/// Alias used by the D6 brief for the headless service facade.
+pub type SpiritService = SpiritCore;

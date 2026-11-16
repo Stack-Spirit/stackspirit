@@ -12,13 +12,16 @@ use crate::error::{SpiritError, SpiritErrorCode, code_for_exit};
 use crate::ssh::command::{CommandOutput, INITIAL_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT};
 use crate::ssh::{CommandRunner, SshOptions, SshRemote, SshTarget};
 use crate::vowp::asif::{AsifExport, AsifExportOptions, AsifImportOptions, AsifPackage};
-use crate::wire::enums::TargetMode;
-use crate::wire::ids::{InboxId, JobId, ProjectName, SessionId};
+use crate::vowp::local::SurfacePairing;
+use crate::wire::enums::{OrchestratorApp, TargetMode};
+use crate::wire::ids::{InboxId, JobId, NodeName, ProjectName, SessionId};
 use crate::wire::parse_error_document;
 use crate::wire::{
     AsifExportSummary, AsifImportResponse, CapacityReportDoc, CapacityTarget, FleetQueueRow,
-    FleetStatus, InboxItem, JobAction, SetTargetInput, WireWarning, parse_capacity_report,
-    parse_fleet_inbox, parse_fleet_queue, parse_fleet_status,
+    FleetStatus, InboxItem, JobAction, NodeCard, OrchestratorCard, OrchestratorNewRequest,
+    SetTargetInput, SurfaceEntry, SurfacePairOutput, SurfacePairRequest, SurfaceRevokeResult,
+    SurfaceRotateRequest, SurfaceRotateResult, WireWarning, ensure_surface_id,
+    parse_capacity_report, parse_fleet_inbox, parse_fleet_queue, parse_fleet_status,
 };
 
 /// A successful `vowp --version` probe.
@@ -112,6 +115,103 @@ pub trait VowpClient: Send + Sync {
             "ASIF import is unavailable for this client",
         )
         .with_hint("Connect with a VOWP client that implements the ASIF contract."))
+    }
+
+    /// Creates a pending home surface through `vowp surface pair`.
+    ///
+    /// The default refuses: a client that does not implement D6 must not pretend to
+    /// mint a surface or a pairing code.
+    async fn surface_pair(
+        &self,
+        _request: SurfacePairRequest,
+    ) -> Result<SurfacePairing, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "surface pairing is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 surface contract."))
+    }
+
+    /// Reads `vowp surface ls [--node <node>] --json`.
+    async fn surface_list(&self, _node: Option<&str>) -> Result<Vec<SurfaceEntry>, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the surface read model is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 surface contract."))
+    }
+
+    /// Rotates a surface token through `vowp surface rotate`.
+    async fn surface_rotate(
+        &self,
+        _request: SurfaceRotateRequest,
+    ) -> Result<SurfaceRotateResult, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "surface rotation is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 surface contract."))
+    }
+
+    /// Revokes every token of a surface through `vowp surface revoke`.
+    async fn surface_revoke(&self, _surface: &str) -> Result<SurfaceRevokeResult, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "surface revocation is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 surface contract."))
+    }
+
+    /// Reads `vowp orchestrator ls --json`.
+    async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the orchestrator read model is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
+    }
+
+    /// Materializes a local app host through `vowp orchestrator new --node ...`.
+    async fn orchestrator_new(
+        &self,
+        _request: OrchestratorNewRequest,
+    ) -> Result<OrchestratorCard, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "local orchestrator creation is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
+    }
+
+    /// Stops a local app host through `vowp orchestrator stop`.
+    async fn orchestrator_stop(&self, _name: &str) -> Result<OrchestratorCard, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "local orchestrator stop is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
+    }
+
+    /// Resumes a local app host through `vowp orchestrator resume`.
+    async fn orchestrator_resume(&self, _name: &str) -> Result<OrchestratorCard, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "local orchestrator resume is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
+    }
+
+    /// Reads one redacted `vowp node show --json` card.
+    async fn node_card(
+        &self,
+        _project: Option<&str>,
+        _node: &str,
+    ) -> Result<NodeCard, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the node read model is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the node contract."))
     }
 
     /// Returns the non-fatal [`WireWarning`]s collected since the last drain.
@@ -261,6 +361,18 @@ pub(crate) fn check_command_output(output: CommandOutput) -> Result<CommandOutpu
 
 fn push_json(argv: &mut Vec<String>) {
     argv.push("--json".to_owned());
+}
+
+fn orchestrator_app_arg(app: &OrchestratorApp) -> Result<&'static str, SpiritError> {
+    match app {
+        OrchestratorApp::Opencode => Ok("opencode"),
+        OrchestratorApp::ClaudeCode => Ok("claude-code"),
+        OrchestratorApp::Chat => Ok("chat"),
+        OrchestratorApp::Unknown(raw) => Err(SpiritError::invalid_input(
+            "orchestrator app",
+            format!("unknown app {raw:?}"),
+        )),
+    }
 }
 
 /// Validates the user-visible park reason before it reaches `vowp job park --reason`.
@@ -456,6 +568,172 @@ impl VowpClient for SshVowpClient {
             .map_err(|err| SpiritError::parse("capacity target", err))
     }
 
+    async fn surface_pair(
+        &self,
+        request: SurfacePairRequest,
+    ) -> Result<SurfacePairing, SpiritError> {
+        request.validate()?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "surface".to_owned(),
+            "pair".to_owned(),
+            "--session".to_owned(),
+            request.session,
+            "--node".to_owned(),
+            request.node,
+            "--kind".to_owned(),
+            request.kind.as_str().to_owned(),
+        ]);
+        if let Some(app) = request.app {
+            argv.extend(["--app".to_owned(), app]);
+        }
+        if let Some(replace) = request.replace {
+            argv.extend(["--replace".to_owned(), replace]);
+        }
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        let parsed: SurfacePairOutput = serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("surface pair", err))?;
+        Ok(SurfacePairing::from_output(parsed))
+    }
+
+    async fn surface_list(&self, node: Option<&str>) -> Result<Vec<SurfaceEntry>, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend(["surface".to_owned(), "ls".to_owned()]);
+        if let Some(node) = node {
+            NodeName::parse(node)?;
+            argv.extend(["--node".to_owned(), node.to_owned()]);
+        }
+        let output = self.run(&argv, READ_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("surface list", err))
+    }
+
+    async fn surface_rotate(
+        &self,
+        request: SurfaceRotateRequest,
+    ) -> Result<SurfaceRotateResult, SpiritError> {
+        request.validate()?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend(["surface".to_owned(), "rotate".to_owned(), request.surface]);
+        if let Some(node) = request.node {
+            argv.extend(["--node".to_owned(), node]);
+        }
+        if let Some(wait) = request.wait {
+            argv.extend(["--wait".to_owned(), wait]);
+        }
+        if let Some(grace) = request.grace {
+            argv.extend(["--grace".to_owned(), grace]);
+        }
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("surface rotate", err))
+    }
+
+    async fn surface_revoke(&self, surface: &str) -> Result<SurfaceRevokeResult, SpiritError> {
+        ensure_surface_id(surface)?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "surface".to_owned(),
+            "revoke".to_owned(),
+            surface.to_owned(),
+            "--yes".to_owned(),
+        ]);
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("surface revoke", err))
+    }
+
+    async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend(["orchestrator".to_owned(), "ls".to_owned()]);
+        let output = self.run(&argv, READ_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("orchestrator list", err))
+    }
+
+    async fn orchestrator_new(
+        &self,
+        request: OrchestratorNewRequest,
+    ) -> Result<OrchestratorCard, SpiritError> {
+        request.validate()?;
+        let app = orchestrator_app_arg(&request.app)?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "orchestrator".to_owned(),
+            "new".to_owned(),
+            "--node".to_owned(),
+            request.node,
+            "--app".to_owned(),
+            app.to_owned(),
+        ]);
+        if let Some(project) = request.project {
+            argv.extend(["--project".to_owned(), project]);
+        }
+        if let Some(name) = request.name {
+            argv.extend(["--name".to_owned(), name]);
+        }
+        if request.force {
+            argv.push("--force".to_owned());
+        }
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("orchestrator new", err))
+    }
+
+    async fn orchestrator_stop(&self, name: &str) -> Result<OrchestratorCard, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "orchestrator".to_owned(),
+            "stop".to_owned(),
+            name.to_owned(),
+        ]);
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("orchestrator stop", err))
+    }
+
+    async fn orchestrator_resume(&self, name: &str) -> Result<OrchestratorCard, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "orchestrator".to_owned(),
+            "resume".to_owned(),
+            name.to_owned(),
+        ]);
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("orchestrator resume", err))
+    }
+
+    async fn node_card(&self, project: Option<&str>, node: &str) -> Result<NodeCard, SpiritError> {
+        NodeName::parse(node)?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        if let Some(project) = project {
+            ProjectName::parse(project)?;
+            argv.extend(["--project".to_owned(), project.to_owned()]);
+        }
+        argv.extend(["node".to_owned(), "show".to_owned(), node.to_owned()]);
+        let output = self.run(&argv, READ_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout).map_err(|err| SpiritError::parse("node show", err))
+    }
+
     async fn asif_export(
         &self,
         project: &str,
@@ -518,6 +796,19 @@ struct MockState {
     asif_exports: Vec<(String, String, AsifExportOptions)>,
     asif_imports: Vec<(String, usize, AsifImportOptions)>,
     warnings: Vec<WireWarning>,
+    surfaces: Vec<SurfaceEntry>,
+    surface_pairing: Option<SurfacePairOutput>,
+    surface_rotation: Option<SurfaceRotateResult>,
+    surface_revocation: Option<SurfaceRevokeResult>,
+    surface_pair_calls: Vec<SurfacePairRequest>,
+    surface_rotate_calls: Vec<SurfaceRotateRequest>,
+    surface_revoke_calls: Vec<String>,
+    orchestrators: Vec<OrchestratorCard>,
+    orchestrator_new_result: Option<OrchestratorCard>,
+    orchestrator_new_calls: Vec<OrchestratorNewRequest>,
+    orchestrator_stop_calls: Vec<String>,
+    orchestrator_resume_calls: Vec<String>,
+    node_cards: Vec<NodeCard>,
 }
 
 /// A programmable in-memory client for tests and previews.
@@ -551,6 +842,19 @@ impl MockVowpClient {
                 asif_exports: Vec::new(),
                 asif_imports: Vec::new(),
                 warnings: Vec::new(),
+                surfaces: Vec::new(),
+                surface_pairing: None,
+                surface_rotation: None,
+                surface_revocation: None,
+                surface_pair_calls: Vec::new(),
+                surface_rotate_calls: Vec::new(),
+                surface_revoke_calls: Vec::new(),
+                orchestrators: Vec::new(),
+                orchestrator_new_result: None,
+                orchestrator_new_calls: Vec::new(),
+                orchestrator_stop_calls: Vec::new(),
+                orchestrator_resume_calls: Vec::new(),
+                node_cards: Vec::new(),
             })),
         }
     }
@@ -632,6 +936,136 @@ impl MockVowpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .asif_imports
+            .clone()
+    }
+
+    /// Replaces the `vowp surface ls` rows.
+    #[must_use]
+    pub fn with_surfaces(self, surfaces: Vec<SurfaceEntry>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surfaces = surfaces;
+        self
+    }
+
+    /// Configures the `vowp surface pair` result.
+    #[must_use]
+    pub fn with_surface_pairing(self, pairing: SurfacePairOutput) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surface_pairing = Some(pairing);
+        self
+    }
+
+    /// Configures the `vowp surface rotate` result.
+    #[must_use]
+    pub fn with_surface_rotation(self, rotation: SurfaceRotateResult) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surface_rotation = Some(rotation);
+        self
+    }
+
+    /// Configures the `vowp surface revoke` result.
+    #[must_use]
+    pub fn with_surface_revocation(self, revocation: SurfaceRevokeResult) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surface_revocation = Some(revocation);
+        self
+    }
+
+    /// Replaces the `vowp orchestrator ls` cards.
+    #[must_use]
+    pub fn with_orchestrators(self, orchestrators: Vec<OrchestratorCard>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrators = orchestrators;
+        self
+    }
+
+    /// Configures the card returned by `vowp orchestrator new`.
+    #[must_use]
+    pub fn with_orchestrator_new_result(self, card: OrchestratorCard) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrator_new_result = Some(card);
+        self
+    }
+
+    /// Replaces the `vowp node show` cards.
+    #[must_use]
+    pub fn with_node_cards(self, cards: Vec<NodeCard>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .node_cards = cards;
+        self
+    }
+
+    /// Returns recorded surface-pair requests.
+    #[must_use]
+    pub fn surface_pair_calls(&self) -> Vec<SurfacePairRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surface_pair_calls
+            .clone()
+    }
+
+    /// Returns recorded surface-rotate requests.
+    #[must_use]
+    pub fn surface_rotate_calls(&self) -> Vec<SurfaceRotateRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surface_rotate_calls
+            .clone()
+    }
+
+    /// Returns recorded surface-revoke ids.
+    #[must_use]
+    pub fn surface_revoke_calls(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surface_revoke_calls
+            .clone()
+    }
+
+    /// Returns recorded orchestrator-new requests.
+    #[must_use]
+    pub fn orchestrator_new_calls(&self) -> Vec<OrchestratorNewRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrator_new_calls
+            .clone()
+    }
+
+    /// Returns recorded orchestrator-stop names.
+    #[must_use]
+    pub fn orchestrator_stop_calls(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrator_stop_calls
+            .clone()
+    }
+
+    /// Returns recorded orchestrator-resume names.
+    #[must_use]
+    pub fn orchestrator_resume_calls(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrator_resume_calls
             .clone()
     }
 
@@ -810,6 +1244,137 @@ impl VowpClient for MockVowpClient {
         updated.set_at = crate::time::Timestamp::now();
         updated.reason = reason.to_owned();
         Ok(updated)
+    }
+
+    async fn surface_pair(
+        &self,
+        request: SurfacePairRequest,
+    ) -> Result<SurfacePairing, SpiritError> {
+        request.validate()?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.surface_pair_calls.push(request);
+        state
+            .surface_pairing
+            .clone()
+            .map(SurfacePairing::from_output)
+            .ok_or_else(|| {
+                SpiritError::new(
+                    SpiritErrorCode::Internal,
+                    "the mock VOWP client has no configured surface pairing",
+                )
+            })
+    }
+
+    async fn surface_list(&self, _node: Option<&str>) -> Result<Vec<SurfaceEntry>, SpiritError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .surfaces
+            .clone())
+    }
+
+    async fn surface_rotate(
+        &self,
+        request: SurfaceRotateRequest,
+    ) -> Result<SurfaceRotateResult, SpiritError> {
+        request.validate()?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.surface_rotate_calls.push(request);
+        state.surface_rotation.clone().ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the mock VOWP client has no configured surface rotation",
+            )
+        })
+    }
+
+    async fn surface_revoke(&self, surface: &str) -> Result<SurfaceRevokeResult, SpiritError> {
+        ensure_surface_id(surface)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.surface_revoke_calls.push(surface.to_owned());
+        state.surface_revocation.clone().ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the mock VOWP client has no configured surface revocation",
+            )
+        })
+    }
+
+    async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrators
+            .clone())
+    }
+
+    async fn orchestrator_new(
+        &self,
+        request: OrchestratorNewRequest,
+    ) -> Result<OrchestratorCard, SpiritError> {
+        request.validate()?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.orchestrator_new_calls.push(request);
+        state.orchestrator_new_result.clone().ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the mock VOWP client has no configured orchestrator",
+            )
+        })
+    }
+
+    async fn orchestrator_stop(&self, name: &str) -> Result<OrchestratorCard, SpiritError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.orchestrator_stop_calls.push(name.to_owned());
+        state
+            .orchestrators
+            .iter()
+            .find(|card| card.name == name)
+            .cloned()
+            .ok_or_else(|| SpiritError::not_found(&format!("orchestrator {name}")))
+    }
+
+    async fn orchestrator_resume(&self, name: &str) -> Result<OrchestratorCard, SpiritError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.orchestrator_resume_calls.push(name.to_owned());
+        state
+            .orchestrators
+            .iter()
+            .find(|card| card.name == name)
+            .cloned()
+            .ok_or_else(|| SpiritError::not_found(&format!("orchestrator {name}")))
+    }
+
+    async fn node_card(&self, _project: Option<&str>, node: &str) -> Result<NodeCard, SpiritError> {
+        NodeName::parse(node)?;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .node_cards
+            .iter()
+            .find(|card| card.name.as_str() == node)
+            .cloned()
+            .ok_or_else(|| SpiritError::not_found(&format!("node {node}")))
     }
 
     async fn asif_export(

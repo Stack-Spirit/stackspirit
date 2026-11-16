@@ -229,19 +229,25 @@ fn snapshot_session_surface_card_parses_surface_ref() {
 }
 
 #[test]
-fn snapshot_orchestrator_card_does_not_assume_node() {
+fn snapshot_orchestrator_card_tolerates_a_missing_or_present_node() {
     let status = fresh();
     let orchestrator = &status.snapshot.orchestrators[0];
     let value = serde_json::to_value(orchestrator).unwrap();
     assert!(
-        value.get("node").is_none(),
-        "the current contract has no node field"
+        value["node"].is_null(),
+        "a home-hosted card has no node and the view must not invent one"
     );
     assert_eq!(value["app"], "opencode");
     assert_eq!(
         value["join"]["phone"],
         "Open the VOWP board and join vowp-main"
     );
+
+    let cards: Vec<spirit_core::wire::OrchestratorCard> = serde_json::from_str(include_str!(
+        "../fixtures/vowp/orchestrator-list-local.json"
+    ))
+    .unwrap();
+    assert_eq!(cards[0].node.as_ref().unwrap().as_str(), "mac-studio");
 }
 
 #[test]

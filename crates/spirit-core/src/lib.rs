@@ -25,21 +25,34 @@ pub use connection::{
     ConnectStage, ConnectionManager, ConnectionSnapshot, ConnectionState, LatencyStats, PollPolicy,
     PollScheduler, Revision, SpiritEvent,
 };
-pub use engine::gate::{AsifGate, GateSnapshot, LocalAgentState, LocalOrchestratorGate};
+pub use engine::gate::{
+    AsifGate, GateSnapshot, LocalAgentState, LocalAgentStatus, LocalOrchestratorGate,
+    local_orchestrator_enabled,
+};
+pub use engine::local::{
+    LocalNodeState, LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorPrerequisite,
+    LocalOrchestratorState, LocalPathMapStatus,
+};
 pub use engine::{EngineStatus, Keychain, SecretString, StackSpiritEngine};
 pub use error::{SpiritError, SpiritErrorCode};
 pub use host::{
     HostId, HostKeyPin, HostProfile, HostProfilePatch, HostStore, NewHostProfile, SshTarget,
 };
-pub use service::{KeyStatus, SpiritCore};
+pub use service::{KeyStatus, SpiritCore, SpiritService};
 pub use time::{Clock, SystemClock, Timestamp};
-pub use view::{CapacityView, FleetView, JobLanes};
+pub use view::{
+    CapacityView, FleetView, JobLanes, LocalAgentView, LocalOrchestratorView, LocalSessionState,
+    LocalSurfaceView,
+};
 pub use vowp::{
-    AsifExport, AsifExportOptions, AsifImportOptions, AsifLossPolicy, AsifPackage, VowpClient,
+    AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
+    AsifLossPolicy, AsifPackage, LocalAgentClient, SurfacePairing, SurfacePairingView, VowpClient,
     VowpProbe, ensure_package_size,
 };
 pub use wire::{
-    ASIF_ARCHIVE_CAP_BYTES, ASIF_FORMAT, ASIF_JSON_CAP_BYTES, AsifCounts, AsifExportSummary,
-    AsifImportResponse, AsifLoss, AsifReport, AsifSessionRef, CapacityReportDoc, FleetQueueRow,
-    FleetStatus, InboxItem, Snapshot, parse_asif_export_summary, parse_asif_import_response,
+    AGENT_PROTOCOL, ASIF_ARCHIVE_CAP_BYTES, ASIF_FORMAT, ASIF_JSON_CAP_BYTES, AgentPathMap,
+    AgentStatusDocument, AsifCounts, AsifExportSummary, AsifImportResponse, AsifLoss, AsifReport,
+    AsifSessionRef, CapacityReportDoc, FleetQueueRow, FleetStatus, InboxItem, NodeCard, PathRef,
+    Snapshot, SurfaceEntry, SurfacePairRequest, SurfaceRotateRequest, parse_asif_export_summary,
+    parse_asif_import_response,
 };

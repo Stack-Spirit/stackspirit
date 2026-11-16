@@ -166,6 +166,25 @@ pub enum LocalAgentState {
     Incompatible,
 }
 
+impl LocalAgentState {
+    /// Returns the stable wire/display label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::NotInstalled => "not_installed",
+            Self::NotEnrolled => "not_enrolled",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Revoked => "revoked",
+            Self::Superseded => "superseded",
+            Self::Stopped => "stopped",
+            Self::Incompatible => "incompatible",
+        }
+    }
+}
+
 /// The Mac-side local agent status. It is displayed separately from the home gate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalAgentStatus {
@@ -247,9 +266,42 @@ impl GateSnapshot {
     #[must_use]
     pub fn local_orchestrator_enabled(&self) -> bool {
         self.features.local_orchestrator_actions
-            && matches!(self.local_orchestrator, LocalOrchestratorGate::Ready { .. })
-            && self.local_agent.state == LocalAgentState::Connected
+            && local_orchestrator_enabled(
+                &self.local_orchestrator,
+                self.local_agent.state == LocalAgentState::Connected,
+            )
     }
+
+    /// Returns the D6 flag the current gate and local-agent state would advertise.
+    #[must_use]
+    pub fn local_orchestrator_actions_allowed(&self) -> bool {
+        local_orchestrator_enabled(
+            &self.local_orchestrator,
+            self.local_agent.state == LocalAgentState::Connected,
+        )
+    }
+
+    /// Enables the D6 feature switch only for `Ready` with a connected local agent.
+    ///
+    /// This is the one place the flag is derived. A `WaitingForVowpPhase3`,
+    /// `Incompatible`, `Unreachable`, `Unknown` or `Probing` gate, or any local-agent
+    /// state other than `connected`, keeps the actions disabled.
+    pub fn enforce_local_orchestrator_flag(&mut self) {
+        self.features.local_orchestrator_actions = self.local_orchestrator_actions_allowed();
+    }
+}
+
+/// The exact three-part D6 enable rule from `D6-READINESS.md` §2.1.
+///
+/// The build flag is checked separately by [`GateSnapshot::local_orchestrator_enabled`].
+/// This function answers the capability question: the gate is `Ready` and the Mac agent
+/// is `connected`.
+#[must_use]
+pub fn local_orchestrator_enabled(
+    gate: &LocalOrchestratorGate,
+    local_agent_connected: bool,
+) -> bool {
+    matches!(gate, LocalOrchestratorGate::Ready { .. }) && local_agent_connected
 }
 
 /// A cached gate snapshot, refreshed on connect, version change or explicit re-probe.

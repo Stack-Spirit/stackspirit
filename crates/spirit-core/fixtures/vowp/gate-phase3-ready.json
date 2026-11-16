@@ -53,6 +53,6 @@
   },
   "features": {
     "asif_actions": false,
-    "local_orchestrator_actions": false
+    "local_orchestrator_actions": true
   }
 }

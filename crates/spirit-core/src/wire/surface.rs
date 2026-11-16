@@ -1,10 +1,11 @@
-//! Orchestrator cards. The current contract has **no `node` field**; StackSpirit must
-//! never assume one (see `docs/VOWP-CONTRACT.md` §11.3.3).
+//! Orchestrator cards. The merged v0.4 protocol adds an optional `node`; an installed
+//! build may omit it and a v0.2 card legitimately has `None`. StackSpirit displays it
+//! when present and never infers a node from its absence (`VOWP-CONTRACT.md` §11.3.3).
 
 use serde::{Deserialize, Serialize};
 
 use crate::wire::enums::OrchestratorApp;
-use crate::wire::ids::{ProjectName, SessionId};
+use crate::wire::ids::{NodeName, ProjectName, SessionId};
 
 /// Join instructions for the three ways to reach an orchestrator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,8 +29,11 @@ pub struct OrchestratorCard {
     pub project: Option<ProjectName>,
     /// App the orchestrator runs in.
     pub app: OrchestratorApp,
-    /// `running`, `stopped` or `degraded`.
+    /// `starting`, `running`, `stopped`, `degraded`, `node_offline` or `failed`.
     pub state: String,
+    /// Node that runs the app; `None` for a home-hosted v0.2 orchestrator.
+    #[serde(default)]
+    pub node: Option<NodeName>,
     /// How to join from the three surfaces.
     pub join: JoinInstructions,
 }
