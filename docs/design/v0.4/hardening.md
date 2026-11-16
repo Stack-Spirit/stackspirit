@@ -1,11 +1,12 @@
 # v0.4 — phase 4 hardening: optional WSS, a service, rotation, bundles, a separate user and metrics
 
-Status: **implemented in this tree; the phase-exit evidence is outstanding.** The four library
-slices and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the shipped
-behaviour. Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1
-describes them. The seven-day soak (§8.3), the rollback drill (§8.4) and the independent
-security-review sign-off are phase-exit activities recorded by the evidence slice, not claims in
-this page. No soak run or rollback result is claimed here. No release, tag or date is promised.
+Status: **implemented in this tree; the available phase-exit evidence is recorded in
+[`docs/releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md).** The four library slices
+and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the shipped behaviour.
+Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1 describes them.
+The security review (§8.2) and the rollback drill (§8.4) results are recorded on the evidence page;
+the review leaves one shared-checkout item as an open owner question, and the seven-day soak (§8.3)
+has not been run and remains an open owner question. No release, tag or date is promised.
 
 This page began as the plan for the phase and keeps the design-time wording and markers in the
 sections below. Where a §2–§7 sentence calls a command or flag *(planned)*, the name is the design
@@ -61,8 +62,9 @@ Known deviations from the text below:
 - The gateway does not discard a queued rotation whose replacement token expired before delivery.
   It delivers the frame; the home refuses the expired token on first use and the owner re-pairs.
   `--wait` still stops at the delivery deadline and reports `rotation_pending`.
-- The soak and the rollback drill are not run by this documentation slice; §8.3 and §8.4 remain
-  the evidence contract for the evidence slice.
+- The rollback drill is recorded in
+  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The seven-day soak is not
+  run; §8.3 remains the open owner question.
 
 ## 1. Scope, invariants and vocabulary
 
@@ -970,6 +972,10 @@ DISK_MIN SOURCE`. No path, token or secret appears.
 | **Ship:** global schema v7 `capacity_rollups` with the v6-to-v7 migration and backup in `migrate.rs`, called from `Store::open_global_unbound` in `db.rs`; the rollup writer and pruner; the `CapacityHistory` type and schema registration; `vowp capacity history` human/JSON output. **Files:** `crates/vowp-store/src/schema/global.sql`, `crates/vowp-store/src/db.rs`, `crates/vowp-store/src/migrate.rs`, `crates/vowp-store/src/repo_capacity.rs`, `crates/vowp-store/tests/migrate.rs`, `crates/vowp-store/tests/metrics.rs` *(new)*, `crates/vowp-core/src/capacity/sampler.rs`, `crates/vowp-core/src/capacity/history.rs` *(new)*, `crates/vowp-core/src/capacity/mod.rs`, `crates/vowp-core/tests/capacity_measure.rs`, `crates/vowp-protocol/src/capacity.rs`, `crates/vowp-protocol/src/schema.rs`, `crates/vowp-protocol/tests/schema.rs`, `crates/vowp-cli/src/cli.rs`, `crates/vowp-cli/src/cmd/capacity.rs`, `crates/vowp-cli/tests/capacity.rs`. | `capacity_rollups_migrates_v6_to_v7_with_a_backup` (new), `capacity_history_buckets_raw_samples_into_five_minute_points` (new), `capacity_history_is_idempotent_across_a_repeated_tick` (new), `capacity_history_keeps_thirty_days_and_prunes_the_rest` (new), `capacity_history_clamps_since_to_the_retained_window` (new), `capacity_history_json_matches_the_exported_schema` (new), `capacity_history_is_read_only_and_writes_no_ledger_row` (new), `sampler_prunes_old_rows` (existing; keep green with the new 48-hour window), `sampler_degrades_on_non_linux` (existing; keep green with the fallback rollup). | Alerts and notifications; per-node history; Prometheus/OpenTelemetry export; configurable retention; cost budgets; a daemon route; long-term archive; a chart UI. |
 
 ## 8. Docs and release gates
+
+The evidence record is [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md): it
+carries the §8.2 checklist with code and test links and the §8.4 drill commands and results. §8.3
+is not claimed there.
 
 ### 8.1 Documentation set
 
