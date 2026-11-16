@@ -1433,7 +1433,7 @@ fn bundle_result_is_chunked_and_resumed_after_a_disconnect() {
     let repo = repo_dir.path().join("worktree");
     let git = SystemGit::new();
     std::fs::create_dir_all(&repo).expect("repo");
-    git_ok(&git, &repo, &["init", "-b", "main"]);
+    git_init(&git, &repo);
     std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
     git_ok(&git, &repo, &["add", "-A"]);
     git_ok(&git, &repo, &["commit", "-m", "base"]);
@@ -1595,7 +1595,7 @@ fn a_home_bundle_abort_fails_the_run_without_chunks() {
     let repo = repo_dir.path().join("worktree");
     let git = SystemGit::new();
     std::fs::create_dir_all(&repo).expect("repo");
-    git_ok(&git, &repo, &["init", "-b", "main"]);
+    git_init(&git, &repo);
     std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
     git_ok(&git, &repo, &["add", "-A"]);
     git_ok(&git, &repo, &["commit", "-m", "base"]);
@@ -1668,7 +1668,7 @@ fn bundle_summary_waits_for_a_delayed_accept() {
     let repo = repo_dir.path().join("worktree");
     let git = SystemGit::new();
     std::fs::create_dir_all(&repo).expect("repo");
-    git_ok(&git, &repo, &["init", "-b", "main"]);
+    git_init(&git, &repo);
     std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
     git_ok(&git, &repo, &["add", "-A"]);
     git_ok(&git, &repo, &["commit", "-m", "base"]);
@@ -1740,6 +1740,16 @@ fn bundle_summary_waits_for_a_delayed_accept() {
     );
 }
 
+/// Initialises a test repository with a commit identity local to it.
+///
+/// CI runners have no global `user.name`/`user.email`, and the tests must never read the
+/// owner's `~/.gitconfig`; the identity lives in the temporary repository's own config.
+fn git_init(git: &SystemGit, repo: &Path) {
+    git_ok(git, repo, &["init", "-b", "main"]);
+    git_ok(git, repo, &["config", "user.name", "vowp test"]);
+    git_ok(git, repo, &["config", "user.email", "vowp-test@example.invalid"]);
+}
+
 /// Runs git in `cwd`, asserting success.
 fn git_ok(git: &SystemGit, cwd: &Path, args: &[&str]) {
     let output = git.run(cwd, args).expect("git");
@@ -1759,7 +1769,7 @@ fn create_job_bundle_returns_one_ref_and_only_committed_objects() {
     let repo = dir.path().join("worktree");
     let git = SystemGit::new();
     std::fs::create_dir_all(&repo).expect("repo");
-    git_ok(&git, &repo, &["init", "-b", "main"]);
+    git_init(&git, &repo);
     std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
     git_ok(&git, &repo, &["add", "-A"]);
     git_ok(&git, &repo, &["commit", "-m", "base"]);
