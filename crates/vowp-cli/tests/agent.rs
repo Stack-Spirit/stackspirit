@@ -2079,6 +2079,7 @@ fn agent_run_service_refuses_a_loose_state_dir_with_exit_five() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn agent_run_service_writes_the_run_marker_and_drains_on_sigterm() {
     let home = TempDir::new().expect("temp home");
