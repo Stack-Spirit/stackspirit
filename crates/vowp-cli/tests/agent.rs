@@ -2064,6 +2064,28 @@ fn agent_gateway_refuses_a_non_loopback_bind() {
 }
 
 #[test]
+fn agent_gateway_stdio_refuses_an_uninitialised_home() {
+    // A home that has never run `vowp init` has no store and no `~/.vowp` state.
+    let home = TempDir::new().expect("temp home");
+    let (code, stdout, stderr) = run_binary(home.path(), &["agent", "gateway", "--stdio"]);
+
+    assert_eq!(code, 3, "an uninitialised home is not found: {stderr}");
+    assert!(stdout.is_empty(), "a refusal writes no agent frame: {stdout}");
+    assert!(
+        stderr.contains("vowp home is not initialised"),
+        "the refusal must say the home is not initialised: {stderr}"
+    );
+    assert!(
+        stderr.contains("vowp init"),
+        "the refusal must name the command that fixes it: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no project selected"),
+        "the refusal must not look like a project-selection failure: {stderr}"
+    );
+}
+
+#[test]
 fn agent_gateway_stdio_enrolls_and_handshakes_on_a_multi_project_home() {
     let home = GatewayHome::new(&["alpha", "beta"]);
     let node = NodeName::parse("mac-studio").expect("node slug");
