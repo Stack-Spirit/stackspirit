@@ -11,18 +11,24 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::SpiritError;
-use crate::ssh::command::CommandOutput;
+use crate::ssh::command::{CommandOutput, CommandSpec};
 use crate::ssh::{CommandRunner, SshOptions, SshTarget, ssh_command};
 use crate::time::Timestamp;
 
 const GATE_CACHE_TTL_SECS: u64 = 10 * 60;
 const NIL_ULID: &str = "00000000000000000000000000";
 
-/// The `orchestrator new` after-help sentence that proves the Phase 3 local-node meaning.
+/// The `orchestrator new` after-help sentence that proves the local-node meaning.
 /// The global SSH selector says only "Run the command on that node over ssh"; that string
 /// is never accepted as proof (D6-READINESS.md §2.2.2).
 const ORCHESTRATOR_NEW_LOCAL_NODE_TEXT: [&str; 2] =
     ["names the node that runs the app", "not an SSH redirect"];
+
+/// The `surface pair` after-help sentence that proves `--node` is the surface's node.
+/// The top-level `vowp surface --help` sentence is not accepted; the probe reads
+/// `vowp surface pair --help`, where the merged CLI repeats the local meaning.
+const SURFACE_PAIR_LOCAL_NODE_TEXT: [&str; 2] =
+    ["names the node the surface runs on", "not an SSH redirect"];
 
 /// The complete Phase 3 capability set named by `VOWP-CONTRACT.md` §11.3.
 pub const PHASE3_MILESTONES: [&str; 6] = [
@@ -402,7 +408,20 @@ fn version_from_output(output: &CommandOutput) -> Option<String> {
 }
 
 fn safe_detail(error: &SpiritError) -> String {
-    let redacted = crate::error::redact(&error.message);
+    let scrubbed = safe_text(&error.message);
+    if scrubbed.is_empty() {
+        error.code.as_str().to_owned()
+    } else {
+        scrubbed
+    }
+}
+
+/// Redacts secrets and path-like tokens from a short display string.
+///
+/// Evidence and `LocalAgentStatus.last_error` may quote VOWP text; no home path, state
+/// directory, key file, or token may survive this filter.
+fn safe_text(input: &str) -> String {
+    let redacted = crate::error::redact(input);
     let scrubbed: String = redacted
         .split_whitespace()
         .map(|word| {
@@ -419,10 +438,21 @@ fn safe_detail(error: &SpiritError) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    if scrubbed.is_empty() {
-        error.code.as_str().to_owned()
-    } else {
-        scrubbed.chars().take(200).collect()
+    scrubbed.chars().take(200).collect()
+}
+
+fn local_agent_state_label(state: LocalAgentState) -> &'static str {
+    match state {
+        LocalAgentState::Unknown => "unknown",
+        LocalAgentState::NotInstalled => "not_installed",
+        LocalAgentState::NotEnrolled => "not_enrolled",
+        LocalAgentState::Connecting => "connecting",
+        LocalAgentState::Connected => "connected",
+        LocalAgentState::Reconnecting => "reconnecting",
+        LocalAgentState::Revoked => "revoked",
+        LocalAgentState::Superseded => "superseded",
+        LocalAgentState::Stopped => "stopped",
+        LocalAgentState::Incompatible => "incompatible",
     }
 }
 
@@ -444,6 +474,116 @@ fn safe_protocol(input: &str) -> String {
 
 fn evidence_exit(label: &str, output: &CommandOutput) -> String {
     format!("{label}: exit {}", output.status)
+}
+
+/// Runs one home-side `--help` probe and records whether the merged CLI advertises the
+/// exact flags and local-node meaning D6 needs. A missing or ambiguous help stays
+/// `Waiting`; it is never accepted as evidence for a different command.
+async fn probe_home_help(
+    runner: &dyn CommandRunner,
+    options: &GateProbeOptions,
+    label: &str,
+    args: &[&str],
+    required: &[&str],
+    evidence: &mut Vec<String>,
+) -> Result<bool, SpiritError> {
+    let argv = {
+        let mut argv = base_argv(options, false);
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        argv
+    };
+    match run_remote(runner, options, &argv).await {
+        Ok(output) if output.success() => {
+            let text = output.stdout_text();
+            if required.iter().all(|needle| text.contains(needle)) {
+                evidence.push(format!("{label}: exit 0"));
+                Ok(true)
+            } else {
+                evidence.push(format!("{label}: required flags/text not advertised"));
+                Ok(false)
+            }
+        }
+        Ok(output) => {
+            evidence.push(evidence_exit(label, &output));
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Runs the Mac-side help probes that prove the local agent can pair a surface, run the
+/// daemon, and read its path map. Failures are missing capabilities, not `Unreachable`:
+/// the home gate is still a valid read when the local binary is old or absent.
+async fn probe_local_agent_commands(
+    runner: &dyn CommandRunner,
+    evidence: &mut Vec<String>,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    let checks: [(&str, &[&str], &[&str], &str); 3] = [
+        (
+            "vowp agent pair --help",
+            &["agent", "pair", "--help"],
+            &["--code-file", "--surface", "--session"],
+            "local surface pairing",
+        ),
+        (
+            "vowp agent run --help",
+            &["agent", "run", "--help"],
+            &["--foreground", "--role"],
+            "local agent run",
+        ),
+        (
+            "vowp agent paths --help",
+            &["agent", "paths", "--help"],
+            &["add", "rm", "ls"],
+            "local path map",
+        ),
+    ];
+    for (label, args, required, missing_label) in checks {
+        let spec = CommandSpec::new("vowp", args.iter().map(|arg| (*arg).to_owned()).collect())
+            .with_timeout(Duration::from_secs(10));
+        match runner.run(&spec).await {
+            Ok(output) if output.success() => {
+                let text = output.stdout_text();
+                if required.iter().all(|needle| text.contains(needle)) {
+                    evidence.push(format!("{label}: exit 0"));
+                } else {
+                    evidence.push(format!("{label}: required flags/text not advertised"));
+                    missing.push(missing_label.to_owned());
+                }
+            }
+            Ok(output) => {
+                evidence.push(evidence_exit(label, &output));
+                missing.push(missing_label.to_owned());
+            }
+            Err(_) => {
+                evidence.push(format!("{label}: unavailable"));
+                missing.push(missing_label.to_owned());
+            }
+        }
+    }
+
+    // Service and doctor are optional local prerequisites, not Ready gates. Record what
+    // the installed local binary advertises so the details drawer can explain a gap.
+    for (label, args) in [
+        (
+            "vowp agent service --help",
+            &["agent", "service", "--help"][..],
+        ),
+        (
+            "vowp agent doctor --help",
+            &["agent", "doctor", "--help"][..],
+        ),
+    ] {
+        let spec = CommandSpec::new("vowp", args.iter().map(|arg| (*arg).to_owned()).collect())
+            .with_timeout(Duration::from_secs(10));
+        match runner.run(&spec).await {
+            Ok(output) if output.success() => evidence.push(format!("{label}: exit 0 (optional)")),
+            Ok(output) => evidence.push(format!("{} (optional)", evidence_exit(label, &output))),
+            Err(_) => evidence.push(format!("{label}: unavailable (optional)")),
+        }
+    }
+    missing
 }
 
 /// Probes ASIF export and import support. Read-only: the export probe uses the nil ULID
@@ -622,6 +762,12 @@ struct AgentStatusDoc {
     last_heartbeat: Option<Timestamp>,
     #[serde(default)]
     last_error: Option<String>,
+    /// Present in the merged Phase 3/4 `agent status` document. Older builds omit it;
+    /// absence keeps the `local cache` capability `Waiting`.
+    #[serde(default)]
+    cache_entries: Option<u64>,
+    #[serde(default)]
+    cache_bytes: Option<u64>,
 }
 
 /// Probes the home capability and the Mac-side local agent separately.
@@ -630,7 +776,7 @@ pub async fn probe_local_orchestrator(
     local_runner: Option<&dyn CommandRunner>,
     options: &GateProbeOptions,
 ) -> (LocalOrchestratorGate, LocalAgentStatus) {
-    let local_agent = probe_local_agent(local_runner).await;
+    let (local_agent, local_cache_reported) = probe_local_agent(local_runner).await;
     let mut evidence = Vec::new();
     let version_argv = {
         let mut argv = base_argv(options, false);
@@ -689,10 +835,23 @@ pub async fn probe_local_orchestrator(
     // An active local agent is proven by `node show`, never inferred from this shape.
     let names: Vec<String> = match node_list {
         Ok(output) if output.success() => {
-            evidence.push("vowp node ls --json: exit 0".to_owned());
-            serde_json::from_slice::<Vec<NodeListRow>>(&output.stdout)
-                .map(|rows| rows.into_iter().map(|row| row.name).collect())
-                .unwrap_or_default()
+            match serde_json::from_slice::<Vec<NodeListRow>>(&output.stdout) {
+                Ok(rows) => {
+                    evidence.push("vowp node ls --json: exit 0".to_owned());
+                    rows.into_iter().map(|row| row.name).collect()
+                }
+                Err(_) => {
+                    evidence.push("vowp node ls --json: not a Node[] document".to_owned());
+                    return (
+                        LocalOrchestratorGate::Incompatible {
+                            detected: "vowp node ls --json is not the documented array".to_owned(),
+                            required: "a JSON array of node rows".to_owned(),
+                            evidence,
+                        },
+                        local_agent,
+                    );
+                }
+            }
         }
         Ok(output) => {
             evidence.push(evidence_exit("vowp node ls --json", &output));
@@ -721,6 +880,7 @@ pub async fn probe_local_orchestrator(
 
     let mut active_agent: Option<NodeCardProbe> = None;
     let mut active_agent_not_online = false;
+    let mut malformed_card = false;
     for name in names.iter().take(16) {
         let argv = {
             let mut argv = base_argv(options, true);
@@ -750,6 +910,7 @@ pub async fn probe_local_orchestrator(
         }
         let Ok(card) = serde_json::from_slice::<NodeCardProbe>(&output.stdout) else {
             evidence.push("vowp node show --json: parse failed".to_owned());
+            malformed_card = true;
             continue;
         };
         // A card without kind/status/presence cannot prove an active local agent.
@@ -771,6 +932,16 @@ pub async fn probe_local_orchestrator(
                 local_agent,
             );
         };
+        if card.name.as_deref().is_none_or(str::is_empty) {
+            return (
+                LocalOrchestratorGate::Incompatible {
+                    detected: format!("node card for {} is missing its name", safe_token(name, 64)),
+                    required: "NodeCard with a name".to_owned(),
+                    evidence,
+                },
+                local_agent,
+            );
+        }
         evidence.push(format!(
             "vowp node show --json: kind={} status={} presence={}",
             safe_token(kind, 16),
@@ -790,6 +961,16 @@ pub async fn probe_local_orchestrator(
         }
     }
     let Some(agent_card) = active_agent else {
+        if malformed_card {
+            return (
+                LocalOrchestratorGate::Incompatible {
+                    detected: "a node card is not a NodeCard".to_owned(),
+                    required: "NodeCard with kind, status and presence".to_owned(),
+                    evidence,
+                },
+                local_agent,
+            );
+        }
         if active_agent_not_online {
             evidence.push("local agent node is not online".to_owned());
         }
@@ -842,11 +1023,20 @@ pub async fn probe_local_orchestrator(
         argv
     };
     match run_remote(runner, options, &offload_argv).await {
-        Ok(output)
-            if output.success()
-                && serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok() =>
-        {
-            evidence.push("vowp offload status --json: exit 0".to_owned());
+        Ok(output) if output.success() => {
+            let documented = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .is_some_and(|doc| {
+                    ["nodes", "assignments", "ready"]
+                        .iter()
+                        .all(|key| doc.get(*key).is_some_and(serde_json::Value::is_array))
+                });
+            if documented {
+                evidence.push("vowp offload status --json: exit 0".to_owned());
+            } else {
+                evidence.push("vowp offload status --json: not the documented shape".to_owned());
+                missing.push("offload executor (Phase 2)".to_owned());
+            }
         }
         Ok(output) => {
             evidence.push(evidence_exit("vowp offload status --json", &output));
@@ -862,45 +1052,81 @@ pub async fn probe_local_orchestrator(
         }
     }
 
-    for (label, missing_label, args, needle) in [
+    // The merged v0.4 CLI surface. `surface pair`/`rotate` repeat the local-node meaning
+    // in their after-help; the top-level `surface --help` sentence and the global SSH
+    // selector are never accepted on their own. `agent surface start|attach|detach` is a
+    // design sketch, not a command in the merged source, so it is not probed.
+    let home_checks: [(&str, &[&str], &[&str], &str); 8] = [
         (
-            "vowp agent surface start --help",
-            "local opencode app host",
-            vec!["agent", "surface", "start", "--help"],
-            None,
+            "vowp surface pair --help",
+            &["surface", "pair", "--help"],
+            &[
+                "--session",
+                "--kind",
+                "--app",
+                "--replace",
+                SURFACE_PAIR_LOCAL_NODE_TEXT[0],
+                SURFACE_PAIR_LOCAL_NODE_TEXT[1],
+            ],
+            "surface pairing",
         ),
         (
-            "vowp agent surface attach --help",
-            "surface bridge",
-            vec!["agent", "surface", "attach", "--help"],
-            None,
+            "vowp surface ls --help",
+            &["surface", "ls", "--help"],
+            &[],
+            "surface read model",
+        ),
+        (
+            "vowp surface revoke --help",
+            &["surface", "revoke", "--help"],
+            &["--yes"],
+            "surface revocation",
+        ),
+        (
+            "vowp surface rotate --help",
+            &["surface", "rotate", "--help"],
+            &[
+                "--wait",
+                "--grace",
+                SURFACE_PAIR_LOCAL_NODE_TEXT[0],
+                SURFACE_PAIR_LOCAL_NODE_TEXT[1],
+            ],
+            "surface rotation",
         ),
         (
             "vowp mcp --help",
+            &["mcp", "--help"],
+            &["--agent-socket", "--surface"],
             "MCP proxy",
-            vec!["mcp", "--help"],
-            Some("--agent-socket"),
         ),
-    ] {
-        let argv = {
-            let mut argv = base_argv(options, false);
-            argv.extend(args.into_iter().map(str::to_owned));
-            argv
-        };
-        match run_remote(runner, options, &argv).await {
-            Ok(output) if output.success() => {
-                let text = output.stdout_text();
-                if needle.is_none_or(|needle| text.contains(needle)) {
-                    evidence.push(format!("{label}: exit 0"));
-                } else {
-                    evidence.push(format!("{label}: flag not advertised"));
-                    missing.push(missing_label.to_owned());
-                }
-            }
-            Ok(output) => {
-                evidence.push(evidence_exit(label, &output));
-                missing.push(missing_label.to_owned());
-            }
+        (
+            "vowp orchestrator new --help",
+            &["orchestrator", "new", "--help"],
+            &[
+                "--app",
+                "--force",
+                ORCHESTRATOR_NEW_LOCAL_NODE_TEXT[0],
+                ORCHESTRATOR_NEW_LOCAL_NODE_TEXT[1],
+            ],
+            "orchestrator materialization",
+        ),
+        (
+            "vowp orchestrator stop --help",
+            &["orchestrator", "stop", "--help"],
+            &[],
+            "orchestrator lifecycle",
+        ),
+        (
+            "vowp orchestrator resume --help",
+            &["orchestrator", "resume", "--help"],
+            &[],
+            "orchestrator lifecycle",
+        ),
+    ];
+    for (label, args, required, missing_label) in home_checks {
+        match probe_home_help(runner, options, label, args, required, &mut evidence).await {
+            Ok(true) => {}
+            Ok(false) => missing.push(missing_label.to_owned()),
             Err(error) => {
                 return (
                     LocalOrchestratorGate::Unreachable {
@@ -912,99 +1138,6 @@ pub async fn probe_local_orchestrator(
         }
     }
 
-    // The Phase 3 local-node meaning is an after-help sentence, not the presence of
-    // `--node`: the global SSH selector also advertises `--node`. Only the local-node
-    // text proves the D6 create command; ambiguous help stays `Waiting`.
-    let orchestrator_new_argv = {
-        let mut argv = base_argv(options, false);
-        argv.extend([
-            "orchestrator".to_owned(),
-            "new".to_owned(),
-            "--help".to_owned(),
-        ]);
-        argv
-    };
-    match run_remote(runner, options, &orchestrator_new_argv).await {
-        Ok(output) if output.success() => {
-            let text = output.stdout_text();
-            if ORCHESTRATOR_NEW_LOCAL_NODE_TEXT
-                .iter()
-                .all(|needle| text.contains(needle))
-            {
-                evidence
-                    .push("vowp orchestrator new --help: local-node meaning present".to_owned());
-            } else if text.contains("--node") {
-                evidence.push(
-                    "vowp orchestrator new --help: --node is only the global SSH selector"
-                        .to_owned(),
-                );
-                missing.push("orchestrator materialization".to_owned());
-            } else {
-                evidence.push("vowp orchestrator new --help: --node not advertised".to_owned());
-                missing.push("orchestrator materialization".to_owned());
-            }
-        }
-        Ok(output) => {
-            evidence.push(evidence_exit("vowp orchestrator new --help", &output));
-            missing.push("orchestrator materialization".to_owned());
-        }
-        Err(error) => {
-            return (
-                LocalOrchestratorGate::Unreachable {
-                    detail: safe_detail(&error),
-                },
-                local_agent,
-            );
-        }
-    }
-
-    let node_paths_argv = {
-        let mut argv = base_argv(options, true);
-        argv.extend([
-            "--project".to_owned(),
-            project.clone(),
-            "node".to_owned(),
-            "paths".to_owned(),
-            safe_token(agent_card.name.as_deref().unwrap_or_default(), 64),
-        ]);
-        argv
-    };
-    match run_remote(runner, options, &node_paths_argv).await {
-        Ok(output) if output.success() => {
-            evidence.push("vowp node paths --json: exit 0".to_owned());
-        }
-        Ok(output) => {
-            // The installed/contracted CLI may lack `node paths` entirely. That is a
-            // missing VOWP capability, not a false negative: say so and stay `Waiting`.
-            let text = output.stderr_text().to_ascii_lowercase();
-            let unsupported = [
-                "unrecognized subcommand",
-                "unknown command",
-                "invalid subcommand",
-                "unexpected argument",
-            ]
-            .iter()
-            .any(|needle| text.contains(needle));
-            if unsupported {
-                evidence.push(format!(
-                    "vowp node paths --json: exit {} (unsupported subcommand)",
-                    output.status
-                ));
-            } else {
-                evidence.push(evidence_exit("vowp node paths --json", &output));
-            }
-            missing.push("local cache".to_owned());
-        }
-        Err(error) => {
-            return (
-                LocalOrchestratorGate::Unreachable {
-                    detail: safe_detail(&error),
-                },
-                local_agent,
-            );
-        }
-    }
-
     let orchestrator_ls_argv = {
         let mut argv = base_argv(options, true);
         argv.extend(["orchestrator".to_owned(), "ls".to_owned()]);
@@ -1012,7 +1145,12 @@ pub async fn probe_local_orchestrator(
     };
     match run_remote(runner, options, &orchestrator_ls_argv).await {
         Ok(output) if output.success() => {
-            evidence.push("vowp orchestrator ls --json: exit 0".to_owned());
+            if serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).is_ok() {
+                evidence.push("vowp orchestrator ls --json: exit 0".to_owned());
+            } else {
+                evidence.push("vowp orchestrator ls --json: not an array".to_owned());
+                missing.push("orchestrator read model".to_owned());
+            }
         }
         Ok(output) => {
             evidence.push(evidence_exit("vowp orchestrator ls --json", &output));
@@ -1025,6 +1163,33 @@ pub async fn probe_local_orchestrator(
                 },
                 local_agent,
             );
+        }
+    }
+
+    // The Mac-side half is a required part of Ready. A local agent that is not installed,
+    // not enrolled, stopped, revoked, or reconnecting keeps the gate `Waiting`; it can
+    // never be `Ready` on the home probe alone.
+    if let Some(local) = local_runner {
+        if local_agent.state != LocalAgentState::NotInstalled {
+            missing.extend(probe_local_agent_commands(local, &mut evidence).await);
+        }
+    }
+    if local_agent.state != LocalAgentState::Connected {
+        evidence.push(format!(
+            "vowp agent status --json: {}",
+            local_agent_state_label(local_agent.state)
+        ));
+        missing.push("local agent connection".to_owned());
+    } else if local_agent.protocol.as_deref() != Some("vowp-agent/1") {
+        evidence.push("vowp agent status --json: local protocol not reported".to_owned());
+        missing.push("local agent protocol".to_owned());
+    }
+    if local_runner.is_some() && local_agent.state != LocalAgentState::NotInstalled {
+        if local_cache_reported {
+            evidence.push("vowp agent status --json: cache stats reported".to_owned());
+        } else {
+            evidence.push("vowp agent status --json: cache stats not reported".to_owned());
+            missing.push("local cache".to_owned());
         }
     }
 
@@ -1047,11 +1212,20 @@ pub async fn probe_local_orchestrator(
             capabilities: vec![
                 "node_card".to_owned(),
                 "offload_status".to_owned(),
-                "surface_start".to_owned(),
-                "surface_attach".to_owned(),
+                "surface_pair".to_owned(),
+                "surface_list".to_owned(),
+                "surface_revoke".to_owned(),
+                "surface_rotate".to_owned(),
                 "mcp_agent_socket".to_owned(),
                 "orchestrator_new_node".to_owned(),
+                "orchestrator_lifecycle".to_owned(),
                 "orchestrator_read".to_owned(),
+                "local_agent_connected".to_owned(),
+                "local_surface_pair".to_owned(),
+                "local_agent_run".to_owned(),
+                "backfill".to_owned(),
+                "local_path_map".to_owned(),
+                "local_cache".to_owned(),
             ],
             evidence,
         },
@@ -1059,27 +1233,36 @@ pub async fn probe_local_orchestrator(
     )
 }
 
-async fn probe_local_agent(local_runner: Option<&dyn CommandRunner>) -> LocalAgentStatus {
+async fn probe_local_agent(local_runner: Option<&dyn CommandRunner>) -> (LocalAgentStatus, bool) {
     let Some(runner) = local_runner else {
-        return LocalAgentStatus {
-            state: LocalAgentState::NotInstalled,
-            last_error: Some("local vowp is not available".to_owned()),
-            ..LocalAgentStatus::default()
-        };
+        return (
+            LocalAgentStatus {
+                state: LocalAgentState::NotInstalled,
+                last_error: Some("local vowp is not available".to_owned()),
+                ..LocalAgentStatus::default()
+            },
+            false,
+        );
     };
     let argv = vec!["--json".to_owned(), "agent".to_owned(), "status".to_owned()];
     let spec =
         crate::ssh::command::CommandSpec::new("vowp", argv).with_timeout(Duration::from_secs(10));
     match runner.run(&spec).await {
-        Ok(output) if output.status == 3 => LocalAgentStatus {
-            state: LocalAgentState::NotEnrolled,
-            ..LocalAgentStatus::default()
-        },
-        Ok(output) if !output.success() => LocalAgentStatus {
-            state: LocalAgentState::Unknown,
-            last_error: Some(format!("vowp agent status exited {}", output.status)),
-            ..LocalAgentStatus::default()
-        },
+        Ok(output) if output.status == 3 => (
+            LocalAgentStatus {
+                state: LocalAgentState::NotEnrolled,
+                ..LocalAgentStatus::default()
+            },
+            false,
+        ),
+        Ok(output) if !output.success() => (
+            LocalAgentStatus {
+                state: LocalAgentState::Unknown,
+                last_error: Some(format!("vowp agent status exited {}", output.status)),
+                ..LocalAgentStatus::default()
+            },
+            false,
+        ),
         Ok(output) => match serde_json::from_slice::<AgentStatusDoc>(&output.stdout) {
             Ok(doc) => {
                 let state = match doc.connection.as_deref().unwrap_or("unknown") {
@@ -1095,31 +1278,39 @@ async fn probe_local_agent(local_runner: Option<&dyn CommandRunner>) -> LocalAge
                     .protocol
                     .as_deref()
                     .is_some_and(|protocol| protocol != "vowp-agent/1");
-                LocalAgentStatus {
-                    state: if incompatible {
-                        LocalAgentState::Incompatible
-                    } else {
-                        state
+                let cache_reported = doc.cache_entries.is_some() && doc.cache_bytes.is_some();
+                (
+                    LocalAgentStatus {
+                        state: if incompatible {
+                            LocalAgentState::Incompatible
+                        } else {
+                            state
+                        },
+                        node: doc.node.map(|node| safe_token(&node, 64)),
+                        protocol: doc.protocol.map(|protocol| safe_protocol(&protocol)),
+                        last_heartbeat: doc.last_heartbeat,
+                        last_error: doc.last_error.map(|error| safe_text(&error)),
                     },
-                    node: doc.node.map(|node| safe_token(&node, 64)),
-                    protocol: doc.protocol.map(|protocol| safe_protocol(&protocol)),
-                    last_heartbeat: doc.last_heartbeat,
-                    last_error: doc
-                        .last_error
-                        .map(|error| error.chars().take(200).collect()),
-                }
+                    cache_reported,
+                )
             }
-            Err(_) => LocalAgentStatus {
-                state: LocalAgentState::Unknown,
-                last_error: Some("vowp agent status output is not valid JSON".to_owned()),
+            Err(_) => (
+                LocalAgentStatus {
+                    state: LocalAgentState::Unknown,
+                    last_error: Some("vowp agent status output is not valid JSON".to_owned()),
+                    ..LocalAgentStatus::default()
+                },
+                false,
+            ),
+        },
+        Err(error) => (
+            LocalAgentStatus {
+                state: LocalAgentState::NotInstalled,
+                last_error: Some(safe_detail(&error)),
                 ..LocalAgentStatus::default()
             },
-        },
-        Err(error) => LocalAgentStatus {
-            state: LocalAgentState::NotInstalled,
-            last_error: Some(safe_detail(&error)),
-            ..LocalAgentStatus::default()
-        },
+            false,
+        ),
     }
 }
 
@@ -1133,7 +1324,7 @@ mod tests {
             local_orchestrator: LocalOrchestratorGate::Ready {
                 agent_protocol: "vowp-agent/1".to_owned(),
                 node: Some("mac-studio".to_owned()),
-                capabilities: vec!["surface_start".to_owned()],
+                capabilities: vec!["surface_pair".to_owned()],
                 evidence: vec!["test".to_owned()],
             },
             asif: AsifGate::Ready {

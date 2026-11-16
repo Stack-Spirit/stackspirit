@@ -7,14 +7,30 @@
     "capabilities": [
       "node_card",
       "offload_status",
-      "surface_start",
-      "surface_attach",
+      "surface_pair",
+      "surface_list",
+      "surface_revoke",
+      "surface_rotate",
       "mcp_agent_socket",
       "orchestrator_new_node",
-      "orchestrator_read"
+      "orchestrator_lifecycle",
+      "orchestrator_read",
+      "local_agent_connected",
+      "local_surface_pair",
+      "local_agent_run",
+      "backfill",
+      "local_path_map",
+      "local_cache"
     ],
     "evidence": [
-      "vowp offload status --json: exit 0"
+      "vowp node show --json: kind=agent status=active presence=online",
+      "vowp offload status --json: exit 0",
+      "vowp surface pair --help: exit 0",
+      "vowp surface rotate --help: exit 0",
+      "vowp mcp --help: exit 0",
+      "vowp orchestrator new --help: exit 0",
+      "vowp orchestrator ls --json: exit 0",
+      "vowp agent status --json: cache stats reported"
     ]
   },
   "asif": {

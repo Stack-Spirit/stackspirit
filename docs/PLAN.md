@@ -1692,9 +1692,9 @@ API key             [ •••••••••••••••• ]  [ Save
 Two cards at the bottom of the Engine view:
 
 ```text
-Local orchestrator                     Waiting for VOWP Phase 2/3
+Local orchestrator                     Waiting for VOWP Phase 2/3/4
 Run global and project orchestrators on this Mac.
-Missing: local app host · bridge · MCP proxy · orchestrator materialization · backfill · local cache
+Missing: surface rotation · orchestrator materialization · local agent connection
 [ Details ]                            [ Run locally (disabled) ]
 
 .asif.zip sessions                     Waiting for VOWP ASIF
@@ -1753,7 +1753,7 @@ Missing: v4-asif-core · v4-asif-cli
 | D3 | `ss-3-fleet-canvas` | D2 | Fleet canvas, worker ring, job lanes, capacity/storage rail, inbox | Same |
 | D4 | `ss-4-engine-onboarding` | D2, D3 | Bundled StackSpirit Engine, included models, BYOK keychain, external harness picker, gate cards | Same; gate probes are read-only |
 | D5 | ASIF wiring | D4 + VOWP `v4-asif-*` | Live `.asif.zip` export/import | **Gated** |
-| D6 | Local orchestrators | D5 optional + VOWP Phase 2/3 `v4-local-3*` | Live local orchestrator sessions | **Gated** |
+| D6 | Local orchestrators | D5 optional + VOWP Phase 2/3/4 `v4-local-3*`/`v4-local-4f-cli-surface` | Live local orchestrator sessions | **Gated** |
 | W1 | Web app | D1–D4 | `apps/spirit-web` over HTTP/SSE | Same, later |
 | C1 | CLI | D1–D4 | `crates/spirit-cli` over `spirit-core` | Same, later |
 
@@ -2349,20 +2349,31 @@ The detailed contract is in `VOWP-CONTRACT.md` §11.2.
 
 ### 9.8 Phase D6 — local orchestrators (gated)
 
-Not implemented until VOWP Phase 2 (`v4-local-2e/2f/2g`) and Phase 3 (`v4-local-3*`) are
-merged, the local `vowp agent` is available, and the local agent is connected. When
-`LocalOrchestratorGate` is `Ready` **and** `features.local_orchestrator_actions` is
-enabled:
+Not implemented until VOWP Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`), and the
+Phase 4 CLI surface (`v4-local-4f-cli-surface`) are merged and a build containing them is
+installed on both the home and the Mac, and the local agent is enrolled and `connected`.
+When `LocalOrchestratorGate` is `Ready` **and**
+`features.local_orchestrator_actions` is enabled:
 
-- The Engine view can create/attach a local orchestrator through VOWP's own commands.
+- The Engine view creates a local orchestrator through VOWP's own home commands:
+  `vowp surface pair` then the Mac-side `vowp agent pair`, and
+  `vowp orchestrator new --node <mac> --app opencode` for the app host. `surface ls`,
+  `surface rotate`, and `surface revoke` own the surface token lifecycle;
+  `orchestrator ls|stop|resume` own the read model and lifecycle.
+- The Mac runs one `vowp agent run` (or the optional `vowp agent service install`), and
+  exposes MCP through `vowp mcp --agent-socket`; a chat surface uses
+  `vowp chat --agent --session <id>`. There is no `vowp agent surface start|attach|detach`
+  command in the merged CLI, so D6 does not call or require one.
 - A local orchestrator surface uses the StackSpirit Engine or the selected external
-  harness; VOWP owns the lease, log, and backfill.
+  harness; VOWP owns the lease, log, session mirror, and backfill.
 - The app displays the node, protocol, and agent status; disconnects and degraded states
-  are honest.
+  are honest. A local agent that is not enrolled or not `connected` leaves the gate
+  `Waiting`/`NotEnrolled`, never `Ready`.
 - The app never starts a second supervisor, never opens a VOWP database, and never sends
   a home secret to the desktop.
 
-The detailed contract and probe are in `VOWP-CONTRACT.md` §11.3.
+The detailed contract, command mapping, and probe are in `VOWP-CONTRACT.md` §11.3.
+
 
 ### 9.9 W1 — Web app (after Desktop MVP)
 

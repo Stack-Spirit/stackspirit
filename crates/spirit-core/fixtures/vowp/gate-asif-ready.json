@@ -3,11 +3,11 @@
   "local_orchestrator": {
     "state": "waiting_for_vowp_phase3",
     "missing": [
-      "local cache"
+      "local agent connection"
     ],
-    "detected_version": "0.4.0",
+    "detected_version": "0.3.0",
     "evidence": [
-      "vowp offload status --json: exit 0"
+      "vowp agent status --json: not_enrolled"
     ]
   },
   "asif": {
