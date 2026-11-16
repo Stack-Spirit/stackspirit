@@ -1080,6 +1080,229 @@ fn fake_gateway_bundle_result_end_to_end() {
 }
 
 #[test]
+fn bundle_post_import_gate_failure_keeps_the_inspection_ref_and_job_branch() {
+    let home = Home::new(HomeOptions {
+        result_transport: ResultTransport::Bundle,
+        ..HomeOptions::default()
+    });
+    let gateway = home.connect();
+    home.heartbeat(&gateway);
+    let (assignment, lease, _) = home.expect_assign(&gateway, 0);
+    assert_eq!(assignment.result_transport, ResultTransport::Bundle);
+    assert!(
+        assignment.remote_url.is_empty(),
+        "a bundle assignment carries no push remote"
+    );
+    home.accept(&gateway, &assignment);
+    // The bundle is a valid `base..job/<id>` transfer with one owned change and one path
+    // outside the job's `src/**` owns. Only the post-import gate can reject it.
+    let run = home.run_job(
+        &assignment,
+        &[
+            ("src/lib.rs", "pub fn bundled() -> u32 {\n    4\n}\n"),
+            ("notes/outside.txt", "not in the job brief\n"),
+        ],
+    );
+    home.hello(&gateway, &assignment, &lease);
+
+    // The node creates exactly one `base..job/<id>` bundle in its worktree.
+    let bundle_path = home.root.join("node-bundle");
+    let bundle_text = bundle_path.display().to_string();
+    git_ok(
+        &run.worktree,
+        &[
+            "bundle",
+            "create",
+            &bundle_text,
+            &format!("{}..job/{}", assignment.base_commit, assignment.job),
+        ],
+    );
+    let bytes = fs::read(&bundle_path).expect("bundle file");
+    let sha = result::sha256_hex(&bytes);
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::BundleStart {
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+        base: assignment.base_commit.clone(),
+        head: run.head.clone(),
+        branch: format!("job/{}", assignment.job),
+        bytes: bytes.len() as u64,
+        sha256: sha.clone(),
+    });
+    let accepted = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::BundleAccept { .. }));
+    match accepted {
+        AgentFrame::BundleAccept { offset, .. } => assert_eq!(offset, 0, "a fresh transfer starts at zero"),
+        other => panic!("expected BundleAccept, got {other:?}"),
+    }
+    for (index, chunk) in bytes.chunks(256 * 1024).enumerate() {
+        gateway.send(&AgentFrame::BundleChunk {
+            run_id: assignment.run_id.clone(),
+            epoch: assignment.epoch,
+            offset: (index * 256 * 1024) as u64,
+            data: to_hex(chunk),
+        });
+    }
+    gateway.send(&AgentFrame::BundleEnd {
+        run_id: assignment.run_id.clone(),
+        epoch: assignment.epoch,
+        bytes: bytes.len() as u64,
+        sha256: sha.clone(),
+    });
+    gateway.barrier();
+    assert!(
+        !gateway
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::BundleAbort { .. })),
+        "the gateway did not refuse the bundle: {:?}",
+        gateway.frames()
+    );
+
+    home.finishing(&gateway, &assignment, &run.head);
+    home.turn_end(&gateway, &assignment, summary_ok());
+
+    // The transfer and import succeeded; the gate rejection is the terminal result.
+    let run_row = home.store.require_run(&assignment.run_id).expect("run row");
+    assert_eq!(run_row.outcome, Some(RunOutcome::Error), "the run fails the gate");
+    assert!(
+        run_row.detail.contains("result_gate_failed"),
+        "run detail: {}",
+        run_row.detail
+    );
+    let record = result::load(&home.store, &assignment.run_id)
+        .expect("result record")
+        .expect("failed record");
+    assert_eq!(record.status, "failed");
+    assert_eq!(record.transport, "bundle");
+    assert_eq!(record.base_commit, home.base);
+    assert_eq!(record.head_commit.as_deref(), Some(run.head.as_str()));
+    assert!(
+        record.detail.starts_with("result_gate_failed:"),
+        "detail: {}",
+        record.detail
+    );
+    assert!(
+        !record.detail.contains("bundle_failed"),
+        "the bundle itself was accepted: {}",
+        record.detail
+    );
+
+    let job = home.job();
+    assert_eq!(job.state, JobState::Ready, "a gate failure keeps the job retryable");
+    assert!(job.note.contains("result_gate_failed"), "note: {}", job.note);
+    assert!(job.note.contains("owns_respected"), "note: {}", job.note);
+    assert!(job.note.contains("notes/outside.txt"), "note: {}", job.note);
+    assert_ne!(job.state, JobState::Merging);
+    assert!(job.worktree.is_none(), "the staging worktree is removed for a retry");
+    assert!(
+        !home
+            .deps
+            .paths
+            .root()
+            .join("agent-results")
+            .join(assignment.run_id.as_str())
+            .exists(),
+        "the staging worktree path is removed"
+    );
+    assert!(
+        !home
+            .deps
+            .paths
+            .root()
+            .join("tmp")
+            .join("agent-bundles")
+            .join(assignment.run_id.as_str())
+            .exists(),
+        "the staging bundle file and repository are removed after settle"
+    );
+
+    // Step 4 imported the objects before the gate ran: both refs stay at the verified head.
+    let inspection = format!("refs/vowp/jobs/{}", home.job.id);
+    assert_eq!(
+        git_output(&home.checkout, &["rev-parse", &inspection]).trim(),
+        run.head,
+        "the inspection ref stays at the verified head"
+    );
+    let branch = format!("refs/heads/job/{}", home.job.id);
+    assert_eq!(
+        git_output(&home.checkout, &["rev-parse", &branch]).trim(),
+        run.head,
+        "the local job branch stays at the verified head"
+    );
+
+    // A failed gate never merges and a bundle run never pushes.
+    let merges = home
+        .store
+        .ledger_since(&LedgerFilter {
+            kind: Some(vowp_protocol::LedgerKind::Merge),
+            job_id: Some(home.job.id.clone()),
+            ..LedgerFilter::default()
+        })
+        .expect("merge ledger");
+    assert!(merges.is_empty(), "a failed gate never merges");
+    assert_eq!(
+        git_output(&home.checkout, &["rev-parse", "HEAD"]).trim(),
+        home.base,
+        "the main checkout does not move"
+    );
+    assert_eq!(
+        git_output(&home.origin, &["rev-parse", "refs/heads/main"]).trim(),
+        home.base,
+        "the origin's default branch is untouched"
+    );
+    let pushed = git_output(&home.origin, &["for-each-ref", "--format=%(refname)", "refs/heads/job"]);
+    assert!(pushed.trim().is_empty(), "the bundle path never pushes: {pushed}");
+    let remote_branch = git_run(
+        &home.checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/job/{}", home.job.id),
+        ],
+    );
+    assert_ne!(
+        remote_branch.exit_code,
+        Some(0),
+        "the home never fetched a pushed job branch"
+    );
+
+    // The authoritative gates ran on the imported diff.
+    let gates = home
+        .store
+        .gate_results_for(&home.job.id, job.attempts)
+        .expect("gate results");
+    let owns = gates
+        .iter()
+        .find(|gate| gate.gate.kind() == GateKind::OwnsRespected)
+        .expect("owns result");
+    assert!(!owns.passed, "the outside path violates owns: {:?}", owns.evidence);
+    assert!(
+        matches!(
+            &owns.evidence,
+            vowp_protocol::Evidence::OwnsRespected { violations, .. }
+                if violations.iter().any(|path| path == "notes/outside.txt")
+        ),
+        "owns evidence: {:?}",
+        owns.evidence
+    );
+    let secrets = gates
+        .iter()
+        .find(|gate| gate.gate.kind() == GateKind::SecretScan)
+        .expect("secret result");
+    assert!(secrets.passed, "the diff carries no secret: {:?}", secrets.evidence);
+    assert_eq!(
+        home.assignment(&assignment.run_id).state,
+        AgentAssignmentState::Finished
+    );
+    assert!(home.store.lease(&assignment.session_id).expect("lease").is_none());
+
+    let outcome = gateway.shutdown();
+    assert!(matches!(outcome, GatewayOutcome::Closed { .. }));
+    drop(home);
+}
+
+#[test]
 fn offload_rejects_a_home_only_project_and_a_denied_kind() {
     let home_only = Home::new(HomeOptions {
         placement: Placement::Node {
