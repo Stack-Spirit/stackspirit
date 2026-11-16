@@ -9,10 +9,13 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use vowp_protocol::Timestamp;
 use vowp_protocol::{
-    Executor, HarnessConfig, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, Timestamp, VowpConfig,
+    Executor, HarnessConfig, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, VowpConfig,
 };
 
 /// Provider key variables the tests remove so the runner's environment cannot leak in.
