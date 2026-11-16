@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use vowp_adapters::proc::{process_alive, valid_pid};
+use vowp_agent::WssIngress;
 use vowp_core::Deps;
 use vowp_core::loops::{NodeReconcileReport, NodeSupervisor, NodeTickReport};
 use vowp_core::vault::Redactor;
-use vowp_protocol::{Clock, Level, Log, ProjectName, ProjectState, Timestamp};
+use vowp_protocol::{Clock, Level, Log, NodeFile, ProjectName, ProjectState, Timestamp};
 use vowp_store::{MigrationReport, NodePaths, Store, StoreError};
 use vowp_tmux::{LayoutSpec, TmuxError, WindowManager, WindowSpec, session_name_for_project};
 
@@ -59,6 +60,12 @@ const DAEMON_START_WAIT: Duration = Duration::from_secs(5);
 
 /// Grace after SIGTERM before the daemon child is killed with SIGKILL.
 const DAEMON_STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// Grace after SIGTERM before the WSS gateway child is killed with SIGKILL.
+const WSS_STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a newly spawned WSS gateway has to stay alive before it counts as started.
+const WSS_START_PROBE: Duration = Duration::from_millis(100);
 
 /// How long a detached `up` waits for the foreground supervisor's window address.
 ///
@@ -282,6 +289,139 @@ impl Drop for WebWindow {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// The optional `vowp agent gateway --listen` child behind the owner's TLS reverse proxy.
+///
+/// The listener binds only the configured loopback address; the proxy is not a VOWP process
+/// and is not configured here. The child is a direct child of the foreground supervisor and
+/// stops with it.
+struct WssGateway {
+    child: Option<Child>,
+}
+
+impl WssGateway {
+    /// Stops the child with SIGTERM, escalates to SIGKILL and reaps it.
+    fn stop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = send_term(child.id());
+        let deadline = Instant::now() + WSS_STOP_WAIT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    break;
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+        let _ = child.wait();
+    }
+}
+
+impl Drop for WssGateway {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Reads `[ingress.wss]` from the node config; `None` means WSS is off.
+fn wss_ingress(paths: &NodePaths) -> Result<Option<WssIngress>, CliError> {
+    let path = paths.root().join("config.toml");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)?;
+    let node = NodeFile::from_toml(&text)?;
+    if !node.ingress.wss.enabled {
+        return Ok(None);
+    }
+    WssIngress::from_config(&node.ingress.wss)
+        .map(Some)
+        .map_err(|error| CliError::Invalid(error.to_string()))
+}
+
+/// Returns the gateway binary: `VOWP_GATEWAY_BIN`, the current `vowp`, then `PATH`.
+///
+/// The hidden gateway is a subcommand of this binary, so a normal install uses the running
+/// executable. `VOWP_GATEWAY_BIN` is the test seam.
+fn gateway_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("VOWP_GATEWAY_BIN") {
+        return PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.is_file() {
+            return exe;
+        }
+    }
+    PathBuf::from("vowp")
+}
+
+/// Starts the WSS listener child when the node config enables it.
+///
+/// A missing or unstartable binary warns and returns `None`; the supervisor keeps running,
+/// exactly like the optional web window. The child's stdout is discarded so it cannot corrupt
+/// `up --json`; its stderr stays visible for a startup failure.
+fn start_wss_gateway(
+    paths: &NodePaths,
+    ingress: &WssIngress,
+    io: &mut dyn IoStreams,
+    announce: bool,
+) -> Option<WssGateway> {
+    let binary = gateway_binary();
+    let mut command = Command::new(&binary);
+    command
+        .arg("--home")
+        .arg(paths.root())
+        .arg("agent")
+        .arg("gateway")
+        .arg("--listen")
+        .arg(ingress.listen.to_string())
+        .stdin(Stdio::null())
+        // The supervisor prints its own one-line announcement; the child's stdout would
+        // otherwise land in `up --json`. Its stderr stays visible for a startup failure.
+        .stdout(Stdio::null());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = writeln!(
+                io.err(),
+                "warning: wss gateway not started: cannot run {}: {error}",
+                binary.display()
+            );
+            return None;
+        }
+    };
+    std::thread::sleep(WSS_START_PROBE);
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let _ = writeln!(
+                io.err(),
+                "warning: wss gateway exited during startup ({status}); the supervisor keeps running"
+            );
+            return None;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writeln!(io.err(), "warning: wss gateway could not be checked: {error}");
+            return None;
+        }
+    }
+    if announce && writeln!(io.out(), "wss gateway: ws://{}/agent/v1", ingress.listen).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    Some(WssGateway { child: Some(child) })
 }
 
 /// Starts the optional web-window daemon and waits briefly for its address.
@@ -835,6 +975,16 @@ where
             print_web_window(io, address)?;
         }
     }
+    // The WSS listener is optional and off by default. A config error, a missing binary or
+    // a listener that exits immediately warns; the supervisor is not optional.
+    let mut wss_gateway = match wss_ingress(paths) {
+        Ok(Some(ingress)) => start_wss_gateway(paths, &ingress, io, !json),
+        Ok(None) => None,
+        Err(error) => {
+            let _ = writeln!(io.err(), "warning: wss gateway not started: {error}");
+            None
+        }
+    };
     // The supervisor waits up to `tick_secs` between ticks; a cancellation alone
     // would keep `vowp down` waiting for that whole interval. Wake it as soon as the
     // stop watcher cancels so shutdown is prompt.
@@ -879,6 +1029,9 @@ where
     // keep the adapter/gate grace period open or outlive the supervisor.
     if let Some(window) = web_window.as_mut() {
         window.stop();
+    }
+    if let Some(gateway) = wss_gateway.as_mut() {
+        gateway.stop();
     }
     // Runner cancellation is cooperative: wait for adapter/gate children, escalating once
     // the grace expires, so a clean signal shutdown does not orphan harness processes.

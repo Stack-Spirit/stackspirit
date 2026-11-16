@@ -15,9 +15,13 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Serialize;
-use vowp_core::agent::pair::{RotationPolicy, create_pending_surface, revoke_surface, rotate_surface_with_policy};
+use vowp_core::agent::pair::{
+    RotationPolicy, SurfaceListRow, create_pending_surface, replace_pending_surface, revoke_surface,
+    rotate_surface_with_policy, surface_list_row,
+};
 use vowp_protocol::{
     NodeName, NodePresence, SessionId, SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState, Timestamp,
 };
@@ -27,6 +31,9 @@ use crate::cli::{SurfaceCommand, SurfaceLsArgs, SurfacePairArgs, SurfaceRevokeAr
 use crate::node_ctx::NodeRole;
 use crate::output::{Table, local_time_at, print_json};
 use crate::{CliError, Ctx, IoStreams};
+
+/// Longest warning window for a surface token before it expires.
+const EXPIRY_WARNING: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Private file holding the surface ids this home CLI created.
 const SURFACE_INDEX_FILE: &str = "surfaces.json";
@@ -50,15 +57,25 @@ fn pair(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfacePairArgs, node: Option<
     let session = SessionId::parse(&args.session)
         .map_err(|_| CliError::Invalid(format!("invalid session id {:?}", args.session)))?;
     let kind = parse_kind(&args.kind)?;
+    let replace = args.replace.as_deref().map(parse_surface_id).transpose()?;
     let store = ctx.fleet_store()?;
-    if let Some(existing) = pending_duplicate(&store, ctx, &node, &session, kind, args.app.as_deref())? {
-        return Err(CliError::Conflict(format!(
-            "surface {} is already pending for session {session}; revoke it before pairing again",
-            existing.id
-        )));
-    }
-    let pending = create_pending_surface(&store, &node, &session, kind, args.app.as_deref(), ctx.clock().now())?;
+    let now = ctx.clock().now();
+    let pending = match &replace {
+        Some(old) => replace_pending_surface(&store, ctx.deps(), old, &node, &session, kind, args.app.as_deref(), now)?,
+        None => {
+            if let Some(existing) = pending_duplicate(&store, ctx, &node, &session, kind, args.app.as_deref())? {
+                return Err(CliError::Conflict(format!(
+                    "surface {} is already pending for session {session}; revoke it before pairing again",
+                    existing.id
+                )));
+            }
+            create_pending_surface(&store, &node, &session, kind, args.app.as_deref(), now)?
+        }
+    };
     append_index(ctx, &pending.surface.id)?;
+    if let Some(old) = &replace {
+        append_index(ctx, old)?;
+    }
 
     let command = agent_pair_command(&pending.surface.id, &session, args.app.as_deref());
     let output = SurfacePairOutput {
@@ -70,10 +87,14 @@ fn pair(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfacePairArgs, node: Option<
         code: pending.code.clone(),
         expires_at: pending.expires_at,
         command: command.clone(),
+        replaced: replace.clone(),
     };
     if ctx.json() {
         print_json(io, &output)?;
     } else {
+        if let Some(old) = &replace {
+            writeln!(io.out(), "revoked surface {old} and created its replacement")?;
+        }
         writeln!(
             io.out(),
             "created pending surface {} on {node} ({})",
@@ -98,16 +119,17 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, _args: &SurfaceLsArgs, node: Option<&
         None => None,
     };
     let store = ctx.fleet_store()?;
+    let now = ctx.clock().now();
     let mut entries = Vec::new();
     for id in read_index(ctx)? {
-        let Some(surface) = store.surface_by_id(&id)? else {
+        let Some(row) = surface_list_row(&store, ctx.deps(), &id, now)? else {
             continue;
         };
-        if filter.as_ref().is_some_and(|node| surface.node != *node) {
+        if filter.as_ref().is_some_and(|node| row.surface.node != *node) {
             continue;
         }
         let tokens = store.list_surface_tokens(&id)?;
-        entries.push(SurfaceEntry::from_store(surface, &tokens));
+        entries.push(SurfaceEntry::from_row(row, &tokens, now));
     }
     entries.sort_by(|left, right| left.id.0.cmp(&right.id.0));
 
@@ -115,8 +137,7 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, _args: &SurfaceLsArgs, node: Option<&
         print_json(io, &entries)?;
         return Ok(0);
     }
-    let now = ctx.clock().now();
-    let mut table = Table::new(&["ID", "NODE", "KIND", "STATE", "SCOPES", "EXPIRES"]);
+    let mut table = Table::new(&["ID", "NODE", "KIND", "STATE", "SCOPES", "PREFIX", "EXPIRES", "OVERLAP"]);
     for entry in &entries {
         table.row(vec![
             entry.id.to_string(),
@@ -124,14 +145,69 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, _args: &SurfaceLsArgs, node: Option<&
             wire_name(&entry.kind),
             wire_name(&entry.state),
             join_or_dash(&entry.scopes),
+            entry.prefix.clone().unwrap_or_else(|| "-".to_owned()),
             entry
                 .expires_at
-                .map(|expiry| local_time_at(expiry, now, ctx.tz_offset_minutes()))
+                .map(|expiry| {
+                    let marker = if entry.expired { " expired" } else { "" };
+                    format!("{}{marker}", local_time_at(expiry, now, ctx.tz_offset_minutes()))
+                })
                 .unwrap_or_else(|| "-".to_owned()),
+            overlap_cell(entry, now, ctx.tz_offset_minutes()),
         ]);
     }
     writeln!(io.out(), "{}", table.render(ctx.color()))?;
+    warn_expiring_surface_tokens(io, &entries, now)?;
     Ok(0)
+}
+
+/// Returns the `OVERLAP` cell for one surface row.
+///
+/// An undelivered rotation shows `PENDING` plus the replacement token's delivery deadline.
+/// Otherwise an older token that is still valid during the overlap shows its deadline.
+fn overlap_cell(entry: &SurfaceEntry, now: Timestamp, tz_offset_minutes: i32) -> String {
+    if entry.pending {
+        let deadline = entry
+            .delivery_deadline
+            .map(|at| format!(" until {}", local_time_at(at, now, tz_offset_minutes)))
+            .unwrap_or_default();
+        return format!("PENDING{deadline}");
+    }
+    match entry.overlap_until {
+        Some(until) => format!("until {}", local_time_at(until, now, tz_offset_minutes)),
+        None => "-".to_owned(),
+    }
+}
+
+/// Prints one warning line when a surface token expires within seven days.
+fn warn_expiring_surface_tokens(
+    io: &mut dyn IoStreams,
+    entries: &[SurfaceEntry],
+    now: Timestamp,
+) -> Result<(), CliError> {
+    let expiring: Vec<&SurfaceEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .expires_at
+                .is_some_and(|expiry| expiry > now && expiry.since(now) <= EXPIRY_WARNING)
+        })
+        .collect();
+    if expiring.is_empty() {
+        return Ok(());
+    }
+    let expiry = expiring
+        .iter()
+        .filter_map(|entry| entry.expires_at)
+        .min()
+        .map(|expiry| expiry.as_rfc3339())
+        .unwrap_or_else(|| "-".to_owned());
+    writeln!(
+        io.err(),
+        "warning: {} surface token(s) expire within 7 days (earliest {expiry}); rotate with `vowp surface rotate <id>`",
+        expiring.len()
+    )?;
+    Ok(())
 }
 
 fn revoke(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRevokeArgs) -> Result<i32, CliError> {
@@ -173,6 +249,15 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
         }
         None => None,
     };
+    let grace = match args.grace.as_deref() {
+        Some(value) => parse_duration_arg(value, "--grace")?,
+        None => RotationPolicy::default().grace,
+    };
+    let wait = args
+        .wait
+        .as_deref()
+        .map(|value| parse_duration_arg(value, "--wait"))
+        .transpose()?;
     let store = ctx.fleet_store()?;
     let existing = store.surface_by_id(&id)?;
     if let Some(surface) = &existing {
@@ -192,10 +277,20 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
     }
 
     let now = ctx.clock().now();
-    let rotation = rotate_surface_with_policy(&store, ctx.deps(), &id, RotationPolicy::default(), now)?;
+    let rotation = rotate_surface_with_policy(&store, ctx.deps(), &id, RotationPolicy { grace, wait }, now)?;
     let rotated = &rotation.rotated;
     append_index(ctx, &id)?;
 
+    if let Some(wait) = wait
+        && !rotation.delivered
+    {
+        return Err(CliError::Remote(format!(
+            "rotation_pending: the rotation was queued for node {} but its frame was not drained within {}; \
+             run `vowp surface ls` to see the delivery deadline",
+            rotated.node,
+            format_duration(wait)
+        )));
+    }
     let offline = node_is_offline(&store, &rotated.node, now)?;
     let output = SurfaceRotateOutput {
         surface: rotated.surface.id.clone(),
@@ -203,6 +298,8 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
         prefix: rotated.prefix.clone(),
         expires_at: rotated.expires_at,
         old_expires_at: rotated.old_expires_at,
+        pending: !rotation.delivered,
+        queued_at: Some(rotation.queued_at),
     };
     if ctx.json() {
         print_json(io, &output)?;
@@ -211,8 +308,11 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
         writeln!(io.out(), "prefix: {}", output.prefix)?;
         writeln!(io.out(), "expires: {}", output.expires_at.as_rfc3339())?;
         writeln!(io.out(), "old token expires: {}", output.old_expires_at.as_rfc3339())?;
+        if output.pending {
+            writeln!(io.out(), "delivery: pending")?;
+        }
     }
-    if offline {
+    if offline && !rotation.delivered {
         writeln!(
             io.err(),
             "warning: node {} is offline; the agent must re-pair before {}",
@@ -221,6 +321,49 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
         )?;
     }
     Ok(0)
+}
+
+/// Parses a `--wait` or `--grace` duration such as `30s`, `10m`, `24h` or `7d`.
+fn parse_duration_arg(value: &str, flag: &str) -> Result<Duration, CliError> {
+    let text = value.trim();
+    let (digits, multiplier) = if let Some(digits) = text.strip_suffix('s') {
+        (digits, 1_u64)
+    } else if let Some(digits) = text.strip_suffix('m') {
+        (digits, 60_u64)
+    } else if let Some(digits) = text.strip_suffix('h') {
+        (digits, 3_600_u64)
+    } else if let Some(digits) = text.strip_suffix('d') {
+        (digits, 86_400_u64)
+    } else if let Some(digits) = text.strip_suffix('w') {
+        (digits, 604_800_u64)
+    } else {
+        return Err(CliError::Invalid(format!(
+            "invalid {flag} {value:?}; use a duration such as 30m, 10m, 24h or 7d"
+        )));
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CliError::Invalid(format!(
+            "invalid {flag} {value:?}; use a duration such as 30m, 10m, 24h or 7d"
+        )));
+    }
+    let count: u64 = digits
+        .parse()
+        .map_err(|_| CliError::Invalid(format!("invalid {flag} {value:?}")))?;
+    let seconds = count
+        .checked_mul(multiplier)
+        .ok_or_else(|| CliError::Invalid(format!("{flag} {value:?} is too long")))?;
+    Ok(Duration::from_secs(seconds))
+}
+
+/// Formats a duration for a refusal message.
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() % 3_600 == 0 {
+        format!("{}h", duration.as_secs() / 3_600)
+    } else if duration.as_secs() % 60 == 0 {
+        format!("{}m", duration.as_secs() / 60)
+    } else {
+        format!("{}s", duration.as_secs())
+    }
 }
 
 /// Returns whether a surface's node is not currently online.
@@ -358,7 +501,7 @@ fn wire_name<T: Serialize>(value: &T) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-/// One `surface ls` row: the read model plus its token scopes and active expiry.
+/// One `surface ls` row: the read model plus its token prefix, expiries and pending rotation.
 #[derive(Debug, Serialize)]
 struct SurfaceEntry {
     id: SurfaceId,
@@ -366,29 +509,46 @@ struct SurfaceEntry {
     kind: SurfaceKind,
     state: SurfaceState,
     scopes: Vec<SurfaceScope>,
+    /// Display prefix of the newest active token; never the token.
+    prefix: Option<String>,
+    /// Expiry of the newest stored (unrevoked) token, even when it has already passed.
     expires_at: Option<Timestamp>,
+    /// Latest expiry among older active tokens while a rotation overlaps.
+    overlap_until: Option<Timestamp>,
+    /// Whether the stored expiry has already passed while the surface stays attached.
+    expired: bool,
+    /// Whether a rotation frame is still queued for the node.
+    pending: bool,
+    /// When the queued rotation was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queued_at: Option<Timestamp>,
+    /// When the queued replacement token expires (the delivery deadline).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_deadline: Option<Timestamp>,
 }
 
 impl SurfaceEntry {
-    fn from_store(surface: SurfaceInfo, tokens: &[SurfaceToken]) -> Self {
-        let mut scopes: Vec<SurfaceScope> = Vec::new();
-        for scope in tokens.iter().flat_map(|token| token.scopes.iter()) {
-            if !scopes.contains(scope) {
-                scopes.push(scope.clone());
-            }
-        }
-        let expires_at = tokens
+    /// Builds one row from the merged core read model and the surface's stored tokens.
+    fn from_row(row: SurfaceListRow, tokens: &[SurfaceToken], now: Timestamp) -> Self {
+        let latest_expiry = tokens
             .iter()
             .filter(|token| token.revoked_at.is_none())
             .filter_map(|token| token.expires_at)
             .max();
+        let expired = row.prefix.is_none() && latest_expiry.is_some_and(|expiry| expiry <= now);
         Self {
-            id: surface.id,
-            node: surface.node,
-            kind: surface.kind,
-            state: surface.state,
-            scopes,
-            expires_at,
+            id: row.surface.id,
+            node: row.surface.node,
+            kind: row.surface.kind,
+            state: row.surface.state,
+            scopes: row.scopes,
+            prefix: row.prefix,
+            expires_at: latest_expiry,
+            overlap_until: row.overlap_until,
+            expired,
+            pending: row.pending,
+            queued_at: row.queued_at,
+            delivery_deadline: row.delivery_deadline,
         }
     }
 }
@@ -404,6 +564,9 @@ struct SurfacePairOutput {
     code: String,
     expires_at: Timestamp,
     command: String,
+    /// The surface revoked by `--replace`, when one was named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced: Option<SurfaceId>,
 }
 
 /// JSON shape of `vowp surface revoke`.
@@ -425,6 +588,10 @@ struct SurfaceRotateOutput {
     prefix: String,
     expires_at: Timestamp,
     old_expires_at: Timestamp,
+    /// Whether the replacement frame is still waiting for the node.
+    pending: bool,
+    /// When the replacement frame was queued.
+    queued_at: Option<Timestamp>,
 }
 
 #[cfg(test)]

@@ -15,8 +15,13 @@ use serde::Serialize;
 use time::{Date, macros::format_description};
 use vowp_core::CapacityManager;
 use vowp_core::capacity::reload::{self, ReloadOutcome};
-use vowp_protocol::{CapacityReport, CapacityTarget, ProtocolError, SessionId, TargetMode, Timestamp};
+use vowp_core::capacity::{HistoryBucket, read_history};
+use vowp_protocol::{
+    CapacityHistory, CapacityReport, CapacityTarget, HistorySource, ProtocolError, SessionId, TargetMode, Timestamp,
+};
+use vowp_store::Store;
 
+use crate::node_ctx::NodeRole;
 use crate::output::Table;
 use crate::{CliError, Ctx, IoStreams};
 
@@ -39,6 +44,8 @@ pub enum CapacityCommand {
     Set(CapacitySetArgs),
     /// Validate or apply the on-disk provider caps and target without a restart.
     Reload(CapacityReloadArgs),
+    /// Read the bounded capacity rollup history.
+    History(CapacityHistoryArgs),
 }
 
 /// Arguments for `vowp capacity show`.
@@ -84,6 +91,17 @@ pub struct CapacityReloadArgs {
     pub check: bool,
 }
 
+/// Arguments for `vowp capacity history`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct CapacityHistoryArgs {
+    /// Start of the window (duration or date); defaults to 24h.
+    #[arg(long, value_name = "DUR|DATE")]
+    pub since: Option<String>,
+    /// Bucket width: `5m` (stored), `1h` or `1d` (read-time); defaults to 5m.
+    #[arg(long, value_name = "5m|1h|1d")]
+    pub bucket: Option<String>,
+}
+
 /// The JSON and human shape of `vowp capacity reload`.
 #[derive(Debug, Clone, Serialize)]
 struct ReloadOutput {
@@ -108,6 +126,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &CapacityArgs) -> Result<i32
         }
         CapacityCommand::Set(args) => set(ctx, io, args)?,
         CapacityCommand::Reload(args) => reload(ctx, io, args)?,
+        CapacityCommand::History(args) => history(ctx, io, args)?,
     }
     Ok(0)
 }
@@ -165,6 +184,88 @@ fn reload_check(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<(), CliError> {
         error: None,
     };
     print_reload(ctx, io, true, &outcome)
+}
+
+/// Runs `capacity history`: a read-only view of the retained 5-minute rollups.
+fn history(ctx: &Ctx, io: &mut dyn IoStreams, args: &CapacityHistoryArgs) -> Result<(), CliError> {
+    let bucket = match args.bucket.as_deref() {
+        None => HistoryBucket::FiveMinutes,
+        Some(value) => HistoryBucket::parse(value)
+            .ok_or_else(|| CliError::Invalid(format!("unknown --bucket {value:?}; use 5m, 1h or 1d")))?,
+    };
+    let now = ctx.clock().now();
+    let requested = args.since.as_deref().map(|value| parse_since(value, now)).transpose()?;
+    let store = match ctx.role() {
+        NodeRole::Home => Store::open_read_only(ctx.paths(), None)?,
+        NodeRole::Control => {
+            return Err(CliError::NotFound(
+                "this is a control machine; the home holds the database".to_owned(),
+            ));
+        }
+        NodeRole::Uninitialised => {
+            return Err(CliError::NotFound(
+                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
+            ));
+        }
+    };
+    let history = read_history(&store, now, requested, bucket)?;
+    if let Some(requested) = requested
+        && requested < history.since
+    {
+        writeln!(
+            io.err(),
+            "note: --since is before the retained window; showing since {}",
+            history.since.as_rfc3339()
+        )?;
+    }
+    if ctx.json() {
+        crate::output::print_json(io, &history)?;
+        return Ok(());
+    }
+    print_history(ctx, io, &history)?;
+    Ok(())
+}
+
+/// Prints one `CapacityHistory` as the documented table and the cost footer.
+fn print_history(ctx: &Ctx, io: &mut dyn IoStreams, history: &CapacityHistory) -> Result<(), CliError> {
+    let mut table = Table::new(&["AT", "SAMPLES", "MEM_MIN/AVG/MAX", "LOAD1", "DISK_MIN", "SOURCE"]);
+    for point in &history.points {
+        table.row(vec![
+            point.at.as_rfc3339(),
+            point.samples.to_string(),
+            format!(
+                "{} / {} / {}",
+                format_bytes(point.mem_available.min),
+                format_bytes(point.mem_available.avg),
+                format_bytes(point.mem_available.max)
+            ),
+            format!("{:.2}", point.load1_avg),
+            format_bytes(point.disk_free_home_min),
+            history_source_label(point.source).to_owned(),
+        ]);
+    }
+    writeln!(io.out(), "{}", table.render(ctx.color()))?;
+    if history.points.is_empty() {
+        writeln!(io.out(), "history: no rollups in the window")?;
+    }
+    writeln!(
+        io.out(),
+        "window: since {} (bucket {}s, retention {}s)",
+        history.since.as_rfc3339(),
+        history.bucket_secs,
+        history.retention_secs
+    )?;
+    writeln!(io.out(), "cost: vowp cost --by day")?;
+    Ok(())
+}
+
+/// Returns the documented label of one history point's source.
+fn history_source_label(source: HistorySource) -> &'static str {
+    match source {
+        HistorySource::Proc => "proc",
+        HistorySource::Fallback => "fallback",
+        HistorySource::Mixed => "mixed",
+    }
 }
 
 /// Prints one reload result as JSON or as the human reload card.

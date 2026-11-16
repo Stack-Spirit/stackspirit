@@ -3663,3 +3663,184 @@ fn loops_and_schedule_all_handlers_list_every_project() {
         "{schedules}"
     );
 }
+
+/// A fake `vowp agent gateway --listen` child that records its arguments and lifecycle.
+struct FakeGateway {
+    _tools: tempfile::TempDir,
+    args: PathBuf,
+    pid: PathBuf,
+    stopped: PathBuf,
+    script: PathBuf,
+}
+
+impl FakeGateway {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tools = tempfile::tempdir().expect("fake gateway tools");
+        let script = tools.path().join("vowp-gateway");
+        let args = tools.path().join("gateway.args");
+        let pid = tools.path().join("gateway.pid");
+        let stopped = tools.path().join("gateway.stopped");
+        let body = r#"#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_GATEWAY_ARGS"
+printf '%s\n' "$$" > "$FAKE_GATEWAY_PID"
+trap 'printf stopped > "$FAKE_GATEWAY_STOPPED"; exit 0' TERM INT
+while :; do
+  sleep 0.2 &
+  child=$!
+  wait "$child"
+done
+"#;
+        std::fs::write(&script, body).expect("fake gateway script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod gateway");
+        Self {
+            _tools: tools,
+            args,
+            pid,
+            stopped,
+            script,
+        }
+    }
+
+    fn envs(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("VOWP_GATEWAY_BIN", self.script.display().to_string()),
+            ("FAKE_GATEWAY_ARGS", self.args.display().to_string()),
+            ("FAKE_GATEWAY_PID", self.pid.display().to_string()),
+            ("FAKE_GATEWAY_STOPPED", self.stopped.display().to_string()),
+        ]
+    }
+
+    fn args(&self) -> Option<Vec<String>> {
+        let text = std::fs::read_to_string(&self.args).ok()?;
+        Some(text.lines().map(str::to_owned).collect())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        read_pid_file(&self.pid)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.is_file()
+    }
+}
+
+impl Drop for FakeGateway {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid() {
+            kill_group(pid);
+        }
+    }
+}
+
+/// Writes a node `config.toml` that enables or disables the WSS ingress.
+fn write_wss_config(env: &common::TestEnv, enabled: bool, listen: &str) {
+    let text = format!("[ingress.wss]\nenabled = {enabled}\nlisten = \"{listen}\"\n");
+    std::fs::write(env.home_path().join("config.toml"), text).expect("write node config");
+}
+
+#[test]
+fn up_starts_the_wss_gateway_when_ingress_is_enabled() {
+    let env = common::TestEnv::new();
+    write_wss_config(&env, true, "127.0.0.1:18743");
+    let fake = FakeGateway::new();
+    let mut supervisor = SupervisorProcess::spawn_with(env.home_path(), env.project_path(), &fake.envs());
+
+    assert!(
+        eventually(|| fake.args().is_some()),
+        "the fake gateway did not start; supervisor stdout:\n{}\nstderr:\n{}",
+        supervisor.stdout(),
+        supervisor.stderr()
+    );
+    assert_eq!(
+        fake.args().expect("gateway args"),
+        vec![
+            "--home".to_owned(),
+            env.home_path().display().to_string(),
+            "agent".to_owned(),
+            "gateway".to_owned(),
+            "--listen".to_owned(),
+            "127.0.0.1:18743".to_owned(),
+        ],
+        "the listener is the hidden gateway on the configured loopback address"
+    );
+    assert!(
+        eventually(|| supervisor
+            .stdout()
+            .contains("wss gateway: ws://127.0.0.1:18743/agent/v1")),
+        "the supervisor surfaces the listener; stdout:\n{}",
+        supervisor.stdout()
+    );
+    let gateway_pid = fake.pid().expect("gateway pid");
+
+    kill_signal(supervisor.pid(), "TERM");
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .expect("SIGTERM must stop the supervisor within 15 s");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a cancelled supervisor exits cleanly; stderr:\n{}",
+        supervisor.stderr()
+    );
+    assert!(
+        eventually(|| !process_alive(gateway_pid)),
+        "the gateway child {gateway_pid} survived the supervisor"
+    );
+    assert!(
+        eventually(|| fake.stopped()),
+        "the gateway did not observe SIGTERM; stderr:\n{}",
+        supervisor.stderr()
+    );
+}
+
+#[test]
+fn up_does_not_start_the_wss_gateway_when_ingress_is_disabled() {
+    let env = common::TestEnv::new();
+    write_wss_config(&env, false, "127.0.0.1:18744");
+    let fake = FakeGateway::new();
+    let mut supervisor = SupervisorProcess::spawn_with(env.home_path(), env.project_path(), &fake.envs());
+    assert!(
+        eventually(|| supervisor.stdout().contains("supervisor running")),
+        "the supervisor did not start; stdout:\n{}\nstderr:\n{}",
+        supervisor.stdout(),
+        supervisor.stderr()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(fake.args().is_none(), "a disabled ingress starts no gateway child");
+
+    kill_signal(supervisor.pid(), "TERM");
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .expect("SIGTERM must stop the supervisor within 15 s");
+    assert_eq!(status.code(), Some(0), "stderr:\n{}", supervisor.stderr());
+}
+
+#[test]
+fn up_warns_and_continues_when_the_wss_gateway_binary_is_missing() {
+    let env = common::TestEnv::new();
+    write_wss_config(&env, true, "127.0.0.1:18745");
+    let missing = env.home_path().join("missing-vowp-gateway");
+    let mut supervisor = SupervisorProcess::spawn_with(
+        env.home_path(),
+        env.project_path(),
+        &[("VOWP_GATEWAY_BIN", missing.display().to_string())],
+    );
+    assert!(
+        eventually(|| supervisor.stderr().contains("wss gateway not started")),
+        "the missing listener warns; stderr:\n{}",
+        supervisor.stderr()
+    );
+    assert!(
+        supervisor.stdout().contains("supervisor running"),
+        "the supervisor keeps running; stdout:\n{}",
+        supervisor.stdout()
+    );
+
+    kill_signal(supervisor.pid(), "TERM");
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .expect("SIGTERM must stop the supervisor within 15 s");
+    assert_eq!(status.code(), Some(0), "stderr:\n{}", supervisor.stderr());
+}

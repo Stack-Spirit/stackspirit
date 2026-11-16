@@ -4,9 +4,11 @@
 //! `~/.vowp-agent`, opens a store or starts ssh.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,11 +17,13 @@ use clap::Parser;
 use tempfile::TempDir;
 use vowp_agent::{
     AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, Cache, ConnectionState, FrameRead, FrameStream,
-    NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, Transport,
+    NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, ServiceError, Transport,
+    TransportConfig, WssTlsMode,
 };
 use vowp_cli::BufferIo;
 use vowp_cli::agent_exec::CoreRunHandler;
 use vowp_cli::cli::{AgentCommand, Cli, Command};
+use vowp_cli::cmd::agent::{enrollment_transport_config, service_error_exit_code};
 use vowp_cli::node_ctx::ControlConfig;
 use vowp_core::agent::pair::{issue_surface_token, verify_surface_token};
 use vowp_protocol::{
@@ -35,13 +39,24 @@ mod common;
 use common::TestEnv;
 
 fn run_binary(home: &Path, args: &[&str]) -> (i32, String, String) {
-    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+    run_binary_with(home, args, &[])
+}
+
+/// Runs the real binary with an isolated home and extra environment values.
+fn run_binary_with(home: &Path, args: &[&str], envs: &[(&str, String)]) -> (i32, String, String) {
+    let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"));
+    command
         .args(args)
         .env("HOME", home)
-        .env_remove("VOWP_AGENT_HOME")
         .env("NO_COLOR", "1")
-        .output()
-        .expect("run vowp");
+        .env_remove("VOWP_AGENT_HOME")
+        .env_remove("VOWP_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .env_remove("XDG_CONFIG_HOME");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("run vowp");
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -136,6 +151,11 @@ fn agent_enroll_help_names_code_file() {
     let help = io.stdout();
     assert!(help.contains("--code-file"), "help must name --code-file: {help}");
     assert!(help.contains("--target"), "help must name --target: {help}");
+    assert!(help.contains("--wss"), "help must name --wss: {help}");
+    assert!(
+        help.contains("--tls-fingerprint"),
+        "help must name --tls-fingerprint: {help}"
+    );
     assert!(help.contains("PATH|-"), "help must document stdin: {help}");
 }
 
@@ -155,10 +175,12 @@ fn agent_enroll_accepts_code_file_stdin() {
         Command::Agent {
             command: AgentCommand::Enroll(args),
         } => {
-            assert_eq!(args.target, "home.example");
+            assert_eq!(args.target.as_deref(), Some("home.example"));
             assert_eq!(args.code_file, "-");
             assert!(args.project.is_empty());
             assert!(args.worktree_root.is_none());
+            assert!(args.wss.is_none());
+            assert!(args.tls_fingerprint.is_none());
         }
         other => panic!("expected agent enroll, got {other:?}"),
     }
@@ -1633,4 +1655,802 @@ fn agent_run_rejects_an_unmapped_project() {
         !fixture.worktree("agent-exec-unmapped").exists(),
         "a rejected assignment creates no worktree"
     );
+}
+
+// ---------------------------------------------------------------------------
+// v0.4 CLI surface: WSS enrollment, service, gateway and surface UX
+// ---------------------------------------------------------------------------
+
+/// A fake `systemctl` that records every invocation and answers status queries.
+struct FakeManager {
+    _dir: TempDir,
+    log: PathBuf,
+}
+
+impl FakeManager {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("fake manager dir");
+        let log = dir.path().join("manager.log");
+        let script = dir.path().join("systemctl");
+        let body = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_MANAGER_LOG"
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$2" = "show" ]; then
+  case "${FAKE_MANAGER_MODE-}" in
+    loaded)
+      printf 'LoadState=loaded\nActiveState=active\nMainPID=1234\nExecMainStatus=0\n'
+      ;;
+    stopped)
+      printf 'LoadState=loaded\nActiveState=inactive\nMainPID=0\nExecMainStatus=1\n'
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+fi
+exit 0
+"#;
+        std::fs::write(&script, body).expect("fake systemctl");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        Self { _dir: dir, log }
+    }
+
+    fn path(&self) -> &Path {
+        self._dir.path()
+    }
+
+    fn envs(&self, mode: &str, xdg: &Path) -> Vec<(&'static str, String)> {
+        vec![
+            ("PATH", self.path().display().to_string()),
+            ("FAKE_MANAGER_LOG", self.log.display().to_string()),
+            ("FAKE_MANAGER_MODE", mode.to_owned()),
+            ("XDG_CONFIG_HOME", xdg.display().to_string()),
+        ]
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+/// One service unit path under the temporary `$XDG_CONFIG_HOME`.
+#[cfg(target_os = "linux")]
+fn service_unit_path(home: &Path) -> PathBuf {
+    home.join(".config/systemd/user/vowp-agent.service")
+}
+
+/// Creates a private agent state directory for the service tests.
+fn private_state_dir(home: &Path) -> PathBuf {
+    let state = home.join(".vowp-agent");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("state mode");
+    state
+}
+
+#[test]
+fn agent_enroll_accepts_wss_and_carries_the_url_and_fingerprint() {
+    let cli = Cli::try_parse_from([
+        "vowp",
+        "agent",
+        "enroll",
+        "--wss",
+        "wss://home.example/agent/v1",
+        "--code-file",
+        "-",
+    ])
+    .expect("parse agent enroll --wss");
+    match cli.command {
+        Command::Agent {
+            command: AgentCommand::Enroll(args),
+        } => {
+            assert!(args.target.is_none(), "the target is optional with --wss");
+            assert_eq!(args.wss.as_deref(), Some("wss://home.example/agent/v1"));
+            assert!(args.tls_fingerprint.is_none());
+        }
+        other => panic!("expected agent enroll, got {other:?}"),
+    }
+
+    let fingerprint = format!("sha256:{}", "a".repeat(64));
+    let cli = Cli::try_parse_from([
+        "vowp",
+        "agent",
+        "enroll",
+        "--wss",
+        "wss://home.example/agent/v1",
+        "--tls-fingerprint",
+        &fingerprint,
+        "--code-file",
+        "-",
+    ])
+    .expect("parse agent enroll --tls-fingerprint");
+    match cli.command {
+        Command::Agent {
+            command: AgentCommand::Enroll(args),
+        } => assert_eq!(args.tls_fingerprint.as_deref(), Some(fingerprint.as_str())),
+        other => panic!("expected agent enroll, got {other:?}"),
+    }
+
+    assert_eq!(enrollment_transport_config(None, None).expect("ssh default"), None);
+    assert_eq!(
+        enrollment_transport_config(Some("wss://home.example/agent/v1"), None).expect("system mode"),
+        Some(TransportConfig::Wss {
+            url: "wss://home.example/agent/v1".to_owned(),
+            tls: WssTlsMode::System,
+            fingerprint: None,
+        })
+    );
+    assert_eq!(
+        enrollment_transport_config(Some("wss://home.example/agent/v1"), Some(&fingerprint)).expect("pin mode"),
+        Some(TransportConfig::Wss {
+            url: "wss://home.example/agent/v1".to_owned(),
+            tls: WssTlsMode::Pin,
+            fingerprint: Some(fingerprint),
+        })
+    );
+    assert!(enrollment_transport_config(Some("http://home.example/agent/v1"), None).is_err());
+    assert!(enrollment_transport_config(Some("wss://home.example/agent/v1"), Some("sha256:short")).is_err());
+}
+
+#[test]
+fn agent_enroll_without_target_or_wss_exits_two() {
+    let home = TempDir::new().expect("temp home");
+    let (code, _stdout, stderr) = run_binary(home.path(), &["agent", "enroll", "--code-file", "-"]);
+    assert_eq!(code, 2, "a missing transport is invalid input: {stderr}");
+    assert!(stderr.contains("--target") || stderr.contains("--wss"), "{stderr}");
+}
+
+#[test]
+fn agent_gateway_refuses_a_non_loopback_bind() {
+    let home = TempDir::new().expect("temp home");
+    let (code, _stdout, stderr) = run_binary(home.path(), &["agent", "gateway", "--listen", "0.0.0.0:0"]);
+    assert_eq!(code, 5, "a public bind is refused: {stderr}");
+    assert!(stderr.contains("loopback"), "{stderr}");
+}
+
+/// One spawned `agent gateway --listen` process, killed if the test panics.
+struct GatewayProcess(Child);
+
+impl Drop for GatewayProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Sends one HTTP upgrade request and returns the response head and body.
+fn http_upgrade(port: u16, path: &str, protocol: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the gateway");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).expect("write request");
+    stream.flush().expect("flush request");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    response
+}
+
+#[test]
+fn agent_gateway_listen_refuses_other_routes_and_subprotocols() {
+    let env = TestEnv::new();
+    let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .arg("--home")
+        .arg(env.home_path())
+        .args(["agent", "gateway", "--listen", "127.0.0.1:0"])
+        .env("HOME", env.home_path())
+        .env("NO_COLOR", "1")
+        .env_remove("VOWP_AGENT_HOME")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn agent gateway");
+    let stdout = child.stdout.take().expect("gateway stdout");
+    let mut guard = GatewayProcess(child);
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read gateway line");
+    assert!(
+        line.contains("ws://127.0.0.1:") && line.contains("/agent/v1"),
+        "the gateway prints its bound address: {line:?}"
+    );
+    let address = line
+        .split("ws://")
+        .nth(1)
+        .expect("bound address")
+        .split('/')
+        .next()
+        .expect("host:port");
+    let port: u16 = address
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .expect("gateway port");
+
+    let wrong_path = http_upgrade(port, "/other", "vowp-agent/1");
+    assert!(
+        wrong_path.starts_with("HTTP/1.1 404"),
+        "only /agent/v1 is served: {wrong_path:?}"
+    );
+    let wrong_protocol = http_upgrade(port, "/agent/v1", "other/1");
+    assert!(
+        wrong_protocol.starts_with("HTTP/1.1 400"),
+        "the vowp-agent/1 subprotocol is required: {wrong_protocol:?}"
+    );
+
+    let _ = guard.0.kill();
+    let _ = guard.0.wait();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_service_install_print_writes_nothing_and_names_the_manager() {
+    let home = TempDir::new().expect("temp home");
+    private_state_dir(home.path());
+    let manager = FakeManager::new();
+    let xdg = home.path().join(".config");
+    let envs = manager.envs("loaded", &xdg);
+    let (code, stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install", "--print"], &envs);
+    assert_eq!(code, 0, "service install --print failed: {stderr}");
+    assert!(stdout.contains("[Service]"), "{stdout}");
+    assert!(stdout.contains("ExecStart="), "{stdout}");
+    assert!(stdout.contains("systemctl --user daemon-reload"), "{stdout}");
+    assert!(
+        stdout.contains("systemctl --user enable --now vowp-agent.service"),
+        "{stdout}"
+    );
+    assert!(!service_unit_path(home.path()).exists(), "--print writes nothing");
+    assert!(
+        manager.log().is_empty(),
+        "--print invokes no manager: {}",
+        manager.log()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_service_install_writes_one_unit_and_only_now_runs_the_manager() {
+    let home = TempDir::new().expect("temp home");
+    private_state_dir(home.path());
+    let manager = FakeManager::new();
+    let xdg = home.path().join(".config");
+    let envs = manager.envs("loaded", &xdg);
+
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install"], &envs);
+    assert_eq!(code, 0, "service install failed: {stderr}");
+    let unit = service_unit_path(home.path());
+    assert!(unit.is_file(), "the unit is written at {}", unit.display());
+    let mode = std::fs::metadata(&unit).expect("unit metadata").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the unit is private");
+    let text = std::fs::read_to_string(&unit).expect("unit text");
+    assert!(text.contains("generated by vowp agent service install"), "{text}");
+    assert!(manager.log().is_empty(), "install without --now invokes no manager");
+
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install", "--now"], &envs);
+    assert_eq!(code, 0, "service install --now failed: {stderr}");
+    let log = manager.log();
+    assert!(log.contains("--user daemon-reload"), "{log}");
+    assert!(log.contains("--user enable --now vowp-agent.service"), "{log}");
+
+    std::fs::write(&unit, "[Service]\nDescription=someone else\n").expect("foreign unit");
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install"], &envs);
+    assert_eq!(code, 4, "a foreign unit is refused without --force: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&unit).expect("foreign unit text"),
+        "[Service]\nDescription=someone else\n",
+        "the foreign file is not replaced"
+    );
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install", "--force"], &envs);
+    assert_eq!(code, 0, "install --force replaces the foreign unit: {stderr}");
+    assert!(
+        std::fs::read_to_string(&unit)
+            .expect("forced unit text")
+            .contains("generated by vowp agent service install"),
+        "the forced unit is VOWP's own text"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_service_uninstall_removes_only_a_generated_unit_and_keeps_the_state() {
+    let home = TempDir::new().expect("temp home");
+    let state = private_state_dir(home.path());
+    let token_dir = state.join("surfaces/01ARZ3NDEKTSV4RRFFQ69G5FAW");
+    std::fs::create_dir_all(&token_dir).expect("surface dir");
+    std::fs::write(token_dir.join("token"), "kept-token-placeholder").expect("token");
+    let manager = FakeManager::new();
+    let xdg = home.path().join(".config");
+    let envs = manager.envs("loaded", &xdg);
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install"], &envs);
+    assert_eq!(code, 0, "install failed: {stderr}");
+    let unit = service_unit_path(home.path());
+    assert!(unit.is_file());
+
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "uninstall"], &envs);
+    assert_eq!(code, 5, "uninstall without --yes is refused: {stderr}");
+    assert!(unit.is_file(), "the refused uninstall keeps the unit");
+
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "uninstall", "--yes"], &envs);
+    assert_eq!(code, 0, "uninstall failed: {stderr}");
+    assert!(!unit.exists(), "the generated unit is removed");
+    let log = manager.log();
+    assert!(log.contains("--user disable --now vowp-agent.service"), "{log}");
+    assert!(log.contains("--user daemon-reload"), "{log}");
+    assert_eq!(
+        std::fs::read_to_string(token_dir.join("token")).expect("token kept"),
+        "kept-token-placeholder",
+        "uninstall keeps every token"
+    );
+
+    std::fs::write(&unit, "[Unit]\nDescription=someone else\n").expect("foreign unit");
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "uninstall", "--yes"], &envs);
+    assert_eq!(code, 4, "a foreign unit is not removed: {stderr}");
+    assert!(unit.is_file(), "the foreign file stays");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_service_status_reads_the_manager_and_reports_unavailable_json() {
+    let home = TempDir::new().expect("temp home");
+    private_state_dir(home.path());
+    let manager = FakeManager::new();
+    let xdg = home.path().join(".config");
+    let loaded = manager.envs("loaded", &xdg);
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "service", "install"], &loaded);
+    assert_eq!(code, 0, "install failed: {stderr}");
+
+    let (code, value, stderr) = run_binary_with(home.path(), &["--json", "agent", "service", "status"], &loaded);
+    assert_eq!(code, 0, "{stderr}");
+    let value: serde_json::Value = serde_json::from_str(&value).expect("status JSON");
+    assert_eq!(value["available"], true);
+    assert_eq!(value["unit"], "vowp-agent.service");
+    assert_eq!(value["state"], "loaded");
+    assert_eq!(value["loaded"], true);
+    assert_eq!(value["pid"], 1234);
+    assert_eq!(value["last_exit"], 0);
+    assert!(value.get("unit_path").is_none(), "JSON stays path-free: {value}");
+
+    let stopped = manager.envs("stopped", &xdg);
+    let (code, human, stderr) = run_binary_with(home.path(), &["agent", "service", "status"], &stopped);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(human.contains("unit:"), "{human}");
+    assert!(
+        human.contains("loaded: yes"),
+        "LoadState=loaded is the manager's loaded state: {human}"
+    );
+    assert!(human.contains("pid: -"), "{human}");
+    assert!(human.contains("last exit: 1"), "{human}");
+
+    let empty = tempfile::tempdir().expect("empty PATH");
+    let unavailable = vec![
+        ("PATH", empty.path().display().to_string()),
+        ("XDG_CONFIG_HOME", xdg.display().to_string()),
+    ];
+    let (code, value, stderr) = run_binary_with(home.path(), &["--json", "agent", "service", "status"], &unavailable);
+    assert_eq!(code, 0, "{stderr}");
+    let value: serde_json::Value = serde_json::from_str(&value).expect("unavailable JSON");
+    assert_eq!(value["available"], false);
+    assert_eq!(value["state"], "unavailable");
+}
+
+#[test]
+fn agent_service_unsupported_platform_is_exit_five() {
+    let code = service_error_exit_code(&ServiceError::UnsupportedPlatform);
+    assert_eq!(code, 5);
+    assert!(
+        ServiceError::UnsupportedPlatform
+            .to_string()
+            .contains("Linux and macOS")
+    );
+}
+
+#[test]
+fn agent_run_service_without_home_exits_two() {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .args(["agent", "run", "--service"])
+        .env_remove("HOME")
+        .env_remove("VOWP_AGENT_HOME")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run vowp agent run --service");
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn agent_run_service_writes_the_run_marker_and_drains_on_sigterm() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    enrolled_agent_config(home.path());
+    NodeKey::load_or_generate(&state_dir).expect("node key");
+
+    let tools = tempfile::tempdir().expect("fake tools");
+    let ssh = tools.path().join("ssh");
+    let log = tools.path().join("ssh.log");
+    std::fs::write(&ssh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_SSH_LOG\"\nexit 1\n").expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
+
+    let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .args(["agent", "run", "--service", "--foreground"])
+        .env("HOME", home.path())
+        .env("PATH", tools.path())
+        .env("FAKE_SSH_LOG", &log)
+        .env("NO_COLOR", "1")
+        .env_remove("VOWP_AGENT_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn agent run --service");
+    let marker = state_dir.join("run");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(marker.is_file(), "the service run writes the run marker");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !log.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(log.is_file(), "the service run opens the configured transport");
+
+    let status = ProcessCommand::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let exit = loop {
+        if let Some(status) = child.try_wait().expect("poll agent") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the service run did not drain within 15 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(exit.code(), Some(0), "a drained service run exits 0");
+    assert!(marker.is_file(), "a drain keeps the marker for the next start");
+    let log = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(log.contains("vowp agent gateway --stdio"), "{log}");
+}
+
+/// Writes one local surface directory with a token, expiry and state.
+fn write_local_surface(state_dir: &Path, id: &str, token: &str, expiry: Timestamp, state: &str) {
+    let dir = state_dir.join("surfaces").join(id);
+    std::fs::create_dir_all(&dir).expect("surface dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("surface mode");
+    if !token.is_empty() {
+        let path = dir.join("token");
+        std::fs::write(&path, token).expect("token");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("token mode");
+    }
+    let path = dir.join("expires_at");
+    std::fs::write(&path, expiry.as_rfc3339()).expect("expiry");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("expiry mode");
+    let path = dir.join("state");
+    std::fs::write(&path, state).expect("state");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("state mode");
+}
+
+#[test]
+fn agent_status_adds_the_surfaces_array_and_warns_within_seven_days() {
+    let home = TempDir::new().expect("temp home");
+    enrolled_agent_config(home.path());
+    let state_dir = home.path().join(".vowp-agent");
+    let now = Timestamp::now();
+    let early = now.plus(Duration::from_secs(3 * 24 * 60 * 60));
+    let late = now.plus(Duration::from_secs(20 * 24 * 60 * 60));
+    let early_token = "AAAAAAAAAAAA-local-fixture".to_owned();
+    let late_token = "BBBBBBBBBBBB-local-fixture".to_owned();
+    write_local_surface(&state_dir, "01ARZ3NDEKTSV4RRFFQ69G5FAW", &early_token, early, "paired");
+    write_local_surface(&state_dir, "01ARZ3NDEKTSV4RRFFQ69G5FAX", &late_token, late, "paired");
+    let dead_dir = state_dir.join("surfaces/01ARZ3NDEKTSV4RRFFQ69G5FAY");
+    std::fs::create_dir_all(&dead_dir).expect("needs-pair dir");
+    std::fs::set_permissions(&dead_dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    std::fs::write(dead_dir.join("state"), "needs_pair").expect("state");
+
+    let (code, stdout, stderr) = run_binary(home.path(), &["--json", "agent", "status"]);
+    assert_eq!(code, 0, "status failed: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("status JSON");
+    let surfaces = value["surfaces"].as_array().expect("surfaces array");
+    assert_eq!(surfaces.len(), 3, "{value}");
+    let first = surfaces
+        .iter()
+        .find(|row| row["surface"] == "01ARZ3NDEKTSV4RRFFQ69G5FAW")
+        .expect("early surface");
+    assert_eq!(first["prefix"], "AAAAAAAAAAAA");
+    assert_eq!(first["state"], "paired");
+    assert_eq!(first["expires_at"], early.as_rfc3339());
+    let needs_pair = surfaces
+        .iter()
+        .find(|row| row["surface"] == "01ARZ3NDEKTSV4RRFFQ69G5FAY")
+        .expect("needs-pair surface");
+    assert_eq!(needs_pair["state"], "needs_pair");
+    assert_eq!(
+        value["surface_token_expires_at"],
+        early.as_rfc3339(),
+        "the earliest active expiry stays the compatibility field"
+    );
+    assert_eq!(stderr.matches("warning:").count(), 1, "{stderr}");
+    assert!(stderr.contains("7 days"), "{stderr}");
+    for (label, text) in [("stdout", &stdout), ("stderr", &stderr)] {
+        assert!(!text.contains(&early_token), "{label} carries no token: {text}");
+        assert!(!text.contains(&late_token), "{label} carries no token: {text}");
+    }
+
+    let (code, human, stderr) = run_binary(home.path(), &["agent", "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(human.contains("surfaces:"), "{human}");
+    assert!(human.contains("01ARZ3NDEKTSV4RRFFQ69G5FAW"), "{human}");
+}
+
+/// Creates one attached surface and returns its node, id and stored token.
+fn attached_surface(env: &TestEnv, session: &SessionId) -> (NodeName, SurfaceId, String) {
+    let value = pair_surface(env, session);
+    let code = value["code"].as_str().expect("pairing code");
+    let id = SurfaceId(value["surface"].as_str().expect("surface id").to_owned());
+    let node = NodeName::parse("mac-studio").expect("node slug");
+    let store = env.store();
+    let now = store.clock().now();
+    let issued = issue_surface_token(&store, &node, &id, session, "opencode", code, now).expect("issue token");
+    (node, id, issued.token)
+}
+
+#[test]
+fn surface_rotate_wait_returns_when_the_frame_is_drained() {
+    let (env, node, session) = seed_pairing_env();
+    let (_node, surface, _token) = attached_surface(&env, &session);
+    let home = env.home_path().to_path_buf();
+    let request = surface.0.clone();
+    let drainer = std::thread::spawn(move || {
+        let spool = vowp_core::agent::AgentFrameSpool::new(&home);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if spool.read(&node, &request).expect("read queued frame").is_some() {
+                spool.complete(&node, &request).expect("drain queued frame");
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    });
+    let (code, value, stderr) = env.run_json(&["surface", "rotate", &surface.0, "--wait", "3s"]);
+    assert!(
+        drainer.join().expect("drainer thread"),
+        "the drainer saw the queued frame"
+    );
+    assert_eq!(code, 0, "surface rotate --wait failed: {stderr}");
+    assert_eq!(value["pending"], false, "{value}");
+    assert!(value["prefix"].is_string(), "{value}");
+    assert!(
+        !stderr.contains("rotation_pending"),
+        "a drained rotation is not pending: {stderr}"
+    );
+}
+
+#[test]
+fn surface_rotate_wait_reports_rotation_pending_with_exit_seven() {
+    let (env, _node, session) = seed_pairing_env();
+    let (_node, surface, _token) = attached_surface(&env, &session);
+    let (code, stdout, stderr) = env.run(&["surface", "rotate", &surface.0, "--wait", "0s"]);
+    assert_eq!(code, 7, "an undrained rotation is exit 7: {stdout} {stderr}");
+    assert!(stderr.contains("rotation_pending"), "{stderr}");
+    let frame = env
+        .home_path()
+        .join("agent-frames/mac-studio")
+        .join(format!("{}.json", surface.0));
+    assert!(frame.is_file(), "the queued frame stays for the next connection");
+}
+
+#[test]
+fn surface_rotate_grace_is_capped_at_twenty_four_hours() {
+    let (env, _node, session) = seed_pairing_env();
+    let (_node, surface, old_token) = attached_surface(&env, &session);
+    let (code, _stdout, stderr) = env.run(&["surface", "rotate", &surface.0, "--grace", "48h"]);
+    assert_eq!(code, 0, "surface rotate --grace failed: {stderr}");
+    let store = env.store();
+    let now = Timestamp::now();
+    let old = store
+        .list_surface_tokens(&surface)
+        .expect("token rows")
+        .into_iter()
+        .find(|token| token.token_hash == vowp_core::agent::hash_code(&old_token))
+        .expect("old token row");
+    let expiry = old.expires_at.expect("old token keeps an expiry");
+    assert!(
+        expiry.since(now) <= Duration::from_secs(24 * 60 * 60) + Duration::from_secs(2),
+        "the grace is capped at 24 hours: {}",
+        expiry.as_rfc3339()
+    );
+    assert!(
+        expiry.since(now) >= Duration::from_secs(23 * 60 * 60),
+        "a 48h request still grants almost the 24h cap: {}",
+        expiry.as_rfc3339()
+    );
+
+    // A second rotation with a short grace shortens the replacement token too.
+    let (code, value, stderr) = env.run_json(&["surface", "rotate", &surface.0, "--grace", "30m"]);
+    assert_eq!(code, 0, "{stderr}");
+    let old_expires: Timestamp = serde_json::from_value(value["old_expires_at"].clone()).expect("old expiry");
+    let remaining = old_expires.since(Timestamp::now());
+    assert!(
+        remaining <= Duration::from_secs(30 * 60) + Duration::from_secs(2) && remaining >= Duration::from_secs(29 * 60),
+        "the short grace is applied: {}",
+        old_expires.as_rfc3339()
+    );
+}
+
+#[test]
+fn surface_rotate_grace_refuses_pending_and_revoked_surfaces() {
+    let (env, node, session) = seed_pairing_env();
+    let store = env.store();
+    let now = store.clock().now();
+    let pending = vowp_core::agent::pair::create_pending_surface(
+        &store,
+        &node,
+        &session,
+        vowp_protocol::SurfaceKind::Opencode,
+        Some("opencode"),
+        now,
+    )
+    .expect("pending surface");
+    let (code, _stdout, stderr) = env.run(&["surface", "rotate", &pending.surface.id.0, "--grace", "1h"]);
+    assert_eq!(code, 4, "a pending surface is a conflict: {stderr}");
+
+    let (_node, surface, _token) = attached_surface(&env, &session);
+    let deps = env.global(false);
+    let input = BufferIo::new("");
+    let ctx = vowp_cli::Ctx::build(&deps, &input).expect("context");
+    vowp_core::agent::pair::revoke_surface(&store, ctx.deps(), &surface, now).expect("revoke");
+    let (code, _stdout, stderr) = env.run(&["surface", "rotate", &surface.0, "--grace", "1h"]);
+    assert_eq!(code, 5, "a revoked surface is refused: {stderr}");
+}
+
+#[test]
+fn surface_pair_replace_revokes_the_old_surface_and_clears_the_stale_frame() {
+    let (env, _node, session) = seed_pairing_env();
+    let (_node, old, old_token) = attached_surface(&env, &session);
+    let (code, _stdout, stderr) = env.run(&["surface", "rotate", &old.0]);
+    assert_eq!(code, 0, "rotation failed: {stderr}");
+    let frame = env
+        .home_path()
+        .join("agent-frames/mac-studio")
+        .join(format!("{}.json", old.0));
+    assert!(frame.is_file(), "the rotation is queued before the replace");
+
+    let (code, value, stderr) = env.run_json(&[
+        "surface",
+        "pair",
+        "--session",
+        session.as_ref(),
+        "--node",
+        "mac-studio",
+        "--kind",
+        "opencode",
+        "--app",
+        "opencode",
+        "--replace",
+        &old.0,
+    ]);
+    assert_eq!(code, 0, "surface pair --replace failed: {stderr}");
+    assert_eq!(value["replaced"], old.0);
+    let new_id = SurfaceId(value["surface"].as_str().expect("new surface").to_owned());
+    assert_ne!(new_id, old);
+    assert_eq!(value["code"].as_str().expect("new code").len(), 52);
+    assert!(!frame.exists(), "the old surface's queued frame is removed");
+
+    let store = env.store();
+    assert_eq!(
+        store.surface_by_id(&old).expect("old lookup").expect("old row").state,
+        SurfaceState::Revoked
+    );
+    assert_eq!(
+        store
+            .surface_by_id(&new_id)
+            .expect("new lookup")
+            .expect("new row")
+            .state,
+        SurfaceState::Pending
+    );
+    assert!(
+        store
+            .list_surface_tokens(&old)
+            .expect("old tokens")
+            .iter()
+            .all(|token| token.revoked_at.is_some()),
+        "every old token is revoked"
+    );
+    assert!(
+        verify_surface_token(&store, &old_token, Timestamp::now()).is_err(),
+        "the old token is dead immediately"
+    );
+}
+
+#[test]
+fn surface_ls_shows_prefix_overlap_pending_and_expired_without_a_token() {
+    let (env, _node, session) = seed_pairing_env();
+    let (_node, surface, _token) = attached_surface(&env, &session);
+    let (code, rotated, stderr) = env.run_json(&["surface", "rotate", &surface.0]);
+    assert_eq!(code, 0, "rotation failed: {stderr}");
+    let new_expiry: Timestamp = serde_json::from_value(rotated["expires_at"].clone()).expect("new expiry");
+
+    let store = env.store();
+    let tokens = store.list_surface_tokens(&surface).expect("tokens");
+    let newest = tokens
+        .iter()
+        .filter(|token| token.revoked_at.is_none())
+        .max_by_key(|token| token.created_at)
+        .expect("newest token");
+    let old_expiry = tokens
+        .iter()
+        .filter(|token| token.revoked_at.is_none())
+        .filter_map(|token| token.expires_at)
+        .filter(|expiry| *expiry < new_expiry)
+        .max()
+        .expect("overlap expiry");
+
+    let (code, value, stderr) = env.run_json(&["surface", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    let entry = value
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|entry| entry["id"] == surface.0)
+        .expect("surface row");
+    assert_eq!(entry["prefix"], newest.prefix);
+    assert_eq!(entry["expires_at"], new_expiry.as_rfc3339());
+    assert_eq!(entry["overlap_until"], old_expiry.as_rfc3339());
+    assert_eq!(entry["pending"], true);
+    assert_eq!(entry["delivery_deadline"], new_expiry.as_rfc3339());
+    assert_eq!(entry["expired"], false);
+    let text = serde_json::to_string(&value).expect("json text");
+    assert!(!text.contains("vowp_surf_"), "no token in JSON: {text}");
+
+    let (code, human, stderr) = env.run(&["surface", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(human.contains("PREFIX"), "{human}");
+    assert!(human.contains("OVERLAP"), "{human}");
+    assert!(human.contains("PENDING"), "{human}");
+    assert!(!human.contains("vowp_surf_"), "no token in human output: {human}");
+
+    let now = Timestamp::now();
+    let past = now.minus(Duration::from_secs(60));
+    for token in store.list_surface_tokens(&surface).expect("tokens") {
+        if token.revoked_at.is_none() {
+            store
+                .shorten_surface_token_expiry(&token.id, past)
+                .expect("expire token");
+        }
+    }
+    let (code, human, stderr) = env.run(&["surface", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(human.contains("expired"), "an expired token is marked: {human}");
+    assert!(human.contains("attached"), "the surface state stays attached: {human}");
+    let (code, value, stderr) = env.run_json(&["surface", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    let entry = value
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|entry| entry["id"] == surface.0)
+        .expect("surface row");
+    assert_eq!(entry["state"], "attached");
+    assert_eq!(entry["expired"], true);
+    assert!(entry["prefix"].is_null(), "no active prefix: {entry}");
+}
+
+#[test]
+fn agent_service_install_without_home_exits_two() {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .args(["agent", "service", "install", "--print"])
+        .env_remove("HOME")
+        .env_remove("VOWP_AGENT_HOME")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run vowp agent service install");
+    assert_eq!(output.status.code(), Some(2));
 }

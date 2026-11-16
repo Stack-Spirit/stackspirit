@@ -456,3 +456,19 @@ fn offload_status_lists_nodes_assignments_and_waiting_reasons() {
         "status must not print the project path: {human}"
     );
 }
+
+#[test]
+fn offload_policy_reports_the_bundle_result_transport() {
+    let env = TestEnv::new();
+    let mut config = env.config.clone();
+    config.offload.result_transport = vowp_protocol::ResultTransport::Bundle;
+    write_config(&env, &config);
+
+    let (code, value, stderr) = env.run_json(&["offload", "policy"]);
+    assert_eq!(code, 0, "bundle must be a legal result transport: {stderr}");
+    assert_eq!(value["result_transport"], "bundle", "{value}");
+
+    let (code, human, stderr) = env.run(&["offload", "policy"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(human.contains("result_transport: bundle"), "{human}");
+}

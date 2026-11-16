@@ -1279,17 +1279,24 @@ pub enum AgentCommand {
     Run(AgentRunArgs),
     /// Show the last local agent status.
     Status(AgentStatusArgs),
-    /// Hidden: serve the home side of one agent stdio connection.
+    /// Install, remove or inspect the launchd or systemd-user service.
+    Service(AgentServiceArgs),
+    /// Report local agent warnings without failing on them.
+    Doctor(AgentDoctorArgs),
+    /// Hidden: serve the home side of one agent stdio or WebSocket connection.
     #[command(hide = true)]
     Gateway(AgentGatewayArgs),
 }
 
 /// Arguments for `vowp agent enroll`.
+///
+/// `--target` names the SSH home. `--wss` instead stores a WSS transport; the target is then
+/// optional because the proxy URL carries the route.
 #[derive(Debug, Clone, Args)]
 pub struct AgentEnrollArgs {
     /// ssh destination of the home.
     #[arg(long, value_name = "SSH-TARGET")]
-    pub target: String,
+    pub target: Option<String>,
     /// File holding the one-time code, or `-` for stdin.
     #[arg(long, value_name = "PATH|-")]
     pub code_file: String,
@@ -1299,6 +1306,12 @@ pub struct AgentEnrollArgs {
     /// Worktree root for every --project; defaults to `<checkout>/.vowp/worktrees`.
     #[arg(long, value_name = "PATH")]
     pub worktree_root: Option<PathBuf>,
+    /// Reach the home through a WSS proxy URL instead of SSH.
+    #[arg(long, value_name = "URL")]
+    pub wss: Option<String>,
+    /// Hard-pin the proxy certificate (`sha256:<hex>`); only with --wss.
+    #[arg(long, value_name = "SHA256:HEX", requires = "wss")]
+    pub tls_fingerprint: Option<String>,
 }
 
 /// Arguments for `vowp agent paths`.
@@ -1375,6 +1388,9 @@ pub struct AgentRunArgs {
     /// Agent role: `surface`, `executor` or `both`.
     #[arg(long, value_name = "ROLE")]
     pub role: Option<String>,
+    /// Run under the service manager: write the `run` marker and drain on SIGTERM.
+    #[arg(long)]
+    pub service: bool,
 }
 
 /// Arguments for `vowp agent status`.
@@ -1385,9 +1401,61 @@ pub struct AgentStatusArgs {}
 #[derive(Debug, Clone, Default, Args)]
 pub struct AgentGatewayArgs {
     /// Serve one JSON frame per line on stdin/stdout.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "listen")]
     pub stdio: bool,
+    /// Serve one gateway connection per WebSocket on this loopback address.
+    #[arg(long, value_name = "ADDR", conflicts_with = "stdio")]
+    pub listen: Option<String>,
 }
+
+/// Arguments for `vowp agent service`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentServiceArgs {
+    /// The service subcommand.
+    #[command(subcommand)]
+    pub command: AgentServiceCommand,
+}
+
+/// `vowp agent service` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum AgentServiceCommand {
+    /// Write exactly one launchd plist or systemd user unit.
+    Install(AgentServiceInstallArgs),
+    /// Stop the unit and remove only a VOWP-generated file.
+    Uninstall(AgentServiceUninstallArgs),
+    /// Show the unit path and the manager's reported state.
+    Status(AgentServiceStatusArgs),
+}
+
+/// Arguments for `vowp agent service install`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentServiceInstallArgs {
+    /// Print the unit text and commands without writing or invoking the manager.
+    #[arg(long)]
+    pub print: bool,
+    /// Replace a file at the unit path that VOWP did not generate.
+    #[arg(long)]
+    pub force: bool,
+    /// Run the current-user manager commands after writing the unit.
+    #[arg(long)]
+    pub now: bool,
+}
+
+/// Arguments for `vowp agent service uninstall`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentServiceUninstallArgs {
+    /// Remove the unit without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// Arguments for `vowp agent service status`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentServiceStatusArgs {}
+
+/// Arguments for `vowp agent doctor`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AgentDoctorArgs {}
 
 /// `vowp surface` subcommands.
 #[derive(Debug, Clone, Subcommand)]
@@ -1418,6 +1486,9 @@ pub struct SurfacePairArgs {
     /// Application name carried into the token scopes.
     #[arg(long, value_name = "APP")]
     pub app: Option<String>,
+    /// Revoke this surface and create the replacement pending surface in one transaction.
+    #[arg(long, value_name = "SURFACE-ID")]
+    pub replace: Option<String>,
 }
 
 /// Arguments for `vowp surface ls`.
@@ -1446,6 +1517,12 @@ pub struct SurfaceRevokeArgs {
 pub struct SurfaceRotateArgs {
     /// Surface id printed by `vowp surface pair`.
     pub id: String,
+    /// Poll the outbox for this long and exit 7 with `rotation_pending` if still queued.
+    #[arg(long, value_name = "DURATION")]
+    pub wait: Option<String>,
+    /// Shorten the old tokens to `now + grace` instead of the ten-minute default (max 24 h).
+    #[arg(long, value_name = "DURATION")]
+    pub grace: Option<String>,
 }
 
 /// Arguments for `vowp loops`.
