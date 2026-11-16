@@ -1,67 +1,29 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
-
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  E2E_LOCK,
+  E2E_TIMEOUT,
+  startViteServer,
+  stopViteServer,
+  type ViteServer,
+} from "./support";
+
 // Both gated-off cases share the two dev servers started in `beforeAll`; keep them in
 // one worker so a parallel worker never races for the same ports.
-test.describe.configure({ mode: "serial" });
+test.describe.configure({ mode: "serial", lock: E2E_LOCK, timeout: E2E_TIMEOUT });
 
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
 const WAITING_PORT = 1426;
 const INCOMPATIBLE_PORT = 1427;
 const WAITING_URL = `http://127.0.0.1:${WAITING_PORT}`;
 const INCOMPATIBLE_URL = `http://127.0.0.1:${INCOMPATIBLE_PORT}`;
-const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const servers: ChildProcess[] = [];
-let serverLog = "";
+const servers: ViteServer[] = [];
 
 async function expectNoWcagViolations(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
   expect(results.violations).toEqual([]);
-}
-
-async function startServer(scenario: string, port: number): Promise<void> {
-  const server = spawn(
-    process.platform === "win32" ? "npm.cmd" : "npm",
-    ["run", "dev", "--", "--port", String(port), "--strictPort"],
-    {
-      cwd: APP_ROOT,
-      env: {
-        ...process.env,
-        VITE_SPIRIT_MOCK: "1",
-        VITE_SPIRIT_MOCK_SCENARIO: scenario,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  server.stdout?.on("data", (chunk: Buffer) => {
-    serverLog += chunk.toString();
-  });
-  server.stderr?.on("data", (chunk: Buffer) => {
-    serverLog += chunk.toString();
-  });
-  servers.push(server);
-
-  const url = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    if (server.exitCode !== null) {
-      throw new Error(`Vite exited before serving ${url}:\n${serverLog.slice(-4000)}`);
-    }
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
-      // The dev server socket is not open yet.
-    }
-    await delay(200);
-  }
-  throw new Error(`Vite did not serve ${url}:\n${serverLog.slice(-4000)}`);
 }
 
 async function openEngine(page: Page, url: string) {
@@ -77,23 +39,17 @@ async function openEngine(page: Page, url: string) {
 }
 
 test.beforeAll(async () => {
-  await Promise.all([
-    startServer("gate-d6-waiting", WAITING_PORT),
-    startServer("gate-d6-incompatible", INCOMPATIBLE_PORT),
-  ]);
+  try {
+    servers.push(await startViteServer("gate-d6-waiting", WAITING_PORT));
+    servers.push(await startViteServer("gate-d6-incompatible", INCOMPATIBLE_PORT));
+  } catch (error) {
+    await Promise.all(servers.map((server) => stopViteServer(server.process)));
+    throw error;
+  }
 });
 
 test.afterAll(async () => {
-  await Promise.all(
-    servers.map(async (server) => {
-      if (server.exitCode !== null) return;
-      server.kill("SIGTERM");
-      await new Promise<void>((resolveExit) => {
-        server.once("exit", () => resolveExit());
-        setTimeout(resolveExit, 5_000);
-      });
-    }),
-  );
+  await Promise.all(servers.map((server) => stopViteServer(server.process)));
 });
 
 test("a Waiting local-orchestrator gate keeps every start action disabled", async ({

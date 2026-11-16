@@ -1,71 +1,33 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
-
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+
+import {
+  E2E_LOCK,
+  E2E_TIMEOUT,
+  startViteServer,
+  stopViteServer,
+  type ViteServer,
+} from "./support";
+
+test.describe.configure({ lock: E2E_LOCK, timeout: E2E_TIMEOUT });
 
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
 const READY_PORT = 1428;
 const READY_URL = `http://127.0.0.1:${READY_PORT}`;
-const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-let server: ChildProcess | null = null;
-let serverLog = "";
+let server: ViteServer | null = null;
 
 async function expectNoWcagViolations(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
   expect(results.violations).toEqual([]);
 }
 
-async function waitForServer(url: string): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    if (server && server.exitCode !== null) {
-      throw new Error(`Vite exited before serving ${url}:\n${serverLog.slice(-4000)}`);
-    }
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
-      // The dev server socket is not open yet.
-    }
-    await delay(200);
-  }
-  throw new Error(`Vite did not serve ${url}:\n${serverLog.slice(-4000)}`);
-}
-
 test.beforeAll(async () => {
-  server = spawn(
-    process.platform === "win32" ? "npm.cmd" : "npm",
-    ["run", "dev", "--", "--port", String(READY_PORT), "--strictPort"],
-    {
-      cwd: APP_ROOT,
-      env: {
-        ...process.env,
-        VITE_SPIRIT_MOCK: "1",
-        VITE_SPIRIT_MOCK_SCENARIO: "gate-d6-ready",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  server.stdout?.on("data", (chunk: Buffer) => {
-    serverLog += chunk.toString();
-  });
-  server.stderr?.on("data", (chunk: Buffer) => {
-    serverLog += chunk.toString();
-  });
-  await waitForServer(READY_URL);
+  server = await startViteServer("gate-d6-ready", READY_PORT);
 });
 
 test.afterAll(async () => {
-  if (!server || server.exitCode !== null) return;
-  server.kill("SIGTERM");
-  await new Promise<void>((resolveExit) => {
-    server?.once("exit", () => resolveExit());
-    setTimeout(resolveExit, 5_000);
-  });
+  await stopViteServer(server?.process ?? null);
 });
 
 test("Ready local orchestrator flow stays honest and gated by the connected agent", async ({

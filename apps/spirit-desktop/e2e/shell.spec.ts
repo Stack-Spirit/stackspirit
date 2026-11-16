@@ -1,6 +1,10 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+import { E2E_LOCK, E2E_TIMEOUT } from "./support";
+
+test.describe.configure({ lock: E2E_LOCK, timeout: E2E_TIMEOUT });
+
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
 
 async function expectNoWcagViolations(page: Page) {
