@@ -11,9 +11,10 @@ The v0.1 public release is **v0.1.0**, v0.2 is **v0.2.0** and v0.3 is **v0.3.0**
 2026-11-12. The v0.4 local-orchestrator design is accepted; Phases 0–3 are shipped, and the
 phase-4 hardening build and its documentation are implemented in the tree. The security review
 checklist and the rollback drill are recorded in
-[`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); only the seven-day soak is still
-pending, and it remains an owner question. No 0.4 release or date is promised.
-The slices that merged after the 0.3.0 tag are recorded separately below.
+[`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the seven-day soak is owner-deferred:
+the owner will run it on their Mac and home, record the commit, dates and numbers, and close phase 4
+with that explicit deferral. Phase 4 is complete in the tree with that deferral. No 0.4 release or
+date is promised. The slices that merged after the 0.3.0 tag are recorded separately below.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the normative v0.2 specification is
@@ -133,7 +134,7 @@ The accepted phases and their state in this tree:
 | 1 | Local `vowp chat`: surface pairing, leases, turn ingest, spool replay and takeover | shipped |
 | 2 | Offload executor: placement policy, path map, isolated worktree, events, result push and home verification | shipped; offload is opt-in and off by default |
 | 3 | Local opencode surface: app frames, agent socket, opencode bridge, MCP proxy, orchestrator materialization and local cache | shipped |
-| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | implemented with its documentation; security checklist and rollback drill [recorded](releases/v0.4-hardening.md); seven-day soak not run (owner question) |
+| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | complete in the tree with its documentation; security checklist and rollback drill [recorded](releases/v0.4-hardening.md); seven-day soak owner-deferred to the owner's Mac and home |
 
 Phase 0 is proved by the wire types in
 [`crates/vowp-protocol/src/agent.rs`](../crates/vowp-protocol/src/agent.rs), the enrollment, key
@@ -181,8 +182,9 @@ tests and the ordered slice list. The WSS transport and listener, the agent serv
 `--wait`/`--grace` path, the bundle result, the separate-user checks and the capacity history are
 in the tree, and [the agent-node guide](guides/agent-node.md) is the operator path. The security
 review checklist and the rollback drill on a restored copy are recorded in
-[`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the seven-day soak has not been
-run and remains an owner question. This page does not claim the soak or a release date. The accepted
+[`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the seven-day soak is owner-deferred:
+the owner will run it on their Mac and home, record the commit, dates and numbers, and close phase 4
+with that explicit deferral. This page does not claim the soak or a release date. The accepted
 [`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md) remains the binding design
 for the phases that are shipped.
 

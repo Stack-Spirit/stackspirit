@@ -6,7 +6,9 @@ and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the s
 Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1 describes them.
 The security review (§8.2) and the rollback drill (§8.4) results are recorded on the evidence page;
 the review leaves one shared-checkout item as an open owner question, and the seven-day soak (§8.3)
-has not been run and remains an open owner question. No release, tag or date is promised.
+has not been run and is **owner-deferred**: the owner will run it on their Mac and home, record the
+commit, dates and observed numbers, and phase 4 closes with that explicit deferral. No release, tag
+or date is promised.
 
 This page began as the plan for the phase and keeps the design-time wording and markers in the
 sections below. Where a §2–§7 sentence calls a command or flag *(planned)*, the name is the design
@@ -63,8 +65,9 @@ Known deviations from the text below:
   It delivers the frame; the home refuses the expired token on first use and the owner re-pairs.
   `--wait` still stops at the delivery deadline and reports `rotation_pending`.
 - The rollback drill is recorded in
-  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The seven-day soak is not
-  run; §8.3 remains the open owner question.
+  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The seven-day soak has not
+  been run and is **owner-deferred**: the owner will run it on their Mac and home and record the
+  commit, dates and observed numbers. Phase 4 closes with that explicit deferral.
 
 ## 1. Scope, invariants and vocabulary
 

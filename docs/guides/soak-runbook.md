@@ -1,8 +1,9 @@
 # The seven-day soak runbook
 
-> **Status: current.** Every command on this page exists in this tree. The seven-day soak itself has
-> **not** been run: the results table in [§6](#6-results-table) starts at `not run`, no number is
-> claimed here, and no pass may be written without an observed value in the same row.
+> **Status: current; owner-deferred.** Every command on this page exists in this tree. The seven-day
+> soak itself has **not** been run: the owner will run this runbook on their Mac and home when they
+> choose, and until then the results table in [§6](#6-results-table) remains at `not run`. No number
+> is claimed here, and no pass may be written without an observed value in the same row.
 
 This is the operator procedure for the soak in
 [`docs/design/v0.4/hardening.md`](../design/v0.4/hardening.md#83-soak) §8.3: one home, one Mac node

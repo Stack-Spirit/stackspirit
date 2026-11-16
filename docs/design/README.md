@@ -70,7 +70,7 @@ ambiguous or wrong, open an issue rather than inventing a different design.
 | File | Status | What it covers |
 |---|---|---|
 | [`v0.4/asif-integration.md`](v0.4/asif-integration.md) | **implemented for the ASIF slice** | ASIF 0.4 (review draft) interchange: the pinned adapter, core facade, `session export/import --format asif`, declared losses and strict mode, remote streams, the daemon download/report/import routes and the `/import` page. |
-| [`v0.4/hardening.md`](v0.4/hardening.md) | implemented in the tree; [security checklist and rollback drill recorded](../releases/v0.4-hardening.md), seven-day soak not run | Phase-4 hardening: optional WSS ingress behind a loopback listener, launchd/systemd-user service install, rotation UX, bundle result, separate user, bounded metrics history, and the phase-exit review, soak and rollback gates. |
+| [`v0.4/hardening.md`](v0.4/hardening.md) | implemented in the tree; [security checklist and rollback drill recorded](../releases/v0.4-hardening.md), seven-day soak owner-deferred | Phase-4 hardening: optional WSS ingress behind a loopback listener, launchd/systemd-user service install, rotation UX, bundle result, separate user, bounded metrics history, and the phase-exit review, soak and rollback gates. |
 | [`v0.4/live-upgrade-and-drain.md`](v0.4/live-upgrade-and-drain.md) | accepted design, queued | Live binary/schema upgrade, cooperative drain and selective subsystem restart. |
 | [`v0.4/local-orchestrator.md`](v0.4/local-orchestrator.md) | draft; Phase 0/1 implemented | The Mac-side local surface and outbound local agent (offload, path map, result return). |
 | [`v0.4/public-positioning-review.md`](v0.4/public-positioning-review.md) | private review note | Public-claim qualifications and the wording not applied to the public tree. |
@@ -107,8 +107,9 @@ The v0.4 local agent and Phase 3 (including `v4-local-3h-offline-cache`) are shi
 and the phase-4 hardening build (WSS, service, rotation UX, bundle result, separate user and
 capacity history) and its documentation are implemented in the tree. The security review checklist
 and the rollback drill are recorded in
-[`releases/v0.4-hardening.md`](../releases/v0.4-hardening.md); the seven-day soak has not been run
-and remains an owner question. It is not a completed release. The
+[`releases/v0.4-hardening.md`](../releases/v0.4-hardening.md); the seven-day soak is owner-deferred,
+to be run by the owner on their Mac and home with the commit, dates and numbers recorded. Phase 4
+closes with that explicit deferral. It is not a completed release. The
 live-upgrade/drain slice is queued. Multi-user accounts, multi-home sync and
 the remaining roadmap items are still planned, as marked in
 [`../roadmap.md`](../roadmap.md).
