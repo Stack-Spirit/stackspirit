@@ -252,15 +252,16 @@ impl LocalSurfaceView {
         let lease_is_ours = session
             .and_then(|session| session.active_surface.as_ref())
             .is_some_and(|holder| holder.surface_id == surface.id);
+        let node_is_online =
+            node.is_some_and(|node| node.presence == NodePresence::Online.as_str());
         let can_write = surface.is_writable(now)
             && agent.connection == AgentConnectionState::Connected
             && protocol.as_deref() == Some(AGENT_PROTOCOL)
-            && lease_is_ours;
+            && lease_is_ours
+            && node_is_online;
         Self {
             surface_id: surface.id.clone(),
-            node: node
-                .map(|node| node.name.clone())
-                .unwrap_or_else(|| surface.node.clone()),
+            node: surface.node.clone(),
             protocol,
             agent_status: agent.connection.as_str().to_owned(),
             lease_holder,
@@ -327,10 +328,7 @@ impl LocalOrchestratorView {
             project: card.project.clone(),
             app: card.app.clone(),
             state: card.state.clone(),
-            node: card
-                .node
-                .clone()
-                .or_else(|| node.map(|node| node.name.clone())),
+            node: card.node.clone(),
             protocol,
             agent_status: agent.connection.as_str().to_owned(),
             lease_holder,

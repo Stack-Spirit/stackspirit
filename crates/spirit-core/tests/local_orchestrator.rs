@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use spirit_core::engine::local::{
-    LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorState, LocalPathMapStatus,
+    LocalNodeState, LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorState,
+    LocalPathMapStatus,
 };
 use spirit_core::engine::{
     EngineSupervisor, EngineSupervisorConfig, FakeEngineRuntime, GateFeatureFlags, GateSnapshot,
@@ -18,7 +19,10 @@ use spirit_core::service::{SpiritCore, SpiritService};
 use spirit_core::ssh::command::{CommandOutput, CommandSpec};
 use spirit_core::ssh::{FakeCommandRunner, SshOptions, SshTarget};
 use spirit_core::time::Timestamp;
-use spirit_core::view::{AgentPathView, LocalAgentView, LocalSessionState, LocalSurfaceView};
+use spirit_core::view::{
+    AgentPathView, LocalAgentView, LocalOrchestratorView, LocalSessionState, LocalSurfaceView,
+    OrchestratorView, SessionCardView, SurfaceRefView,
+};
 use spirit_core::vowp::{
     AgentPairRequest, CommandLocalAgent, LocalAgentClient, MockLocalAgentClient, MockVowpClient,
     VowpClient,
@@ -522,6 +526,78 @@ fn d6_revoked_and_expired_surfaces_are_not_writable() {
     );
     assert_eq!(attached.agent_status, "connected");
     assert_eq!(attached.protocol.as_deref(), Some(AGENT_PROTOCOL));
+}
+
+#[test]
+fn d6_surface_view_uses_the_surface_row_node() {
+    let surfaces: Vec<SurfaceEntry> = serde_json::from_str(SURFACE_LIST).unwrap();
+    let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let local = LocalNodeState::from_card(&node_card());
+    let now = Timestamp::parse("2026-11-16T12:00:00.000Z").unwrap();
+    let mut surface = surfaces[0].clone();
+    surface.node = "other-node".to_owned();
+
+    let view = LocalSurfaceView::from_parts(&surface, &agent, Some(&local), None, now);
+    assert_eq!(view.node, "other-node");
+}
+
+#[test]
+fn d6_orchestrator_view_does_not_infer_a_node_from_the_local_card() {
+    let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let local = LocalNodeState::from_card(&node_card());
+    let mut card = orchestrator_card("home-hosted");
+    card.node = None;
+
+    let card = OrchestratorView::from_card(&card);
+    assert!(card.node.is_none());
+
+    let view = LocalOrchestratorView::from_parts(&card, &agent, Some(&local), None);
+    assert_eq!(view.node, None);
+}
+
+#[test]
+fn d6_offline_node_cannot_write_even_with_the_lease() {
+    let surfaces: Vec<SurfaceEntry> = serde_json::from_str(SURFACE_LIST).unwrap();
+    let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let now = Timestamp::parse("2026-11-16T12:00:00.000Z").unwrap();
+    let session = SessionCardView {
+        id: SESSION_ID.to_owned(),
+        project: Some("vowp".to_owned()),
+        job_id: None,
+        role: None,
+        title: "local session".to_owned(),
+        state: "running".to_owned(),
+        executor: None,
+        node: "mac-studio".to_owned(),
+        active_surface: Some(SurfaceRefView {
+            surface_id: surfaces[0].id.clone(),
+            kind: "opencode".to_owned(),
+            holder: "desktop".to_owned(),
+            node: "mac-studio".to_owned(),
+            acquired_at: Timestamp::epoch(),
+            heartbeat_at: Timestamp::epoch(),
+        }),
+        last_event_at: Timestamp::epoch(),
+    };
+
+    let mut offline = LocalNodeState::from_card(&node_card());
+    offline.presence = "offline".to_owned();
+    let disconnected =
+        LocalSurfaceView::from_parts(&surfaces[0], &agent, Some(&offline), Some(&session), now);
+    assert_eq!(
+        disconnected.session_state,
+        LocalSessionState::Disconnected.as_str()
+    );
+    assert!(
+        !disconnected.can_write,
+        "an offline node cannot write the session"
+    );
+
+    let online = LocalNodeState::from_card(&node_card());
+    let writable =
+        LocalSurfaceView::from_parts(&surfaces[0], &agent, Some(&online), Some(&session), now);
+    assert_eq!(writable.session_state, LocalSessionState::Running.as_str());
+    assert!(writable.can_write);
 }
 
 #[test]
