@@ -28,10 +28,11 @@ use spirit_core::vowp::{
     VowpClient,
 };
 use spirit_core::wire::{
-    AGENT_PROTOCOL, AgentPathMap, AgentStatusDocument, AgentSurfaceStatus, NodeCard,
-    OrchestratorCard, OrchestratorNewRequest, PathRef, ProjectName, SessionId, SurfaceEntry,
-    SurfaceLifecycleState, SurfacePairOutput, SurfacePairRequest, SurfaceRevokeResult,
-    SurfaceRotateRequest, SurfaceRotateResult, parse_capacity_report, parse_fleet_status,
+    AGENT_PROTOCOL, AgentPathAddRequest, AgentPathMap, AgentStatusDocument, AgentSurfaceState,
+    AgentSurfaceStatus, NodeCard, OrchestratorCard, OrchestratorNewRequest, PathRef, ProjectName,
+    SessionId, SurfaceEntry, SurfaceLifecycleState, SurfacePairOutput, SurfacePairRequest,
+    SurfaceRevokeResult, SurfaceRotateRequest, SurfaceRotateResult, parse_capacity_report,
+    parse_fleet_status,
 };
 
 const GATE_PHASE3_READY: &str = include_str!("../fixtures/vowp/gate-phase3-ready.json");
@@ -135,6 +136,28 @@ fn surface_pair_request() -> SurfacePairRequest {
 
 fn remote_argv(spec: &CommandSpec) -> String {
     spec.args.last().cloned().unwrap_or_default()
+}
+
+fn running_session_for(surface: &SurfaceEntry) -> SessionCardView {
+    SessionCardView {
+        id: SESSION_ID.to_owned(),
+        project: Some("vowp".to_owned()),
+        job_id: None,
+        role: None,
+        title: "local session".to_owned(),
+        state: "running".to_owned(),
+        executor: None,
+        node: surface.node.clone(),
+        active_surface: Some(SurfaceRefView {
+            surface_id: surface.id.clone(),
+            kind: "opencode".to_owned(),
+            holder: "desktop".to_owned(),
+            node: surface.node.clone(),
+            acquired_at: Timestamp::epoch(),
+            heartbeat_at: Timestamp::epoch(),
+        }),
+        last_event_at: Timestamp::epoch(),
+    }
 }
 
 #[test]
@@ -458,6 +481,14 @@ async fn d6_local_agent_pair_sends_the_code_on_stdin_and_drops_the_token_path() 
     let paired = agent.pair(&request).await.unwrap();
     assert_eq!(paired.surface_id, SURFACE_ID);
     let call = runner.last_call().expect("call");
+    assert_eq!(call.program, "vowp");
+    assert_eq!(call.args[0], "--json");
+    assert_eq!(call.args[1], "agent");
+    assert_eq!(call.args[2], "pair");
+    assert!(
+        !call.args.iter().any(|arg| arg == "vowp"),
+        "the program must not be repeated as an argument"
+    );
     assert!(call.args.iter().any(|arg| arg == "--code-file"));
     assert!(call.args.iter().any(|arg| arg == "-"));
     assert!(
@@ -476,12 +507,61 @@ async fn d6_local_agent_pair_sends_the_code_on_stdin_and_drops_the_token_path() 
 }
 
 #[tokio::test]
+async fn d6_local_agent_path_add_and_remove_use_vowp_as_the_program() {
+    let runner = Arc::new(FakeCommandRunner::new(vec![
+        CommandOutput::ok(
+            br#"{"project":"vowp","local_root":"/Users/example/src/vowp","worktree_root":null,"allow":["src"]}"#
+                .to_vec(),
+        ),
+        CommandOutput::ok(Vec::new()),
+    ]));
+    let agent = CommandLocalAgent::new(runner.clone());
+    let request = AgentPathAddRequest {
+        project_root: "/Users/example/src/vowp".to_owned(),
+        name: Some("vowp".to_owned()),
+        worktree_root: None,
+        allow: vec!["src".to_owned()],
+    };
+    let map = agent.add_path(&request).await.unwrap();
+    assert_eq!(map.project.as_str(), "vowp");
+    agent.remove_path(&map.project).await.unwrap();
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].program, "vowp");
+    assert_eq!(
+        calls[0].args,
+        [
+            "--json",
+            "agent",
+            "paths",
+            "add",
+            "--project",
+            "/Users/example/src/vowp",
+            "--name",
+            "vowp",
+            "--allow",
+            "src",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    );
+    assert_eq!(calls[1].program, "vowp");
+    assert_eq!(
+        calls[1].args,
+        ["--json", "agent", "paths", "rm", "vowp"]
+            .map(str::to_owned)
+            .to_vec()
+    );
+}
+
+#[tokio::test]
 async fn d6_local_agent_paths_and_status_are_safe_views() {
     let runner = Arc::new(FakeCommandRunner::new(vec![
         CommandOutput::ok(AGENT_PATHS.as_bytes().to_vec()),
         CommandOutput::ok(AGENT_CONNECTED.as_bytes().to_vec()),
     ]));
-    let agent = CommandLocalAgent::new(runner);
+    let agent = CommandLocalAgent::new(runner.clone());
     let paths = agent.paths().await.unwrap();
     assert_eq!(paths.len(), 1);
     let views: Vec<AgentPathView> = paths.iter().map(AgentPathView::from_map).collect();
@@ -496,6 +576,27 @@ async fn d6_local_agent_paths_and_status_are_safe_views() {
     let json = serde_json::to_string(&view).unwrap();
     assert!(!json.contains("/Users/"), "{json}");
     assert!(!json.contains("key_fingerprint"), "{json}");
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].program, "vowp");
+    assert_eq!(
+        calls[0].args,
+        ["--json", "agent", "paths", "ls"]
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(calls[1].program, "vowp");
+    assert_eq!(
+        calls[1].args,
+        ["--json", "agent", "status"].map(str::to_owned).to_vec()
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.args.iter().any(|arg| arg == "vowp")),
+        "the program must not be repeated as an argument"
+    );
 }
 
 #[tokio::test]
@@ -529,6 +630,46 @@ fn d6_revoked_and_expired_surfaces_are_not_writable() {
 }
 
 #[test]
+fn d6_mac_surface_state_controls_writability_and_session_state() {
+    let surfaces: Vec<SurfaceEntry> = serde_json::from_str(SURFACE_LIST).unwrap();
+    let mut agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let local = LocalNodeState::from_card(&node_card());
+    let now = Timestamp::parse("2026-11-16T12:00:00.000Z").unwrap();
+    let session = running_session_for(&surfaces[0]);
+
+    agent.surfaces[0].state = AgentSurfaceState::Revoked;
+    let revoked =
+        LocalSurfaceView::from_parts(&surfaces[0], &agent, Some(&local), Some(&session), now);
+    assert_eq!(revoked.session_state, LocalSessionState::Revoked.as_str());
+    assert!(!revoked.can_write);
+
+    agent.surfaces[0].state = AgentSurfaceState::NeedsPair;
+    let needs_pair =
+        LocalSurfaceView::from_parts(&surfaces[0], &agent, Some(&local), Some(&session), now);
+    assert_eq!(
+        needs_pair.session_state,
+        LocalSessionState::Pending.as_str()
+    );
+    assert!(!needs_pair.can_write);
+
+    agent.surfaces[0].state = AgentSurfaceState::Paired;
+    let paired =
+        LocalSurfaceView::from_parts(&surfaces[0], &agent, Some(&local), Some(&session), now);
+    assert_eq!(paired.session_state, LocalSessionState::Running.as_str());
+    assert!(paired.can_write);
+
+    agent.surfaces.clear();
+    let missing =
+        LocalSurfaceView::from_parts(&surfaces[0], &agent, Some(&local), Some(&session), now);
+    assert_eq!(
+        missing.session_state,
+        LocalSessionState::Unknown.as_str(),
+        "the Mac agent does not report a local token for this surface"
+    );
+    assert!(!missing.can_write);
+}
+
+#[test]
 fn d6_surface_view_uses_the_surface_row_node() {
     let surfaces: Vec<SurfaceEntry> = serde_json::from_str(SURFACE_LIST).unwrap();
     let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
@@ -536,9 +677,17 @@ fn d6_surface_view_uses_the_surface_row_node() {
     let now = Timestamp::parse("2026-11-16T12:00:00.000Z").unwrap();
     let mut surface = surfaces[0].clone();
     surface.node = "other-node".to_owned();
+    let session = running_session_for(&surface);
 
-    let view = LocalSurfaceView::from_parts(&surface, &agent, Some(&local), None, now);
+    let view = LocalSurfaceView::from_parts(&surface, &agent, Some(&local), Some(&session), now);
     assert_eq!(view.node, "other-node");
+    assert_eq!(
+        view.agent_status, "unknown",
+        "the Mac agent is not on this surface's node"
+    );
+    assert!(view.protocol.is_none());
+    assert_eq!(view.session_state, LocalSessionState::Unknown.as_str());
+    assert!(!view.can_write);
 }
 
 #[test]
@@ -553,6 +702,26 @@ fn d6_orchestrator_view_does_not_infer_a_node_from_the_local_card() {
 
     let view = LocalOrchestratorView::from_parts(&card, &agent, Some(&local), None);
     assert_eq!(view.node, None);
+}
+
+#[test]
+fn d6_orchestrator_state_honours_the_local_node_presence() {
+    let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let card = OrchestratorView::from_card(&orchestrator_card("home-hosted"));
+
+    let mut revoked = LocalNodeState::from_card(&node_card());
+    revoked.presence = "revoked".to_owned();
+    let view = LocalOrchestratorView::from_parts(&card, &agent, Some(&revoked), None);
+    assert_eq!(view.session_state, LocalSessionState::Revoked.as_str());
+
+    let mut offline = LocalNodeState::from_card(&node_card());
+    offline.presence = "offline".to_owned();
+    let view = LocalOrchestratorView::from_parts(&card, &agent, Some(&offline), None);
+    assert_eq!(view.session_state, LocalSessionState::Disconnected.as_str());
+
+    let online = LocalNodeState::from_card(&node_card());
+    let view = LocalOrchestratorView::from_parts(&card, &agent, Some(&online), None);
+    assert_eq!(view.session_state, LocalSessionState::Running.as_str());
 }
 
 #[test]

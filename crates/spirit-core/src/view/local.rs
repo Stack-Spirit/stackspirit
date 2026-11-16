@@ -11,8 +11,8 @@ use crate::engine::local::LocalNodeState;
 use crate::time::Timestamp;
 use crate::view::fleet::{JoinView, OrchestratorView, SessionCardView};
 use crate::wire::{
-    AGENT_PROTOCOL, AgentConnectionState, AgentPathMap, AgentStatusDocument, AgentSurfaceStatus,
-    NodePresence, SurfaceEntry,
+    AGENT_PROTOCOL, AgentConnectionState, AgentPathMap, AgentStatusDocument, AgentSurfaceState,
+    AgentSurfaceStatus, NodePresence, SurfaceEntry,
 };
 
 /// The local surface/session state shown to the owner.
@@ -239,22 +239,42 @@ impl LocalSurfaceView {
         session: Option<&SessionCardView>,
         now: Timestamp,
     ) -> Self {
-        let protocol = node
-            .and_then(|node| node.protocol.clone())
-            .or_else(|| agent.protocol.clone());
+        let agent_applies = agent_describes_surface(surface, agent, node);
+        let protocol = if agent_applies {
+            node.and_then(|node| node.protocol.clone())
+                .or_else(|| agent.protocol.clone())
+        } else {
+            None
+        };
         let lease_holder = session.and_then(|session| {
             session
                 .active_surface
                 .as_ref()
                 .map(|surface| surface.holder.clone())
         });
-        let session_state = derive_session_state(surface, agent, node, session, now);
+        let agent_surface = if agent_applies {
+            agent
+                .surfaces
+                .iter()
+                .find(|status| status.surface == surface.id)
+        } else {
+            None
+        };
+        let session_state = if agent_applies {
+            derive_session_state(surface, agent, agent_surface, node, session, now)
+        } else {
+            LocalSessionState::Unknown
+        };
         let lease_is_ours = session
             .and_then(|session| session.active_surface.as_ref())
             .is_some_and(|holder| holder.surface_id == surface.id);
         let node_is_online =
             node.is_some_and(|node| node.presence == NodePresence::Online.as_str());
-        let can_write = surface.is_writable(now)
+        let mac_surface_is_paired =
+            agent_surface.is_some_and(|status| status.state == AgentSurfaceState::Paired);
+        let can_write = agent_applies
+            && mac_surface_is_paired
+            && surface.is_writable(now)
             && agent.connection == AgentConnectionState::Connected
             && protocol.as_deref() == Some(AGENT_PROTOCOL)
             && lease_is_ours
@@ -263,7 +283,11 @@ impl LocalSurfaceView {
             surface_id: surface.id.clone(),
             node: surface.node.clone(),
             protocol,
-            agent_status: agent.connection.as_str().to_owned(),
+            agent_status: if agent_applies {
+                agent.connection.as_str().to_owned()
+            } else {
+                "unknown".to_owned()
+            },
             lease_holder,
             session_state: session_state.as_str().to_owned(),
             kind: surface.kind.as_str().to_owned(),
@@ -338,9 +362,22 @@ impl LocalOrchestratorView {
     }
 }
 
+fn agent_describes_surface(
+    surface: &SurfaceEntry,
+    agent: &AgentStatusDocument,
+    node: Option<&LocalNodeState>,
+) -> bool {
+    node.is_none_or(|node| node.name == surface.node)
+        && agent
+            .node
+            .as_deref()
+            .is_none_or(|name| name == surface.node)
+}
+
 fn derive_session_state(
     surface: &SurfaceEntry,
     agent: &AgentStatusDocument,
+    agent_surface: Option<&AgentSurfaceStatus>,
     node: Option<&LocalNodeState>,
     session: Option<&SessionCardView>,
     now: Timestamp,
@@ -361,6 +398,14 @@ fn derive_session_state(
     if surface.is_revoked() {
         return LocalSessionState::Revoked;
     }
+    if let Some(status) = agent_surface {
+        match status.state {
+            AgentSurfaceState::Revoked => return LocalSessionState::Revoked,
+            AgentSurfaceState::NeedsPair => return LocalSessionState::Pending,
+            AgentSurfaceState::Unknown(_) => return LocalSessionState::Unknown,
+            AgentSurfaceState::Paired => {}
+        }
+    }
     if let Some(node) = node {
         match node.presence.as_str() {
             "revoked" => return LocalSessionState::Revoked,
@@ -374,6 +419,9 @@ fn derive_session_state(
     }
     if surface.is_expired(now) {
         return LocalSessionState::Disconnected;
+    }
+    if agent_surface.is_none() {
+        return LocalSessionState::Unknown;
     }
     match session {
         Some(session) => LocalSessionState::from_session_state(&session.state),
@@ -407,8 +455,13 @@ fn derive_orchestrator_state(
         | AgentConnectionState::Incompatible => return LocalSessionState::Disconnected,
         AgentConnectionState::Connected => {}
     }
-    if node.is_some_and(|node| node.presence == NodePresence::Degraded.as_str()) {
-        return LocalSessionState::Degraded;
+    if let Some(node) = node {
+        match node.presence.as_str() {
+            "revoked" => return LocalSessionState::Revoked,
+            "offline" => return LocalSessionState::Disconnected,
+            "degraded" => return LocalSessionState::Degraded,
+            _ => {}
+        }
     }
     if let Some(session) = session {
         return LocalSessionState::from_session_state(&session.state);

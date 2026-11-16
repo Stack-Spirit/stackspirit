@@ -87,7 +87,7 @@ impl CommandLocalAgent {
     }
 
     fn base_argv(&self) -> Vec<String> {
-        vec!["vowp".to_owned(), "--json".to_owned()]
+        vec!["--json".to_owned()]
     }
 
     async fn run(
