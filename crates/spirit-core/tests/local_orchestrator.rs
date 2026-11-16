@@ -29,10 +29,10 @@ use spirit_core::vowp::{
 };
 use spirit_core::wire::{
     AGENT_PROTOCOL, AgentPathAddRequest, AgentPathMap, AgentStatusDocument, AgentSurfaceState,
-    AgentSurfaceStatus, NodeCard, OrchestratorCard, OrchestratorNewRequest, PathRef, ProjectName,
-    SessionId, SurfaceEntry, SurfaceLifecycleState, SurfacePairOutput, SurfacePairRequest,
-    SurfaceRevokeResult, SurfaceRotateRequest, SurfaceRotateResult, parse_capacity_report,
-    parse_fleet_status,
+    AgentSurfaceStatus, NodeCard, NodeName, OrchestratorCard, OrchestratorNewRequest, PathRef,
+    ProjectName, SessionId, SurfaceEntry, SurfaceLifecycleState, SurfacePairOutput,
+    SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest, SurfaceRotateResult,
+    parse_capacity_report, parse_fleet_status,
 };
 
 const GATE_PHASE3_READY: &str = include_str!("../fixtures/vowp/gate-phase3-ready.json");
@@ -744,6 +744,166 @@ fn d6_orchestrator_state_honours_the_local_node_presence() {
     let online = LocalNodeState::from_card(&node_card());
     let view = LocalOrchestratorView::from_parts(&card, &agent, Some(&online), None);
     assert_eq!(view.session_state, LocalSessionState::Running.as_str());
+}
+
+#[test]
+fn d6_node_less_orchestrator_never_borrows_the_mac_agent() {
+    let connected: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let revoked: AgentStatusDocument = serde_json::from_str(AGENT_REVOKED).unwrap();
+    let local = LocalNodeState::from_card(&node_card());
+    let surfaces: Vec<SurfaceEntry> = serde_json::from_str(SURFACE_LIST).unwrap();
+    let session = running_session_for(&surfaces[0]);
+    let mut card = OrchestratorView::from_card(&orchestrator_card("home-hosted"));
+    card.node = None;
+
+    for agent in [&connected, &revoked] {
+        let view = LocalOrchestratorView::from_parts(&card, agent, Some(&local), Some(&session));
+        assert_eq!(view.node, None, "a v0.2 home-hosted card has no node");
+        assert_eq!(
+            view.agent_status, "unknown",
+            "the Mac agent does not describe a node-less card"
+        );
+        assert!(view.protocol.is_none(), "no borrowed protocol");
+        assert!(
+            view.lease_holder.is_none(),
+            "no borrowed lease holder from this node"
+        );
+        assert_eq!(
+            view.session_state,
+            LocalSessionState::Unknown.as_str(),
+            "no borrowed connected/revoked session state"
+        );
+    }
+}
+
+#[test]
+fn d6_other_node_orchestrator_never_borrows_the_mac_agent() {
+    let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let local = LocalNodeState::from_card(&node_card());
+    let surfaces: Vec<SurfaceEntry> = serde_json::from_str(SURFACE_LIST).unwrap();
+    let session = running_session_for(&surfaces[0]);
+    let mut card = OrchestratorView::from_card(&orchestrator_card("other-node"));
+    card.node = Some("other-node".to_owned());
+
+    for local_node in [Some(&local), None] {
+        let view = LocalOrchestratorView::from_parts(&card, &agent, local_node, Some(&session));
+        assert_eq!(view.node.as_deref(), Some("other-node"));
+        assert_eq!(view.agent_status, "unknown");
+        assert!(view.protocol.is_none());
+        assert!(view.lease_holder.is_none());
+        assert_eq!(view.session_state, LocalSessionState::Unknown.as_str());
+    }
+}
+
+#[test]
+fn d6_orchestrator_does_not_borrow_an_agent_without_a_matching_node_source() {
+    let agent: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    let mut unnamed_agent = agent.clone();
+    unnamed_agent.node = None;
+    let mut card = OrchestratorView::from_card(&orchestrator_card("vowp-local"));
+    assert_eq!(card.node.as_deref(), Some("mac-studio"));
+
+    let view = LocalOrchestratorView::from_parts(&card, &unnamed_agent, None, None);
+    assert_eq!(view.agent_status, "unknown");
+    assert!(view.protocol.is_none());
+    assert_eq!(view.session_state, LocalSessionState::Unknown.as_str());
+
+    card.node = None;
+    let view = LocalOrchestratorView::from_parts(&card, &agent, None, None);
+    assert_eq!(view.agent_status, "unknown");
+}
+
+#[test]
+fn d6_agent_last_error_scrubs_a_quoted_absolute_path() {
+    let mut document: AgentStatusDocument = serde_json::from_str(AGENT_CONNECTED).unwrap();
+    for raw in [
+        r#"failed to read "/Users/example/private/secret.txt""#,
+        r#"failed to open '/Users/example/My Documents/secret.txt' for read"#,
+    ] {
+        document.last_error = Some(raw.to_owned());
+        let view = LocalAgentView::from_document(&document);
+        let error = view.last_error.as_deref().expect("last error");
+        assert!(!error.contains("/Users/"), "{error}");
+        assert!(!error.contains("secret.txt"), "{error}");
+        assert!(error.contains("[path]"), "{error}");
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("/Users/"), "{json}");
+        assert!(!json.contains("secret.txt"), "{json}");
+        assert!(json.contains("[path]"), "{json}");
+    }
+}
+
+#[test]
+fn d6_guard_refuses_a_stale_node_card_or_target_from_another_node() {
+    let snapshot = ready_snapshot();
+    let mut other_node = node_card();
+    other_node.name = NodeName::parse("other-node").unwrap();
+    let state = LocalOrchestratorState {
+        node: Some(LocalNodeState::from_card(&other_node)),
+        ..LocalOrchestratorState::default()
+    };
+    let guard = LocalOrchestratorGuard::from_snapshot(&snapshot, &state);
+    for target in [Some("other-node"), Some("mac-studio"), None] {
+        let error = guard
+            .ensure(LocalOrchestratorAction::OrchestratorNew, target)
+            .unwrap_err();
+        assert!(error.message.contains("node_name"), "{error}");
+        assert!(error.message.contains("other-node"), "{error}");
+    }
+
+    let guard =
+        LocalOrchestratorGuard::from_snapshot(&snapshot, &LocalOrchestratorState::default());
+    let error = guard
+        .ensure(LocalOrchestratorAction::OrchestratorNew, Some("other-node"))
+        .unwrap_err();
+    assert!(error.message.contains("node_name"), "{error}");
+    assert!(error.message.contains("other-node"), "{error}");
+    assert!(
+        guard
+            .ensure(LocalOrchestratorAction::OrchestratorNew, Some("mac-studio"))
+            .is_ok(),
+        "the gate's own node still passes with no stored card"
+    );
+
+    let mut no_gate_node = ready_snapshot();
+    if let LocalOrchestratorGate::Ready { node, .. } = &mut no_gate_node.local_orchestrator {
+        *node = None;
+    }
+    let guard =
+        LocalOrchestratorGuard::from_snapshot(&no_gate_node, &LocalOrchestratorState::default());
+    let error = guard
+        .ensure(LocalOrchestratorAction::OrchestratorNew, Some("mac-studio"))
+        .unwrap_err();
+    assert!(error.message.contains("node_name"), "{error}");
+}
+
+#[tokio::test]
+async fn d6_orchestrator_new_refuses_a_stale_other_node_card_before_the_command() {
+    let client = fresh_mock().with_orchestrator_new_result(orchestrator_card("vowp-local"));
+    let core = connected_core(&client).await;
+    core.set_gates(ready_snapshot());
+    let mut other_node = node_card();
+    other_node.name = NodeName::parse("other-node").unwrap();
+    core.set_local_node_card(&other_node);
+    core.set_local_agent_paths(&[path_map()]);
+
+    for target in ["other-node", "mac-studio"] {
+        let request = OrchestratorNewRequest {
+            node: target.to_owned(),
+            app: spirit_core::wire::OrchestratorApp::Opencode,
+            project: Some("vowp".to_owned()),
+            name: Some("vowp-local".to_owned()),
+            force: false,
+        };
+        let error = core.orchestrator_new(&client, request).await.unwrap_err();
+        assert!(error.message.contains("node_name"), "{error}");
+        assert!(error.message.contains("other-node"), "{error}");
+    }
+    assert_eq!(
+        client.orchestrator_new_calls().len(),
+        0,
+        "a stale node card must not run the command"
+    );
 }
 
 #[test]

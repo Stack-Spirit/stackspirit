@@ -336,16 +336,24 @@ impl LocalOrchestratorView {
         node: Option<&LocalNodeState>,
         session: Option<&SessionCardView>,
     ) -> Self {
-        let protocol = node
-            .and_then(|node| node.protocol.clone())
-            .or_else(|| agent.protocol.clone());
-        let lease_holder = session.and_then(|session| {
-            session
-                .active_surface
-                .as_ref()
-                .map(|surface| surface.holder.clone())
-        });
-        let session_state = derive_orchestrator_state(card, agent, node, session);
+        let agent_applies = agent_describes_orchestrator(card, agent, node);
+        let protocol = if agent_applies {
+            node.and_then(|node| node.protocol.clone())
+                .or_else(|| agent.protocol.clone())
+        } else {
+            None
+        };
+        let lease_holder = if agent_applies {
+            session.and_then(|session| {
+                session
+                    .active_surface
+                    .as_ref()
+                    .map(|surface| surface.holder.clone())
+            })
+        } else {
+            None
+        };
+        let session_state = derive_orchestrator_state(card, agent, node, session, agent_applies);
         Self {
             name: card.name.clone(),
             session_id: card.session_id.clone(),
@@ -354,7 +362,11 @@ impl LocalOrchestratorView {
             state: card.state.clone(),
             node: card.node.clone(),
             protocol,
-            agent_status: agent.connection.as_str().to_owned(),
+            agent_status: if agent_applies {
+                agent.connection.as_str().to_owned()
+            } else {
+                "unknown".to_owned()
+            },
             lease_holder,
             session_state: session_state.as_str().to_owned(),
             join: card.join.clone(),
@@ -372,6 +384,27 @@ fn agent_describes_surface(
             .node
             .as_deref()
             .is_none_or(|name| name == surface.node)
+}
+
+/// Returns true only when the orchestrator card names the node the local agent runs on.
+///
+/// A `node: None` card is a v0.2 home-hosted orchestrator, not a local one. An
+/// agent or local-node row that names a different node likewise does not describe
+/// this card. When neither source names a node, there is no evidence that the
+/// card and the local agent are on the same node, so the agent state is not applied.
+fn agent_describes_orchestrator(
+    card: &OrchestratorView,
+    agent: &AgentStatusDocument,
+    node: Option<&LocalNodeState>,
+) -> bool {
+    let Some(card_node) = card.node.as_deref() else {
+        return false;
+    };
+    let local_node_known = node.is_some();
+    let agent_node_known = agent.node.is_some();
+    (local_node_known || agent_node_known)
+        && node.is_none_or(|node| node.name == card_node)
+        && agent.node.as_deref().is_none_or(|name| name == card_node)
 }
 
 fn derive_session_state(
@@ -434,7 +467,14 @@ fn derive_orchestrator_state(
     agent: &AgentStatusDocument,
     node: Option<&LocalNodeState>,
     session: Option<&SessionCardView>,
+    agent_applies: bool,
 ) -> LocalSessionState {
+    // The local session is unknown unless the card belongs to the local agent's
+    // node. A home-hosted v0.2 card or another node's card must never inherit the
+    // Mac agent's connected/revoked state or a fleet session from this node.
+    if !agent_applies {
+        return LocalSessionState::Unknown;
+    }
     match card.state.as_str() {
         "node_offline" => return LocalSessionState::Disconnected,
         "stopped" => return LocalSessionState::Stopped,
@@ -490,12 +530,10 @@ fn safe_protocol(input: &str) -> String {
 
 fn safe_text(input: &str) -> String {
     let redacted = crate::error::redact(input);
-    redacted
+    scrub_absolute_paths(&redacted)
         .split_whitespace()
         .map(|word| {
-            if word.starts_with('/')
-                || word.starts_with("~/")
-                || word.contains("known_hosts")
+            if word.contains("known_hosts")
                 || word.contains("id_rsa")
                 || word.contains("id_ed25519")
                 || word.contains(".vowp-agent")
@@ -510,4 +548,54 @@ fn safe_text(input: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+/// Replaces an absolute path with `[path]`, including a path inside quotes.
+///
+/// The path starts at a `/` or `~/` that follows whitespace, an opening quote or
+/// punctuation. A quoted path is scrubbed through its closing quote, so a path
+/// containing spaces cannot leave a tail behind. Unquoted paths stop at whitespace
+/// or closing punctuation.
+fn scrub_absolute_paths(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_path = false;
+    let mut path_quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if in_path {
+            let terminates = path_quote.map_or_else(|| is_path_terminator(c), |quote| c == quote);
+            if terminates {
+                in_path = false;
+                path_quote = None;
+                out.push(c);
+            }
+            continue;
+        }
+        let previous = out.chars().next_back();
+        let boundary = previous.is_none_or(|p| p.is_whitespace() || is_path_opener(p));
+        let starts_path = boundary && (c == '/' || (c == '~' && chars.peek() == Some(&'/')));
+        if starts_path {
+            out.push_str("[path]");
+            in_path = true;
+            path_quote = previous.filter(|p| is_quote(*p));
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn is_quote(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\'' | '`' | '\u{2018}' | '\u{2019}' | '\u{201c}' | '\u{201d}'
+    )
+}
+
+fn is_path_opener(c: char) -> bool {
+    is_quote(c) || matches!(c, '(' | '[' | '{' | '<' | '=' | ',' | ';' | ':' | '|')
+}
+
+fn is_path_terminator(c: char) -> bool {
+    c.is_whitespace() || is_quote(c) || matches!(c, ')' | ']' | '}' | '>' | ',' | ';' | '|')
 }

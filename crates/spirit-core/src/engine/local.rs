@@ -378,7 +378,35 @@ impl LocalOrchestratorGuard {
     }
 
     fn ensure_node(&self, target_node: Option<&str>) -> Result<(), SpiritError> {
+        let gate_node = match &self.gate {
+            LocalOrchestratorGate::Ready { node, .. } => node.as_deref(),
+            _ => None,
+        };
         if let Some(node) = &self.node {
+            // The stored card is evidence only when the gate validated the same node.
+            // A stale active/online card from another connection must not authorize
+            // an action the gate did not validate.
+            match gate_node {
+                Some(active) if node.name == active => {}
+                Some(active) => {
+                    return Err(refusal(
+                        LocalOrchestratorPrerequisite::NodeName,
+                        format!(
+                            "node {} does not match the gate's active local-agent node {active}",
+                            node.name
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(refusal(
+                        LocalOrchestratorPrerequisite::NodeName,
+                        format!(
+                            "node {} was not validated by the gate's active local-agent node",
+                            node.name
+                        ),
+                    ));
+                }
+            }
             if node.status != NodeStatus::Active.as_str() {
                 return Err(refusal(
                     LocalOrchestratorPrerequisite::NodeStatus,
@@ -420,18 +448,23 @@ impl LocalOrchestratorGuard {
             }
             return Ok(());
         }
-        if let (
-            Some(target),
-            LocalOrchestratorGate::Ready {
-                node: Some(active), ..
-            },
-        ) = (target_node, &self.gate)
-        {
-            if target != active {
-                return Err(refusal(
-                    LocalOrchestratorPrerequisite::NodeName,
-                    format!("node {target} is not the active local-agent node {active}"),
-                ));
+        if let Some(target) = target_node {
+            match gate_node {
+                Some(active) if target == active => {}
+                Some(active) => {
+                    return Err(refusal(
+                        LocalOrchestratorPrerequisite::NodeName,
+                        format!("node {target} is not the active local-agent node {active}"),
+                    ));
+                }
+                None => {
+                    return Err(refusal(
+                        LocalOrchestratorPrerequisite::NodeName,
+                        format!(
+                            "node {target} was not validated by the gate's active local-agent node"
+                        ),
+                    ));
+                }
             }
         }
         Ok(())
