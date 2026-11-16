@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use tempfile::tempdir;
 use vowp_adapters::proc::{ProcUsage, RunHandle, SpawnSpec, child_env};
