@@ -7,8 +7,9 @@ tokens, and reaches the home over SSH stdio by default or through an owner-manag
 
 > **Status: current.** Enrollment, the WSS transport, `agent service`, `agent run --service`,
 > the separate-user checks, surface rotation, bundle result and `capacity history` are
-> implemented in this tree. The seven-day soak and the rollback drill are phase-exit evidence
-> recorded by the release evidence slice, not by this guide.
+> implemented in this tree. The security review checklist and the rollback drill are recorded in
+> [`../releases/v0.4-hardening.md`](../releases/v0.4-hardening.md); the seven-day soak has not been
+> run and remains an owner question.
 
 ## What the node needs
 

@@ -11,8 +11,9 @@ policy is in [`SECURITY.md`](../SECURITY.md).
 > **Status: current.** The home/control split, leases, MCP write checks, secrets, the daemon's two
 > token-gated writes, lifecycle, backup, gates, promotion, `vowp doctor` and the v0.4 agent node
 > (WSS, service, rotation, bundle and capacity history) on this page are implemented, and these
-> rules are binding on the code on `main`. The phase-exit soak and rollback drill are evidence
-> recorded by the release evidence slice, not a claim on this page.
+> rules are binding on the code on `main`. The security review checklist and the rollback drill
+> are recorded in [`releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the seven-day soak
+> has not been run and remains an owner question.
 
 ## Reporting a vulnerability
 
