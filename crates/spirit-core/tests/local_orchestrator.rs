@@ -688,6 +688,28 @@ fn d6_surface_view_uses_the_surface_row_node() {
     assert!(view.protocol.is_none());
     assert_eq!(view.session_state, LocalSessionState::Unknown.as_str());
     assert!(!view.can_write);
+
+    // Either node source alone is enough to keep the agent from describing the surface.
+    let view = LocalSurfaceView::from_parts(&surface, &agent, None, Some(&session), now);
+    assert_eq!(
+        view.agent_status, "unknown",
+        "the agent's node alone does not match the surface"
+    );
+    assert!(view.protocol.is_none());
+    assert_eq!(view.session_state, LocalSessionState::Unknown.as_str());
+    assert!(!view.can_write);
+
+    let mut no_agent_node = agent.clone();
+    no_agent_node.node = None;
+    let view =
+        LocalSurfaceView::from_parts(&surface, &no_agent_node, Some(&local), Some(&session), now);
+    assert_eq!(
+        view.agent_status, "unknown",
+        "the local node alone does not match the surface"
+    );
+    assert!(view.protocol.is_none());
+    assert_eq!(view.session_state, LocalSessionState::Unknown.as_str());
+    assert!(!view.can_write);
 }
 
 #[test]
