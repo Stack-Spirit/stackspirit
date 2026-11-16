@@ -1662,11 +1662,13 @@ fn agent_run_rejects_an_unmapped_project() {
 // ---------------------------------------------------------------------------
 
 /// A fake `systemctl` that records every invocation and answers status queries.
+#[cfg(target_os = "linux")]
 struct FakeManager {
     _dir: TempDir,
     log: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 impl FakeManager {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("fake manager dir");
@@ -1720,6 +1722,7 @@ fn service_unit_path(home: &Path) -> PathBuf {
 }
 
 /// Creates a private agent state directory for the service tests.
+#[cfg(target_os = "linux")]
 fn private_state_dir(home: &Path) -> PathBuf {
     let state = home.join(".vowp-agent");
     std::fs::create_dir_all(&state).expect("state dir");
