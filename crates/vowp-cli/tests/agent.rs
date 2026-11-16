@@ -2059,6 +2059,24 @@ fn agent_run_service_without_home_exits_two() {
 }
 
 #[test]
+fn agent_run_service_refuses_a_loose_state_dir_with_exit_five() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    enrolled_agent_config(home.path());
+    NodeKey::load_or_generate(&state_dir).expect("node key");
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).expect("loose mode");
+
+    let (code, _stdout, stderr) = run_binary(home.path(), &["agent", "run", "--service"]);
+    assert_eq!(code, 5, "a loose state directory is a refusal: {stderr}");
+    assert!(stderr.contains("mode 755"), "{stderr}");
+    assert!(stderr.contains("must be 700"), "{stderr}");
+    assert!(
+        !stderr.contains("config:"),
+        "an isolation refusal is not a config error: {stderr}"
+    );
+}
+
+#[test]
 fn agent_run_service_writes_the_run_marker_and_drains_on_sigterm() {
     let home = TempDir::new().expect("temp home");
     let state_dir = home.path().join(".vowp-agent");

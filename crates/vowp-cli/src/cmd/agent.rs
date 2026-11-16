@@ -17,10 +17,11 @@ use vowp_agent::service::{
     self, InstallOptions, ServiceError, ServicePlatform, ServiceSpec, SystemManager, run_marker_path,
 };
 use vowp_agent::{
-    AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, NodeKey, RunOptions, RunOutcome,
-    ServiceRunOutcome, SurfacePairRequest, SurfaceStatus, SystemAgentClock, TransportConfig, WssIngress, WssListener,
-    WssTls, WssTlsMode, WssTransport, check_state_dir, current_uid, fingerprint_of, is_fingerprint, load_public,
-    pending_spool_bytes, surface_statuses, surface_token_expiry, transport_for_config, validate_enrollment_code,
+    AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, IsolationError, NodeKey, RunOptions,
+    RunOutcome, ServiceRunOutcome, SurfacePairRequest, SurfaceStatus, SystemAgentClock, TransportConfig, WssIngress,
+    WssListener, WssTls, WssTlsMode, WssTransport, check_state_dir, current_uid, ensure_not_root, ensure_state_dir,
+    fingerprint_of, is_fingerprint, load_public, pending_spool_bytes, surface_statuses, surface_token_expiry,
+    transport_for_config, validate_enrollment_code,
 };
 use vowp_core::agent::gateway;
 use vowp_protocol::{AGENT_PROTOCOL, AgentPathMap, AgentRole, ErrorKind, ProjectName, SessionId, SurfaceId, Timestamp};
@@ -460,6 +461,7 @@ fn pair(global: &Global, io: &mut dyn IoStreams, args: &AgentPairArgs) -> Result
 
 fn run_agent(global: &Global, io: &mut dyn IoStreams, args: &AgentRunArgs) -> Result<i32, CliError> {
     let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    check_run_isolation(&state_dir)?;
     let config = AgentConfig::load(&state_dir).map_err(map_agent_error)?;
     let key = NodeKey::load(&state_dir).map_err(map_agent_error)?;
     let handler = Arc::new(CoreRunHandler::new(config.clone()));
@@ -513,6 +515,29 @@ fn run_agent(global: &Global, io: &mut dyn IoStreams, args: &AgentRunArgs) -> Re
                 Err(CliError::Conflict(format!("agent superseded by {connection_id}")))
             }
         }
+    }
+}
+
+/// Checks the state directory before the library's run loop repeats the check.
+///
+/// The library reports an isolation refusal as [`AgentError::Config`], which the generic
+/// mapping turns into exit 2. Checking here first lets the CLI use
+/// [`IsolationError::exit_code`], so a loose or foreign state directory and a root process are
+/// refusals with exit 5, as `hardening.md` §6.2 requires.
+fn check_run_isolation(state_dir: &Path) -> Result<(), CliError> {
+    let uid = current_uid().map_err(map_isolation_error)?;
+    ensure_not_root(uid).map_err(map_isolation_error)?;
+    ensure_state_dir(state_dir, uid).map_err(map_isolation_error)?;
+    Ok(())
+}
+
+/// Maps an isolation refusal onto the CLI error whose exit code is the documented one.
+fn map_isolation_error(error: IsolationError) -> CliError {
+    let message = error.to_string();
+    match error.exit_code() {
+        2 => CliError::Invalid(message),
+        5 => CliError::Guard(message),
+        _ => CliError::Io(std::io::Error::other(message)),
     }
 }
 
@@ -1115,6 +1140,15 @@ fn check_agent_surfaces(state_dir: &Path, checks: &mut AgentDoctorChecks) {
                     problems.push(format!(
                         "surface {} token expired at {expiry}; rotate or re-pair",
                         surface.surface
+                    ));
+                } else if expires_within_warning(surface, now) {
+                    let expiry = surface
+                        .expires_at
+                        .map(|expiry| expiry.as_rfc3339())
+                        .unwrap_or_else(|| "-".to_owned());
+                    problems.push(format!(
+                        "surface {} token expires within 7 days at {expiry}; run `vowp surface rotate {}`",
+                        surface.surface, surface.surface
                     ));
                 }
             }

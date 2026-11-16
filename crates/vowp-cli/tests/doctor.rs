@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
+use std::time::Duration;
 
 use vowp_protocol::{
-    Executor, HarnessConfig, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, VowpConfig,
+    Executor, HarnessConfig, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, Timestamp, VowpConfig,
 };
 
 /// Provider key variables the tests remove so the runner's environment cannot leak in.
@@ -464,4 +465,58 @@ fn agent_doctor_reports_warnings_by_name_only() {
             assert!(!text.contains(secret), "{label} must not carry {secret}: {text}");
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_doctor_warns_when_a_surface_token_expires_within_seven_days() {
+    let env = common::TestEnv::new();
+    let state = env.home_path().join(".vowp-agent");
+    private_dir(&state);
+    let surfaces_dir = state.join("surfaces");
+    private_dir(&surfaces_dir);
+    let surface = surfaces_dir.join("01ARZ3NDEKTSV4RRFFQ69G5FAZ");
+    private_dir(&surface);
+    private_file(&surface.join("token"), "expiring-token-placeholder");
+    let expiry = Timestamp::now()
+        .plus(Duration::from_secs(3 * 24 * 60 * 60))
+        .as_rfc3339();
+    private_file(&surface.join("expires_at"), &expiry);
+    private_file(&surface.join("state"), "paired");
+
+    let tools = tempfile::tempdir().expect("fake tools");
+    let systemctl = tools.path().join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nexit 1\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let output = env
+        .command(env!("CARGO_BIN_EXE_vowp"))
+        .env("PATH", tools.path())
+        .env("XDG_CONFIG_HOME", env.home_path().join(".config"))
+        .env_remove("VOWP_AGENT_HOME")
+        .args(["--json", "agent", "doctor"])
+        .output()
+        .expect("run agent doctor");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "agent doctor reports warnings without failing; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent doctor JSON");
+    let surfaces = find_check(&value, "surfaces");
+    assert_eq!(surfaces["status"], "warn", "{surfaces}");
+    let detail = surfaces["detail"].as_str().expect("detail");
+    assert!(detail.contains("01ARZ3NDEKTSV4RRFFQ69G5FAZ"), "{detail}");
+    assert!(detail.contains("within 7 days"), "{detail}");
+    assert!(detail.contains("expires"), "{detail}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("expiring-token-placeholder"),
+        "doctor never prints a token: {stdout}"
+    );
 }
