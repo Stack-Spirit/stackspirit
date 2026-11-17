@@ -50,6 +50,30 @@ conformance, an exact or lossless round trip, portable continuation or native-ha
 The adapter is pinned as a git dependency for now; that is the release blocker recorded in
 [`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md) §4.3, not a pass.
 
+**v0.4 local orchestrator: agent nodes, local chat, offload and the local opencode surface**
+
+- Phase 0: outbound agent nodes with Ed25519 node identity and one-time enrollment, the
+  authenticated SSH-stdio gateway and presence reporting. The optional WSS transport is covered
+  in the Phase-4 entry below.
+- Phase 1: a local `vowp chat` surface that pairs over the agent connection, acquires and
+  heartbeats the same session lease as the home, ingests turns into the single session log and
+  replays its spool after a disconnect, with lease takeover and the read-only follow mode.
+- Phase 2: opt-in offload with a placement policy, a Mac path map, an isolated worktree per job,
+  ordered run events and home verification of the pushed `job/<id>` branch. Offload remains off
+  by default.
+- Phase 3: the local opencode surface — attach/detach, native-event, turn and MCP frames; the
+  mode-0600 agent socket; the opencode SSE bridge; the stdio MCP proxy with its bounded offline
+  read cache; and home materialization and lifecycle of a local orchestrator.
+- The acceptance repair: the home gateway handles all five local-surface frames and MCP tool
+  calls, `vowp agent pair` uses the live agent socket instead of superseding it, a local opencode
+  host auto-wires its bridge, and unsent bridge frames are included in the pending spool count.
+  The real-gateway multi-project E2E proof is
+  [`crates/vowp-cli/tests/agent.rs`](crates/vowp-cli/tests/agent.rs).
+
+The design is in [`docs/design/v0.4/local-orchestrator.md`](docs/design/v0.4/local-orchestrator.md);
+the Phase 3 proof table is in [`docs/roadmap.md`](docs/roadmap.md#v04-local-orchestrator). The owner
+live Mac smoke test is still pending; no 0.4 release or date is promised.
+
 **Phase-4 hardening: agent nodes, WSS, rotation, bundles and capacity history**
 
 - `vowp agent enroll --wss <url>` (with optional `--tls-fingerprint`) stores the optional WSS

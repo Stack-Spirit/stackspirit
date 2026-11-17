@@ -1,10 +1,9 @@
 # v0.4 — the local orchestrator: a local surface and a local node on the home's terms
 
-Status: **draft; decisions accepted (2026-11-13); Phase 0–2 implemented, Phase 3 started
-(2026-11-14).** The owner accepted the transport, result-return, phase-order and
-offload/secret proposals; §16.1 records them and the remaining MVP defaults. Where this note
-conflicts with the v0.2 specification, the v0.2 specification still governs the shipped tree and
-this note is a proposal.
+Status: **draft; decisions accepted (2026-11-13); Phases 0–3 implemented (2026-11-17).** The owner
+accepted the transport, result-return, phase-order and offload/secret proposals; §16.1 records them
+and the remaining MVP defaults. Where this note conflicts with the v0.2 specification, the v0.2
+specification still governs the shipped tree and this note is a proposal.
 
 The **home** is the VPS. It stays the only home: the global DB, every project DB, every session
 log, every lease, the snapshot and the supervisor are there. v0.4 adds two things on the owner's
@@ -1751,7 +1750,7 @@ longer blocks the first implementation slice.
 
 ### 16.3 Implementation tracking
 
-Status as of 2026-11-14. The job graph is the source of truth: "done" means the branch merged on
+Status as of 2026-11-17. The job graph is the source of truth: "done" means the branch merged on
 `main`; "running", "pending" and "cancelled" are the graph states on that date. These lists record
 the graph, not a promise.
 
@@ -1813,13 +1812,25 @@ events, push, home fetch/verify, the `owns_respected` and `secret_scan` gates an
 also covers a home-only refusal, a denied kind, a pinned offline node, a mid-run disconnect with a
 gapless replay, a failed push and a head outside the job's `owns`.
 
-Phase 2 is complete; Phase 3 has started. The current protocol slice is `v4-local-3a-app-frames`
-(running): attach/detach, native event, turn and MCP tool frames for the local app surface, format
-only. The next slices in §14.1 — the opencode bridge, the MCP proxy and orchestrator
-materialization — are planned work and not yet queued; no job id exists for them. The framework job
-`v4-c5-live-upgrade-drain` is separate from the v0.4 phase order: it is the current continuity work
-and is running, not done. A future agent should start from `vowp job ls --all` and
-`vowp graph --json`, not from this table alone.
+Phase 3 is complete. All its slices are merged on `main`: `v4-local-3a-app-frames`,
+`v4-local-3b-agent-socket`, `v4-local-3c-opencode-bridge`, `v4-local-3d-mcp-proxy`,
+`v4-local-3e-test-stability`, `v4-local-3f-orchestrator-home`,
+`v4-local-3g-agent-orchestrator`, `v4-local-3h-offline-cache` and
+`v4-local-3j-agent-app-files`. `v4-local-3i-gateway-commands` was cancelled: the gateway command
+drain was folded into the orchestrator-home path and finished by `v4-p0-1-gateway-surface-mcp`.
+The Phase 3 proof table in [`../../roadmap.md`](../../roadmap.md) records one row per Phase 3 slice
+with its tests; this note does not duplicate it.
+
+**P0 local-surface repair.** The post-Phase-3 acceptance run found the home gateway dropping the
+five local-surface frames and gaps in agent pairing and bridge wiring. `v4-p0-1-gateway-surface-mcp`
+now handles attach/detach, native events, turns and MCP tool calls, including the home MCP tool
+layer, and `v4-p0-2-agent-bridge-pair-e2e` routes pairing through the live agent socket, auto-wires
+the opencode bridge for local hosts, and counts unsent bridge frames in `pending_spool_bytes`. The
+real-gateway multi-project E2E proof is
+[`crates/vowp-cli/tests/agent.rs`](../../../crates/vowp-cli/tests/agent.rs).
+
+A future agent should still start from `vowp job ls --all` and `vowp graph --json`, not from this
+table alone.
 
 The supervisor owns dispatch, gates, verify, fix and merge. Track with:
 
