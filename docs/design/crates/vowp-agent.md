@@ -598,10 +598,13 @@ heartbeat also reloads `agent.json` and sends any changed `PathMapUpdate` frames
 rewrites `status.json` 0600; that file holds names and counts, never a path map.
 
 `Ping` is answered with `Pong`. `Revoked` and `Superseded` end the loop with the matching
-`RunOutcome`. A dropped transport, EOF or any post-handshake `Error` frame is reported in
-`status.json` and retried with [`Backoff`]: 1, 2, 4 … 60 seconds with up to 25 % jitter. A
-connection that stayed up for 60 seconds resets the backoff. Fatal authentication, config, key and
-protocol failures end the loop; a post-handshake home refusal does not.
+`RunOutcome`. A dropped transport, EOF or a post-handshake `Error` frame other than a
+surface-token refusal is reported in `status.json` and retried with [`Backoff`]: 1, 2, 4 … 60
+seconds with up to 25 % jitter. A connection that stayed up for 60 seconds resets the backoff.
+The exception is a `Refused` error whose message names a surface token: the client marks that
+surface `needs_pair`, fails its pending tool calls and continues on the same connection with no
+backoff retry. Fatal authentication, config, key and protocol failures end the loop; a
+post-handshake home refusal of the node does not.
 
 The CLI loads `status.json` through `AgentStatus::load`, fills missing node, home and protocol/
 fingerprint fields from `agent.json` and `node.pub`, recounts `spool/` so the displayed byte
