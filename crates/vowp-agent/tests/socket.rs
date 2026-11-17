@@ -553,6 +553,73 @@ fn agent_socket_is_0600_and_refuses_a_second_live_server() {
     assert!(path.exists(), "the dropped listener leaves a stale file");
     let rebound = AgentSocket::bind(dir.path()).expect("a stale socket file is replaced");
     assert_eq!(rebound.path(), path);
+
+    let mut stream = connect(&path);
+    send_request(&mut stream, json!({ "kind": "ping" }));
+    let mut reader = BufReader::new(stream);
+    assert_eq!(
+        read_response(&mut reader),
+        json!({ "kind": "pong" }),
+        "the rebound server must serve the replaced socket"
+    );
+}
+
+#[test]
+fn agent_socket_answers_immediate_pings_on_many_connections() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let socket = AgentSocket::bind(dir.path()).expect("bind");
+    for index in 0..16 {
+        // Send as soon as connect returns, before the accept thread may run.
+        let mut stream = connect(socket.path());
+        send_request(&mut stream, json!({ "kind": "ping" }));
+        let mut reader = BufReader::new(stream);
+        assert_eq!(
+            read_response(&mut reader),
+            json!({ "kind": "pong" }),
+            "connection {index} did not receive a pong"
+        );
+    }
+}
+
+#[test]
+fn agent_socket_refuses_a_regular_file_at_its_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(AGENT_SOCKET_FILE);
+    fs::write(&path, b"not an agent socket").expect("write regular file");
+
+    let bound = AgentSocket::bind(dir.path());
+    assert!(
+        matches!(bound.as_ref(), Err(AgentError::Config(_))),
+        "a regular file must be refused"
+    );
+    assert_eq!(
+        fs::read(&path).expect("the regular file stays"),
+        b"not an agent socket",
+        "bind must never remove a non-socket file"
+    );
+}
+
+#[test]
+fn agent_socket_refuses_a_symlink_at_its_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("target");
+    fs::write(&target, b"target contents").expect("write target");
+    let path = dir.path().join(AGENT_SOCKET_FILE);
+    std::os::unix::fs::symlink(&target, &path).expect("symlink the socket path");
+
+    let bound = AgentSocket::bind(dir.path());
+    assert!(
+        matches!(bound.as_ref(), Err(AgentError::Config(_))),
+        "a symlink must be refused"
+    );
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("the symlink stays")
+            .file_type()
+            .is_symlink(),
+        "bind must not replace the symlink"
+    );
+    assert_eq!(fs::read(&target).expect("the target stays"), b"target contents");
 }
 
 #[test]

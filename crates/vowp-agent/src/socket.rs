@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -255,34 +255,32 @@ impl Drop for AgentSocket {
 }
 
 fn bind_listener(path: &Path) -> Result<UnixListener, AgentError> {
-    if path.exists() {
-        match UnixStream::connect(path) {
-            Ok(stream) => {
-                drop(stream);
+    match fs::symlink_metadata(path) {
+        Ok(_) => match probe_socket(path) {
+            SocketProbe::Live => {
                 return Err(AgentError::Config("the agent socket is already in use".to_owned()));
             }
-            Err(error) if is_stale_socket_error(&error) => remove_socket_file(path)?,
-            Err(_) => {
+            SocketProbe::Stale => remove_socket_file(path)?,
+            SocketProbe::Unknown => {
                 return Err(AgentError::Config(
                     "the agent socket exists and could not be probed".to_owned(),
                 ));
             }
-        }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AgentError::Io(error)),
     }
     match UnixListener::bind(path) {
         Ok(listener) => Ok(listener),
         // The path can appear between the probe and the bind. Probe once more so only a
         // genuinely stale file is removed.
-        Err(error) if error.kind() == io::ErrorKind::AddrInUse => match UnixStream::connect(path) {
-            Ok(stream) => {
-                drop(stream);
-                Err(AgentError::Config("the agent socket is already in use".to_owned()))
-            }
-            Err(probe) if is_stale_socket_error(&probe) => {
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => match probe_socket(path) {
+            SocketProbe::Live => Err(AgentError::Config("the agent socket is already in use".to_owned())),
+            SocketProbe::Stale => {
                 remove_socket_file(path)?;
                 UnixListener::bind(path).map_err(AgentError::Io)
             }
-            Err(_) => Err(AgentError::Config("the agent socket is already in use".to_owned())),
+            SocketProbe::Unknown => Err(AgentError::Config("the agent socket is already in use".to_owned())),
         },
         Err(error) => Err(AgentError::Io(error)),
     }
@@ -296,10 +294,81 @@ fn remove_socket_file(path: &Path) -> Result<(), AgentError> {
     }
 }
 
+/// Result of probing an existing path that may be a live or a stale agent socket.
+enum SocketProbe {
+    /// A server answered the liveness ping.
+    Live,
+    /// The path is a socket file that no server is serving.
+    Stale,
+    /// The path is not a socket, or the probe could not tell whether it is live.
+    Unknown,
+}
+
+/// One liveness request written to an existing socket before the bind replaces it.
+const SOCKET_PROBE_REQUEST: &[u8] = b"{\"kind\":\"ping\"}\n";
+
+/// How long the bind-time liveness probe waits for the server's reply.
+const SOCKET_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Probes an existing `agent.sock` path without ever removing a non-socket file.
+///
+/// A successful `connect` is not proof of a live server: Darwin can report a refused
+/// connection only on the first read or write (through `SO_ERROR`). Only an answer to
+/// a `Ping` proves the server is live; a reset, EOF or broken pipe proves the file is a
+/// leftover socket that can be replaced.
+fn probe_socket(path: &Path) -> SocketProbe {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {}
+        // A regular file, directory or symlink is never replaced.
+        Ok(_) => return SocketProbe::Unknown,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return SocketProbe::Stale,
+        Err(_) => return SocketProbe::Unknown,
+    }
+    let mut stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(error) => return classify_probe_error(&error),
+    };
+    // BSD sockets can inherit O_NONBLOCK from the nonblocking listener; a read timeout
+    // does not make a nonblocking stream block. The probe needs blocking I/O.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(SOCKET_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SOCKET_PROBE_TIMEOUT));
+    if let Err(error) = stream.write_all(SOCKET_PROBE_REQUEST) {
+        return classify_probe_error(&error);
+    }
+    if let Err(error) = stream.flush() {
+        return classify_probe_error(&error);
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => SocketProbe::Stale,
+        Ok(_) => SocketProbe::Live,
+        Err(error) => classify_probe_error(&error),
+    }
+}
+
+fn classify_probe_error(error: &io::Error) -> SocketProbe {
+    if is_stale_socket_error(error) {
+        SocketProbe::Stale
+    } else {
+        SocketProbe::Unknown
+    }
+}
+
+/// Returns whether a probe failure means the socket file has no live server behind it.
+///
+/// Anything other than a permission, would-block, timeout or interrupted failure is a
+/// dead-server failure on a path that the caller already confirmed is a socket. That
+/// deliberately covers the wider Darwin error set (`ConnectionReset`, `AddrNotAvailable`,
+/// `InvalidInput`, `ENOTSOCK`, `EPROTOTYPE`, ...) that a stale socket can produce.
 fn is_stale_socket_error(error: &io::Error) -> bool {
-    matches!(
+    !matches!(
         error.kind(),
-        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound | io::ErrorKind::NotConnected
+        io::ErrorKind::PermissionDenied
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
     )
 }
 
@@ -323,6 +392,10 @@ fn accept_loop(listener: UnixListener, shared: Arc<SocketShared>) {
 }
 
 fn handle_client(stream: UnixStream, shared: Arc<SocketShared>) {
+    // macOS/BSD accept() inherits O_NONBLOCK from the nonblocking listener, and setting
+    // a read timeout does not make a nonblocking stream block. Restore blocking mode
+    // before the timeouts and before cloning the stream for the reader.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT));
     let reader_stream = match stream.try_clone() {

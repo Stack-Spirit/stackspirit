@@ -116,6 +116,9 @@ impl Drop for FakeSse {
 }
 
 fn serve_connection(mut stream: TcpStream, events: &[Value], honor_since: bool, requests: &Mutex<Vec<RequestRecord>>) {
+    // macOS/BSD accept() inherits O_NONBLOCK from the nonblocking listener, and a read
+    // timeout does not make a nonblocking stream block.
+    stream.set_nonblocking(false).expect("blocking client stream");
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let mut raw = Vec::new();
@@ -869,6 +872,8 @@ impl Drop for LiveSse {
 }
 
 fn serve_live(mut stream: TcpStream, commands: &mpsc::Receiver<SseCommand>) {
+    // macOS/BSD accept() inherits O_NONBLOCK from the nonblocking listener.
+    stream.set_nonblocking(false).expect("blocking live client stream");
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut raw = Vec::new();
     let mut chunk = [0u8; 2048];
