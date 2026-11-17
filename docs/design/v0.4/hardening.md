@@ -5,9 +5,8 @@ Status: **implemented in this tree; the available phase-exit evidence is recorde
 and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the shipped behaviour.
 Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1 describes them.
 The security review (§8.2) and the rollback drill (§8.4) results are recorded on the evidence page;
-the review leaves one shared-checkout item as an open owner question, and the owner live Mac smoke
-test (§8.3) is **pending**: one run on the owner's Mac against the owner's home, then the result is
-recorded there. No release, tag or date is promised.
+the owner live Mac smoke test (§8.3) is **pending**: one run on the owner's Mac against the
+owner's home, then the result is recorded there. No release, tag or date is promised.
 
 This page began as the plan for the phase and keeps the design-time wording and markers in the
 sections below. Where a §2–§7 sentence calls a command or flag *(planned)*, the name is the design
@@ -57,9 +56,6 @@ Known deviations from the text below:
 - `CapacityHistory` also carries `until` and `retention_secs`, and `vowp capacity history` has no
   command-specific `--json` (the global flag applies). The document is described in
   [`../types.md`](../types.md) §16.1 and [`crates/vowp-core.md`](../crates/vowp-core.md) §10.
-- A separate user is supported for a standard account, but the tree does not claim to refuse a
-  group-writable shared checkout as a runtime check; it documents such a checkout as unsupported.
-  The state-directory owner/mode and root checks are enforced.
 - The gateway does not discard a queued rotation whose replacement token expired before delivery.
   It delivers the frame; the home refuses the expired token on first use and the owner re-pairs.
   `--wait` still stops at the delivery deadline and reports `rotation_pending`.
@@ -798,7 +794,17 @@ is a filesystem and process boundary for the owner's files; it is not a sandbox 
   owner's checkout. Git's `safe.directory` is not a fix for a shared checkout; a shared working
   tree is unsupported (§6.5).
 - A shared read-only project mirror may be group-readable for the agent to fetch, but the agent's
-  clone and worktrees are private. A group-writable shared checkout is refused.
+  clone and worktrees are private. A project checkout, worktree root or git directory that is owned
+  by another uid or is group- or world-writable is refused with `WorktreeError::UnsafeCheckout`,
+  before a run is assigned or started. The check runs when `PathMap::new` builds the map and again
+  at run start in `WorktreeManager::create`, before it inspects, fetches or creates anything; the
+  git directory is checked there after `common_dir()` resolves it. Named tests:
+  `path_map_refuses_a_group_writable_checkout`,
+  `path_map_refuses_a_world_writable_worktree_root`,
+  `path_map_accepts_a_group_readable_private_checkout`,
+  `worktree_create_rechecks_the_checkout_before_creating` and
+  `worktree_create_refuses_a_group_writable_git_dir` in
+  [`crates/vowp-agent/tests/worktree.rs`](../../../crates/vowp-agent/tests/worktree.rs).
 - Provider and git credentials for the agent user live in that user's environment or Keychain and
   are never copied from the owner. The home sends names, never values, exactly as today.
 

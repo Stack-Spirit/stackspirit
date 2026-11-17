@@ -338,9 +338,10 @@ domain. A root `LaunchDaemon` or a system-wide systemd unit is unsupported.
 
 The separate user is a filesystem and process boundary for the **owner's** files, not a sandbox
 for repository code. The harness runs as the agent user and can read that user's own node key and
-surface tokens if it tries; a repository that needs a home-only secret is not offloaded. A shared
-group-writable checkout is unsupported, and a state directory owned by another uid or mode 0755 is
-a refusal (exit 5). See [the security model](../security.md#separate-user-limits).
+surface tokens if it tries; a repository that needs a home-only secret is not offloaded. A project
+checkout, worktree root or git directory owned by another uid or group- or world-writable is a
+refusal; group and world read/execute remain allowed. A state directory owned by another uid or
+mode 0755 is a refusal (exit 5). See [the security model](../security.md#separate-user-limits).
 
 ## WSS deployment
 

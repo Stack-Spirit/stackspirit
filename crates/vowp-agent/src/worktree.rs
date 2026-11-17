@@ -16,7 +16,7 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -120,6 +120,14 @@ pub enum WorktreeError {
         /// Rejected canonical path.
         path: PathBuf,
     },
+    /// A project checkout, worktree root or git directory is not private to the agent uid.
+    #[error("unsafe checkout {path}: {detail}; it must be owned by the current user and not group/world-writable")]
+    UnsafeCheckout {
+        /// Offending canonical path.
+        path: PathBuf,
+        /// What was found: the owner or the mode.
+        detail: String,
+    },
     /// The mapped local root is not a git checkout.
     #[error("not a git checkout: {path}")]
     NotAGitCheckout {
@@ -214,6 +222,7 @@ impl WorktreeError {
             | Self::PathOutsideRoot { .. }
             | Self::SymlinkEscape { .. }
             | Self::CaseOnlyEscape { .. }
+            | Self::UnsafeCheckout { .. }
             | Self::NotAGitCheckout { .. }
             | Self::InvalidCommit { .. }
             | Self::InvalidRemote { .. }
@@ -309,8 +318,9 @@ impl GitRunner for SystemGit {
 
 /// A validated, local-only path map for one project.
 ///
-/// Construction canonicalises both roots and checks that they exist, are directories and carry
-/// a write bit. Resolution never returns a path outside those roots.
+/// Construction canonicalises both roots and checks that they exist, are directories, carry a
+/// write bit, are owned by the agent uid and are not group- or world-writable. Resolution never
+/// returns a path outside those roots.
 #[derive(Debug, Clone)]
 pub struct PathMap {
     project: ProjectName,
@@ -324,7 +334,9 @@ impl PathMap {
     ///
     /// `worktree_root` defaults to `<local_root>/.vowp/worktrees` when the map omits it. A
     /// missing root is [`WorktreeError::PathMissing`]; a root without a write bit is
-    /// [`WorktreeError::PathNotWritable`]. Neither panics.
+    /// [`WorktreeError::PathNotWritable`]. A root owned by another uid or group- or
+    /// world-writable is [`WorktreeError::UnsafeCheckout`]. Group/world read and execute are
+    /// allowed, so a read-only shared mirror may be group-readable. Neither panics.
     pub fn new(map: &AgentPathMap) -> Result<Self, WorktreeError> {
         let local_root = validate_root(Path::new(&map.local_root), "local_root")?;
         let worktree_root = match &map.worktree_root {
@@ -335,12 +347,26 @@ impl PathMap {
             }
         };
         let allow = validate_allow(&map.allow, &local_root)?;
-        Ok(Self {
+        let paths = Self {
             project: map.project.clone(),
             local_root,
             worktree_root,
             allow,
-        })
+        };
+        paths.check_private_checkout()?;
+        Ok(paths)
+    }
+
+    /// Rechecks that both roots are private to the agent uid.
+    ///
+    /// [`Self::new`] runs this check when the map is built; [`WorktreeManager::create`] runs it
+    /// again at run start, because a checkout's owner or mode can change after startup. The
+    /// roots must be directories owned by the effective uid with no group or world write bit
+    /// (`mode & 0o022 == 0`). Group/world read and execute are allowed.
+    pub fn check_private_checkout(&self) -> Result<(), WorktreeError> {
+        let uid = effective_uid()?;
+        check_private_dir(&self.local_root, uid)?;
+        check_private_dir(&self.worktree_root, uid)
     }
 
     /// Returns the project this map belongs to.
@@ -718,6 +744,7 @@ impl WorktreeManager {
     pub fn create(&self, spec: &WorktreeSpec) -> Result<Worktree, WorktreeError> {
         validate_commit(&spec.base_commit)?;
         validate_remote(&spec.remote)?;
+        self.map.check_private_checkout()?;
         let path = self.map.worktree_path(&spec.job)?;
         let branch = job_branch(&spec.job);
 
@@ -730,6 +757,10 @@ impl WorktreeManager {
         }
 
         let common_dir = self.common_dir()?;
+        // A group-writable `.git` is part of a shared checkout even when the working tree
+        // itself looks private. Check it after git resolves the path and before any fetch,
+        // inspect or create step.
+        check_private_dir(&common_dir, effective_uid()?)?;
         let record_path = ownership_record_path(&common_dir, &spec.job);
         // Git prints object names in lowercase; normalise an uppercase home input so a clean
         // worktree at the same object is recognised for reuse.
@@ -1458,6 +1489,72 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), WorktreeError> {
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Returns the effective uid of this process.
+///
+/// Linux exposes the real, effective, saved and filesystem ids in `/proc/self/status`; the
+/// second `Uid:` field is the effective uid. Other Unixes report the effective uid from
+/// `id -u`.
+fn effective_uid() -> Result<u32, WorktreeError> {
+    #[cfg(target_os = "linux")]
+    if let Ok(text) = fs::read_to_string("/proc/self/status") {
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(field) = rest.split_whitespace().nth(1)
+            {
+                return field.parse::<u32>().map_err(|_| WorktreeError::Refused {
+                    detail: "the process uid is not an integer".to_owned(),
+                });
+            }
+        }
+    }
+    let output = Command::new("id").arg("-u").output()?;
+    if !output.status.success() {
+        return Err(WorktreeError::Refused {
+            detail: "could not determine the effective uid with `id -u`".to_owned(),
+        });
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| WorktreeError::Refused {
+            detail: "`id -u` did not return an integer".to_owned(),
+        })
+}
+
+/// Checks that `path` is a real directory owned by `uid` with no group or world write bit.
+///
+/// Group and world read/execute are allowed so a read-only shared mirror can be
+/// group-readable. `symlink_metadata` is used so a symbolic link is refused instead of
+/// followed; callers pass an already canonical path.
+fn check_private_dir(path: &Path, uid: u32) -> Result<(), WorktreeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(WorktreeError::UnsafeCheckout {
+            path: path.to_path_buf(),
+            detail: "it is a symbolic link".to_owned(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(WorktreeError::NotADirectory {
+            path: path.to_path_buf(),
+        });
+    }
+    if metadata.uid() != uid {
+        return Err(WorktreeError::UnsafeCheckout {
+            path: path.to_path_buf(),
+            detail: format!("owned by uid {}, expected uid {uid}", metadata.uid()),
+        });
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(WorktreeError::UnsafeCheckout {
+            path: path.to_path_buf(),
+            detail: format!("mode {mode:03o} grants group or world write"),
+        });
+    }
     Ok(())
 }
 

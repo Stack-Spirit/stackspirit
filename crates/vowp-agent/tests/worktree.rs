@@ -88,6 +88,11 @@ impl Fixture {
         git(&main, &["config", "user.name", "VOWP Test"]);
         let worktrees = root.join("worktrees");
         fs::create_dir_all(&worktrees).expect("worktree root");
+        // The checkout shape the agent supports, independent of the runner's umask: group and
+        // world may read and execute, and the private worktree root is 0700.
+        fs::set_permissions(&main, fs::Permissions::from_mode(0o755)).expect("main mode");
+        fs::set_permissions(main.join(".git"), fs::Permissions::from_mode(0o755)).expect("git dir mode");
+        fs::set_permissions(&worktrees, fs::Permissions::from_mode(0o700)).expect("worktree root mode");
         Self {
             _dir: dir,
             root,
@@ -911,6 +916,7 @@ fn path_map_resolves_project_worktree_and_subdir_and_enforces_allow() {
     // An omitted worktree root defaults to <local_root>/.vowp/worktrees.
     let default_root = fixture.main.join(".vowp").join("worktrees");
     fs::create_dir_all(&default_root).expect("default worktree root");
+    fs::set_permissions(&default_root, fs::Permissions::from_mode(0o755)).expect("default root mode");
     let mut map_with_default = fixture.map();
     map_with_default.worktree_root = None;
     let default_map = PathMap::new(&map_with_default).expect("default worktree root map");
@@ -969,6 +975,7 @@ fn path_map_reports_missing_and_unwritable_roots() {
 
     let plain = fixture.root.join("plain");
     fs::create_dir_all(&plain).expect("plain dir");
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o755)).expect("plain mode");
     let map = AgentPathMap {
         project,
         local_root: plain.to_str().expect("plain").to_owned(),
@@ -997,4 +1004,106 @@ fn worktree_create_rejects_invalid_commit_and_remote() {
         .create(&fixture.spec(&job).with_remote("--upload-pack=evil"))
         .expect_err("option-like remote must be refused");
     assert!(matches!(error, WorktreeError::InvalidRemote { .. }), "{error}");
+}
+
+#[test]
+fn path_map_refuses_a_group_writable_checkout() {
+    let fixture = Fixture::new();
+    fs::set_permissions(&fixture.main, fs::Permissions::from_mode(0o775)).expect("group-writable mode");
+
+    let error = PathMap::new(&fixture.map()).expect_err("a group-writable checkout must be refused");
+    match &error {
+        WorktreeError::UnsafeCheckout { path, detail } => {
+            assert_eq!(path, &fixture.main);
+            assert!(
+                detail.contains("group") || detail.contains("world"),
+                "the detail must name the writable class: {detail}"
+            );
+        }
+        other => panic!("expected unsafe_checkout, got {other}"),
+    }
+    let message = error.to_string();
+    assert!(
+        message.contains(fixture.main.to_str().expect("main path")),
+        "the message must name the checkout: {message}"
+    );
+    assert!(
+        message.contains("owned by the current user and not group/world-writable"),
+        "the message must name the expected condition: {message}"
+    );
+}
+
+#[test]
+fn path_map_refuses_a_world_writable_worktree_root() {
+    let fixture = Fixture::new();
+    fs::set_permissions(&fixture.worktrees, fs::Permissions::from_mode(0o707)).expect("world-writable mode");
+
+    let error = PathMap::new(&fixture.map()).expect_err("a world-writable worktree root must be refused");
+    match &error {
+        WorktreeError::UnsafeCheckout { path, .. } => assert_eq!(path, &fixture.worktrees),
+        other => panic!("expected unsafe_checkout, got {other}"),
+    }
+    let message = error.to_string();
+    assert!(
+        message.contains(fixture.worktrees.to_str().expect("worktree path")),
+        "the message must name the worktree root: {message}"
+    );
+    assert!(
+        message.contains("owned by the current user and not group/world-writable"),
+        "the message must name the expected condition: {message}"
+    );
+}
+
+#[test]
+fn path_map_accepts_a_group_readable_private_checkout() {
+    let fixture = Fixture::new();
+    // 0755 has group/world read and execute but no group/world write; 0700 is the private
+    // worktree root. Both are supported.
+    fs::set_permissions(&fixture.main, fs::Permissions::from_mode(0o755)).expect("group-readable mode");
+    fs::set_permissions(&fixture.worktrees, fs::Permissions::from_mode(0o700)).expect("private mode");
+
+    let map = PathMap::new(&fixture.map()).expect("a group-readable private checkout must be accepted");
+    assert_eq!(map.local_root(), fixture.main);
+    assert_eq!(map.worktree_root(), fixture.worktrees);
+    map.check_private_checkout()
+        .expect("the recheck accepts the same shape");
+}
+
+#[test]
+fn worktree_create_rechecks_the_checkout_before_creating() {
+    let fixture = Fixture::new();
+    let job = fixture.job("job-18");
+    let recorder = Arc::new(RecordingGit::default());
+    let manager = WorktreeManager::with_git(fixture.path_map(), recorder.clone());
+    // The map was valid when it was built; a later chmod must still be caught at run start.
+    fs::set_permissions(&fixture.main, fs::Permissions::from_mode(0o775)).expect("group-writable mode");
+
+    let error = manager
+        .create(&fixture.spec(&job))
+        .expect_err("a checkout made group-writable after startup must be refused");
+    assert!(matches!(error, WorktreeError::UnsafeCheckout { .. }), "{error}");
+    assert_eq!(recorder.worktree_adds(), 0, "no worktree may be created");
+    assert!(!fixture.worktrees.join(job.as_str()).exists());
+    assert!(fixture.branch_head("job/job-18").is_none());
+}
+
+#[test]
+fn worktree_create_refuses_a_group_writable_git_dir() {
+    let fixture = Fixture::new();
+    let job = fixture.job("job-19");
+    let recorder = Arc::new(RecordingGit::default());
+    let manager = WorktreeManager::with_git(fixture.path_map(), recorder.clone());
+    let git_dir = fixture.main.join(".git");
+    fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o775)).expect("group-writable git dir");
+
+    let error = manager
+        .create(&fixture.spec(&job))
+        .expect_err("a group-writable git directory must be refused");
+    match &error {
+        WorktreeError::UnsafeCheckout { path, .. } => assert_eq!(path, &git_dir),
+        other => panic!("expected unsafe_checkout, got {other}"),
+    }
+    assert_eq!(recorder.worktree_adds(), 0, "no worktree may be created");
+    assert!(!fixture.worktrees.join(job.as_str()).exists());
+    assert!(fixture.branch_head("job/job-19").is_none());
 }

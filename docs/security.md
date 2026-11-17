@@ -474,9 +474,10 @@ This is **not a sandbox**. The harness runs as the agent user and can read that 
 `node.key` and surface tokens if it tries. The boundary protects the owner's files and SSH key
 from repository code running under a different account; it does not protect the agent's own
 secrets from a harness the agent starts. A repository that needs a home-only secret is not
-offloaded. A shared checkout or a group-writable working tree is unsupported; the agent's clone
-and worktrees are private. Do not run as root or install a system-wide unit or a root
-`LaunchDaemon`.
+offloaded. The agent refuses a project checkout, worktree root or git directory that is owned by
+another uid or is group- or world-writable; group and world read/execute remain allowed, so a
+read-only shared mirror may be group-readable. The agent's clone and worktrees stay private. Do
+not run as root or install a system-wide unit or a root `LaunchDaemon`.
 
 `vowp agent doctor` checks the state directory's owner and mode, the service unit and the run
 marker, the local surface states and copied login material. It reports file **names** only
