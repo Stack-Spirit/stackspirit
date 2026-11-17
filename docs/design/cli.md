@@ -595,8 +595,9 @@ The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 CLI/gateway/agent end-to-end slice adds `agent_paths_add_reaches_the_home_without_a_reconnect`,
 `node_enroll_replace_rotates_a_pending_code_and_node_rm_yes_removes_it` and
 `opencode_stdout_readiness_reaches_running_and_a_failed_start_has_a_redacted_last_error` in
-`tests/agent.rs`; the first two use a real gateway and a fake `ssh` script, and the last also starts
-the real agent daemon against a fake `opencode` binary.
+`tests/agent.rs`; the path-map and stdout-readiness tests use a real gateway and a fake `ssh`
+script, the stdout-readiness test also starts the real agent daemon against a fake `opencode`
+binary, and the node-enrollment test runs in-process through `vowp_cli::run`.
 
 The ASIF slice adds, in `tests/asif.rs`: `session_export_asif_uses_default_asif_zip_name`,
 `session_export_asif_stdout_is_binary_and_refuses_json`,
@@ -704,9 +705,11 @@ expired or replayed code is a non-retryable refusal (exit 5); a missing enrollme
 Loads `agent.json` and `node.key`, connects, and sends a heartbeat every 10 seconds (the interval
 `HomeChallenge` names); each heartbeat rewrites `status.json` (0600). `Ping` is answered with
 `Pong`. `Revoked` stops with exit 5 and `Superseded` stops with exit 4. A dropped connection,
-EOF, any post-handshake `Error` frame or retryable home error reconnects with exponential backoff
-(1, 2, 4 … 60 seconds, with jitter; a 60-second stable connection resets it); an unexpected known
-frame after the handshake is logged and ignored by the gateway rather than ending the session.
+EOF, a post-handshake `Error` frame or retryable home error reconnects with exponential backoff
+(1, 2, 4 … 60 seconds, with jitter; a 60-second stable connection resets it); a `Refused` error
+naming a surface token is the exception, marking that surface `needs_pair` while the connection
+stays up. An unexpected known frame after the handshake is logged and ignored by the gateway rather
+than ending the session.
 `--role` is `surface`, `executor` or `both` (default `both`). `--foreground` is accepted and is the
 default. `--service` is the service-manager
 mode: it checks the state directory and root rule, writes the 0600 `run` marker, installs the

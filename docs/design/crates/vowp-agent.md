@@ -581,9 +581,11 @@ the surface's token and expiry files; `status.json` no longer reports an expiry 
    and the enrolled node. A mismatch is an authentication or protocol error.
 5. `Revoked` and `Superseded` stop immediately; `Error { kind: auth }` during the handshake is
    fatal. After the handshake any `Error` frame is a connection failure: the client keeps its
-   spool and state, records a redacted reason in `status.json` and reconnects. It never exits the
-   process for a post-handshake home error, and a Ping or another known frame is answered normally
-   while a path-map reply is pending.
+   spool and state, records a redacted reason in `status.json` and reconnects. The exception is a
+   `Refused` error whose message names a surface token: the client marks that surface `needs_pair`,
+   fails its pending tool calls and continues on the same connection. It never exits the process
+   for a post-handshake home error, and a Ping or another known frame is answered normally while a
+   path-map reply is pending.
 
 ### Heartbeat and reconnect
 

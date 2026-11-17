@@ -890,10 +890,12 @@ differs.
   predates the frame answers `Error`; the agent disables further updates for that run instead of
   reconnecting in a loop.
 - A post-handshake `Error` from the home is a connection failure, not a terminal node event: the
-  agent records a redacted reason, keeps its spool and reconnects. `Revoked` and `Superseded`
-  remain terminal. An unexpected but known frame after the handshake is logged and ignored; the
-  gateway never ends an authenticated session just because a newer agent sent a frame it does not
-  use.
+  agent records a redacted reason, keeps its spool and reconnects. The exception is a `Refused`
+  error whose message names a surface token: the agent marks that surface `needs_pair` and stays on
+  the same connection, because a dead surface token is not a dead node key. `Revoked` and
+  `Superseded` remain terminal. An unexpected but known frame after the handshake is logged and
+  ignored; the gateway never ends an authenticated session just because a newer agent sent a frame
+  it does not use.
 - Home restart closes the socket; the agent reconnects and reconciles with `Resume`.
 
 ### 8.3 Frames
@@ -1604,11 +1606,13 @@ Named tests, grouped by area:
 - `node_enroll_replace_rotates_a_pending_code_and_node_rm_yes_removes_it`
 - `opencode_stdout_readiness_reaches_running_and_a_failed_start_has_a_redacted_last_error`
 
-The three named tests run in `crates/vowp-cli/tests/agent.rs` with a real `vowp agent gateway
---stdio` process, a fake `ssh` script and a fake `opencode` script. The path-map test counts the
-fake `ssh` invocations and requires exactly one connection; the orchestrator test never writes a
-`service.json` before the start and asserts the agent materializes a 0600 file from the app's
-stdout before the home card shows `running`.
+The three named tests run in `crates/vowp-cli/tests/agent.rs`. The path-map and stdout-readiness
+tests use a real `vowp agent gateway --stdio` process and a fake `ssh` script; the stdout-readiness
+test also starts the real agent daemon against a fake `opencode` script. The node-enrollment test
+runs in-process through `vowp_cli::run` and uses neither. The path-map test counts the fake `ssh`
+invocations and requires exactly one connection; the orchestrator fixture writes no `service.json`
+before the start, then the test asserts the home card shows `running` and only afterwards that the
+agent materialized a 0600 file from the app's stdout.
 
 **Disconnect and recovery**
 
