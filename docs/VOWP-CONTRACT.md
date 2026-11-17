@@ -1404,8 +1404,8 @@ surface** of the v0.4 plan:
 | Phase 4 (`v4-local-4f-cli-surface`) | gateway `--listen`, agent service/doctor, `surface rotate`, `surface pair --replace`, and the CLI/JSON release surface | The commands and flags the gate probes. |
 
 `v4-local-4f-cli-surface` is **merged in the VOWP source** (commit `121f319`, with the
-follow-up `d523314`); its parent Phase 4 slices are merged or no longer block the CLI
-surface. The installed `vowp 0.3.0` binary on this host is older: it has
+follow-ups `d523314` and `3b421ed`); its parent Phase 4 slices are merged or no longer block
+the CLI surface. The installed `vowp 0.3.0` binary on this host is older: it has
 `surface pair|ls|revoke` but no `surface rotate`, no `agent service|doctor`, and no
 `orchestrator new` local-node after-help. Source presence is **not** installed capability.
 
@@ -1448,9 +1448,17 @@ vowp orchestrator resume <name>
 Owner-only setup commands (never gate evidence, never run by the probe):
 
 ```sh
-vowp node enroll <node> [--label <label>]...
+vowp node enroll <node> [--label <label>]... [--replace]
 vowp node revoke <node> --yes
+vowp node rm <node> --yes
 ```
+
+`node enroll` creates the pending node and prints a one-time code once. `--replace` rotates a
+**pending** node's code in one transaction and replaces its labels when given; expired codes
+are purged first. An `active` node is refused, so revoke or remove it before enrolling a
+replacement; a `revoked` node must be removed first. `node rm --yes` removes a node without a
+confirmation prompt and purges its enrollment codes; `node revoke --yes` revokes its
+credentials. None of these commands is gate evidence.
 
 Mac-side commands:
 
@@ -1496,14 +1504,20 @@ Which command proves each D6 capability:
 | Service mode | `vowp agent service --help` exits 0 | Mac | optional local prerequisite |
 | Local diagnostics | `vowp agent doctor --help` exits 0 | Mac | optional local prerequisite |
 | Enrollment | `vowp agent enroll --help` exits 0; `vowp agent status --json` exit 3 before enrollment | Mac | owner setup |
-| Node enrollment code | `vowp node enroll` succeeds on the home | home | owner setup (write) |
-| Path map setup | `vowp agent paths add` / `rm` / `ls` | Mac | owner setup |
+| Node enrollment code | `vowp node enroll <node> [--label <label>]...` succeeds on the home; a stale `pending` node is recovered with `vowp node enroll <node> --replace`, an `active` node requires an explicit `vowp node revoke <node> --yes` or `vowp node rm <node> --yes` first, and a `revoked` node requires `vowp node rm <node> --yes` first | home | owner setup (write) |
+| Path map setup | `vowp agent paths add` / `rm` / `ls`; the running agent reloads the map on its next heartbeat and reports it as `PathMapUpdate`, which the home persists in `node_paths` | Mac | owner setup |
+
+`--replace` and `--yes` are owner-setup and session-robustness details, not new gate evidence:
+they make a retry explicit but prove no capability. The enrollment and path-map rows keep their
+owner-setup kind; no gate row changes.
 
 `vowp node paths <node> --json` **does not exist in the merged CLI** and is not a D6
-probe. Local cache is a Mac-side read from `vowp agent status --json`; the home never reads
-a Mac path map. `vowp agent service` and `vowp agent doctor` are optional: service mode is
-an alternative to a foreground `vowp agent run`, and doctor is diagnostic. Neither makes a
-gate `Ready`.
+probe. Local cache is a Mac-side read from `vowp agent status --json`. The home persists the
+map the Mac reports in `node_paths`, validates it lexically, and never copies raw roots into a
+card, log, or frame; it exposes only `NodeCard.mapped` project names. There is still no
+`node paths` CLI read model. `vowp agent service` and `vowp agent doctor` are optional:
+service mode is an alternative to a foreground `vowp agent run`, and doctor is diagnostic.
+Neither makes a gate `Ready`.
 
 Agent frames used by the commands:
 
@@ -1512,11 +1526,16 @@ Agent frames used by the commands:
 | `vowp surface pair` (home) | Creates a `pending` surface and a one-time code; no agent frame until the Mac redeems it. |
 | `vowp surface ls` (home) | Read-only `SurfaceEntry[]` rows (id, node, kind, state, scopes, prefix, expiry, overlap, pending); no agent frame. |
 | `vowp agent pair` (Mac) | `AgentFrame::SurfacePair { code, surface_id, session, app }`; the home replies `SurfaceIssued { surface_id, token, scopes, expires_at }`. |
+| `vowp agent paths add` (Mac) | The running `vowp agent run` reloads the changed map on its next heartbeat and sends `AgentFrame::PathMapUpdate { map }` per added or changed project on the authenticated gateway connection. The home requires an `active` node, validates the map lexically (absolute, no parent traversal, no control bytes), persists the row to `node_paths`, and replies `Pong`. An invalid map or a non-active node returns a typed `Error` frame **without closing the session**. |
 | `vowp surface rotate` (home) | Queues an `AgentFrame::SurfaceIssued` with the replacement token; the old token stays valid for the ten-minute overlap. |
 | `vowp surface revoke` (home) | Revokes every active token, marks the surface `revoked`, and removes any queued rotation; no agent frame is queued. A later pairing attempt for the revoked surface gets `AgentFrame::SurfaceRevoked { surface_id, reason }` from the gateway. |
 | `vowp agent run` (Mac) | `SurfaceAttach`, `SurfaceEvent`, `SurfaceTurn`, `SurfaceDetach`, `LeaseAcquire`, `LeaseHeartbeat`, `LeaseRelease`. |
 | `vowp mcp --agent-socket` (Mac) | `AgentFrame::ToolCall` to the home and `ToolResult` back. |
 | `vowp orchestrator new --node` / `vowp orchestrator stop` / `vowp orchestrator resume` (home) | `vowp orchestrator new --node` sends `AgentFrame::OrchestratorCommand(Start)`; `stop`/`resume` send `Stop`/`Resume`; the agent replies `OrchestratorResult`. `--node` has the local-node meaning only on `new`; on `stop`/`resume` it remains the global SSH selector. |
+
+Unexpected post-handshake frames are logged by redacted frame kind and ignored; they no longer
+close an authenticated gateway connection. A newer agent may send a frame the home does not
+understand yet, and the session stays open.
 
 Protocol facts that are frozen enough to check:
 
@@ -1611,7 +1630,10 @@ StackSpirit parses only the fields D6 uses and tolerates additions. It does not 
    `local-orchestrator.md` §12.1 lists `vowp node paths <name> --json`, but the merged
    `vowp-cli` has no such subcommand. D6 must not probe it. The local cache is a Mac-side
    read from `vowp agent status --json` (`cache_entries`, `cache_bytes`,
-   `cache_oldest_at`), and the home never reads a Mac path map.
+   `cache_oldest_at`). The home does persist the map the Mac reports through
+   `AgentFrame::PathMapUpdate` in `node_paths`: it validates the map lexically, never
+   copies raw roots into a card, log, or frame, exposes only `NodeCard.mapped` project
+   names, and has no `node paths` CLI read model.
 6. **Phase 0/1 commands look like progress.** `vowp node ls`, `vowp node show`,
    `vowp surface ls`, and `vowp orchestrator ls` exist before the complete local surface.
    They are necessary but not sufficient evidence; the probe also requires the Phase 2

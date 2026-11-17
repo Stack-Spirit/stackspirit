@@ -26,9 +26,12 @@ home-side `vowp orchestrator new --node <node> --app opencode`; the Mac agent ma
 - **Job:** `ss-20-d6-contract-reconcile`; this document is one of the tracked paths changed.
   The D6 status and §4 implementation notes are refreshed by `ss-21-d6-bridge-ui`.
   The §1–§3 command evidence below is unchanged owner-setup evidence; no owner write was
-  performed by either job.
+  performed by either job. `ss-24-vowp-contract-node-enroll` refreshed the source citations and
+  the §3.2 recovery note only; no evidence row or gate rule changed.
 - **VOWP source under test:** merge `121f319` (`v4-local-4f-cli-surface`), follow-up
-  `d523314`; source version still reports `0.3.0`.
+  `d523314`, and `3b421ed` (path maps, failure details, node enrollment: `node enroll
+  --replace`, `node rm --yes`, and authenticated `PathMapUpdate` persistence); source
+  version still reports `0.3.0`.
 - **VOWP CLI installed under test:** `vowp 0.3.0`.
 - **Writes performed by this job:** none to VOWP, the local agent, or the VOWP home. No
   `vowp agent enroll`, `vowp surface pair`, or `vowp orchestrator new` was run.
@@ -43,7 +46,7 @@ All commands below were run read-only on the job host against the **installed** 
 No real SSH host was contacted and no VOWP database was opened by hand. The desktop's real D6
 probe runs the home half over SSH; these local commands exercise the same CLI surface and are
 enough to disprove readiness, not to prove a live desktop probe. Source claims cite the VOWP
-checkout at `d523314`; they are not installed evidence.
+checkout at `3b421ed` (which contains `121f319`/`d523314`); they are not installed evidence.
 
 `vowp agent status` is a **Mac-side** command. This job host is the home/control side, so its
 `vowp agent status` result says only that this host has no agent enrollment. The owner must run
@@ -82,10 +85,10 @@ deliberately omitted.
 
 ### 1.3 Installed binary versus the merged VOWP source
 
-The VOWP checkout at `d523314` contains the merged Phase 4 CLI surface. The installed
-`vowp 0.3.0` binary lags it:
+The VOWP checkout at `3b421ed` (containing `121f319`/`d523314`) contains the merged Phase 4
+CLI surface. The installed `vowp 0.3.0` binary lags it:
 
-| Surface | Merged source (`d523314`) | Installed `vowp 0.3.0` |
+| Surface | Merged source (`3b421ed`) | Installed `vowp 0.3.0` |
 |---|---|---|
 | `vowp surface pair` | present with `--replace` and the local-node after-help | present, but **no `--replace`** |
 | `vowp surface ls` | present | present |
@@ -99,13 +102,20 @@ The VOWP checkout at `d523314` contains the merged Phase 4 CLI surface. The inst
 | `vowp orchestrator ls` / `stop` / `resume` | present; `OrchestratorCard.node` is optional | present; installed cards emit no `node` |
 | `vowp mcp --agent-socket` | present | present |
 
+The `3b421ed` follow-up adds `vowp node enroll --replace` (rotate a pending node's code in one
+transaction), `vowp node rm --yes` (remove a node and purge its enrollment codes), and
+authenticated `PathMapUpdate` persistence: the home validates the reported map lexically and
+stores it in `node_paths`, replying `Pong`, and an invalid map returns a typed `Error` without
+closing the session. These are owner-setup and session-robustness details, not gate evidence;
+the §2 probe table is unchanged.
+
 The source version still reports `0.3.0`, so a build with the merged surface may look
 identical to the stale installed binary in `vowp --version`. That is exactly why the gate
 uses command/flag/after-help probes, not the version.
 
 Source presence is **not** installed capability. Until the build containing `121f319`/
-`d523314` is installed on both the home and the Mac, the home's installed CLI is what the
-SSH probe sees and the Mac's installed CLI is what the local-agent half sees. The
+`d523314`/`3b421ed` is installed on both the home and the Mac, the home's installed CLI is what
+the SSH probe sees and the Mac's installed CLI is what the local-agent half sees. The
 installed binary is not D6-ready.
 
 ### 1.4 VOWP Phase 4 job evidence
@@ -283,6 +293,10 @@ installed, not reasons to fall back to the stale `agent surface start|attach` de
 without service mode; missing doctor only removes a diagnostic. Record either result and do not
 treat a missing optional command as D6-ready or D6-blocking by itself.
 
+`vowp node enroll --replace` and `vowp node rm --yes` are owner-setup forms, not gate probes.
+They are not part of the §2 `Ready` table, and their presence or absence changes no gate rule;
+they only make a stale pending node or an explicit removal recoverable without inventing a flag.
+
 Do **not** run `vowp surface pair`, `vowp surface rotate`, `vowp orchestrator new`, or a real
 `vowp agent run` in this step; help and read-only probes only.
 
@@ -300,9 +314,28 @@ secret with a short TTL. Do not put it in a command argument, a shell variable a
 log, a report, or this repository; clear the terminal scrollback if needed. Record only the node
 name placeholder and the command exit code.
 
+If the node already exists as `pending` (for example the code expired or was lost), recover it in
+one transaction with `--replace`; a stale code is purged before the new one is issued:
+
+```sh
+vowp --project <project> node enroll <node> --replace [--label <label>]...
+```
+
+`--replace` refuses an `active` node and a `revoked` node. Resolve those explicitly first; they
+are never replaced silently:
+
+```sh
+vowp --project <project> node revoke <node> --yes   # active node: revoke its credentials
+vowp --project <project> node rm <node> --yes       # active or revoked node: remove it
+```
+
+`node rm --yes` removes a node without a confirmation prompt and also purges its enrollment
+codes. `--replace`, `--yes`, `node revoke`, and `node rm` are owner setup, not gate evidence.
+
 `--project` is the global project selector; on a multi-project home it selects the right project
-store. The current installed `node enroll --help` lists `--label` plus the global options. Use
-the release's documented flags and do not invent one.
+store. The current installed `node enroll --help` lists `--label` plus the global options; the
+merged `3b421ed` source adds `--replace`. Use the release's documented flags and do not invent
+one.
 
 ### 3.3 On the Mac: enroll with a private code file (write)
 
@@ -541,7 +574,7 @@ not the UI.
 | D6 Desktop actions and honest Engine panel | Implemented in `ss-21-d6-bridge-ui`; no owner action. | `npm test`, `npm run test:e2e`, `cargo test -p spirit-core --features fixtures`, `cargo clippy -p spirit-core --all-targets -- -D warnings` | Implemented behind the `Ready` + `connected` gate; gated-off and Ready MockBridge flows covered. |
 | Install the Phase 4 CLI build | `v4-local-4f-cli-surface` is done in source; install that build on the home and Mac. Do not substitute the source checkout. | `vowp --project <vowp-project> job show v4-local-4f-cli-surface --json` → `state: done`; record `vowp --version` | Job `done`; installed binary is still `0.3.0` |
 | Surface lifecycle `surface rotate` and `surface pair --replace` | Install the build above on the home. | `vowp surface rotate --help` → exit 0 with `--wait`/`--grace`; `vowp surface pair --help` → `--replace` present | `rotate` exit 2; `pair` has no `--replace` |
-| Active local-agent node with protocol `vowp-agent/1` | On the home, create the pending node; on the Mac, enroll with the private code file, map paths, and run one agent. | `vowp --project <project> node show <node> --json` → `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version` present | Only `kind: home`, `status: active`, `presence: offline`, `protocol: null` |
+| Active local-agent node with protocol `vowp-agent/1` | On the home, create the pending node (a stale `pending` node is recovered with `node enroll <node> --replace`; revoke or remove an `active`/`revoked` node first); on the Mac, enroll with the private code file, map paths, and run one agent. | `vowp --project <project> node show <node> --json` → `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version` present | Only `kind: home`, `status: active`, `presence: offline`, `protocol: null` |
 | Local agent state `connected` | Enroll and run the agent as above; keep it running. | `vowp agent status --json` → exit 0, `connection: connected`, `protocol: vowp-agent/1`, `last_heartbeat`, `cache_entries`, `cache_bytes` present | Exit 3, not enrolled |
 | Mac command surface `agent pair` / `run` / `paths` | Install the merged build on the Mac; these help commands are required by the gate. | `vowp agent pair --help`, `vowp agent run --help`, `vowp agent paths --help` → exit 0 with their documented flags/subcommands | Help exits 0 on the installed build; no live pairing/run |
 | Phase 3 local-node meaning of `vowp orchestrator new --node` | Install the build; verify the help's local-node sentence. Do not create an orchestrator yet. | `vowp orchestrator new --help` contains “names the node that runs the app” and “not an SSH redirect” | `--node` is only the global “Run the command on that node over ssh” option |
@@ -579,9 +612,16 @@ VOWP, read-only (these files live in the companion VOWP repository and are not m
   `node paths`; the merged CLI has no such subcommand.
 - `docs/design/v0.4/hardening.md` §9.5 — the `v4-local-4f-cli-surface` scope; the job is merged
   in source at `121f319`.
-- `crates/vowp-cli/src/cli.rs` — merged command definitions for `surface pair|ls|revoke|rotate`,
-  `agent enroll|paths|pair|run|status|service|doctor`, and
-  `orchestrator new|ls|stop|resume`.
+- `crates/vowp-cli/src/cli.rs` — merged command definitions for `node add|ls|rm|enroll|revoke|show`,
+  `surface pair|ls|revoke|rotate`, `agent enroll|paths|pair|run|status|service|doctor`, and
+  `orchestrator new|ls|stop|resume`; `NodeEnrollArgs` carries `--replace` and `NodeRmArgs`
+  carries `--yes`.
+- `crates/vowp-core/src/agent/enroll.rs` — `create_pending`, `replace_pending` (pending-only
+  code rotation with an active/revoked refusal), and `apply_path_map` (lexical validation and
+  the home-only `node_paths` row).
+- `crates/vowp-core/src/agent/gateway.rs` — `AgentFrame::PathMapUpdate` handling (`Pong` on
+  persist, typed `Error` without closing the session) and the log-and-ignore path for
+  unexpected post-handshake frames.
 - `crates/vowp-cli/src/cmd/surface.rs` — the home surface lifecycle and the
   `surface pair`/`rotate` local-node handling.
 - `crates/vowp-cli/src/cmd/agent.rs` — `vowp agent status` exit-3 not-enrolled path, the status
