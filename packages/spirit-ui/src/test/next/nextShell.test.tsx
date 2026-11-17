@@ -163,7 +163,7 @@ describe("NextShell", () => {
     const menu = screen.getByRole("menu", { name: "Settings" });
     expect(within(menu).getByRole("menuitem", { name: "Add server" })).toBeInTheDocument();
     expect(within(menu).getByRole("group", { name: "Theme" })).toBeInTheDocument();
-    await user.click(within(menu).getByRole("button", { name: "Dark" }));
+    await user.click(within(menu).getByRole("menuitemradio", { name: "Dark" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
 
     await user.click(within(menu).getByRole("menuitem", { name: "All settings" }));

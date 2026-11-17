@@ -5,6 +5,10 @@ import { E2E_LOCK, E2E_TIMEOUT } from "./support";
 
 test.describe.configure({ lock: E2E_LOCK, timeout: E2E_TIMEOUT });
 
+// The details panel slides and fades in; with reduced motion it appears at once, so
+// axe measures the finished colours instead of a half-transparent animation frame.
+test.use({ contextOptions: { reducedMotion: "reduce" } });
+
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
 
 async function expectNoWcagViolations(page: Page) {

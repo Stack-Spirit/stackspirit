@@ -155,7 +155,13 @@ export function Sidebar({
                 <span className="nx-menu__text">Theme</span>
                 <span className="nx-segment nx-segment--tiny">
                   {(["system", "light", "dark"] as const).map((value) => (
-                    <button key={value} type="button" aria-pressed={theme === value} onClick={() => onTheme(value)}>
+                    <button
+                      key={value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={theme === value}
+                      onClick={() => onTheme(value)}
+                    >
                       {value === "system" ? "Auto" : value === "light" ? "Light" : "Dark"}
                     </button>
                   ))}

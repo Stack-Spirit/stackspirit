@@ -481,7 +481,8 @@ button.nx-node:focus-visible {
   cursor: pointer;
 }
 
-.nx-segment button[aria-pressed="true"] {
+.nx-segment button[aria-pressed="true"],
+.nx-segment button[aria-checked="true"] {
   background: var(--nx-panel);
   color: var(--nx-text);
   box-shadow: 0 0 0 1px var(--nx-line), 0 1px 2px rgb(13 18 15 / 0.06);

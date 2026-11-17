@@ -59,6 +59,10 @@ and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web
 
 ## Documentation
 
+- [`docs/HANDOFF-DESKTOP-UI.md`](docs/HANDOFF-DESKTOP-UI.md) — start here for the desktop UI
+  redesign: owner decisions (brand, layout, naming, sessions, SSH and secrets), real versus
+  preview features, and next steps.
+
 - [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md) — Desktop MVP release and
   closeout note: scope, evidence, limitations, and owner sign-off status.
 - [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) — D5 ASIF release and closeout note:
