@@ -75,8 +75,8 @@ The adapter is pinned as a git dependency for now; that is the release blocker r
 - The separate-user shape, service limits, WSS trust boundary, rotation storage and bundle
   verification are documented in [`docs/security.md`](docs/security.md), with the operator path
   in [`docs/guides/agent-node.md`](docs/guides/agent-node.md) and the design/status pages updated.
-  The seven-day soak, rollback drill and security-review sign-off remain phase-exit evidence and
-  are not claimed here.
+  The owner live Mac smoke test is pending; the rollback drill and security-review sign-off are
+  recorded phase-exit evidence.
 
 ### Changed
 

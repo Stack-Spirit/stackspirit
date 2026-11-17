@@ -8,8 +8,8 @@ tokens, and reaches the home over SSH stdio by default or through an owner-manag
 > **Status: current.** Enrollment, the WSS transport, `agent service`, `agent run --service`,
 > the separate-user checks, surface rotation, bundle result and `capacity history` are
 > implemented in this tree. The security review checklist and the rollback drill are recorded in
-> [`../releases/v0.4-hardening.md`](../releases/v0.4-hardening.md); the seven-day soak has not been
-> run and remains an owner question.
+> [`../releases/v0.4-hardening.md`](../releases/v0.4-hardening.md); the owner live Mac smoke test is
+> pending the owner's run.
 
 ## What the node needs
 

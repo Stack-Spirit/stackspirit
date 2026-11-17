@@ -12,8 +12,8 @@ policy is in [`SECURITY.md`](../SECURITY.md).
 > token-gated writes, lifecycle, backup, gates, promotion, `vowp doctor` and the v0.4 agent node
 > (WSS, service, rotation, bundle and capacity history) on this page are implemented, and these
 > rules are binding on the code on `main`. The security review checklist and the rollback drill
-> are recorded in [`releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the seven-day soak
-> has not been run and remains an owner question.
+> are recorded in [`releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the owner live Mac
+> smoke test is pending the owner's run.
 
 ## Reporting a vulnerability
 

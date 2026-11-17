@@ -5,10 +5,9 @@ Status: **implemented in this tree; the available phase-exit evidence is recorde
 and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the shipped behaviour.
 Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1 describes them.
 The security review (§8.2) and the rollback drill (§8.4) results are recorded on the evidence page;
-the review leaves one shared-checkout item as an open owner question, and the seven-day soak (§8.3)
-has not been run and is **owner-deferred**: the owner will run it on their Mac and home, record the
-commit, dates and observed numbers, and phase 4 closes with that explicit deferral. No release, tag
-or date is promised.
+the review leaves one shared-checkout item as an open owner question, and the owner live Mac smoke
+test (§8.3) is **pending**: one run on the owner's Mac against the owner's home, then the result is
+recorded there. No release, tag or date is promised.
 
 This page began as the plan for the phase and keeps the design-time wording and markers in the
 sections below. Where a §2–§7 sentence calls a command or flag *(planned)*, the name is the design
@@ -65,9 +64,9 @@ Known deviations from the text below:
   It delivers the frame; the home refuses the expired token on first use and the owner re-pairs.
   `--wait` still stops at the delivery deadline and reports `rotation_pending`.
 - The rollback drill is recorded in
-  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The seven-day soak has not
-  been run and is **owner-deferred**: the owner will run it on their Mac and home and record the
-  commit, dates and observed numbers. Phase 4 closes with that explicit deferral.
+  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The owner live Mac smoke
+  test has not been run; it is **pending** the owner's run against their Mac and home and the
+  record on that page.
 
 ## 1. Scope, invariants and vocabulary
 
@@ -84,7 +83,7 @@ Every item below is planned for phase 4; §4.1 describes the one rotation slice 
 | Bundle result | A node without push access returns `base..head` as a verified git bundle over the agent channel. | `result_transport = "push"` |
 | Separate user | A dedicated standard account is a supported way to run the agent; the rules are explicit. | the owner's account |
 | Metrics history | A bounded local history for capacity and cost feeds a read-only CLI/JSON surface. | 30 days of 5-minute rollups |
-| Docs and release gates | Security review, soak and rollback drill are named phase-exit activities. | no release |
+| Docs and release gates | Security review, owner live Mac smoke test and rollback drill are named phase-exit activities. | no release |
 
 ### 1.2 Invariants that still bind
 
@@ -977,8 +976,8 @@ DISK_MIN SOURCE`. No path, token or secret appears.
 ## 8. Docs and release gates
 
 The evidence record is [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md): it
-carries the §8.2 checklist with code and test links and the §8.4 drill commands and results. §8.3
-is not claimed there.
+carries the §8.2 checklist with code and test links and the §8.4 drill commands and results. The
+owner live Mac smoke test (§8.3) is pending and is not claimed there.
 
 ### 8.1 Documentation set
 
@@ -1026,24 +1025,16 @@ The phase exit requires a security review with evidence in the report:
 The review is a checklist with links to the named tests and the code; an unresolved item is a
 `questions_for_owner` entry, not a silent waiver.
 
-### 8.3 Soak
+### 8.3 Owner live Mac smoke test
 
-Run one Mac node and one home for seven days with SSH and one WSS window, offload enabled for one
-project and bundle mode exercised in a second window. Success criteria:
+The phase exit records one smoke test, run once on the owner's Mac against the owner's home:
 
-- no lost event, no duplicate `seq`, no duplicate event id after a forced disconnect;
-- a takeover makes the old surface read-only in under 2 seconds and writes a capsule;
-- a 1,000-event replay finishes in under 10 seconds;
-- `secret_scan` finds nothing on any offloaded diff; no home-only secret is in a frame or spool;
-- a rotation queued while the node is offline arrives on reconnect; the `surface ls` prefix/expiry
-  matches the agent's status;
-- a killed agent is restarted by the service; a revoked agent is **not** restarted;
-- the rollup rows cover the seven days within the retention bound; `capacity history` reports the
-  gap during a stopped supervisor;
-- rollback drill completes and the v0.3 flows still pass.
+1. pair or start one local orchestrator;
+2. complete one no-op turn and verify the same VPS session log;
+3. stop and clean up the test orchestrator.
 
-The soak is evidence in the report: dates are not promised, but the run's commit and the observed
-numbers are recorded.
+Status is **pending** until the owner records the run on the evidence page; it is not claimed as
+passed. There is no multi-day run or daily checklist.
 
 ### 8.4 Rollback drill
 
@@ -1074,7 +1065,7 @@ numbers are recorded.
 | `cargo clippy --workspace --all-targets -- -D warnings` | no warnings |
 | `cargo test --workspace` | every suite passes |
 | Security review | §8.2 checklist with test links |
-| Soak | §8.3 numbers and commit |
+| Owner live Mac smoke test | §8.3 smoke-test record; pending until the owner runs it |
 | Rollback drill | §8.4 commands and results on the copy |
 
 There is no publish, deploy, release tag or visibility change in the phase.
@@ -1083,7 +1074,7 @@ There is no publish, deploy, release tag or visibility change in the phase.
 
 | Ship | Test | Not in this slice |
 |---|---|---|
-| **Ship:** the guide, the security page, the crate/design pages, the regenerated reference, the roadmap/README status, and a report with the soak/rollback evidence. **Files:** `docs/guides/agent-node.md` *(new)*, `docs/guides/README.md`, `docs/guides/install.md`, `docs/guides/multi-node.md`, `docs/guides/operating.md`, `docs/security.md`, `docs/design/crates/vowp-agent.md`, `docs/design/crates/vowp-core.md`, `docs/design/crates/vowp-store.md`, `docs/design/crates/vowp-cli.md`, `docs/design/cli.md`, `docs/design/types.md`, `docs/design/schema/global.sql`, `docs/reference/cli.md` and the schema pages (regenerated), `docs/design/v0.4/hardening.md`, `docs/design/README.md`, `docs/roadmap.md`, `CHANGELOG.md`. | `bash docs/tests/run.sh`, `python3 docs/reference/check-reference.py` and the manual review/soak/drill; no new unit test is added by a docs-only change. | A release, tag or announcement; a public claim; a hosted relay; a date. |
+| **Ship:** the guide, the security page, the crate/design pages, the regenerated reference, the roadmap/README status, and a report with the smoke-test/rollback evidence. **Files:** `docs/guides/agent-node.md` *(new)*, `docs/guides/README.md`, `docs/guides/install.md`, `docs/guides/multi-node.md`, `docs/guides/operating.md`, `docs/security.md`, `docs/design/crates/vowp-agent.md`, `docs/design/crates/vowp-core.md`, `docs/design/crates/vowp-store.md`, `docs/design/crates/vowp-cli.md`, `docs/design/cli.md`, `docs/design/types.md`, `docs/design/schema/global.sql`, `docs/reference/cli.md` and the schema pages (regenerated), `docs/design/v0.4/hardening.md`, `docs/design/README.md`, `docs/roadmap.md`, `CHANGELOG.md`. | `bash docs/tests/run.sh`, `python3 docs/reference/check-reference.py` and the manual review/smoke test/drill; no new unit test is added by a docs-only change. | A release, tag or announcement; a public claim; a hosted relay; a date. |
 
 ## 9. Ordered slice list
 
@@ -1210,8 +1201,8 @@ with their slices).
 ### 9.6 `v4-local-4g-hardening-docs`
 
 **Scope.** The guide, the security page, the crate/design/reference pages, the status lines and the
-release-gate evidence (security review, soak, rollback drill). It is docs-only; it runs after the
-CLI surface is merged so every command it shows exists.
+release-gate evidence (security review, owner live Mac smoke test, rollback drill). It is docs-only;
+it runs after the CLI surface is merged so every command it shows exists.
 
 **Owns.** `docs/**`, `CHANGELOG.md`.
 

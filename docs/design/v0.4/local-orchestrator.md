@@ -1509,7 +1509,7 @@ or refused.
 | **1** | local `vowp chat`: lease, turn-begin/ingest over the agent, spool/replay, takeover | a chat turn on the Mac lands in the home log; Wi-Fi drop replays with no gap; phone takeover makes the Mac read-only | opencode app, jobs |
 | **2** | offload executor: `AssignRun`, path map, worktree, events, summary, push/fetch, policy, capacity, waiting reasons | a build/docs job runs on the Mac, commits return by push, the home gates/merges; pinned offline waits; home-only secret refuses | opencode app, bundle, WSS |
 | **3** | local opencode: app host, bridge, MCP proxy, orchestrator materialize, backfill, local cache | opencode on the Mac writes the same session; MCP tools proxy; takeover; paths normalized; phone continues | WSS, launchd |
-| **4** | hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics, docs | security review, soak, rollback drill | multi-user, Windows |
+| **4** | hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics, docs | security review, owner live Mac smoke test, rollback drill | multi-user, Windows |
 
 **MVP = phases 0–2.** The product goal is phase 3. If the owner wants the opencode app first,
 swap phases 2 and 3; the agent transport is the same. This is open question 14 in §16.

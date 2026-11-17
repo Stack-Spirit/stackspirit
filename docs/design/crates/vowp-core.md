@@ -954,8 +954,8 @@ The fake node still stands in for `vowp-agent`'s `WorktreeManager` and `CoreRunH
 own tests cover creation, reuse, push and bundle chunking), the gateway is the in-process stdio
 server rather than the SSH forced command, and the suite stops at `gating` rather than running
 the merge queue. The WSS listener, the bundle result and the launchd/systemd-user service have
-their own named tests in `vowp-agent` and `vowp-core`; the soak that exercises them together is a
-phase-exit activity, not part of this suite.
+their own named tests in `vowp-agent` and `vowp-core`; the owner live Mac smoke test that exercises
+them together is a phase-exit activity, not part of this suite.
 
 ### 9.4 Orchestrators on a local node (`surface/orchestrator.rs`)
 
