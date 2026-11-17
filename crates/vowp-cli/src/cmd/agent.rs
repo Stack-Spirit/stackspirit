@@ -17,11 +17,11 @@ use vowp_agent::service::{
     self, InstallOptions, ServiceError, ServicePlatform, ServiceSpec, SystemManager, run_marker_path,
 };
 use vowp_agent::{
-    AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, IsolationError, NodeKey, RunOptions,
-    RunOutcome, ServiceRunOutcome, SurfacePairRequest, SurfaceStatus, SystemAgentClock, TransportConfig, WssIngress,
-    WssListener, WssTls, WssTlsMode, WssTransport, check_state_dir, current_uid, ensure_not_root, ensure_state_dir,
-    fingerprint_of, is_fingerprint, load_public, pending_spool_bytes, surface_statuses, surface_token_expiry,
-    transport_for_config, validate_enrollment_code,
+    AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, IsolationError, NodeKey, PairedSurface,
+    RunOptions, RunOutcome, ServiceRunOutcome, SurfacePairRequest, SurfaceStatus, SystemAgentClock, TransportConfig,
+    WssIngress, WssListener, WssTls, WssTlsMode, WssTransport, check_state_dir, current_uid, ensure_not_root,
+    ensure_state_dir, fingerprint_of, is_fingerprint, load_public, pending_spool_bytes, surface_statuses,
+    surface_token_expiry, transport_for_config, validate_enrollment_code,
 };
 use vowp_core::Deps;
 use vowp_core::agent::gateway;
@@ -505,8 +505,14 @@ fn pair(global: &Global, io: &mut dyn IoStreams, args: &AgentPairArgs) -> Result
     let app = args.app.clone().unwrap_or_else(|| "agent".to_owned());
     let request = SurfacePairRequest::new(code, surface_id, session, app);
 
-    let mut client = AgentClient::from_state_dir(state_dir, Arc::new(SystemAgentClock)).map_err(map_agent_error)?;
-    let paired = client.pair(&request).map_err(map_agent_error)?;
+    // A running `vowp agent run` owns the one node connection. Opening a second direct
+    // connection with the same node key would supersede it, so prefer its local socket.
+    let paired = if let Some(paired) = pair_through_agent_socket(&state_dir, &request)? {
+        paired
+    } else {
+        let mut client = AgentClient::from_state_dir(state_dir, Arc::new(SystemAgentClock)).map_err(map_agent_error)?;
+        client.pair(&request).map_err(map_agent_error)?
+    };
     if global.json {
         print_json(io, &paired)?;
     } else {
@@ -519,6 +525,42 @@ fn pair(global: &Global, io: &mut dyn IoStreams, args: &AgentPairArgs) -> Result
         )?;
     }
     Ok(0)
+}
+
+/// Tries the pairing over `<state_dir>/agent.sock`.
+///
+/// `Ok(None)` means the caller should fall back to one direct agent connection: the socket
+/// is missing or not accepting connections, or the running agent reports `home_offline`.
+/// A pairing refusal from a live agent is returned as the CLI error instead of retrying
+/// through a second connection that would supersede it.
+fn pair_through_agent_socket(
+    state_dir: &Path,
+    request: &SurfacePairRequest,
+) -> Result<Option<PairedSurface>, CliError> {
+    let response = match vowp_agent::socket::pair_over_socket(state_dir, request).map_err(map_agent_error)? {
+        Some(response) => response,
+        None => return Ok(None),
+    };
+    match response {
+        vowp_agent::socket::PairReply::Paired {
+            surface_id,
+            scopes,
+            expires_at,
+            token_path,
+        } => Ok(Some(PairedSurface {
+            surface_id,
+            scopes,
+            expires_at,
+            token_path,
+        })),
+        vowp_agent::socket::PairReply::Error { code, message: _ } if code == "home_offline" => Ok(None),
+        vowp_agent::socket::PairReply::Error { code, message } => Err(match code.as_str() {
+            "invalid_request" => CliError::Invalid(message),
+            "pair_timeout" => CliError::Remote(message),
+            "surface_revoked" | "pair_failed" => CliError::Guard(message),
+            _ => CliError::Remote(message),
+        }),
+    }
 }
 
 fn run_agent(global: &Global, io: &mut dyn IoStreams, args: &AgentRunArgs) -> Result<i32, CliError> {

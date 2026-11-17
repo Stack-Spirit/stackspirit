@@ -144,11 +144,76 @@ struct StatusDocument<'a> {
     surfaces: Vec<SurfaceStatus>,
 }
 
-/// Returns the number of bytes below `state_dir/spool`.
+/// Returns the number of bytes waiting in the local spool and in every bridge spool.
+///
+/// The agent spool (`state_dir/spool`) is counted byte-for-byte. For each local surface
+/// bridge (`state_dir/bridge/<surface>/spool`) only the records whose `native_id` is not
+/// in `sent.json` are counted: a record stays on disk after sending for inspection, but
+/// it is no longer pending once the home accepted it.
 pub fn pending_spool_bytes(state_dir: &Path) -> u64 {
     let mut total = 0u64;
     walk_bytes(&state_dir.join("spool"), &mut total);
+    total.saturating_add(bridge_pending_bytes(&state_dir.join(crate::bridge::BRIDGE_DIR)))
+}
+
+/// Adds the unsent `BridgeFrame` record bytes below every `bridge/<surface>/spool`.
+fn bridge_pending_bytes(bridge_dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(bridge_dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        total = total.saturating_add(bridge_surface_pending_bytes(
+            &entry.path().join(crate::bridge::BRIDGE_SPOOL_DIR),
+        ));
+    }
     total
+}
+
+/// Returns the bytes of one surface's unsent records in `events.jsonl`.
+fn bridge_surface_pending_bytes(spool_dir: &Path) -> u64 {
+    let sent = read_bridge_sent(&spool_dir.join(crate::bridge::BRIDGE_SENT_FILE));
+    let text = match fs::read_to_string(spool_dir.join(crate::bridge::BRIDGE_EVENTS_FILE)) {
+        Ok(text) => text,
+        Err(_) => return 0,
+    };
+    let mut total = 0u64;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let pending = match serde_json::from_str::<crate::bridge::BridgeFrame>(line) {
+            Ok(frame) => !sent.iter().any(|id| id == frame.native_id()),
+            // An unreadable record cannot be proven sent; count it so a corrupt spool is
+            // visible in status instead of silently disappearing.
+            Err(_) => true,
+        };
+        if pending {
+            total = total.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX).saturating_add(1));
+        }
+    }
+    total
+}
+
+/// Reads `bridge/<surface>/spool/sent.json`, ignoring a missing or unreadable file.
+fn read_bridge_sent(path: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct SentFile {
+        #[serde(default)]
+        sent: Vec<String>,
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<SentFile>(&bytes)
+        .map(|file| file.sent)
+        .unwrap_or_default()
 }
 
 fn walk_bytes(dir: &Path, total: &mut u64) {

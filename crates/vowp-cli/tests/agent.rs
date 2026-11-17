@@ -5,12 +5,15 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
+use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -18,20 +21,25 @@ use ed25519_dalek::{Signer, SigningKey};
 use tempfile::TempDir;
 use vowp_agent::{
     AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, Cache, ConnectionState, FrameRead, FrameStream,
-    NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, ServiceError, SshTransport,
-    SystemAgentClock, Transport, TransportConfig, WssTlsMode,
+    NodeKey, PushStatus, RunHandler, RunOptions, RunOutcome as AgentRunOutcome, RunSink, RunSinkError, RunSummary,
+    ServiceError, SshTransport, SurfacePairRequest, SystemAgentClock, Transport, TransportConfig, WssTlsMode,
+    pending_spool_bytes,
 };
-use vowp_cli::BufferIo;
 use vowp_cli::agent_exec::CoreRunHandler;
 use vowp_cli::cli::{AgentCommand, Cli, Command};
 use vowp_cli::cmd::agent::{enrollment_transport_config, service_error_exit_code};
 use vowp_cli::node_ctx::ControlConfig;
-use vowp_core::agent::pair::{issue_surface_token, verify_surface_token};
+use vowp_cli::{BufferIo, Ctx, Global};
+use vowp_core::agent::gateway::{self, GatewayOptions};
+use vowp_core::agent::pair::{create_pending_surface, issue_surface_token, verify_surface_token};
+use vowp_core::deps::Deps;
+use vowp_core::surface::orchestrator::{CommandSpool, NewOrchestrator, Orchestrator};
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, AssignmentPayload,
-    ErrorKind, Executor, JobId, NodeKind, NodeName, NodeStatus, PathRef, Project, ProjectName, RemoteEvent, RemoteLine,
-    RemoteRunState, RunId, RunOutcome, RunPurpose, RunRejectReason, SecretName, Session, SessionId, SessionRole,
-    SessionState, StopReason, SurfaceId, SurfaceState, Timestamp, TurnSummary, VowpConfig,
+    ErrorKind, Executor, JobId, NodeKind, NodeName, NodeStatus, OrchestratorApp, PathRef, Project, ProjectName,
+    RemoteEvent, RemoteLine, RemoteRunState, RunId, RunOutcome, RunPurpose, RunRejectReason, SecretName, Session,
+    SessionId, SessionRole, SessionState, StopReason, SurfaceId, SurfaceKind, SurfaceState, Timestamp, TurnSummary,
+    VowpConfig,
 };
 use vowp_store::{NodeCredential, NodePath, NodePaths, Store};
 
@@ -3326,4 +3334,1011 @@ fn agent_service_install_without_home_exits_two() {
         .output()
         .expect("run vowp agent service install");
     assert_eq!(output.status.code(), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Real gateway E2E over in-process pipes: AgentClient + socket MCP + bridge
+// ---------------------------------------------------------------------------
+
+/// Builds `Deps` for a temporary [`GatewayHome`] without spawning a process.
+fn in_process_deps(home: &GatewayHome, project: &str) -> Deps {
+    let io = BufferIo::new("");
+    let global = Global {
+        json: true,
+        home: Some(home.root()),
+        project: Some(home.checkout(project).display().to_string()),
+        ..Global::default()
+    };
+    Ctx::build(&global, &io).expect("test context").deps().clone()
+}
+
+/// One real `gateway::serve` connection per [`Transport::open`] over Unix pipes.
+struct InProcessGateway {
+    paths: NodePaths,
+    deps: Deps,
+    home_id: String,
+}
+
+impl InProcessGateway {
+    fn new(home: &GatewayHome) -> Self {
+        let deps = in_process_deps(home, "vowp");
+        Self {
+            paths: NodePaths::new(home.root()),
+            home_id: deps.node.to_string(),
+            deps,
+        }
+    }
+}
+
+impl Transport for InProcessGateway {
+    fn open(&mut self) -> Result<Box<dyn FrameStream>, AgentError> {
+        let (agent_side, gateway_side) = UnixStream::pair().map_err(AgentError::Io)?;
+        let read = gateway_side.try_clone().map_err(AgentError::Io)?;
+        let store = Store::open_global(&self.paths)
+            .map_err(|error| AgentError::Config(error.to_string()))?
+            .with_clock(self.deps.clock.clone());
+        let deps = self.deps.clone();
+        let options = GatewayOptions {
+            home_id: self.home_id.clone(),
+            heartbeat_secs: 1,
+            max_frame_bytes: 1024 * 1024,
+            handshake_timeout: Duration::from_secs(5),
+        };
+        thread::Builder::new()
+            .name("e2e-home-gateway".to_owned())
+            .spawn(move || {
+                let _ = gateway::serve_with_options(&store, &deps, BufReader::new(read), gateway_side, options);
+            })
+            .map_err(AgentError::Io)?;
+        let writer = agent_side.try_clone().map_err(AgentError::Io)?;
+        let (sender, frames) = mpsc::channel();
+        thread::Builder::new()
+            .name("e2e-agent-reader".to_owned())
+            .spawn(move || {
+                let mut reader = BufReader::new(agent_side);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if sender.send(line).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(AgentError::Io)?;
+        Ok(Box::new(PipeFrameStream { writer, frames }))
+    }
+}
+
+/// The agent end of one in-process gateway connection.
+struct PipeFrameStream {
+    writer: UnixStream,
+    frames: mpsc::Receiver<String>,
+}
+
+impl FrameStream for PipeFrameStream {
+    fn recv(&mut self, timeout: Option<Duration>) -> Result<FrameRead, AgentError> {
+        let line = match timeout {
+            Some(limit) => match self.frames.recv_timeout(limit) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(FrameRead::Timeout),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(FrameRead::Closed),
+            },
+            None => match self.frames.recv() {
+                Ok(line) => line,
+                Err(_) => return Ok(FrameRead::Closed),
+            },
+        };
+        let frame = serde_json::from_str(&line).map_err(AgentError::Json)?;
+        Ok(FrameRead::Frame(frame))
+    }
+
+    fn send(&mut self, frame: &AgentFrame) -> Result<(), AgentError> {
+        let mut bytes = serde_json::to_vec(frame)?;
+        bytes.push(b'\n');
+        self.writer.write_all(&bytes).map_err(AgentError::Io)?;
+        self.writer.flush().map_err(AgentError::Io)
+    }
+}
+
+/// One loopback SSE endpoint that the fake opencode service URL points at.
+struct FakeSseServer {
+    port: u16,
+    events: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    accept: Option<thread::JoinHandle<()>>,
+}
+
+impl FakeSseServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake opencode");
+        let port = listener.local_addr().expect("fake opencode address").port();
+        listener.set_nonblocking(true).expect("nonblocking fake opencode");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let events = Arc::clone(&events);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            // macOS/BSD inherit O_NONBLOCK across accept(); the reader
+                            // below needs blocking I/O with timeouts.
+                            stream.set_nonblocking(false).expect("accept restores blocking mode");
+                            let events = Arc::clone(&events);
+                            let stop = Arc::clone(&stop);
+                            thread::spawn(move || serve_sse(stream, events, stop));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+        };
+        Self {
+            port,
+            events,
+            stop,
+            accept: Some(accept),
+        }
+    }
+
+    fn push(&self, event: serde_json::Value) {
+        let text = format!("data: {}\n\n", serde_json::to_string(&event).expect("event JSON"));
+        self.events.lock().expect("fake SSE events").push(text);
+    }
+}
+
+impl Drop for FakeSseServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+    }
+}
+
+/// Serves the event stream, replaying every enqueued event until the test stops it.
+fn serve_sse(mut stream: TcpStream, events: Arc<Mutex<Vec<String>>>, stop: Arc<AtomicBool>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let mut reader = match stream.try_clone() {
+        Ok(stream) => BufReader::new(stream),
+        Err(_) => return,
+    };
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) if line == "\r\n" || line == "\n" => break,
+            Ok(_) => {}
+        }
+    }
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+    if stream.write_all(headers.as_bytes()).is_err() {
+        return;
+    }
+    let mut sent = 0usize;
+    while !stop.load(Ordering::SeqCst) {
+        let batch = events.lock().expect("fake SSE events").clone();
+        for text in batch.iter().skip(sent) {
+            if stream.write_all(text.as_bytes()).is_err() || stream.flush().is_err() {
+                return;
+            }
+        }
+        sent = batch.len();
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Writes the fake `opencode` that prints the SSE listener's readiness and password.
+fn install_fake_opencode(tools: &Path, port: u16) -> PathBuf {
+    std::fs::create_dir_all(tools).expect("fake tools dir");
+    let path = tools.join("opencode");
+    let body = format!(
+        "#!/bin/sh\nprintf 'server listening on http://127.0.0.1:{port}\\n'\nprintf 'server password test-only-e2e-password\\n'\nsleep 60\n"
+    );
+    std::fs::write(&path, body).expect("fake opencode");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod opencode");
+    path
+}
+
+/// Writes one private orchestrator config before the home command arrives.
+#[allow(clippy::too_many_arguments)]
+fn prewrite_orchestrator_config(
+    state_dir: &Path,
+    name: &str,
+    app: OrchestratorApp,
+    project: Option<&ProjectName>,
+    working_dir: &Path,
+    command: &Path,
+) {
+    let dir = state_dir.join("orchestrators").join(name);
+    let service_dir = dir.join(".opencode/state/opencode");
+    std::fs::create_dir_all(&service_dir).expect("orchestrator dirs");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("orchestrator dir mode");
+    let value = serde_json::json!({
+        "name": name,
+        "app": app,
+        "project": project.map(ToString::to_string),
+        "command": command.display().to_string(),
+        "args": [],
+        "working_dir": working_dir.display().to_string(),
+        "service_json": service_dir.join("service.json").display().to_string(),
+    });
+    let path = dir.join("config.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("config JSON")).expect("orchestrator config");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("config mode");
+}
+
+/// Seeds one active node and its credential for an in-process agent.
+fn prepare_agent(home: &GatewayHome, node_name: &str) -> (TempDir, PathBuf, NodeName, NodeKey, AgentConfig) {
+    let agent_home = tempfile::tempdir().expect("agent home");
+    let state_dir = agent_home.path().join(".vowp-agent");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).expect("state dir mode");
+    let key = NodeKey::generate(&state_dir).expect("node key");
+    let node = NodeName::parse(node_name).expect("node slug");
+    let store = home.store();
+    let now = store.clock().now();
+    store
+        .insert_pending_node(&node, &["linux".to_owned()], now)
+        .expect("pending node");
+    store
+        .set_node_status(&node, NodeStatus::Active, "", now)
+        .expect("active node");
+    let key_id = key.public_key_hex();
+    store
+        .upsert_node_credential(&NodeCredential {
+            node: node.clone(),
+            key_id: key_id.clone(),
+            public_key: key_id,
+            created_at: now,
+            last_used_at: None,
+            revoked_at: None,
+        })
+        .expect("node credential");
+    let deps = in_process_deps(home, "vowp");
+    let config = AgentConfig::new(deps.node.to_string(), node.clone(), state_dir.clone(), "in-process");
+    config.write().expect("agent.json");
+    (agent_home, state_dir, node, key, config)
+}
+
+/// Starts one real `AgentClient` run loop over the in-process gateway.
+fn start_agent(
+    home: &GatewayHome,
+    state_dir: PathBuf,
+    key: NodeKey,
+    config: AgentConfig,
+) -> thread::JoinHandle<Result<AgentRunOutcome, AgentError>> {
+    let transport = InProcessGateway::new(home);
+    thread::spawn(move || {
+        let mut client = AgentClient::new(state_dir, key, config, Box::new(transport), Arc::new(SystemAgentClock));
+        client.run(&RunOptions::new(AgentRole::Both))
+    })
+}
+
+/// Waits until the agent has bound its socket and completed the handshake.
+fn wait_for_in_process_agent_connected(state_dir: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let connected = AgentStatus::load(state_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|status| status.connection == ConnectionState::Connected);
+        let socket_bound = std::fs::symlink_metadata(state_dir.join("agent.sock"))
+            .is_ok_and(|metadata| metadata.file_type().is_socket());
+        if connected && socket_bound {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let status = std::fs::read_to_string(AgentStatus::file_path(state_dir)).unwrap_or_default();
+            panic!("the in-process agent did not connect; status: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Revokes the node so the run loop stops cleanly, then joins it.
+fn stop_agent(home: &GatewayHome, node: &NodeName, handle: thread::JoinHandle<Result<AgentRunOutcome, AgentError>>) {
+    let store = home.store();
+    let now = store.clock().now();
+    store
+        .set_node_status(node, NodeStatus::Revoked, "", now)
+        .expect("revoke node");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "the in-process agent did not stop after revoke"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let outcome = handle.join().expect("agent thread").expect("agent run");
+    assert!(
+        matches!(outcome, AgentRunOutcome::Revoked { .. }),
+        "the in-process agent must stop on revoke, got {outcome:?}"
+    );
+}
+
+/// Ages a node past the offline threshold without changing its active status.
+fn set_node_offline(home: &GatewayHome, node: &NodeName) {
+    let store = home.store();
+    let old = store.clock().now().minus(Duration::from_secs(600));
+    store
+        .set_node_status(node, NodeStatus::Active, "", old)
+        .expect("offline node");
+}
+
+/// Marks a previously created node online now.
+fn set_node_online(home: &GatewayHome, node: &NodeName) {
+    let store = home.store();
+    let now = store.clock().now();
+    store
+        .touch_node(node, now, Some("0.4.0"), Some(AGENT_PROTOCOL), &serde_json::json!({}))
+        .expect("online node");
+}
+
+/// An orchestrator manager that only queues commands for the live gateway.
+fn remote_manager(deps: &Deps) -> Orchestrator {
+    Orchestrator::with_transport(
+        deps.clone(),
+        Vec::new(),
+        Arc::new(CommandSpool::with_timeout(deps.paths.root(), Duration::ZERO)),
+    )
+}
+
+/// One home-side remote orchestrator request.
+fn remote_request(name: &str, app: OrchestratorApp, project: Option<&ProjectName>) -> NewOrchestrator {
+    NewOrchestrator {
+        name: name.to_owned(),
+        project: project.cloned(),
+        app,
+        executor: None,
+        force: false,
+    }
+}
+
+/// Waits for a queued start/resume result to reach the home record.
+fn wait_for_orchestrator_state(manager: &Orchestrator, name: &str, expected: vowp_protocol::OrchestratorNodeState) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let info = manager.info(name).expect("orchestrator info");
+        let state = info.card.state;
+        if state == expected {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "orchestrator {name} stayed {state:?}, expected {expected:?}; detail: {:?}; last_error: {:?}",
+                info.detail, info.card.last_error
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Creates one pending surface and redeems it with the real `vowp agent pair` CLI.
+///
+/// With a live agent the CLI must route through `agent.sock`; the fallback direct
+/// SSH/WSS connection would use the fake target and fail the test.
+fn pair_via_agent_cli(
+    home: &GatewayHome,
+    agent_home: &Path,
+    state_dir: &Path,
+    node: &NodeName,
+    session: &SessionId,
+) -> SurfaceId {
+    let home_store = home.store();
+    let now = home_store.clock().now();
+    let pending = create_pending_surface(&home_store, node, session, SurfaceKind::Opencode, Some("opencode"), now)
+        .expect("pending surface");
+    let code = pending.code.clone();
+    let surface = pending.surface.id.clone();
+    let code_file = agent_home.join("pair.code");
+    std::fs::write(&code_file, &code).expect("pair code file");
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .args([
+            "agent",
+            "pair",
+            "--code-file",
+            &code_file.display().to_string(),
+            "--surface",
+            surface.0.as_str(),
+            "--session",
+            session.as_str(),
+            "--app",
+            "opencode",
+        ])
+        .env("HOME", agent_home)
+        .env("VOWP_AGENT_HOME", state_dir)
+        .env("NO_COLOR", "1")
+        .env_remove("VOWP_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("run vowp agent pair");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "agent pair failed: {stdout} {stderr}");
+    assert!(
+        !stdout.contains(&code) && !stderr.contains(&code),
+        "the code must not be printed"
+    );
+    let token_path = AgentConfig::surface_token_path(state_dir, &surface);
+    assert!(
+        token_path.is_file(),
+        "the live agent did not write {}",
+        token_path.display()
+    );
+    let token = std::fs::read_to_string(&token_path).expect("surface token");
+    assert!(
+        !stdout.contains(token.trim()) && !stderr.contains(token.trim()),
+        "the surface token must not be printed"
+    );
+    assert!(
+        AgentConfig::surface_session_path(state_dir, &surface).is_file(),
+        "the live agent did not write the session binding"
+    );
+    surface
+}
+
+/// One MCP `tools/call` through the real `vowp mcp --agent-socket` proxy.
+fn mcp_tool_call(
+    home: &GatewayHome,
+    state_dir: &Path,
+    surface: &SurfaceId,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> (Duration, serde_json::Value) {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    });
+    let input = format!("{}\n", serde_json::to_string(&request).expect("MCP request"));
+    let args = vec![
+        "vowp".to_owned(),
+        "--home".to_owned(),
+        home.root().display().to_string(),
+        "--project".to_owned(),
+        home.checkout("vowp").display().to_string(),
+        "mcp".to_owned(),
+        "--agent-socket".to_owned(),
+        state_dir.join("agent.sock").display().to_string(),
+        "--surface".to_owned(),
+        surface.0.as_str().to_owned(),
+    ];
+    let mut io = BufferIo::new(input.clone());
+    let started = Instant::now();
+    let code = vowp_cli::run(args, &mut io);
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0, "{tool} failed: {}", io.stderr());
+    let response = io
+        .stdout()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value["id"] == 1)
+        .unwrap_or_else(|| panic!("{tool} returned no JSON-RPC response: {}", io.stdout()));
+    (elapsed, response)
+}
+
+/// Returns the text payload of a successful MCP tool result.
+fn mcp_text(response: &serde_json::Value) -> serde_json::Value {
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("MCP text result");
+    serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_owned()))
+}
+
+/// Reads `vowp session tail <id> --json` as one parsed JSON value per event line.
+fn session_tail(home: &GatewayHome, session: &SessionId) -> Vec<serde_json::Value> {
+    let args = vec![
+        "vowp".to_owned(),
+        "--home".to_owned(),
+        home.root().display().to_string(),
+        "--project".to_owned(),
+        home.checkout("vowp").display().to_string(),
+        "--json".to_owned(),
+        "session".to_owned(),
+        "tail".to_owned(),
+        session.as_str().to_owned(),
+    ];
+    let mut io = BufferIo::new("");
+    let code = vowp_cli::run(args, &mut io);
+    assert_eq!(code, 0, "session tail failed: {}", io.stderr());
+    io.stdout()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("session event JSON"))
+        .collect()
+}
+
+/// Waits until every event kind appears in the session log.
+fn wait_for_tail_kinds(home: &GatewayHome, session: &SessionId, expected: &[&str]) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let tail = session_tail(home, session);
+        let kinds: Vec<&str> = tail.iter().filter_map(|event| event["type"].as_str()).collect();
+        if expected.iter().all(|kind| kinds.contains(kind)) {
+            return tail;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session tail never reached {expected:?}; saw {kinds:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Sends one raw socket request and reads one response.
+fn socket_request(path: &Path, request: serde_json::Value) -> serde_json::Value {
+    let mut stream = UnixStream::connect(path).expect("connect agent socket");
+    let mut bytes = serde_json::to_vec(&request).expect("socket request JSON");
+    bytes.push(b'\n');
+    stream.write_all(&bytes).expect("write socket request");
+    stream.flush().expect("flush socket request");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read socket response");
+    serde_json::from_str(&line).expect("socket response JSON")
+}
+
+/// Pushes the full simulated OpenCode turn used by both real-gateway tests.
+fn push_turn_events(server: &FakeSseServer, prompt: &str, answer: &str, base: i64) {
+    server.push(serde_json::json!({
+        "type": "session.execution.started",
+        "created": base,
+        "data": {"sessionID": "native-e2e", "model": "deepseek/deepseek-flash"},
+    }));
+    server.push(serde_json::json!({
+        "type": "session.inbox.enqueued",
+        "created": base + 1,
+        "data": {
+            "sessionID": "native-e2e",
+            "inboxID": "inbox-e2e",
+            "item": {"type": "user", "payload": {"text": prompt}},
+        },
+    }));
+    server.push(serde_json::json!({
+        "type": "session.tool.called",
+        "created": base + 2,
+        "data": {
+            "sessionID": "native-e2e",
+            "id": "tool-e2e",
+            "name": "bash",
+            "input": {"command": "printf hello"},
+        },
+    }));
+    server.push(serde_json::json!({
+        "type": "session.tool.success",
+        "created": base + 3,
+        "data": {
+            "sessionID": "native-e2e",
+            "id": "tool-e2e",
+            "content": [{"type": "text", "text": "hello"}],
+        },
+    }));
+    server.push(serde_json::json!({
+        "type": "session.text.ended",
+        "created": base + 4,
+        "data": {
+            "sessionID": "native-e2e",
+            "assistantMessageID": "assistant-e2e",
+            "ordinal": 0,
+            "text": answer,
+            "model": "deepseek/deepseek-flash",
+        },
+    }));
+    server.push(serde_json::json!({
+        "type": "session.usage.updated",
+        "created": base + 5,
+        "data": {
+            "sessionID": "native-e2e",
+            "tokens": {"input": 120, "output": 40},
+            "cost": 0.012,
+        },
+    }));
+    server.push(serde_json::json!({
+        "type": "session.execution.succeeded",
+        "created": base + 6,
+        "data": {"sessionID": "native-e2e"},
+    }));
+}
+
+/// Asserts the unbound session's finished run row is in the reserved `_node` project.
+fn assert_node_run_finished(home: &GatewayHome, tail: &[serde_json::Value]) {
+    let run_id = tail
+        .iter()
+        .find(|event| event["type"] == "cost")
+        .and_then(|event| event["payload"]["run_id"].as_str())
+        .expect("the cost event carries the run id");
+    let node_project = ProjectName::parse("_node").expect("node project");
+    let store = Store::open_with_project(&home.paths(), &node_project).expect("_node store");
+    let run_id = RunId::parse(run_id).expect("run id");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let run = store.run(&run_id).expect("run lookup").expect("_node run row");
+        if run.ended_at.is_some() {
+            assert_eq!(run.outcome, Some(RunOutcome::Ok), "run outcome: {run:?}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "the _node run did not finish: {run:?}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Returns the JSON command files in one `agent-commands/<node>` outbox.
+fn json_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Queues a `Start` and then a `Stop` with no live connection, leaving the start superseded.
+fn queue_superseded_start(
+    home: &GatewayHome,
+    manager: &Orchestrator,
+    node: &NodeName,
+    name: &str,
+) -> (SessionId, PathBuf) {
+    let info = manager
+        .create_on_node(
+            &remote_request(name, OrchestratorApp::Opencode, None),
+            Some(node.clone()),
+        )
+        .expect("queue orchestrator start");
+    let outbox = home.root().join("agent-commands").join(node.as_str());
+    let start = json_files(&outbox)
+        .into_iter()
+        .next()
+        .expect("the start command is queued");
+    manager.stop(name).expect("queue orchestrator stop");
+    (info.session, start)
+}
+
+#[test]
+fn real_gateway_unbound_orchestrator_pairs_over_socket_and_mirrors_sse() {
+    let home = GatewayHome::new(&["vowp", "stackspirit"]);
+    let (agent_home, state_dir, node, key, config) = prepare_agent(&home, "mac-studio");
+    let deps = in_process_deps(&home, "vowp");
+    let manager = remote_manager(&deps);
+
+    // Create while the node is offline: the home keeps the session and queues no start,
+    // so the surface can be paired before the agent has anything to attach.
+    set_node_offline(&home, &node);
+    let info = manager
+        .create_on_node(
+            &remote_request("global", OrchestratorApp::Opencode, None),
+            Some(node.clone()),
+        )
+        .expect("create unbound orchestrator");
+    let session = info.session.clone();
+    assert_eq!(info.card.project, None);
+
+    let sse = FakeSseServer::start();
+    let tools = agent_home.path().join("bin");
+    let fake = install_fake_opencode(&tools, sse.port);
+    prewrite_orchestrator_config(
+        &state_dir,
+        "global",
+        OrchestratorApp::Opencode,
+        None,
+        &state_dir.join("orchestrators/global"),
+        &fake,
+    );
+
+    let handle = start_agent(&home, state_dir.clone(), key, config);
+    wait_for_in_process_agent_connected(&state_dir);
+
+    // Pair through the live agent's socket. A direct second connection would supersede it.
+    let surface = pair_via_agent_cli(&home, agent_home.path(), &state_dir, &node, &session);
+    assert!(
+        !handle.is_finished(),
+        "pairing through agent.sock must not supersede the live AgentClient connection"
+    );
+    let status = AgentStatus::load(&state_dir)
+        .expect("agent status")
+        .expect("status written");
+    assert_eq!(status.connection, ConnectionState::Connected);
+
+    set_node_online(&home, &node);
+    manager.resume("global").expect("resume the unbound orchestrator");
+    wait_for_orchestrator_state(&manager, "global", vowp_protocol::OrchestratorNodeState::Running);
+    let service_path = state_dir.join("orchestrators/global/.opencode/state/opencode/service.json");
+    assert!(service_path.is_file(), "the fake opencode service was not materialized");
+
+    // MCP reads and writes over the real proxy, all against the real gateway.
+    let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "fleet_status", serde_json::json!({}));
+    assert!(elapsed < Duration::from_secs(1), "fleet_status took {elapsed:?}");
+    let fleet = mcp_text(&response);
+    let names: Vec<&str> = fleet["snapshot"]["projects"]
+        .as_array()
+        .expect("fleet projects")
+        .iter()
+        .filter_map(|project| project["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"vowp") && names.contains(&"stackspirit"),
+        "fleet_status must see the multi-project home: {names:?}"
+    );
+
+    let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "session_resume", serde_json::json!({}));
+    assert!(elapsed < Duration::from_secs(1), "session_resume took {elapsed:?}");
+    let resumed = mcp_text(&response);
+    assert_eq!(resumed["session"]["id"], session.as_str(), "{resumed}");
+
+    let (elapsed, response) = mcp_tool_call(
+        &home,
+        &state_dir,
+        &surface,
+        "capacity_set",
+        serde_json::json!({"target": 1, "mode": "auto"}),
+    );
+    assert!(elapsed < Duration::from_secs(1), "capacity_set took {elapsed:?}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+
+    let (elapsed, response) = mcp_tool_call(
+        &home,
+        &state_dir,
+        &surface,
+        "job_add",
+        serde_json::json!({
+            "project": "vowp",
+            "id": "vowp-e2e-1",
+            "title": "Real-gateway unbound E2E",
+            "kind": "build",
+            "role": "worker",
+            "owns": ["src/**"],
+        }),
+    );
+    assert!(elapsed < Duration::from_secs(1), "job_add took {elapsed:?}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let vowp = ProjectName::parse("vowp").expect("project");
+    let project_store = Store::open_with_project(&home.paths(), &vowp).expect("project store");
+    assert!(
+        project_store
+            .job(&JobId::parse("vowp-e2e-1").expect("job id"))
+            .expect("job lookup")
+            .is_some(),
+        "the MCP job_add did not reach the vowp project"
+    );
+
+    // Simulated OpenCode SSE -> AgentClient's auto-wired bridge -> real gateway.
+    let base = Timestamp::now().unix_millis();
+    push_turn_events(&sse, "please run the E2E turn", "the E2E answer", base);
+    let expected = [
+        "turn.started",
+        "user.message",
+        "tool.call",
+        "tool.result",
+        "assistant.message",
+        "cost",
+        "turn.ended",
+    ];
+    let tail = wait_for_tail_kinds(&home, &session, &expected);
+    assert!(
+        tail.iter().filter_map(|event| event["seq"].as_u64()).any(|seq| seq > 1),
+        "the mirrored turn must advance the session log: {tail:?}"
+    );
+    assert_node_run_finished(&home, &tail);
+    assert_eq!(
+        pending_spool_bytes(&state_dir),
+        0,
+        "no bridge frame may remain unsent after the turn ended"
+    );
+
+    stop_agent(&home, &node, handle);
+    drop(sse);
+}
+
+#[test]
+fn real_gateway_project_orchestrator_defaults_job_project_and_enforces_one_lease() {
+    let home = GatewayHome::new(&["vowp", "stackspirit"]);
+    let (agent_home, state_dir, node, key, config) = prepare_agent(&home, "mac-studio");
+    let deps = in_process_deps(&home, "vowp");
+    let manager = remote_manager(&deps);
+    let project = ProjectName::parse("vowp").expect("project");
+
+    set_node_offline(&home, &node);
+    let info = manager
+        .create_on_node(
+            &remote_request("bound", OrchestratorApp::Opencode, Some(&project)),
+            Some(node.clone()),
+        )
+        .expect("create project-bound orchestrator");
+    let session = info.session.clone();
+    assert_eq!(info.card.project.as_ref(), Some(&project));
+
+    let sse = FakeSseServer::start();
+    let tools = agent_home.path().join("bin");
+    let fake = install_fake_opencode(&tools, sse.port);
+    prewrite_orchestrator_config(
+        &state_dir,
+        "bound",
+        OrchestratorApp::Opencode,
+        Some(&project),
+        &home.checkout("vowp"),
+        &fake,
+    );
+
+    let handle = start_agent(&home, state_dir.clone(), key, config);
+    wait_for_in_process_agent_connected(&state_dir);
+    let surface = pair_via_agent_cli(&home, agent_home.path(), &state_dir, &node, &session);
+    assert!(!handle.is_finished(), "pairing must not supersede the live agent");
+
+    set_node_online(&home, &node);
+    manager.resume("bound").expect("resume the project-bound orchestrator");
+    wait_for_orchestrator_state(&manager, "bound", vowp_protocol::OrchestratorNodeState::Running);
+
+    let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "fleet_status", serde_json::json!({}));
+    assert!(elapsed < Duration::from_secs(1), "fleet_status took {elapsed:?}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+
+    let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "session_resume", serde_json::json!({}));
+    assert!(elapsed < Duration::from_secs(1), "session_resume took {elapsed:?}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+
+    // No project argument: the bound session's project must be used.
+    let (elapsed, response) = mcp_tool_call(
+        &home,
+        &state_dir,
+        &surface,
+        "job_add",
+        serde_json::json!({
+            "id": "vowp-bound-1",
+            "title": "Project-bound E2E",
+            "kind": "build",
+            "role": "worker",
+        }),
+    );
+    assert!(elapsed < Duration::from_secs(1), "job_add took {elapsed:?}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let project_store = Store::open_with_project(&home.paths(), &project).expect("project store");
+    assert!(
+        project_store
+            .job(&JobId::parse("vowp-bound-1").expect("job id"))
+            .expect("job lookup")
+            .is_some(),
+        "job_add must default to the session's bound project on a multi-project home"
+    );
+
+    let base = Timestamp::now().unix_millis();
+    push_turn_events(&sse, "bound orchestrator prompt", "bound orchestrator answer", base);
+    let expected = [
+        "turn.started",
+        "user.message",
+        "tool.call",
+        "tool.result",
+        "assistant.message",
+        "turn.ended",
+    ];
+    let _tail = wait_for_tail_kinds(&home, &session, &expected);
+    assert_eq!(
+        pending_spool_bytes(&state_dir),
+        0,
+        "no bridge frame may remain unsent after the turn ended"
+    );
+
+    // A second surface for the same session must not steal the live lease.
+    let lease_before = home
+        .store()
+        .lease(&session)
+        .expect("lease lookup")
+        .expect("orchestrator holds a lease")
+        .surface_id
+        .clone();
+    let second = pair_via_agent_cli(&home, agent_home.path(), &state_dir, &node, &session);
+    assert_ne!(second, surface);
+    let response = socket_request(
+        &state_dir.join("agent.sock"),
+        serde_json::json!({
+            "kind": "attach",
+            "surface": second.0.as_str(),
+            "session": session.as_str(),
+        }),
+    );
+    assert_eq!(response["kind"], "ok", "{response}");
+    thread::sleep(Duration::from_millis(500));
+    let lease_after = home
+        .store()
+        .lease(&session)
+        .expect("lease lookup")
+        .expect("the orchestrator still holds its lease")
+        .surface_id
+        .clone();
+    assert_eq!(
+        lease_after, lease_before,
+        "the first surface must keep the one live lease"
+    );
+
+    stop_agent(&home, &node, handle);
+    drop(sse);
+}
+
+#[test]
+fn real_gateway_agent_pair_ignores_a_superseded_orchestrator_command() {
+    // Direct transport: the home drains and retires the superseded Start before the
+    // pairing answer; the client must keep reading instead of failing.
+    let home = GatewayHome::new(&["vowp"]);
+    let deps = in_process_deps(&home, "vowp");
+    let direct_manager = remote_manager(&deps);
+    let (direct_home, direct_state, direct_node, direct_key, direct_config) = prepare_agent(&home, "mac-direct");
+    set_node_online(&home, &direct_node);
+    let (direct_session, direct_start) =
+        queue_superseded_start(&home, &direct_manager, &direct_node, "direct-superseded");
+
+    let pending = create_pending_surface(
+        &home.store(),
+        &direct_node,
+        &direct_session,
+        SurfaceKind::Opencode,
+        Some("opencode"),
+        Timestamp::now(),
+    )
+    .expect("pending surface");
+    let surface = pending.surface.id.clone();
+    let request = SurfacePairRequest::new(pending.code, surface.clone(), direct_session.clone(), "opencode");
+    let mut direct = AgentClient::new(
+        direct_state.clone(),
+        direct_key,
+        direct_config,
+        Box::new(InProcessGateway::new(&home)),
+        Arc::new(SystemAgentClock),
+    );
+    let paired = direct
+        .pair(&request)
+        .expect("direct pairing must ignore the superseded OrchestratorCommand");
+    assert_eq!(paired.surface_id, surface);
+    assert!(paired.token_path.is_file());
+    assert!(
+        !direct_start.exists(),
+        "the superseded start command in agent-commands/ must be retired"
+    );
+    drop(direct_home);
+
+    // Socket transport: the live agent remains connected and the same pairing succeeds
+    // through agent.sock without opening a superseding second connection.
+    let (live_home, live_state, live_node, live_key, live_config) = prepare_agent(&home, "mac-live");
+    let live_manager = remote_manager(&deps);
+    set_node_online(&home, &live_node);
+    let (live_session, live_start) = queue_superseded_start(&home, &live_manager, &live_node, "live-superseded");
+
+    let handle = start_agent(&home, live_state.clone(), live_key, live_config);
+    wait_for_in_process_agent_connected(&live_state);
+    let surface = pair_via_agent_cli(&home, live_home.path(), &live_state, &live_node, &live_session);
+    assert!(!handle.is_finished(), "socket pairing superseded the live agent");
+    assert_eq!(
+        AgentStatus::load(&live_state)
+            .expect("agent status")
+            .expect("status written")
+            .connection,
+        ConnectionState::Connected
+    );
+    assert!(
+        !live_start.exists(),
+        "the live gateway must retire the superseded command before answering SurfacePair"
+    );
+    assert!(
+        AgentConfig::surface_token_path(&live_state, &surface).is_file(),
+        "the socket-routed pairing did not write the token"
+    );
+
+    stop_agent(&home, &live_node, handle);
 }

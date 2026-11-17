@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vowp_protocol::SessionId;
 use vowp_protocol::SurfaceId;
+use vowp_protocol::SurfaceScope;
 use vowp_protocol::Timestamp;
 use vowp_protocol::agent::surface::{ToolCall, ToolError};
 
@@ -84,6 +85,17 @@ pub enum SocketRequest {
         /// MCP arguments as a JSON object; never a local path or secret value.
         arguments: Value,
     },
+    /// Redeem a one-time pairing code over the live `vowp agent run` connection.
+    Pair {
+        /// One-time pairing code; never logged or echoed.
+        code: String,
+        /// Surface the owner created on the home.
+        surface: SurfaceId,
+        /// Session the surface will mirror.
+        session: SessionId,
+        /// Application name, for example `opencode`.
+        app: String,
+    },
 }
 
 /// One response written by the server, one JSON object per line.
@@ -112,6 +124,43 @@ pub enum SocketResponse {
         /// Human-readable message; never a payload, token or absolute local path.
         message: String,
     },
+}
+
+/// The answer to one [`SocketRequest::Pair`].
+///
+/// The running agent writes the token to disk itself and returns only its path. The
+/// plaintext token never crosses this local socket or appears in this value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PairReply {
+    /// The home accepted the pairing request and the files are on disk.
+    Paired {
+        /// Surface the token belongs to.
+        surface_id: SurfaceId,
+        /// Scopes granted to the token.
+        scopes: Vec<SurfaceScope>,
+        /// When the token expires.
+        expires_at: Timestamp,
+        /// Mode-0600 file that holds the token; never the token itself.
+        token_path: PathBuf,
+    },
+    /// The pairing request failed locally or at the home.
+    Error {
+        /// Machine-readable code, for example `home_offline` or `pair_failed`.
+        code: String,
+        /// Human-readable message; never a pairing code or surface token.
+        message: String,
+    },
+}
+
+impl PairReply {
+    /// Builds one typed pairing failure.
+    pub(crate) fn error(code: &str, message: impl Into<String>) -> Self {
+        Self::Error {
+            code: code.to_owned(),
+            message: message.into(),
+        }
+    }
 }
 
 impl SocketResponse {
@@ -150,6 +199,10 @@ pub(crate) enum SocketEvent {
     ToolCall {
         call: ToolCall,
         reply: Sender<SocketResponse>,
+    },
+    Pair {
+        request: crate::client::SurfacePairRequest,
+        reply: Sender<PairReply>,
     },
 }
 
@@ -415,9 +468,13 @@ fn handle_client(stream: UnixStream, shared: Arc<SocketShared>) {
         match read_request_line(&mut reader, &mut line) {
             Ok(false) => break,
             Ok(true) => {
-                let (response, close) = handle_request(&shared, &line);
+                let (response, close) = handle_request(&shared, &line, &mut writer);
                 line.clear();
-                if write_response(&mut writer, &response).is_err() || close {
+                let wrote = match response {
+                    Some(response) => write_response(&mut writer, &response).is_ok(),
+                    None => true,
+                };
+                if !wrote || close {
                     break;
                 }
             }
@@ -436,17 +493,17 @@ fn handle_client(stream: UnixStream, shared: Arc<SocketShared>) {
     shared.clients.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) {
+fn handle_request(shared: &SocketShared, line: &[u8], writer: &mut UnixStream) -> (Option<SocketResponse>, bool) {
     let request = match parse_request(line) {
         Ok(request) => request,
-        Err(failure) => return (SocketResponse::error(failure.code, failure.message), false),
+        Err(failure) => return (Some(SocketResponse::error(failure.code, failure.message)), false),
     };
     match request {
-        SocketRequest::Ping => (SocketResponse::Pong, false),
+        SocketRequest::Ping => (Some(SocketResponse::Pong), false),
         SocketRequest::Attach { surface, session } => {
             let (reply, receiver) = mpsc::channel();
             if !shared.connected.load(Ordering::SeqCst) {
-                return (offline_response(), false);
+                return (Some(offline_response()), false);
             }
             if shared
                 .inbox
@@ -457,14 +514,14 @@ fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) 
                 })
                 .is_err()
             {
-                return (offline_response(), false);
+                return (Some(offline_response()), false);
             }
-            (wait_for_reply(&receiver, shared, None), false)
+            (Some(wait_for_reply(&receiver, shared, None)), false)
         }
         SocketRequest::Detach { surface, session } => {
             let (reply, receiver) = mpsc::channel();
             if !shared.connected.load(Ordering::SeqCst) {
-                return (offline_response(), false);
+                return (Some(offline_response()), false);
             }
             if shared
                 .inbox
@@ -475,9 +532,9 @@ fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) 
                 })
                 .is_err()
             {
-                return (offline_response(), false);
+                return (Some(offline_response()), false);
             }
-            (wait_for_reply(&receiver, shared, None), false)
+            (Some(wait_for_reply(&receiver, shared, None)), false)
         }
         SocketRequest::ToolCall {
             request_id,
@@ -493,7 +550,7 @@ fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) 
             if !shared.connected.load(Ordering::SeqCst) {
                 let response = offline_tool_result(&request_id);
                 return (
-                    with_cached_fallback(shared, &request_id, cache_key.as_ref(), response),
+                    Some(with_cached_fallback(shared, &request_id, cache_key.as_ref(), response)),
                     false,
                 );
             }
@@ -507,15 +564,33 @@ fn handle_request(shared: &SocketShared, line: &[u8]) -> (SocketResponse, bool) 
             if shared.inbox.send(SocketEvent::ToolCall { call, reply }).is_err() {
                 let response = offline_tool_result(&request_id);
                 return (
-                    with_cached_fallback(shared, &request_id, cache_key.as_ref(), response),
+                    Some(with_cached_fallback(shared, &request_id, cache_key.as_ref(), response)),
                     false,
                 );
             }
             let response = wait_for_reply(&receiver, shared, Some(&request_id));
             (
-                with_cached_fallback(shared, &request_id, cache_key.as_ref(), response),
+                Some(with_cached_fallback(shared, &request_id, cache_key.as_ref(), response)),
                 false,
             )
+        }
+        SocketRequest::Pair {
+            code,
+            surface,
+            session,
+            app,
+        } => {
+            let (reply, receiver) = mpsc::channel();
+            if !shared.connected.load(Ordering::SeqCst) {
+                return (Some(offline_response()), false);
+            }
+            let request = crate::client::SurfacePairRequest::new(code, surface, session, app);
+            if shared.inbox.send(SocketEvent::Pair { request, reply }).is_err() {
+                return (Some(offline_response()), false);
+            }
+            let reply = wait_for_pair_reply(&receiver, shared);
+            let _ = write_pair_reply(writer, &reply);
+            (None, true)
         }
     }
 }
@@ -554,6 +629,33 @@ fn offline_for(tool_request: Option<&str>) -> SocketResponse {
     match tool_request {
         Some(request_id) => offline_tool_result(request_id),
         None => offline_response(),
+    }
+}
+
+/// Waits for the frame loop to answer one pairing request.
+fn wait_for_pair_reply(receiver: &Receiver<PairReply>, shared: &SocketShared) -> PairReply {
+    let started = Instant::now();
+    loop {
+        match receiver.recv_timeout(SOCKET_POLL) {
+            Ok(reply) => return reply,
+            Err(RecvTimeoutError::Disconnected) => {
+                return PairReply::error(
+                    "home_offline",
+                    "the agent is not connected to the home; start `vowp agent run`",
+                );
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if !shared.connected.load(Ordering::SeqCst) {
+                    return PairReply::error(
+                        "home_offline",
+                        "the agent is not connected to the home; start `vowp agent run`",
+                    );
+                }
+                if started.elapsed() >= REPLY_TIMEOUT {
+                    return PairReply::error("pair_timeout", "the agent did not answer the pairing request");
+                }
+            }
+        }
     }
 }
 
@@ -646,7 +748,7 @@ struct SocketFailure {
 fn parse_request(line: &[u8]) -> Result<SocketRequest, SocketFailure> {
     let value: Value = serde_json::from_slice(line).map_err(|_| invalid_request())?;
     let kind = value.get("kind").and_then(Value::as_str).ok_or_else(invalid_request)?;
-    if !matches!(kind, "ping" | "attach" | "detach" | "tool_call") {
+    if !matches!(kind, "ping" | "attach" | "detach" | "tool_call" | "pair") {
         return Err(SocketFailure {
             code: "unknown_kind",
             message: "unknown request kind".to_owned(),
@@ -702,6 +804,23 @@ fn validate_request(request: &SocketRequest) -> Result<(), SocketFailure> {
                 message: "surface must be a 26-character ULID".to_owned(),
             })
         }
+        SocketRequest::Pair { code, surface, app, .. } => {
+            crate::client::validate_pairing_code(code).map_err(|_| SocketFailure {
+                code: "invalid_request",
+                message: "pairing code must be 52 characters".to_owned(),
+            })?;
+            validate_surface_id(surface).map_err(|_| SocketFailure {
+                code: "invalid_request",
+                message: "surface must be a 26-character ULID".to_owned(),
+            })?;
+            if app.is_empty() || app.chars().count() > 64 || app.chars().any(char::is_control) {
+                return Err(SocketFailure {
+                    code: "invalid_request",
+                    message: "app must be a printable name of at most 64 characters".to_owned(),
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -752,4 +871,62 @@ fn write_response(writer: &mut UnixStream, response: &SocketResponse) -> io::Res
     bytes.push(b'\n');
     writer.write_all(&bytes)?;
     writer.flush()
+}
+
+/// Writes one pairing answer on its own connection.
+fn write_pair_reply(writer: &mut UnixStream, reply: &PairReply) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(reply).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes)?;
+    writer.flush()
+}
+
+/// Tries one pairing request over a live `vowp agent run` socket.
+///
+/// `Ok(None)` means the socket is missing, is not a private Unix socket, or is no longer
+/// accepting connections; the caller may then open one direct agent connection. A response
+/// is returned unchanged, including `home_offline`. The pairing code is written once and
+/// never logged; the token only reaches the disk file the running client writes.
+pub fn pair_over_socket(
+    state_dir: &Path,
+    request: &crate::client::SurfacePairRequest,
+) -> Result<Option<PairReply>, AgentError> {
+    let path = state_dir.join(AGENT_SOCKET_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Ok(None);
+    }
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(None),
+    };
+    // macOS/BSD may inherit O_NONBLOCK; a read timeout does not make a nonblocking stream
+    // block. Pairing is one request and one reply, so blocking I/O is correct here.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(crate::client::PAIR_TIMEOUT + Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(crate::client::PAIR_TIMEOUT + Duration::from_secs(5)));
+    let request = SocketRequest::Pair {
+        code: request.code.clone(),
+        surface: request.surface_id.clone(),
+        session: request.session.clone(),
+        app: request.app.clone(),
+    };
+    let mut bytes = serde_json::to_vec(&request)?;
+    bytes.push(b'\n');
+    if stream.write_all(&bytes).is_err() || stream.flush().is_err() {
+        return Ok(None);
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) | Err(_) => Ok(None),
+        Ok(_) => {
+            let reply: PairReply = serde_json::from_str(&line)
+                .map_err(|_| AgentError::Protocol("the agent returned an unreadable pairing response".to_owned()))?;
+            Ok(Some(reply))
+        }
+    }
 }

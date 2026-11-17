@@ -1680,7 +1680,12 @@ fn raw_event_key(event: &Value, data: &Value) -> String {
     durable_seq(event, data)
         .map(|seq| format!("seq:{seq}"))
         .or_else(|| event.get("id").and_then(Value::as_str).map(|id| format!("id:{id}")))
-        .unwrap_or_else(|| format!("ts:{}", event_timestamp(event)))
+        .unwrap_or_else(|| {
+            // Two non-durable events of different types can share a millisecond; the type
+            // keeps their fallback keys distinct so neither is dropped as a duplicate.
+            let kind = event.get("type").and_then(Value::as_str).unwrap_or("unknown");
+            format!("ts:{kind}:{}", event_timestamp(event))
+        })
 }
 
 fn event_timestamp(event: &Value) -> Timestamp {

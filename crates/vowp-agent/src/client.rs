@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use vowp_protocol::agent::surface::{SurfaceAttach, SurfaceDetach, ToolCall, ToolResult};
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, AgentRole, ErrorKind, NodeName,
-    OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, ProjectName, SessionId,
-    SurfaceId, SurfaceScope, Timestamp,
+    OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, ProjectName,
+    SessionId, SurfaceId, SurfaceScope, Timestamp,
 };
 
 use crate::bridge::{BridgeState, OpencodeBridge};
@@ -27,7 +27,7 @@ use crate::executor::{RunDriver, RunHandler};
 use crate::key::NodeKey;
 use crate::orchestrator::{ORCHESTRATOR_POLL, OrchestratorHost, PrepareOutcome, SurfaceAttachment, SurfaceBinding};
 use crate::service::ServiceRunOutcome;
-use crate::socket::{AgentSocket, SOCKET_POLL, SocketEvent, SocketResponse, TOOL_CALL_TIMEOUT};
+use crate::socket::{AgentSocket, PairReply, SOCKET_POLL, SocketEvent, SocketResponse, TOOL_CALL_TIMEOUT};
 use crate::status::{AgentStatus, ConnectionState, pending_spool_bytes, surface_token_expiry};
 use crate::surface_state::{SurfaceRefusal, mark_needs_pair, mark_paired, mark_revoked, surface_statuses};
 use crate::transport::{FrameRead, FrameStream, MAX_FRAME_BYTES, Transport, transport_for_config};
@@ -243,9 +243,10 @@ pub struct AgentClient {
     tool_call_timeout: Duration,
     cache: Cache,
     cache_pruned_at: Option<Timestamp>,
-    bridge: Option<BridgeLink>,
+    bridges: Vec<BridgeLink>,
     orchestrator: OrchestratorHost,
     pending_orchestrator: Option<PendingOrchestrator>,
+    pending_pairs: HashMap<SurfaceId, PendingPair>,
     enroll_transport: Option<TransportConfig>,
 }
 
@@ -258,6 +259,13 @@ struct PendingToolCall {
     reply: mpsc::Sender<SocketResponse>,
     deadline: Instant,
     cache_key: Option<CacheKey>,
+}
+
+/// One socket-originated pairing request awaiting the home's `SurfaceIssued`.
+struct PendingPair {
+    session: SessionId,
+    reply: mpsc::Sender<PairReply>,
+    deadline: Instant,
 }
 
 /// The surface, tool and arguments needed to store one successful read.
@@ -324,9 +332,10 @@ impl AgentClient {
             tool_call_timeout: TOOL_CALL_TIMEOUT,
             cache,
             cache_pruned_at: None,
-            bridge: None,
+            bridges: Vec::new(),
             orchestrator,
             pending_orchestrator: None,
+            pending_pairs: HashMap::new(),
             enroll_transport: None,
         }
     }
@@ -360,9 +369,10 @@ impl AgentClient {
             tool_call_timeout: TOOL_CALL_TIMEOUT,
             cache,
             cache_pruned_at: None,
-            bridge: None,
+            bridges: Vec::new(),
             orchestrator,
             pending_orchestrator: None,
+            pending_pairs: HashMap::new(),
             enroll_transport: None,
         }
     }
@@ -407,22 +417,23 @@ impl AgentClient {
     /// The bridge uses the same outbound connection as tool calls; its frames are spooled
     /// before they are sent, and a lost lease stops it read-only without deleting the
     /// spool. The caller loads and configures the bridge with [`OpencodeBridge::load`].
+    /// More than one bridge may be attached; the accessors below report the first one.
     pub fn with_bridge(mut self, bridge: OpencodeBridge) -> Self {
-        self.bridge = Some(BridgeLink {
+        self.bridges.push(BridgeLink {
             bridge,
             attached: false,
         });
         self
     }
 
-    /// Returns the attached bridge, when this client hosts one.
+    /// Returns the first attached bridge, when this client hosts one.
     pub fn bridge(&self) -> Option<&OpencodeBridge> {
-        self.bridge.as_ref().map(|link| &link.bridge)
+        self.bridges.first().map(|link| &link.bridge)
     }
 
-    /// Returns the attached bridge's observable state.
+    /// Returns the first attached bridge's observable state.
     pub fn bridge_state(&self) -> Option<BridgeState> {
-        self.bridge.as_ref().map(|link| link.bridge.state())
+        self.bridges.first().map(|link| link.bridge.state())
     }
 
     /// Sets the project path map sent by the next [`AgentClient::enroll`].
@@ -605,6 +616,27 @@ impl AgentClient {
                     message,
                     retryable,
                 }) => return Err(remote_error(kind, message, retryable)),
+                FrameRead::Frame(AgentFrame::Ping) => {
+                    self.send_frame(&AgentFrame::Pong)?;
+                }
+                // The gateway drains its post-handshake queues before it reads this
+                // connection's pairing frame, so a command, assignment or lease notice
+                // can arrive ahead of `SurfaceIssued`. None of them belongs to a one-shot
+                // pairing connection; keep waiting for the matching answer.
+                FrameRead::Frame(
+                    AgentFrame::OrchestratorCommand(_)
+                    | AgentFrame::AssignRun { .. }
+                    | AgentFrame::CancelRun { .. }
+                    | AgentFrame::RunLost { .. }
+                    | AgentFrame::Cleanup { .. }
+                    | AgentFrame::Credit { .. }
+                    | AgentFrame::Pong
+                    | AgentFrame::IngestAck { .. }
+                    | AgentFrame::LeaseLost { .. }
+                    | AgentFrame::LeaseRevoked { .. }
+                    | AgentFrame::BundleAccept { .. }
+                    | AgentFrame::BundleAbort { .. },
+                ) => {}
                 FrameRead::Frame(_) => {
                     return Err(AgentError::Protocol("expected SurfaceIssued from the home".to_owned()));
                 }
@@ -715,12 +747,8 @@ impl AgentClient {
         if let Err(error) = self.cache.clear_surface(surface) {
             debug_failure("cache clear after a refused surface token failed", &error);
         }
-        if self
-            .bridge
-            .as_ref()
-            .is_some_and(|link| link.bridge.surface() == surface)
-        {
-            self.surface_read_only(refusal.message.clone());
+        if self.bridges.iter().any(|link| link.bridge.surface() == surface) {
+            self.bridge_read_only(surface, refusal.message.clone());
         }
         self.orchestrator.stop_surface(surface);
         self.status.surface_token_expires_at = surface_token_expiry(&self.state_dir);
@@ -1025,9 +1053,9 @@ impl AgentClient {
         }
         let outcome = self.run_loop(driver, options, stop.as_ref());
         let _ = self.detach_bridge();
-        if let Some(link) = self.bridge.as_mut() {
-            // Injected values live only for one run. The spool and cursor stay private on
-            // disk for inspection and a later backfill.
+        // Injected and auto-wired values live only for one run. The spool and cursor stay
+        // private on disk for inspection and a later backfill.
+        for link in &mut self.bridges {
             link.bridge.finish();
         }
         self.settle_pending_orchestrator();
@@ -1184,33 +1212,60 @@ impl AgentClient {
         Ok(())
     }
 
-    /// Attaches the bridge surface and replays anything its spool still holds.
+    /// Attaches every bridge surface and replays anything its spool still holds.
     fn attach_bridge(&mut self) -> Result<(), AgentError> {
-        let Some(link) = self.bridge.as_ref() else {
-            return Ok(());
-        };
-        if link.attached || link.bridge.state().read_only.is_some() {
-            return Ok(());
+        let mut attached_any = false;
+        let mut index = 0;
+        while index < self.bridges.len() {
+            let skip = {
+                let link = &self.bridges[index];
+                link.attached || link.bridge.state().read_only.is_some()
+            };
+            if !skip {
+                let (surface, session) = {
+                    let link = &self.bridges[index];
+                    (link.bridge.surface().clone(), link.bridge.session().clone())
+                };
+                self.send_frame(&AgentFrame::SurfaceAttach(SurfaceAttach { surface, session }))?;
+                self.bridges[index].attached = true;
+                attached_any = true;
+            }
+            index += 1;
         }
-        let surface = link.bridge.surface().clone();
-        let session = link.bridge.session().clone();
-        self.send_frame(&AgentFrame::SurfaceAttach(SurfaceAttach { surface, session }))?;
-        if let Some(link) = self.bridge.as_mut() {
-            link.attached = true;
+        if !attached_any {
+            return Ok(());
         }
         self.flush_bridge()?;
-        if let Some(link) = self.bridge.as_mut()
-            && let Err(error) = link.bridge.attach()
-            && error.is_fatal()
-        {
-            return Err(error);
+        let mut index = 0;
+        while index < self.bridges.len() {
+            let active = {
+                let link = &self.bridges[index];
+                link.attached && link.bridge.state().read_only.is_none()
+            };
+            if active
+                && let Err(error) = self.bridges[index].bridge.attach()
+                && error.is_fatal()
+            {
+                return Err(error);
+            }
+            index += 1;
         }
         Ok(())
     }
 
     /// Sends every spooled bridge frame the home has not seen, in spool order.
     fn flush_bridge(&mut self) -> Result<(), AgentError> {
-        let pending = match self.bridge.as_ref() {
+        let mut index = 0;
+        while index < self.bridges.len() {
+            self.flush_bridge_at(index)?;
+            index += 1;
+        }
+        Ok(())
+    }
+
+    /// Flushes the spool of one bridge without borrowing the whole client's bridge list.
+    fn flush_bridge_at(&mut self, index: usize) -> Result<(), AgentError> {
+        let pending = match self.bridges.get(index) {
             Some(link) => link.bridge.pending_frames()?,
             None => return Ok(()),
         };
@@ -1219,21 +1274,21 @@ impl AgentClient {
                 break;
             }
             if self
-                .bridge
-                .as_ref()
+                .bridges
+                .get(index)
                 .is_some_and(|link| link.bridge.state().read_only.is_some())
             {
                 break;
             }
             self.send_frame(&frame.as_agent_frame())?;
-            if let Some(link) = self.bridge.as_mut() {
+            if let Some(link) = self.bridges.get_mut(index) {
                 link.bridge.mark_sent(frame.native_id())?;
             }
         }
         Ok(())
     }
 
-    /// Reads one short local SSE window and sends the frames it produced.
+    /// Reads one short local SSE window from every attached bridge and sends what it produced.
     ///
     /// A local stream failure is not a home-connection failure: the bridge reconnects
     /// from its cursor on the next loop turn. A frame write failure is a connection
@@ -1242,70 +1297,94 @@ impl AgentClient {
         if self.connection.is_none() {
             return Ok(());
         }
-        let sync = {
-            let Some(link) = self.bridge.as_mut() else {
-                return Ok(());
+        let mut index = 0;
+        while index < self.bridges.len() {
+            let sync = {
+                let Some(link) = self.bridges.get_mut(index) else {
+                    index += 1;
+                    continue;
+                };
+                if !link.attached || link.bridge.state().read_only.is_some() {
+                    index += 1;
+                    continue;
+                }
+                match link.bridge.poll() {
+                    Ok(sync) => sync,
+                    Err(error) if error.is_fatal() => return Err(error),
+                    Err(_) => {
+                        index += 1;
+                        continue;
+                    }
+                }
             };
-            if !link.attached || link.bridge.state().read_only.is_some() {
-                return Ok(());
+            for frame in sync.frames {
+                if self.connection.is_none() {
+                    break;
+                }
+                self.send_frame(&frame.as_agent_frame())?;
+                if let Some(link) = self.bridges.get_mut(index) {
+                    link.bridge.mark_sent(frame.native_id())?;
+                }
             }
-            match link.bridge.poll() {
-                Ok(sync) => sync,
-                Err(error) if error.is_fatal() => return Err(error),
-                Err(_) => return Ok(()),
-            }
-        };
-        for frame in sync.frames {
-            if self.connection.is_none() {
-                break;
-            }
-            self.send_frame(&frame.as_agent_frame())?;
-            if let Some(link) = self.bridge.as_mut() {
-                link.bridge.mark_sent(frame.native_id())?;
-            }
+            index += 1;
         }
         Ok(())
     }
 
-    /// Flushes, sends `SurfaceDetach` and stops reading the local app.
+    /// Flushes, sends `SurfaceDetach` for every attached bridge and stops reading the local apps.
     fn detach_bridge(&mut self) -> Result<(), AgentError> {
-        let Some(link) = self.bridge.as_ref() else {
-            return Ok(());
-        };
-        if !link.attached {
-            if let Some(link) = self.bridge.as_mut() {
-                link.bridge.close_stream();
+        let mut index = 0;
+        while index < self.bridges.len() {
+            let (attached, surface, session, read_only) = {
+                let link = &self.bridges[index];
+                (
+                    link.attached,
+                    link.bridge.surface().clone(),
+                    link.bridge.session().clone(),
+                    link.bridge.state().read_only.is_some(),
+                )
+            };
+            if !attached {
+                self.bridges[index].bridge.close_stream();
+                index += 1;
+                continue;
             }
-            return Ok(());
-        }
-        let surface = link.bridge.surface().clone();
-        let session = link.bridge.session().clone();
-        let read_only = link.bridge.state().read_only.is_some();
-        if !read_only {
-            self.flush_bridge()?;
-        }
-        if self.connection.is_some() {
-            self.send_frame(&AgentFrame::SurfaceDetach(SurfaceDetach { surface, session }))?;
-        }
-        if let Some(link) = self.bridge.as_mut() {
+            if !read_only {
+                self.flush_bridge_at(index)?;
+            }
+            if self.connection.is_some() {
+                self.send_frame(&AgentFrame::SurfaceDetach(SurfaceDetach { surface, session }))?;
+            }
+            let link = &mut self.bridges[index];
             link.attached = false;
             link.bridge.close_stream();
+            index += 1;
         }
         Ok(())
     }
 
-    /// Stops the bridge read-only and keeps its spool for inspection.
+    /// Stops every bridge read-only and keeps its spool for inspection.
     fn surface_read_only(&mut self, reason: String) {
-        if let Some(link) = self.bridge.as_mut() {
+        for link in &mut self.bridges {
             // The surface frame was already sent. Keep `attached` true so the final
             // detach is sent without flushing the pending spool.
-            link.bridge.note_lease_lost(reason);
+            link.bridge.note_lease_lost(reason.clone());
+        }
+    }
+
+    /// Stops only the bridge for one revoked or refused surface read-only.
+    fn bridge_read_only(&mut self, surface: &SurfaceId, reason: String) {
+        for link in &mut self.bridges {
+            if link.bridge.surface() == surface {
+                link.bridge.note_lease_lost(reason.clone());
+            }
         }
     }
 
     fn stop_socket(&mut self) {
         self.set_socket_connected(false);
         self.fail_pending_tool_calls("home_offline", "the agent stopped listening for local tool calls");
+        self.fail_pending_pairs("home_offline", "the agent stopped listening for local pairing requests");
         self.socket = None;
     }
 
@@ -1320,7 +1399,8 @@ impl AgentClient {
         self.set_socket_connected(false);
         self.connection = None;
         self.fail_pending_tool_calls("home_offline", "the home connection is not available");
-        if let Some(link) = self.bridge.as_mut() {
+        self.fail_pending_pairs("home_offline", "the home connection is not available");
+        for link in &mut self.bridges {
             link.attached = false;
             link.bridge.close_stream();
         }
@@ -1339,6 +1419,10 @@ impl AgentClient {
     fn handle_orchestrator_command(&mut self, command: OrchestratorCommand) -> Result<(), AgentError> {
         match &command {
             OrchestratorCommand::Stop { .. } => {
+                // Stop flushes and closes the app's bridge before `orchestrator.stop` sends
+                // `SurfaceDetach` and signals the process, so the last spooled line is not
+                // lost with the app.
+                self.close_orchestrator_bridge(command.name());
                 let result = self.orchestrator.stop(
                     &command,
                     &mut ConnectionSurface {
@@ -1353,6 +1437,96 @@ impl AgentClient {
             }
             OrchestratorCommand::Resume { .. } => self.begin_orchestrator_start(command, None),
         }
+    }
+
+    /// Flushes and closes the bridge bound to an orchestrator that is about to stop.
+    ///
+    /// The bridge is removed from the client's list; its spool and cursor stay on disk for
+    /// inspection. `OrchestratorHost::stop` still sends the `SurfaceDetach` frame, so the
+    /// home releases the lease even though this bridge no longer does.
+    fn close_orchestrator_bridge(&mut self, name: &str) {
+        let surface = self
+            .orchestrator
+            .state(name)
+            .ok()
+            .flatten()
+            .and_then(|state| state.surface)
+            .or_else(|| {
+                self.orchestrator
+                    .config(name)
+                    .ok()
+                    .flatten()
+                    .and_then(|config| config.surface)
+            });
+        let Some(surface) = surface else {
+            return;
+        };
+        let Some(index) = self.bridges.iter().position(|link| link.bridge.surface() == &surface) else {
+            return;
+        };
+        let read_only = self.bridges[index].bridge.state().read_only.is_some();
+        if !read_only {
+            let _ = self.flush_bridge_at(index);
+        }
+        let mut link = self.bridges.remove(index);
+        link.bridge.close_stream();
+    }
+
+    /// Returns the index of an active bridge for `surface`.
+    fn bridge_index_for_surface(&self, surface: &SurfaceId) -> Option<usize> {
+        self.bridges.iter().position(|link| link.bridge.surface() == surface)
+    }
+
+    /// Opens the local opencode bridge for one running orchestrator host.
+    ///
+    /// The home's `SurfaceAttach` was already sent by `finish_start` or
+    /// `reattach_orchestrators`, so the returned link is marked attached. A missing
+    /// `service.json`, a non-opencode app or an unreadable service is not an orchestrator
+    /// failure: the host keeps running and a later start or reconnect may wire it.
+    fn ensure_orchestrator_bridge(&mut self, name: &str, binding: &SurfaceBinding) -> Option<usize> {
+        if let Some(index) = self.bridge_index_for_surface(&binding.surface) {
+            if self.bridges[index].bridge.state().read_only.is_none() {
+                return Some(index);
+            }
+            // A read-only bridge cannot recover; a new start or resume loads a fresh
+            // reader over the same surface spool and cursor.
+            self.bridges.remove(index);
+        }
+        let config = match self.orchestrator.config(name) {
+            Ok(Some(config)) => config,
+            Ok(None) => return None,
+            Err(error) => {
+                debug_failure(
+                    "the local orchestrator config could not be read for bridging",
+                    &AgentError::Config(error.message),
+                );
+                return None;
+            }
+        };
+        if config.app != OrchestratorApp::Opencode {
+            return None;
+        }
+        let service_json = config.service_json.as_deref()?;
+        let maps = self.path_maps().to_vec();
+        let bridge = OpencodeBridge::load(
+            Path::new(service_json),
+            &self.state_dir,
+            binding.surface.clone(),
+            binding.session.clone(),
+        )
+        .and_then(|bridge| bridge.with_path_maps(&maps));
+        let bridge = match bridge {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                debug_failure("the local opencode bridge could not be loaded", &error);
+                return None;
+            }
+        };
+        self.bridges.push(BridgeLink {
+            bridge,
+            attached: false,
+        });
+        Some(self.bridges.len().saturating_sub(1))
     }
 
     /// Returns the local checkout for a project bound to an orchestrator command.
@@ -1419,12 +1593,27 @@ impl AgentClient {
                 return self.send_frame(&AgentFrame::OrchestratorResult(result));
             }
         };
+        let prepared = match &outcome {
+            PrepareOutcome::Ready(prepared) => Some((prepared.name.clone(), prepared.app, prepared.binding.clone())),
+            PrepareOutcome::Failed(_) => None,
+        };
         let result = self.orchestrator.finish_start(
             outcome,
             &mut ConnectionSurface {
                 connection: &mut self.connection,
             },
         );
+        let running = result.accepted && result.state == OrchestratorNodeState::Running;
+        if running
+            && let Some((name, OrchestratorApp::Opencode, binding)) = prepared
+            && let Some(index) = self.ensure_orchestrator_bridge(&name, &binding)
+        {
+            // `finish_start` already sent `SurfaceAttach` (or the host was already
+            // attached by a duplicate start); only the local SSE reader is opened here.
+            self.bridges[index].attached = true;
+            let _ = self.bridges[index].bridge.attach();
+            let _ = self.flush_bridge_at(index);
+        }
         self.send_frame(&AgentFrame::OrchestratorResult(result))
     }
 
@@ -1452,7 +1641,12 @@ impl AgentClient {
             self.orchestrator
                 .mark_running(&host.name)
                 .map_err(|error| AgentError::Config(error.message))?;
+            if let Some(index) = self.ensure_orchestrator_bridge(&host.name, &host.binding) {
+                self.bridges[index].attached = true;
+                let _ = self.bridges[index].bridge.attach();
+            }
         }
+        self.flush_bridge()?;
         Ok(())
     }
 
@@ -1465,6 +1659,7 @@ impl AgentClient {
             self.handle_socket_event(event)?;
         }
         self.expire_pending_tool_calls();
+        self.expire_pending_pairs();
         Ok(())
     }
 
@@ -1481,6 +1676,52 @@ impl AgentClient {
                 reply,
             } => self.forward_surface_frame(AgentFrame::SurfaceDetach(SurfaceDetach { surface, session }), reply),
             SocketEvent::ToolCall { call, reply } => self.forward_tool_call(call, reply),
+            SocketEvent::Pair { request, reply } => self.forward_pair(request, reply),
+        }
+    }
+
+    /// Forwards one pairing request while the run loop keeps heartbeating.
+    fn forward_pair(&mut self, request: SurfacePairRequest, reply: mpsc::Sender<PairReply>) -> Result<(), AgentError> {
+        if self.connection.is_none() {
+            let _ = reply.send(pair_offline_error());
+            return Ok(());
+        }
+        if self.pending_pairs.contains_key(&request.surface_id) {
+            let _ = reply.send(PairReply::error(
+                "pair_busy",
+                "another pairing request is already using this surface id",
+            ));
+            return Ok(());
+        }
+        let frame = AgentFrame::SurfacePair {
+            code: request.code.clone(),
+            surface_id: request.surface_id.clone(),
+            session: request.session.clone(),
+            app: request.app.clone(),
+        };
+        match self.send_frame(&frame) {
+            Ok(()) => {
+                self.pending_pairs.insert(
+                    request.surface_id,
+                    PendingPair {
+                        session: request.session,
+                        reply,
+                        deadline: Instant::now() + PAIR_TIMEOUT,
+                    },
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let response = match &error {
+                    AgentError::FrameTooLarge { .. } => {
+                        PairReply::error("frame_too_large", "the request does not fit the home frame limit")
+                    }
+                    AgentError::Json(_) => PairReply::error("invalid_request", "the request could not be encoded"),
+                    _ => pair_offline_error(),
+                };
+                let _ = reply.send(response);
+                socket_forward_failure(error)
+            }
         }
     }
 
@@ -1647,6 +1888,74 @@ impl AgentClient {
         }
     }
 
+    /// Answers every pairing request still waiting for the home with one typed failure.
+    fn fail_pending_pairs(&mut self, code: &str, message: &str) {
+        let pending: Vec<(SurfaceId, PendingPair)> = self.pending_pairs.drain().collect();
+        for (_, pair) in pending {
+            let _ = pair.reply.send(PairReply::error(code, message));
+        }
+    }
+
+    /// Expires pairing requests the home never answered.
+    fn expire_pending_pairs(&mut self) {
+        if self.pending_pairs.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let expired: Vec<SurfaceId> = self
+            .pending_pairs
+            .iter()
+            .filter(|(_, pair)| pair.deadline <= now)
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in expired {
+            if let Some(pair) = self.pending_pairs.remove(&surface) {
+                let _ = pair.reply.send(PairReply::error(
+                    "pair_timeout",
+                    "the home did not answer the surface pairing request",
+                ));
+            }
+        }
+    }
+
+    /// Writes the token, expiry and session binding for one socket-originated pairing.
+    fn complete_pending_pair(
+        &mut self,
+        surface_id: SurfaceId,
+        token: String,
+        scopes: Vec<SurfaceScope>,
+        expires_at: Timestamp,
+        pair: PendingPair,
+    ) -> Result<(), AgentError> {
+        validate_surface_id(&surface_id)?;
+        if token.is_empty() {
+            let _ = pair.reply.send(PairReply::error(
+                "pair_failed",
+                "the home returned an empty surface token",
+            ));
+            return Err(AgentError::Protocol(
+                "the home returned an empty surface token".to_owned(),
+            ));
+        }
+        let token_path = write_surface_token(&self.state_dir, &surface_id, &token, expires_at)?;
+        write_surface_binding(&self.state_dir, &surface_id, &pair.session)?;
+        mark_paired(&self.state_dir, &surface_id)?;
+        // A fresh pairing replaces every read cached before it, so a re-paired surface
+        // can never read data fetched under the previous token.
+        if let Err(error) = self.cache.clear_surface(&surface_id) {
+            debug_failure("cache clear after socket pairing failed", &error);
+        }
+        self.status.surface_token_expires_at = surface_token_expiry(&self.state_dir);
+        self.save_status()?;
+        let _ = pair.reply.send(PairReply::Paired {
+            surface_id,
+            scopes,
+            expires_at,
+            token_path,
+        });
+        Ok(())
+    }
+
     /// Returns the current local status, refreshing spool and surface expiry.
     pub fn status(&self) -> AgentStatus {
         let mut status = self.status.clone();
@@ -1770,24 +2079,32 @@ impl AgentClient {
                         AgentFrame::SurfaceIssued {
                             surface_id,
                             token,
-                            scopes: _,
+                            scopes,
                             expires_at,
                         } => {
-                            if let Err(error) = self.apply_surface_issued(surface_id, token, expires_at) {
+                            if let Some(pair) = self.pending_pairs.remove(&surface_id) {
+                                if let Err(error) =
+                                    self.complete_pending_pair(surface_id, token, scopes, expires_at, pair)
+                                {
+                                    return serve_outcome_from_error(error);
+                                }
+                            } else if let Err(error) = self.apply_surface_issued(surface_id, token, expires_at) {
                                 return serve_outcome_from_error(error);
                             }
                         }
                         AgentFrame::SurfaceRevoked { surface_id, reason } => {
+                            if let Some(pair) = self.pending_pairs.remove(&surface_id) {
+                                let _ = pair.reply.send(PairReply::error(
+                                    "surface_revoked",
+                                    format!("surface {surface_id} was revoked: {reason}"),
+                                ));
+                            }
                             self.forget_surface_token(&surface_id);
                             if let Err(error) = self.cache.clear_surface(&surface_id) {
                                 debug_failure("cache clear after surface revocation failed", &error);
                             }
-                            if self
-                                .bridge
-                                .as_ref()
-                                .is_some_and(|link| link.bridge.surface() == &surface_id)
-                            {
-                                self.surface_read_only(reason);
+                            if self.bridges.iter().any(|link| link.bridge.surface() == &surface_id) {
+                                self.bridge_read_only(&surface_id, reason);
                             }
                             self.orchestrator.stop_surface(&surface_id);
                         }
@@ -1814,6 +2131,15 @@ impl AgentClient {
                             message,
                             retryable: _,
                         } => {
+                            if self.pending_pairs.len() == 1
+                                && let Some(surface) = self.pending_pairs.keys().next().cloned()
+                                && let Some(pair) = self.pending_pairs.remove(&surface)
+                            {
+                                let _ = pair.reply.send(PairReply::error(
+                                    "pair_failed",
+                                    format!("the home refused surface pairing: {message}"),
+                                ));
+                            }
                             if self.awaiting_path_map_reply
                                 && (kind == ErrorKind::InvalidInput || message.contains("unexpected frame"))
                             {
@@ -1890,9 +2216,9 @@ impl AgentClient {
             // bounded by the bridge's own short timeout, so a heartbeat or a pending tool
             // call is never blocked behind a quiet local app.
             let bridge_active = self
-                .bridge
-                .as_ref()
-                .is_some_and(|link| link.attached && link.bridge.state().read_only.is_none());
+                .bridges
+                .iter()
+                .any(|link| link.attached && link.bridge.state().read_only.is_none());
             let wait = if bridge_active {
                 Some(
                     wait.unwrap_or(crate::bridge::SSE_READ_TIMEOUT)
@@ -1975,6 +2301,13 @@ fn socket_offline_error() -> SocketResponse {
         code: "home_offline".to_owned(),
         message: "the agent is not connected to the home; start `vowp agent run`".to_owned(),
     }
+}
+
+fn pair_offline_error() -> PairReply {
+    PairReply::error(
+        "home_offline",
+        "the agent is not connected to the home; start `vowp agent run`",
+    )
 }
 
 fn socket_offline_tool_result(request_id: &str) -> SocketResponse {

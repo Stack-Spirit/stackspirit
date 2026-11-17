@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use vowp_agent::{
-    AgentClient, AgentClock, AgentConfig, AgentError, FrameRead, FrameStream, NodeKey, RunOptions, RunOutcome,
-    SurfacePairRequest, Transport,
+    AgentClient, AgentClock, AgentConfig, AgentError, BridgeFrame, FrameRead, FrameStream, NodeKey, RunOptions,
+    RunOutcome, SurfacePairRequest, Transport, pending_spool_bytes,
 };
+use vowp_protocol::agent::surface::SurfaceEvent;
 use vowp_protocol::{
-    AGENT_PROTOCOL, AgentFrame, AgentRole, ErrorKind, NodeName, SessionId, SurfaceId, SurfaceScope, Timestamp,
+    AGENT_PROTOCOL, AgentFrame, AgentRole, ErrorKind, EventBody, JobId, NodeName, OrchestratorCommand, PathRef,
+    ProjectName, RunId, SessionId, SurfaceId, SurfaceScope, Timestamp, UserMessage,
 };
 
 const CODE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -692,4 +694,132 @@ fn agent_status_shows_the_surface_prefix_and_expiry_without_the_token() {
     assert_eq!(document["surfaces"][0]["expires_at"], paired.expires_at.as_rfc3339());
     assert_eq!(document["surface_token_expires_at"], paired.expires_at.as_rfc3339());
     assert!(!text.contains(&token()), "status.json never carries the token");
+}
+
+#[test]
+fn agent_pair_ignores_unrelated_post_handshake_frames_before_surface_issued() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let run = RunId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAX").expect("run id");
+    let job = JobId::parse("job-1").expect("job id");
+    let project = ProjectName::parse("vowp").expect("project");
+    let home = FakeHome::new().with_pair_frames(vec![
+        AgentFrame::Ping,
+        AgentFrame::OrchestratorCommand(OrchestratorCommand::Stop {
+            request_id: "request-stop".to_owned(),
+            name: "work".to_owned(),
+        }),
+        AgentFrame::CancelRun {
+            run_id: run.clone(),
+            epoch: 0,
+            reason: "cancelled".to_owned(),
+        },
+        AgentFrame::RunLost {
+            run_id: run.clone(),
+            reason: "lost".to_owned(),
+        },
+        AgentFrame::Cleanup {
+            run_id: run.clone(),
+            job,
+            worktree: PathRef::Project {
+                project: project.clone(),
+            },
+        },
+        AgentFrame::Credit {
+            run_id: run.clone(),
+            count: 1,
+        },
+        AgentFrame::Pong,
+        AgentFrame::IngestAck {
+            run_id: run.clone(),
+            event_id: None,
+            seq: None,
+            duplicate: false,
+            lease_revoked: None,
+            error: None,
+        },
+        AgentFrame::LeaseLost {
+            reason: "lease lost".to_owned(),
+        },
+        AgentFrame::LeaseRevoked {
+            reason: "lease revoked".to_owned(),
+            holder: "phone".to_owned(),
+        },
+        AgentFrame::BundleAccept {
+            run_id: run.clone(),
+            epoch: 0,
+            offset: 0,
+        },
+        AgentFrame::BundleAbort {
+            run_id: run,
+            epoch: 0,
+            reason: "aborted".to_owned(),
+        },
+    ]);
+    let mut client = client(dir.path(), home.clone());
+    let paired = client
+        .pair(&request())
+        .expect("pairing must wait for its SurfaceIssued instead of failing on a queued frame");
+    assert_eq!(paired.surface_id, SurfaceId(SURFACE.to_owned()));
+    assert!(
+        home.frames().iter().any(|frame| matches!(frame, AgentFrame::Pong)),
+        "a Ping ahead of SurfaceIssued must be answered"
+    );
+}
+
+#[test]
+fn pending_spool_bytes_counts_only_unsent_bridge_records() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let spool = dir.path().join("bridge").join(SURFACE).join("spool");
+    std::fs::create_dir_all(&spool).expect("spool dir");
+    std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o700)).expect("spool mode");
+    let surface = SurfaceId(SURFACE.to_owned());
+    let session = SessionId::parse(SESSION).expect("session id");
+    let frames = [
+        BridgeFrame::Event {
+            event: Box::new(SurfaceEvent {
+                surface: surface.clone(),
+                session: session.clone(),
+                native_id: "one".to_owned(),
+                event: EventBody::UserMessage(UserMessage {
+                    text: "first".to_owned(),
+                    attachments: Vec::new(),
+                    note: None,
+                }),
+            }),
+        },
+        BridgeFrame::Event {
+            event: Box::new(SurfaceEvent {
+                surface,
+                session,
+                native_id: "two".to_owned(),
+                event: EventBody::UserMessage(UserMessage {
+                    text: "second".to_owned(),
+                    attachments: Vec::new(),
+                    note: None,
+                }),
+            }),
+        },
+    ];
+    let mut record = String::new();
+    let mut lengths = Vec::new();
+    for frame in &frames {
+        let mut line = serde_json::to_string(frame).expect("frame JSON");
+        line.push('\n');
+        lengths.push(line.len() as u64);
+        record.push_str(&line);
+    }
+    std::fs::write(spool.join("events.jsonl"), &record).expect("events spool");
+    std::fs::write(spool.join("sent.json"), r#"{"sent":["one"]}"#).expect("sent index");
+    assert_eq!(
+        pending_spool_bytes(dir.path()),
+        lengths[1],
+        "one unsent record remains pending while the other is already sent"
+    );
+
+    std::fs::write(spool.join("sent.json"), r#"{"sent":["one","two"]}"#).expect("sent index");
+    assert_eq!(
+        pending_spool_bytes(dir.path()),
+        0,
+        "sent records stay on disk but are no longer pending"
+    );
 }
