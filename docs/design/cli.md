@@ -275,13 +275,13 @@ mode 0600. `session lease` prints the token only on acquire. Full protocol: `ses
 ### `vowp cost [--by job|role|provider|model|day] [--since <dur\|date>] [--job id]`
 Table `KEY RUNS USD INPUT OUTPUT CACHE_R SOURCE`; totals row; `SOURCE` is `receipt`, `price-table`, `unknown` or `mixed`, derived from `CostRow.receipt_entries`/`price_table_entries`/`unknown_entries`: one source present → that source, more than one → `mixed`. Unknown costs are shown as `?` and counted separately (never as 0). JSON: `{"by":"job","rows":[{"key":"graph-engine","runs":3,"usd":0.42,"tokens":{…},"source":"receipt"}],"total":{…}}`.
 
-### `vowp node add <name> <ssh-target> · ls · rm <name>`
-`add` records the node and tests `ssh -o BatchMode=yes <target> vowp --version` (stores the result in `capabilities`; failure is a warning unless `--strict`). `add <name> -` registers a surface-only executor node (a laptop that dials the home; the home never dials it). `ls`: `NAME TARGET LOCAL LAST_SEEN VERSION`.
+### `vowp node add <name> <ssh-target> · ls · rm <name> [--yes]`
+`add` records the node and tests `ssh -o BatchMode=yes <target> vowp --version` (stores the result in `capabilities`; failure is a warning unless `--strict`). `add <name> -` registers a surface-only executor node (a laptop that dials the home; the home never dials it). `ls`: `NAME TARGET LOCAL LAST_SEEN VERSION`. `rm` never prompts, accepts `--yes` for scripts, removes the node row and purges its stranded enrollment codes; an unknown node is exit 3.
 
-### `vowp node enroll <name> [--label <label>]... · revoke <name> [--yes] · show <name> [--json]`
-These commands are home-only; a control machine exits 5 because the code and credentials need the home store. `enroll` creates an `agent`-kind `pending` node and a one-time 52-character code valid for ten minutes, then prints the code once and the command `vowp agent enroll --target <home-ssh-target> --code-file -`. The code is never written to the log or a file; an existing node is exit 4. `revoke` marks the node `revoked` and revokes every credential (without `--yes` it refuses with exit 5); an unknown node is exit 3. Phase 0 has no live connection registry, so the gateway sends `Revoked` on the node's next frame. `show` prints the redacted `NodeCard`: kind, status, computed presence, labels, latest capacity, mapped projects, agent version, protocol, last error and `last_seen_at`. It never prints a path map, an absolute local path or a secret name. `node ls` and its JSON `Node` shape are unchanged.
+### `vowp node enroll <name> [--label <label>]... [--replace] · revoke <name> [--yes] · show <name> [--json]`
+These commands are home-only; a control machine exits 5 because the code and credentials need the home store. `enroll` creates an `agent`-kind `pending` node and a one-time 52-character code valid for ten minutes, then prints the code once and the command `vowp agent enroll --target <home-ssh-target> --code-file -`. The code is never written to the log or a file; an existing node is exit 4. `--replace` rotates a `pending` node's code in one transaction: the old pending code is refused immediately, the labels are updated, and the node stays `pending`. An `active` or `revoked` node is refused with exit 4 (revoke or remove it first) so a live enrollment is never wiped. `revoke` marks the node `revoked` and revokes every credential (without `--yes` it refuses with exit 5); an unknown node is exit 3. Phase 0 has no live connection registry, so the gateway sends `Revoked` on the node's next frame. `show` prints the redacted `NodeCard`: kind, status, computed presence, labels, latest capacity, mapped projects, agent version, protocol, last error and `last_seen_at`. It never prints a path map, an absolute local path or a secret name. `node ls` and its JSON `Node` shape are unchanged.
 
-JSON: `enroll` prints `{"node":"mac-studio","code":"…","expires_at":"2026-11-14T10:10:00.000Z","command":"vowp agent enroll --target <home-ssh-target> --code-file -"}`; `revoke` prints `{"node":"mac-studio","status":"revoked","credentials_revoked":1}`; `show` prints the flattened `NodeCard` plus `"last_seen_at"` and no path-map field.
+JSON: `enroll` and `enroll --replace` print `{"node":"mac-studio","code":"…","expires_at":"2026-11-14T10:10:00.000Z","command":"vowp agent enroll --target <home-ssh-target> --code-file -"}` (human output starts with `created pending node` or `replaced pending node`); `revoke` prints `{"node":"mac-studio","status":"revoked","credentials_revoked":1}`; `show` prints the flattened `NodeCard` plus `"last_seen_at"` and no path-map field. `rm --json` prints the removed `Node` row.
 
 ### `vowp loops [--all] [pause <loop> | resume <loop>]`
 No args: table of loop rows (`NAME KIND STATE INTERVAL LAST NEXT STATUS FAILS`). Loop rows are per project; `--all` lists every project's rows with a project column. `pause/resume` set `loops.state` (L1 itself cannot be paused; use `down`). Exit 3 for an unknown loop name. With more than one project and no `--project`, exit 2 listing them.
@@ -470,7 +470,7 @@ exit 5 instead of working around it. Answers are names only: `--harness`, `--pro
 ### 6.10 `vowp orchestrator`
 
 ```
-vowp orchestrator new [--name <n>] [--project <p>] --app opencode|claude-code|chat [--executor <e>] [--force]
+vowp orchestrator new [--name <n>] [--project <p>] --app opencode|claude-code|chat [--node <n>] [--executor <e>] [--force]
 vowp orchestrator ls
 vowp orchestrator stop <name>
 vowp orchestrator resume <name>
@@ -480,10 +480,23 @@ Creates an ordinary session with role `orchestrator` (fleet-wide or project-boun
 directory `~/.vowp/orchestrators/<name>/` with `orchestrator.json` (0600), the app config
 (`opencode.json` or `.mcp.json`) registering `vowp mcp`, and an `AGENTS.md` instructions template.
 It starts the app host where the app supports one, takes the lease, and prints `join.desktop`,
-`join.phone` and `join.chat` instructions. `--app claude-code` records a degraded orchestrator and
+`join.phone` and `join.chat` instructions. `--node <n>` names the local node that runs the app (it
+is not an SSH redirect for this command); the node materializes its own private config and reports
+`running` only after the app is healthy. `--app claude-code` records a degraded orchestrator and
 exits non-zero when no claude.ai login exists rather than pretending the host runs. `stop` stops the
 host and releases the lease (the session stays); `resume` starts it again; the supervisor resumes
 running orchestrators after a restart. JSON: `OrchestratorCard`.
+
+An opencode app may write its own 0600 `service.json` or, on macOS, print its readiness on stdout
+(`server listening on http://127.0.0.1:<port>` and `server password <secret>`); the agent parses
+the stdout lines and materializes a private 0600 `service.json`, so no file must exist before the
+start. A default `opencode`, `claude` or `vowp` missing from `PATH` is `capability_missing` and
+starts no process. The default `chat` app is started as `vowp chat --agent <session>` with
+`VOWP_AGENT_HOME` set to the agent state directory and a piped stdin held open; an early exit is
+`app_exited`. `OrchestratorCard.last_error` carries the redacted failure reason for a `failed`,
+`degraded` or `node_offline` record, is `null` for `starting`, `running` and `stopped`, and is
+cleared by a clean `resume` or `stop`. It never contains a port, password, secret value or absolute
+local path.
 
 ### 6.11 `vowp mcp`
 
@@ -578,7 +591,12 @@ The v0.4 agent slice adds `agent_status_without_enrollment_exits_three`,
 `job_add_refuses_node_placement_when_offload_is_disabled`,
 `job_add_persists_any_placement_and_job_show_reads_it`,
 `offload_policy_json_is_the_effective_policy` and
-`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`.
+`offload_status_lists_nodes_assignments_and_waiting_reasons` in `tests/offload.rs`. The v0.4
+CLI/gateway/agent end-to-end slice adds `agent_paths_add_reaches_the_home_without_a_reconnect`,
+`node_enroll_replace_rotates_a_pending_code_and_node_rm_yes_removes_it` and
+`opencode_stdout_readiness_reaches_running_and_a_failed_start_has_a_redacted_last_error` in
+`tests/agent.rs`; the first two use a real gateway and a fake `ssh` script, and the last also starts
+the real agent daemon against a fake `opencode` binary.
 
 The ASIF slice adds, in `tests/asif.rs`: `session_export_asif_uses_default_asif_zip_name`,
 `session_export_asif_stdout_is_binary_and_refuses_json`,
@@ -654,7 +672,10 @@ The worktree root defaults to `<checkout>/.vowp/worktrees` and is created when m
 checkout is allowed. The command validates the roots, writes `agent.json` 0600, and prints the
 owner-only mapping `vowp /Users/owner/src/vowp worktrees /Users/owner/src/vowp/.vowp/worktrees`;
 `--json` prints the `AgentPathMap`. A running `vowp agent run` reloads the file on its next
-heartbeat and sends `PathMapUpdate`. Without enrollment it exits 3 with the enrollment hint.
+heartbeat and sends `PathMapUpdate` on the live connection. The home persists the row before it
+answers `Pong`, so `vowp node show <node> --json` lists the project in `mapped` without a
+re-enrollment or a reconnect; a bad map gets an `Error` frame and the connection stays open.
+Without enrollment it exits 3 with the enrollment hint.
 
 ### `vowp agent paths rm <PROJECT>`
 Removes one project from the local map and writes `agent.json` 0600. An unknown project is
@@ -683,9 +704,11 @@ expired or replayed code is a non-retryable refusal (exit 5); a missing enrollme
 Loads `agent.json` and `node.key`, connects, and sends a heartbeat every 10 seconds (the interval
 `HomeChallenge` names); each heartbeat rewrites `status.json` (0600). `Ping` is answered with
 `Pong`. `Revoked` stops with exit 5 and `Superseded` stops with exit 4. A dropped connection,
-EOF or retryable home error reconnects with exponential backoff (1, 2, 4 … 60 seconds, with
-jitter; a 60-second stable connection resets it). `--role` is `surface`, `executor` or `both`
-(default `both`). `--foreground` is accepted and is the default. `--service` is the service-manager
+EOF, any post-handshake `Error` frame or retryable home error reconnects with exponential backoff
+(1, 2, 4 … 60 seconds, with jitter; a 60-second stable connection resets it); an unexpected known
+frame after the handshake is logged and ignored by the gateway rather than ending the session.
+`--role` is `surface`, `executor` or `both` (default `both`). `--foreground` is accepted and is the
+default. `--service` is the service-manager
 mode: it checks the state directory and root rule, writes the 0600 `run` marker, installs the
 SIGTERM/SIGINT drain flag and exits 0 after a clean drain. It is supported on Linux and macOS only
 (exit 5 elsewhere); `agent service install` puts it in the unit.

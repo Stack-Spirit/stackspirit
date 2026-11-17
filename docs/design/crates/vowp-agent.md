@@ -361,6 +361,7 @@ impl OrchestratorHost {
     pub fn with_startup(self, startup: Duration) -> Self;
     pub fn with_stop_grace(self, grace: Duration) -> Self;
     pub fn with_app_command(self, app: OrchestratorApp, program: impl Into<String>, args: Vec<String>) -> Self;
+    pub fn with_path_lookup(self, dir: impl Into<PathBuf>) -> Self;
     pub fn root(state_dir: &Path) -> PathBuf;
     pub fn dir(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError>;
     pub fn config_path(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError>;
@@ -578,8 +579,11 @@ the surface's token and expiry files; `status.json` no longer reports an expiry 
    `nonce + "\n" + home_id + "\n" + connection_id`, lowercase hex (64 bytes, 128 hex characters).
 4. `HomeWelcome` must name the negotiated `vowp-agent/1` protocol, the same home and connection,
    and the enrolled node. A mismatch is an authentication or protocol error.
-5. `Revoked` and `Superseded` stop immediately; `Error { kind: auth }` is fatal, other `Error`
-   frames are retried only when `retryable` is true.
+5. `Revoked` and `Superseded` stop immediately; `Error { kind: auth }` during the handshake is
+   fatal. After the handshake any `Error` frame is a connection failure: the client keeps its
+   spool and state, records a redacted reason in `status.json` and reconnects. It never exits the
+   process for a post-handshake home error, and a Ping or another known frame is answered normally
+   while a path-map reply is pending.
 
 ### Heartbeat and reconnect
 
@@ -592,10 +596,10 @@ heartbeat also reloads `agent.json` and sends any changed `PathMapUpdate` frames
 rewrites `status.json` 0600; that file holds names and counts, never a path map.
 
 `Ping` is answered with `Pong`. `Revoked` and `Superseded` end the loop with the matching
-`RunOutcome`. A dropped transport, EOF or retryable home error is reported in `status.json` and
-retried with [`Backoff`]: 1, 2, 4 … 60 seconds with up to 25 % jitter. A connection that stayed up
-for 60 seconds resets the backoff. Fatal authentication, config, key, protocol and non-retryable
-home errors end the loop.
+`RunOutcome`. A dropped transport, EOF or any post-handshake `Error` frame is reported in
+`status.json` and retried with [`Backoff`]: 1, 2, 4 … 60 seconds with up to 25 % jitter. A
+connection that stayed up for 60 seconds resets the backoff. Fatal authentication, config, key and
+protocol failures end the loop; a post-handshake home refusal does not.
 
 The CLI loads `status.json` through `AgentStatus::load`, fills missing node, home and protocol/
 fingerprint fields from `agent.json` and `node.pub`, recounts `spool/` so the displayed byte
@@ -813,6 +817,18 @@ settings the home never sees: the app program and argv, the working directory an
 stop and resume keep the command and surface binding. A new config uses `opencode serve`,
 `claude` or `vowp chat --agent` for the three apps; `OrchestratorHost::with_app_command`
 replaces that default for a test or an owner whose binary lives outside `PATH`.
+`OrchestratorHost::with_path_lookup` resolves a default program against a private directory
+instead of the process `PATH` (tests use this and also pass that directory as the child's
+`PATH`). Before any spawn, a default bare program is resolved on `PATH`; a missing default
+`opencode`, `claude` or `vowp` is `capability_missing` and leaves no host state. A custom
+command or an absolute path keeps the existing `spawn_failed` behavior.
+
+For the default `chat` app the host rewrites the argv to
+`vowp chat --agent <session>` from the resolved binding on every start, sets `VOWP_AGENT_HOME`
+to the agent state directory, and keeps a piped stdin handle open for the life of the host.
+`chat` and `claude` are interactive: an exit inside the first 200 ms is `app_exited` rather than
+a host that silently disappears, and dropping the held stdin on stop lets the app see EOF. The
+same stdin hold keeps a `claude` Remote Control process alive; its arguments are unchanged.
 
 Every fresh start and every resume also writes the app-facing files in that same 0700
 directory, through the same atomic 0600 helper: `AGENTS.md`, `opencode.json` for opencode and
@@ -853,12 +869,19 @@ token, a pair link or a path outside the agent state directory.
 A start or resume runs on a worker thread, not in the frame loop, so heartbeats, runs and local
 tool calls keep flowing while the app starts. The worker writes `host.json` with the process
 group leader's pid and `starting`, then waits up to `ORCHESTRATOR_START_TIMEOUT` (20 seconds)
-for an opencode app's `service.json`. The file must be owner-only (no group or other bits), a
-regular file, valid JSON with a non-empty password and a loopback URL or a usable port. The
-port and password are read only for validation; they are never copied into the config, host
-state, result, error or a log, and the child's stdout/stderr go to `/dev/null`. A missing
-binary is `spawn_failed`; a malformed or too-wide file is `config_invalid`; a process that
-exits first is `app_exited`; a start that times out is `service_timeout`.
+for an opencode app's readiness. Readiness is the app's own `service.json` (0600) or, on macOS,
+the two lines `opencode serve` prints on stdout: `server listening on
+http://127.0.0.1:<port>` and `server password <secret>`. The agent reads stdout (and drains
+stderr) while the start is in flight, parses only those two readiness lines, and materializes a
+private 0600 `service.json` with the URL, port, pid and password. No file must be written by the
+app first, and no file is read from a previous run. The resulting file must be owner-only (no
+group or other bits), a regular file, valid JSON with a non-empty password and a loopback URL or
+a usable port. The port and password are read only for validation; they are never copied into the
+config, host state, result, error or a log. Once startup ends the stdout reader stops parsing and
+keeps draining the pipe so the app cannot block. A missing default binary is `capability_missing`;
+a custom command that cannot start is `spawn_failed`; a malformed or too-wide file is
+`config_invalid`; a process that exits first is `app_exited`; a start that times out is
+`service_timeout`.
 
 The app runs in its own process group with private `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
 `XDG_STATE_HOME` and `XDG_CACHE_HOME` below `<orchestrator>/.opencode/`. The surface binding
@@ -1056,9 +1079,9 @@ allowlist and `Io`/`Json` for a file problem; its callers treat every store or l
 diagnostic-only and never fail a tool call because of it. The worktree primitives use their own
 `WorktreeError`, mapped to the protocol's refusal vocabulary by `reject_reason`; §8 lists its
 variants. The orchestrator host uses the protocol's `OrchestratorError` (codes such as
-`invalid_name`, `spawn_failed`, `config_invalid`, `service_timeout`, `surface_missing`,
-`surface_ambiguous`, `attach_failed`, `stop_failed`, `not_found` and `busy`); its messages never
-name a local path, a port or a secret value.
+`invalid_name`, `capability_missing`, `spawn_failed`, `config_invalid`, `service_timeout`,
+`surface_missing`, `surface_ambiguous`, `attach_failed`, `stop_failed`, `not_found` and `busy`);
+its messages never name a local path, a port or a secret value.
 
 ## 7. Named tests
 
@@ -1155,7 +1178,14 @@ private directory and stops the fake app. The app-files slice adds
 `orchestrator_resume_refreshes_the_app_files_atomically` and
 `orchestrator_app_files_never_contain_a_secret_or_pair_link`; the fake app records its
 environment and reads `opencode.json` and `AGENTS.md` from `OPENCODE_CONFIG_DIR`, so the tests
-prove the files are readable by the process opencode would start, not only present on disk.
+prove the files are readable by the process opencode would start, not only present on disk. The
+macOS host slice adds `orchestrator_macos_stdout_readiness_materializes_0600_service_json`,
+`orchestrator_app_exits_before_ready_is_typed`, `orchestrator_service_timeout_is_typed`,
+`orchestrator_missing_default_binary_is_capability_missing`,
+`orchestrator_chat_default_command_carries_the_session_and_holds_stdin` and
+`orchestrator_claude_holds_stdin_and_reports_an_early_exit`; the transport adds
+`agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal` and
+`agent_reconnects_after_any_non_retryable_home_error`.
 
 The phase-4 hardening slice adds five loopback transport tests in `tests/transport.rs`, with a
 loopback TLS proxy and an in-memory home: `wss_carries_the_same_frames_as_stdio`,

@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use vowp_agent::{
     AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, Cache, ConnectionState, FrameRead, FrameStream,
     NodeKey, PushStatus, RunHandler, RunOptions, RunSink, RunSinkError, RunSummary, ServiceError, SshTransport,
-    Transport, TransportConfig, WssTlsMode,
+    SystemAgentClock, Transport, TransportConfig, WssTlsMode,
 };
 use vowp_cli::BufferIo;
 use vowp_cli::agent_exec::CoreRunHandler;
@@ -262,7 +262,7 @@ impl GatewayHome {
             .expect("vowp.toml");
             store
                 .upsert_project(&Project {
-                    name: project,
+                    name: project.clone(),
                     path: checkout.display().to_string(),
                     remote_url: None,
                     default_branch: "main".to_owned(),
@@ -271,12 +271,18 @@ impl GatewayHome {
                     updated_at: now,
                 })
                 .expect("project row");
+            Store::create_project_db(&paths, &project).expect("project database");
         }
         Self { unix_home }
     }
 
     fn home(&self) -> &Path {
         self.unix_home.path()
+    }
+
+    /// Returns the node home root (`$HOME/.vowp`) the home CLI receives with `--home`.
+    fn root(&self) -> PathBuf {
+        self.paths().root().to_path_buf()
     }
 
     fn paths(&self) -> NodePaths {
@@ -376,6 +382,17 @@ fn gateway_capacity() -> AgentCapacity {
 /// `serve` handles exactly one connection: an `Enroll` is answered with `Enrolled` and the
 /// gateway exits, then the agent reconnects for the handshake. The test does the same.
 fn enroll_node(gateway_home: &GatewayHome, node: &NodeName, key: &SigningKey, project: &ProjectName) {
+    enroll_node_with_public_key(gateway_home, node, &public_hex(key), project, Vec::new());
+}
+
+/// Redeems one enrollment code for an already generated public key and optional path map.
+fn enroll_node_with_public_key(
+    gateway_home: &GatewayHome,
+    node: &NodeName,
+    public_key: &str,
+    project: &ProjectName,
+    paths: Vec<AgentPathMap>,
+) {
     let store = gateway_home.store();
     let pending =
         vowp_core::agent::create_pending(&store, node, &["linux".to_owned()], Timestamp::now()).expect("pending node");
@@ -386,13 +403,13 @@ fn enroll_node(gateway_home: &GatewayHome, node: &NodeName, key: &SigningKey, pr
         &mut stdin,
         &AgentFrame::Enroll {
             code: pending.code,
-            public_key: public_hex(key),
+            public_key: public_key.to_owned(),
             agent_version: "0.3.0".to_owned(),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             labels: vec!["linux".to_owned()],
             capabilities: gateway_capabilities(project),
-            paths: Vec::new(),
+            paths,
         },
     );
     match read_agent_frame(&mut stdout) {
@@ -402,6 +419,41 @@ fn enroll_node(gateway_home: &GatewayHome, node: &NodeName, key: &SigningKey, pr
     drop(stdin);
     let status = wait_for_exit(&mut child, Duration::from_secs(10));
     assert_eq!(status.code(), Some(0), "an enrollment connection exits 0");
+}
+
+/// Writes a fake `ssh` that runs the real gateway against `gateway_home`.
+///
+/// Every invocation appends one line to `log`, so a test can prove the agent opened exactly
+/// one connection and never re-enrolled or reconnected.
+fn fake_gateway_ssh(tools: &Path, gateway_home: &Path, log: &Path) -> PathBuf {
+    std::fs::create_dir_all(tools).expect("fake tools dir");
+    let script = tools.join("ssh");
+    let binary = env!("CARGO_BIN_EXE_vowp");
+    let root = gateway_home.join(".vowp");
+    let text = format!(
+        "#!/bin/sh\nprintf 'connect\\n' >> \"{}\"\nHOME=\"{}\" exec \"{}\" --home \"{}\" agent gateway --stdio\n",
+        log.display(),
+        gateway_home.display(),
+        binary,
+        root.display()
+    );
+    std::fs::write(&script, text).expect("fake ssh");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod ssh");
+    script
+}
+
+/// Returns whether `check` succeeds before `timeout`, polling every 20 ms.
+fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if check() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Opens a new gateway connection and completes the AgentHello challenge.
@@ -550,6 +602,91 @@ fn agent_paths_add_update_and_remove_one_project() {
 }
 
 #[test]
+fn agent_paths_add_reaches_the_home_without_a_reconnect() {
+    let gateway = GatewayHome::new(&["vowp", "docs"]);
+    let node = NodeName::parse("mac-studio").expect("node slug");
+    let project = ProjectName::parse("vowp").expect("project");
+    let agent_home = TempDir::new().expect("agent home");
+    let state_dir = agent_home.path().join(".vowp-agent");
+    let key = NodeKey::generate(&state_dir).expect("node key");
+    enroll_node_with_public_key(&gateway, &node, &key.public_key_hex(), &project, Vec::new());
+
+    let tools = agent_home.path().join("bin");
+    let log = agent_home.path().join("ssh.log");
+    let ssh = fake_gateway_ssh(&tools, gateway.home(), &log);
+    let config = AgentConfig::new("home-1", node.clone(), state_dir.clone(), "home.example");
+    config.write().expect("agent.json");
+    let mut client = AgentClient::new(
+        state_dir,
+        key,
+        config,
+        Box::new(SshTransport::with_binary("home.example", ssh.display().to_string())),
+        Arc::new(SystemAgentClock),
+    );
+    client.connect().expect("agent handshake");
+
+    let (docs_root, _map) = checkout_map(agent_home.path(), "docs-checkout", "docs");
+    let (code, stdout, stderr) = run_binary(
+        agent_home.path(),
+        &[
+            "agent",
+            "paths",
+            "add",
+            "--project",
+            docs_root.to_str().expect("utf-8 checkout"),
+        ],
+    );
+    assert_eq!(code, 0, "paths add failed: {stdout} {stderr}");
+    assert_eq!(
+        client.refresh_path_maps().expect("send the path map update"),
+        1,
+        "only the added project is sent"
+    );
+
+    let store = gateway.store();
+    let persisted = wait_until(Duration::from_secs(5), || {
+        store
+            .list_node_paths(&node)
+            .expect("node paths")
+            .iter()
+            .any(|path| path.project.as_str() == "docs")
+    });
+    assert!(persisted, "the home gateway did not persist the PathMapUpdate frame");
+
+    let root = gateway.root();
+    let (code, card, stderr) = run_binary(
+        gateway.home(),
+        &[
+            "--json",
+            "--home",
+            root.to_str().expect("utf-8 home"),
+            "--project",
+            "vowp",
+            "node",
+            "show",
+            node.as_str(),
+        ],
+    );
+    assert_eq!(code, 0, "node show failed: {stderr}");
+    let card: serde_json::Value = serde_json::from_str(&card).expect("node card JSON");
+    let mapped = card["mapped"].as_array().expect("mapped array");
+    assert!(
+        mapped.iter().any(|name| name == "docs"),
+        "node show must list the new project without re-enrolling: {card}"
+    );
+    let text = card.to_string();
+    assert!(
+        !text.contains(docs_root.to_str().expect("utf-8 checkout")),
+        "the redacted card leaked the local root: {text}"
+    );
+    let connections = std::fs::read_to_string(&log).unwrap_or_default().lines().count();
+    assert_eq!(
+        connections, 1,
+        "the path update must use the live connection, not a reconnect: {log:?}"
+    );
+}
+
+#[test]
 fn agent_status_redacts_absolute_paths_from_the_snapshot_cache() {
     let home = TempDir::new().expect("temp home");
     let state_dir = home.path().join(".vowp-agent");
@@ -671,6 +808,109 @@ fn node_enroll_refuses_a_duplicate_node() {
     let (code, _stdout, stderr) = env.run(&["node", "enroll", "mac-studio"]);
     assert_eq!(code, 4, "a duplicate node is a conflict: {stderr}");
     assert!(stderr.contains("already exists"), "{stderr}");
+}
+
+#[test]
+fn node_enroll_replace_rotates_a_pending_code_and_node_rm_yes_removes_it() {
+    let env = TestEnv::new();
+    let name = NodeName::parse("mac-studio").expect("node slug");
+    let (code, first, stderr) = env.run_json(&[
+        "node",
+        "enroll",
+        "mac-studio",
+        "--label",
+        "darwin-arm64",
+        "--label",
+        "gpu",
+    ]);
+    assert_eq!(code, 0, "first enrollment failed: {stderr}");
+    let first_code = first["code"].as_str().expect("first code").to_owned();
+
+    let (code, second, stderr) = env.run_json(&[
+        "node",
+        "enroll",
+        "mac-studio",
+        "--replace",
+        "--label",
+        "darwin-arm64",
+        "--label",
+        "xcode",
+    ]);
+    assert_eq!(code, 0, "replace failed: {stderr}");
+    let second_code = second["code"].as_str().expect("replacement code").to_owned();
+    assert_ne!(first_code, second_code, "replace must rotate the one-time code");
+    assert_eq!(second["node"], "mac-studio");
+
+    let store = env.store();
+    let now = store.clock().now();
+    assert!(
+        store
+            .consume_enrollment_code(&vowp_core::agent::hash_code(&first_code), now)
+            .expect("old code lookup")
+            .is_none(),
+        "the rotated code must not redeem"
+    );
+    assert!(
+        store
+            .consume_enrollment_code(&vowp_core::agent::hash_code(&second_code), now)
+            .expect("new code lookup")
+            .is_some(),
+        "the replacement code must redeem"
+    );
+    let card = store.node_card(&name, now).expect("card lookup").expect("node exists");
+    assert_eq!(card.status, NodeStatus::Pending);
+    assert_eq!(card.labels, vec!["darwin-arm64".to_owned(), "xcode".to_owned()]);
+
+    store
+        .set_node_status(&name, NodeStatus::Active, "", now)
+        .expect("activate node");
+    let (code, _stdout, stderr) = env.run(&["node", "enroll", "mac-studio", "--replace"]);
+    assert_eq!(code, 4, "an active node is never replaced: {stderr}");
+    assert!(stderr.contains("active"), "{stderr}");
+    assert!(stderr.contains("node rm mac-studio --yes"), "{stderr}");
+    assert_eq!(
+        store
+            .node_card(&name, now)
+            .expect("card lookup")
+            .expect("node kept")
+            .status,
+        NodeStatus::Active,
+        "a refused replace leaves the live node untouched"
+    );
+
+    let (code, removed, stderr) = env.run_json(&["node", "rm", "mac-studio", "--yes"]);
+    assert_eq!(code, 0, "node rm --yes failed: {stderr}");
+    assert_eq!(removed["name"], "mac-studio");
+    assert!(
+        store.require_node(&name).is_err(),
+        "the removed node is gone from the registry"
+    );
+    let (code, _stdout, stderr) = env.run(&["node", "show", "mac-studio"]);
+    assert_eq!(code, 3, "a removed node is not found: {stderr}");
+    let (code, nodes, stderr) = env.run_json(&["node", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !nodes
+            .as_array()
+            .expect("node list")
+            .iter()
+            .any(|node| node["name"] == "mac-studio"),
+        "the removed node is absent from node ls: {nodes}"
+    );
+
+    // A removed node must not leave an enrollment code that can still be redeemed.
+    let (code, ghost, stderr) = env.run_json(&["node", "enroll", "ghost"]);
+    assert_eq!(code, 0, "ghost enrollment failed: {stderr}");
+    let ghost_code = ghost["code"].as_str().expect("ghost code").to_owned();
+    let (code, _stdout, stderr) = env.run_json(&["node", "rm", "ghost", "--yes"]);
+    assert_eq!(code, 0, "ghost removal failed: {stderr}");
+    assert!(
+        store
+            .consume_enrollment_code(&vowp_core::agent::hash_code(&ghost_code), now)
+            .expect("ghost code lookup")
+            .is_none(),
+        "node rm purges the node's stranded enrollment codes"
+    );
 }
 
 #[test]
@@ -815,6 +1055,232 @@ fn node_enroll_is_home_only() {
         !home.path().join(".vowp/vowp.db").exists(),
         "the control machine must not create a home database"
     );
+}
+
+/// One spawned `vowp agent run --foreground` process, killed if the test panics.
+struct AgentRunProcess(Child);
+
+impl Drop for AgentRunProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawns the real agent daemon with the fake transport and apps on its `PATH`.
+fn spawn_agent_run(agent_home: &Path, tools: &Path) -> AgentRunProcess {
+    let stderr = std::fs::File::create(agent_home.join("agent.err")).expect("agent stderr file");
+    let path = format!("{}:/usr/bin:/bin", tools.display());
+    let child = ProcessCommand::new(env!("CARGO_BIN_EXE_vowp"))
+        .args(["agent", "run", "--foreground"])
+        .env("HOME", agent_home)
+        .env("PATH", path)
+        .env("NO_COLOR", "1")
+        .env_remove("VOWP_AGENT_HOME")
+        .env_remove("VOWP_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("spawn agent run");
+    AgentRunProcess(child)
+}
+
+/// Waits until `vowp agent status --json` reports a connected agent.
+fn wait_for_connected_agent(agent_home: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last;
+    loop {
+        let (code, stdout, stderr) = run_binary(agent_home, &["--json", "agent", "status"]);
+        last = format!("exit {code}: {stdout} {stderr}");
+        if code == 0
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout)
+            && value["connection"] == "connected"
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let log = std::fs::read_to_string(agent_home.join("agent.err")).unwrap_or_default();
+            panic!("the agent did not connect: {last}; stderr: {log}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Writes one paired-surface session binding; the orchestrator attaches through it.
+fn write_agent_surface(state_dir: &Path, surface: &SurfaceId, session: &SessionId) {
+    let dir = AgentConfig::surface_dir(state_dir, surface);
+    std::fs::create_dir_all(&dir).expect("surface dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("surface mode");
+    let path = AgentConfig::surface_session_path(state_dir, surface);
+    std::fs::write(&path, session.as_str()).expect("surface session");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("session mode");
+}
+
+/// Writes the fake `opencode` app with executable mode.
+fn write_fake_opencode(tools: &Path, body: &str) -> PathBuf {
+    std::fs::create_dir_all(tools).expect("fake tools dir");
+    let path = tools.join("opencode");
+    std::fs::write(&path, body).expect("fake opencode");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod opencode");
+    path
+}
+
+#[test]
+fn opencode_stdout_readiness_reaches_running_and_a_failed_start_has_a_redacted_last_error() {
+    let gateway = GatewayHome::new(&["vowp"]);
+    let node = NodeName::parse("mac-studio").expect("node slug");
+    let project = ProjectName::parse("vowp").expect("project");
+    let agent_home = TempDir::new().expect("agent home");
+    let state_dir = agent_home.path().join(".vowp-agent");
+    let (_checkout, map) = checkout_map(agent_home.path(), "vowp-checkout", "vowp");
+    let key = NodeKey::generate(&state_dir).expect("node key");
+    enroll_node_with_public_key(&gateway, &node, &key.public_key_hex(), &project, vec![map.clone()]);
+    let config =
+        AgentConfig::new("home-1", node.clone(), state_dir.clone(), "home.example").with_path_maps(vec![map.clone()]);
+    config.write().expect("agent.json");
+    let surface = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned());
+    let session = SessionId::new();
+    write_agent_surface(&state_dir, &surface, &session);
+
+    let tools = agent_home.path().join("bin");
+    let _ssh = fake_gateway_ssh(&tools, gateway.home(), &agent_home.path().join("ssh.log"));
+    let success_app = "#!/bin/sh\n\
+        printf 'server listening on http://127.0.0.1:46321\\n'\n\
+        printf 'server password test-only-orchestrator-password\\n'\n\
+        sleep 5\n";
+    write_fake_opencode(&tools, success_app);
+    let _agent = spawn_agent_run(agent_home.path(), &tools);
+    wait_for_connected_agent(agent_home.path());
+
+    let root = gateway.root().display().to_string();
+    let start = |name: &str| {
+        let args = vec![
+            "--json".to_owned(),
+            "--home".to_owned(),
+            root.clone(),
+            "--project".to_owned(),
+            "vowp".to_owned(),
+            "orchestrator".to_owned(),
+            "new".to_owned(),
+            "--name".to_owned(),
+            name.to_owned(),
+            "--app".to_owned(),
+            "opencode".to_owned(),
+            "--node".to_owned(),
+            "mac-studio".to_owned(),
+            "--project".to_owned(),
+            "vowp".to_owned(),
+        ];
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_binary(gateway.home(), &refs)
+    };
+
+    let (code, stdout, stderr) = start("mac");
+    assert_eq!(code, 0, "the orchestrator did not start: {stdout} {stderr}");
+    let card: serde_json::Value = serde_json::from_str(&stdout).expect("orchestrator card JSON");
+    assert_eq!(card["state"], "running", "{card}");
+    assert_eq!(card["node"], "mac-studio");
+    assert!(
+        card["last_error"].is_null(),
+        "a running orchestrator has no last_error: {card}"
+    );
+
+    // The app only printed readiness; the agent materialized the private service file itself.
+    let service_path = state_dir.join("orchestrators/mac/.opencode/state/opencode/service.json");
+    assert!(
+        service_path.is_file(),
+        "stdout readiness must materialize {}",
+        service_path.display()
+    );
+    let mode = std::fs::metadata(&service_path)
+        .expect("service metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the materialized service.json is private");
+    let service: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&service_path).expect("service bytes")).expect("service JSON");
+    assert_eq!(service["url"], "http://127.0.0.1:46321");
+    assert_eq!(service["port"], 46321);
+
+    // A second start whose app exits before readiness forces a redacted failure card.
+    let secret = "FAKE-ORCHESTRATOR-SECRET";
+    let failure_app = format!(
+        "#!/bin/sh\n\
+         printf 'server password {secret} at /srv/owner/private\\n' >&2\n\
+         printf 'server listening on http://127.0.0.1:46322\\n'\n\
+         sleep 1\n\
+         exit 1\n"
+    );
+    write_fake_opencode(&tools, &failure_app);
+    let (code, _stdout, stderr) = start("broken");
+    assert_eq!(code, 5, "a failed local start is a refusal: {stderr}");
+    let (code, cards, stderr) = run_binary(
+        gateway.home(),
+        &[
+            "--json",
+            "--home",
+            root.as_str(),
+            "--project",
+            "vowp",
+            "orchestrator",
+            "ls",
+        ],
+    );
+    assert_eq!(code, 0, "orchestrator ls failed: {stderr}");
+    let cards: serde_json::Value = serde_json::from_str(&cards).expect("orchestrator list JSON");
+    let cards = cards.as_array().expect("orchestrator cards");
+    let broken = cards
+        .iter()
+        .find(|card| card["name"] == "broken")
+        .expect("the failed orchestrator record exists");
+    assert_eq!(broken["state"], "failed", "{broken}");
+    let last_error = broken["last_error"]
+        .as_str()
+        .expect("a failed orchestrator carries a non-null last_error");
+    assert!(!last_error.is_empty(), "last_error is empty: {broken}");
+    for forbidden in [
+        secret,
+        "/srv/owner/private",
+        map.local_root.as_str(),
+        state_dir.to_str().expect("utf-8 state dir"),
+        service_path.to_str().expect("utf-8 service path"),
+        "46322",
+        "127.0.0.1",
+    ] {
+        assert!(
+            !last_error.contains(forbidden),
+            "last_error leaked {forbidden:?}: {last_error}"
+        );
+        assert!(
+            !broken.to_string().contains(forbidden),
+            "the failed card leaked {forbidden:?}: {broken}"
+        );
+    }
+    let mac = cards
+        .iter()
+        .find(|card| card["name"] == "mac")
+        .expect("the running orchestrator record exists");
+    assert_eq!(mac["state"], "running", "{mac}");
+    assert!(mac["last_error"].is_null(), "{mac}");
+
+    // Stop the successful host so its fake app does not outlive the test.
+    let (code, _stdout, stderr) = run_binary(
+        gateway.home(),
+        &[
+            "--home",
+            root.as_str(),
+            "--project",
+            "vowp",
+            "orchestrator",
+            "stop",
+            "mac",
+        ],
+    );
+    assert_eq!(code, 0, "orchestrator stop failed: {stderr}");
 }
 
 /// Creates a temporary home with an active `mac-studio` node and one idle session.

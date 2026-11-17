@@ -175,7 +175,7 @@ auditable path: one outbound connection, one framed protocol, the same lease che
 - `vowp-core::agent` — home-side enrollment, connection registry, dispatch, offload policy, run
   fences and ingest. It depends on protocol and store.
 - `vowp-store` — new tables and store methods.
-- `vowp-cli` — `node enroll/revoke/show/paths`, `agent ...`, `offload ...` and the hidden
+- `vowp-cli` — `node enroll/revoke/rm/show`, `agent ...`, `offload ...` and the hidden
   `agent gateway`.
 - The supervisor hosts the agent socket and the connection registry, and reuses `IngestSession`
   for event appends.
@@ -220,13 +220,13 @@ No credential is ever put in argv, a URL, a log line, a snapshot or a session ev
 1. On the home, the owner runs:
 
    ```sh
-   vowp node enroll mac-studio --label darwin-arm64 --project vowp
+   vowp node enroll mac-studio --label darwin-arm64
    ```
 
-   The home creates a `pending` node and a one-time code (256 random bits, stored hashed, TTL
-   10 minutes, single use), then prints the code and the exact `vowp agent enroll` command. The
-   code is a secret; it is shown once. `--project` pre-authorizes a project on the node; the Mac
-   still supplies the local root in its path map.
+   The home creates a `pending` node and a one-time code (stored hashed, TTL 10 minutes, single
+   use), then prints the code and the exact `vowp agent enroll` command. The code is a secret; it
+   is shown once. The Mac supplies its project path map at enrollment or later with
+   `vowp agent paths add`; the home never chooses a local root.
 
 2. On the Mac:
 
@@ -250,8 +250,15 @@ No credential is ever put in argv, a URL, a log line, a snapshot or a session ev
    the owner's `node enroll` is the approval. The inbox path is for a node that self-requests
    enrollment (Phase 3).
 
-5. Re-enrollment needs a new code. Re-enrolling an active node with runs requires `--force` on the
-   home; the old credentials are revoked and the node's runs are fenced after the new key is bound.
+5. Re-enrollment needs a new code. An active node is revoked and removed first
+   (`vowp node revoke <name> --yes` then `vowp node rm <name> --yes`); its old credentials are
+   revoked and its runs are fenced by the revoke. `vowp node enroll <name> --replace` rotates a
+   `pending` node's one-time code in one transaction: the old pending code is refused immediately,
+   the node stays `pending`, and the new code is printed once. An `active` or `revoked` node is
+   refused (exit 4) so a live enrollment is never wiped; revoke it or run
+   `vowp node rm <name> --yes` first. `node rm`
+   never prompts, accepts `--yes` for scripts, removes the node row and purges its stranded
+   enrollment codes; an unknown node is exit 3.
 
 6. Revocation: `vowp node revoke <name>` sets `status=revoked`, revokes every credential, closes the
    connection, fences the node's runs and releases its leases. The agent receives `Revoked {
@@ -488,6 +495,12 @@ existing `__exec`/ingest loop with the agent as a persistent transport, and it a
 and MCP unknowns. It proves the lease, spool, replay and takeover behavior before the app bridge is
 added.
 
+`--session <id>` is equivalent to the positional id, and `--follow` and `--takeover` are refused
+in agent mode. When a home orchestrator uses the default `chat` app, the agent starts
+`vowp chat --agent <session>` with `VOWP_AGENT_HOME` pointing at its own state directory and keeps
+a piped stdin open for the life of the host, so the interactive process does not see immediate
+EOF. An early exit is `app_exited`; the orchestrator card carries the redacted reason.
+
 ### 5.6 Local context and privacy
 
 The app reads local files; the session log records what the app and its tools emit. The home stores
@@ -499,7 +512,8 @@ The phone cannot join the Mac's loopback app server. The phone continues through
 `vowp chat`; a tunnel from the phone to the Mac is out of scope.
 
 The app's local server binds `127.0.0.1` with its own password. The agent reads the local
-`service.json` (0600) for the port and password, and never logs them. The pair link is a secret.
+`service.json` (0600), or materializes it from the app's stdout readiness lines when the app
+prints them, and never logs the port or password. The pair link is a secret.
 
 ### 5.7 Orchestrators on a local node
 
@@ -522,6 +536,18 @@ vowp orchestrator new --name mac --app opencode --node mac-studio --project vowp
   home cannot see the Mac's local files; call `session_resume` if the tool is available; ask before
   public actions; never read a secret. It does not tell the app to open a tunnel; the agent is the
   transport.
+- opencode readiness is either the app's own `service.json` (0600) or its stdout. On macOS,
+  `opencode serve` may print `server listening on http://127.0.0.1:<port>` and
+  `server password <secret>` instead of pre-writing the file; the agent parses those lines and
+  materializes a private 0600 `service.json` in the app's state tree. The app never needs a
+  pre-written file. The file must still carry a non-empty password and a loopback URL or port; the
+  port and password stay private and never enter a card, result, log or `host.json`.
+- A default app binary is resolved on `PATH` before spawning. A missing default `opencode`,
+  `claude` or `vowp` is `capability_missing` and starts no process; a custom command or an
+  absolute path keeps the existing `spawn_failed` behavior.
+- `OrchestratorCard.last_error` is the redacted failure detail. It is set only for `failed`,
+  `degraded` and `node_offline` records, is `null` for `starting`, `running` and `stopped`, and
+  `resume`/`stop` clear it. It never carries a port, password, secret value or absolute local path.
 - If the home restarts while a local orchestrator was `running`, `resume_all` marks it `degraded`
   and the home resumes it when the node reconnects. A `stopped` orchestrator stays stopped.
 
@@ -554,27 +580,16 @@ absolute paths in the snapshot.
 
 ### 6.2 Enrollment and path mapping
 
-The initial path map comes from `~/.vowp-agent/paths.toml` at enrollment; the owner can edit it or
-use `vowp agent paths set`.
+The path map is persisted in the agent's 0600 `agent.json` as `path_maps`. The owner adds,
+updates and removes entries with `vowp agent paths add|rm` and reads them with `vowp agent paths
+ls` or `vowp agent status`. `vowp agent enroll --project <PATH>` supplies the initial entries;
+without `--project`, enrollment reuses the saved map.
 
-```toml
-[agent]
-home = "vowp-home"            # the home's node name
-node = "mac-studio"
-state_dir = "~/.vowp-agent"
-roles = ["surface", "executor"]
-
-[agent.transport]
-kind = "ssh"
-target = "<home-ssh-target>"
-
-[agent.paths.vowp]
-root = "/Users/owner/src/vowp"
-worktrees = "/Users/owner/src/vowp/.vowp/worktrees"
-
-[agent.paths.docs]
-root = "/Users/owner/src/vowp-docs"
-worktrees = "/Users/owner/src/vowp-docs/.vowp/worktrees"
+```sh
+vowp agent paths add --project ~/src/vowp --name vowp --allow src
+vowp agent paths add --project ~/src/vowp-docs --name docs
+vowp agent paths ls --json
+vowp agent paths rm docs
 ```
 
 Validation on the agent and on the home:
@@ -590,9 +605,14 @@ Validation on the agent and on the home:
 - the home stores the last reported absolute map in `node_paths` for the owner, but `vowp node
   show` redacts it from the default output and from the snapshot/API.
 
-Path changes are initiated on the Mac, because only the Mac knows its filesystem. `vowp agent paths
-set` sends `PathMapUpdate`; the home updates `node_paths`; jobs waiting on `path_unmapped` become
-eligible on the next tick. The home never edits the Mac's paths.
+Path changes are initiated on the Mac, because only the Mac knows its filesystem. A running agent
+reloads `agent.json` on every heartbeat and sends one `PathMapUpdate` for each added or changed
+project over its live connection. The home validates and persists the `node_paths` row before it
+answers `Pong`; a bad map is answered with `Error` and the connection stays open. Jobs waiting on
+`path_unmapped` become eligible on the next tick. `vowp node show <node> --json` shows the new
+project name in `mapped` immediately, without re-enrollment or a reconnect; the redacted card
+never carries the reported absolute roots. A removal changes only local eligibility because the
+frame vocabulary has no removal message. The home never edits the Mac's paths.
 
 A missing local root reports `path_missing`; pinned jobs wait, `any` jobs may use another eligible
 node or the home. The owner fixes the path and the node becomes eligible again.
@@ -864,6 +884,16 @@ differs.
 - Heartbeat every 10 seconds. The home sends `Ping`; the agent answers `Pong`; no pong for 30
   seconds closes the connection. The agent reconnects with exponential backoff (1, 2, 4 … 60
   seconds, with jitter) and resets after 60 seconds of a stable connection.
+- Each agent heartbeat also reloads `agent.json` and sends a `PathMapUpdate` for every project
+  added or changed since the last report. The home validates the map, persists it and answers
+  `Pong`; an invalid map gets `Error` without closing the authenticated session. A home that
+  predates the frame answers `Error`; the agent disables further updates for that run instead of
+  reconnecting in a loop.
+- A post-handshake `Error` from the home is a connection failure, not a terminal node event: the
+  agent records a redacted reason, keeps its spool and reconnects. `Revoked` and `Superseded`
+  remain terminal. An unexpected but known frame after the handshake is logged and ignored; the
+  gateway never ends an authenticated session just because a newer agent sent a frame it does not
+  use.
 - Home restart closes the socket; the agent reconnects and reconciles with `Resume`.
 
 ### 8.3 Frames
@@ -888,8 +918,8 @@ Agent → home:
 | `SurfaceTurn` | `started`/`ended` control frame for an attached turn |
 | `ToolCall` | an MCP tool call from a local client |
 | `LeaseAcquire` / `LeaseTakeover` / `LeaseHeartbeat` / `LeaseRelease` | lease operations |
-| `PathMapUpdate` | a project's local root/worktree root changed |
-| `Pong` | heartbeat reply |
+| `PathMapUpdate` | a project's local root/worktree root changed; the home persists it and answers `Pong` |
+| `Pong` | heartbeat reply, and the path-map update acknowledgement |
 
 Home → agent:
 
@@ -1024,7 +1054,11 @@ MVP, TLS under WSS), the frame is never logged, and the agent writes it 0600 and
 
 - `vowp agent status` shows connection, node, home, protocol, pending events, runs, spool bytes,
   path maps, surface token expiry (not values) and the last error.
-- `vowp node show` and `vowp fleet status` show presence, runs, capacity and waiting reasons.
+- `vowp node show` and `vowp fleet status` show presence, runs, capacity and waiting reasons;
+  `node show` shows project names in `mapped` and never the absolute path map.
+- `OrchestratorCard.last_error` shows a redacted failure reason for a `failed`, `degraded` or
+  `node_offline` local orchestrator and is `null` while it is starting, running or stopped. It
+  never contains a port, password, secret value or absolute local path.
 - The local app receives MCP tool errors with a clear message. The bridge cannot force another
   vendor's UI to display a banner; the `AGENTS.md`, the MCP responses and the agent status carry
   the notice. This is the same limitation as the v0.2 takeover notice.
@@ -1359,10 +1393,10 @@ pending counts; it does not offer a queryable session history.
 
 | Command | Purpose |
 |---|---|
-| `vowp node enroll <name> [--label <l>]... [--project <p>]... [--require-approval]` | create a pending node and a one-time code |
+| `vowp node enroll <name> [--label <l>]... [--replace]` | create a pending node and a one-time code; `--replace` rotates a pending node's code |
+| `vowp node rm <name> [--yes]` | remove a node and purge its stranded enrollment codes |
 | `vowp node revoke <name> [--yes]` | revoke credentials, close, fence runs |
-| `vowp node show <name> [--json]` | presence, capacity, paths, runs, last error |
-| `vowp node paths <name> [--json]` | the last reported path map |
+| `vowp node show <name> [--json]` | presence, capacity, mapped project names, runs, last error |
 | `vowp surface pair --session <id> --node <name> --kind opencode [--app <app>]` | one-time surface code |
 | `vowp surface ls [--node <name>] [--json]` | surfaces, scopes, expiry |
 | `vowp surface rotate <id>` / `vowp surface revoke <id>` | token lifecycle |
@@ -1372,8 +1406,9 @@ pending counts; it does not offer a queryable session history.
 | `vowp fleet status` | human output adds a node summary and waiting reasons; `--json` stays the v0.2 snapshot in the MVP |
 | `vowp doctor` | checks the agent socket, gateway, credentials, path maps, token expiry, spool |
 
-`node show --json` may contain local paths; it is owner-only. The snapshot and the daemon never
-include them.
+`node show --json` is a redacted `NodeCard`: it names mapped projects but never carries a local
+root, worktree root, secret name or path map. The full map stays owner-only in `node_paths` and in
+the agent's `agent.json`; the snapshot and the daemon never include it.
 
 `vowp node ls --json` and the MCP `node_status` tool are the machine-readable node model in the
 MVP. The snapshot stays `vowp-snapshot/1`; adding a `nodes` array is a separate schema version and
@@ -1383,19 +1418,20 @@ is not required for the local surface or offload.
 
 | Command | Purpose |
 |---|---|
-| `vowp agent enroll --target <ssh-target> --code-file <path> [--name <node>]` | enroll this Mac |
+| `vowp agent enroll [--target <ssh-target> \| --wss <URL>] --code-file <path\|-> [--project <PATH>]... [--worktree-root <PATH>]` | enroll this Mac |
 | `vowp agent run [--foreground] [--role <role>]` | the daemon; role is `surface`, `executor` or `both` |
 | `vowp agent status [--json]` | connection, spool, runs, paths, last error |
-| `vowp agent paths set <project> <local-root> [--worktree-root <path>]` | update the path map |
+| `vowp agent paths add --project <PATH> [--name <n>] [--worktree-root <path>] [--allow <rel>]...` | add or update one path-map entry |
+| `vowp agent paths rm <PROJECT>` | remove one path-map entry |
 | `vowp agent paths ls [--json]` | local path map |
-| `vowp agent pair --code-file <path>` | redeem a surface code |
-| `vowp agent surface start --app opencode --session <id> [--project <p>] [--port <p>]` | start the local app host |
-| `vowp agent surface attach --app opencode --session <id> [--port <p>] [--takeover] [--backfill]` | attach to a running app |
-| `vowp agent surface detach --session <id>` | detach and release the lease |
+| `vowp agent pair --code-file <path> --surface <id> --session <id> [--app <app>]` | redeem a surface code |
+| `vowp agent surface start --app opencode --session <id> [--project <p>] [--port <p>]` *(planned)* | start the local app host |
+| `vowp agent surface attach --app opencode --session <id> [--port <p>] [--takeover] [--backfill]` *(planned)* | attach to a running app |
+| `vowp agent surface detach --session <id>` *(planned)* | detach and release the lease |
 | `vowp agent doctor` | local checks |
 | `vowp chat --agent --session <id>` | local chat surface |
 | `vowp mcp --agent-socket <path> --surface <id>` | local MCP proxy |
-| `vowp agent service install` / `uninstall` | launchd, Phase 4 |
+| `vowp agent service install` / `uninstall` / `status` | launchd or systemd user unit |
 
 Both `--code-file` flags accept `-` for stdin, so a one-time code never appears in argv, `ps` or
 shell history.
@@ -1561,6 +1597,18 @@ Named tests, grouped by area:
 - `offload_fails_cleanly_when_the_push_fails`
 - `node_disk_low_and_battery_draining_stop_new_runs`
 - `node_provider_limit_does_not_park_home_jobs`
+
+**CLI, gateway and agent end to end**
+
+- `agent_paths_add_reaches_the_home_without_a_reconnect`
+- `node_enroll_replace_rotates_a_pending_code_and_node_rm_yes_removes_it`
+- `opencode_stdout_readiness_reaches_running_and_a_failed_start_has_a_redacted_last_error`
+
+The three named tests run in `crates/vowp-cli/tests/agent.rs` with a real `vowp agent gateway
+--stdio` process, a fake `ssh` script and a fake `opencode` script. The path-map test counts the
+fake `ssh` invocations and requires exactly one connection; the orchestrator test never writes a
+`service.json` before the start and asserts the agent materializes a 0600 file from the app's
+stdout before the home card shows `running`.
 
 **Disconnect and recovery**
 
