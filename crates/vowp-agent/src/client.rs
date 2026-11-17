@@ -1724,9 +1724,6 @@ impl AgentClient {
                 }
                 FrameRead::Closed => return ServeOutcome::Disconnected("connection closed".to_owned()),
                 FrameRead::Frame(frame) => {
-                    if self.awaiting_path_map_reply && !matches!(&frame, AgentFrame::Error { .. }) {
-                        self.awaiting_path_map_reply = false;
-                    }
                     match frame {
                         AgentFrame::Ping => {
                             if let Err(error) = self.send_frame(&AgentFrame::Pong) {
@@ -1815,16 +1812,21 @@ impl AgentClient {
                         AgentFrame::Error {
                             kind,
                             message,
-                            retryable,
+                            retryable: _,
                         } => {
-                            if self.awaiting_path_map_reply {
-                                // Older homes answer an unknown `PathMapUpdate` with `Error`
-                                // and close the connection. Keep the connection usable by
-                                // not sending more map updates; the next process retries.
+                            if self.awaiting_path_map_reply
+                                && (kind == ErrorKind::InvalidInput || message.contains("unexpected frame"))
+                            {
+                                // An older home answers an unknown `PathMapUpdate` with `Error`
+                                // and often closes the connection. Stop sending map updates for
+                                // this run and reconnect; never exit the process for this.
                                 self.awaiting_path_map_reply = false;
                                 self.path_map_updates = false;
                                 self.sent_path_maps = self.path_maps().to_vec();
-                                continue;
+                                return ServeOutcome::Disconnected(
+                                    "the home rejected a path map update; path-map updates are disabled for this run"
+                                        .to_owned(),
+                                );
                             }
                             if kind == ErrorKind::Refused
                                 && is_surface_token_refusal(&message)
@@ -1841,8 +1843,9 @@ impl AgentClient {
                                     Err(error) => return ServeOutcome::Failed(error),
                                 }
                             }
-                            let error = remote_error(kind, message, retryable);
-                            return disconnected_or_failed(error);
+                            // A home error after the handshake is not a terminal node event:
+                            // keep the spool and state, report a redacted reason and reconnect.
+                            return ServeOutcome::Disconnected(remote_disconnect_message(kind));
                         }
                         AgentFrame::OrchestratorCommand(command) => {
                             if let Err(error) = self.handle_orchestrator_command(command) {
@@ -2118,6 +2121,11 @@ fn remote_error(kind: ErrorKind, message: String, retryable: bool) -> AgentError
             retryable,
         }
     }
+}
+
+/// Returns the redacted `last_error` recorded for a post-handshake home error.
+fn remote_disconnect_message(kind: ErrorKind) -> String {
+    format!("the home returned an error ({kind:?}); the agent is reconnecting")
 }
 
 /// Returns whether a home refusal names a surface token rather than the node key.

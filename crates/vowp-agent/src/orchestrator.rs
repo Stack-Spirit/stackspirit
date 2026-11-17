@@ -13,13 +13,15 @@
 //! They are read when needed and never appear in a host state file, a result detail, an error
 //! or a log line.
 
+use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,6 +65,10 @@ pub const ORCHESTRATOR_POLL: Duration = Duration::from_millis(25);
 const SERVICE_INVALID_GRACE: Duration = Duration::from_millis(750);
 /// Time between SIGTERM and SIGKILL when a host is stopped.
 pub const ORCHESTRATOR_STOP_GRACE: Duration = Duration::from_secs(2);
+/// How long a `chat` or `claude` app must stay alive after spawn before it is considered up.
+const STARTUP_LIVENESS: Duration = Duration::from_millis(200);
+/// Longest stdout line retained while waiting for an app's listening URL.
+const STARTUP_LINE_MAX: usize = 4096;
 
 /// The local-surface `AGENTS.md` template written for every orchestrator app.
 ///
@@ -281,6 +287,12 @@ pub struct OrchestratorHost {
     startup: Duration,
     stop_grace: Duration,
     command_override: Option<AppCommand>,
+    /// Piped stdin handles for `chat` and `claude` hosts. Keeping the pipe open stops the
+    /// interactive app from seeing immediate EOF; dropping it on stop closes the app's input.
+    stdin_holds: Arc<Mutex<HashMap<String, ChildStdin>>>,
+    /// Optional PATH used to resolve a default app program. Tests point it at a private
+    /// directory so a fake `vowp` or `opencode` never touches the owner's real binaries.
+    path_lookup: Option<PathBuf>,
 }
 
 impl OrchestratorHost {
@@ -291,6 +303,8 @@ impl OrchestratorHost {
             startup: ORCHESTRATOR_START_TIMEOUT,
             stop_grace: ORCHESTRATOR_STOP_GRACE,
             command_override: None,
+            stdin_holds: Arc::new(Mutex::new(HashMap::new())),
+            path_lookup: None,
         }
     }
 
@@ -316,6 +330,15 @@ impl OrchestratorHost {
             program: program.into(),
             args,
         });
+        self
+    }
+
+    /// Resolves a default app program against `dir` instead of the process `PATH`.
+    ///
+    /// The app is also spawned with this `PATH`, so a test can place a fake `vowp` or
+    /// `opencode` script in a private directory and never start the owner's real binary.
+    pub fn with_path_lookup(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.path_lookup = Some(dir.into());
         self
     }
 
@@ -435,6 +458,7 @@ impl OrchestratorHost {
                 });
             }
             Ok(Some(_)) => {
+                self.release_stdin(&name);
                 let _ = fs::remove_file(Self::host_path(&self.state_dir, &name).unwrap_or_default());
             }
             Ok(None) => {}
@@ -444,12 +468,21 @@ impl OrchestratorHost {
         }
 
         let mut config = config;
+        if let Err(error) = self.check_default_capability(&config) {
+            return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
+        }
         let binding = match resolve_binding(&self.state_dir, &mut config) {
             Ok(binding) => binding,
             Err(error) => {
                 return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
             }
         };
+        // `vowp chat --agent` needs the session id it mirrors. An older local config may
+        // have been written before the argument existed, so the resolved binding supplies
+        // it again on every start.
+        if self.uses_default_chat_command(&config) {
+            config.args = vec!["chat".to_owned(), "--agent".to_owned(), binding.session.to_string()];
+        }
         if let Err(error) = self.write_config(&config) {
             return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
         }
@@ -470,14 +503,39 @@ impl OrchestratorHost {
         let startup = self.startup;
         let state_dir = self.state_dir.clone();
         let name = name.clone();
+        let capture_output = config.app == OrchestratorApp::Opencode || service_json.is_some();
 
-        let mut child = match spawn_app(&program, &args, &working_dir, &state_dir, &name, config.app) {
-            Ok(child) => child,
+        self.release_stdin(&name);
+        let spawned = match spawn_app(
+            &program,
+            &args,
+            &working_dir,
+            &state_dir,
+            &name,
+            config.app,
+            capture_output,
+            self.path_lookup.as_deref(),
+        ) {
+            Ok(spawned) => spawned,
             Err(error) => {
                 return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
             }
         };
+        let SpawnedApp {
+            mut child,
+            startup: mut capture,
+        } = spawned;
         let pid = child.id();
+        // `chat` and `claude` are interactive: a missing binary or an immediate exit is a
+        // failed start, not a host that silently reports `Starting` and then disappears.
+        if matches!(config.app, OrchestratorApp::Chat | OrchestratorApp::ClaudeCode)
+            && let Err(error) = wait_for_initial_liveness(&mut child, config.app, STARTUP_LIVENESS)
+        {
+            stop_process(pid, Duration::from_millis(0));
+            let _ = child.wait();
+            let _ = fs::remove_file(Self::host_path(&state_dir, &name).unwrap_or_default());
+            return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
+        }
         let started_at = Timestamp::now();
         let starting = OrchestratorHostState {
             name: name.clone(),
@@ -507,13 +565,17 @@ impl OrchestratorHost {
                     config_error("the opencode host has no local service.json path"),
                 ));
             };
-            if let Err(error) = wait_for_service(service_json, pid, startup) {
+            if let Err(error) = wait_for_service(service_json, &mut child, startup, capture.as_ref()) {
                 stop_process(pid, Duration::from_millis(0));
                 let _ = child.wait();
                 let _ = fs::remove_file(Self::host_path(&state_dir, &name).unwrap_or_default());
                 return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
             }
         }
+        // The app may have printed its readiness before this point; keep the pipe reader
+        // draining but stop parsing now that startup is over.
+        drop(capture.take());
+        self.hold_stdin(&name, child.stdin.take());
 
         // Reap the child so a crashed app does not leave a zombie; the pid file and the
         // process-group signal are the authorities after this point.
@@ -618,6 +680,7 @@ impl OrchestratorHost {
                 );
             }
         }
+        self.release_stdin(&name);
         let _ = fs::remove_file(Self::host_path(&self.state_dir, &name).unwrap_or_default());
         let mut result = OrchestratorResult::accepted(&request_id, OrchestratorNodeState::Stopped);
         result.detail = Some(if detach_failed {
@@ -683,6 +746,7 @@ impl OrchestratorHost {
             {
                 stop_process(pid, self.stop_grace);
             }
+            self.release_stdin(&state.name);
             let _ = fs::remove_file(Self::host_path(&self.state_dir, &state.name).unwrap_or_default());
         }
     }
@@ -721,6 +785,10 @@ impl OrchestratorHost {
     /// `clean` removes the orchestrator directories (node revoke); otherwise the private
     /// config stays so a later `Resume` can start the app again (agent exit).
     pub fn stop_all(&self, clean: bool) {
+        self.stdin_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         let Ok(entries) = fs::read_dir(Self::root(&self.state_dir)) else {
             return;
         };
@@ -913,6 +981,68 @@ impl OrchestratorHost {
         }
     }
 
+    /// Returns whether `config` still names the built-in `vowp chat --agent` command.
+    fn uses_default_chat_command(&self, config: &OrchestratorConfig) -> bool {
+        let overridden = self
+            .command_override
+            .as_ref()
+            .is_some_and(|command| command.app == config.app);
+        !overridden && config.app == OrchestratorApp::Chat && config.command.as_deref() == Some("vowp")
+    }
+
+    /// Refuses a default app program that is not installed before a process is spawned.
+    ///
+    /// The check resolves a bare program name on `PATH`; it never runs `<program> --version`,
+    /// so a test or a fake app script is never started just to probe it. A custom command and
+    /// an absolute path keep the existing `spawn_failed` behavior.
+    fn check_default_capability(&self, config: &OrchestratorConfig) -> Result<(), OrchestratorError> {
+        if self
+            .command_override
+            .as_ref()
+            .is_some_and(|command| command.app == config.app)
+        {
+            return Ok(());
+        }
+        let Some(program) = config.command.as_deref() else {
+            return Ok(());
+        };
+        if program.contains('/') {
+            return Ok(());
+        }
+        let (default_program, _) = self.default_command(config.app);
+        if program != default_program {
+            return Ok(());
+        }
+        if resolve_program(program, self.path_lookup.as_deref()).is_some() {
+            return Ok(());
+        }
+        Err(OrchestratorError::new(
+            "capability_missing",
+            format!("the local {program} binary is not installed or not on PATH"),
+            false,
+        ))
+    }
+
+    /// Keeps a piped stdin handle open for one interactive app host.
+    fn hold_stdin(&self, name: &str, stdin: Option<ChildStdin>) {
+        let mut holds = self
+            .stdin_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        holds.remove(name);
+        if let Some(stdin) = stdin {
+            holds.insert(name.to_owned(), stdin);
+        }
+    }
+
+    /// Drops the piped stdin handle that kept one interactive app host alive.
+    fn release_stdin(&self, name: &str) {
+        self.stdin_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(name);
+    }
+
     /// Stops or degrades a prepared host after a failed attach or app-file refresh.
     fn fail_prepared(&self, prepared: &PreparedHost, error: OrchestratorError) -> OrchestratorResult {
         if prepared.state == OrchestratorNodeState::Starting {
@@ -939,6 +1069,7 @@ impl OrchestratorHost {
         {
             stop_process(pid, self.stop_grace);
         }
+        self.release_stdin(name);
         let _ = fs::remove_file(Self::host_path(&self.state_dir, name).unwrap_or_default());
     }
 
@@ -1064,6 +1195,49 @@ fn binding_from(session: Option<SessionId>, surface: Option<SurfaceId>) -> Resul
     }
 }
 
+/// Resolves a bare program name on `path`, or the process `PATH` when none is given.
+fn resolve_program(program: &str, path: Option<&Path>) -> Option<PathBuf> {
+    if program.contains('/') {
+        let path = Path::new(program);
+        return is_executable_file(path).then(|| path.to_path_buf());
+    }
+    let path = path
+        .map(|dir| dir.as_os_str().to_owned())
+        .or_else(|| std::env::var_os("PATH"))?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+/// A freshly spawned app and its optional startup-output reader.
+struct SpawnedApp {
+    child: Child,
+    startup: Option<StartupCapture>,
+}
+
+/// One readiness event printed by an app before it accepts requests.
+enum StartupEvent {
+    Listening(String),
+    Password(String),
+}
+
+/// The bounded, in-memory view of an app's startup output.
+struct StartupCapture {
+    events: mpsc::Receiver<StartupEvent>,
+    active: Arc<AtomicBool>,
+}
+
+impl Drop for StartupCapture {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_app(
     program: &str,
     args: &[String],
@@ -1071,7 +1245,9 @@ fn spawn_app(
     state_dir: &Path,
     name: &str,
     app: OrchestratorApp,
-) -> Result<Child, OrchestratorError> {
+    capture_output: bool,
+    path_lookup: Option<&Path>,
+) -> Result<SpawnedApp, OrchestratorError> {
     if program.is_empty() || program.contains('\0') || program.chars().any(char::is_control) {
         return Err(import_error("config_invalid", "the local app command is not usable"));
     }
@@ -1087,6 +1263,7 @@ fn spawn_app(
         ensure_private_dir(&xdg.join(leaf))
             .map_err(|_| config_error("the private app directory could not be created"))?;
     }
+    let interactive = matches!(app, OrchestratorApp::Chat | OrchestratorApp::ClaudeCode);
     let mut command = Command::new(program);
     command
         .args(args)
@@ -1096,35 +1273,166 @@ fn spawn_app(
         .env("XDG_STATE_HOME", xdg.join("state"))
         .env("XDG_CACHE_HOME", xdg.join("cache"))
         .env("VOWP_ORCHESTRATOR_APP", app_name(app))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdin(if interactive { Stdio::piped() } else { Stdio::null() })
+        .stdout(if capture_output { Stdio::piped() } else { Stdio::null() })
+        .stderr(if capture_output { Stdio::piped() } else { Stdio::null() })
         .process_group(0);
     if app == OrchestratorApp::Opencode {
         // opencode reads its global `opencode.json` and `AGENTS.md` from this directory. The
         // app's working directory stays the project checkout, which is never written to.
         command.env(ORCHESTRATOR_CONFIG_DIR_ENV, &dir);
     }
-    command
+    if app == OrchestratorApp::Chat {
+        // `vowp chat --agent` must use the same agent state as the host that started it.
+        command.env("VOWP_AGENT_HOME", state_dir);
+    }
+    if let Some(path) = path_lookup
+        && !program.contains('/')
+    {
+        command.env("PATH", path);
+    }
+    let mut child = command
         .spawn()
-        .map_err(|_| OrchestratorError::new("spawn_failed", "the app command could not be started", true))
-}
-
-fn wait_for_service(path: &Path, pid: u32, timeout: Duration) -> Result<(), OrchestratorError> {
-    let deadline = Instant::now() + timeout;
-    let mut invalid_since: Option<Instant> = None;
-    loop {
-        if !process_alive(pid) {
+        .map_err(|_| OrchestratorError::new("spawn_failed", "the app command could not be started", true))?;
+    let startup = if capture_output {
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let (sender, events) = mpsc::channel();
+        let active = Arc::new(AtomicBool::new(true));
+        let mut readers_ok = true;
+        if let Some(stdout) = stdout {
+            let sender = sender.clone();
+            let active = Arc::clone(&active);
+            let thread = thread::Builder::new()
+                .name(format!("vowp-orchestrator-stdout-{name}"))
+                .spawn(move || read_startup_stdout(stdout, sender, active));
+            readers_ok &= thread.is_ok();
+        }
+        if let Some(stderr) = stderr {
+            let thread = thread::Builder::new()
+                .name(format!("vowp-orchestrator-stderr-{name}"))
+                .spawn(move || drain_output(stderr));
+            readers_ok &= thread.is_ok();
+        }
+        drop(sender);
+        if !readers_ok {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(OrchestratorError::new(
-                "app_exited",
-                "the app exited before it wrote service.json",
+                "spawn_failed",
+                "the app output could not be read",
                 true,
             ));
+        }
+        Some(StartupCapture { events, active })
+    } else {
+        None
+    };
+    Ok(SpawnedApp { child, startup })
+}
+
+/// Reads bounded stdout lines until EOF and reports only startup readiness.
+fn read_startup_stdout(mut reader: impl Read, sender: mpsc::Sender<StartupEvent>, active: Arc<AtomicBool>) {
+    let mut line = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => return,
+        };
+        for byte in &chunk[..read] {
+            if *byte == b'\n' {
+                report_startup_line(&line, &sender, &active);
+                line.clear();
+            } else if line.len() < STARTUP_LINE_MAX {
+                line.push(*byte);
+            }
+        }
+    }
+    if !line.is_empty() {
+        report_startup_line(&line, &sender, &active);
+    }
+}
+
+fn report_startup_line(line: &[u8], sender: &mpsc::Sender<StartupEvent>, active: &AtomicBool) {
+    if !active.load(Ordering::Relaxed) {
+        return;
+    }
+    let text = String::from_utf8_lossy(line);
+    if let Some(url) = parse_listening_line(&text) {
+        let _ = sender.send(StartupEvent::Listening(url));
+    } else if let Some(password) = parse_password_line(&text) {
+        let _ = sender.send(StartupEvent::Password(password));
+    }
+}
+
+/// Drains a pipe so the child never blocks on a full OS buffer.
+fn drain_output(mut reader: impl Read) {
+    let mut chunk = [0u8; 4096];
+    while reader.read(&mut chunk).is_ok_and(|read| read > 0) {}
+}
+
+fn parse_listening_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    let rest = line
+        .strip_prefix("server listening on ")
+        .or_else(|| line.strip_prefix("listening on "))?;
+    let url = rest.split_whitespace().next()?;
+    is_loopback_url(url).then(|| url.to_owned())
+}
+
+fn parse_password_line(line: &str) -> Option<String> {
+    let secret = line.trim().strip_prefix("server password ")?.trim();
+    (!secret.is_empty() && secret.len() <= STARTUP_LINE_MAX).then(|| secret.to_owned())
+}
+
+/// Returns whether `url` is a loopback HTTP URL with a usable non-zero port.
+fn is_loopback_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let Some((host, port)) = rest.rsplit_once(':') else {
+        return false;
+    };
+    matches!(host, "127.0.0.1" | "localhost") && port.trim_end_matches('/').parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+/// Waits for an app-written `service.json` or an app-printed loopback URL.
+fn wait_for_service(
+    path: &Path,
+    child: &mut Child,
+    timeout: Duration,
+    capture: Option<&StartupCapture>,
+) -> Result<(), OrchestratorError> {
+    let pid = child.id();
+    let deadline = Instant::now() + timeout;
+    let mut invalid_since: Option<Instant> = None;
+    let mut url: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut materialized: Option<(String, Option<String>)> = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return Err(OrchestratorError::new(
+                    "app_exited",
+                    "the app exited before it became healthy",
+                    true,
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Err(OrchestratorError::new(
+                    "app_exited",
+                    "the app exit status could not be read",
+                    true,
+                ));
+            }
         }
         match read_service(path) {
             Ok(()) => return Ok(()),
             Err(error) if error.code == "service_missing" => invalid_since = None,
-            Err(error) if error.code == "config_invalid" => {
+            Err(error) if error.code == "config_invalid" && materialized.is_none() => {
                 // The app may be writing the file while it is read. Retry a short window
                 // before treating genuinely malformed content as a failed start.
                 let started = *invalid_since.get_or_insert_with(Instant::now);
@@ -1132,7 +1440,28 @@ fn wait_for_service(path: &Path, pid: u32, timeout: Duration) -> Result<(), Orch
                     return Err(error);
                 }
             }
+            // A file materialized from stdout is rewritten once the password line arrives;
+            // its temporary missing password is not an app failure.
+            Err(_) if materialized.is_some() => {}
             Err(error) => return Err(error),
+        }
+        if let Some(capture) = capture {
+            while let Ok(event) = capture.events.try_recv() {
+                match event {
+                    StartupEvent::Listening(found) => url = Some(found),
+                    StartupEvent::Password(secret) => password = Some(secret),
+                }
+            }
+            if let Some(found) = url.as_deref() {
+                let key = (found.to_owned(), password.clone());
+                if materialized.as_ref() != Some(&key) {
+                    materialize_service(path, found, password.as_deref(), pid)?;
+                    materialized = Some(key);
+                }
+                if read_service(path).is_ok() {
+                    return Ok(());
+                }
+            }
         }
         if Instant::now() >= deadline {
             return Err(OrchestratorError::new(
@@ -1142,6 +1471,54 @@ fn wait_for_service(path: &Path, pid: u32, timeout: Duration) -> Result<(), Orch
             ));
         }
         thread::sleep(ORCHESTRATOR_POLL);
+    }
+}
+
+/// Writes the private `service.json` an app only printed on stdout.
+fn materialize_service(path: &Path, url: &str, password: Option<&str>, pid: u32) -> Result<(), OrchestratorError> {
+    let port = url_port(url).ok_or_else(|| config_error("the app printed no usable loopback port"))?;
+    let mut value = serde_json::Map::new();
+    value.insert("version".to_owned(), serde_json::Value::String("stdout".to_owned()));
+    value.insert("url".to_owned(), serde_json::Value::String(url.to_owned()));
+    value.insert("port".to_owned(), serde_json::Value::from(port));
+    value.insert("pid".to_owned(), serde_json::Value::from(pid));
+    if let Some(password) = password {
+        value.insert("password".to_owned(), serde_json::Value::String(password.to_owned()));
+    }
+    let bytes = serde_json::to_vec_pretty(&serde_json::Value::Object(value))
+        .map_err(|_| config_error("the app service state could not be encoded"))?;
+    write_atomic_private(path, &bytes).map_err(|_| config_error("the app service state could not be written"))
+}
+
+/// Fails a `chat` or `claude` start when the process exits during its first moments.
+fn wait_for_initial_liveness(
+    child: &mut Child,
+    app: OrchestratorApp,
+    window: Duration,
+) -> Result<(), OrchestratorError> {
+    let deadline = Instant::now() + window;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return Err(OrchestratorError::new(
+                    "app_exited",
+                    format!("the {} app exited during startup", app_name(app)),
+                    false,
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Err(OrchestratorError::new(
+                    "app_exited",
+                    format!("the {} app exited during startup", app_name(app)),
+                    false,
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 

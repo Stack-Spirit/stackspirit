@@ -545,6 +545,270 @@ fn orchestrator_bad_service_json_is_typed_and_leaves_no_host() {
 }
 
 #[test]
+fn orchestrator_macos_stdout_readiness_materializes_0600_service_json() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = format!("topsecret-macos-{}", "P".repeat(20));
+    let script = root.path().join("macos-opencode.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\n\
+         printf 'server listening on http://127.0.0.1:43123\\n'\n\
+         printf 'server password topsecret-macos-%s\\n' \"PPPPPPPPPPPPPPPPPPPP\"\n\
+         while :; do sleep 0.05; done\n",
+    )
+    .expect("stdout app");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_secs(5))
+        .with_stop_grace(Duration::from_millis(300))
+        .with_app_command(OrchestratorApp::Opencode, script.display().to_string(), Vec::new());
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("macos-stdout", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+    assert_eq!(result.state, OrchestratorNodeState::Running);
+
+    let config = host
+        .config("macos-stdout")
+        .expect("config")
+        .expect("materialized config");
+    let service_path = PathBuf::from(config.service_json.expect("service.json path"));
+    assert!(service_path.is_file(), "stdout readiness writes service.json");
+    assert_private_file(&service_path);
+    let service: serde_json::Value =
+        serde_json::from_slice(&fs::read(&service_path).expect("service bytes")).expect("service json");
+    assert_eq!(service["url"], "http://127.0.0.1:43123");
+    assert_eq!(service["port"], 43123);
+    assert_eq!(service["password"], password.as_str());
+
+    let dir = OrchestratorHost::dir(&state, "macos-stdout").expect("dir");
+    let host_state =
+        fs::read_to_string(OrchestratorHost::host_path(&state, "macos-stdout").expect("path")).expect("host state");
+    let record = fs::read_to_string(dir.join("orchestrator.json")).expect("record");
+    for text in [
+        serde_json::to_string(&result).expect("result json"),
+        format!("{result:?}"),
+        host_state,
+        record,
+    ] {
+        assert!(!text.contains(&password), "{text}");
+        assert!(!text.contains("43123"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        assert!(!text.contains(&state.display().to_string()), "{text}");
+    }
+
+    host.stop(&stop_command("macos-stdout"), &mut link);
+}
+
+#[test]
+fn orchestrator_app_exits_before_ready_is_typed() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let script = root.path().join("exit-before-ready.sh");
+    fs::write(&script, "#!/bin/sh\nexit 7\n").expect("exit app");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_secs(2))
+        .with_app_command(OrchestratorApp::Opencode, script.display().to_string(), Vec::new());
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("exit-early", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(!result.accepted, "{result:?}");
+    assert_eq!(result.state, OrchestratorNodeState::Failed);
+    assert_eq!(result.error.expect("error").code, "app_exited");
+    assert!(host.state("exit-early").expect("state").is_none());
+    assert!(link.attached.is_empty());
+}
+
+#[test]
+fn orchestrator_service_timeout_is_typed() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let script = root.path().join("silent-app.sh");
+    fs::write(&script, "#!/bin/sh\nwhile :; do sleep 0.05; done\n").expect("silent app");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_millis(200))
+        .with_app_command(OrchestratorApp::Opencode, script.display().to_string(), Vec::new());
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("timeout", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(!result.accepted, "{result:?}");
+    assert_eq!(result.state, OrchestratorNodeState::Failed);
+    assert_eq!(result.error.expect("error").code, "service_timeout");
+    assert!(host.state("timeout").expect("state").is_none());
+}
+
+#[test]
+fn orchestrator_missing_default_binary_is_capability_missing() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let empty = root.path().join("empty-bin");
+    fs::create_dir_all(&empty).expect("empty bin");
+    let host = OrchestratorHost::new(&state).with_path_lookup(&empty);
+
+    let outcome = host.prepare_start(&start_command("no-opencode", OrchestratorApp::Opencode), Some(&working));
+    match outcome {
+        vowp_agent::PrepareOutcome::Failed(result) => {
+            assert_eq!(result.state, OrchestratorNodeState::Failed);
+            let error = result.error.expect("error");
+            assert_eq!(error.code, "capability_missing");
+            assert!(error.message.contains("opencode"), "{}", error.message);
+            assert!(
+                !error.message.contains(&empty.display().to_string()),
+                "{}",
+                error.message
+            );
+        }
+        other => panic!("expected capability_missing, got {other:?}"),
+    }
+    assert!(host.state("no-opencode").expect("state").is_none());
+}
+
+#[test]
+fn orchestrator_chat_default_command_carries_the_session_and_holds_stdin() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).expect("bin dir");
+    let record = root.path().join("chat-record");
+    let script = bin.join("vowp");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" > \"{}.args\"\n\
+             printf '%s\\n' \"${{VOWP_AGENT_HOME:-}}\" > \"{}.home\"\n\
+             while read line; do :; done\n",
+            record.display(),
+            record.display()
+        ),
+    )
+    .expect("fake vowp");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_secs(2))
+        .with_stop_grace(Duration::from_millis(300))
+        .with_path_lookup(&bin);
+    let mut link = RecordingLink::default();
+    let command = OrchestratorCommand::Start {
+        request_id: "req-start-chat".to_owned(),
+        name: "chat".to_owned(),
+        app: OrchestratorApp::Chat,
+        project: None,
+    };
+
+    let result = host.start(&command, None, &mut link);
+    assert!(result.accepted, "{result:?}");
+    assert_eq!(result.state, OrchestratorNodeState::Running);
+    let config = host.config("chat").expect("config").expect("chat config");
+    assert_eq!(
+        config.args,
+        vec!["chat".to_owned(), "--agent".to_owned(), SESSION.to_owned()]
+    );
+    let args = fs::read_to_string(format!("{}.args", record.display())).expect("args");
+    assert_eq!(args.trim(), format!("chat --agent {SESSION}"));
+    let home = fs::read_to_string(format!("{}.home", record.display())).expect("home");
+    assert_eq!(
+        home.trim(),
+        state.display().to_string(),
+        "vowp chat must use the agent state that started it"
+    );
+    let pid = host.state("chat").expect("state").expect("running").pid.expect("pid");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        process_alive(pid),
+        "the piped stdin handle must keep `vowp chat` alive past EOF"
+    );
+
+    host.stop(&stop_command("chat"), &mut link);
+    wait_until(|| !process_alive(pid));
+}
+
+#[test]
+fn orchestrator_claude_holds_stdin_and_reports_an_early_exit() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let record = root.path().join("claude-record");
+    let script = root.path().join("fake-claude.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             printf 'started\\n' > \"{}.started\"\n\
+             while read line; do :; done\n",
+            record.display()
+        ),
+    )
+    .expect("fake claude");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_secs(2))
+        .with_stop_grace(Duration::from_millis(300))
+        .with_app_command(OrchestratorApp::ClaudeCode, script.display().to_string(), Vec::new());
+    let mut link = RecordingLink::default();
+    let command = OrchestratorCommand::Start {
+        request_id: "req-start-claude".to_owned(),
+        name: "claude".to_owned(),
+        app: OrchestratorApp::ClaudeCode,
+        project: None,
+    };
+
+    let result = host.start(&command, None, &mut link);
+    assert!(result.accepted, "{result:?}");
+    let pid = host.state("claude").expect("state").expect("running").pid.expect("pid");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(process_alive(pid), "claude keeps a piped stdin handle");
+    host.stop(&stop_command("claude"), &mut link);
+    wait_until(|| !process_alive(pid));
+
+    let early = root.path().join("claude-exits.sh");
+    fs::write(&early, "#!/bin/sh\nexit 3\n").expect("early claude");
+    fs::set_permissions(&early, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let host = OrchestratorHost::new(&state).with_app_command(
+        OrchestratorApp::ClaudeCode,
+        early.display().to_string(),
+        Vec::new(),
+    );
+    let result = host.start(
+        &OrchestratorCommand::Start {
+            request_id: "req-start-claude-early".to_owned(),
+            name: "claude-early".to_owned(),
+            app: OrchestratorApp::ClaudeCode,
+            project: None,
+        },
+        None,
+        &mut link,
+    );
+    assert!(!result.accepted, "{result:?}");
+    assert_eq!(result.error.expect("error").code, "app_exited");
+    assert!(host.state("claude-early").expect("state").is_none());
+}
+
+#[test]
 fn orchestrator_never_logs_the_port_password_or_absolute_path() {
     let root = tempfile::tempdir().expect("temp dir");
     let state = agent_state(root.path());

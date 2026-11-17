@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,10 +18,11 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::server::{Request as ServerRequest, Response as ServerResponse};
 use tungstenite::protocol::Message;
 use vowp_agent::{
-    AgentClient, AgentClock, AgentConfig, AgentError, FrameRead, FrameStream, NodeKey, Transport, TransportConfig,
-    WssIngress, WssListener, WssTls, WssTlsMode, WssTransport, certificate_fingerprint, handshake_payload,
+    AgentClient, AgentClock, AgentConfig, AgentError, FrameRead, FrameStream, NodeKey, RunOptions, RunOutcome,
+    Transport, TransportConfig, WssIngress, WssListener, WssTls, WssTlsMode, WssTransport, certificate_fingerprint,
+    handshake_payload,
 };
-use vowp_protocol::{AGENT_PROTOCOL, AgentFrame, NodeName, Timestamp};
+use vowp_protocol::{AGENT_PROTOCOL, AgentFrame, AgentPathMap, AgentRole, NodeName, ProjectName, Timestamp};
 
 const HEARTBEAT_SECS: u64 = 10;
 const SUBPROTOCOL: &str = "vowp-agent/1";
@@ -358,17 +359,61 @@ fn wss_client(dir: &Path, url: &str, tls: WssTls) -> AgentClient {
 struct StdioState {
     frames: Vec<AgentFrame>,
     auth_ok: usize,
+    connections: usize,
+    heartbeats: usize,
+    status_on_reconnect: Option<String>,
 }
 
-#[derive(Clone, Default)]
+/// How the stdio fake answers a heartbeat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HeartbeatReply {
+    /// End the run with `Revoked`, as the parity tests expect.
+    #[default]
+    Revoke,
+    /// Answer with `Ping` and then an old-home `PathMapUpdate` refusal, then `Revoked`
+    /// on the next connection.
+    RejectPathMap,
+    /// Answer with a non-retryable `Internal` error, then `Revoked` on the next connection.
+    RefuseOnce,
+}
+
+#[derive(Clone)]
 struct StdioHome {
     state: Arc<Mutex<StdioState>>,
+    heartbeat_reply: HeartbeatReply,
+    status_path: Option<PathBuf>,
+}
+
+impl Default for StdioHome {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StdioState::default())),
+            heartbeat_reply: HeartbeatReply::Revoke,
+            status_path: None,
+        }
+    }
 }
 
 impl Transport for StdioHome {
     fn open(&mut self) -> Result<Box<dyn FrameStream>, AgentError> {
+        let connection = {
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.connections += 1;
+            state.connections
+        };
+        if connection > 1
+            && let Some(path) = self.status_path.as_deref()
+            && let Ok(text) = std::fs::read_to_string(path)
+        {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .status_on_reconnect = Some(text);
+        }
         Ok(Box::new(StdioStream {
             state: Arc::clone(&self.state),
+            heartbeat_reply: self.heartbeat_reply,
+            connection,
             outbound: VecDeque::new(),
             key: None,
             challenge: None,
@@ -378,6 +423,8 @@ impl Transport for StdioHome {
 
 struct StdioStream {
     state: Arc<Mutex<StdioState>>,
+    heartbeat_reply: HeartbeatReply,
+    connection: usize,
     outbound: VecDeque<AgentFrame>,
     key: Option<String>,
     challenge: Option<(String, String, String)>,
@@ -401,9 +448,9 @@ impl FrameStream for StdioStream {
             AgentFrame::AgentHello { key_id, .. } => {
                 self.key = Some(key_id.clone());
                 let challenge = (
-                    "stdio-nonce".to_owned(),
+                    format!("stdio-nonce-{}", self.connection),
                     "home-1".to_owned(),
-                    "stdio-connection".to_owned(),
+                    format!("stdio-connection-{}", self.connection),
                 );
                 self.challenge = Some(challenge.clone());
                 self.outbound.push_back(AgentFrame::HomeChallenge {
@@ -430,7 +477,7 @@ impl FrameStream for StdioStream {
                         protocol: AGENT_PROTOCOL.to_owned(),
                         home_id: "home-1".to_owned(),
                         node: NodeName::parse("mac-studio").expect("node slug"),
-                        connection_id: "stdio-connection".to_owned(),
+                        connection_id: format!("stdio-connection-{}", self.connection),
                     });
                 } else {
                     self.outbound.push_back(AgentFrame::Error {
@@ -441,9 +488,33 @@ impl FrameStream for StdioStream {
                 }
             }
             AgentFrame::Heartbeat { .. } => {
-                self.outbound.push_back(AgentFrame::Revoked {
-                    reason: "revoked by owner".to_owned(),
-                });
+                let first = {
+                    let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.heartbeats += 1;
+                    state.heartbeats == 1
+                };
+                match (first, self.heartbeat_reply) {
+                    (true, HeartbeatReply::RejectPathMap) => {
+                        // The home answers the heartbeat with `Ping` before it has read the
+                        // `PathMapUpdate` that follows it, then refuses the unknown frame.
+                        self.outbound.push_back(AgentFrame::Ping);
+                        self.outbound.push_back(AgentFrame::Error {
+                            kind: vowp_protocol::ErrorKind::InvalidInput,
+                            message: "unexpected frame".to_owned(),
+                            retryable: false,
+                        });
+                    }
+                    (true, HeartbeatReply::RefuseOnce) => {
+                        self.outbound.push_back(AgentFrame::Error {
+                            kind: vowp_protocol::ErrorKind::Internal,
+                            message: "the home had an internal failure".to_owned(),
+                            retryable: false,
+                        });
+                    }
+                    _ => self.outbound.push_back(AgentFrame::Revoked {
+                        reason: "revoked by owner".to_owned(),
+                    }),
+                }
             }
             _ => {}
         }
@@ -461,6 +532,143 @@ fn stdio_client(dir: &Path, home: StdioHome) -> AgentClient {
     config.write().expect("agent.json");
     let key = NodeKey::load_or_generate(dir).expect("node key");
     AgentClient::new(dir.to_path_buf(), key, config, Box::new(home), Arc::new(fixed_clock()))
+}
+
+impl StdioHome {
+    fn with_heartbeat_reply(heartbeat_reply: HeartbeatReply) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StdioState::default())),
+            heartbeat_reply,
+            status_path: None,
+        }
+    }
+
+    fn with_status_path(mut self, path: PathBuf) -> Self {
+        self.status_path = Some(path);
+        self
+    }
+
+    fn status_on_reconnect(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status_on_reconnect
+            .clone()
+    }
+
+    fn connections(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connections
+    }
+
+    fn frames(&self) -> Vec<AgentFrame> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .frames
+            .clone()
+    }
+}
+
+#[test]
+fn agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(root.join(".vowp/worktrees")).expect("project and worktree root");
+    let map = AgentPathMap {
+        project: ProjectName::parse("vowp").expect("project"),
+        local_root: root.display().to_string(),
+        worktree_root: None,
+        allow: Vec::new(),
+    };
+    let config = AgentConfig::new(
+        "home-1",
+        NodeName::parse("mac-studio").expect("node slug"),
+        dir.path().to_path_buf(),
+        "home.example",
+    )
+    .with_path_maps(vec![map]);
+    config.write().expect("agent.json");
+    let key = NodeKey::load_or_generate(dir.path()).expect("node key");
+    let spool_marker = dir.path().join("spool").join("kept-events.jsonl");
+    std::fs::create_dir_all(spool_marker.parent().expect("spool parent")).expect("spool dir");
+    std::fs::write(&spool_marker, "pending events\n").expect("spool marker");
+    let home =
+        StdioHome::with_heartbeat_reply(HeartbeatReply::RejectPathMap).with_status_path(dir.path().join("status.json"));
+    let mut client = AgentClient::new(
+        dir.path().to_path_buf(),
+        key,
+        config,
+        Box::new(home.clone()),
+        Arc::new(fixed_clock()),
+    );
+
+    let outcome = client
+        .run(&RunOptions::new(AgentRole::Both))
+        .expect("an old home's path map refusal reconnects instead of exiting");
+    assert!(matches!(outcome, RunOutcome::Revoked { .. }), "{outcome:?}");
+    assert_eq!(home.connections(), 2, "the agent reconnected after the refusal");
+    let status = home
+        .status_on_reconnect()
+        .expect("the status file is written before the reconnect");
+    assert!(status.contains("reconnecting"), "{status}");
+    assert!(status.contains("path map"), "the refusal is recorded: {status}");
+    assert_eq!(
+        std::fs::read_to_string(&spool_marker).expect("spool marker survives"),
+        "pending events\n",
+        "the spool is preserved across the reconnect"
+    );
+    let frames = home.frames();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(frame, AgentFrame::PathMapUpdate { .. }))
+            .count(),
+        1,
+        "path map updates are disabled for this run after the refusal"
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(frame, AgentFrame::Pong)),
+        "the ping is still answered: {frames:?}"
+    );
+    assert!(
+        AgentConfig::load(dir.path()).is_ok(),
+        "the enrolled state is preserved across the reconnect"
+    );
+    assert!(
+        dir.path().join("status.json").is_file(),
+        "the status file is preserved across the reconnect"
+    );
+}
+
+#[test]
+fn agent_reconnects_after_any_non_retryable_home_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let home =
+        StdioHome::with_heartbeat_reply(HeartbeatReply::RefuseOnce).with_status_path(dir.path().join("status.json"));
+    let mut client = stdio_client(dir.path(), home.clone());
+
+    let outcome = client
+        .run(&RunOptions::new(AgentRole::Both))
+        .expect("a post-handshake home error reconnects instead of exiting with a failure");
+    assert!(matches!(outcome, RunOutcome::Revoked { .. }), "{outcome:?}");
+    assert_eq!(home.connections(), 2, "the agent reconnected after the home error");
+    let status = home
+        .status_on_reconnect()
+        .expect("the status file is written before the reconnect");
+    assert!(status.contains("reconnecting"), "{status}");
+    assert!(status.contains("Internal"), "the error kind is recorded: {status}");
+    let frames = home.frames();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(frame, AgentFrame::Heartbeat { .. }))
+            .count(),
+        2,
+        "one heartbeat per connection is enough to show a reconnect: {frames:?}"
+    );
 }
 
 fn frame_tag(frame: &AgentFrame) -> &'static str {
