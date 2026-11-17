@@ -6,7 +6,12 @@
 //! capabilities and initial path map. A code issued before an existing enrollment is stale
 //! and cannot re-enroll an active or revoked node.
 
-use vowp_protocol::{AGENT_PROTOCOL, AgentCapabilities, AgentPathMap, NodeName, NodeStatus, Timestamp};
+use std::collections::BTreeSet;
+use std::path::{Component, Path};
+
+use vowp_protocol::{
+    AGENT_PROTOCOL, AgentCapabilities, AgentPathMap, MAX_PATH_REF_LEN, NodeName, NodeStatus, ProjectName, Timestamp,
+};
 use vowp_store::{EnrollmentCode, EnrollmentKind, NodeCredential, NodePath, Store};
 
 use super::auth;
@@ -50,18 +55,21 @@ pub struct Enrolled {
 
 /// Creates a pending `agent` node and a one-time enrollment code.
 ///
-/// A node that already exists in any enrollment state is a conflict: Phase 0 has no
-/// `--force` re-enrollment. The code is returned in plaintext exactly once; only its hash is
-/// written to the store.
+/// A node that already exists in any enrollment state is a conflict; [`replace_pending`]
+/// rotates a pending node's code and refuses an active or revoked node. Expired codes are
+/// purged first so a stranded code does not linger in the store. The code is returned in
+/// plaintext exactly once; only its hash is written to the store.
 pub fn create_pending(
     store: &Store,
     node: &NodeName,
     labels: &[String],
     now: Timestamp,
 ) -> Result<PendingEnrollment, CoreError> {
+    store.purge_expired_enrollment_codes(now)?;
     if let Some(card) = store.node_card(node, now)? {
         return Err(vowp_store::StoreError::Conflict(format!(
-            "node {node} already exists ({:?}); revoke or remove it before enrolling again",
+            "node {node} already exists ({:?}); pass `--replace` to rotate a pending node, \
+             or revoke or remove it before enrolling again",
             card.status
         ))
         .into());
@@ -89,6 +97,96 @@ pub fn create_pending(
         code_hash,
         expires_at,
     })
+}
+
+/// Rotates a pending node's one-time code in one transaction.
+///
+/// An expired pending code is purged and replaced in the same call, so
+/// `vowp node enroll <name> --replace` recovers a stranded pending enrollment in one step.
+/// An `active` node is refused: replacing it would wipe a live enrollment. A `revoked` node
+/// must be removed first, which keeps every destructive action explicit.
+pub fn replace_pending(
+    store: &Store,
+    node: &NodeName,
+    labels: &[String],
+    now: Timestamp,
+) -> Result<PendingEnrollment, CoreError> {
+    store.purge_expired_enrollment_codes(now)?;
+    let Some(card) = store.node_card(node, now)? else {
+        return Err(CoreError::NotFound(format!("node {node}")));
+    };
+    match card.status {
+        NodeStatus::Pending => {}
+        NodeStatus::Active => {
+            return Err(vowp_store::StoreError::Conflict(format!(
+                "node {node} is active; run `vowp node revoke {node} --yes` or \
+                 `vowp node rm {node} --yes` before enrolling a replacement"
+            ))
+            .into());
+        }
+        NodeStatus::Revoked => {
+            return Err(vowp_store::StoreError::Conflict(format!(
+                "node {node} is revoked; run `vowp node rm {node} --yes` before enrolling again"
+            ))
+            .into());
+        }
+    }
+    let generated = code::new_enrollment_code(now);
+    let NewEnrollmentCode {
+        code,
+        code_hash,
+        expires_at,
+    } = generated;
+    let labels = (!labels.is_empty()).then_some(labels);
+    store.replace_pending_enrollment(
+        node,
+        labels,
+        &EnrollmentCode {
+            code_hash: code_hash.clone(),
+            node: node.clone(),
+            kind: EnrollmentKind::Node,
+            surface_id: None,
+            expires_at,
+            used_at: None,
+            created_by: "owner".to_owned(),
+            created_at: now,
+        },
+    )?;
+    Ok(PendingEnrollment {
+        node: node.clone(),
+        code,
+        code_hash,
+        expires_at,
+    })
+}
+
+/// Validates and stores one path map reported on an authenticated connection.
+///
+/// The roots exist on the node, not on the home, so validation is lexical: absolute,
+/// non-empty, free of control bytes and parent traversal. The home never touches its own
+/// disk here and never copies the raw roots into a card, log or frame.
+pub fn apply_path_map(store: &Store, node: &NodeName, map: &AgentPathMap, now: Timestamp) -> Result<(), CoreError> {
+    validate_paths(std::slice::from_ref(map))?;
+    let Some(card) = store.node_card(node, now)? else {
+        return Err(CoreError::NotFound(format!("node {node}")));
+    };
+    if card.status != NodeStatus::Active {
+        return Err(CoreError::Refused(format!("node {node} is not active")));
+    }
+    store.upsert_node_path(&node_path(node, map, now))?;
+    Ok(())
+}
+
+/// Converts one validated map into the home-only `node_paths` row.
+fn node_path(node: &NodeName, map: &AgentPathMap, now: Timestamp) -> NodePath {
+    NodePath {
+        node: node.clone(),
+        project: map.project.clone(),
+        local_root: map.local_root.clone(),
+        worktree_root: map.worktree_root.clone().unwrap_or_else(|| map.local_root.clone()),
+        allow: map.allow.clone(),
+        updated_at: now,
+    }
 }
 
 /// Redeems one enrollment code and binds the node's public key.
@@ -153,14 +251,7 @@ pub fn redeem(store: &Store, request: &EnrollRequest, now: Timestamp) -> Result<
         &capabilities_value(&request.capabilities)?,
     )?;
     for path in &request.paths {
-        store.upsert_node_path(&NodePath {
-            node: stored.node.clone(),
-            project: path.project.clone(),
-            local_root: path.local_root.clone(),
-            worktree_root: path.worktree_root.clone().unwrap_or_else(|| path.local_root.clone()),
-            allow: path.allow.clone(),
-            updated_at: now,
-        })?;
+        store.upsert_node_path(&node_path(&stored.node, path, now))?;
     }
     Ok(Enrolled { node: stored.node })
 }
@@ -183,21 +274,91 @@ pub(crate) fn capabilities_value(capabilities: &AgentCapabilities) -> Result<ser
 }
 
 /// Refuses a path map entry the home cannot store safely.
+///
+/// The rules mirror the node's `AgentConfig::validate_path_maps` lexically. The roots are
+/// remote paths, so the home never resolves them on its own filesystem.
 fn validate_paths(paths: &[AgentPathMap]) -> Result<(), CoreError> {
+    let mut projects = BTreeSet::new();
     for path in paths {
-        if path.local_root.is_empty() || !path.local_root.starts_with('/') || path.local_root.contains('\0') {
+        validate_path_map(path)?;
+        if !projects.insert(path.project.as_str()) {
             return Err(CoreError::Invalid(format!(
-                "project {} local root must be an absolute path",
+                "project {} is mapped more than once",
                 path.project
             )));
         }
-        if let Some(root) = &path.worktree_root {
-            if root.is_empty() || !root.starts_with('/') || root.contains('\0') {
-                return Err(CoreError::Invalid(format!(
-                    "project {} worktree root must be an absolute path",
-                    path.project
-                )));
-            }
+    }
+    Ok(())
+}
+
+/// Refuses one path map whose roots or allow entries are not safe home records.
+fn validate_path_map(path: &AgentPathMap) -> Result<(), CoreError> {
+    // `AgentPathMap.project` is already a validated slug; re-parsing keeps this function
+    // usable when a future caller passes raw text and names the project in its errors.
+    if ProjectName::parse(path.project.as_str()).is_err() {
+        return Err(CoreError::Invalid(format!(
+            "project {:?} is not a valid project name",
+            path.project.as_str()
+        )));
+    }
+    validate_root(&path.local_root, &path.project, "local root")?;
+    if let Some(root) = &path.worktree_root {
+        validate_root(root, &path.project, "worktree root")?;
+    }
+    let mut allow = BTreeSet::new();
+    for entry in &path.allow {
+        validate_allow_entry(entry, &path.project)?;
+        if !allow.insert(entry.as_str()) {
+            return Err(CoreError::Invalid(format!(
+                "project {} has a duplicate allow entry",
+                path.project
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses one absolute remote root with traversal, NUL or control bytes.
+fn validate_root(root: &str, project: &ProjectName, label: &str) -> Result<(), CoreError> {
+    if root.is_empty() || !root.starts_with('/') {
+        return Err(CoreError::Invalid(format!(
+            "project {project} {label} must be an absolute path"
+        )));
+    }
+    if root.contains('\0') || root.chars().any(char::is_control) {
+        return Err(CoreError::Invalid(format!(
+            "project {project} {label} contains a control character"
+        )));
+    }
+    if Path::new(root)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(CoreError::Invalid(format!(
+            "project {project} {label} must not contain parent traversal"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses one allow entry that is not a normalised relative path.
+fn validate_allow_entry(entry: &str, project: &ProjectName) -> Result<(), CoreError> {
+    let invalid = || {
+        CoreError::Invalid(format!(
+            "project {project} allow entry must be a normalised relative path"
+        ))
+    };
+    if entry.is_empty()
+        || entry.len() > MAX_PATH_REF_LEN
+        || entry.contains('\0')
+        || entry.contains('\\')
+        || entry.starts_with('/')
+    {
+        return Err(invalid());
+    }
+    for part in entry.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.chars().any(char::is_control) {
+            return Err(invalid());
         }
     }
     Ok(())

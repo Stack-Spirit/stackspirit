@@ -1175,6 +1175,9 @@ pub struct NodeAddArgs {
 pub struct NodeRmArgs {
     /// Node name.
     pub name: String,
+    /// Remove without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Arguments for `vowp node enroll`.
@@ -1185,6 +1188,9 @@ pub struct NodeEnrollArgs {
     /// Owner-assigned label; repeat for several labels.
     #[arg(long, value_name = "LABEL")]
     pub label: Vec<String>,
+    /// Rotate a pending node's one-time code in one transaction.
+    #[arg(long)]
+    pub replace: bool,
 }
 
 /// Arguments for `vowp node revoke`.

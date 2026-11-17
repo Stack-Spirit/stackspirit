@@ -554,6 +554,7 @@ impl Orchestrator {
                         node: card_node,
                         last_request_id: None,
                         detail: Some(redact_text(&error.to_string())),
+                        last_error: None,
                     };
                     let _ = write_state(&dir, &state);
                     return Err(error);
@@ -581,6 +582,7 @@ impl Orchestrator {
             node: card_node,
             last_request_id: None,
             detail: None,
+            last_error: None,
         };
         write_state(&dir, &state)?;
         if let (Some(host), Some(handle)) = (host.as_ref(), handle.as_ref()) {
@@ -620,6 +622,7 @@ impl Orchestrator {
             } else {
                 Some(format!("node {} is {}", card.name, presence_name(card.presence)))
             },
+            last_error: None,
         };
         write_state(&dir, &state)?;
         if !online {
@@ -638,14 +641,20 @@ impl Orchestrator {
         if !matches!(&result, Ok(CommandDelivery::Queued)) {
             write_state(&dir, &state)?;
         }
-        if let Err(error) = result {
-            self.deps.log.log(
-                Level::Warn,
-                "orchestrator",
-                &format!("cannot deliver start for {} to node {}: {error}", state.name, card.name),
-            );
+        match result {
+            Ok(CommandDelivery::Applied) if state.state == OrchestratorNodeState::Failed => {
+                Err(refused_by_node(&card.name, "start", &state))
+            }
+            Ok(_) => Ok(info_from_state(state, dir, None)),
+            Err(error) => {
+                self.deps.log.log(
+                    Level::Warn,
+                    "orchestrator",
+                    &format!("cannot deliver start for {} to node {}: {error}", state.name, card.name),
+                );
+                Ok(info_from_state(state, dir, None))
+            }
         }
-        Ok(info_from_state(state, dir, None))
     }
 
     /// Lists every orchestrator.
@@ -722,6 +731,7 @@ impl Orchestrator {
             self.release_lease(&dir, &state.name, &state.session_id)?;
             let _ = fs::remove_file(dir.join(LEASE_FILE));
             state.state = OrchestratorNodeState::Stopped;
+            state.detail = None;
             return write_state(&dir, &state);
         }
         if let Some(handle) = host_handle(&dir, state.app) {
@@ -734,6 +744,7 @@ impl Orchestrator {
         self.release_lease(&dir, &state.name, &state.session_id)?;
         let _ = fs::remove_file(dir.join(LEASE_FILE));
         state.state = OrchestratorNodeState::Stopped;
+        state.detail = None;
         write_state(&dir, &state)
     }
 
@@ -790,6 +801,7 @@ impl Orchestrator {
         } else {
             let Some(host) = host.as_ref() else {
                 state.state = OrchestratorNodeState::Running;
+                state.detail = None;
                 write_state(&dir, &state)?;
                 return Ok(info_from_state(state, dir, None));
             };
@@ -807,6 +819,7 @@ impl Orchestrator {
                         let _ = fs::remove_file(dir.join(LEASE_FILE));
                     }
                     state.state = OrchestratorNodeState::Degraded;
+                    state.detail = Some(redact_text(&error.to_string()));
                     let _ = write_state(&dir, &state);
                     return Err(error);
                 }
@@ -819,6 +832,7 @@ impl Orchestrator {
             None => fallback_join(state.app, &state.session_id),
         };
         state.state = OrchestratorNodeState::Running;
+        state.detail = None;
         state.join = Some(join);
         write_state(&dir, &state)?;
         if let Some(host) = host.as_ref() {
@@ -871,6 +885,7 @@ impl Orchestrator {
                 }
                 if let Ok(Some(host)) = self.host_for(state.app) {
                     self.mirror(&dir, &state, host.as_ref(), &handle);
+                    state.detail = None;
                     resumed.push(info_from_state(state, dir, Some(handle)));
                     continue;
                 }
@@ -923,6 +938,7 @@ impl Orchestrator {
         let request_id = new_request_id();
         state.last_request_id = Some(request_id.clone());
         state.state = OrchestratorNodeState::Starting;
+        state.detail = None;
         write_state(dir, state)?;
         let command = if start {
             OrchestratorCommand::Start {
@@ -1001,6 +1017,7 @@ impl Orchestrator {
             let request_id = new_request_id();
             state.last_request_id = Some(request_id.clone());
             state.state = OrchestratorNodeState::Starting;
+            state.detail = None;
             write_state(&dir, &state)?;
             let command = if start {
                 OrchestratorCommand::Start {
@@ -1080,6 +1097,7 @@ impl Orchestrator {
         let request_id = new_request_id();
         state.last_request_id = Some(request_id.clone());
         state.state = OrchestratorNodeState::Starting;
+        state.detail = None;
         write_state(dir, &state)?;
         let command = OrchestratorCommand::Resume {
             request_id,
@@ -1091,11 +1109,7 @@ impl Orchestrator {
         }
         result?;
         if state.state == OrchestratorNodeState::Failed {
-            return Err(CoreError::Refused(format!(
-                "node {} refused to resume orchestrator {}",
-                state.node.as_ref().map(NodeName::as_str).unwrap_or("?"),
-                state.name
-            )));
+            return Err(refused_by_node(&node, "resume", &state));
         }
         Ok(info_from_state(state, dir.to_path_buf(), None))
     }
@@ -1658,6 +1672,23 @@ fn is_node_offline_error(error: &CoreError) -> bool {
     }
 }
 
+/// Builds the refusal a failed synchronous node result returns.
+///
+/// The detail is redacted again here as defence in depth: a caller may hold state from an
+/// older file, and a refusal is printed on the terminal and captured in scripts.
+fn refused_by_node(node: &NodeName, action: &str, state: &StateFile) -> CoreError {
+    let detail = state
+        .detail
+        .as_deref()
+        .map(redact_text)
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or_else(|| "the node returned no detail".to_owned());
+    CoreError::Refused(format!(
+        "node {node} refused to {action} orchestrator {}: {detail}",
+        state.name
+    ))
+}
+
 /// Applies one agent result to a persisted record.
 fn apply_result_to_state(state: &mut StateFile, result: &OrchestratorResult) {
     state.state = result.state;
@@ -1680,25 +1711,44 @@ fn sanitize_result(mut result: OrchestratorResult) -> OrchestratorResult {
     result
 }
 
-/// Redacts absolute paths and obvious secret assignments from free text.
+/// Redacts absolute paths, URLs with credentials or a loopback port, and secret values
+/// from free text.
 ///
 /// The agent contract already forbids a path or a secret in a result; this is the home's
-/// defence in depth so a mistaken detail cannot enter `orchestrator.json` or a log.
+/// defence in depth so a mistaken detail cannot enter `orchestrator.json`, a card, a CLI
+/// refusal or a log. A URL is replaced whole, so a userinfo password or a
+/// `http://127.0.0.1:<port>` link never survives even when the port is the only secret.
 pub fn redact_text(text: &str) -> String {
+    let secret_keys = ["token", "password", "secret", "apikey", "api_key", "code"];
     let mut words = Vec::new();
+    let mut redact_next = false;
     for word in text.split_whitespace() {
         let bare = word.trim_start_matches(['(', '[', '{', '\'', '"']);
         let lower = bare.to_ascii_lowercase();
-        let looks_like_secret = lower.contains('=')
-            && ["token", "password", "secret", "apikey", "api_key", "code"]
-                .iter()
-                .any(|key| lower.contains(key));
-        if bare.starts_with('/') || bare.starts_with("~/") {
+        let looks_like_secret = lower.contains('=') && secret_keys.iter().any(|key| lower.contains(key));
+        let has_userinfo = bare
+            .split_once("://")
+            .is_some_and(|(_, rest)| rest.split('/').next().unwrap_or_default().contains('@'));
+        let loopback = lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("0.0.0.0");
+        let was_redacted = redact_next;
+        if was_redacted {
+            words.push("<redacted>".to_owned());
+            redact_next = false;
+        } else if has_userinfo || loopback {
+            words.push("<url>".to_owned());
+        } else if bare.starts_with('/') || bare.starts_with("~/") {
             words.push("<path>".to_owned());
         } else if looks_like_secret {
             words.push("<redacted>".to_owned());
         } else {
             words.push(word.to_owned());
+        }
+        // `token: value`, `password = value` and `Bearer value` are all assignments whose
+        // value is a secret. `token=value` was already redacted as one word.
+        if !was_redacted {
+            let key = bare.trim_end_matches([':', '=']).to_ascii_lowercase();
+            let assignment = secret_keys.contains(&key.as_str()) || key == "bearer";
+            redact_next = assignment && !looks_like_secret;
         }
     }
     words.join(" ").chars().take(512).collect()
@@ -1760,6 +1810,9 @@ struct StateFile {
     /// Last redacted failure or state detail for the owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// Derived card field, persisted so the fleet snapshot sees the same last error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
 }
 
 impl StateFile {
@@ -1772,10 +1825,24 @@ impl StateFile {
             app: self.app,
             state: self.state,
             node: self.node.clone(),
+            last_error: self.last_error(),
             join: self
                 .join
                 .clone()
                 .unwrap_or_else(|| fallback_join(self.app, &self.session_id)),
+        }
+    }
+
+    /// Returns the redacted failure detail only for a failed, degraded or offline record.
+    ///
+    /// A cleanly running or stopped record has no `last_error`, even when an old detail is
+    /// still on disk; [`Orchestrator::resume`] and [`Orchestrator::stop`] clear it as well.
+    fn last_error(&self) -> Option<String> {
+        match self.state {
+            OrchestratorNodeState::Failed | OrchestratorNodeState::Degraded | OrchestratorNodeState::NodeOffline => {
+                self.detail.as_deref().map(redact_text)
+            }
+            OrchestratorNodeState::Starting | OrchestratorNodeState::Running | OrchestratorNodeState::Stopped => None,
         }
     }
 }
@@ -1820,8 +1887,13 @@ fn read_state(dir: &Path) -> Result<Option<StateFile>, CoreError> {
 }
 
 /// Writes an orchestrator state file with mode 0600.
+///
+/// The persisted document also carries the derived [`OrchestratorCard::last_error`] so the
+/// fleet snapshot, which reads this same file, shows the same redacted failure detail.
 fn write_state(dir: &Path, state: &StateFile) -> Result<(), CoreError> {
-    write_private_json(&dir.join(STATE_FILE), state)
+    let mut stored = state.clone();
+    stored.last_error = state.last_error();
+    write_private_json(&dir.join(STATE_FILE), &stored)
 }
 
 /// Returns the live app handle recorded by a host, when its pid is still alive.

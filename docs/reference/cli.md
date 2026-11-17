@@ -1461,6 +1461,7 @@ Arguments:
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
+      --yes                  Remove without asking for confirmation
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
@@ -1484,6 +1485,7 @@ Options:
       --json                 Print one machine-readable JSON document on stdout
       --label <LABEL>        Owner-assigned label; repeat for several labels
       --node <NAME>          Run the command on that node over ssh
+      --replace              Rotate a pending node's one-time code in one transaction
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --no-color             Disable colour even when stdout is a terminal

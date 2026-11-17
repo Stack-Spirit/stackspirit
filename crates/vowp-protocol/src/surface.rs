@@ -422,6 +422,11 @@ pub struct OrchestratorCard {
     /// Node that runs the app; `None` for a v0.2 orchestrator hosted on the home.
     #[serde(default)]
     pub node: Option<NodeName>,
+    /// Last redacted failure or state detail, when the record is failed, degraded or
+    /// offline. `None` for a healthy or cleanly stopped orchestrator; never a path, port,
+    /// password, pairing link or secret value.
+    #[serde(default)]
+    pub last_error: Option<String>,
     /// How to join from the three surfaces.
     pub join: JoinInstructions,
 }

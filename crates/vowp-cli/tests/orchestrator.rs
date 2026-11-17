@@ -21,9 +21,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
 use tempfile::TempDir;
 use vowp_protocol::{
-    AgentCapabilities, AgentCapacity, AgentFrame, JoinInstructions, Lease, Node, NodeName, NodeStatus, OrchestratorApp,
-    OrchestratorCommand, OrchestratorNodeState, OrchestratorResult, Project, ProjectName, SessionId, SessionRole,
-    Surface, SurfaceId, SurfaceKind, Timestamp, VowpConfig,
+    AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, JoinInstructions, Lease, Node, NodeName, NodeStatus,
+    OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, Project,
+    ProjectName, SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp, VowpConfig,
 };
 use vowp_store::{NodeCredential, NodePaths, Store, hash_lease_token};
 
@@ -328,6 +328,14 @@ fn manager(
     )
 }
 
+/// A refused result the fake agent returns instead of accepting a start or resume.
+struct FakeRefusal {
+    state: OrchestratorNodeState,
+    code: String,
+    message: String,
+    detail: Option<String>,
+}
+
 /// A fake agent frame stream backed by the home's command spool.
 ///
 /// It reads `agent-commands/<node>/*.json`, records each `OrchestratorCommand` and writes
@@ -341,6 +349,15 @@ struct FakeAgent {
 
 impl FakeAgent {
     fn start(home: &Path, node: &NodeName) -> Self {
+        Self::start_with(home, node, None)
+    }
+
+    /// Starts a fake agent that refuses every `Start` and `Resume` with `refusal`.
+    fn start_refusing(home: &Path, node: &NodeName, refusal: FakeRefusal) -> Self {
+        Self::start_with(home, node, Some(refusal))
+    }
+
+    fn start_with(home: &Path, node: &NodeName, refusal: Option<FakeRefusal>) -> Self {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let command_dir = home.join("agent-commands").join(node.as_str());
@@ -365,14 +382,32 @@ impl FakeAgent {
                                 continue;
                             };
                             let request_id = command.request_id().to_owned();
-                            let state = match command {
-                                OrchestratorCommand::Stop { .. } => OrchestratorNodeState::Stopped,
-                                OrchestratorCommand::Start { .. } | OrchestratorCommand::Resume { .. } => {
-                                    OrchestratorNodeState::Running
+                            let frame = match (&refusal, &command) {
+                                (
+                                    Some(refusal),
+                                    OrchestratorCommand::Start { .. } | OrchestratorCommand::Resume { .. },
+                                ) => {
+                                    let mut result = OrchestratorResult::failed(
+                                        request_id.clone(),
+                                        refusal.state,
+                                        OrchestratorError::new(refusal.code.clone(), refusal.message.clone(), false),
+                                    );
+                                    result.detail = refusal.detail.clone();
+                                    AgentFrame::OrchestratorResult(result)
+                                }
+                                _ => {
+                                    let state = match command {
+                                        OrchestratorCommand::Stop { .. } => OrchestratorNodeState::Stopped,
+                                        OrchestratorCommand::Start { .. } | OrchestratorCommand::Resume { .. } => {
+                                            OrchestratorNodeState::Running
+                                        }
+                                    };
+                                    AgentFrame::OrchestratorResult(OrchestratorResult::accepted(
+                                        request_id.clone(),
+                                        state,
+                                    ))
                                 }
                             };
-                            let frame =
-                                AgentFrame::OrchestratorResult(OrchestratorResult::accepted(request_id.clone(), state));
                             std::fs::create_dir_all(&result_dir).expect("fake result dir");
                             let result_path = result_dir.join(format!("{request_id}.json"));
                             let temp = result_dir.join(format!("{request_id}.tmp"));
@@ -1286,6 +1321,11 @@ fn orchestrator_live_gateway_drains_commands_and_reconnects() {
     let orchestrator = Orchestrator::new(deps(&env));
     let info = orchestrator.info("live").expect("info after disconnect");
     assert_eq!(info.card.state, OrchestratorNodeState::Degraded);
+    assert_eq!(
+        info.card.last_error.as_deref(),
+        Some("node mac-studio connection dropped"),
+        "a degraded card exposes the redacted disconnection detail"
+    );
 
     // A reconnect heartbeat queues a Resume command; the new connection must send it
     // and apply the next result to the same record.
@@ -1316,6 +1356,43 @@ fn orchestrator_live_gateway_drains_commands_and_reconnects() {
         thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    assert!(
+        info.card.last_error.is_none(),
+        "a clean reconnect clears last_error: {info:?}"
+    );
+    gateway.finish();
+}
+
+#[test]
+fn node_show_json_reflects_a_live_path_map_update() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let key = SigningKey::from_bytes(&[9_u8; 32]);
+    bind_key(&env, &node, &key);
+
+    let mut gateway = LiveGateway::start(&env);
+    authenticate(&mut gateway, &node, &key);
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: AgentPathMap {
+            project: env.project_name().clone(),
+            local_root: "/srv/owner/vowp".to_owned(),
+            worktree_root: Some("/srv/owner/vowp/.vowp/worktrees".to_owned()),
+            allow: vec!["src".to_owned()],
+        },
+    });
+    gateway.expect(|frame| matches!(frame, AgentFrame::Pong));
+
+    let (code, card, stderr) = env.run_json(&["node", "show", node.as_str()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        card["mapped"],
+        serde_json::json!([env.project_name().as_str()]),
+        "node show sees the map without a reconnect: {card}"
+    );
+    assert!(
+        !card.to_string().contains("/srv/owner"),
+        "the card must not carry the reported local root: {card}"
+    );
     gateway.finish();
 }
 
@@ -1390,6 +1467,129 @@ fn orchestrator_new_with_a_node_creates_a_card_and_sends_start() {
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0]["node"], "mac-studio");
     assert_eq!(cards[0]["state"], "running");
+}
+
+#[test]
+fn orchestrator_new_reports_a_refused_node_detail_without_leaking_it() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let _agent = FakeAgent::start_refusing(
+        env.home_path(),
+        &node,
+        FakeRefusal {
+            state: OrchestratorNodeState::Failed,
+            code: "spawn_failed".to_owned(),
+            message: "cannot start /srv/owner/app token=FAKE-NOT-A-SECRET \
+                      at http://owner:FAKE-NOT-A-SECRET@127.0.0.1:4096/link"
+                .to_owned(),
+            detail: None,
+        },
+    );
+    let (code, _, stderr) = env.run(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "mac",
+        "--app",
+        "opencode",
+        "--node",
+        node.as_str(),
+    ]);
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains("refused to start orchestrator mac"), "{stderr}");
+    assert!(stderr.contains("spawn_failed"), "{stderr}");
+    for forbidden in ["/srv/", "FAKE-NOT-A-SECRET", "127.0.0.1", "4096"] {
+        assert!(
+            !stderr.contains(forbidden),
+            "the refusal leaked {forbidden:?}: {stderr}"
+        );
+    }
+
+    let state = read_json(&state_path(&env.orchestrator_dir("mac")));
+    assert_eq!(state["state"], "failed");
+    let last_error = state["last_error"].as_str().expect("persisted last_error");
+    assert!(last_error.starts_with("spawn_failed:"), "{last_error}");
+    for forbidden in ["/srv/", "FAKE-NOT-A-SECRET", "127.0.0.1", "4096"] {
+        assert!(
+            !last_error.contains(forbidden),
+            "the state file leaked {forbidden:?}: {last_error}"
+        );
+    }
+
+    let (code, cards, stderr) = env.run_json(&["orchestrator", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        cards[0]["last_error"], last_error,
+        "orchestrator ls --json carries the redacted detail"
+    );
+}
+
+#[test]
+fn orchestrator_resume_reports_refusal_detail_and_running_clears_last_error() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let accepting = FakeAgent::start(env.home_path(), &node);
+    let (code, card, stderr) = env.run_json(&[
+        "orchestrator",
+        "new",
+        "--name",
+        "mac",
+        "--app",
+        "opencode",
+        "--node",
+        node.as_str(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(card["state"], "running");
+    assert!(card["last_error"].is_null(), "a healthy card has no last_error: {card}");
+    drop(accepting);
+
+    let refusing = FakeAgent::start_refusing(
+        env.home_path(),
+        &node,
+        FakeRefusal {
+            state: OrchestratorNodeState::Failed,
+            code: "service_timeout".to_owned(),
+            message: "the app did not answer password=FAKE-NOT-A-SECRET at http://localhost:4096/join".to_owned(),
+            detail: None,
+        },
+    );
+    let (code, _, stderr) = env.run(&["orchestrator", "resume", "mac"]);
+    assert_eq!(code, 5, "{stderr}");
+    assert!(
+        stderr.contains("node mac-studio refused to resume orchestrator mac: service_timeout:"),
+        "{stderr}"
+    );
+    for forbidden in ["FAKE-NOT-A-SECRET", "localhost", "4096"] {
+        assert!(
+            !stderr.contains(forbidden),
+            "the refusal leaked {forbidden:?}: {stderr}"
+        );
+    }
+    let state = read_json(&state_path(&env.orchestrator_dir("mac")));
+    assert_eq!(state["state"], "failed");
+    let last_error = state["last_error"].as_str().expect("persisted last_error");
+    assert!(last_error.contains("service_timeout"), "{last_error}");
+    for forbidden in ["FAKE-NOT-A-SECRET", "localhost", "4096"] {
+        assert!(
+            !last_error.contains(forbidden),
+            "the state file leaked {forbidden:?}: {last_error}"
+        );
+    }
+    drop(refusing);
+
+    let accepting = FakeAgent::start(env.home_path(), &node);
+    let (code, card, stderr) = env.run_json(&["orchestrator", "resume", "mac"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(card["state"], "running");
+    assert!(card["last_error"].is_null(), "a clean resume clears last_error: {card}");
+    let state = read_json(&state_path(&env.orchestrator_dir("mac")));
+    assert_eq!(state["state"], "running");
+    assert!(
+        state.get("last_error").is_none(),
+        "a clean record omits last_error from disk: {state}"
+    );
+    drop(accepting);
 }
 
 #[test]

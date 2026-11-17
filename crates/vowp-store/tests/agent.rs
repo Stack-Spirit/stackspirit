@@ -332,6 +332,146 @@ fn enrollment_code_expires() {
 }
 
 #[test]
+fn pending_enrollment_replacement_rotates_codes_and_labels_atomically() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = NodePaths::new(tmp.path());
+    let store = Store::open(&paths).expect("store");
+    let mac = node("mac-studio");
+    store
+        .insert_pending_node(&mac, &["old-label".to_owned()], ts(T0))
+        .expect("pending node");
+    store
+        .insert_enrollment_code(&EnrollmentCode {
+            code_hash: "old-code".to_owned(),
+            node: mac.clone(),
+            kind: EnrollmentKind::Node,
+            surface_id: None,
+            expires_at: ts(T1),
+            used_at: None,
+            created_by: "owner".to_owned(),
+            created_at: ts(T0),
+        })
+        .expect("old code");
+
+    store
+        .replace_pending_enrollment(
+            &mac,
+            Some(&["new-label".to_owned()]),
+            &EnrollmentCode {
+                code_hash: "new-code".to_owned(),
+                node: mac.clone(),
+                kind: EnrollmentKind::Node,
+                surface_id: None,
+                expires_at: ts(T1),
+                used_at: None,
+                created_by: "owner".to_owned(),
+                created_at: ts(T0),
+            },
+        )
+        .expect("replace");
+
+    assert!(
+        store
+            .consume_enrollment_code("old-code", ts(T0))
+            .expect("old consume")
+            .is_none(),
+        "the replaced code must not redeem"
+    );
+    let consumed = store
+        .consume_enrollment_code("new-code", ts(T0))
+        .expect("new consume")
+        .expect("the replacement code redeems");
+    assert_eq!(consumed.node, mac);
+    assert_eq!(consumed.used_at, Some(ts(T0)));
+    let card = store.node_card(&mac, ts(T0)).expect("card").expect("present");
+    assert_eq!(card.status, NodeStatus::Pending);
+    assert_eq!(card.labels, vec!["new-label".to_owned()]);
+
+    // Omitted labels preserve the labels already on the node.
+    store
+        .replace_pending_enrollment(
+            &mac,
+            None,
+            &EnrollmentCode {
+                code_hash: "third-code".to_owned(),
+                node: mac.clone(),
+                kind: EnrollmentKind::Node,
+                surface_id: None,
+                expires_at: ts(T1),
+                used_at: None,
+                created_by: "owner".to_owned(),
+                created_at: ts(T0),
+            },
+        )
+        .expect("replace without labels");
+    assert_eq!(
+        store.node_card(&mac, ts(T0)).expect("card").expect("present").labels,
+        vec!["new-label".to_owned()]
+    );
+}
+
+#[test]
+fn pending_enrollment_replacement_refuses_active_and_revoked_nodes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = NodePaths::new(tmp.path());
+    let store = Store::open(&paths).expect("store");
+    let mac = node("mac-studio");
+    store.insert_pending_node(&mac, &[], ts(T0)).expect("pending node");
+    store
+        .insert_enrollment_code(&EnrollmentCode {
+            code_hash: "kept".to_owned(),
+            node: mac.clone(),
+            kind: EnrollmentKind::Node,
+            surface_id: None,
+            expires_at: ts(T1),
+            used_at: None,
+            created_by: "owner".to_owned(),
+            created_at: ts(T0),
+        })
+        .expect("code");
+    let replacement = EnrollmentCode {
+        code_hash: "replacement".to_owned(),
+        node: mac.clone(),
+        kind: EnrollmentKind::Node,
+        surface_id: None,
+        expires_at: ts(T1),
+        used_at: None,
+        created_by: "owner".to_owned(),
+        created_at: ts(T0),
+    };
+
+    store
+        .set_node_status(&mac, NodeStatus::Active, "", ts(T1))
+        .expect("activate");
+    let error = store
+        .replace_pending_enrollment(&mac, None, &replacement)
+        .expect_err("active node must be refused");
+    assert!(matches!(error, StoreError::Conflict(_)), "got {error:?}");
+    assert!(
+        store
+            .consume_enrollment_code("kept", ts(T0))
+            .expect("kept code")
+            .is_some(),
+        "a refused replacement must leave the old code alone"
+    );
+
+    store
+        .set_node_status(&mac, NodeStatus::Revoked, "", ts(T1))
+        .expect("revoke");
+    let error = store
+        .replace_pending_enrollment(&mac, None, &replacement)
+        .expect_err("revoked node must be refused");
+    assert!(matches!(error, StoreError::Conflict(_)), "got {error:?}");
+    assert_eq!(store.purge_node_enrollment_codes(&mac).expect("purge"), 1);
+    assert!(
+        store
+            .consume_enrollment_code("replacement", ts(T0))
+            .expect("replacement")
+            .is_none()
+    );
+}
+
+#[test]
 fn node_credential_round_trips_and_revokes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = NodePaths::new(tmp.path());

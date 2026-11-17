@@ -423,6 +423,79 @@ impl Store {
         Ok(removed as u64)
     }
 
+    /// Deletes every enrollment code of one node and returns the number removed.
+    ///
+    /// `enrollment_codes` has no foreign key to `nodes`, so removing a node leaves its codes
+    /// behind unless the caller removes them explicitly.
+    pub fn purge_node_enrollment_codes(&self, node: &NodeName) -> Result<u64, StoreError> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM main.enrollment_codes WHERE node = ?1", [node.as_str()])?;
+        Ok(removed as u64)
+    }
+
+    /// Rotates a pending node's one-time code in one immediate transaction.
+    ///
+    /// Every unconsumed node code of `node` is deleted, the labels are replaced when
+    /// `labels` is `Some`, and `code` is inserted. The node must still be `pending`: an
+    /// active or revoked node is refused so a live enrollment is never wiped silently.
+    pub fn replace_pending_enrollment(
+        &self,
+        node: &NodeName,
+        labels: Option<&[String]>,
+        code: &EnrollmentCode,
+    ) -> Result<(), StoreError> {
+        if code.node != *node || code.kind != EnrollmentKind::Node {
+            return Err(StoreError::InvalidInput(
+                "replacement code must be a node code for the same node".to_owned(),
+            ));
+        }
+        self.transaction(|store| {
+            let status: Option<String> = store
+                .conn
+                .query_row(
+                    "SELECT status FROM main.nodes WHERE name = ?1",
+                    [node.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(status) = status else {
+                return Err(StoreError::not_found("node", node.as_str()));
+            };
+            if status != "pending" {
+                return Err(StoreError::Conflict(format!(
+                    "node {node} is {status}; only a pending enrollment can be replaced"
+                )));
+            }
+            if let Some(labels) = labels {
+                store.conn.execute(
+                    "UPDATE main.nodes SET labels_json = ?1 WHERE name = ?2",
+                    params![json_to_text(&labels.to_vec())?, node.as_str()],
+                )?;
+            }
+            store.conn.execute(
+                "DELETE FROM main.enrollment_codes WHERE node = ?1 AND kind = 'node' AND used_at IS NULL",
+                [node.as_str()],
+            )?;
+            store.conn.execute(
+                "INSERT INTO main.enrollment_codes
+                   (code_hash, node, kind, surface_id, expires_at, used_at, created_by, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    code.code_hash,
+                    code.node.as_str(),
+                    enum_to_text(&code.kind)?,
+                    code.surface_id,
+                    ts_to_text(code.expires_at),
+                    opt_ts_to_text(code.used_at),
+                    code.created_by,
+                    ts_to_text(code.created_at),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Inserts or replaces the path map for one node and project.
     pub fn upsert_node_path(&self, path: &NodePath) -> Result<(), StoreError> {
         self.conn.execute(

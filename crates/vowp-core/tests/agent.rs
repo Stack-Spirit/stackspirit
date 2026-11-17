@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::{Signer, SigningKey};
 use support::fake_git::FakeGit;
 use tempfile::TempDir;
+use vowp_core::agent::enroll::replace_pending;
 use vowp_core::agent::gateway::{self, GatewayOptions, GatewayOutcome};
 use vowp_core::agent::{
     AgentFrameSpool, EnrollRequest, RotationPolicy, SURFACE_TOKEN_OVERLAP, SURFACE_TOKEN_TTL, auth, create_pending,
@@ -27,10 +28,10 @@ use vowp_core::{
 };
 use vowp_protocol::{
     Actor, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId,
-    EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, LedgerKind, MemoryLog, NewJob, NodeName,
-    NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, Role,
-    RunId, RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId,
-    SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary, VowpConfig,
+    EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, LedgerKind, Level, MemoryLog, NewJob,
+    NodeName, NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine,
+    RemoteRunState, Role, RunId, RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState,
+    StopReason, SurfaceId, SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{LedgerFilter, NodePath, NodePaths, StateChange, Store, hash_lease_token};
@@ -3130,4 +3131,316 @@ fn gateway_returns_an_offloaded_result_to_the_gating_path() {
         "the main checkout stays clean"
     );
     gateway.finish().expect("gateway");
+}
+
+/// Builds one path map for the gateway path-map tests.
+fn reported_path_map(project: &str, local_root: &str, worktree_root: Option<&str>, allow: &[&str]) -> AgentPathMap {
+    AgentPathMap {
+        project: ProjectName::parse(project).expect("project"),
+        local_root: local_root.to_owned(),
+        worktree_root: worktree_root.map(str::to_owned),
+        allow: allow.iter().map(|entry| (*entry).to_owned()).collect(),
+    }
+}
+
+#[test]
+fn path_map_update_is_persisted_and_acknowledged() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let vowp = ProjectName::parse("vowp").expect("project");
+    let alpha = ProjectName::parse("alpha").expect("project");
+
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: reported_path_map("vowp", "/srv/vowp", Some("/srv/vowp-wt"), &["src"]),
+    });
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    let store = test_store(home.path(), &clock);
+    let card = store.node_card(&name, clock.now()).expect("card").expect("present");
+    assert_eq!(card.mapped, vec![vowp.clone()], "the new project is mapped");
+    let paths = store.list_node_paths(&name).expect("paths");
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].local_root, "/srv/vowp");
+    assert_eq!(paths[0].worktree_root, "/srv/vowp-wt");
+    assert_eq!(paths[0].allow, vec!["src".to_owned()]);
+    assert_eq!(paths[0].updated_at, clock.now());
+
+    // Replacing the map keeps one row and updates every field without re-enrolling.
+    clock.advance(Duration::from_secs(5));
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: reported_path_map("vowp", "/srv/vowp-renamed", None, &["docs"]),
+    });
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    let paths = store.list_node_paths(&name).expect("paths");
+    assert_eq!(paths.len(), 1, "the upsert does not add a second row");
+    assert_eq!(paths[0].local_root, "/srv/vowp-renamed");
+    assert_eq!(paths[0].worktree_root, "/srv/vowp-renamed");
+    assert_eq!(paths[0].allow, vec!["docs".to_owned()]);
+    assert_eq!(paths[0].updated_at, clock.now());
+
+    // A second project arrives in the same connection.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: reported_path_map("alpha", "/srv/alpha", Some("/srv/alpha-wt"), &[]),
+    });
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    let card = store.node_card(&name, clock.now()).expect("card").expect("present");
+    assert_eq!(card.mapped, vec![alpha, vowp.clone()]);
+
+    // Repeated updates in one burst are applied in order; the last one wins.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: reported_path_map("vowp", "/srv/one", None, &[]),
+    });
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: reported_path_map("vowp", "/srv/two", None, &[]),
+    });
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    let mut pongs = 0;
+    wait_until(|| {
+        pongs = gateway
+            .output
+            .frames()
+            .into_iter()
+            .skip(start)
+            .filter(|frame| matches!(frame, AgentFrame::Pong))
+            .count();
+        pongs >= 2
+    });
+    let paths = store.list_node_paths(&name).expect("paths");
+    let vowp_path = paths.iter().find(|path| path.project == vowp).expect("vowp map");
+    assert_eq!(vowp_path.local_root, "/srv/two", "the last update wins");
+
+    let outcome = gateway.finish().expect("gateway");
+    assert_eq!(outcome, GatewayOutcome::Closed { node: Some(name) });
+}
+
+#[test]
+fn invalid_path_map_updates_are_refused_without_dropping_the_connection() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let invalid = [
+        reported_path_map("vowp", "", None, &[]),
+        reported_path_map("vowp", "relative/root", None, &[]),
+        reported_path_map("vowp", "/srv/../etc", None, &[]),
+        reported_path_map("vowp", "/srv/vowp\u{0}", None, &[]),
+        reported_path_map("vowp", "/srv/vowp", Some(""), &[]),
+        reported_path_map("vowp", "/srv/vowp", Some("/srv/../wt"), &[]),
+        reported_path_map("vowp", "/srv/vowp", None, &[""]),
+        reported_path_map("vowp", "/srv/vowp", None, &["../secret"]),
+        reported_path_map("vowp", "/srv/vowp", None, &["/absolute"]),
+        reported_path_map("vowp", "/srv/vowp", None, &["src/./nested"]),
+        reported_path_map("vowp", "/srv/vowp", None, &["src", "src"]),
+    ];
+    for map in invalid {
+        let start = gateway.frame_count();
+        gateway.send(&AgentFrame::PathMapUpdate { map });
+        let AgentFrame::Error {
+            kind,
+            retryable,
+            message,
+        } = gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Error { .. }))
+        else {
+            panic!("expected an Error frame");
+        };
+        assert_eq!(kind, ErrorKind::InvalidInput);
+        assert!(!retryable, "an invalid map is not retryable");
+        assert!(
+            !message.contains("/srv/"),
+            "the refusal must not echo a local root: {message}"
+        );
+    }
+
+    // The connection stayed open: a later frame is still answered.
+    let start = gateway.frame_count();
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    let store = test_store(home.path(), &clock);
+    assert!(
+        store.list_node_paths(&name).expect("paths").is_empty(),
+        "an invalid map must not be stored"
+    );
+    let warnings: Vec<String> = gateway
+        .log
+        .lines()
+        .into_iter()
+        .filter(|(level, _, message)| *level == Level::Warn && message.contains("path map"))
+        .map(|(_, _, message)| message)
+        .collect();
+    assert!(!warnings.is_empty(), "an invalid map is logged");
+    for warning in warnings {
+        assert!(!warning.contains("/srv/../etc"), "{warning}");
+        assert!(!warning.contains("relative/root"), "{warning}");
+    }
+
+    let outcome = gateway.finish().expect("gateway");
+    assert_eq!(outcome, GatewayOutcome::Closed { node: Some(name) });
+}
+
+#[test]
+fn path_map_update_from_a_revoked_node_is_refused() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let store = test_store(home.path(), &clock);
+    store
+        .set_node_status(&name, NodeStatus::Revoked, "revoked by owner", clock.now())
+        .expect("revoke");
+    gateway.send(&AgentFrame::PathMapUpdate {
+        map: reported_path_map("vowp", "/srv/vowp", None, &[]),
+    });
+    let AgentFrame::Revoked { reason } = gateway.expect(|frame| matches!(frame, AgentFrame::Revoked { .. })) else {
+        panic!("expected Revoked");
+    };
+    assert!(reason.contains("revoked"), "{reason}");
+    let outcome = gateway.finish().expect("gateway");
+    assert_eq!(
+        outcome,
+        GatewayOutcome::Closed {
+            node: Some(name.clone())
+        }
+    );
+    assert!(
+        store.list_node_paths(&name).expect("paths").is_empty(),
+        "a revoked node must not update its map"
+    );
+}
+
+#[test]
+fn unexpected_post_handshake_frames_are_logged_and_ignored() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+
+    let gateway = Gateway::start(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let start = gateway.frame_count();
+    // `Enrolled` is a home -> agent frame; an agent must never send it. A home that does
+    // not know it yet must warn and keep the authenticated session.
+    gateway.send(&AgentFrame::Enrolled {
+        home_id: "home-1".to_owned(),
+        node: name.clone(),
+        protocol: "vowp-agent/1".to_owned(),
+        server_time: clock.now(),
+        heartbeat_secs: 10,
+    });
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    let frames = gateway.output.frames();
+    assert!(
+        !frames.iter().any(|frame| matches!(
+            frame,
+            AgentFrame::Error {
+                kind: ErrorKind::InvalidInput,
+                ..
+            }
+        )),
+        "an unexpected post-handshake frame produced InvalidInput: {frames:?}"
+    );
+    let warnings: Vec<(String, String)> = gateway
+        .log
+        .lines()
+        .into_iter()
+        .filter(|(level, _, _)| *level == Level::Warn)
+        .map(|(_, target, message)| (target, message))
+        .collect();
+    assert!(
+        warnings.iter().any(|(target, message)| target.contains("mac-studio")
+            && message.contains("unexpected post-handshake frame enrolled")),
+        "the warning names the node and frame kind: {warnings:?}"
+    );
+    assert!(
+        !gateway.log.contains("vowp-agent/1"),
+        "the warning must not echo frame payloads"
+    );
+
+    let outcome = gateway.finish().expect("gateway");
+    assert_eq!(outcome, GatewayOutcome::Closed { node: Some(name) });
+}
+
+#[test]
+fn replace_pending_rotates_a_pending_code_and_refuses_an_active_node() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let store = test_store(home.path(), &clock);
+    let first = create_pending(&store, &name, &["old".to_owned()], clock.now()).expect("pending node");
+
+    let second = replace_pending(&store, &name, &["new".to_owned()], clock.now()).expect("replace pending");
+    assert_ne!(first.code, second.code, "the code rotates");
+    let old_request = EnrollRequest {
+        code: first.code,
+        public_key: public_hex(&signing_key()),
+        agent_version: "0.3.0".to_owned(),
+        capabilities: capabilities(),
+        paths: Vec::new(),
+    };
+    let error = redeem(&store, &old_request, clock.now()).expect_err("the old code is gone");
+    assert!(matches!(error, CoreError::Refused(_)), "got {error:?}");
+    let card = store.node_card(&name, clock.now()).expect("card").expect("present");
+    assert_eq!(card.labels, vec!["new".to_owned()]);
+
+    let request = EnrollRequest {
+        code: second.code,
+        public_key: public_hex(&signing_key()),
+        agent_version: "0.3.0".to_owned(),
+        capabilities: capabilities(),
+        paths: Vec::new(),
+    };
+    redeem(&store, &request, clock.now()).expect("the replacement code enrolls");
+    let error = replace_pending(&store, &name, &[], clock.now()).expect_err("an active node is refused");
+    assert!(error.to_string().contains("active"), "{error}");
+    assert!(error.to_string().contains("revoke"), "{error}");
+}
+
+#[test]
+fn replace_pending_rotates_an_expired_pending_code_in_one_step() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let store = test_store(home.path(), &clock);
+    let first = create_pending(&store, &name, &[], clock.now()).expect("pending node");
+    clock.advance(Duration::from_secs(11 * 60));
+
+    let second = replace_pending(&store, &name, &[], clock.now()).expect("replace expired pending");
+    assert_ne!(first.code, second.code);
+    let old = EnrollRequest {
+        code: first.code,
+        public_key: public_hex(&signing_key()),
+        agent_version: "0.3.0".to_owned(),
+        capabilities: capabilities(),
+        paths: Vec::new(),
+    };
+    assert!(
+        redeem(&store, &old, clock.now()).is_err(),
+        "the expired code must not redeem"
+    );
+    let request = EnrollRequest {
+        code: second.code,
+        public_key: public_hex(&signing_key()),
+        agent_version: "0.3.0".to_owned(),
+        capabilities: capabilities(),
+        paths: Vec::new(),
+    };
+    redeem(&store, &request, clock.now()).expect("the fresh code enrolls");
 }

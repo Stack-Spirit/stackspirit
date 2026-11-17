@@ -1064,13 +1064,45 @@ fn run_connection_inner(
                     Err(error) => return Err(error),
                 }
             }
+            AgentFrame::PathMapUpdate { map } => {
+                if card.status != NodeStatus::Active {
+                    send_error(
+                        writer,
+                        ErrorKind::Auth,
+                        format!("node {} is not active", session.node),
+                        false,
+                    )?;
+                    continue;
+                }
+                let project = map.project.clone();
+                match enroll::apply_path_map(store, &session.node, &map, now) {
+                    Ok(()) => {
+                        // The deployed client clears `awaiting_path_map_reply` on any
+                        // non-`Error` frame, so `Pong` is the backward-compatible ack.
+                        send_frame(writer, &AgentFrame::Pong)?;
+                    }
+                    Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
+                        deps.log.log(
+                            Level::Warn,
+                            &format!("agent {}", session.node),
+                            &format!("refused path map update for project {project}: {:?}", error.kind()),
+                        );
+                        send_error(writer, error.kind(), error.to_string(), false)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             AgentFrame::Ping => send_frame(writer, &AgentFrame::Pong)?,
             AgentFrame::Pong => {}
-            _ => {
-                send_error(writer, ErrorKind::InvalidInput, "unexpected frame", false)?;
-                return Ok(GatewayOutcome::Closed {
-                    node: Some(session.node),
-                });
+            other => {
+                // A known frame that is unexpected in this direction must not end an
+                // authenticated session: a newer agent may send a frame this home does not
+                // understand yet. Log only the redacted frame kind and keep the connection.
+                deps.log.log(
+                    Level::Warn,
+                    &format!("agent {}", session.node),
+                    &format!("ignoring unexpected post-handshake frame {}", frame_kind(&other)),
+                );
             }
         }
     }
@@ -1881,6 +1913,16 @@ fn send_frame(writer: &mut dyn Write, frame: &AgentFrame) -> Result<(), CoreErro
         path: "agent gateway output".to_owned(),
         source: error,
     })
+}
+
+/// Returns the wire kind of one frame for a redacted warning.
+///
+/// Only the `type` tag is read; no payload, path or token from the frame is logged.
+fn frame_kind(frame: &AgentFrame) -> String {
+    serde_json::to_value(frame)
+        .ok()
+        .and_then(|value| value.get("type").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// Writes one typed `Error` frame.

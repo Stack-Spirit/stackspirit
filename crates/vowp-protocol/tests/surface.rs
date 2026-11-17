@@ -198,6 +198,7 @@ fn orchestrator_card_carries_its_node_and_typed_state() {
         app: OrchestratorApp::Opencode,
         state: OrchestratorNodeState::NodeOffline,
         node: Some(NodeName::parse("mac-studio").expect("node name")),
+        last_error: Some("node_offline: node mac-studio is offline".to_owned()),
         join: JoinInstructions {
             desktop: "vowp orchestrator resume mac".to_owned(),
             phone: "vowp chat <session>".to_owned(),
@@ -208,6 +209,7 @@ fn orchestrator_card_carries_its_node_and_typed_state() {
     let value = serde_json::to_value(&card).expect("orchestrator card JSON");
     assert_eq!(value["state"], "node_offline");
     assert_eq!(value["node"], "mac-studio");
+    assert_eq!(value["last_error"], "node_offline: node mac-studio is offline");
     let text = value.to_string();
     for forbidden in ["/", "token", "secret", "password", "127.0.0.1"] {
         assert!(!text.contains(forbidden), "card carries {forbidden:?}: {text}");

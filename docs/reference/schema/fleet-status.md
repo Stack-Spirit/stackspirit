@@ -835,6 +835,14 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
           "$ref": "#/$defs/JoinInstructions",
           "description": "How to join from the three surfaces."
         },
+        "last_error": {
+          "default": null,
+          "description": "Last redacted failure or state detail, when the record is failed, degraded or\noffline. `None` for a healthy or cleanly stopped orchestrator; never a path, port,\npassword, pairing link or secret value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "Orchestrator name.",
           "type": "string"

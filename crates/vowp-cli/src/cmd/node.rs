@@ -132,10 +132,15 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
 fn remove(ctx: &Ctx, io: &mut dyn IoStreams, args: &NodeRmArgs) -> Result<i32, CliError> {
     require_registry(ctx)?;
     let name = NodeName::parse(&args.name)?;
+    // `node rm` never prompted, so `--yes` is accepted for scripts without changing the
+    // default behaviour when it is omitted.
+    let _ = args.yes;
     let node = if ctx.role() == NodeRole::Home {
         let store = ctx.store()?;
         let node = store.require_node(&name)?;
         store.remove_node(&name)?;
+        // `enrollment_codes` has no foreign key to `nodes`; drop the node's stranded codes.
+        let _ = store.purge_node_enrollment_codes(&name)?;
         node
     } else {
         let root = ctx.paths().root();
@@ -160,11 +165,19 @@ fn remove(ctx: &Ctx, io: &mut dyn IoStreams, args: &NodeRmArgs) -> Result<i32, C
 }
 
 /// Creates a pending local-agent node and prints its one-time code and enrollment command.
+///
+/// `--replace` rotates a pending node's code in one transaction; an active or revoked node
+/// is refused so a live enrollment is never wiped. Expired pending codes are purged first.
 fn enroll_node(ctx: &Ctx, io: &mut dyn IoStreams, args: &NodeEnrollArgs) -> Result<i32, CliError> {
     require_home(ctx)?;
     let name = NodeName::parse(&args.name)?;
     let now = ctx.clock().now();
-    let pending = enroll::create_pending(&ctx.store()?, &name, &args.label, now)?;
+    let store = ctx.store()?;
+    let pending = if args.replace {
+        enroll::replace_pending(&store, &name, &args.label, now)?
+    } else {
+        enroll::create_pending(&store, &name, &args.label, now)?
+    };
     let command = "vowp agent enroll --target <home-ssh-target> --code-file -".to_owned();
     if ctx.json() {
         print_json(
@@ -177,7 +190,8 @@ fn enroll_node(ctx: &Ctx, io: &mut dyn IoStreams, args: &NodeEnrollArgs) -> Resu
             },
         )?;
     } else {
-        writeln!(io.out(), "created pending node {}", pending.node)?;
+        let action = if args.replace { "replaced" } else { "created" };
+        writeln!(io.out(), "{action} pending node {}", pending.node)?;
         writeln!(io.out(), "code: {}", pending.code)?;
         writeln!(io.out(), "run on the node:")?;
         writeln!(io.out(), "  {command}")?;
