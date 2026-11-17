@@ -324,12 +324,9 @@ pub fn acquire_agent_lease(
     now: Timestamp,
 ) -> Result<AgentLeaseAcquire, CoreError> {
     let session_row = store.require_session(session)?;
-    if surface.node != session_row.node {
-        return Err(CoreError::Refused(format!(
-            "surface {} belongs to node {}, not the session's node {}",
-            surface.id, surface.node, session_row.node
-        )));
-    }
+    // A paired surface on another node is legitimately authorized to acquire the lease of
+    // a session the home created before pairing. The surface-token scope and the live
+    // lease are the authority; the session row's original node is not.
     let tail_seq = session_row.last_seq;
     let takeover = mode == LeaseMode::Takeover;
     let outcome = store.transaction(|tx| {

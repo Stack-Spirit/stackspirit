@@ -246,6 +246,28 @@ impl CommandSpool {
         Ok(commands)
     }
 
+    /// Retires one queued command without publishing an unsolicited result.
+    ///
+    /// A result that no record names as its latest command is stale: the owner already
+    /// moved on to a newer request id. Removing the outbox file keeps the next connection
+    /// from re-sending a superseded command. A missing file is already retired.
+    pub fn retire(&self, node: &NodeName, request_id: &str) -> Result<(), CoreError> {
+        if !safe_request_id(request_id) {
+            return Err(CoreError::Invalid(format!(
+                "invalid orchestrator request id {request_id:?}"
+            )));
+        }
+        let path = self.outbox(node).join(format!("{request_id}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(CoreError::Io {
+                path: path.display().to_string(),
+                source,
+            }),
+        }
+    }
+
     /// Publishes one agent result and retires its command.
     ///
     /// The result file is written before the command is removed, so an interrupted write
@@ -472,7 +494,12 @@ impl Orchestrator {
         drop(global);
 
         create_private_dir(&dir)?;
-        let scoped = self.scoped_deps(req.project.as_ref())?;
+        let mut scoped = self.scoped_deps(req.project.as_ref())?;
+        // A remote-node orchestrator session lives on the home but records the node whose
+        // app will run it, so a later pairing on that node is authorized.
+        if let Some(card) = remote_card.as_ref() {
+            scoped.node = card.name.clone();
+        }
         let service = SessionService::new(scoped.clone());
         let cwd = if remote_card.is_some() {
             // The node resolves its own local root. The home never stores or shows the
@@ -1052,6 +1079,26 @@ impl Orchestrator {
             }
         }
         Ok(resumed)
+    }
+
+    /// Returns whether `command` is still the latest command for its record on `node`.
+    ///
+    /// A `stop` is always current: the owner's stop is final even when a newer start or
+    /// resume was queued behind it. Any other command whose request id is no longer the
+    /// record's latest one has been superseded and must be retired rather than sent.
+    pub fn is_command_current(&self, node: &NodeName, command: &OrchestratorCommand) -> Result<bool, CoreError> {
+        if matches!(command, OrchestratorCommand::Stop { .. }) {
+            return Ok(true);
+        }
+        let state = match read_state(&self.dir(command.name())) {
+            Ok(Some(state)) => state,
+            // A record that is absent has no command waiting for it. A momentarily
+            // unreadable record is not proof of supersession; sending is safe because the
+            // correlated result decides.
+            Ok(None) => return Ok(false),
+            Err(_) => return Ok(true),
+        };
+        Ok(state.node.as_ref() == Some(node) && state.last_request_id.as_deref() == Some(command.request_id()))
     }
 
     /// Applies one agent result to the record with the matching node and request id.
@@ -1634,15 +1681,51 @@ impl Orchestrator {
             }
             self.release_lease(&dir, &state.name, &state.session_id)?;
         }
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(CoreError::Io {
-                path: dir.display().to_string(),
-                source,
-            }),
+        remove_dir_all_bounded(&dir)
+    }
+}
+
+/// How many attempts a forced orchestrator-directory removal may make.
+const REMOVE_ATTEMPTS: u32 = 25;
+
+/// How long each failed removal waits before retrying.
+const REMOVE_RETRY: Duration = Duration::from_millis(40);
+
+/// Removes `dir`, retrying transient `--force` races while a dying app flushes its WAL.
+///
+/// A SQLite WAL checkpoint can keep recreating a file while `remove_dir_all` walks the
+/// tree, which surfaces as `DirectoryNotEmpty`/`ENOTEMPTY`, `AlreadyExists` or
+/// `PermissionDenied`. `NotFound` is already the desired state.
+fn remove_dir_all_bounded(dir: &Path) -> Result<(), CoreError> {
+    for attempt in 0..REMOVE_ATTEMPTS {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt + 1 < REMOVE_ATTEMPTS && transient_remove_error(&error) => {
+                thread::sleep(REMOVE_RETRY);
+            }
+            Err(source) => {
+                return Err(CoreError::Io {
+                    path: dir.display().to_string(),
+                    source,
+                });
+            }
         }
     }
+    Err(CoreError::Io {
+        path: dir.display().to_string(),
+        source: std::io::Error::other("the directory was still busy after the bounded retries"),
+    })
+}
+
+/// Returns whether a directory-removal error can clear up on its own.
+fn transient_remove_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::DirectoryNotEmpty
+            | std::io::ErrorKind::AlreadyExists
+            | std::io::ErrorKind::PermissionDenied
+    ) || matches!(error.raw_os_error(), Some(39) | Some(66))
 }
 
 /// Returns a fresh, opaque command correlation id.

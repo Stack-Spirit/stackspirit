@@ -491,6 +491,44 @@ impl Store {
         Ok(leases)
     }
 
+    /// Stamps the heartbeat of the lease identified by its session, surface and node.
+    ///
+    /// A v0.4 local surface identifies its lease by these three values on every mirrored
+    /// frame, so it never has to carry the 52-character plaintext token. Returns false when
+    /// no matching row exists.
+    pub fn heartbeat_surface_lease(
+        &self,
+        session: &SessionId,
+        surface: &SurfaceId,
+        node: &NodeName,
+        at: Timestamp,
+    ) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE main.leases SET heartbeat_at = ?1
+             WHERE session_id = ?2 AND surface_id = ?3 AND node = ?4",
+            params![ts_to_text(at), session.as_str(), surface.0.as_str(), node.as_str()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Deletes the lease identified by its session, surface and node.
+    ///
+    /// This is the release path of a local surface that identifies itself by its paired
+    /// surface rather than by the plaintext lease token. Returns false when no matching row
+    /// exists.
+    pub fn release_surface_lease(
+        &self,
+        session: &SessionId,
+        surface: &SurfaceId,
+        node: &NodeName,
+    ) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "DELETE FROM main.leases WHERE session_id = ?1 AND surface_id = ?2 AND node = ?3",
+            params![session.as_str(), surface.0.as_str(), node.as_str()],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Lists every lease, ordered by session id.
     pub fn list_leases(&self) -> Result<Vec<Lease>, StoreError> {
         let mut statement = self
