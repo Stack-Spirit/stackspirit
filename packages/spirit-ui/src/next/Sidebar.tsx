@@ -20,6 +20,8 @@ export interface SidebarProps {
   onTheme: (theme: ThemePreference) => void;
   resizeHandle: HTMLAttributes<HTMLDivElement>;
   resizing: boolean;
+  /** Opens the raw VOWP document (diagnostics). */
+  onOpenRaw: () => void;
 }
 
 /**
@@ -37,6 +39,7 @@ export function Sidebar({
   onTheme,
   resizeHandle,
   resizing,
+  onOpenRaw,
 }: SidebarProps) {
   const fleet = useFleet();
   const connection = useConnection();
@@ -59,7 +62,7 @@ export function Sidebar({
       </div>
 
       <div className="nx-side__scroll">
-        <ServerCard view={view} onNavigate={onNavigate} onAddServer={onAddServer} />
+        <ServerCard view={view} onNavigate={onNavigate} onAddServer={onAddServer} onOpenRaw={onOpenRaw} />
 
         <nav className="nx-side__nav" aria-label="Sessions">
           {connected ? (
@@ -186,12 +189,16 @@ function ServerCard({
   view,
   onNavigate,
   onAddServer,
+  onOpenRaw,
 }: {
   view: NextView;
   onNavigate: (view: NextView) => void;
   onAddServer: () => void;
+  onOpenRaw: () => void;
 }) {
   const hosts = useHosts();
+  const openSessions = useFleetStore((state) => state.openSessions);
+  const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
   const connection = useConnection();
   const selectedHostId = useFleetStore((state) => state.selectedHostId);
   const connect = useFleetStore((state) => state.connect);
@@ -236,14 +243,34 @@ function ServerCard({
       {(close) => (
         <>
           {live ? (
-            <MenuItem
-              onSelect={() => {
-                close();
-                onNavigate({ kind: "server" });
-              }}
-            >
-              Open server page
-            </MenuItem>
+            <>
+              <MenuItem
+                onSelect={() => {
+                  close();
+                  onNavigate({ kind: "server" });
+                }}
+              >
+                Open server page
+              </MenuItem>
+              {sessionsAvailable ? (
+                <MenuItem
+                  onSelect={() => {
+                    close();
+                    openSessions("list");
+                  }}
+                >
+                  Sessions and .asif export
+                </MenuItem>
+              ) : null}
+              <MenuItem
+                onSelect={() => {
+                  close();
+                  onOpenRaw();
+                }}
+              >
+                Raw VOWP document
+              </MenuItem>
+            </>
           ) : null}
           <MenuItem
             onSelect={() => {

@@ -32,6 +32,13 @@ cargo run -p spirit-cli -- --help           # spirit CLI
 npm run dev:web                             # read-only Web shell
 ```
 
+The desktop opens the Meadow shell (`packages/spirit-ui/src/next`): a chat-first layout with
+the sprout-face mark, light and dark themes that follow the system, and the server, workers
+and details views. The classic cockpit is still available with `VITE_SPIRIT_UI=classic` or
+`?ui=classic`, and its e2e specs pin it. In preview mode (`VITE_SPIRIT_MOCK=1`), `?scenario=`
+switches the MockBridge data without a restart. Brand sources and the icon builder live in
+`design/brand`.
+
 The Web shell is read-only and has no browser token. Set `VITE_SPIRIT_MOCK=1` for the shared
 `MockBridge` preview, or set the loopback proxy target and browser origin for a live daemon; see
 [`docs/WEB.md`](docs/WEB.md). The CLI quickstart, fixture mode, and exit codes are in

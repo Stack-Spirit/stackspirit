@@ -2,13 +2,14 @@ import { useState } from "react";
 
 import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
-import { useEngine } from "../state/fleetStore";
+import { useConnection, useEngine, useFleetStore } from "../state/fleetStore";
 import { PageHeader } from "./PageHeader";
 import type { ThemePreference } from "./themePreference";
 
 export interface SettingsViewProps {
   theme: ThemePreference;
   onTheme: (theme: ThemePreference) => void;
+  onOpenRaw?: () => void;
 }
 
 /**
@@ -16,8 +17,11 @@ export interface SettingsViewProps {
  * Advanced reuses the existing Engine view (models, keys, harness, capability gates)
  * and the host manager, so their logic is unchanged.
  */
-export function SettingsView({ theme, onTheme }: SettingsViewProps) {
+export function SettingsView({ theme, onTheme, onOpenRaw }: SettingsViewProps) {
   const engine = useEngine();
+  const openSessions = useFleetStore((state) => state.openSessions);
+  const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
+  const connected = useConnection().state === "connected";
   const [advanced, setAdvanced] = useState(false);
   const model = engine?.selected_model?.label ?? engine?.selected_model?.id ?? "No model selected";
 
@@ -71,6 +75,32 @@ export function SettingsView({ theme, onTheme }: SettingsViewProps) {
             </div>
             {advanced ? (
               <div className="nx-advanced">
+                <div className="nx-settings__row">
+                  <span>
+                    Sessions and .asif.zip
+                    <small>Export and import portable session packages when VOWP supports them.</small>
+                  </span>
+                  <span style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      className="nx-btn nx-btn--quiet nx-btn--sm"
+                      disabled={!sessionsAvailable || !connected}
+                      onClick={() => openSessions("list")}
+                    >
+                      Sessions
+                    </button>
+                    {onOpenRaw ? (
+                      <button
+                        type="button"
+                        className="nx-btn nx-btn--quiet nx-btn--sm"
+                        disabled={!connected}
+                        onClick={onOpenRaw}
+                      >
+                        Raw VOWP document
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
                 <HostManager />
                 <EngineView />
               </div>

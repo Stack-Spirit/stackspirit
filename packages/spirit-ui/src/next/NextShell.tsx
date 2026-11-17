@@ -2,8 +2,12 @@ import { useEffect, useState, type CSSProperties } from "react";
 
 import type { SpiritBridge } from "../bridge";
 import { useConnection, useFleet, useFleetStore, useHosts, useSelectedHostId } from "../state/fleetStore";
+import { RawDocumentDrawer } from "../views/capacity/RawDocumentDrawer";
 import { AddHostWizard } from "../views/hosts/AddHostWizard";
+import { InboxDrawer } from "../views/inbox/InboxDrawer";
+import { SessionsDrawer } from "../views/sessions/SessionsDrawer";
 import { AddProjectDialog } from "./AddProjectDialog";
+import { ErrorNotice } from "./ErrorNotice";
 import { ChatView } from "./ChatView";
 import { useConversations } from "./conversations";
 import { ContextPanel } from "./ContextPanel";
@@ -45,6 +49,12 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const side = useResizable({ storageKey: "stackspirit.sidebarWidth", initial: 272, min: 220, max: 420, grows: "right" });
   const drawer = useResizable({ storageKey: "stackspirit.panelWidth", initial: 400, min: 320, max: 640, grows: "left" });
   const [addingProject, setAddingProject] = useState(false);
+  // Classic drawers, reused unchanged: inbox answers, .asif sessions, raw document.
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
+  const sessionsOpen = useFleetStore((state) => state.sessionsOpen);
+  const sessionsIntent = useFleetStore((state) => state.sessionsIntent);
+  const closeSessions = useFleetStore((state) => state.closeSessions);
 
   const connected = connection.state === "connected" || connection.state === "stale";
   // "global" shows the Connect prompt until a saved server is connected; the setup
@@ -124,7 +134,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
 
   let main;
   if (view.kind === "settings") {
-    main = <SettingsView theme={theme} onTheme={setTheme} />;
+    main = <SettingsView theme={theme} onTheme={setTheme} onOpenRaw={() => setRawOpen(true)} />;
   } else if (view.kind === "server" && serverLabel) {
     main = <ServerPage serverLabel={serverLabel} onOpenProject={openWorkers} />;
   } else if (view.kind === "workers" && serverLabel) {
@@ -163,20 +173,32 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         onTheme={setTheme}
         resizeHandle={side.handleProps}
         resizing={side.dragging}
+        onOpenRaw={() => setRawOpen(true)}
       />
       <div className={`nx-stage${panelOpen ? " nx-stage--panel" : ""}`}>
-        {main}
+        <div className="nx-column">
+          <ErrorNotice />
+          {main}
+        </div>
         {connected ? (
           <ContextPanel
             project={scopeProject}
             onOpenServer={openServer}
             onOpenWorkers={openWorkers}
             onOpenSession={(project) => openSession(project)}
+            onOpenInbox={() => setInboxOpen(true)}
             resizeHandle={drawer.handleProps}
           />
         ) : null}
       </div>
       {addServerDialog}
+      <InboxDrawer key={inboxOpen ? "inbox-open" : "inbox-closed"} open={inboxOpen} onClose={() => setInboxOpen(false)} />
+      <RawDocumentDrawer open={rawOpen} onClose={() => setRawOpen(false)} />
+      <SessionsDrawer
+        key={`${sessionsOpen ? "open" : "closed"}-${sessionsIntent}`}
+        open={sessionsOpen}
+        onClose={closeSessions}
+      />
       {addingProject && serverLabel ? (
         <AddProjectDialog
           serverLabel={serverLabel}

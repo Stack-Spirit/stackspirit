@@ -22,6 +22,8 @@ export default defineConfig({
     url: "http://127.0.0.1:1420",
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { VITE_SPIRIT_MOCK: "1" },
+    // The classic cockpit specs pin the classic shell; next-shell.spec.ts opts in
+    // to the default Meadow shell with ?ui=next.
+    env: { VITE_SPIRIT_MOCK: "1", VITE_SPIRIT_UI: "classic" },
   },
 });

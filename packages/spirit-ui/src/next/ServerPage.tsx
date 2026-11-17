@@ -1,5 +1,6 @@
 import { latencyLabel } from "../domain/format";
 import { useConnection, useFleet, useFleetStore } from "../state/fleetStore";
+import { CapacityRail } from "../views/capacity/CapacityRail";
 import { Meter, Slots, useServerHealth } from "./health";
 import { NodeMap, type MapBranch } from "./NodeMap";
 import { PageHeader } from "./PageHeader";
@@ -124,6 +125,16 @@ export function ServerPage({ serverLabel, onOpenProject }: { serverLabel: string
               />
             )}
           </div>
+
+          <details className="nx-block nx-disclosure">
+            <summary>
+              <h2>Capacity controls</h2>
+              <span className="nx-row-item__meta">Target workers, brake, limits and waiting jobs</span>
+            </summary>
+            <div className="nx-classic">
+              <CapacityRail />
+            </div>
+          </details>
 
           <div className="nx-block">
             <div className="nx-block__head">

@@ -12,6 +12,8 @@ export interface ContextPanelProps {
   onOpenServer: () => void;
   onOpenWorkers: (project: string) => void;
   onOpenSession: (project: string) => void;
+  /** Opens the full inbox, where questions can be answered. */
+  onOpenInbox?: () => void;
   /** Drag handle on the panel's left edge. */
   resizeHandle?: HTMLAttributes<HTMLDivElement>;
 }
@@ -60,7 +62,7 @@ export function ContextPanel(props: ContextPanelProps) {
           <div className="nx-drawer__body">
             {panel.kind === "overview" ? <Overview {...props} /> : null}
             {panel.kind === "server" ? <ServerDetail onOpenServer={props.onOpenServer} /> : null}
-            {panel.kind === "inbox" ? <InboxDetail project={props.project} /> : null}
+            {panel.kind === "inbox" ? <InboxDetail project={props.project} onOpenInbox={props.onOpenInbox} /> : null}
             {panel.kind === "job" ? <JobDetail content={panel} {...props} /> : null}
           </div>
         </div>
@@ -69,7 +71,7 @@ export function ContextPanel(props: ContextPanelProps) {
   );
 }
 
-function Overview({ project, onOpenServer, onOpenWorkers }: ContextPanelProps) {
+function Overview({ project, onOpenServer, onOpenWorkers, onOpenInbox }: ContextPanelProps) {
   const fleet = useFleet();
   const openPanel = useShellUi((state) => state.openPanel);
   const running = (fleet?.running ?? []).filter((worker) => project === null || worker.project === project);
@@ -114,7 +116,7 @@ function Overview({ project, onOpenServer, onOpenWorkers }: ContextPanelProps) {
           </button>
         ) : null}
       </section>
-      <InboxDetail project={project} />
+      <InboxDetail project={project} onOpenInbox={onOpenInbox} />
       <ServerDetail onOpenServer={onOpenServer} compact />
     </>
   );
@@ -144,7 +146,7 @@ function ServerDetail({ onOpenServer, compact = false }: { onOpenServer: () => v
   );
 }
 
-function InboxDetail({ project }: { project: string | null }) {
+function InboxDetail({ project, onOpenInbox }: { project: string | null; onOpenInbox?: () => void }) {
   const fleet = useFleet();
   const [scope, setScope] = useState<"project" | "all">(project ? "project" : "all");
   const active = project ? scope : "all";
@@ -192,6 +194,11 @@ function InboxDetail({ project }: { project: string | null }) {
           ))}
         </ul>
       )}
+      {onOpenInbox ? (
+        <button type="button" className="nx-link" onClick={onOpenInbox}>
+          Answer in inbox →
+        </button>
+      ) : null}
     </section>
   );
 }

@@ -16,11 +16,11 @@ if (!container) throw new Error("missing #root");
 
 const root = createRoot(container);
 
-// The redesigned shell is opt-in while it is being designed: VITE_SPIRIT_UI=next or
-// ?ui=next. The classic shell stays the default so its tests and flows are unchanged.
+// The Meadow shell is the default. The classic cockpit stays available while the
+// redesign settles: VITE_SPIRIT_UI=classic or ?ui=classic (its e2e suite uses this).
 const uiParam = new URLSearchParams(window.location.search).get("ui");
-const useNext = uiParam ? uiParam === "next" : import.meta.env.VITE_SPIRIT_UI === "next";
-const Shell = useNext ? NextShell : AppShell;
+const useClassic = uiParam ? uiParam === "classic" : import.meta.env.VITE_SPIRIT_UI === "classic";
+const Shell = useClassic ? AppShell : NextShell;
 
 void createBridge()
   .then((bridge) => {

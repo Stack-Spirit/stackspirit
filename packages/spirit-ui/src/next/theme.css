@@ -33,27 +33,29 @@
 
   /* Text */
   --nx-text: #0d120f;
-  --nx-muted: #56635a;
-  --nx-faint: #84907f;
+  --nx-muted: #4f5c53;
+  --nx-faint: #5f6b5d;
 
-  /* Accent use */
-  --nx-accent: var(--nx-green-strong);
+  /* Accent use. Text-on-light greens are darker than the brand green so they
+     meet WCAG AA (4.5:1) on every surface; #43a85a stays for marks, bars, dots. */
+  --nx-accent: #256b3c;
   --nx-accent-fill: var(--nx-green);
   --nx-accent-ink: #ffffff;
   --nx-accent-soft: #e4f2d8;
   --nx-accent-soft-ink: var(--nx-green-deep);
   /* Text on a filled green button: white on light, near-black on dark. */
   --nx-btn-ink: #ffffff;
+  --nx-btn-bg: var(--nx-green-strong);
 
   /* Where a session runs: Server is the green home, Local is a calm blue. */
-  --nx-server: var(--nx-green-strong);
+  --nx-server: #256b3c;
   --nx-server-soft: #e4f2d8;
-  --nx-local: #2f6db0;
+  --nx-local: #2a63a0;
   --nx-local-soft: #e2edf8;
 
   /* States */
-  --nx-ok: #2e7f48;
-  --nx-warn: #a86a12;
+  --nx-ok: #256b3c;
+  --nx-warn: #8f560b;
   --nx-warn-soft: #fbf0dc;
   --nx-danger: #b5372f;
   --nx-danger-soft: #fbe5e2;
@@ -75,14 +77,14 @@
   --text: var(--nx-text);
   --text-muted: var(--nx-muted);
   --text-faint: var(--nx-faint);
-  --accent: var(--nx-accent-fill);
+  --accent: var(--nx-btn-bg);
   --accent-strong: var(--nx-accent);
-  --accent-ink: var(--nx-accent-ink);
+  --accent-ink: var(--nx-btn-ink);
   --state-ok: var(--nx-ok);
   --state-info: var(--nx-local);
   --state-warn: var(--nx-warn);
   --state-danger: var(--nx-danger);
-  --state-unknown: var(--nx-faint);
+  --state-unknown: var(--nx-muted);
   --shadow-panel: var(--nx-shadow);
   --scrim: rgb(13 18 15 / 0.32);
   --focus-ring: 0 0 0 2px var(--nx-page), 0 0 0 4px var(--nx-green);
@@ -99,11 +101,12 @@
     --nx-line: #25322a;
     --nx-line-strong: #34443a;
     --nx-text: #eef3ee;
-    --nx-muted: #9faea3;
-    --nx-faint: #74827a;
+    --nx-muted: #a8b6ab;
+    --nx-faint: #8d9b91;
     --nx-accent: #7ccb6b;
     --nx-accent-ink: #0d120f;
     --nx-btn-ink: #0d120f;
+    --nx-btn-bg: #43a85a;
     --nx-accent-soft: #1a2e21;
     --nx-accent-soft-ink: #cdedb0;
     --nx-server: #7ccb6b;
@@ -131,11 +134,12 @@
   --nx-line: #25322a;
   --nx-line-strong: #34443a;
   --nx-text: #eef3ee;
-  --nx-muted: #9faea3;
-  --nx-faint: #74827a;
+  --nx-muted: #a8b6ab;
+  --nx-faint: #8d9b91;
   --nx-accent: #7ccb6b;
   --nx-accent-ink: #0d120f;
   --nx-btn-ink: #0d120f;
+    --nx-btn-bg: #43a85a;
   --nx-accent-soft: #1a2e21;
   --nx-accent-soft-ink: #cdedb0;
   --nx-server: #7ccb6b;
@@ -260,7 +264,7 @@
   padding: 0 14px;
   border: 1px solid transparent;
   border-radius: var(--nx-radius);
-  background: var(--nx-accent-fill);
+  background: var(--nx-btn-bg);
   color: var(--nx-btn-ink);
   font-size: 14px;
   font-weight: 500;
@@ -416,8 +420,8 @@ button.nx-node:focus-visible {
   min-width: 18px;
   padding: 0 6px;
   border-radius: 999px;
-  background: var(--nx-accent-fill);
-  color: #ffffff;
+  background: var(--nx-btn-bg);
+  color: var(--nx-btn-ink);
   font-size: 11px;
   font-weight: 600;
   line-height: 18px;
@@ -1226,8 +1230,8 @@ button.nx-node:focus-visible {
   height: 32px;
   border: 0;
   border-radius: 50%;
-  background: var(--nx-accent-fill);
-  color: #ffffff;
+  background: var(--nx-btn-bg);
+  color: var(--nx-btn-ink);
   font-size: 16px;
   cursor: pointer;
 }
@@ -2116,4 +2120,98 @@ button.nx-node:hover {
   .nx-drawer__inner {
     width: 100vw;
   }
+}
+
+/* ======================================================================
+   Error bar, main column, disclosures
+   ====================================================================== */
+
+/* The main view and the error bar above it. */
+.nx-column {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.nx-error {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 12px 6px 20px;
+  border-bottom: 1px solid color-mix(in srgb, var(--nx-danger) 30%, var(--nx-line));
+  background: var(--nx-danger-soft);
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
+.nx-error__text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.nx-error__text strong {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nx-error__text span {
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-error__retry {
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.nx-disclosure > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.nx-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.nx-disclosure > summary::before {
+  content: "▸";
+  color: var(--nx-faint);
+  font-size: 12px;
+  transition: transform 150ms ease;
+}
+
+.nx-disclosure[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.nx-disclosure > summary h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.nx-disclosure > summary:focus-visible {
+  outline: none;
+  border-radius: var(--nx-radius-sm);
+  box-shadow: var(--focus-ring);
+}
+
+/* Reused classic panels inside the new pages. */
+.nx-classic {
+  padding: 16px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius-lg);
+  background: var(--nx-panel);
 }

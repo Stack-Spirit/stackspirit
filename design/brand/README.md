@@ -54,6 +54,16 @@ python3 -I tools/master_mark.py gen/r2-sprout.png mark   # exact master PNG
 Run them in this order; `export_mark.py` writes pooled icons that `icon_mark.py`
 then replaces.
 
+Desktop app icons (macOS tile, `.icns`, `.ico` and the PNG sizes Tauri lists):
+
+```sh
+python3 -I design/brand/tools/app_icon.py design/brand/mark apps/spirit-desktop/src-tauri/icons
+```
+
+The desktop favicons are copies of `mark/icon-32.png` and `mark/icon-16.png` in
+`apps/spirit-desktop/public/`. The UI uses `mark/stackspirit-mark-master.png`, copied to
+`packages/spirit-ui/src/next/assets/spirit-mark.png`.
+
 ## Folder
 
 | Path | What |
