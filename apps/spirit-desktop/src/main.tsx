@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import {
   AppShell,
   ErrorState,
+  NextShell,
   toSpiritError,
 } from "@stackspirit/ui";
 import "@stackspirit/ui/styles.css";
@@ -15,11 +16,17 @@ if (!container) throw new Error("missing #root");
 
 const root = createRoot(container);
 
+// The redesigned shell is opt-in while it is being designed: VITE_SPIRIT_UI=next or
+// ?ui=next. The classic shell stays the default so its tests and flows are unchanged.
+const uiParam = new URLSearchParams(window.location.search).get("ui");
+const useNext = uiParam ? uiParam === "next" : import.meta.env.VITE_SPIRIT_UI === "next";
+const Shell = useNext ? NextShell : AppShell;
+
 void createBridge()
   .then((bridge) => {
     root.render(
       <StrictMode>
-        <AppShell bridge={bridge} />
+        <Shell bridge={bridge} />
       </StrictMode>,
     );
   })

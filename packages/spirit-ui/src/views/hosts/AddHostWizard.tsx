@@ -16,11 +16,13 @@ import { ProbeChecklist, probeAllowsSave } from "./ProbeChecklist";
 export interface AddHostWizardProps {
   onClose: () => void;
   onSaved?: (label: string) => void;
+  /** Dialog title; the classic shell keeps "Add your VPS". */
+  title?: string;
 }
 
 type Step = 1 | 2 | 3;
 
-export function AddHostWizard({ onClose, onSaved }: AddHostWizardProps) {
+export function AddHostWizard({ onClose, onSaved, title = "Add your VPS" }: AddHostWizardProps) {
   const bridge = useFleetStore((state) => state.bridge);
   const addHost = useFleetStore((state) => state.addHost);
   const [step, setStep] = useState<Step>(1);
@@ -114,7 +116,7 @@ export function AddHostWizard({ onClose, onSaved }: AddHostWizardProps) {
   return (
     <Modal
       open
-      title="Add your VPS"
+      title={title}
       onClose={onClose}
       footer={
         step === 1 ? (

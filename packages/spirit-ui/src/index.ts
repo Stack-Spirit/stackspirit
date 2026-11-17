@@ -16,6 +16,7 @@ export * from "./domain/raw";
 export * from "./state/fleetStore";
 
 export { AppShell } from "./app/AppShell";
+export { NextShell } from "./next/NextShell";
 export { StatusStrip } from "./app/StatusStrip";
 export { TopBar, type AppView, type TopBarProps } from "./app/TopBar";
 
