@@ -15,18 +15,24 @@
 //! connection open so the agent can retry with a fresh code, while an internal store failure
 //! closes it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use vowp_protocol::{
-    AGENT_PROTOCOL, AgentCapabilities, AgentFrame, ErrorKind, Executor, ExecutorRef, IngestAck, Lease, LeaseMode,
-    LedgerEntry, LedgerKind, Level, NodeName, NodeStatus, ProjectName, RemoteLine, RunId, RunPurpose, SessionId,
-    SurfaceId, SurfaceInfo, SurfaceKind, SurfaceState, Timestamp, TurnSummary,
+use vowp_protocol::agent::surface::{
+    SurfaceAttach, SurfaceDetach, SurfaceEvent, SurfaceTurn, SurfaceTurnState, ToolCall as SurfaceToolCall,
+    ToolError as SurfaceToolError, ToolResult as SurfaceToolResult,
 };
+use vowp_protocol::{
+    AGENT_PROTOCOL, Actor, AgentCapabilities, AgentFrame, Cost, ErrorKind, EventBody, EventSource, EventType, Executor,
+    ExecutorRef, HarnessKind, IngestAck, Lease, LeaseMode, LedgerEntry, LedgerKind, Level, NodeName, NodeStatus,
+    ProjectName, RemoteLine, Run, RunId, RunOutcome, RunPurpose, SessionId, SessionRole, SessionState, StopReason,
+    SurfaceId, SurfaceInfo, SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnEnded, TurnStarted, TurnSummary,
+};
+use vowp_store::session_log::{NewEvent, SessionLog, index_row};
 use vowp_store::{NodeCredential, Store};
 
 use super::{auth, dispatch, enroll, pair, spool::AgentFrameSpool};
@@ -416,6 +422,11 @@ fn run_connection_inner(
     // owns the session log handle, so a fenced run is dropped here and its later frames
     // are answered with `RunLost` instead of being appended.
     let mut chats: BTreeMap<RunId, ChatStream<'_>> = BTreeMap::new();
+    // Surfaces attached on this connection and the turn each is mirroring. A paired
+    // surface identifies its lease by `(session, surface, node)` on every mirrored frame,
+    // so the connection does not need the plaintext lease token.
+    let mut attached_surfaces: HashMap<SurfaceId, SessionId> = HashMap::new();
+    let mut surface_turns: HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn> = HashMap::new();
     // Orchestrator commands cross the same authenticated connection. The home command
     // writes the durable spool; this connection drains it and publishes the result back.
     let orchestrator = Orchestrator::new_queued(deps.clone());
@@ -424,7 +435,7 @@ fn run_connection_inner(
     let mut sent_commands: BTreeSet<String> = BTreeSet::new();
     loop {
         if connection_is_current(store, &session.node, &session.connection_id) {
-            drain_orchestrator_commands(writer, &session.node, &spool, &mut sent_commands)?;
+            drain_orchestrator_commands(writer, &session.node, &orchestrator, &spool, &mut sent_commands)?;
             drain_agent_frames(writer, &session.node, &frame_spool)?;
         }
         let frame = match poll_frame(incoming, writer, options.max_frame_bytes)? {
@@ -527,6 +538,16 @@ fn run_connection_inner(
                         return Err(error);
                     }
                 }
+                refresh_attached_surfaces(
+                    projects,
+                    store,
+                    deps,
+                    &session.node,
+                    &mut attached_surfaces,
+                    &mut surface_turns,
+                    writer,
+                    now,
+                )?;
             }
             AgentFrame::RunAccepted {
                 assignment_id,
@@ -695,6 +716,81 @@ fn run_connection_inner(
                 }
                 Err(error) => return Err(error),
             },
+            AgentFrame::SurfaceAttach(attach) => {
+                match handle_surface_attach(store, &session.node, &attach, &mut attached_surfaces, writer, now) {
+                    Ok(()) => {}
+                    Err(SurfaceFrameError::NotFound(message)) => {
+                        // The agent may attach a local orchestrator binding before the home
+                        // has a pairing for it. A connection-level Error is terminal for the
+                        // agent frame loop, which would also lose the in-flight
+                        // OrchestratorResult; warn instead and let the first mirrored event
+                        // carry the typed refusal. The surface stays unregistered and no
+                        // lease is granted.
+                        deps.log.log(
+                            Level::Warn,
+                            &format!("agent {}", session.node),
+                            &format!("ignoring attach for an unknown surface: {message}"),
+                        );
+                    }
+                    Err(error) => send_surface_frame_error(writer, error)?,
+                }
+            }
+            AgentFrame::SurfaceDetach(detach) => {
+                handle_surface_detach(
+                    projects,
+                    store,
+                    deps,
+                    &session.node,
+                    &detach,
+                    &mut attached_surfaces,
+                    &mut surface_turns,
+                    now,
+                )?;
+            }
+            AgentFrame::SurfaceTurn(turn) => {
+                match handle_surface_turn(
+                    projects,
+                    store,
+                    deps,
+                    &session.node,
+                    &turn,
+                    &mut attached_surfaces,
+                    &mut surface_turns,
+                    writer,
+                    now,
+                ) {
+                    Ok(()) | Err(SurfaceFrameError::Sent) => {}
+                    Err(error) => send_surface_frame_error(writer, error)?,
+                }
+            }
+            AgentFrame::SurfaceEvent(event) => {
+                match handle_surface_event(
+                    projects,
+                    store,
+                    deps,
+                    &session.node,
+                    &event,
+                    &mut attached_surfaces,
+                    &mut surface_turns,
+                    writer,
+                    now,
+                ) {
+                    Ok(()) | Err(SurfaceFrameError::Sent) => {}
+                    Err(error) => send_surface_frame_error(writer, error)?,
+                }
+            }
+            AgentFrame::ToolCall(call) => {
+                handle_surface_tool_call(
+                    store,
+                    deps,
+                    &session.node,
+                    &call,
+                    &mut attached_surfaces,
+                    &mut chats,
+                    writer,
+                    now,
+                )?;
+            }
             AgentFrame::LeaseAcquire {
                 surface,
                 session: session_id,
@@ -1056,7 +1152,10 @@ fn run_connection_inner(
                     }
                     Ok(None) => {
                         // No record has this request id as its latest command. Do not
-                        // publish an unsolicited result file.
+                        // publish an unsolicited result file; retire the superseded
+                        // command so the next connection never re-sends it.
+                        spool.retire(&session.node, &result.request_id)?;
+                        sent_commands.remove(&result.request_id);
                     }
                     Err(error @ (CoreError::Refused(_) | CoreError::Invalid(_) | CoreError::NotFound(_))) => {
                         send_error(writer, error.kind(), error.to_string(), false)?;
@@ -1116,11 +1215,20 @@ fn run_connection_inner(
 fn drain_orchestrator_commands(
     writer: &mut dyn Write,
     node: &NodeName,
+    orchestrator: &Orchestrator,
     spool: &CommandSpool,
     sent: &mut BTreeSet<String>,
 ) -> Result<(), CoreError> {
     for command in spool.pending(node)? {
         let request_id = command.request_id().to_owned();
+        // A queued command whose request id is no longer the record's latest one was
+        // superseded while the node was offline. Retire it instead of sending a stale
+        // start/resume that would race the new one.
+        if !orchestrator.is_command_current(node, &command)? {
+            spool.retire(node, &request_id)?;
+            sent.remove(&request_id);
+            continue;
+        }
         if !sent.insert(request_id.clone()) {
             continue;
         }
@@ -1319,12 +1427,9 @@ fn resume_chat_stream<'a>(
     if run.ended_at.is_some() {
         return Err(CoreError::Refused(format!("run {run_id} has already ended")));
     }
-    if session_row.node != *node {
-        return Err(CoreError::Refused(format!(
-            "session {session} belongs to node {}, not {node}",
-            session_row.node
-        )));
-    }
+    // A session created on the home may be paired to a surface on this node. The paired
+    // surface, the run's node and the live lease are the proof, not the session's original
+    // `node` column.
     let Some(current) = store.lease(session)? else {
         return Err(CoreError::Refused(format!("session {session} has no live lease")));
     };
@@ -1414,10 +1519,10 @@ fn begin_agent_turn<'a>(
             lease: lease.to_owned(),
             executor: ExecutorRef {
                 executor,
-                node: Some(row.node.clone()),
+                node: Some(node.clone()),
             },
             purpose,
-            node: row.node.clone(),
+            node: node.clone(),
             // The agent resolves its own working directory locally; the home must not
             // record a Mac absolute path in a run row or an event.
             cwd: None,
@@ -1685,11 +1790,1153 @@ fn bound_surface(
     if surface.metadata.get("session").and_then(serde_json::Value::as_str) != Some(session.as_str()) {
         return Err(CoreError::Refused("surface is paired for another session".to_owned()));
     }
-    let session_row = store.require_session(session)?;
-    if session_row.node != *node {
-        return Err(CoreError::Refused("session belongs to another node".to_owned()));
-    }
+    // The session may have been created on the home before it was paired to this node's
+    // surface. The surface row, its metadata binding and the live lease are the authority;
+    // the session's original `node` column is not.
+    store.require_session(session)?;
     Ok(surface)
+}
+
+/// One attached surface's open turn, used to number `turn.ended`, accumulate cost and
+/// classify the run when the app ends the turn.
+struct AttachedSurfaceTurn {
+    /// Run row that owns the turn.
+    run_id: RunId,
+    /// When the app reported the turn start.
+    started_at: Timestamp,
+    /// Cost accumulated from `cost` events in the turn.
+    cost: Cost,
+    /// Whether an `error` event was seen in the turn.
+    saw_error: bool,
+    /// Last error text, kept only for the run detail.
+    last_error: Option<String>,
+    /// Harness the surface mirrors.
+    harness: HarnessKind,
+}
+
+/// The verified identity and scopes of one active paired surface.
+struct ActiveSurface {
+    /// Surface row.
+    info: SurfaceInfo,
+    /// Union of the scopes of every active token.
+    scopes: Vec<SurfaceScope>,
+}
+
+/// Why a surface frame could not be accepted.
+enum SurfaceFrameError {
+    /// The surface row is missing.
+    NotFound(String),
+    /// The frame is not authorized.
+    Refused(String),
+    /// The surface or its token was revoked.
+    Revoked(SurfaceId),
+    /// The refusal was already sent; the connection must keep running.
+    Sent,
+    /// An internal store or I/O failure closes the connection.
+    Core(CoreError),
+}
+
+impl From<CoreError> for SurfaceFrameError {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl From<vowp_store::StoreError> for SurfaceFrameError {
+    fn from(error: vowp_store::StoreError) -> Self {
+        Self::Core(CoreError::from(error))
+    }
+}
+
+/// Verifies one surface and at least one active token, and returns its scope union.
+///
+/// Every v0.4 local-surface frame identifies its surface by id and session rather than
+/// carrying the plaintext surface token on the connection. The node connection is already
+/// Ed25519-authenticated, so the checks here are the surface row, its node and session
+/// binding, and whether its token rows still contain an active token.
+fn active_surface(
+    store: &Store,
+    node: &NodeName,
+    surface_id: &SurfaceId,
+    target_session: &SessionId,
+    now: Timestamp,
+) -> Result<ActiveSurface, SurfaceFrameError> {
+    let Some(surface) = store.surface_by_id(surface_id)? else {
+        return Err(SurfaceFrameError::NotFound(format!("surface {surface_id}")));
+    };
+    if surface.state == SurfaceState::Revoked {
+        return Err(SurfaceFrameError::Revoked(surface_id.clone()));
+    }
+    if surface.node != *node {
+        return Err(SurfaceFrameError::Refused("surface belongs to another node".to_owned()));
+    }
+    if surface.state == SurfaceState::Pending {
+        return Err(SurfaceFrameError::Refused(
+            "surface token is missing; pair the surface first".to_owned(),
+        ));
+    }
+    if surface.metadata.get("session").and_then(serde_json::Value::as_str) != Some(target_session.as_str()) {
+        return Err(SurfaceFrameError::Refused(
+            "surface is paired for another session".to_owned(),
+        ));
+    }
+    match store.require_session(target_session) {
+        Ok(_) => {}
+        Err(vowp_store::StoreError::NotFound { .. }) => {
+            return Err(SurfaceFrameError::NotFound(format!("session {target_session}")));
+        }
+        Err(error) => return Err(SurfaceFrameError::Core(CoreError::from(error))),
+    }
+
+    let tokens = store.list_surface_tokens(surface_id)?;
+    let active: Vec<_> = tokens
+        .iter()
+        .filter(|token| token.revoked_at.is_none())
+        .filter(|token| token.expires_at.is_none_or(|expires_at| expires_at > now))
+        .collect();
+    if active.is_empty() {
+        let message = if tokens.is_empty() {
+            "surface token is invalid"
+        } else if tokens.iter().any(|token| token.revoked_at.is_none()) {
+            "surface token has expired"
+        } else {
+            "surface token was revoked"
+        };
+        return Err(SurfaceFrameError::Refused(message.to_owned()));
+    }
+    if let Some(newest) = active.last() {
+        store.touch_surface_token(&newest.id, now)?;
+    }
+    let mut scopes = Vec::new();
+    for token in &active {
+        for scope in &token.scopes {
+            if !scopes.contains(scope) {
+                scopes.push(scope.clone());
+            }
+        }
+    }
+    Ok(ActiveSurface { info: surface, scopes })
+}
+
+/// Sends the typed frame for one surface verification failure.
+fn send_surface_frame_error(writer: &mut dyn Write, error: SurfaceFrameError) -> Result<(), CoreError> {
+    match error {
+        SurfaceFrameError::NotFound(message) => send_error(writer, ErrorKind::NotFound, message, false),
+        SurfaceFrameError::Refused(message) => send_error(writer, ErrorKind::Refused, message, false),
+        SurfaceFrameError::Revoked(surface_id) => send_frame(
+            writer,
+            &AgentFrame::SurfaceRevoked {
+                surface_id,
+                reason: "surface was revoked".to_owned(),
+            },
+        ),
+        SurfaceFrameError::Sent => Ok(()),
+        SurfaceFrameError::Core(error) => Err(error),
+    }
+}
+
+/// Returns whether the scopes grant `session.write:<session>`.
+fn grants_write(scopes: &[SurfaceScope], session: &SessionId) -> bool {
+    let scope = format!("session.write:{}", session.as_str());
+    scopes.iter().any(|granted| granted.as_str() == scope)
+}
+
+/// Returns the harness a paired surface mirrors.
+fn surface_harness(surface: &SurfaceInfo) -> HarnessKind {
+    match surface.app.as_deref() {
+        Some("opencode") => return HarnessKind::Opencode,
+        Some("claude") | Some("claude_code") | Some("claude-code") => return HarnessKind::ClaudeCode,
+        _ => {}
+    }
+    match surface.kind {
+        SurfaceKind::ClaudeCode => HarnessKind::ClaudeCode,
+        _ => HarnessKind::Opencode,
+    }
+}
+
+/// Appends, redacts and indexes one mirrored surface event.
+#[allow(clippy::too_many_arguments)]
+fn append_surface_event(
+    store: &Store,
+    deps: &Deps,
+    session: &SessionId,
+    harness: HarnessKind,
+    node: &NodeName,
+    body: EventBody,
+    actor: Actor,
+    ts: Option<Timestamp>,
+    native: Option<(&str, Timestamp)>,
+) -> Result<vowp_protocol::EventEnvelope, CoreError> {
+    // A harness may attach its model to the payload; carry it into the event source when
+    // present. The protocol's current payloads have no model field, so this is usually
+    // `None`.
+    let model = body
+        .to_value()
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let log = SessionLog::open(&deps.paths, session, deps.clock.clone())?;
+    let new = NewEvent {
+        actor,
+        source: EventSource {
+            harness,
+            model,
+            node: Some(node.clone()),
+            native_session_id: None,
+        },
+        body,
+        raw: None,
+        ts,
+    };
+    let appended = log.append(crate::vault::redact_event(deps, new)?)?;
+    let row = index_row(&appended);
+    store.transaction(|tx| {
+        tx.index_event(&row)?;
+        match native {
+            Some((native_id, at)) => tx.insert_native_event(session, harness, native_id, &appended.envelope.id, at),
+            None => Ok(true),
+        }
+    })?;
+    log.sync()?;
+    Ok(appended.envelope)
+}
+
+/// Counts `turn.started` rows, returning the next turn number.
+fn next_surface_turn_number(store: &Store, session: &SessionId) -> Result<u32, CoreError> {
+    let rows = store.event_rows(session, 0, u32::MAX)?;
+    let count = rows
+        .iter()
+        .filter(|row| row.event_type == EventType::TurnStarted)
+        .count();
+    Ok(u32::try_from(count).unwrap_or(u32::MAX).saturating_add(1))
+}
+
+/// Counts `turn.started` rows, returning the current (or first) turn number.
+fn current_surface_turn_number(store: &Store, session: &SessionId) -> Result<u32, CoreError> {
+    let rows = store.event_rows(session, 0, u32::MAX)?;
+    let count = rows
+        .iter()
+        .filter(|row| row.event_type == EventType::TurnStarted)
+        .count();
+    Ok(u32::try_from(count).unwrap_or(u32::MAX).max(1))
+}
+
+/// Maps a session role to the run role recorded for an attached turn.
+fn run_role_for(role: Option<SessionRole>) -> vowp_protocol::RunRole {
+    match role {
+        Some(SessionRole::Planner) => vowp_protocol::RunRole::Planner,
+        Some(SessionRole::Keeper) => vowp_protocol::RunRole::Keeper,
+        Some(SessionRole::Verifier) => vowp_protocol::RunRole::Verifier,
+        Some(SessionRole::Worker | SessionRole::User | SessionRole::Orchestrator) | None => {
+            vowp_protocol::RunRole::Worker
+        }
+    }
+}
+
+/// Runs `body` with the store bound to `project`, opening a newly registered project.
+///
+/// The gateway opens every project that exists when the connection starts. A project
+/// registered during a long-lived connection is opened here on first use; a bare
+/// in-memory test store has no paths and falls back to the connection's handle.
+fn with_surface_project_store<T>(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    project: Option<&ProjectName>,
+    body: impl FnOnce(&Store) -> Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    if let Some(paths) = store.paths() {
+        let key = project.cloned().unwrap_or_else(node_project);
+        if store.project(&key)?.is_some() {
+            let _ = Store::create_project_db(paths, &key);
+            if let Ok(handle) = Store::open_with_project(paths, &key) {
+                let handle = handle.with_clock(deps.clock.clone());
+                return body(&handle);
+            }
+        }
+    }
+    body(projects.for_project(store, project))
+}
+
+/// Finishes the run of one attached turn and returns the session to idle.
+#[allow(clippy::too_many_arguments)]
+fn finish_surface_run(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    session: &SessionId,
+    run_id: &RunId,
+    outcome: RunOutcome,
+    exit_code: Option<i32>,
+    cost: Cost,
+    detail: String,
+    _now: Timestamp,
+) -> Result<(), CoreError> {
+    let row = store.require_session(session)?;
+    with_surface_project_store(projects, store, deps, row.project.as_ref(), |project_store| {
+        if project_store.bound_project().is_some() {
+            match project_store.finish_run(
+                run_id,
+                &vowp_store::RunFinish {
+                    outcome,
+                    exit_code,
+                    limit_kind: None,
+                    cost,
+                    native_session_id: None,
+                    detail,
+                },
+            ) {
+                Ok(()) => {}
+                // An attached turn can end without a start (a detached/partial stream) or
+                // after the run row was already finished by another path.
+                Err(vowp_store::StoreError::NotFound { .. } | vowp_store::StoreError::Conflict(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    })?;
+    store.set_session_state(session, SessionState::Idle, None)?;
+    Ok(())
+}
+
+/// Closes the open turn of one surface as interrupted, writing its `turn.ended`.
+#[allow(clippy::too_many_arguments)]
+fn close_open_surface_turn(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    key: &(SurfaceId, SessionId),
+    surface_turns: &mut HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn>,
+    stop_reason: StopReason,
+    outcome: RunOutcome,
+    detail: &str,
+    now: Timestamp,
+) -> Result<(), CoreError> {
+    let Some(open) = surface_turns.remove(key) else {
+        return Ok(());
+    };
+    let session = &key.1;
+    let turn = current_surface_turn_number(store, session)?;
+    let duration_ms = u64::try_from(now.since(open.started_at).as_millis()).ok();
+    append_surface_event(
+        store,
+        deps,
+        session,
+        open.harness,
+        &deps.node,
+        EventBody::TurnEnded(vowp_protocol::TurnEnded {
+            turn,
+            stop_reason,
+            duration_ms,
+        }),
+        Actor::System,
+        None,
+        None,
+    )?;
+    finish_surface_run(
+        projects,
+        store,
+        deps,
+        session,
+        &open.run_id,
+        outcome,
+        None,
+        open.cost,
+        detail.to_owned(),
+        now,
+    )
+}
+
+/// Verifies that `surface` still holds a live lease on `session`, refreshing it.
+///
+/// A surface no longer holding the lease becomes read-only: its open turn is interrupted
+/// and a typed `LeaseRevoked` or `LeaseLost` frame tells the agent to stop sending events.
+#[allow(clippy::too_many_arguments)]
+fn verify_surface_writer(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    node: &NodeName,
+    surface: &SurfaceId,
+    session: &SessionId,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    surface_turns: &mut HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn>,
+    writer: &mut dyn Write,
+    now: Timestamp,
+) -> Result<(), SurfaceFrameError> {
+    let key = (surface.clone(), session.clone());
+    match store.lease(session)? {
+        Some(current) if current.surface_id.as_ref() == Some(surface) && lease::is_live(now, &current) => {
+            store.heartbeat_surface_lease(session, surface, node, now)?;
+            Ok(())
+        }
+        Some(current) if current.surface_id.as_ref() != Some(surface) => {
+            close_open_surface_turn(
+                projects,
+                store,
+                deps,
+                &key,
+                surface_turns,
+                StopReason::Interrupted,
+                RunOutcome::Killed,
+                "the session was taken over by another surface",
+                now,
+            )?;
+            attached_surfaces.remove(surface);
+            send_frame(
+                writer,
+                &AgentFrame::LeaseRevoked {
+                    reason: format!("this surface is read-only; taken over by {}", current.holder),
+                    holder: current.holder,
+                },
+            )?;
+            Err(SurfaceFrameError::Sent)
+        }
+        _ => {
+            close_open_surface_turn(
+                projects,
+                store,
+                deps,
+                &key,
+                surface_turns,
+                StopReason::Interrupted,
+                RunOutcome::Killed,
+                "the lease expired or was released",
+                now,
+            )?;
+            attached_surfaces.remove(surface);
+            send_frame(
+                writer,
+                &AgentFrame::LeaseLost {
+                    reason: "the lease expired or was released; this surface is read-only".to_owned(),
+                },
+            )?;
+            Err(SurfaceFrameError::Sent)
+        }
+    }
+}
+
+/// Refreshes the surface row and lease of every attached surface on a node heartbeat.
+///
+/// A surface whose lease moved to another surface is told `LeaseRevoked`; a surface whose
+/// lease disappeared is told `LeaseLost`. Either way its open turn is closed and it is
+/// dropped from the writer set, without dropping the node connection.
+#[allow(clippy::too_many_arguments)]
+fn refresh_attached_surfaces(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    node: &NodeName,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    surface_turns: &mut HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn>,
+    writer: &mut dyn Write,
+    now: Timestamp,
+) -> Result<(), CoreError> {
+    let attached: Vec<(SurfaceId, SessionId)> = attached_surfaces
+        .iter()
+        .map(|(surface, session)| (surface.clone(), session.clone()))
+        .collect();
+    for (surface, session) in attached {
+        let key = (surface.clone(), session.clone());
+        let Some(info) = store.surface_by_id(&surface)? else {
+            close_open_surface_turn(
+                projects,
+                store,
+                deps,
+                &key,
+                surface_turns,
+                StopReason::Interrupted,
+                RunOutcome::Killed,
+                "the surface was removed",
+                now,
+            )?;
+            attached_surfaces.remove(&surface);
+            send_frame(
+                writer,
+                &AgentFrame::SurfaceRevoked {
+                    surface_id: surface,
+                    reason: "surface was revoked".to_owned(),
+                },
+            )?;
+            continue;
+        };
+        if info.state == SurfaceState::Revoked {
+            let _ = store.release_surface_lease(&session, &surface, node);
+            close_open_surface_turn(
+                projects,
+                store,
+                deps,
+                &key,
+                surface_turns,
+                StopReason::Interrupted,
+                RunOutcome::Killed,
+                "the surface was revoked",
+                now,
+            )?;
+            attached_surfaces.remove(&surface);
+            send_frame(
+                writer,
+                &AgentFrame::SurfaceRevoked {
+                    surface_id: surface,
+                    reason: "surface was revoked".to_owned(),
+                },
+            )?;
+            continue;
+        }
+        store.set_surface_state(&surface, SurfaceState::Attached, now)?;
+        if store.heartbeat_surface_lease(&session, &surface, node, now)? {
+            continue;
+        }
+        match store.lease(&session)? {
+            Some(current) if current.surface_id.as_ref() != Some(&surface) => {
+                close_open_surface_turn(
+                    projects,
+                    store,
+                    deps,
+                    &key,
+                    surface_turns,
+                    StopReason::Interrupted,
+                    RunOutcome::Killed,
+                    "the session was taken over by another surface",
+                    now,
+                )?;
+                attached_surfaces.remove(&surface);
+                send_frame(
+                    writer,
+                    &AgentFrame::LeaseRevoked {
+                        reason: format!("this surface is read-only; taken over by {}", current.holder),
+                        holder: current.holder,
+                    },
+                )?;
+            }
+            _ => {
+                close_open_surface_turn(
+                    projects,
+                    store,
+                    deps,
+                    &key,
+                    surface_turns,
+                    StopReason::Interrupted,
+                    RunOutcome::Killed,
+                    "the lease expired or was released",
+                    now,
+                )?;
+                attached_surfaces.remove(&surface);
+                send_frame(
+                    writer,
+                    &AgentFrame::LeaseLost {
+                        reason: "the lease expired or was released; this surface is read-only".to_owned(),
+                    },
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handles one `SurfaceAttach`: verifies the surface token, then acquires or follows.
+fn handle_surface_attach(
+    store: &Store,
+    node: &NodeName,
+    attach: &SurfaceAttach,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    writer: &mut dyn Write,
+    now: Timestamp,
+) -> Result<(), SurfaceFrameError> {
+    let active = active_surface(store, node, &attach.surface, &attach.session, now)?;
+    store.set_surface_state(&attach.surface, SurfaceState::Attached, now)?;
+    if !grants_write(&active.scopes, &attach.session) {
+        // Read-only follower: attach succeeds, but the surface never joins the writers.
+        return Ok(());
+    }
+    match store.lease(&attach.session)? {
+        Some(current) if current.surface_id.as_ref() == Some(&attach.surface) => {
+            store.heartbeat_surface_lease(&attach.session, &attach.surface, node, now)?;
+            attached_surfaces.insert(attach.surface.clone(), attach.session.clone());
+        }
+        Some(current) if lease::is_live(now, &current) => {
+            send_frame(
+                writer,
+                &AgentFrame::LeaseRevoked {
+                    reason: format!("this surface is read-only; taken over by {}", current.holder),
+                    holder: current.holder,
+                },
+            )?;
+        }
+        _ => match lease::acquire_agent_lease(store, &attach.session, &active.info, LeaseMode::Acquire, now)? {
+            lease::AgentLeaseAcquire::Granted { .. } => {
+                attached_surfaces.insert(attach.surface.clone(), attach.session.clone());
+            }
+            lease::AgentLeaseAcquire::Conflict(conflict) => {
+                send_frame(
+                    writer,
+                    &AgentFrame::LeaseRevoked {
+                        reason: format!("this surface is read-only; taken over by {}", conflict.holder),
+                        holder: conflict.holder,
+                    },
+                )?;
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Handles one `SurfaceDetach`: close the open turn, then release the surface lease.
+#[allow(clippy::too_many_arguments)]
+fn handle_surface_detach(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    node: &NodeName,
+    detach: &SurfaceDetach,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    surface_turns: &mut HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn>,
+    now: Timestamp,
+) -> Result<(), CoreError> {
+    attached_surfaces.remove(&detach.surface);
+    close_open_surface_turn(
+        projects,
+        store,
+        deps,
+        &(detach.surface.clone(), detach.session.clone()),
+        surface_turns,
+        StopReason::Interrupted,
+        RunOutcome::Killed,
+        "the surface detached mid-turn",
+        now,
+    )?;
+    if let Some(surface) = store.surface_by_id(&detach.surface)? {
+        let bound =
+            surface.metadata.get("session").and_then(serde_json::Value::as_str) == Some(detach.session.as_str());
+        if surface.node == *node && bound {
+            let _ = store.release_surface_lease(&detach.session, &detach.surface, node);
+        }
+    }
+    Ok(())
+}
+
+/// Handles one `SurfaceTurn` boundary.
+#[allow(clippy::too_many_arguments)]
+fn handle_surface_turn(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    node: &NodeName,
+    turn: &SurfaceTurn,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    surface_turns: &mut HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn>,
+    writer: &mut dyn Write,
+    now: Timestamp,
+) -> Result<(), SurfaceFrameError> {
+    let active = active_surface(store, node, &turn.surface, &turn.session, now)?;
+    if !grants_write(&active.scopes, &turn.session) {
+        return Err(SurfaceFrameError::Refused(format!(
+            "surface token does not grant session.write:{}",
+            turn.session.as_str()
+        )));
+    }
+    verify_surface_writer(
+        projects,
+        store,
+        deps,
+        node,
+        &turn.surface,
+        &turn.session,
+        attached_surfaces,
+        surface_turns,
+        writer,
+        now,
+    )?;
+    let harness = surface_harness(&active.info);
+    let key = (turn.surface.clone(), turn.session.clone());
+    if let Some(existing) = store.native_event(&turn.session, harness, &turn.native_id)? {
+        let seq = store
+            .event_rows(&turn.session, 0, u32::MAX)?
+            .into_iter()
+            .find(|row| row.id == existing)
+            .map(|row| row.seq);
+        let run_id = surface_turns
+            .get(&key)
+            .map(|open| open.run_id.clone())
+            .unwrap_or_else(RunId::new);
+        send_frame(
+            writer,
+            &AgentFrame::IngestAck {
+                run_id,
+                event_id: Some(existing),
+                seq,
+                duplicate: true,
+                lease_revoked: None,
+                error: None,
+            },
+        )?;
+        return Ok(());
+    }
+
+    match turn.state {
+        SurfaceTurnState::Started => {
+            close_open_surface_turn(
+                projects,
+                store,
+                deps,
+                &key,
+                surface_turns,
+                StopReason::Interrupted,
+                RunOutcome::Killed,
+                "a new turn started before the previous one ended",
+                now,
+            )?;
+            let turn_num = next_surface_turn_number(store, &turn.session)?;
+            let run_id = RunId::new();
+            let session_row = store.require_session(&turn.session)?;
+            let run = Run {
+                id: run_id.clone(),
+                job_id: session_row.job_id.clone(),
+                session_id: Some(turn.session.clone()),
+                role: run_role_for(session_row.role),
+                purpose: RunPurpose::Continue,
+                profile: None,
+                rung: 0,
+                executor: session_row.executor.clone(),
+                provider: None,
+                node: node.clone(),
+                native_session_id: None,
+                pid: None,
+                window: None,
+                cwd: Some(String::new()),
+                started_at: turn.at,
+                ended_at: None,
+                exit_code: None,
+                outcome: None,
+                limit_kind: None,
+                cost: Cost::unknown(),
+                detail: String::new(),
+            };
+            let inserted =
+                with_surface_project_store(projects, store, deps, session_row.project.as_ref(), |project_store| {
+                    if project_store.bound_project().is_some() {
+                        project_store.insert_run(&run)?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })?;
+            if inserted {
+                store.set_session_state(&turn.session, SessionState::Running, None)?;
+            }
+            let appended = append_surface_event(
+                store,
+                deps,
+                &turn.session,
+                harness,
+                node,
+                EventBody::TurnStarted(TurnStarted { turn: turn_num }),
+                Actor::System,
+                Some(turn.at),
+                Some((&turn.native_id, turn.at)),
+            )?;
+            surface_turns.insert(
+                key,
+                AttachedSurfaceTurn {
+                    run_id: run_id.clone(),
+                    started_at: turn.at,
+                    cost: Cost::unknown(),
+                    saw_error: false,
+                    last_error: None,
+                    harness,
+                },
+            );
+            send_frame(
+                writer,
+                &AgentFrame::IngestAck {
+                    run_id,
+                    event_id: Some(appended.id),
+                    seq: Some(appended.seq),
+                    duplicate: false,
+                    lease_revoked: None,
+                    error: None,
+                },
+            )?;
+        }
+        SurfaceTurnState::Ended => {
+            let open = surface_turns.remove(&key);
+            let turn_num = current_surface_turn_number(store, &turn.session)?;
+            let duration_ms = open
+                .as_ref()
+                .and_then(|open| u64::try_from(turn.at.since(open.started_at).as_millis()).ok());
+            let saw_error = open.as_ref().is_some_and(|open| open.saw_error);
+            let stop_reason = if saw_error {
+                StopReason::Error
+            } else {
+                StopReason::EndTurn
+            };
+            let appended = append_surface_event(
+                store,
+                deps,
+                &turn.session,
+                harness,
+                node,
+                EventBody::TurnEnded(TurnEnded {
+                    turn: turn_num,
+                    stop_reason,
+                    duration_ms,
+                }),
+                Actor::System,
+                Some(turn.at),
+                Some((&turn.native_id, turn.at)),
+            )?;
+            let run_id = open.as_ref().map(|open| open.run_id.clone()).unwrap_or_else(RunId::new);
+            if let Some(open) = open {
+                let detail = open.last_error.clone().unwrap_or_default();
+                finish_surface_run(
+                    projects,
+                    store,
+                    deps,
+                    &turn.session,
+                    &open.run_id,
+                    if saw_error { RunOutcome::Error } else { RunOutcome::Ok },
+                    Some(if saw_error { 1 } else { 0 }),
+                    open.cost,
+                    detail,
+                    now,
+                )?;
+            }
+            send_frame(
+                writer,
+                &AgentFrame::IngestAck {
+                    run_id,
+                    event_id: Some(appended.id),
+                    seq: Some(appended.seq),
+                    duplicate: false,
+                    lease_revoked: None,
+                    error: None,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Handles one mirrored `SurfaceEvent`.
+#[allow(clippy::too_many_arguments)]
+fn handle_surface_event(
+    projects: &ProjectStores,
+    store: &Store,
+    deps: &Deps,
+    node: &NodeName,
+    event: &SurfaceEvent,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    surface_turns: &mut HashMap<(SurfaceId, SessionId), AttachedSurfaceTurn>,
+    writer: &mut dyn Write,
+    now: Timestamp,
+) -> Result<(), SurfaceFrameError> {
+    let active = active_surface(store, node, &event.surface, &event.session, now)?;
+    if !grants_write(&active.scopes, &event.session) {
+        return Err(SurfaceFrameError::Refused(format!(
+            "surface token does not grant session.write:{}",
+            event.session.as_str()
+        )));
+    }
+    verify_surface_writer(
+        projects,
+        store,
+        deps,
+        node,
+        &event.surface,
+        &event.session,
+        attached_surfaces,
+        surface_turns,
+        writer,
+        now,
+    )?;
+    let harness = surface_harness(&active.info);
+    let key = (event.surface.clone(), event.session.clone());
+    if let Some(existing) = store.native_event(&event.session, harness, &event.native_id)? {
+        let seq = store
+            .event_rows(&event.session, 0, u32::MAX)?
+            .into_iter()
+            .find(|row| row.id == existing)
+            .map(|row| row.seq);
+        let run_id = surface_turns
+            .get(&key)
+            .map(|open| open.run_id.clone())
+            .unwrap_or_else(RunId::new);
+        send_frame(
+            writer,
+            &AgentFrame::IngestAck {
+                run_id,
+                event_id: Some(existing),
+                seq,
+                duplicate: true,
+                lease_revoked: None,
+                error: None,
+            },
+        )?;
+        return Ok(());
+    }
+
+    let mut body = event.event.clone();
+    if let Some(open) = surface_turns.get_mut(&key) {
+        match &mut body {
+            EventBody::Cost(cost) => {
+                open.cost.add(&cost.cost);
+                if cost.run_id.is_none() {
+                    cost.run_id = Some(open.run_id.clone());
+                }
+            }
+            EventBody::Error(error) => {
+                open.saw_error = true;
+                open.last_error = Some(error.message.clone());
+            }
+            _ => {}
+        }
+    }
+    let actor = match body.event_type() {
+        EventType::UserMessage => Actor::User,
+        EventType::AssistantMessage | EventType::AssistantReasoning => Actor::Assistant,
+        EventType::ToolCall | EventType::ToolResult | EventType::FileChange => Actor::Tool,
+        _ => Actor::System,
+    };
+    let appended = append_surface_event(
+        store,
+        deps,
+        &event.session,
+        harness,
+        node,
+        body,
+        actor,
+        None,
+        Some((&event.native_id, now)),
+    )?;
+    let run_id = surface_turns
+        .get(&key)
+        .map(|open| open.run_id.clone())
+        .unwrap_or_else(RunId::new);
+    send_frame(
+        writer,
+        &AgentFrame::IngestAck {
+            run_id,
+            event_id: Some(appended.id),
+            seq: Some(appended.seq),
+            duplicate: false,
+            lease_revoked: None,
+            error: None,
+        },
+    )?;
+    Ok(())
+}
+
+/// Tools that write session or fleet state from a local surface.
+const SURFACE_WRITE_TOOLS: &[&str] = &[
+    "inbox_answer",
+    "job_add",
+    "job_pause",
+    "job_retry",
+    "capacity_set",
+    "session_handoff",
+];
+
+/// Sends one `ToolResult` success or failure.
+fn send_tool_result(
+    writer: &mut dyn Write,
+    request_id: &str,
+    outcome: Result<serde_json::Value, crate::surface::mcp::ToolFailure>,
+) -> Result<(), CoreError> {
+    let result = match outcome {
+        Ok(value) => {
+            let text = serde_json::to_string(&value).map_err(vowp_protocol::ProtocolError::from)?;
+            AgentFrame::ToolResult(SurfaceToolResult {
+                request_id: request_id.to_owned(),
+                result: Some(serde_json::json!({
+                    "content": [{"type": "text", "text": text}],
+                    "isError": false,
+                })),
+                error: None,
+            })
+        }
+        Err(error) => AgentFrame::ToolResult(SurfaceToolResult {
+            request_id: request_id.to_owned(),
+            result: None,
+            error: Some(SurfaceToolError {
+                code: error.code,
+                message: error.message,
+                retryable: false,
+            }),
+        }),
+    };
+    send_frame(writer, &result)
+}
+
+/// Sends one typed `ToolResult` refusal.
+fn send_tool_failure(writer: &mut dyn Write, request_id: &str, code: &str, message: &str) -> Result<(), CoreError> {
+    send_frame(
+        writer,
+        &AgentFrame::ToolResult(SurfaceToolResult {
+            request_id: request_id.to_owned(),
+            result: None,
+            error: Some(SurfaceToolError {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable: false,
+            }),
+        }),
+    )
+}
+
+/// Handles one `ToolCall` from a paired local surface.
+#[allow(clippy::too_many_arguments)]
+fn handle_surface_tool_call(
+    store: &Store,
+    deps: &Deps,
+    node: &NodeName,
+    call: &SurfaceToolCall,
+    attached_surfaces: &mut HashMap<SurfaceId, SessionId>,
+    chats: &mut BTreeMap<RunId, ChatStream<'_>>,
+    writer: &mut dyn Write,
+    now: Timestamp,
+) -> Result<(), CoreError> {
+    let active = match active_surface(store, node, &call.surface, &call.session, now) {
+        Ok(active) => active,
+        Err(SurfaceFrameError::Revoked(surface_id)) => {
+            send_tool_failure(writer, &call.request_id, "refused", "surface token was revoked")?;
+            send_frame(
+                writer,
+                &AgentFrame::SurfaceRevoked {
+                    surface_id,
+                    reason: "surface was revoked".to_owned(),
+                },
+            )?;
+            return Ok(());
+        }
+        Err(SurfaceFrameError::NotFound(message)) => {
+            send_tool_failure(writer, &call.request_id, "not_found", &message)?;
+            return Ok(());
+        }
+        Err(SurfaceFrameError::Refused(message)) => {
+            send_tool_failure(writer, &call.request_id, "refused", &message)?;
+            return Ok(());
+        }
+        Err(SurfaceFrameError::Sent) => return Ok(()),
+        Err(SurfaceFrameError::Core(error)) => return Err(error),
+    };
+
+    let takeover = call.tool == "session_resume"
+        && call
+            .arguments
+            .get("takeover")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    let writes = takeover || SURFACE_WRITE_TOOLS.contains(&call.tool.as_str());
+    if writes {
+        // Refuse an unauthorized write before it can acquire or steal a lease.
+        if !grants_write(&active.scopes, &call.session) {
+            send_tool_failure(
+                writer,
+                &call.request_id,
+                "refused",
+                &format!("surface token does not grant session.write:{}", call.session.as_str()),
+            )?;
+            return Ok(());
+        }
+        if takeover {
+            let target = call
+                .arguments
+                .get("session")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(call.session.as_str());
+            if target != call.session.as_str() {
+                send_tool_failure(
+                    writer,
+                    &call.request_id,
+                    "refused",
+                    "session takeover must target the surface's own session",
+                )?;
+                return Ok(());
+            }
+        }
+        let held_here = matches!(
+            store.lease(&call.session)?,
+            Some(current) if current.surface_id.as_ref() == Some(&call.surface) && lease::is_live(now, &current)
+        );
+        if held_here {
+            store.heartbeat_surface_lease(&call.session, &call.surface, node, now)?;
+            attached_surfaces.insert(call.surface.clone(), call.session.clone());
+        } else if takeover {
+            match lease::acquire_agent_lease(store, &call.session, &active.info, LeaseMode::Takeover, now)? {
+                lease::AgentLeaseAcquire::Granted { previous, .. } => {
+                    if let Some(previous) = previous
+                        && lease::is_live(now, &previous)
+                        && previous.surface_id.as_ref() != Some(&call.surface)
+                        && let Some(previous_surface) = previous.surface_id.clone()
+                        && attached_surfaces.remove(&previous_surface).is_some()
+                    {
+                        let holder = active.info.holder.clone();
+                        send_frame(
+                            writer,
+                            &AgentFrame::LeaseRevoked {
+                                reason: format!("this surface is read-only; taken over by {holder}"),
+                                holder: holder.clone(),
+                            },
+                        )?;
+                        fence_session(
+                            chats,
+                            &call.session,
+                            &format!("session {} was taken over by {holder}", call.session),
+                            writer,
+                        )?;
+                    }
+                    attached_surfaces.insert(call.surface.clone(), call.session.clone());
+                }
+                lease::AgentLeaseAcquire::Conflict(conflict) => {
+                    let notice = crate::surface::takeover::notice(
+                        &conflict.holder,
+                        conflict.since,
+                        deps.config.node.tz_offset_minutes,
+                    );
+                    send_tool_failure(writer, &call.request_id, "refused", &notice)?;
+                    return Ok(());
+                }
+            }
+        } else {
+            match store.lease(&call.session)? {
+                Some(current) if lease::is_live(now, &current) => {
+                    let notice = crate::surface::takeover::notice(
+                        &current.holder,
+                        current.acquired_at,
+                        deps.config.node.tz_offset_minutes,
+                    );
+                    send_tool_failure(writer, &call.request_id, "refused", &notice)?;
+                    return Ok(());
+                }
+                _ => match lease::acquire_agent_lease(store, &call.session, &active.info, LeaseMode::Acquire, now)? {
+                    lease::AgentLeaseAcquire::Granted { .. } => {
+                        attached_surfaces.insert(call.surface.clone(), call.session.clone());
+                    }
+                    lease::AgentLeaseAcquire::Conflict(conflict) => {
+                        let notice = crate::surface::takeover::notice(
+                            &conflict.holder,
+                            conflict.since,
+                            deps.config.node.tz_offset_minutes,
+                        );
+                        send_tool_failure(writer, &call.request_id, "refused", &notice)?;
+                        return Ok(());
+                    }
+                },
+            }
+        }
+    }
+
+    let scopes = active.scopes;
+    let ctx = crate::surface::mcp::ToolContext {
+        deps,
+        store,
+        surface: &call.surface,
+        session: &call.session,
+        scopes: &scopes,
+        now,
+    };
+    let outcome = crate::surface::mcp::call(&ctx, &call.tool, &call.arguments);
+    send_tool_result(writer, &call.request_id, outcome)
 }
 
 /// One item read from the input thread.

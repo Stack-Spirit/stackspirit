@@ -23,15 +23,21 @@ use vowp_core::agent::{
     create_pending_surface, hash_code, issue_surface_token, redeem, replace_pending_surface, revoke, revoke_surface,
     rotate_surface_token, rotate_surface_with_policy, surface_list_row, verify_surface_token,
 };
+use vowp_core::surface::orchestrator::{CommandSpool, NewOrchestrator, Orchestrator, OrchestratorTransport};
 use vowp_core::{
     AdapterRegistry, CommandOutput, CommandRunner, CommandSpec, CoreError, Deps, FixedRng, SystemGit, SystemRunner,
 };
+use vowp_protocol::agent::surface::{
+    SurfaceAttach, SurfaceDetach, SurfaceEvent, SurfaceTurn, SurfaceTurnState, ToolCall as SurfaceToolCall,
+    ToolError as SurfaceToolError,
+};
 use vowp_protocol::{
     Actor, AgentCapabilities, AgentCapacity, AgentFrame, AgentPathMap, Clock, Cost, ErrorKind, EventBody, EventId,
-    EventSource, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, LedgerKind, Level, MemoryLog, NewJob,
-    NodeName, NodePresence, NodeStatus, PathRef, Placement, Project, ProjectName, RemoteEvent, RemoteLine,
-    RemoteRunState, Role, RunId, RunOutcome, RunPurpose, SecretName, Session, SessionId, SessionRole, SessionState,
-    StopReason, SurfaceId, SurfaceKind, SurfaceScope, SurfaceState, Timestamp, TurnSummary, VowpConfig,
+    EventSource, EventType, FakeClock, HarnessKind, JobId, JobKind, JobState, LeaseMode, LedgerKind, Level, MemoryLog,
+    NewJob, NodeName, NodePresence, NodeStatus, OrchestratorApp, OrchestratorNodeState, OrchestratorResult, PathRef,
+    Placement, Project, ProjectName, RemoteEvent, RemoteLine, RemoteRunState, Role, RunId, RunOutcome, RunPurpose,
+    SecretName, Session, SessionId, SessionRole, SessionState, StopReason, SurfaceId, SurfaceKind, SurfaceScope,
+    SurfaceState, Timestamp, TurnSummary, VowpConfig,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{LedgerFilter, NodePath, NodePaths, StateChange, Store, hash_lease_token};
@@ -611,6 +617,103 @@ fn read_log(root: &Path, session: &SessionId) -> Vec<vowp_protocol::EventEnvelop
         .expect("open session log")
         .read_all()
         .expect("read session log")
+}
+
+/// Builds a `SurfaceAttach` frame.
+fn attach_frame(surface: &SurfaceId, session: &SessionId) -> AgentFrame {
+    AgentFrame::SurfaceAttach(SurfaceAttach {
+        surface: surface.clone(),
+        session: session.clone(),
+    })
+}
+
+/// Builds a `SurfaceDetach` frame.
+fn detach_frame(surface: &SurfaceId, session: &SessionId) -> AgentFrame {
+    AgentFrame::SurfaceDetach(SurfaceDetach {
+        surface: surface.clone(),
+        session: session.clone(),
+    })
+}
+
+/// Builds a `SurfaceTurn` boundary frame.
+fn surface_turn_frame(
+    surface: &SurfaceId,
+    session: &SessionId,
+    native_id: &str,
+    state: SurfaceTurnState,
+    at: Timestamp,
+) -> AgentFrame {
+    AgentFrame::SurfaceTurn(SurfaceTurn {
+        surface: surface.clone(),
+        session: session.clone(),
+        native_id: native_id.to_owned(),
+        state,
+        at,
+    })
+}
+
+/// Builds a `SurfaceEvent` frame.
+fn surface_event_frame(surface: &SurfaceId, session: &SessionId, native_id: &str, body: EventBody) -> AgentFrame {
+    AgentFrame::SurfaceEvent(SurfaceEvent {
+        surface: surface.clone(),
+        session: session.clone(),
+        native_id: native_id.to_owned(),
+        event: body,
+    })
+}
+
+/// Builds a proxied `ToolCall` frame.
+fn tool_call_frame(
+    surface: &SurfaceId,
+    session: &SessionId,
+    request_id: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> AgentFrame {
+    AgentFrame::ToolCall(SurfaceToolCall {
+        request_id: request_id.to_owned(),
+        surface: surface.clone(),
+        session: session.clone(),
+        tool: tool.to_owned(),
+        arguments,
+    })
+}
+
+/// Reads one `ToolResult` after `start`.
+fn expect_tool_result(
+    gateway: &Gateway,
+    start: usize,
+) -> (String, Option<serde_json::Value>, Option<SurfaceToolError>) {
+    let AgentFrame::ToolResult(result) =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::ToolResult(_)))
+    else {
+        panic!("expected ToolResult");
+    };
+    (result.request_id, result.result, result.error)
+}
+
+/// Returns whether an MCP content envelope is a successful tool result.
+fn tool_succeeded(result: &serde_json::Value) -> bool {
+    result.get("isError").and_then(serde_json::Value::as_bool) == Some(false)
+        && result
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+}
+
+/// Returns the session's event types in log order.
+fn log_types(root: &Path, session: &SessionId) -> Vec<EventType> {
+    read_log(root, session).iter().map(|event| event.event_type).collect()
+}
+
+/// Reads a project's run row from its bound database.
+fn project_run(root: &Path, clock: &Arc<FakeClock>, project: &str, run: &RunId) -> vowp_protocol::Run {
+    let project = ProjectName::parse(project).expect("project");
+    Store::open_with_project(&NodePaths::new(root), &project)
+        .expect("project store")
+        .with_clock(clock.clone())
+        .require_run(run)
+        .expect("run row")
 }
 
 /// Waits for an `IngestAck` after `start`.
@@ -3443,4 +3546,738 @@ fn replace_pending_rotates_an_expired_pending_code_in_one_step() {
         paths: Vec::new(),
     };
     redeem(&store, &request, clock.now()).expect("the fresh code enrolls");
+}
+
+#[test]
+fn surface_attach_mirrors_an_unbound_global_orchestrator_session() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &[]);
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    // The session was created on the home before it was paired to the Mac surface.
+    let session = session_in(home.path(), &store, &node_name("home-1"), None, SESSION, &clock);
+    let (surface, _token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&attach_frame(&surface, &session));
+    wait_until(|| store.lease(&session).expect("lease lookup").is_some());
+    let lease = store.lease(&session).expect("lease lookup").expect("held");
+    assert_eq!(lease.surface_id.as_ref(), Some(&surface));
+    assert_eq!(lease.node, name);
+
+    let opened_at = clock.now();
+    let start = gateway.frame_count();
+    gateway.send(&surface_turn_frame(
+        &surface,
+        &session,
+        "turn-native-1",
+        SurfaceTurnState::Started,
+        opened_at,
+    ));
+    let (run_id, event_id, seq, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(event_id.is_some());
+    assert!(seq.is_some());
+    assert!(!duplicate, "a fresh turn start is not a duplicate");
+
+    let events = [
+        (
+            "user-1",
+            EventBody::UserMessage(vowp_protocol::UserMessage {
+                text: "mirror me".to_owned(),
+                attachments: Vec::new(),
+                note: None,
+            }),
+        ),
+        (
+            "tool-call-1",
+            EventBody::ToolCall(vowp_protocol::ToolCall {
+                call_id: "call-1".to_owned(),
+                name: "read".to_owned(),
+                input: serde_json::json!({"path": "README.md"}),
+            }),
+        ),
+        (
+            "tool-result-1",
+            EventBody::ToolResult(vowp_protocol::ToolResult {
+                call_id: "call-1".to_owned(),
+                ok: true,
+                output: Some("ok".to_owned()),
+                output_ref: None,
+                exit_code: Some(0),
+            }),
+        ),
+        (
+            "assistant-1",
+            EventBody::AssistantMessage(vowp_protocol::AssistantMessage {
+                text: "done".to_owned(),
+            }),
+        ),
+        (
+            "cost-1",
+            EventBody::Cost(vowp_protocol::CostEvent {
+                cost: Cost::receipt(
+                    0.25,
+                    vowp_protocol::Tokens {
+                        input: 10,
+                        output: 5,
+                        ..vowp_protocol::Tokens::default()
+                    },
+                ),
+                run_id: None,
+            }),
+        ),
+    ];
+    let mut first_user = None;
+    for (native_id, body) in events {
+        let start = gateway.frame_count();
+        gateway.send(&surface_event_frame(&surface, &session, native_id, body));
+        let (acked_run, event_id, seq, duplicate, _, _) = expect_ack(&gateway, start);
+        assert_eq!(acked_run, run_id);
+        assert!(event_id.is_some());
+        assert!(seq.is_some());
+        assert!(!duplicate);
+        if native_id == "user-1" {
+            first_user = Some((event_id.expect("event id"), seq.expect("seq")));
+        }
+    }
+
+    // The same native id is skipped: no second log row, the same event id and seq.
+    let log_before = read_log(home.path(), &session).len();
+    let start = gateway.frame_count();
+    gateway.send(&surface_event_frame(
+        &surface,
+        &session,
+        "user-1",
+        EventBody::UserMessage(vowp_protocol::UserMessage {
+            text: "changed content".to_owned(),
+            attachments: Vec::new(),
+            note: None,
+        }),
+    ));
+    let (_, duplicate_id, duplicate_seq, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(duplicate, "a repeated native id is a duplicate");
+    let (original_id, original_seq) = first_user.expect("user event ack");
+    assert_eq!(duplicate_id, Some(original_id));
+    assert_eq!(duplicate_seq, Some(original_seq));
+    assert_eq!(read_log(home.path(), &session).len(), log_before);
+
+    clock.advance(Duration::from_secs(5));
+    let start = gateway.frame_count();
+    gateway.send(&surface_turn_frame(
+        &surface,
+        &session,
+        "turn-native-1-end",
+        SurfaceTurnState::Ended,
+        clock.now(),
+    ));
+    let (ended_run, ended_event, ended_seq, duplicate, _, _) = expect_ack(&gateway, start);
+    assert_eq!(ended_run, run_id);
+    assert!(ended_event.is_some());
+    assert!(ended_seq.is_some());
+    assert!(!duplicate);
+
+    let types = log_types(home.path(), &session);
+    assert_eq!(
+        types,
+        vec![
+            EventType::TurnStarted,
+            EventType::UserMessage,
+            EventType::ToolCall,
+            EventType::ToolResult,
+            EventType::AssistantMessage,
+            EventType::Cost,
+            EventType::TurnEnded,
+        ]
+    );
+    let cost = read_log(home.path(), &session)
+        .into_iter()
+        .find(|event| event.event_type == EventType::Cost)
+        .expect("cost row");
+    let EventBody::Cost(cost) = cost.body().expect("cost body") else {
+        panic!("expected a cost body");
+    };
+    assert_eq!(
+        cost.run_id,
+        Some(run_id.clone()),
+        "the cost is attributed to the turn run"
+    );
+
+    let run = project_run(home.path(), &clock, "_node", &run_id);
+    assert_eq!(run.node, name);
+    assert_eq!(run.purpose, RunPurpose::Continue);
+    assert_eq!(run.session_id.as_ref(), Some(&session));
+    assert!(run.ended_at.is_some());
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+    assert_eq!(run.exit_code, Some(0));
+    assert_eq!(run.cost.usd, Some(0.25));
+    assert_eq!(run.cost.tokens.input, 10);
+    assert_eq!(
+        store.require_session(&session).expect("session").state,
+        SessionState::Idle
+    );
+
+    gateway.send(&detach_frame(&surface, &session));
+    wait_until(|| store.lease(&session).expect("lease lookup").is_none());
+    assert!(
+        !gateway
+            .output
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::Error { .. })),
+        "a valid attach/turn/detach sequence produces no Error frame"
+    );
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn surface_turns_mirror_a_project_bound_session() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &["vowp"]);
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = session_in(home.path(), &store, &node_name("home-1"), Some("vowp"), SESSION, &clock);
+    let (surface, _token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&attach_frame(&surface, &session));
+    wait_until(|| store.lease(&session).expect("lease lookup").is_some());
+
+    let start = gateway.frame_count();
+    gateway.send(&surface_turn_frame(
+        &surface,
+        &session,
+        "turn-1",
+        SurfaceTurnState::Started,
+        clock.now(),
+    ));
+    let (run_id, _, _, _, _, _) = expect_ack(&gateway, start);
+    let start = gateway.frame_count();
+    gateway.send(&surface_event_frame(
+        &surface,
+        &session,
+        "assistant-1",
+        EventBody::AssistantMessage(vowp_protocol::AssistantMessage {
+            text: "bound".to_owned(),
+        }),
+    ));
+    expect_ack(&gateway, start);
+    let log_before = read_log(home.path(), &session).len();
+    let start = gateway.frame_count();
+    gateway.send(&surface_event_frame(
+        &surface,
+        &session,
+        "assistant-1",
+        EventBody::AssistantMessage(vowp_protocol::AssistantMessage {
+            text: "changed".to_owned(),
+        }),
+    ));
+    let (_, _, _, duplicate, _, _) = expect_ack(&gateway, start);
+    assert!(duplicate, "a project-bound duplicate native id is skipped");
+    assert_eq!(read_log(home.path(), &session).len(), log_before);
+    clock.advance(Duration::from_secs(2));
+    let start = gateway.frame_count();
+    gateway.send(&surface_turn_frame(
+        &surface,
+        &session,
+        "turn-1-end",
+        SurfaceTurnState::Ended,
+        clock.now(),
+    ));
+    expect_ack(&gateway, start);
+
+    let run = project_run(home.path(), &clock, "vowp", &run_id);
+    assert_eq!(run.outcome, Some(RunOutcome::Ok));
+    assert!(run.ended_at.is_some());
+    assert_eq!(
+        store.require_session(&session).expect("session").state,
+        SessionState::Idle
+    );
+    gateway.send(&detach_frame(&surface, &session));
+    wait_until(|| store.lease(&session).expect("lease lookup").is_none());
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn one_lease_enforcement_keeps_a_second_surface_read_only() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &["vowp"]);
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = session_in(home.path(), &store, &node_name("home-1"), Some("vowp"), SESSION, &clock);
+    let (first, first_token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let (second, second_token) = pair_surface(&store, &name, &session, "claude", clock.now());
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&attach_frame(&first, &session));
+    wait_until(|| {
+        store
+            .lease(&session)
+            .expect("lease lookup")
+            .is_some_and(|lease| lease.surface_id.as_ref() == Some(&first))
+    });
+
+    let start = gateway.frame_count();
+    gateway.send(&attach_frame(&second, &session));
+    let AgentFrame::LeaseRevoked { holder, .. } =
+        gateway.expect_after(start, |frame| matches!(frame, AgentFrame::LeaseRevoked { .. }))
+    else {
+        panic!("expected LeaseRevoked for the second surface");
+    };
+    assert_eq!(holder, "opencode");
+    assert_eq!(
+        store
+            .lease(&session)
+            .expect("lease lookup")
+            .expect("held")
+            .surface_id
+            .as_ref(),
+        Some(&first),
+        "an attach from a second surface must not overwrite the live lease"
+    );
+
+    // Read tools still work read-only for the second surface.
+    for (request, tool, arguments) in [
+        ("read-status", "fleet_status", serde_json::json!({})),
+        ("read-resume", "session_resume", serde_json::json!({})),
+    ] {
+        let start = gateway.frame_count();
+        gateway.send(&tool_call_frame(&second, &session, request, tool, arguments));
+        let (request_id, result, error) = expect_tool_result(&gateway, start);
+        assert_eq!(request_id, request);
+        assert!(error.is_none(), "{tool} returned {error:?}");
+        assert!(tool_succeeded(result.as_ref().expect("tool result")), "{tool} failed");
+    }
+
+    // A write from the read-only surface carries the exact takeover notice.
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &second,
+        &session,
+        "write-capacity",
+        "capacity_set",
+        serde_json::json!({"target": 1}),
+    ));
+    let (request_id, result, error) = expect_tool_result(&gateway, start);
+    assert_eq!(request_id, "write-capacity");
+    assert!(result.is_none());
+    let error = error.expect("a write from a read-only surface is refused");
+    assert_eq!(error.code, "refused");
+    assert!(error.message.starts_with("Taken over by opencode"), "{}", error.message);
+    assert_eq!(
+        store
+            .lease(&session)
+            .expect("lease lookup")
+            .expect("held")
+            .surface_id
+            .as_ref(),
+        Some(&first),
+        "a refused write must not steal the lease"
+    );
+
+    // An explicit takeover moves the lease to the second surface and fences the first.
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &second,
+        &session,
+        "takeover",
+        "session_resume",
+        serde_json::json!({"takeover": true}),
+    ));
+    gateway.expect_after(
+        start,
+        |frame| matches!(frame, AgentFrame::LeaseRevoked { holder, .. } if holder == "claude"),
+    );
+    let (request_id, result, error) = expect_tool_result(&gateway, start);
+    assert_eq!(request_id, "takeover");
+    assert!(error.is_none(), "the takeover resume failed: {error:?}");
+    assert!(tool_succeeded(result.as_ref().expect("tool result")));
+    assert_eq!(
+        store
+            .lease(&session)
+            .expect("lease lookup")
+            .expect("held")
+            .surface_id
+            .as_ref(),
+        Some(&second),
+        "the takeover transfers the lease to the second surface"
+    );
+
+    // The old token is untouched by the assertion above; keep both values live so the
+    // compiler and readers see that only scoped tokens were used.
+    assert_eq!(first_token.len(), second_token.len());
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn surface_tool_calls_work_on_a_multi_project_home() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &["vowp", "stackspirit"]);
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = session_in(home.path(), &store, &node_name("home-1"), None, SESSION, &clock);
+    let (surface, _token) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let bound_session = session_in(
+        home.path(),
+        &store,
+        &node_name("home-1"),
+        Some("vowp"),
+        "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        &clock,
+    );
+    let (bound_surface, _bound_token) = pair_surface(&store, &name, &bound_session, "opencode", clock.now());
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    gateway.send(&attach_frame(&surface, &session));
+    gateway.send(&attach_frame(&bound_surface, &bound_session));
+    wait_until(|| {
+        store
+            .lease(&session)
+            .expect("lease lookup")
+            .is_some_and(|lease| lease.surface_id.as_ref() == Some(&surface))
+            && store
+                .lease(&bound_session)
+                .expect("lease lookup")
+                .is_some_and(|lease| lease.surface_id.as_ref() == Some(&bound_surface))
+    });
+
+    for (request, tool, arguments) in [
+        ("status", "fleet_status", serde_json::json!({})),
+        ("resume", "session_resume", serde_json::json!({})),
+        ("capacity", "capacity_set", serde_json::json!({"target": 2})),
+    ] {
+        let start = gateway.frame_count();
+        gateway.send(&tool_call_frame(&surface, &session, request, tool, arguments));
+        let (request_id, result, error) = expect_tool_result(&gateway, start);
+        assert_eq!(request_id, request);
+        assert!(error.is_none(), "{tool}: {error:?}");
+        assert!(tool_succeeded(result.as_ref().expect("tool result")), "{tool} failed");
+    }
+
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &surface,
+        &session,
+        "job-add",
+        "job_add",
+        serde_json::json!({
+            "project": "vowp",
+            "id": "job-one",
+            "title": "one job",
+            "kind": "build",
+            "role": "worker"
+        }),
+    ));
+    let (request_id, result, error) = expect_tool_result(&gateway, start);
+    assert_eq!(request_id, "job-add");
+    assert!(error.is_none(), "job_add failed: {error:?}");
+    assert!(tool_succeeded(result.as_ref().expect("tool result")));
+    let vowp = Store::open_with_project(
+        &NodePaths::new(home.path()),
+        &ProjectName::parse("vowp").expect("project"),
+    )
+    .expect("vowp store");
+    assert!(
+        vowp.job(&JobId::parse("job-one").expect("job id"))
+            .expect("job lookup")
+            .is_some(),
+        "job_add with an explicit project wrote the job to vowp"
+    );
+    assert!(
+        home.path()
+            .join("vowp-checkout")
+            .join(".vowp/jobs/job-one/brief.md")
+            .is_file(),
+        "job_add wrote the brief under the project checkout"
+    );
+
+    // A bound session defaults to its own project; another project is refused.
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &bound_surface,
+        &bound_session,
+        "job-default",
+        "job_add",
+        serde_json::json!({"id": "job-two", "title": "two", "kind": "build", "role": "worker"}),
+    ));
+    let (_, result, error) = expect_tool_result(&gateway, start);
+    assert!(error.is_none(), "a bound session defaults to its project: {error:?}");
+    assert!(tool_succeeded(result.as_ref().expect("tool result")));
+    assert!(
+        vowp.job(&JobId::parse("job-two").expect("job id"))
+            .expect("job lookup")
+            .is_some()
+    );
+
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &bound_surface,
+        &bound_session,
+        "job-other",
+        "job_add",
+        serde_json::json!({
+            "project": "stackspirit",
+            "id": "job-three",
+            "title": "three",
+            "kind": "build",
+            "role": "worker"
+        }),
+    ));
+    let (_, result, error) = expect_tool_result(&gateway, start);
+    assert!(result.is_none());
+    let error = error.expect("a bound surface cannot write another project");
+    assert_eq!(error.code, "refused");
+
+    // A project registered after the gateway opened is opened on first use.
+    register_projects(home.path(), &clock, &["late"]);
+    let late_session = session_in(
+        home.path(),
+        &store,
+        &node_name("home-1"),
+        Some("late"),
+        "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        &clock,
+    );
+    let (late_surface, _) = pair_surface(&store, &name, &late_session, "opencode", clock.now());
+    gateway.send(&attach_frame(&late_surface, &late_session));
+    wait_until(|| store.lease(&late_session).expect("lease lookup").is_some());
+    let start = gateway.frame_count();
+    gateway.send(&surface_turn_frame(
+        &late_surface,
+        &late_session,
+        "late-turn",
+        SurfaceTurnState::Started,
+        clock.now(),
+    ));
+    let (late_run, _, _, _, _, _) = expect_ack(&gateway, start);
+    let start = gateway.frame_count();
+    gateway.send(&surface_turn_frame(
+        &late_surface,
+        &late_session,
+        "late-turn-end",
+        SurfaceTurnState::Ended,
+        clock.now(),
+    ));
+    expect_ack(&gateway, start);
+    let late = project_run(home.path(), &clock, "late", &late_run);
+    assert_eq!(late.outcome, Some(RunOutcome::Ok));
+    assert!(late.ended_at.is_some());
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn surface_tool_calls_refuse_a_revoked_or_expired_surface_token() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    register_projects(home.path(), &clock, &["vowp"]);
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+    let store = test_store(home.path(), &clock);
+    let session = session_in(home.path(), &store, &node_name("home-1"), Some("vowp"), SESSION, &clock);
+    let (revoked_surface, _) = pair_surface(&store, &name, &session, "opencode", clock.now());
+    let revoked_tokens = store.list_surface_tokens(&revoked_surface).expect("tokens");
+    store
+        .revoke_surface_token(&revoked_tokens[0].id, clock.now())
+        .expect("revoke token");
+    let (expired_surface, _) = pair_surface(&store, &name, &session, "claude", clock.now());
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &revoked_surface,
+        &session,
+        "revoked",
+        "fleet_status",
+        serde_json::json!({}),
+    ));
+    let (_, result, error) = expect_tool_result(&gateway, start);
+    assert!(result.is_none());
+    let error = error.expect("a revoked token is refused");
+    assert_eq!(error.code, "refused");
+    assert!(
+        error.message.starts_with("surface token"),
+        "vowp-agent recognizes a surface-token refusal by this prefix: {}",
+        error.message
+    );
+
+    clock.advance(Duration::from_secs(31 * 24 * 60 * 60));
+    let start = gateway.frame_count();
+    gateway.send(&tool_call_frame(
+        &expired_surface,
+        &session,
+        "expired",
+        "fleet_status",
+        serde_json::json!({}),
+    ));
+    let (_, result, error) = expect_tool_result(&gateway, start);
+    assert!(result.is_none());
+    let error = error.expect("an expired token is refused");
+    assert_eq!(error.code, "refused");
+    assert!(
+        error.message.starts_with("surface token"),
+        "the refusal starts with the prefix vowp-agent checks: {}",
+        error.message
+    );
+    assert!(error.message.contains("expired"), "{}", error.message);
+    gateway.finish().expect("gateway");
+}
+
+#[test]
+fn superseded_orchestrator_result_retires_the_stale_outbox_file() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+    let log = Arc::new(MemoryLog::new());
+    let deps = test_deps(home.path(), clock.clone(), log.clone());
+    let orchestrator = Orchestrator::new_queued(deps);
+    let info = orchestrator
+        .create_on_node(
+            &NewOrchestrator {
+                name: "sandbox".to_owned(),
+                project: None,
+                app: OrchestratorApp::Chat,
+                executor: None,
+                force: false,
+            },
+            Some(name.clone()),
+        )
+        .expect("remote orchestrator");
+    let outbox = home.path().join("agent-commands").join(name.as_str());
+    let first = read_outbox_request(&outbox);
+    let pending = CommandSpool::with_timeout(home.path(), Duration::ZERO)
+        .pending(&name)
+        .expect("pending commands");
+    assert_eq!(pending.len(), 1);
+    assert!(
+        orchestrator
+            .is_command_current(&name, &pending[0])
+            .expect("current check"),
+        "the initial start is current: {:?}",
+        pending[0]
+    );
+    orchestrator.resume("sandbox").expect("resume on the remote node");
+    let second = outbox_request_ids(&outbox)
+        .into_iter()
+        .find(|request_id| request_id != &first)
+        .expect("the resume command is queued next to the superseded start");
+    assert_ne!(first, second, "resume assigned a new request id");
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let AgentFrame::OrchestratorCommand(command) =
+        gateway.expect(|frame| matches!(frame, AgentFrame::OrchestratorCommand(_)))
+    else {
+        panic!("expected OrchestratorCommand");
+    };
+    assert_eq!(command.request_id(), second, "only the current command is sent");
+    wait_until(|| !outbox.join(format!("{first}.json")).exists());
+    assert!(outbox.join(format!("{second}.json")).exists());
+
+    // A stale result is accepted as "no record names it" and retires its command.
+    let spool = CommandSpool::with_timeout(home.path(), Duration::ZERO);
+    spool
+        .send(
+            &name,
+            &vowp_protocol::OrchestratorCommand::Resume {
+                request_id: first.clone(),
+                name: "sandbox".to_owned(),
+            },
+        )
+        .expect("queue the stale command");
+    gateway.send(&AgentFrame::OrchestratorResult(OrchestratorResult::accepted(
+        first.clone(),
+        OrchestratorNodeState::Running,
+    )));
+    wait_until(|| !outbox.join(format!("{first}.json")).exists());
+
+    // The current request id still publishes its result and retires its command.
+    gateway.send(&AgentFrame::OrchestratorResult(OrchestratorResult::accepted(
+        second.clone(),
+        OrchestratorNodeState::Running,
+    )));
+    let inbox = home.path().join("agent-results").join(name.as_str());
+    wait_until(|| inbox.join(format!("{second}.json")).exists());
+    wait_until(|| !outbox.join(format!("{second}.json")).exists());
+    assert!(
+        !gateway
+            .output
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::Error { .. })),
+        "a superseded result is not an error"
+    );
+    gateway.finish().expect("gateway");
+    let _ = info;
+}
+
+/// Lists the request ids waiting in one node's command outbox.
+fn outbox_request_ids(outbox: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(outbox)
+        .expect("outbox")
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Reads the single request id waiting in one node's command outbox.
+fn read_outbox_request(outbox: &Path) -> String {
+    let ids = outbox_request_ids(outbox);
+    assert_eq!(ids.len(), 1, "expected one queued command, saw {ids:?}");
+    ids[0].clone()
+}
+
+#[test]
+fn unknown_surface_attach_keeps_the_connection_open() {
+    let home = TempDir::new().expect("temp home");
+    let clock = Arc::new(FakeClock::at(ts()));
+    let name = node_name("mac-studio");
+    let key = signing_key();
+    activate(home.path(), &clock, &name, &key);
+
+    let gateway = Gateway::start_global(home.path(), clock.clone());
+    authenticate(&gateway, &name, &key);
+    let start = gateway.frame_count();
+    gateway.send(&attach_frame(
+        &SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()),
+        &SessionId::parse(SESSION).expect("session"),
+    ));
+    gateway.send(&AgentFrame::Ping);
+    gateway.expect_after(start, |frame| matches!(frame, AgentFrame::Pong));
+    assert!(
+        !gateway
+            .output
+            .frames()
+            .iter()
+            .any(|frame| matches!(frame, AgentFrame::Error { .. })),
+        "an unpaired surface attach must not send a connection-level Error: the agent treats one as terminal"
+    );
+    gateway.finish().expect("gateway");
 }
