@@ -613,6 +613,7 @@ fn reject_detail(error: &WorktreeError) -> &'static str {
         | WorktreeError::SymlinkEscape { .. }
         | WorktreeError::CaseOnlyEscape { .. } => "the working directory escapes the project root",
         WorktreeError::OutsideAllow { .. } => "the working directory is outside the project allow list",
+        WorktreeError::UnsafeCheckout { .. } => "the project checkout is not private to the agent user",
         WorktreeError::NotAGitCheckout { .. } => "the project root is not a git checkout",
         WorktreeError::InvalidCommit { .. } => "the base commit is invalid",
         WorktreeError::InvalidRemote { .. } => "the git remote name is invalid",
