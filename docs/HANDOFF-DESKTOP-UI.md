@@ -132,6 +132,12 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 
 ## 6. Known gaps and cautions
 
+- e2e status on 2026-11-17: desktop 11 passed, 2 failed; web 10 passed. All 5 Meadow
+  shell specs pass. The 2 failures are in the **classic** shell (`e2e/shell.spec.ts`:
+  "preview shell" and "host manager"): axe color-contrast on hovered classic buttons
+  (ratios 1.8–4.4). They fail the same way on `93e8387`, before this redesign, so they are
+  pre-existing. Fix the classic hover tokens or retire the classic shell (step 7).
+
 - The owner has not yet seen the new icon in the Dock (`tauri dev`/`tauri build` not run
   in the design sessions).
 - `design/baseline/` (frozen MockBridge builds of the old UI) is local only and ignored.
