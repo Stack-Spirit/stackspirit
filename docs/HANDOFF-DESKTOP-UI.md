@@ -1,7 +1,7 @@
 # Handoff: StackSpirit desktop UI redesign (Meadow shell)
 
 Read this first if you are picking up the desktop UI, the brand, or the next integration
-steps. Last updated 2026-11-18. It records the decisions the owner made in the design
+steps. Last updated 2026-11-19. It records the decisions the owner made in the design
 sessions, what is real versus preview, and what to do next. `AGENTS.md` still applies
 (Rust core owns host/SSH/VOWP logic, UI calls go through `SpiritBridge`, no secrets).
 
@@ -145,12 +145,33 @@ log or an error. The card shows `name`, `•••• last4`, the update time an
 when VOWP reports one; VOWP `0.4.0` reports none, so the card says so instead of
 guessing. See [`SECURITY.md`](../SECURITY.md) for the exact path and limits.
 
+The setup assistant's chat is real on the bundled StackSpirit Engine (`ss-42`, `cc83371`;
+`ss-45`, `fe6d6e5`; `ss-46`, `c1e2402`). It creates or resumes its private local session,
+sends one turn through `bridge.chat`, and renders the real final model reply; it never
+starts a second engine and never invents an assistant reply. **Live token streaming is
+disabled for now:** the production transport reports `streaming_supported: false` because
+the pinned v1 event names and schema are recorded but the runtime cadence and ordering of
+`message.part.updated`, `message.part.delta` and `session.idle` are unproven without an
+owner model turn (`docs/ORCHESTRATOR-CHAT.md` §2.2.5 and §9.1; `ss-43` live probe;
+verification script `ss-47`, `76b48ac`). The **non-streaming final message is real**: the
+reply arrives as one complete assistant message, not token by token. Do not call it
+streaming until the owner verification records the cadence.
+
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
-- Orchestrator chat replies, and the agent opening the details panel.
-- The Local/Server switch (label only).
+- Assistant replies in the `MockBridge` preview scenarios, and the agent opening the
+  details panel. Every preview assistant message starts with `Preview reply.` and carries
+  `origin: "preview"`; a real bridge drops that origin instead of rendering it (`ss-46`,
+  `c1e2402`).
 - Add project (hands a message to the global orchestrator; no VOWP call).
 
-## 5. Next steps (suggested order, updated 2026-11-18)
+Gated, not preview: Server `global`/`project` chat shows a typed gate (`chat_gated`)
+with the composer disabled and no assistant reply. The blocker is VOWP `0.5`'s
+`vowp orchestrator endpoint` or the owner-approved app-owned SSH forward
+(`docs/ORCHESTRATOR-CHAT.md` §3.6 and §7.2). The Local/Server location is a read-only chip
+derived from the transport; there is no live switch. Moving a session is
+`vowp orchestrator move` (VOWP `0.5`, §5 step 6), so it stays pending too.
+
+## 5. Next steps (suggested order, updated 2026-11-19)
 
 1. **Web app alignment** (`apps/spirit-web`) — **landed (`ss-27`, `a0619ae`).** Read-only
    Web cockpit now uses the Meadow tokens and components; classic cockpit hover contrast
@@ -172,15 +193,22 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
    `vowp agent status` (`connection: connected`) is still an owner check, the live agent
    reports `agent_version: 0.3.0`, and the gate therefore stays `Waiting` with D6
    actions disabled.
-4. **Live orchestrator chat via the paired OpenCode engine (`opencode serve`) — owner
-   decision (2026-11-18):** do **not** reinvent chat or shell out to `vowp chat` per turn.
-   Move `SessionId`, `SessionLocation`, `ChatMessage` and `ProjectRequest` from
-   `next/conversations.ts` into `packages/spirit-ui/src/bridge/wire.ts`, and connect
-   `spirit-core` / `TauriBridge` / `ChatView.tsx` to the orchestrator's OpenCode server
-   (`opencode serve` locally on the Mac when running Local, or over StackSpirit's SSH
-   loopback forward when running on the Server; VOWP `0.5` adds `vowp orchestrator
-   endpoint` to report the active endpoint cleanly, while VOWP's bridge mirrors every turn
-   to the server session log). Keep `MockBridge` scenarios working.
+4. **Live orchestrator chat via the paired OpenCode engine (`opencode serve`) — local setup
+   half landed (`ss-39`, `8980bd9`; `ss-40`, `07dbd2d`; probe `ss-41`, `4785839`; live
+   probe `ss-43`; facts `ss-44`, `ff89ea6`; core `ss-42`, `cc83371`; host/bridge `ss-45`,
+   `fe6d6e5`; view `ss-46`, `c1e2402`; owner verification script `ss-47`, `76b48ac`).**
+   The setup assistant now runs on the bundled engine through `bridge.chat`: it creates or
+   resumes its private local session, sends one turn, and renders the real final reply
+   (see the non-streaming caveat in §6). It never spawns a second engine and never shows a
+   preview reply when `bridge.preview` is false. The owner decision stands: use the
+   orchestrator's OpenCode server, not a new chat store or a per-turn `vowp chat`
+   shell-out. **The Server `global`/`project` half and the Local/Server switch are still
+   pending.** VOWP `0.4.0` has no `vowp orchestrator endpoint`, so Server chat returns the
+   typed `chat_gated` gate until VOWP `0.5` ships the endpoint or the owner approves the
+   app-owned SSH forward; the switch still needs VOWP `0.5` `vowp orchestrator move`
+   (step 6). The contract is [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
+   §9; the owner checklist is
+   [`scripts/verify-orchestrator-chat.mjs`](../scripts/verify-orchestrator-chat.mjs).
 5. **Server secret store over `vowp secret` + `SECURITY.md`** — **landed (`ss-38`,
    `bf45d31`; `ss-34`, `def3538`; `ss-35`, `506d9d2`).** Settings → Advanced → **Server
    secrets** reads `vowp --json secret ls`, stores with `vowp --json secret set <NAME>`
@@ -194,14 +222,17 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
    encrypted-at-rest upgrade. [`SECURITY.md`](../SECURITY.md) records the exact path and
    limits.
 6. **Live `Local` / `Server` switch, `＋ Add project`, and live D6 flip (pairs with VOWP
-   `0.5`):** VOWP `0.5` `vowp orchestrator move` (`b85a8de` / `b7a50f8`) and encrypted
-   `vowp secret` (`c601bc6`) are merged, with `project add --git/--init/--orchestrator`
-   and `orchestrator endpoint` landing next, and the Mac agent is now running `vowp 0.4.0`
-   (`connected`). Flip D6 readiness probes on the live `0.4.0+` agent, wire the session
-   location chip/switch to `vowp orchestrator move` (defaulting to **Local** when the Mac
-   agent is connected), wire the sidebar **`＋` Add project** dialog to VOWP's one-step
-   project add + orchestrator creation, and surface the VOWP `0.5` vault storage mode
-   badge (`basic` / `vault_user` / `encrypted`) in Settings → Server secrets.
+   `0.5`) — still pending:** VOWP `0.5` `vowp orchestrator move` (`b85a8de` / `b7a50f8`)
+   and encrypted `vowp secret` (`c601bc6`) are merged, with
+   `project add --git/--init/--orchestrator` and `orchestrator endpoint` landing next, and
+   the Mac agent is now running `vowp 0.4.0` (`connected`). Flip D6 readiness probes on
+   the live `0.4.0+` agent, wire the session location chip/switch to
+   `vowp orchestrator move` (defaulting to **Local** when the Mac agent is connected), wire
+   the sidebar **`＋` Add project** dialog to VOWP's one-step project add + orchestrator
+   creation, and surface the VOWP `0.5` vault storage mode badge (`basic` / `vault_user` /
+   `encrypted`) in Settings → Server secrets. The local setup chat landing did not change
+   this order: the chat location chip is read-only, and no switch is offered until these
+   commands land.
 7. **Pooled-Compute & Failover Clusters (owner decision 2026-11-18 — Full VOWP-Native
    Cluster V1):**
    - Keep multiple saved servers **independent by default** with a clean server switcher
@@ -241,6 +272,22 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 
 - e2e status (updated 2026-11-18): Meadow desktop specs, web specs (`ss-27`), and classic
   cockpit WCAG contrast specs (`ss-26`, `88be044`) are all green.
+- **Setup chat is non-streaming for now.** The production transport reports
+  `streaming_supported: false`: the pinned v1 event names and schema are recorded, but the
+  runtime cadence and ordering of `message.part.updated`, `message.part.delta` and
+  `session.idle` are unproven without a model turn, so the final assistant message is
+  rendered as one complete message. The reply is real; do not describe it as token-by-token
+  until the owner verification records the cadence (`docs/ORCHESTRATOR-CHAT.md` §2.2.5,
+  §9.1). The incremental text is absent by design, not a failed render.
+- **Pinned sidecar and probe.** The bundled pin is `opencode` `1.19.5`
+  (`engine/manifest.json`). The hermetic probe script (`ss-41`, `4785839`) and the live
+  pinned-engine probe (`ss-43`; facts applied to the contract in `ss-44`, `ff89ea6`) pin
+  the v1 health/session/message/abort/SSE surface. The owner-run check and checklist are
+  `scripts/verify-orchestrator-chat.mjs` (`ss-47`, `76b48ac`); `--check` fails closed when
+  the sidecar or lock is absent (a fresh checkout must run
+  `node scripts/fetch-engine.mjs` first), and `--checklist` prints the §9 steps. No owner
+  model turn has been recorded, so the streaming cadence and the Server-mirroring half
+  remain unverified.
 - The newer Settings surfaces have component coverage, not a new Playwright flow:
   `ss-33`'s Password login card and `ss-35`'s Server secrets card were gated by
   `npm test`/UI tests, and neither job added or re-ran an e2e spec. The e2e statement

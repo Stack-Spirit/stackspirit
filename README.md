@@ -64,6 +64,12 @@ and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web
   redesign: owner decisions (brand, layout, naming, sessions, SSH and secrets), real versus
   preview features, and next steps.
 
+- [`docs/ORCHESTRATOR-CHAT.md`](docs/ORCHESTRATOR-CHAT.md) — the orchestrator chat
+  contract: the bundled-engine setup assistant, the honest non-streaming
+  (`streaming_supported: false`) caveat, the Server chat and Local/Server switch gates, and
+  the owner checklist. The static check and checklist live in
+  [`scripts/verify-orchestrator-chat.mjs`](scripts/verify-orchestrator-chat.mjs).
+
 - [`SECURITY.md`](SECURITY.md) — the implemented security model: SSH host-key pinning, the
   app-owned SSH key, one-time-password onboarding, server secrets in VOWP's vault, and the
   honest limits (VOWP `0.4.0` does not encrypt the vault at rest).
