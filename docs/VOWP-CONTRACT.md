@@ -20,7 +20,6 @@ described in §9.
 
 Sources pinned for this document:
 
-- `/home/dev/vowp/docs/design/stackspirit.md` (product and desktop-first plan).
 - `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md` (local surfaces, offload,
   Phase 0–4, commands, credential model).
 - `/home/dev/vowp/docs/design/v0.4/asif-integration.md` (ASIF 0.4 draft, adapter
@@ -2150,7 +2149,6 @@ D5/D6 commands are listed in §11.2.2 and §11.3.2 and are not run while the gat
 ## 15. See also
 
 - [`PLAN.md`](PLAN.md) — build order, module layout, visual specification, test strategy.
-- `/home/dev/vowp/docs/design/stackspirit.md` — product and desktop-first execution plan.
 - `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md` — Phase 0–4, agent protocol,
   leases, offload, commands.
 - `/home/dev/vowp/docs/design/v0.4/asif-integration.md` — ASIF contract, losses, limits,

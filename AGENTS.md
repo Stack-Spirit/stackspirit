@@ -5,17 +5,17 @@
    calls behind the `SpiritBridge` interface so Web can reuse the UI later, and keep all host/SSH/
    VOWP logic in `crates/spirit-core` so the CLI can reuse it later.
 2. **Cross-Project VOWP Reliance:** `/home/dev/vowp` is the companion VOWP framework repository.
-   - You may read `/home/dev/vowp/docs/design/stackspirit.md`,
-     `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md`,
-     `/home/dev/vowp/docs/design/v0.4/asif-integration.md`, and
+   - The design source of truth is [`docs/HANDOFF-DESKTOP-UI.md`](docs/HANDOFF-DESKTOP-UI.md) for the
+     desktop UI and brand, and [`design/brand/README.md`](design/brand/README.md) for the logo,
+     palette and icon builders. There is no older design note to consult.
+   - You may read `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md`,
+     `/home/dev/vowp/docs/design/v0.4/asif-integration.md`, `/home/dev/vowp/docs/design/cli.md`, and
      `/home/dev/vowp/crates/vowp-protocol/src/` (read-only) to match exact VOWP JSON types.
    - Never edit `/home/dev/vowp` from a `stackspirit` job.
-   - Respect VOWP milestone gates: Phases D0–D4 (core, desktop shell, host connect/disconnect,
-     visual worker/capacity/storage dashboard, and local StackSpirit Engine / `opencode` sidecar
-     setup) can be built and tested now using VOWP's current snapshot/CLI JSON contracts and
-     deterministic fixtures. Live local-orchestrator execution is gated on VOWP Phase 3, and live
-     `.asif.zip` export/import is gated on VOWP `v4-asif-*`; represent those gates explicitly in
-     code and UI (`LocalOrchestratorGate`, `AsifGate`) rather than faking completion.
+   - VOWP 0.4.0 shipped the Phase 3 local-orchestrator surface and the ASIF 0.4 interchange, so
+     those VOWP-side gates are open. Keep the explicit `LocalOrchestratorGate` and `AsifGate` in
+     code and UI until the StackSpirit wiring in `docs/HANDOFF-DESKTOP-UI.md` §5 lands; do not
+     claim a feature is live before then.
 3. **No Secret Leaks:** Never read, print, log, or commit any `.env` file, API key, or token.
    Provider API keys belong in the local OS keychain trait. The owner has approved storing
    keys on the user's own server only through the planned server secret store (verified SSH

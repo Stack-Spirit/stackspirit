@@ -2640,7 +2640,6 @@ A release candidate is done when:
 
 ## 14. References
 
-- `/home/dev/vowp/docs/design/stackspirit.md` — product and desktop-first execution plan.
 - `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md` — Phase 3 local surfaces,
   offload, gates, and commands.
 - `/home/dev/vowp/docs/design/v0.4/asif-integration.md` — ASIF CLI/web contract and
