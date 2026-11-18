@@ -1,19 +1,18 @@
 # Roadmap
 
-Status: current for the 0.3.0 release and the v0.4 slices merged after it; a planning note for
-contributors.
+Status: current for the 0.4.0 release; a planning note for contributors.
 
-This page records what the current tree ships, the v0.4 local-orchestrator work in progress and the
-open candidates. It promises no dates. The authoritative proof for every claim is the linked document,
+This page records what the current tree ships, the v0.4 local-orchestrator work and the open
+candidates. It promises no dates. The authoritative proof for every claim is the linked document,
 file or test, or the code itself.
 
-The v0.1 public release is **v0.1.0**, v0.2 is **v0.2.0** and v0.3 is **v0.3.0**, shipped on
-2026-11-12. The v0.4 local-orchestrator design is accepted; Phases 0–3 are shipped, and the
-phase-4 hardening build and its documentation are implemented in the tree. The security review
-checklist and the rollback drill are recorded in
-[`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the owner live Mac smoke test is
-pending the owner's run and record. Phase 4 is complete in the tree. No 0.4 release or date is
-promised. The slices that merged after the 0.3.0 tag are recorded separately below.
+The v0.1 public release is **v0.1.0**, v0.2 is **v0.2.0**, v0.3 is **v0.3.0** and v0.4 is
+**v0.4.0**, shipped on 2026-11-18. The v0.4 local-orchestrator design is accepted and Phases 0–4
+shipped in 0.4.0. The security review checklist, the owner live Mac smoke test and the rollback
+drill are recorded in [`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the owner
+smoke test passed on 2026-11-18. The shipped inventory is in [`CHANGELOG.md`](../CHANGELOG.md) and
+the [`0.4.0` release notes](release/0.4.0.md). The slices that merged after the 0.3.0 tag are
+included in 0.4.0 and recorded separately below.
 
 The product rationale is [`docs/design/plan.md`](design/plan.md); the v0.1 implementation spec is
 [`docs/design/README.md`](design/README.md); the normative v0.2 specification is
@@ -90,10 +89,10 @@ The shipped inventory is in [`CHANGELOG.md`](../CHANGELOG.md) and the
 | Cost dashboard | `GET /api/v1/cost` and the `/cost` page: grouping by job, day, role, provider and model, a known-USD chart and unknown rows kept separate. Budgets are not implemented. | [`design/v0.2/cost-dashboard.md`](design/v0.2/cost-dashboard.md) |
 | Cross-node session pull | Child and `--same-id` bundle pulls, `--full` directory copies with manifest and checksum checks, and a divergence report instead of a merge. Push and sync are not part of 0.3.0. | [`design/v0.2/cross-node-sync.md`](design/v0.2/cross-node-sync.md) |
 
-### Merged after the 0.3.0 tag
+### Merged after the 0.3.0 tag and shipped in 0.4.0
 
-These five slices are on `main` and in the current tree. They are not in the 0.3.0 archives or the
-0.3.0 release notes.
+These five slices are on `main` and in the 0.4.0 archives and release notes. They are not in the
+0.3.0 archives.
 
 - **Session push.** `vowp session push <node> <session>` exports one `vowp-bundle-v1` in memory and
   streams it to the remote importer. The default creates a child; `--same-id` keeps the origin id only
@@ -119,7 +118,8 @@ These five slices are on `main` and in the current tree. They are not in the 0.3
 
 ## v0.4 — local orchestrator
 
-The v0.4 design is accepted: [`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md)
+Shipped in **0.4.0** on 2026-11-18. The v0.4 design is accepted:
+[`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md)
 records the decision. In one sentence: the Mac runs a local surface and an outbound-only local node,
 the home stays the only writer and the only home, the MVP transport is SSH stdio, results return by
 the node pushing `job/<id>` with its own git credentials, the local `vowp chat` path is proved first,
@@ -133,7 +133,7 @@ The accepted phases and their state in this tree:
 | 1 | Local `vowp chat`: surface pairing, leases, turn ingest, spool replay and takeover | shipped |
 | 2 | Offload executor: placement policy, path map, isolated worktree, events, result push and home verification | shipped; offload is opt-in and off by default |
 | 3 | Local opencode surface: app frames, agent socket, opencode bridge, MCP proxy, orchestrator materialization and local cache | shipped |
-| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | complete in the tree with its documentation; security checklist and rollback drill [recorded](releases/v0.4-hardening.md); owner live Mac smoke test pending |
+| 4 | Hardening: WSS ingress, launchd, token rotation UX, bundle result, separate user, metrics and docs | shipped in 0.4.0; security checklist, owner live Mac smoke test and rollback drill [recorded](releases/v0.4-hardening.md) |
 
 Phase 0 is proved by the wire types in
 [`crates/vowp-protocol/src/agent.rs`](../crates/vowp-protocol/src/agent.rs), the enrollment, key
@@ -171,20 +171,19 @@ Phase 3 is shipped. These slices are merged in this tree:
 | Offline read cache | A bounded private cache under `<state_dir>/cache` answers the six read-only MCP tools with an `as of` line when the home is offline or the reply times out; writes never use it and a revoked surface clears its entries. | [`crates/vowp-agent/src/cache.rs`](../crates/vowp-agent/src/cache.rs), [`crates/vowp-agent/tests/cache.rs`](../crates/vowp-agent/tests/cache.rs) |
 | Job detail page | The daemon serves a read-only job detail API with runs and gates, and the `/jobs/{id}` page renders them. | [`crates/vowp-daemon/src/app.rs`](../crates/vowp-daemon/src/app.rs), [`crates/vowp-daemon/tests/job_detail.rs`](../crates/vowp-daemon/tests/job_detail.rs) |
 
-Phase 3 is shipped; no 0.4 release or date is promised.
+Phase 3 is shipped in 0.4.0.
 
-Phase 4 is implemented in this tree. [`design/v0.4/hardening.md`](design/v0.4/hardening.md)
-turns the phase scope — optional WSS ingress behind a loopback listener, launchd/systemd-user
-service install, rotation UX, bundle result, separate user, bounded metrics history and the
-security-review, owner live Mac smoke test and rollback gates — into one contract per item, with
-the named hermetic tests and the ordered slice list. The WSS transport and listener, the agent
-service, the rotation `--wait`/`--grace` path, the bundle result, the separate-user checks and the
-capacity history are in the tree, and [the agent-node guide](guides/agent-node.md) is the operator
-path. The security review checklist and the rollback drill on a restored copy are recorded in
-[`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the owner live Mac smoke test is
-pending the owner's run and record. This page does not claim the smoke test or a release date. The
-accepted [`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md) remains the
-binding design for the phases that are shipped.
+Phase 4 shipped in 0.4.0. [`design/v0.4/hardening.md`](design/v0.4/hardening.md) turns the phase
+scope — optional WSS ingress behind a loopback listener, launchd/systemd-user service install,
+rotation UX, bundle result, separate user, bounded metrics history and the security-review, owner
+live Mac smoke test and rollback gates — into one contract per item, with the named hermetic tests
+and the ordered slice list. The WSS transport and listener, the agent service, the rotation
+`--wait`/`--grace` path, the bundle result, the separate-user checks and the capacity history are in
+the release, and [the agent-node guide](guides/agent-node.md) is the operator path. The security
+review checklist, the owner live Mac smoke test and the rollback drill on a restored copy are
+recorded in [`docs/releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the smoke test passed on
+2026-11-18. The accepted [`design/v0.4/local-orchestrator.md`](design/v0.4/local-orchestrator.md)
+remains the binding design for the phases that shipped.
 
 ## Open follow-ups
 

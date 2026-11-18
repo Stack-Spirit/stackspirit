@@ -4,12 +4,22 @@ All notable changes to VOWP are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-Release notes are in [`docs/release/0.3.0.md`](docs/release/0.3.0.md),
+Release notes are in [`docs/release/0.4.0.md`](docs/release/0.4.0.md),
+[`docs/release/0.3.0.md`](docs/release/0.3.0.md),
 [`docs/release/0.2.0.md`](docs/release/0.2.0.md) and
 [`docs/release/0.1.0.md`](docs/release/0.1.0.md). The product scope and the
-features deliberately left out of v0.3 are in [`docs/roadmap.md`](docs/roadmap.md).
+features deliberately left out of v0.4 are in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-11-18
+
+The v0.4 feature set: outbound Mac and Linux agent nodes, paired local `vowp chat` and opencode
+orchestrator surfaces, opt-in run offload with push or verified git bundle return, and the phase-4
+hardening work — optional WSS ingress, launchd/systemd-user agent service, surface token rotation,
+separate-user checks, capacity history and live supervisor drain/upgrade. ASIF 0.4 session
+export/import is a review draft. The upgrade path and the known limits are in
+[`docs/release/0.4.0.md`](docs/release/0.4.0.md).
 
 ### Added
 
@@ -72,7 +82,8 @@ The adapter is pinned as a git dependency for now; that is the release blocker r
 
 The design is in [`docs/design/v0.4/local-orchestrator.md`](docs/design/v0.4/local-orchestrator.md);
 the Phase 3 proof table is in [`docs/roadmap.md`](docs/roadmap.md#v04-local-orchestrator). The owner
-live Mac smoke test is still pending; no 0.4 release or date is promised.
+live Mac smoke test passed on 2026-11-18; the record is in
+[`docs/releases/v0.4-hardening.md`](docs/releases/v0.4-hardening.md).
 
 **Phase-4 hardening: agent nodes, WSS, rotation, bundles and capacity history**
 
@@ -103,8 +114,9 @@ live Mac smoke test is still pending; no 0.4 release or date is promised.
 - The separate-user shape, service limits, WSS trust boundary, rotation storage and bundle
   verification are documented in [`docs/security.md`](docs/security.md), with the operator path
   in [`docs/guides/agent-node.md`](docs/guides/agent-node.md) and the design/status pages updated.
-  The owner live Mac smoke test is pending; the rollback drill and security-review sign-off are
-  recorded phase-exit evidence.
+  The owner live Mac smoke test passed on 2026-11-18; the smoke-test record, the rollback drill and
+  the security-review sign-off are recorded phase-exit evidence in
+  [`docs/releases/v0.4-hardening.md`](docs/releases/v0.4-hardening.md).
 
 ### Changed
 
@@ -450,7 +462,8 @@ generated CLI and JSON Schema reference (`docs/reference/`), the design spec
 (`docs/design/`), a docs command/link checker (`docs/tests/`) and the runnable
 `examples/hello-vowp` fake-adapter demo.
 
-[Unreleased]: https://github.com/syver777/vowp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/syver777/vowp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/syver777/vowp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/syver777/vowp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/syver777/vowp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/syver777/vowp/releases/tag/v0.1.0

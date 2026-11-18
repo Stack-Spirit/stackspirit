@@ -1,11 +1,12 @@
 # Install
 
-VOWP 0.3 has two roles:
+VOWP 0.4 has two core roles and an optional third:
 
 | Role | What it is | What it owns |
 |---|---|---|
 | **home** | One Linux VPS. | The global database, every project database, all session logs and the one supervisor. |
 | **control machine** | A laptop, desktop or phone that talks to the home. | A snapshot cache, SSH tunnels and the local app configuration. It holds no truth. |
+| **agent node** | An optional Mac or Linux machine that dials the home. | Its node key, path map, harness login, worktrees and surface tokens. It holds no truth. |
 
 Most people set up the home first, then make the computer they already use the control machine. The
 phone needs no install at all: an SSH app and the owner's key are enough (see
@@ -163,7 +164,7 @@ archives and the npm package contain `vowp` only, so install the matching daemon
 window:
 
 ```sh
-cargo install vowp-daemon --version 0.3.0 --locked
+cargo install vowp-daemon --version 0.4.0 --locked
 vowp-daemon --help
 ```
 

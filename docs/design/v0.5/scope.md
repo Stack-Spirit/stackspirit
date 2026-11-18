@@ -1,16 +1,17 @@
 # v0.5 — scope brief
 
-Status: planning note. v0.5 is not started; no release, tag, date or deploy is promised.
+Status: planning note. v0.4 shipped as **0.4.0** on 2026-11-18; v0.5 is not started; no release,
+tag, date or deploy is promised.
 
 ## Status
 
-v0.4 is code-complete and its evidence is recorded: phase 4 is implemented in the tree, the
-security review checklist and the rollback drill are in
+v0.4 is shipped in **0.4.0** and its evidence is recorded: phase 4 is implemented, the security
+review checklist, the owner live Mac smoke test and the rollback drill are in
 [`docs/releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md), and
 [`docs/roadmap.md`](../../roadmap.md) carries the same status. The owner live Mac smoke test
 (§8.3: pair or start one local orchestrator, complete one no-op turn on the same VPS session log,
-then stop and clean up) is **pending**; it has not been run and is not claimed as passed. v0.5 has
-no design, no code and no accepted scope. The rows below are candidates from the roadmap's
+then stop and clean up) **passed on 2026-11-18**. v0.5 has no design, no code and no accepted
+scope. The rows below are candidates from the roadmap's
 [Open follow-ups](../../roadmap.md#open-follow-ups), not commitments. This page gives the owner
 one decision: which slice, if any, to queue next.
 
@@ -61,10 +62,10 @@ not improve the daily loop; it is a good filler slice behind the window work.
 
 ## What would change this recommendation
 
-- **The owner smoke-test result.** If the live Mac run fails or finds a blocker, v0.4 repair comes
-  first and no v0.5 slice starts.
-- **Release timing.** If the owner chooses to spend the next jobs on v0.4 release work, that work
-  comes first. This page sets no date and does not imply a release.
+- **A v0.4.0 field report.** If the release or early use finds a blocker, v0.4 repair comes first
+  and no v0.5 slice starts.
+- **Release timing.** If the owner chooses to spend the next jobs on 0.4.0 release follow-up, that
+  work comes first. This page sets no date and does not imply a release.
 - **A different owner priority.** Remote or mobile use points at `session push --full` / `sync` or
   the relay; spend control points at metrics alerts or the fan-out budget decision; ACP users point
   at streaming chunks; browser-first use points at the chat turn after its design question.
@@ -73,8 +74,7 @@ not improve the daily loop; it is a good filler slice behind the window work.
 
 ## Questions for owner
 
-1. Should the next job start v0.5 scope work, or stay on v0.4 release work (the smoke-test record
-   and release preparation)?
+1. Should the next job start v0.5 scope work, or stay on v0.4 maintenance and release follow-up?
 2. If v0.5: is the recommended order right — jobs SSE first, then cost, inbox and nodes live
    updates — or is another candidate higher priority?
 3. Should the first slice (jobs list SSE and keeper-action refresh) be queued now?

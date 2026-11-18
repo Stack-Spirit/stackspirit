@@ -1,12 +1,13 @@
 # v0.4 — phase 4 hardening: optional WSS, a service, rotation, bundles, a separate user and metrics
 
-Status: **implemented in this tree; the available phase-exit evidence is recorded in
+Status: **implemented in this tree and shipped in 0.4.0; the phase-exit evidence is recorded in
 [`docs/releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md).** The four library slices
 and the CLI surface (`4b`–`4f`) are merged on `main`, and `4g` documents the shipped behaviour.
 Token rotation's mechanics shipped earlier in `v4-local-4a-surface-rotate`; §4.1 describes them.
-The security review (§8.2) and the rollback drill (§8.4) results are recorded on the evidence page;
-the owner live Mac smoke test (§8.3) is **pending**: one run on the owner's Mac against the
-owner's home, then the result is recorded there. No release, tag or date is promised.
+The security review (§8.2), the owner live Mac smoke test (§8.3) and the rollback drill (§8.4)
+results are recorded on the evidence page; the owner smoke test **passed on 2026-11-18**. No
+separate tag or date is promised by this design page; the release notes are
+[`docs/release/0.4.0.md`](../../release/0.4.0.md).
 
 This page began as the plan for the phase and keeps the design-time wording and markers in the
 sections below. Where a §2–§7 sentence calls a command or flag *(planned)*, the name is the design
@@ -57,10 +58,9 @@ Known deviations from the text below:
 - The gateway does not discard a queued rotation whose replacement token expired before delivery.
   It delivers the frame; the home refuses the expired token on first use and the owner re-pairs.
   `--wait` still stops at the delivery deadline and reports `rotation_pending`.
-- The rollback drill is recorded in
-  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The owner live Mac smoke
-  test has not been run; it is **pending** the owner's run against their Mac and home and the
-  record on that page.
+- The rollback drill and the owner live Mac smoke test are recorded in
+  [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md). The owner ran the smoke
+  test on 2026-11-18; it **passed**, and the record is on that page.
 
 ## 1. Scope, invariants and vocabulary
 
@@ -77,7 +77,7 @@ Every item below is planned for phase 4; §4.1 describes the one rotation slice 
 | Bundle result | A node without push access returns `base..head` as a verified git bundle over the agent channel. | `result_transport = "push"` |
 | Separate user | A dedicated standard account is a supported way to run the agent; the rules are explicit. | the owner's account |
 | Metrics history | A bounded local history for capacity and cost feeds a read-only CLI/JSON surface. | 30 days of 5-minute rollups |
-| Docs and release gates | Security review, owner live Mac smoke test and rollback drill are named phase-exit activities. | no release |
+| Docs and release gates | Security review, owner live Mac smoke test and rollback drill are named phase-exit activities. | release only after the gates pass |
 
 ### 1.2 Invariants that still bind
 
@@ -987,8 +987,8 @@ DISK_MIN SOURCE`. No path, token or secret appears.
 ## 8. Docs and release gates
 
 The evidence record is [`../../releases/v0.4-hardening.md`](../../releases/v0.4-hardening.md): it
-carries the §8.2 checklist with code and test links and the §8.4 drill commands and results. The
-owner live Mac smoke test (§8.3) is pending and is not claimed there.
+carries the §8.2 checklist with code and test links, the §8.4 drill commands and results, and the
+§8.3 owner record. The owner live Mac smoke test passed on 2026-11-18.
 
 ### 8.1 Documentation set
 
@@ -1044,8 +1044,8 @@ The phase exit records one smoke test, run once on the owner's Mac against the o
 2. complete one no-op turn and verify the same VPS session log;
 3. stop and clean up the test orchestrator.
 
-Status is **pending** until the owner records the run on the evidence page; it is not claimed as
-passed. There is no multi-day run or daily checklist.
+Status is **passed**: the owner ran the test on 2026-11-18 and recorded it on the evidence page.
+There is no multi-day run or daily checklist.
 
 ### 8.4 Rollback drill
 
@@ -1076,10 +1076,11 @@ passed. There is no multi-day run or daily checklist.
 | `cargo clippy --workspace --all-targets -- -D warnings` | no warnings |
 | `cargo test --workspace` | every suite passes |
 | Security review | §8.2 checklist with test links |
-| Owner live Mac smoke test | §8.3 smoke-test record; pending until the owner runs it |
+| Owner live Mac smoke test | §8.3 smoke-test record; passed on 2026-11-18 |
 | Rollback drill | §8.4 commands and results on the copy |
 
-There is no publish, deploy, release tag or visibility change in the phase.
+The phase itself performs no publish, deploy, release tag or visibility change; 0.4.0 packaging
+is a separate release job after the gates pass.
 
 ### 8.6 Files, tests and non-slice
 
