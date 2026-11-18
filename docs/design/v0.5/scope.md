@@ -17,8 +17,8 @@ then stop and clean up) **passed on 2026-11-18**.
 
 On 2026-11-18 the owner approved one focused **v0.5** cycle so VOWP provides every engine
 primitive needed by desktop/UI surfaces (and VOWP's own web window) without UI clients reinventing
-transport, session movement, project bootstrap or secret storage. Execute these five slices in
-clean, disjoint-ownership jobs:
+transport, session movement, project bootstrap, secret storage or multi-server pooled capacity.
+Execute these six slices in clean, disjoint-ownership jobs:
 
 ### 1. Live SSE streams for the web window (`vowp-daemon`)
 
@@ -89,6 +89,29 @@ clean, disjoint-ownership jobs:
   to end over SSH pipes without a TTY) and expose the storage mode (`basic`, `vault_user`,
   `encrypted`) in `vowp secret ls --json` so UI clients can display honest security status without
   ever seeing a secret value.
+
+### 6. Pooled cluster capacity across Home and online worker nodes
+
+- Today `CapacityManager::admit` (`crates/vowp-core/src/capacity/admit.rs`) counts **all** open
+  runs against the Home server's single-machine `target_workers` and checks the Home server's RAM
+  and CPU headroom before offload dispatch runs. As a result, adding a second identical server as
+  an agent worker node would still cap total concurrent workers at the Home server's single-host
+  target instead of doubling throughput.
+- Fix capacity admission and the read model so a multi-server cluster pools its compute:
+  1. **Per-host admission split:** runs that execute on the Home count against Home's
+     `target_workers`, Home's RAM/CPU headroom and Home's brake. Runs eligible to offload to an
+     **online worker node** (`Placement::Node` or `Placement::Any` when `[offload] enabled = true`
+     and an online mapped worker node has `busy_slots < max_slots`, sufficient RAM and disk
+     reserve) are admitted against **that worker node's slot and resource headroom** rather than
+     blocking on Home's `target_workers` or Home's CPU/RAM. Two identical 4-worker (or 8-worker)
+     machines therefore admit up to **8 (or 16) concurrent workers** across the cluster, spreading
+     load across Home and all online worker nodes (`default_placement = "any"`).
+  2. **Combined cluster capacity in `capacity report` and `fleet status`:** export additive
+     cluster-wide totals (`cluster`: `online_nodes`, `target_workers` = Home `target_workers` +
+     sum of online worker `max_slots`, `busy_workers` = Home running + sum of online worker
+     `busy_slots`, plus combined total/available RAM, CPU cores and free disk across Home and
+     online worker nodes) alongside the existing per-Home fields so UI clients can display both
+     combined cluster capacity/load and per-machine health. Regenerate `docs/reference/` schemas.
 
 ---
 
