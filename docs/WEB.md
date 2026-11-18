@@ -1292,3 +1292,77 @@ keeps the honest `WebFleetView` and does not mount a desktop view with fabricate
 
 No gated D5/D6 feature is claimed. The Web build is read-only and has no browser token,
 provider key, SSH code, or mock fallback on a live failure.
+
+---
+
+## 10. Meadow design alignment (ss-27, 2026-11-18)
+
+Status: the read-only cockpit now uses the desktop shell's Meadow tokens and surfaces.
+No bridge method, route, write, auth, or network surface changed.
+
+### 10.1 What changed
+
+- `apps/spirit-web/index.html` sets `data-ui="next"` on `<html>`. The app no longer pins
+  `data-theme="dark"`, so light is the default and dark follows the OS, like the desktop
+  shell. The `color-scheme` meta is `light dark`.
+- `apps/spirit-web/src/main.tsx` loads the shared Meadow stylesheet
+  (`packages/spirit-ui/src/next/theme.css`) after `@stackspirit/ui/styles.css`, then the
+  shared fleet stylesheet (`packages/spirit-ui/src/views/fleet/fleet.css`), then
+  `src/web.css`. Every colour, radius, shadow, and focus ring comes from the `--nx-*`
+  Meadow tokens.
+- Geometry follows the desktop shell: 14 px body text and rows, 32 px sidebar and fact
+  rows, 56 px page headers, 12 px secondary text, card/panel surfaces (`--nx-panel`,
+  `--nx-raised`), status dots, and the AA-safe Meadow button fill (`--nx-btn-bg`, `#2e7f48`
+  in light mode).
+- `src/web.css` restyles the reused classic primitives (`Button`, `Badge`, `Panel`,
+  `Drawer`, `EmptyState`, `JobCard`, `JobLane`, `WorkerCard`) with the Meadow tokens. The
+  page header is fixed above a scrolling content column, and the five job lanes wrap
+  responsively instead of hiding lanes behind horizontal scroll.
+
+### 10.2 Shared components reused
+
+- `next/SpiritMark` in the top bar, setup page, boot error, and desktop-only shell.
+- `next/NodeMap` for the read-only **Fleet structure** panel: daemon → project → exact
+  lane counts. It is a pure props component; the leaves are labels, not actions.
+- Not reused: `NextShell`, `Sidebar`, `ServerPage`, `WorkersPage`, `JobRows`,
+  `PageHeader`, `ContextPanel`, and `ErrorNotice`. They read the desktop store
+  (`useFleetStore`/`useShellUi`) or open the desktop details panel, so mounting them would
+  add desktop-only actions or a dead panel toggle to the read-only cockpit. Their layout
+  and tokens are reused instead.
+
+### 10.3 Still classic
+
+- The public `@stackspirit/ui` primitives `Button`, `Badge`, `Panel`, `Drawer`,
+  `EmptyState`, and the prop-driven `JobCard`/`JobLane`/`WorkerCard` views are still the
+  classic components. The Web app does not fork them: `web.css` restyles them with Meadow
+  tokens and leaves their DOM, props, and test ids unchanged.
+- `AppShell`, `TopBar`, `FleetCanvas`, and `CapacityRail` remain unmounted because they
+  need a desktop `FleetView` with capacity and supervisor data. The Web-specific shell
+  remains, as §9.6 describes.
+- The classic `--state-verifier` token has no Meadow equivalent. `web.css` maps it to
+  `#6d28d9` in light mode and `#c4b5fd` in dark mode so gate/verifier badges and the
+  review/fix lane pass WCAG AA. This is a Web-local token, not a shared theme change.
+
+### 10.4 Missing shared exports (follow-up outside this job)
+
+- `packages/spirit-ui/package.json` exports only `.` and `./styles.css`. The `next/`
+  components and `next/theme.css` are therefore deep-imported from the workspace source,
+  the same pattern the Web app already used for `views/fleet/*` and `domain/fleet`. A
+  future change can add `./next` and `./next/theme.css` exports; this job does not edit the
+  desktop package.
+- `--state-verifier` could become a Meadow token (`--nx-verifier` / `--nx-verifier-soft`)
+  so each host does not map it locally.
+
+### 10.5 Verification (2026-11-18)
+
+```sh
+npm run typecheck -w @stackspirit/web   # pass
+npm run lint -w @stackspirit/web        # pass
+npm test -w @stackspirit/web            # 73 passed
+npm run test:e2e -w @stackspirit/web    # 10 passed
+```
+
+The e2e run includes the three WCAG 2.2 AA axe checks (fleet view, inbox drawer, job
+drawer). No bridge test, route, copy constant, write action, or network request changed.
+§9 remains the data and transport contract; this section only records the visual
+alignment.

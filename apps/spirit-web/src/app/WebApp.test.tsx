@@ -37,6 +37,7 @@ describe("Web read-only shell", () => {
     expect(screen.getAllByText("Preview data").length).toBeGreaterThan(0);
     expect(screen.getByTestId("web-lanes")).toBeInTheDocument();
     expect(screen.getByTestId("running-workers")).toBeInTheDocument();
+    expect(screen.getByTestId("web-structure")).toBeInTheDocument();
     expect(screen.getByTestId("lane-count-ready")).toHaveTextContent("3");
     expect(screen.getByTestId("lane-review_fix")).toBeInTheDocument();
     expect(screen.getByTestId("daemon-panel")).toBeInTheDocument();

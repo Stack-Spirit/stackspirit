@@ -5,6 +5,7 @@ import { Button, Panel } from "@stackspirit/ui";
 import { SAME_ORIGIN_REQUIRED } from "../copy";
 import { parseBaseUrl } from "../bridge/baseUrl";
 import { setupRedirectUrl } from "../bridge/create";
+import { SpiritMark } from "../shared/next";
 import type { SpiritErrorDto } from "@stackspirit/ui";
 
 export function SetupPanel({ error }: { error: SpiritErrorDto | null }) {
@@ -36,6 +37,13 @@ export function SetupPanel({ error }: { error: SpiritErrorDto | null }) {
 
   return (
     <main className="web-boot" id="main-canvas">
+      <div className="web-brand">
+        <SpiritMark size={36} />
+        <div>
+          <strong>StackSpirit</strong>
+          <span>Web cockpit · read-only</span>
+        </div>
+      </div>
       <Panel title="Connect to the VOWP daemon" tone="warn">
         <p>
           This Web build talks to one loopback daemon through a same-origin reverse proxy or

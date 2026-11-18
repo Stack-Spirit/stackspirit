@@ -6,6 +6,7 @@ import {
   HOSTS_DESKTOP_ONLY,
   READ_ONLY_NOTICE,
 } from "../copy";
+import { SpiritMark } from "../shared/next";
 
 export type DesktopSurface = "hosts" | "engine" | "gates";
 
@@ -30,9 +31,7 @@ export function DesktopOnlyBoot({ surface }: { surface: DesktopSurface }) {
       </a>
       <header className="topbar web-topbar">
         <div className="topbar__brand">
-          <span className="topbar__mark" aria-hidden="true">
-            ✦
-          </span>
+          <SpiritMark size={28} />
           <span className="topbar__wordmark">StackSpirit</span>
           {preview ? (
             <Badge tone="warn" uppercase className="preview-badge">
@@ -65,10 +64,14 @@ export function DesktopOnlyBoot({ surface }: { surface: DesktopSurface }) {
               <h1 className="page-title">{copy.title}</h1>
             </div>
           </div>
-          <DesktopOnlyPage
-            surface={surface}
-            onBack={() => window.location.assign("/")}
-          />
+          <div className="canvas__scroll">
+            <div className="canvas__inner">
+              <DesktopOnlyPage
+                surface={surface}
+                onBack={() => window.location.assign("/")}
+              />
+            </div>
+          </div>
         </main>
       </div>
     </div>

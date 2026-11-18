@@ -14,8 +14,10 @@ import {
 
 import { READ_ONLY_NOTICE } from "../copy";
 import { webErrorTitle } from "../bridge/errors";
+import { SpiritMark } from "../shared/next";
 import { CapacityPanel, SupervisorCard } from "./CapacityPanel";
 import { DesktopOnlyPage } from "./DesktopOnlyPage";
+import { FleetStructure } from "./FleetStructure";
 import { WebInboxDrawer } from "./InboxDrawer";
 import { JobDrawer } from "./JobDrawer";
 import { Lanes, RunningWorkers, UnavailableDetails } from "./Lanes";
@@ -131,9 +133,7 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
 
       <header className="topbar web-topbar">
         <div className="topbar__brand">
-          <span className="topbar__mark" aria-hidden="true">
-            ✦
-          </span>
+          <SpiritMark size={28} />
           <span className="topbar__wordmark">StackSpirit</span>
           {preview ? (
             <Badge
@@ -242,117 +242,122 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
             </div>
           </div>
 
-          {fleet.error ? (
-            <ErrorBanner
-              error={fleet.error}
-              onDismiss={fleet.clearError}
-              onRetry={() => void fleet.refresh()}
-              retrying={fleet.refreshing}
-            />
-          ) : null}
-
-          {path === "hosts" ? (
-            <DesktopOnlyPage surface="hosts" onBack={() => navigate("fleet")} />
-          ) : path === "engine" ? (
-            <DesktopOnlyPage surface="engine" onBack={() => navigate("fleet")} />
-          ) : path === "gates" ? (
-            <DesktopOnlyPage surface="gates" onBack={() => navigate("fleet")} />
-          ) : fleet.loading && !snapshot ? (
-            <Panel title="Reading the daemon" aria-busy="true">
-              <p>Reading health, the board, jobs, sessions, and the open inbox…</p>
-            </Panel>
-          ) : !snapshot ? (
-            <EmptyState
-              icon="◇"
-              title="No snapshot yet"
-              body="The daemon did not answer. The Web build never falls back to mock data."
-              actionLabel="Retry"
-              onAction={() => void fleet.refresh()}
-            />
-          ) : (
-            <div className="view-stack">
-              {stale ? (
-                <div className="notice notice--warn" role="status" data-testid="stale-banner">
-                  <Badge tone="warn">stale</Badge> no data from the daemon. Last received{" "}
-                  {formatClock(snapshot.fetched_at)};{" "}
-                  {fleet.status?.next_retry_at
-                    ? "the local retry countdown is in the status strip."
-                    : "no local retry countdown is scheduled in this state."}
-                </div>
-              ) : null}
-              {fleet.status?.polling_only ||
-              fleet.status?.stream_state === "reconnecting" ? (
-                <div className="notice notice--warn" role="status">
-                  The board stream is unavailable; the 5 second polling fallback is active.
-                  Data is still read from the daemon, not from a cache or mock.
-                </div>
+          <div className="canvas__scroll">
+            <div className="canvas__inner">
+              {fleet.error ? (
+                <ErrorBanner
+                  error={fleet.error}
+                  onDismiss={fleet.clearError}
+                  onRetry={() => void fleet.refresh()}
+                  retrying={fleet.refreshing}
+                />
               ) : null}
 
-              <Panel title="Daemon" data-testid="daemon-panel">
-                <dl className="web-facts">
-                  <div>
-                    <dt>Node</dt>
-                    <dd className="mono">{snapshot.daemon.node}</dd>
-                  </div>
-                  <div>
-                    <dt>Project</dt>
-                    <dd className="mono">{snapshot.daemon.project}</dd>
-                  </div>
-                  <div>
-                    <dt>Daemon version</dt>
-                    <dd className="mono">{snapshot.daemon.version}</dd>
-                  </div>
-                  <div>
-                    <dt>Origin</dt>
-                    <dd className="mono">{snapshot.daemon.origin}</dd>
-                  </div>
-                  <div>
-                    <dt>Source</dt>
-                    <dd>{snapshot.source === "daemon" ? "live from daemon" : "preview data"}</dd>
-                  </div>
-                  <div>
-                    <dt>Received</dt>
-                    <dd>{formatClock(snapshot.fetched_at)}</dd>
-                  </div>
-                  <div>
-                    <dt>Snapshot changed at</dt>
-                    <dd>{formatClock(snapshot.generated_at)}</dd>
-                  </div>
-                  <div>
-                    <dt>Daemon RTT</dt>
-                    <dd>{latencyLabel(snapshot.latency.last_ms)}</dd>
-                  </div>
-                  <div>
-                    <dt>Last heartbeat</dt>
-                    <dd>
-                      {snapshot.daemon.heartbeat_at
-                        ? `${formatAge(
-                            Math.max(
-                              0,
-                              Math.floor(
-                                (Date.parse(snapshot.daemon.received_at) -
-                                  Date.parse(snapshot.daemon.heartbeat_at)) /
-                                  1000,
-                              ),
-                            ),
-                          )} before this health read`
-                        : "No supervisor heartbeat is present in /api/v1/health."}
-                    </dd>
-                  </div>
-                </dl>
-              </Panel>
+              {path === "hosts" ? (
+                <DesktopOnlyPage surface="hosts" onBack={() => navigate("fleet")} />
+              ) : path === "engine" ? (
+                <DesktopOnlyPage surface="engine" onBack={() => navigate("fleet")} />
+              ) : path === "gates" ? (
+                <DesktopOnlyPage surface="gates" onBack={() => navigate("fleet")} />
+              ) : fleet.loading && !snapshot ? (
+                <Panel title="Reading the daemon" aria-busy="true">
+                  <p>Reading health, the board, jobs, sessions, and the open inbox…</p>
+                </Panel>
+              ) : !snapshot ? (
+                <EmptyState
+                  icon="◇"
+                  title="No snapshot yet"
+                  body="The daemon did not answer. The Web build never falls back to mock data."
+                  actionLabel="Retry"
+                  onAction={() => void fleet.refresh()}
+                />
+              ) : (
+                <div className="view-stack">
+                  {stale ? (
+                    <div className="notice notice--warn" role="status" data-testid="stale-banner">
+                      <Badge tone="warn">stale</Badge> no data from the daemon. Last received{" "}
+                      {formatClock(snapshot.fetched_at)};{" "}
+                      {fleet.status?.next_retry_at
+                        ? "the local retry countdown is in the status strip."
+                        : "no local retry countdown is scheduled in this state."}
+                    </div>
+                  ) : null}
+                  {fleet.status?.polling_only ||
+                  fleet.status?.stream_state === "reconnecting" ? (
+                    <div className="notice notice--warn" role="status">
+                      The board stream is unavailable; the 5 second polling fallback is active.
+                      Data is still read from the daemon, not from a cache or mock.
+                    </div>
+                  ) : null}
 
-              <RunningWorkers
-                snapshot={snapshot}
-                onOpenJob={(job) => setSelectedJobKey(`${job.project}:${job.job_id}`)}
-              />
-              <Lanes
-                snapshot={snapshot}
-                onOpenJob={(job) => setSelectedJobKey(`${job.project}:${job.job_id}`)}
-              />
-              <UnavailableDetails snapshot={snapshot} />
+                  <Panel title="Daemon" data-testid="daemon-panel">
+                    <dl className="web-facts">
+                      <div>
+                        <dt>Node</dt>
+                        <dd className="mono">{snapshot.daemon.node}</dd>
+                      </div>
+                      <div>
+                        <dt>Project</dt>
+                        <dd className="mono">{snapshot.daemon.project}</dd>
+                      </div>
+                      <div>
+                        <dt>Daemon version</dt>
+                        <dd className="mono">{snapshot.daemon.version}</dd>
+                      </div>
+                      <div>
+                        <dt>Origin</dt>
+                        <dd className="mono">{snapshot.daemon.origin}</dd>
+                      </div>
+                      <div>
+                        <dt>Source</dt>
+                        <dd>{snapshot.source === "daemon" ? "live from daemon" : "preview data"}</dd>
+                      </div>
+                      <div>
+                        <dt>Received</dt>
+                        <dd>{formatClock(snapshot.fetched_at)}</dd>
+                      </div>
+                      <div>
+                        <dt>Snapshot changed at</dt>
+                        <dd>{formatClock(snapshot.generated_at)}</dd>
+                      </div>
+                      <div>
+                        <dt>Daemon RTT</dt>
+                        <dd>{latencyLabel(snapshot.latency.last_ms)}</dd>
+                      </div>
+                      <div>
+                        <dt>Last heartbeat</dt>
+                        <dd>
+                          {snapshot.daemon.heartbeat_at
+                            ? `${formatAge(
+                                Math.max(
+                                  0,
+                                  Math.floor(
+                                    (Date.parse(snapshot.daemon.received_at) -
+                                      Date.parse(snapshot.daemon.heartbeat_at)) /
+                                      1000,
+                                  ),
+                                ),
+                              )} before this health read`
+                            : "No supervisor heartbeat is present in /api/v1/health."}
+                        </dd>
+                      </div>
+                    </dl>
+                  </Panel>
+
+                  <FleetStructure snapshot={snapshot} stale={stale} />
+                  <RunningWorkers
+                    snapshot={snapshot}
+                    onOpenJob={(job) => setSelectedJobKey(`${job.project}:${job.job_id}`)}
+                  />
+                  <Lanes
+                    snapshot={snapshot}
+                    onOpenJob={(job) => setSelectedJobKey(`${job.project}:${job.job_id}`)}
+                  />
+                  <UnavailableDetails snapshot={snapshot} />
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </main>
 
         <aside className="rail rail--right" aria-label="Capacity and storage" tabIndex={0}>
