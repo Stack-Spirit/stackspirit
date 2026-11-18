@@ -3,6 +3,7 @@
 pub mod command;
 pub mod fingerprint;
 pub mod known_hosts;
+pub mod password_install;
 pub(crate) mod remote_file;
 pub mod runner;
 
@@ -18,6 +19,10 @@ use crate::ssh::command::{
 };
 pub use command::{WRITE_TIMEOUT, quote_arg};
 pub use fingerprint::{HostKeyScan, ScannedHostKey, scan_host_keys};
+pub use password_install::{
+    AuthorizedKeysMerge, PasswordAuthOutcome, PasswordAuthUnsupported, PasswordInstallOutcome,
+    PasswordInstallRequest, install_public_key_with_password, merge_authorized_keys,
+};
 pub use runner::{CommandRunner, FakeCommandRunner, SystemCommandRunner};
 
 /// The SSH destination for one host profile.

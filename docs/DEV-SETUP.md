@@ -213,6 +213,52 @@ That path is outside the repository; the script never deletes repository files.
 `check` and `tauri-build` reuse an existing `stackspirit-desktop-build:local` image.
 Run `scripts/desktop-build-container.sh build` after changing the Dockerfile.
 
+## One-time-password onboarding (`spirit-core`)
+
+`crates/spirit-core/src/ssh/password_install.rs` holds the core API for onboarding a
+server with a password that is used once and then forgotten:
+
+```rust
+let outcome = spirit_core::ssh::install_public_key_with_password(
+    runner,   // Arc<dyn CommandRunner>; SystemCommandRunner in the app
+    &request, // target, confirmed HostKeyPin, SecretString password,
+              // <private_key_path>.pub and disable_password_auth
+    &options, // app-private known_hosts and timeouts
+)
+.await?;
+```
+
+The first hop is the only one that relaxes `BatchMode`. A generated `SSH_ASKPASS`
+helper (with `SSH_ASKPASS_REQUIRE=force`) reads the password from a `0600` file inside
+a `0700` temp directory; only the helper path is exported, and the directory is
+removed on every exit path. Before the password is written anywhere, an `ssh-keyscan`
+plus `ssh-keygen` scan must match the confirmed `HostKeyPin`, and only that confirmed
+key is written to the app-private `known_hosts`. A fresh key-only `BatchMode=yes`
+login runs `true`; the outcome cannot say `installed` until that hop succeeds.
+
+Exercise it without a server through the fake-command harness:
+
+```sh
+cargo test -p spirit-core --test ssh_install
+```
+
+The tests cover the password staying out of argv, environment values and stdin; the
+askpass file being `0600` inside a `0700` directory and gone after the call; the
+`authorized_keys` merge being idempotent; a wrong password or a changed host key
+returning a typed error with no temp files left; and a failed verify hop never
+reporting `installed`.
+
+A real-server run is **owner verification**. It needs a server you own with password
+login enabled, a confirmed host-key fingerprint, and optionally passwordless sudo
+(`sudo -n true`) plus `sshd -t`/`sshd -T`. The API never prompts for or accepts a sudo
+password. When it applies the optional change, it writes the app-owned drop-in
+`/etc/ssh/sshd_config.d/99-stackspirit-password-auth.conf`, validates it with
+`sshd -t` and the effective `sshd -T` output, reloads sshd, and removes the drop-in
+again if any step fails. If sudo or `sshd -t` is unavailable, that step returns a
+typed `NotSupported` outcome and the key install itself stays successful. The desktop
+card and Tauri command that call this API are a later job; nothing in the UI installs
+a key yet.
+
 ## What remains a native, macOS, or CI check
 
 The Docker workflow is a Linux compile and test environment, not a release pipeline.

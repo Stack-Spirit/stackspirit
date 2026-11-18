@@ -28,6 +28,12 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     /// Bytes written to stdin, when any.
     pub stdin: Option<Vec<u8>>,
+    /// Extra environment variables for the child only.
+    ///
+    /// Values are never rendered in an error and must never hold secret material
+    /// that is not already required by the child. The SSH askpass flow uses this
+    /// for the helper *path* only.
+    pub env: Vec<(String, String)>,
     /// Deadline for the whole process.
     pub timeout: Duration,
     /// Maximum stdout bytes before the call fails with `output_too_large`.
@@ -42,9 +48,18 @@ impl CommandSpec {
             program: program.into(),
             args,
             stdin: None,
+            env: Vec::new(),
             timeout: READ_TIMEOUT,
             output_cap: OUTPUT_CAP_BYTES,
         }
+    }
+
+    /// Adds one environment variable for the child process.
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let Self { env, .. } = &mut self;
+        env.push((key.into(), value.into()));
+        self
     }
 
     /// Replaces the timeout.

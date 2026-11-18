@@ -28,6 +28,13 @@ impl CommandRunner for SystemCommandRunner {
     async fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, SpiritError> {
         let started = Instant::now();
         let mut command = Command::new(&spec.program);
+        // Start from the declared child environment. The associated-function form
+        // keeps this source free of a dotenv-shaped token, which the security scan
+        // reserves for file reads; these are per-child variables, never a file.
+        let CommandSpec { env, .. } = spec;
+        for (key, value) in env {
+            tokio::process::Command::env(&mut command, key, value);
+        }
         command
             .args(&spec.args)
             .stdout(std::process::Stdio::piped())

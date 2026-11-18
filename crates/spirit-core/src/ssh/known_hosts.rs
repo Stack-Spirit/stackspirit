@@ -71,6 +71,35 @@ pub fn contains_key(
     Ok(text.lines().any(|line| format!("{line}\n") == expected))
 }
 
+/// Replaces every pin for `target` with one confirmed key.
+///
+/// Other hosts and comments are preserved. The write goes through
+/// [`write_known_hosts`], so the file is replaced atomically with mode 0600 and
+/// there is never a moment where a second pin for the same target survives.
+pub(crate) fn upsert_pinned_key(
+    path: &Path,
+    target: &SshTarget,
+    key: &ScannedHostKey,
+) -> Result<(), SpiritError> {
+    let pattern = known_hosts_pattern(target);
+    let mut lines = Vec::new();
+    match fs::read_to_string(path) {
+        Ok(text) => {
+            for line in text.lines() {
+                let candidates = line.split_whitespace().next().unwrap_or_default();
+                let same_target = candidates.split(',').any(|entry| entry == pattern);
+                if !same_target {
+                    lines.push(format!("{line}\n"));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(SpiritError::io("reading known_hosts", &error)),
+    }
+    lines.push(known_hosts_line(target, key));
+    write_known_hosts(path, &lines)
+}
+
 /// Returns true when the file carries a key for the target with the pinned SHA-256.
 pub fn contains_pinned_fingerprint(
     path: &Path,
@@ -82,4 +111,50 @@ pub fn contains_pinned_fingerprint(
         return Ok(false);
     };
     contains_key(path, target, key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scanned(body: &str) -> ScannedHostKey {
+        ScannedHostKey {
+            algorithm: "ssh-ed25519".to_owned(),
+            sha256: "SHA256:test".to_owned(),
+            public_key_base64: body.to_owned(),
+            preferred: true,
+        }
+    }
+
+    #[test]
+    fn upsert_replaces_only_the_same_target_and_keeps_other_hosts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("known_hosts");
+        let target = SshTarget::new("owner", "192.0.2.10", 22).unwrap();
+        let other = SshTarget::new("owner", "198.51.100.7", 22).unwrap();
+        write_known_hosts(&path, &[known_hosts_line(&other, &scanned("OTHERKEY"))]).unwrap();
+
+        upsert_pinned_key(&path, &target, &scanned("FIRSTKEY")).unwrap();
+        upsert_pinned_key(&path, &target, &scanned("SECONDKEY")).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("192.0.2.10 "))
+                .count(),
+            1,
+            "a re-pin must not leave the old target line behind"
+        );
+        assert!(text.contains("192.0.2.10 ssh-ed25519 SECONDKEY"));
+        assert!(!text.contains("FIRSTKEY"));
+        assert!(text.contains("198.51.100.7 ssh-ed25519 OTHERKEY"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 }
