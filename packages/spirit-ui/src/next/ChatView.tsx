@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
-import { useEngine, useFleet } from "../state/fleetStore";
+import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
+import type { HostDraft, HostKeyPin, HostKeyScan } from "../bridge/wire";
+import { useEngine, useFleet, useFleetStore } from "../state/fleetStore";
 import {
   useConversations,
   useSessionLocation,
@@ -161,62 +163,230 @@ function Message({ session, message }: { session: SessionId; message: ChatMessag
       </div>
     );
   }
+  const received = message.card?.kind === "secure-received";
+  const card = <MessageCard session={session} message={message} />;
   return (
     <div className="nx-msg">
       <div className="nx-msg__who">
         <SpiritMark size={20} />
         StackSpirit
       </div>
+      {received ? card : null}
       {message.text.map((paragraph, index) => (
-        <p key={index}>{paragraph}</p>
+        <p key={index} className={received ? "nx-secure__outcome" : undefined}>
+          {paragraph}
+        </p>
       ))}
-      {message.card?.kind === "secure-server" ? (
-        <SecureServerCard session={session} messageId={message.id} />
-      ) : null}
-      {message.card?.kind === "secure-received" ? (
-        <div className="nx-secure nx-secure--done">
-          <div className="nx-secure__head">
-            <span className="nx-secure__lock" aria-hidden="true">
-              ✓
-            </span>
-            Server details received for {message.card.host}
-          </div>
-          <div className="nx-secure__note">
-            <span aria-hidden="true">🔒</span>
-            The assistant saw: address provided · password provided. The password itself was used once
-            and is not stored.
-          </div>
-        </div>
-      ) : null}
+      {received ? null : card}
     </div>
   );
 }
 
+function MessageCard({ session, message }: { session: SessionId; message: ChatMessage }) {
+  const card = message.card;
+  if (!card) return null;
+  if (card.kind === "secure-server") {
+    return <SecureServerCard session={session} messageId={message.id} />;
+  }
+  return (
+    <div className="nx-secure nx-secure--done" data-testid="secure-received">
+      <div className="nx-secure__head">
+        <span className="nx-secure__lock" aria-hidden="true">
+          ✓
+        </span>
+        Key installed for {card.host}
+      </div>
+      <div className="nx-secure__verified">
+        <span>Verified fingerprint</span>
+        <code>{card.fingerprint}</code>
+      </div>
+      <div className="nx-secure__note">
+        <span aria-hidden="true">🔒</span>
+        <span>
+          StackSpirit confirmed a fresh key-only login before this message. The assistant saw
+          the server address and this fingerprint; it never saw the one-time password, and the
+          password is not stored.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+type SecureStage = "form" | "scanning" | "confirm" | "installing";
+
+interface SecureFailure {
+  error: SpiritError;
+  /** Which step failed, so the retry action matches it. */
+  action: "scan" | "install";
+}
+
 /**
- * App-owned fields for server details. The values stay in this component: only the
- * host name reaches the conversation, and the password is cleared on submit. In the
- * real app the submit goes to the bridge, which installs a key over SSH.
+ * App-owned fields for server details and the one-time-password install.
+ *
+ * Only the host name and the verified fingerprint enter the conversation. StackSpirit
+ * scans first, shows every offered host key, and installs only after the owner confirms
+ * a fingerprint. The password stays in React state until that confirmation, is cleared
+ * before the install call, and is never rendered, logged, or put in an error.
  */
 function SecureServerCard({ session, messageId }: { session: SessionId; messageId: string }) {
-  const submit = useConversations((state) => state.submitSecureServer);
+  const bridge = useFleetStore((state) => state.bridge);
+  const noteScan = useConversations((state) => state.noteSecureServerScan);
+  const record = useConversations((state) => state.recordSecureServer);
   const [host, setHost] = useState("");
   const [user, setUser] = useState("root");
   const [port, setPort] = useState("22");
   const [password, setPassword] = useState("");
   const [disablePasswords, setDisablePasswords] = useState(true);
-  const ids = { host: useId(), user: useId(), port: useId(), password: useId() };
-  const ready = host.trim() !== "" && user.trim() !== "" && password !== "";
+  const [stage, setStage] = useState<SecureStage>("form");
+  const [scan, setScan] = useState<HostKeyScan | null>(null);
+  const [selectedSha, setSelectedSha] = useState<string | null>(null);
+  const [verified, setVerified] = useState(false);
+  const [confirmedPin, setConfirmedPin] = useState<HostKeyPin | null>(null);
+  const [failure, setFailure] = useState<SecureFailure | null>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+  // Synchronous guard: a fast double click must not start two scans or two installs
+  // before React has rendered the disabled state.
+  const operation = useRef(false);
+  const ids = {
+    host: useId(),
+    user: useId(),
+    port: useId(),
+    password: useId(),
+    fingerprint: useId(),
+    keyGroup: useId(),
+  };
+
+  const busy = stage === "scanning" || stage === "installing";
+  const editing = stage === "form";
+  const onboarding = bridge?.onboarding ?? null;
+  const portNumber = Number(port);
+  const portValid = Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535;
+  const ready = host.trim() !== "" && user.trim() !== "" && password !== "" && portValid && onboarding !== null;
+  const name = host.trim();
+  const draft: HostDraft = {
+    // There is no separate label field on this card; the host is the label, capped at
+    // the core's 64-character limit so a long DNS name cannot fail validation.
+    label: name.slice(0, 64),
+    ssh: { user: user.trim(), host: name, port: portNumber },
+    identity_file: null,
+    vowp_home: null,
+    default_project: null,
+  };
+
+  function resetScan() {
+    setScan(null);
+    setSelectedSha(null);
+    setVerified(false);
+  }
+
+  async function scanHost() {
+    if (!bridge || !ready || busy || operation.current) return;
+    operation.current = true;
+    const firstScan = scan === null;
+    setFailure(null);
+    resetScan();
+    setStage("scanning");
+    // Only the host name enters the transcript. The password stays in the form.
+    if (firstScan) noteScan(session, messageId, name);
+    try {
+      const result = await bridge.hosts.scanFingerprint(draft);
+      const preferred = result.keys.find((key) => key.preferred) ?? result.keys[0] ?? null;
+      setScan(result);
+      setSelectedSha(preferred?.sha256 ?? null);
+      setStage("confirm");
+    } catch (caught) {
+      setFailure({ error: toSpiritError(caught), action: "scan" });
+      setStage("form");
+    } finally {
+      operation.current = false;
+    }
+  }
+
+  async function install() {
+    if (!onboarding || !scan || !selectedSha || !verified || password === "" || busy || operation.current) {
+      return;
+    }
+    const key = scan.keys.find((candidate) => candidate.sha256 === selectedSha);
+    if (!key) return;
+    operation.current = true;
+    // Reuse the first confirmation time while the fingerprint is unchanged. The host
+    // saves a pinned profile before each install and refuses a pin it considers
+    // different, so a retry must not silently change `pinned_at` for the same key.
+    const pin: HostKeyPin = {
+      algorithm: key.algorithm,
+      sha256: key.sha256,
+      pinned_at:
+        confirmedPin &&
+        confirmedPin.algorithm === key.algorithm &&
+        confirmedPin.sha256 === key.sha256
+          ? confirmedPin.pinned_at
+          : scan.scanned_at,
+    };
+    setConfirmedPin(pin);
+    // Read the one-time secret, then clear it from React state before the first await.
+    // From here on no render, snapshot, or error can contain it.
+    const oneTimePassword = password;
+    setPassword("");
+    setFailure(null);
+    setStage("installing");
+    try {
+      await onboarding.createKey();
+      const outcome = await onboarding.installKey({
+        draft,
+        host_key: pin,
+        password: oneTimePassword,
+        disable_password_auth: disablePasswords,
+      });
+      if (outcome.installed !== true) {
+        const notVerified: SpiritError = {
+          code: "ssh_auth",
+          message: "The key was written, but a fresh key-only login did not verify.",
+          hint: "StackSpirit only counts a verified key-only login as success. Retry the install when the server is reachable.",
+          retryable: true,
+        };
+        throw notVerified;
+      }
+      record(session, messageId, {
+        host: name,
+        // The fingerprint the owner confirmed is the host key's, not the app key's.
+        fingerprint: pin.sha256,
+        password_auth: outcome.password_auth,
+      });
+    } catch (caught) {
+      setFailure({ error: toSpiritError(caught), action: "install" });
+      resetScan();
+      setStage("form");
+    } finally {
+      operation.current = false;
+    }
+  }
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!ready) return;
-    const name = host.trim();
-    setPassword("");
-    submit(session, messageId, name);
+    if (stage !== "form") return;
+    void scanHost();
   }
 
+  function retry() {
+    if (!failure || busy) return;
+    if (failure.action === "scan") {
+      void scanHost();
+      return;
+    }
+    setFailure(null);
+    passwordRef.current?.focus();
+  }
+
+  const showDetails = stage === "scanning" || stage === "confirm";
+
   return (
-    <form className="nx-secure" onSubmit={onSubmit} aria-label="Secure server details" autoComplete="off">
+    <form
+      className="nx-secure"
+      onSubmit={onSubmit}
+      aria-label="Secure server details"
+      aria-busy={busy}
+      autoComplete="off"
+    >
       <div className="nx-secure__head">
         <span className="nx-secure__lock" aria-hidden="true">
           🔒
@@ -229,14 +399,29 @@ function SecureServerCard({ session, messageId }: { session: SessionId; messageI
           <input
             id={ids.host}
             value={host}
-            onChange={(event) => setHost(event.target.value)}
+            disabled={!editing}
+            onChange={(event) => {
+              setConfirmedPin(null);
+              setHost(event.target.value);
+            }}
             placeholder="203.0.113.10 or vps.example.com"
             spellCheck={false}
+            autoComplete="off"
           />
         </label>
         <label className="nx-field" htmlFor={ids.user}>
           User
-          <input id={ids.user} value={user} onChange={(event) => setUser(event.target.value)} spellCheck={false} />
+          <input
+            id={ids.user}
+            value={user}
+            disabled={!editing}
+            onChange={(event) => {
+              setConfirmedPin(null);
+              setUser(event.target.value);
+            }}
+            spellCheck={false}
+            autoComplete="off"
+          />
         </label>
         <label className="nx-field" htmlFor={ids.port}>
           Port
@@ -244,39 +429,166 @@ function SecureServerCard({ session, messageId }: { session: SessionId; messageI
             id={ids.port}
             value={port}
             inputMode="numeric"
-            onChange={(event) => setPort(event.target.value.replace(/\D/g, ""))}
+            disabled={!editing}
+            onChange={(event) => {
+              setConfirmedPin(null);
+              setPort(event.target.value.replace(/\D/g, ""));
+            }}
+            autoComplete="off"
           />
         </label>
       </div>
-      <label className="nx-field" htmlFor={ids.password}>
-        One-time password from your provider
-        <input
-          id={ids.password}
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          autoComplete="off"
-        />
-      </label>
-      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+      {editing ? (
+        <label className="nx-field" htmlFor={ids.password}>
+          One-time password from your provider
+          <input
+            ref={passwordRef}
+            id={ids.password}
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="off"
+          />
+        </label>
+      ) : null}
+      {onboarding === null ? (
+        <div className="nx-secure__note" role="status">
+          <span aria-hidden="true">ⓘ</span>
+          <span>One-time-password setup needs the StackSpirit desktop host.</span>
+        </div>
+      ) : null}
+      <label className="nx-secure__verify">
         <input
           type="checkbox"
           checked={disablePasswords}
+          disabled={busy}
           onChange={(event) => setDisablePasswords(event.target.checked)}
         />
         Turn off password login on the server once the key works (recommended)
       </label>
+
+      {showDetails ? (
+        <div className="nx-secure__confirm" role="group" aria-label="Confirm the server fingerprint">
+          <div className="nx-secure__confirm-head">
+            <span className="nx-secure__confirm-title">Server details received for {name}</span>
+            <span className="nx-secure__confirm-sub">
+              {stage === "scanning"
+                ? `Reading the host keys from ${name}… Nothing is installed yet.`
+                : "Nothing has been installed yet. Compare one of these fingerprints with your provider's console or the server's own key, then confirm it."}
+            </span>
+          </div>
+          {stage === "scanning" ? (
+            <div className="nx-secure__progress" role="status">
+              Scanning host keys…
+            </div>
+          ) : null}
+          {scan && stage === "confirm" ? (
+            <>
+              <ul className="nx-secure__keys" aria-label="Offered host keys">
+                {scan.keys.map((key) => {
+                  const keyId = `${ids.keyGroup}-${key.sha256}`;
+                  return (
+                    <li key={key.sha256}>
+                      <label
+                        className="nx-secure__key"
+                        htmlFor={keyId}
+                        data-selected={selectedSha === key.sha256}
+                      >
+                        <input
+                          id={keyId}
+                          type="radio"
+                          name={ids.keyGroup}
+                          checked={selectedSha === key.sha256}
+                          onChange={() => setSelectedSha(key.sha256)}
+                        />
+                        <span className="nx-secure__key-body">
+                          <span className="nx-secure__key-meta">
+                            <span>{key.algorithm}</span>
+                            {key.preferred ? (
+                              <span className="nx-chip nx-chip--tiny nx-chip--server">preferred</span>
+                            ) : null}
+                          </span>
+                          <code className="nx-secure__key-fingerprint">{key.sha256}</code>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+              <label className="nx-secure__verify" htmlFor={ids.fingerprint}>
+                <input
+                  id={ids.fingerprint}
+                  type="checkbox"
+                  checked={verified}
+                  onChange={(event) => setVerified(event.target.checked)}
+                />
+                <span>
+                  I verified this fingerprint
+                  <small>
+                    Only this key is trusted. If the server's key changes later, StackSpirit
+                    refuses to connect.
+                  </small>
+                </span>
+              </label>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
+      {stage === "installing" ? (
+        <div className="nx-secure__progress" role="status">
+          Installing the StackSpirit key and checking a key-only login…
+        </div>
+      ) : null}
+
+      {failure ? (
+        <div className="nx-secure__error" role="alert" data-testid="secure-error">
+          <strong>
+            {failure.error.code === "preview_unavailable"
+              ? "Preview mode cannot install a key"
+              : errorTitle(failure.error)}
+          </strong>
+          <span>{failure.error.message}</span>
+          {failure.error.hint ? <span>{failure.error.hint}</span> : null}
+          {failure.action === "install" ? (
+            <span>
+              The one-time password was cleared and is not stored. Enter it again to retry.
+            </span>
+          ) : null}
+          <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={retry}>
+            {failure.action === "scan" ? "Retry scan" : "Enter the password again"}
+          </button>
+        </div>
+      ) : null}
+
       <div className="nx-secure__note">
         <span aria-hidden="true">🔒</span>
         <span>
-          The assistant never sees what you type here. StackSpirit logs in once, installs a fresh SSH key,
-          asks you to confirm the server's fingerprint, and forgets the password.
+          The assistant never sees this password. StackSpirit reads the server's host key,
+          shows you the fingerprint to confirm, then logs in once to install an app-owned
+          key and forgets the password. Only a verified key-only login counts as success.
         </span>
       </div>
       <div className="nx-secure__actions">
-        <button type="submit" className="nx-btn" disabled={!ready}>
-          Connect securely
-        </button>
+        {stage === "confirm" ? (
+          <>
+            <button type="button" className="nx-btn nx-btn--quiet" onClick={() => void scanHost()} disabled={busy}>
+              Scan again
+            </button>
+            <button
+              type="button"
+              className="nx-btn"
+              onClick={() => void install()}
+              disabled={!verified || !selectedSha || password === "" || busy}
+            >
+              Install key
+            </button>
+          </>
+        ) : (
+          <button type="submit" className="nx-btn" disabled={!ready || busy}>
+            {stage === "scanning" ? "Scanning…" : stage === "installing" ? "Installing…" : "Connect securely"}
+          </button>
+        )}
       </div>
     </form>
   );

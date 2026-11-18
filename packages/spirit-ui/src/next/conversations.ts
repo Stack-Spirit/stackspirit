@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import type { PasswordAuthOutcome, PasswordAuthUnsupported } from "../bridge/wire";
 import { useShellUi, type PanelContent } from "./shellUi";
 
 /**
@@ -21,10 +22,16 @@ export type SessionId = "setup" | "global" | `project:${string}`;
 
 /** A card the app renders inside the conversation instead of plain text. */
 export type ChatCard =
-  /** Asks for server details in app-owned fields. The values never enter the chat. */
+  /**
+   * Asks for server details in app-owned fields. The password never enters the chat;
+   * only the host name is recorded when a scan starts.
+   */
   | { kind: "secure-server" }
-  /** Confirms what the assistant was told: only that a value was provided. */
-  | { kind: "secure-received"; host: string };
+  /**
+   * Confirms a verified app-key install. Deliberately only the host and the
+   * fingerprint: never the user, the port, or anything typed into the card.
+   */
+  | { kind: "secure-received"; host: string; fingerprint: string };
 
 export interface ChatMessage {
   id: string;
@@ -42,13 +49,25 @@ export interface ProjectRequest {
   source: { kind: "git"; url: string; branch: string } | { kind: "folder"; path: string };
 }
 
+/** The verified facts a successful onboarding may put in the conversation. */
+export interface SecureServerReceipt {
+  host: string;
+  /** The confirmed host-key fingerprint (`SHA256:`), not the app key's. */
+  fingerprint: string;
+  /** The optional password-login step; rendered in plain language, never secret. */
+  password_auth: PasswordAuthOutcome;
+}
+
 interface ConversationState {
   messages: Partial<Record<SessionId, ChatMessage[]>>;
   location: Partial<Record<SessionId, SessionLocation>>;
   send: (session: SessionId, text: string) => void;
   /** Hands a new project to the global orchestrator (preview until VOWP exposes project creation). */
   requestProject: (request: ProjectRequest) => void;
-  submitSecureServer: (session: SessionId, messageId: string, host: string) => void;
+  /** Notes a host-key scan on the card message. Only the host name, which is not a secret. */
+  noteSecureServerScan: (session: SessionId, messageId: string, host: string) => void;
+  /** Records a verified key-only install; the secure card turns into a receipt. */
+  recordSecureServer: (session: SessionId, messageId: string, receipt: SecureServerReceipt) => void;
   setLocation: (session: SessionId, location: SessionLocation) => void;
 }
 
@@ -66,10 +85,34 @@ function setupReply(): ChatMessage {
     role: "assistant",
     text: [
       "Let's connect it. I need the server's address and a one-time login from your provider.",
-      "Type them in the secure box below. I never see what you type there: StackSpirit uses the password once to install a fresh SSH key on the server, then forgets it.",
+      "Type them in the secure box below. I never see what you type there: StackSpirit shows you the server's fingerprint to confirm, installs a fresh SSH key, then forgets the password.",
     ],
     card: { kind: "secure-server" },
   };
+}
+
+/** Plain-language copy for why `PasswordAuthentication no` was not applied. */
+const PASSWORD_AUTH_REASON: Record<PasswordAuthUnsupported, string> = {
+  sudo_unavailable: "this server has no usable sudo, so sshd was not changed",
+  no_passwordless_sudo: "this account has no passwordless sudo, so sshd was not changed",
+  sshd_unavailable: "sshd was not available for StackSpirit to check",
+  drop_in_unsupported: "this server has no sshd_config.d drop-in directory",
+  drop_in_ignored: "this server's sshd ignores drop-in configuration",
+  reload_unavailable: "StackSpirit could not reload sshd safely",
+};
+
+/** Honest copy for the optional password-login step. Never includes a secret. */
+function passwordAuthSummary(outcome: PasswordAuthOutcome): string {
+  switch (outcome.state) {
+    case "disabled":
+      return "Password login is now turned off; the StackSpirit key has a verified key-only login.";
+    case "not_requested":
+      return "Password login is still on because you asked to keep it. The new key works.";
+    case "not_supported":
+      return `Password login is still on: ${PASSWORD_AUTH_REASON[outcome.reason]} (${outcome.reason}). The new key works.`;
+    case "failed":
+      return `Password login is still on: the change failed (${outcome.detail}). The new key works; you can retry from Settings.`;
+  }
 }
 
 /**
@@ -126,20 +169,46 @@ export const useConversations = create<ConversationState>((set, get) => ({
     set((state) => ({ messages: { ...state.messages, global: [...current, user, reply] } }));
   },
 
-  submitSecureServer: (session, messageId, host) => {
+  noteSecureServerScan: (session, messageId, host) => {
+    const note = `Checking ${host} for its host key. Nothing is installed until you verify the fingerprint.`;
+    const updated = (get().messages[session] ?? []).map((message) => {
+      if (message.id !== messageId || message.card?.kind !== "secure-server") return message;
+      return {
+        ...message,
+        text: [...message.text.filter((paragraph) => !paragraph.startsWith("Checking ")), note],
+      };
+    });
+    set((state) => ({
+      messages: { ...state.messages, [session]: updated },
+    }));
+  },
+
+  recordSecureServer: (session, messageId, receipt) => {
     const current = get().messages[session] ?? [];
-    const updated = current.map((message) =>
-      message.id === messageId ? { ...message, card: { kind: "secure-received" as const, host } } : message,
+    // The form and its scan note are gone once the install succeeded; the receipt is
+    // a new message.
+    const withoutCard = current.map((message) =>
+      message.id === messageId && message.card?.kind === "secure-server"
+        ? {
+            ...message,
+            card: undefined,
+            text: message.text.filter((paragraph) => !paragraph.startsWith("Checking ")),
+          }
+        : message,
     );
     const reply: ChatMessage = {
       id: nextId(),
       role: "assistant",
-      text: [
-        `Thanks. I was told only that a password was provided for ${host}, not the password itself.`,
-        "Preview: the real app now installs a new key, shows you the server's fingerprint to confirm, and saves the server. For this demo, use Add server in the sidebar.",
-      ],
+      text: [passwordAuthSummary(receipt.password_auth)],
+      card: {
+        kind: "secure-received",
+        host: receipt.host,
+        fingerprint: receipt.fingerprint,
+      },
     };
-    set((state) => ({ messages: { ...state.messages, [session]: [...updated, reply] } }));
+    set((state) => ({
+      messages: { ...state.messages, [session]: [...withoutCard, reply] },
+    }));
   },
 
   setLocation: (session, location) =>

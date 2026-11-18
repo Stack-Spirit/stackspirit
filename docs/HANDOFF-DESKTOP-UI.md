@@ -1,7 +1,7 @@
 # Handoff: StackSpirit desktop UI redesign (Meadow shell)
 
 Read this first if you are picking up the desktop UI, the brand, or the next integration
-steps. Last updated 2026-11-17. It records the decisions the owner made in the design
+steps. Last updated 2026-11-18. It records the decisions the owner made in the design
 sessions, what is real versus preview, and what to do next. `AGENTS.md` still applies
 (Rust core owns host/SSH/VOWP logic, UI calls go through `SpiritBridge`, no secrets).
 
@@ -104,12 +104,20 @@ or key. Free model availability is OpenCode's, so the UI must stay honest about 
 Real (store + bridge, works against a server): hosts, add-server wizard, connect and
 disconnect, fleet, capacity, inbox (answers via the classic inbox drawer), jobs and the
 lane board actions, capacity controls, sessions/.asif, raw document, engine and gates
-(Settings → Advanced, including the D6 local-orchestrator panel), errors and retry.
+(Settings → Advanced, including the D6 local-orchestrator panel), errors and retry, and
+the setup assistant's one-time-password onboarding. That card scans the server's host
+keys, shows every `SHA256:` fingerprint and requires an explicit "I verified this
+fingerprint" confirmation; it then creates the app-owned ed25519 key (passphrase in the
+OS keychain) and installs it through the `onboarding` bridge (`onboarding.createKey` +
+`onboarding.installKey`, backed by `spirit_core::ssh::keygen` and
+`spirit_core::ssh::password_install`). The optional `PasswordAuthentication no` step is
+reported honestly (`disabled`, `not_supported` with its reason, `failed` with its
+detail, or `not_requested`), and the one-time password is cleared before the install
+call, never rendered, logged, or stored. Only a verified key-only login is success.
 
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Orchestrator chat replies, and the agent opening the details panel.
 - The Local/Server switch (label only).
-- The setup assistant's secure server card (does not install a key yet).
 - Add project (hands a message to the global orchestrator; no VOWP call).
 
 ## 5. Next steps (suggested order)
@@ -120,8 +128,14 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
    `ChatMessage` and `ProjectRequest` from `next/conversations.ts` into
    `packages/spirit-ui/src/bridge/wire.ts`, add optional `SpiritBridge` methods, implement
    in `TauriBridge` + Tauri commands + `spirit-core`, keep `MockBridge` scenarios.
-3. **One-time-password onboarding** in `spirit-core` (key install over SSH, fingerprint
-   confirm, optional `PasswordAuthentication no`) behind the secure card.
+3. **One-time-password onboarding** — **landed (ss-31).** The setup assistant's secure
+   card now scans the host keys and requires an explicit fingerprint confirmation, then
+   creates the app-owned key and installs it with the one-time password, optionally
+   applying `PasswordAuthentication no`. The plan wording about installing "a fresh key"
+   is now true: the app creates its own ed25519 key (passphrase in the OS keychain)
+   rather than borrowing the owner's SSH agent. Remaining follow-up: show the saved
+   server and connect it automatically after the install, and add a Settings entry point
+   for retrying the password-login step.
 4. **Server secret store** (stdin transport, encrypted store, warning, revoke list) and a
    `SECURITY.md`.
 5. **Local orchestrator** once VOWP fixes land (path-map updates, macOS `opencode serve`

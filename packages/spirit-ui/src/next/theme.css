@@ -1294,8 +1294,206 @@ button.nx-node:focus-visible {
 
 .nx-secure__actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Fingerprint confirmation, progress and failure inside the secure card. */
+.nx-secure__confirm {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.nx-secure__confirm-head {
+  display: grid;
+  gap: 3px;
+}
+
+.nx-secure__confirm-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.nx-secure__confirm-sub {
+  color: var(--nx-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.nx-secure__progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-accent-soft);
+  color: var(--nx-accent-soft-ink);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.nx-secure__progress::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--nx-green);
+  animation: nx-secure-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes nx-secure-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.nx-secure__keys {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-secure__key {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-panel);
+  cursor: pointer;
+}
+
+.nx-secure__key[data-selected="true"] {
+  border-color: var(--nx-green);
+  box-shadow: 0 0 0 2px var(--nx-accent-soft);
+}
+
+.nx-secure__key input,
+.nx-secure__verify input {
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--nx-green);
+}
+
+.nx-secure__key-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.nx-secure__key-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-secure__key-fingerprint {
+  overflow-wrap: anywhere;
+  color: var(--nx-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.nx-secure__verify {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--nx-text);
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.nx-secure__verify small {
+  display: block;
+  margin-top: 2px;
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.nx-secure__error {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--nx-danger) 34%, var(--nx-line));
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-danger-soft);
+  color: var(--nx-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.nx-secure__error strong {
+  color: var(--nx-danger);
+  font-size: 13px;
+}
+
+.nx-secure__error span {
+  color: var(--nx-muted);
+}
+
+.nx-secure__error .nx-btn {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.nx-secure__verified {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-accent-soft);
+}
+
+.nx-secure__verified span {
+  color: var(--nx-accent-soft-ink);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.nx-secure__verified code {
+  overflow-wrap: anywhere;
+  color: var(--nx-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* The optional password-login result, shown under the verified install card. */
+.nx-secure__outcome {
+  padding: 9px 11px;
+  border-left: 3px solid var(--nx-line-strong);
+  border-radius: 0 var(--nx-radius-sm) var(--nx-radius-sm) 0;
+  background: var(--nx-raised);
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-secure__progress::before {
+    animation: none;
+  }
 }
 
 .nx-field {
