@@ -1621,14 +1621,16 @@ pub struct SecretInfo {
     pub created_at: Timestamp, pub updated_at: Timestamp,
 }
 #[serde(rename_all = "snake_case")]
-pub enum VaultMode { VaultUser, Basic }
+pub enum VaultMode { VaultUser, Basic, Encrypted }
 pub struct SecretRequest {
     pub name: SecretName, pub url: String, pub expires_at: Timestamp, pub single_use: bool,
 }
 ```
 
-Values never appear in these types. The vault stores files, keeps only the last four characters
-for display, and `secret request` returns a loopback URL and expiry, never the value.
+`VaultMode::Encrypted` is the v0.5 encrypted-at-rest age-keyfile mode; its wire value is
+`encrypted`. Values never appear in these types. The vault stores files, keeps only the last
+four characters for display, and `secret request` returns a loopback URL and expiry, never the
+value. See [`v0.5/vault-encrypted.md`](v0.5/vault-encrypted.md).
 
 ### 16.6 CLI-local result types
 

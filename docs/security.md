@@ -36,7 +36,7 @@ pre-release builds are not supported.
 | Prompts, tool output, file contents | Session logs, blobs, run mirrors under `~/.vowp` | They often contain sensitive code or data. |
 | The global and project databases | `~/.vowp/vowp.db`, `~/.vowp/projects/<name>/project.db` | Jobs, decisions, leases and the audit trail. |
 | Provider spend | Harness accounts, the secret store, environment variables | A runaway loop costs money. |
-| Secret values | `~/.vowp/secrets/` (basic mode), `/home/vowp-vault/secrets/` (vault mode) or the service environment | They unlock providers and deploy targets. |
+| Secret values | `~/.vowp/secrets/` (basic mode), `~/.vowp/secrets/encrypted/` plus `~/.vowp/secrets/age.key` (encrypted mode), `/home/vowp-vault/secrets/` (vault mode) or the service environment | They unlock providers and deploy targets. |
 | Harness logins | Claude Code/opencode's own storage | VOWP must never read or copy them. |
 | The control cache and tunnels | `~/.vowp-control/` | Snapshot content, spooled events and local forward records. |
 | App config and opencode pair links | `~/.vowp/orchestrators/<name>/` | They grant access to the session and its tools. |
@@ -96,10 +96,14 @@ error messages, commands and the setup plan.
 |---|---|---|---|
 | **vault user** | The `vowp-vault` Unix user and the helper exist, and one sudoers line lets the runtime user run the helper as `vowp-vault`. | `/home/vowp-vault/secrets/<NAME>`, mode 0600. | `vowp-vault` |
 | **basic** | No sudo or no vault user (common on a VPS the owner does not administer as root). | `~/.vowp/secrets/<NAME>`, mode 0600. | the runtime user (`vowp` or the SSH user) |
+| **encrypted** | The owner opts in with `vowp secret upgrade --encrypted`. | `~/.vowp/secrets/encrypted/<NAME>`, age ciphertext, mode 0600; identity in `~/.vowp/secrets/age.key`, mode 0600. | the runtime user |
 
-`~/.vowp/secrets/mode` contains `vault` when vault mode is active (0600); an absent file means basic
+`~/.vowp/secrets/mode` contains `vault`, `basic` or `encrypted` (0600); an absent file means basic
 mode, so the no-sudo path writes no marker. `vowp secret upgrade` prints the one sudo command that
 creates the vault user and moves the files; without sudo, VOWP stays in basic mode.
+`vowp secret upgrade --encrypted` encrypts every basic value before it removes any plaintext copy
+and writes the mode file last. It refuses vault-user mode and is idempotent when already encrypted;
+`SecretInfo` metadata (`last4`, timestamps) is preserved.
 
 **Basic mode does not separate the value from the agent's user.** The secret file is mode 0600 but
 owned by the runtime user (`vowp` or the SSH user), and the harness is spawned as that same user, so
@@ -108,25 +112,41 @@ runtime user's direct readable tree:** they live under `vowp-vault` at mode 0600
 isolation from code that can invoke the helper: the sudoers rule lets the runtime user run the
 helper as `vowp-vault` with no argument restriction, and the helper can read or write any stored
 name and run the caller's command as `vowp-vault`. Treat the helper as the trust boundary, not the
-Unix user alone. Neither mode encrypts the store at rest; the Unix account permissions and disk
-encryption are the boundary. The vault user is not a hardware keystore.
+Unix user alone. **Encrypted mode protects a copy of the home that does not include the key**: a
+stolen disk, a copied ciphertext directory, or a backup without `age.key`. It is not protection
+from code running as the same user, which can read the mode-0600 key and decrypt every value. There
+is no key rotation, passphrase or recovery path in this slice; losing `age.key` loses the values.
+Basic and vault-user mode do not encrypt the store at rest. The Unix account permissions, disk
+encryption and, in encrypted mode, the key file are the boundary. The vault user is not a hardware
+keystore.
 
 ### Commands
 
 ```sh
 vowp secret set <NAME>          # hidden prompt; never an argument, never echoed
-vowp secret ls                  # name and last-4 only
+vowp secret set <NAME> --stdin  # read the value from stdin; no TTY required
+vowp secret ls                  # name and last-4 only, plus `storage: <mode>`
+vowp secret ls --json           # {"mode":"…","secrets":[…]} with no values
 vowp secret rm <NAME> --yes
-vowp secret upgrade
+vowp secret upgrade             # basic -> vault user
+vowp secret upgrade --encrypted # basic -> encrypted at rest
 vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 ```
 
 - `set` validates the name (`^[A-Z][A-Z0-9_]{0,63}$`), reads the value from a hidden prompt (no TTY →
-  exit 5 with "run it in a terminal or use `vowp secret request`"), writes atomically with mode 0600,
+  exit 5 with "run it in a terminal, pipe the value with `vowp secret set NAME --stdin`, or use
+  `vowp secret request`"), writes atomically with mode 0600 (or age ciphertext in encrypted mode),
   and records only the last four characters in the index. The value is never logged, never in argv and
   never in an event.
-- On a control machine, `set/ls/rm/upgrade` route to the home over SSH; `set` uses `ssh -t` so the
-  home's prompt has a TTY. The value crosses the encrypted SSH channel and is never in argv.
+- With `--stdin` the value comes from the process stdin, never argv; exactly one trailing `\n` or
+  `\r\n` is stripped and an empty value is refused with exit 2. This is the path for scripts and
+  SSH pipes.
+- On a control machine, `set/ls/rm/upgrade` route to the home over SSH; the hidden-prompt `set` uses
+  `ssh -t` so the home's prompt has a TTY, while `set --stdin` uses plain `ssh` and pipes the
+  caller's stdin. The value crosses the encrypted SSH channel and is never in argv.
+- `ls --json` prints one object with `mode` (`basic`, `vault_user` or `encrypted`) and the
+  `SecretInfo` array. This is a deliberate breaking change from the earlier bare array; `set --json`
+  and `rm --json` keep their shapes.
 - `request` binds `127.0.0.1:0`, generates a 32-byte random token, prints a URL with a ten-minute
   expiry, accepts one POST, writes the value through the same store path, returns a page that says
   only `saved` and the last four characters, and closes. The AI sees `NAME saved, ends in …last4`,
@@ -148,7 +168,8 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
   names the variable and aborts the operation before a command runs; harness `env_pass` keeps its
   warn-and-skip behaviour.
 - `__vault-exec` is the hidden read/inject helper: `__vault-exec --env NAME -- <cmd…>` reads the
-  named file and execs `<cmd…>` as `vowp-vault` with that one variable set. It is not limited to
+  named file (decrypting it in encrypted mode) and execs `<cmd…>` as `vowp-vault` with that one
+  variable set. It is not limited to
   `env_pass` names: any stored name works, and the command runs with the vault user's access. The
   sudoers rule permits the runtime user to invoke the helper with no argument restriction, so the
   helper is the trust boundary; a harness that can call it can reach every stored secret, not only
@@ -197,8 +218,11 @@ mode the files are outside the runtime user's direct readable tree, but the help
 boundary: the sudoers rule has no argument restriction, `__vault-exec` can read any stored name, and
 it runs the caller's command as `vowp-vault`. `env_pass` is not an allow-list for the helper. In
 basic mode VOWP does not separate them: the secret file is owned by the same user
-as the harness, so a harness that reads `~/.vowp/secrets/<NAME>` can recover the value. Neither mode
-encrypts the store at rest, and neither can make a secret unreadable to code that is given it. VOWP
+as the harness, so a harness that reads `~/.vowp/secrets/<NAME>` can recover the value. Encrypted
+mode raises the cost of an offline copy, but the key is a mode-0600 file owned by the same runtime
+user, so code running as that user can decrypt every value; there is no key rotation or recovery
+path. Basic and vault-user mode do not encrypt the store at rest. No mode can make a secret
+unreadable to code that is given it. VOWP
 keeps values out of configuration and git, and redacts exact injected values on every session event
 path, in the snapshot, in capsules, in the supervisor log, in command-gate evidence and ledger rows,
 and in the finished report and run mirror. It does **not** keep them out of every database row or
@@ -290,8 +314,9 @@ Treat both directories like a work journal: back them up if you need them, restr
 user account, and never paste raw logs into a public issue. `vowp backup` includes the session content
 but not secrets; the control cache is disposable and is not part of a home backup.
 
-VOWP does not encrypt `~/.vowp` or `~/.vowp-control` at rest. Disk encryption and account permissions
-are your responsibility.
+VOWP does not encrypt `~/.vowp` or `~/.vowp-control` at rest, except for the secret values stored in
+encrypted mode. Session logs, databases, capsules, reports, the mode metadata and the age key remain
+plaintext. Disk encryption and account permissions are your responsibility.
 
 ## Filesystem and process isolation
 

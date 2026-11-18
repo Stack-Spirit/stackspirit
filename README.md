@@ -166,12 +166,15 @@ work.
 
 ![Secrets: set through a hidden prompt or a one-time loopback page, stored in a vault, injected into a worker by name; the model only sees the name and last four characters](docs/images/vowp-secrets.png)
 
-You enter a value through a hidden prompt (`vowp secret set NAME`) or a one-time page on `127.0.0.1`
-that expires in ten minutes (`vowp secret request NAME`). The database stores only the name and last
-four characters. A worker gets the value injected by **name** through its harness's `env_pass` list;
-the model sees `NAME saved, ends in …4f2a`. Values are redacted from the snapshot, session events,
-capsules and reports, blocked by the `secret_scan` gate and the merge queue, and never backed up. The
-honest limit is stated [below](#secrets-honestly).
+You enter a value through a hidden prompt (`vowp secret set NAME`), a pipe
+(`vowp secret set NAME --stdin`, which needs no TTY) or a one-time page on `127.0.0.1` that expires
+in ten minutes (`vowp secret request NAME`). The database stores only the name and last four
+characters. A worker gets the value injected by **name** through its harness's `env_pass` list; the
+model sees `NAME saved, ends in …4f2a`. Basic mode keeps mode-0600 files; `vowp secret upgrade
+--encrypted` can encrypt them at rest with a local age key; `vowp secret ls --json` reports the
+active `mode` without values. Values are redacted from the snapshot, session events, capsules and
+reports, blocked by the `secret_scan` gate and the merge queue, and never backed up. The honest
+limit is stated [below](#secrets-honestly).
 
 ### 9 · One merge queue and guarded Work → Production
 
@@ -318,6 +321,11 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
 - **Vault-user mode** stores files under the separate `vowp-vault` user when sudo can create it.
 - **Basic mode** stores them under `~/.vowp/secrets/` owned by the runtime user at mode 0600. Basic
   mode does not separate the value from the agent's user; the harness runs as that same user.
+- **Encrypted mode** (`vowp secret upgrade --encrypted`) stores age ciphertext under
+  `~/.vowp/secrets/encrypted/` and keeps the age identity in a mode-0600 `~/.vowp/secrets/age.key`.
+  It protects an offline copy of the home without the key; code running as the same user can read
+  the key and decrypt the values. There is no key rotation or recovery path, and the key is never
+  backed up.
 - Injection is by name through a harness's `env_pass` list. The promoter does not add a secret
   environment to deploy commands in this build.
 - Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules and
@@ -326,9 +334,10 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
   prints a secret can still persist it there.
 - **The honest limit:** any agent that can run arbitrary code inside a process that holds a secret can
   print it. Vault mode keeps the files out of the runtime user's direct readable tree, but the helper
-  that reads them is a broad trust boundary. Neither mode encrypts the store at rest. Harness logins
-  stay under the harness's own control, and a secret pasted into a chat is already in the model
-  provider's transcript — rotate it and use the safe path. Secrets are never included in a backup.
+  that reads them is a broad trust boundary. Basic and vault-user mode do not encrypt the store at
+  rest; encrypted mode does not hide values from the user that owns the key. Harness logins stay
+  under the harness's own control, and a secret pasted into a chat is already in the model provider's
+  transcript — rotate it and use the safe path. Secrets are never included in a backup.
 
 The [security model](docs/security.md) states the full coverage and the remaining gaps.
 

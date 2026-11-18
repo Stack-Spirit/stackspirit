@@ -372,25 +372,40 @@ This keeps the supervisor away from any interactive tmux session you or another 
 
 ## Secrets
 
-Secrets are referred to by name. There are two modes:
+Secrets are referred to by name. There are three modes:
 
 | Mode | When | Storage |
 |---|---|---|
 | **vault user** | The `vowp-vault` user and helper exist (sudo allows them). | `/home/vowp-vault/secrets/<NAME>`, mode 0600. |
 | **basic** | No sudo or no vault user. | `~/.vowp/secrets/<NAME>`, mode 0600, owned by the runtime user. |
+| **encrypted** | The owner runs `vowp secret upgrade --encrypted`. | `~/.vowp/secrets/encrypted/<NAME>`, age ciphertext, mode 0600; key in `~/.vowp/secrets/age.key`, mode 0600. |
 
 ```sh
 vowp secret set <NAME>          # hidden prompt; the value is never echoed or in argv
-vowp secret ls                  # names and last four characters only
+vowp secret set <NAME> --stdin  # read the value from stdin; works without a TTY
+vowp secret ls                  # names and last four characters only, plus `storage: <mode>`
+vowp secret ls --json           # {"mode":"…","secrets":[…]} with no values
 vowp secret request <NAME>      # one-time loopback paste page, for a desktop owner
 vowp secret rm <NAME> --yes
 vowp secret upgrade             # prints the one sudo command that creates the vault user
+vowp secret upgrade --encrypted # encrypt basic-mode secrets with a local age key
 ```
 
-On a control machine, `secret set/ls/rm/upgrade` route to the home over SSH; `secret request` opens a
-local tunnel so the browser sees a control-machine loopback URL. A harness receives only the names
-listed in `env_pass`; VOWP injects those names into that child's environment, from the secret store
-when set and otherwise from the process environment.
+On a control machine, `secret set/ls/rm/upgrade` route to the home over SSH; the hidden-prompt `set`
+uses `ssh -t`, while `set --stdin` pipes the caller's stdin without a remote TTY. `secret request`
+opens a local tunnel so the browser sees a control-machine loopback URL. A harness receives only the
+names listed in `env_pass`; VOWP injects those names into that child's environment, from the secret
+store when set and otherwise from the process environment. `--stdin` strips exactly one trailing
+newline and refuses an empty value:
+
+```sh
+printf '%s\n' "$PROVIDER_KEY" | vowp secret set PROVIDER_KEY --stdin
+```
+
+`--encrypted` encrypts every basic value before removing any plaintext copy, writes the mode file
+last and preserves the `last4`/timestamp metadata. It refuses vault-user mode and is idempotent when
+already encrypted. The v0.5 slice does not implement `systemd-creds`; see
+[`vault-encrypted.md`](../design/v0.5/vault-encrypted.md).
 
 Redaction is partial and timed. Event payloads and `raw` appended by the session service or the
 remote ingest path are redacted before writing, as is the snapshot; a capsule is redacted after the
@@ -407,11 +422,14 @@ keeps the files out of the runtime user's direct readable tree**: they live unde
 mode 0600. It is not isolation from code that can invoke the helper: the sudoers rule lets the
 runtime user run the helper as `vowp-vault` with no argument restriction, and `__vault-exec` can
 read any stored name and run the caller's command as `vowp-vault`. Treat the helper as the trust
-boundary; `env_pass` is not an allow-list for it. Neither mode encrypts the file at rest. VOWP keeps
-values out of configuration and git, and redacts exact injected values on the event paths above, but
-it does not keep them out of every database row or every log and cannot make a secret unreadable to
-code that is given it. Harness logins stay under the harness's own control. The full statement is in
-the [security model](../security.md#secrets).
+boundary; `env_pass` is not an allow-list for it. **Encrypted mode** protects an offline copy of the
+home without `age.key`, but the key is a mode-0600 file owned by the same runtime user, so code
+running as that user can decrypt every value; there is no key rotation or recovery path. Basic and
+vault-user mode do not encrypt the file at rest. VOWP keeps values out of configuration and git, and
+redacts exact injected values on the event paths above, but it does not keep them out of every
+database row or every log and cannot make a secret unreadable to code that is given it. Harness
+logins stay under the harness's own control. The full statement is in the
+[security model](../security.md#secrets).
 
 ## Back up and collect garbage
 

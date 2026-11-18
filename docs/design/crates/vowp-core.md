@@ -24,8 +24,9 @@ crates/vowp-core/src/
   capacity/       mod.rs sampler.rs history.rs admit.rs advisor.rs brakes.rs estimates.rs fair.rs scope.rs targets.rs usage.rs
   surface/        mod.rs lease.rs native.rs orchestrator.rs mirror.rs opencode_host.rs claude_remote.rs
                   takeover.rs follow.rs
+  vault/          mod.rs request.rs
 tests/            session_*.rs, gates_*.rs, ledger_*.rs, schedules_*.rs, loops_*.rs, drills_*.rs, promote_*.rs,
-                  agent.rs, offload_dispatch.rs, offload_result.rs, offload_e2e.rs, capacity_measure.rs
+                  agent.rs, offload_dispatch.rs, offload_result.rs, offload_e2e.rs, capacity_measure.rs, vault.rs
 tests/fixtures/   shared recorded fixtures are copied from the vowp-adapters fixtures
 ```
 
@@ -1152,5 +1153,55 @@ Tests (`tests/offload.rs`, values only, no store, tmux or network):
 `no_eligible_node_is_a_waiting_reason_not_a_failure` and
 `missing_origin_or_base_facts_are_refusals`.
 
-## 12. Out of scope (v0.2)
+## 12. `vault` — secret storage, injection and redaction
+
+Spec: `docs/design/v0.2/home-and-surfaces.md` §9 and §13.2, and
+`docs/design/v0.5/vault-encrypted.md` for the encrypted mode.
+
+```rust
+pub mod vault {
+    pub fn mode(deps: &Deps) -> Result<VaultMode, CoreError>;          // vault | basic | encrypted; missing = basic
+    pub fn write_secret(deps: &Deps, name: &SecretName, value: &str) -> Result<SecretInfo, CoreError>;
+    pub fn remove_secret(deps: &Deps, name: &SecretName) -> Result<bool, CoreError>;
+    pub fn list_secrets(deps: &Deps) -> Result<Vec<SecretInfo>, CoreError>;   // index rows only
+    pub fn read_value_for_exec(deps: &Deps, name: &SecretName) -> Result<Option<String>, CoreError>;
+    pub fn env_for(deps: &Deps, req: &TurnRequest) -> Result<Vec<(String, String)>, CoreError>;
+    pub fn env_for_names(deps: &Deps, names: &[String]) -> Result<Vec<(String, String)>, CoreError>;
+    pub fn upgrade(deps: &Deps) -> Result<Upgrade, CoreError>;                 // basic -> vault user
+    pub fn upgrade_encrypted(deps: &Deps) -> Result<EncryptedUpgrade, CoreError>; // basic -> encrypted
+    pub struct Redactor { /* exact values, longest first */ }
+    impl Redactor { pub fn load(deps: &Deps) -> Result<Self, CoreError>; pub fn redact(&self, text: &str) -> String; }
+}
+pub enum Upgrade { AlreadyVault, AlreadyEncrypted, Switched, NeedsCommand(String), NoSudo(String) }
+pub enum EncryptedUpgrade { AlreadyEncrypted, Switched }
+```
+
+- **Basic** writes `<home>/secrets/<NAME>` through a same-directory temporary file, fsync and
+  rename, mode 0600; the directory is 0700. A secret file that is a symlink, not a regular file
+  or not mode 0600 is refused on read.
+- **Vault user** writes and removes through the installed `__vault-admin` helper as
+  `vowp-vault`; `read_value_for_exec` reads the vault directory directly, falls back to
+  `__vault-exec`, and uses the mode-aware path when the helper cannot read the owner's mode
+  file. `upgrade` either moves every basic value through the helper and writes the mode file,
+  or returns the exact sudo command the owner must run. In encrypted mode it reports
+  `Upgrade::AlreadyEncrypted` instead of switching away from the ciphertext.
+- **Encrypted** (v0.5) generates `<home>/secrets/age.key` (an age X25519 identity, mode 0600) on
+  the first write, encrypts each value to `<home>/secrets/encrypted/<NAME>` (mode 0600), and
+  keeps the index metadata unchanged. A missing, unreadable or wrong key is a typed error on
+  both read and write; there is no plaintext fallback and no silent empty value.
+  `upgrade_encrypted` refuses vault-user mode, encrypts every value before deleting any
+  plaintext, writes the mode file last and is idempotent when already encrypted.
+- The **index** lives in the global `secret_index` table (name, `last4`, timestamps); values
+  never enter the database. Legacy `kv` rows under `secret:<NAME>` are migrated once.
+- `Redactor` loads the exact stored values (decrypting them in encrypted mode), longest first,
+  and replaces exact occurrences with `[REDACTED:<NAME>]`. `redact_event`, `redact_capsule`,
+  `redact_job_artifacts`, `redact_text` and the byte-oriented `redact_bytes` cover the event,
+  snapshot, capsule, report/run-mirror, gate-evidence and ledger paths.
+
+Tests: `tests/vault.rs` covers basic round trips and metadata, legacy migration, the one-time
+request page (including malformed POSTs, preconnects and timeouts), exact-value redaction,
+environment injection, the mode file, the vault-user upgrade, and the encrypted round trip, key
+failure, upgrade and redaction cases.
+
+## 13. Out of scope (v0.2)
 HTTP+SSE daemon, ACP, cross-node live sync, IANA timezone schedules, notification hooks (ntfy), automatic price-table download.

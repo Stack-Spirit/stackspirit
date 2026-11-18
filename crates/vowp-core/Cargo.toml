@@ -15,6 +15,7 @@ categories = ["development-tools", "concurrency", "artificial-intelligence", "co
 include = ["src/**", "README.md", "Cargo.toml"]
 
 [dependencies]
+age = "0.12.1"
 cron = "0.17.0"
 ed25519-dalek = "2"
 globset = "0.4.19"
