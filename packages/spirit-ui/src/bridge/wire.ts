@@ -1000,6 +1000,178 @@ export type StateEvent =
   | { kind: "gates"; revision: number; gates: GateSnapshot }
   | { kind: "error"; revision: number; error: SpiritErrorDto };
 
+/*
+ * Orchestrator chat wire types (`docs/ORCHESTRATOR-CHAT.md` §4.1–§4.2).
+ *
+ * These types cross the bridge. The chat shapes below deliberately contain no endpoint
+ * URL, port, token, authorization header, password, key path, identity file, working
+ * directory, binary path, pid, native session id, SSH target or remote port. The core
+ * keeps every one of those values private; the renderer receives only the safe shapes
+ * below. `ProjectRequest` keeps only the add-project dialog's user input: a Git URL or
+ * a folder path the owner chose.
+ */
+
+/** Where an orchestrator session runs, as reported by the transport. */
+export type SessionLocation = "local" | "server";
+
+/** "setup" is the local first-run assistant; "global" and projects are orchestrators. */
+export type SessionId = "setup" | "global" | `project:${string}`;
+
+export type ChatMessageRole = "user" | "assistant";
+export type ChatMessageOrigin = "user" | "model" | "app" | "preview";
+
+export interface ChatMessage {
+  /** Stable across reconnects; derived from the native message id when one exists. */
+  id: string;
+  role: ChatMessageRole;
+  /** Paragraphs of plain text; never HTML, markdown or a tool dump. */
+  text: string[];
+  /** Canonical RFC 3339 UTC string with millis. */
+  created_at: Timestamp;
+  /**
+   * Who produced this message. The real path sets `user`, `model` or `app`; only the
+   * preview bridge sets `preview`, and every preview assistant message says so in its
+   * first paragraph. A real bridge never constructs `preview`.
+   */
+  origin: ChatMessageOrigin;
+  /** True while assistant text is still arriving. */
+  streaming?: boolean;
+  /**
+   * A details-panel hint. Only app/preview messages set it; model text never does.
+   * The renderer maps it to `PanelContent`.
+   */
+  show?: ChatPanelTarget | null;
+}
+
+/** The details panel target, moved here so `MockBridge` need not import `next/`. */
+export type ChatPanelTarget =
+  | { kind: "overview" }
+  | { kind: "server" }
+  | { kind: "inbox" }
+  | { kind: "job"; project: string; jobId: string };
+
+/**
+ * What the add-project dialog collects. The Git URL is the user's repository address
+ * and the folder path is user input, not an endpoint URL or a leaked server/machine
+ * path. Core validates both and never echoes them in an error or a view.
+ */
+export interface ProjectRequest {
+  name: string;
+  source:
+    | { kind: "git"; url: string; branch: string }
+    | { kind: "folder"; path: string };
+}
+
+export type ChatSessionState =
+  | "idle"
+  | "connecting"
+  | "streaming"
+  | "ready"
+  | "stopped"
+  | "error";
+
+export interface ChatModelView {
+  id: string;
+  label: string;
+  provider: string;
+}
+
+export interface ChatSessionView {
+  session: SessionId;
+  /** The actual transport location, never the requested label. */
+  location: SessionLocation;
+  state: ChatSessionState;
+  /** True when a native session is attached and usable. */
+  attached: boolean;
+  /** False when the server has no usable SSE; the UI says so. */
+  streaming_supported: boolean;
+  model: ChatModelView | null;
+  started_at: Timestamp | null;
+  last_event_at: Timestamp | null;
+  error: SpiritErrorDto | null;
+}
+
+export interface ChatStartInput {
+  session: SessionId;
+  /** The project name for project:<name>; null for setup/global. Never a path. */
+  project: string | null;
+  /**
+   * A transport hint. Setup is always local. For global/project, VOWP's endpoint is
+   * authoritative and may override this hint; the reply reports the actual location.
+   */
+  location: SessionLocation;
+  /**
+   * Reuse the stored native session when true (default). For `setup` only,
+   * `false` creates a new local session and leaves the old log intact.
+   * `global`/`project` never create a session here; they attach to VOWP's.
+   */
+  resume?: boolean;
+}
+
+export interface ChatSendInput {
+  session: SessionId;
+  text: string;
+}
+
+export interface ChatSendReceipt {
+  session: SessionId;
+  /** The user message as stored. Render this; do not invent another one. */
+  message: ChatMessage;
+  /** True once the request was accepted locally; assistant text arrives as events. */
+  accepted: boolean;
+}
+
+export interface ChatLogQuery {
+  /** Opaque cursor from a previous page; null/absent starts at the newest page. */
+  cursor?: string | null;
+  /** 1..200; defaults to 50. */
+  limit?: number;
+}
+
+export interface ChatLogPage {
+  messages: ChatMessage[];
+  /** Opaque cursor for older messages; null at the start. */
+  next: string | null;
+  /** True when the local cache dropped messages and this page may have a gap. */
+  truncated: boolean;
+}
+
+export type ChatCloseReason =
+  | "stopped"
+  | "engine_stopped"
+  | "host_disconnected"
+  | "session_lost"
+  | "failed";
+
+/**
+ * One orchestrator chat event.
+ *
+ * `revision` is a monotonic per-bridge counter. A gap (`event.revision > last + 1`)
+ * means the renderer must call `chat.log` for that session and replace the messages.
+ * A `message` event is authoritative and replaces a message with the same `id`; a
+ * `delta` only appends. Events never carry an endpoint URL, credential or path.
+ */
+export type ChatEvent =
+  | { kind: "session"; revision: number; session: ChatSessionView }
+  | { kind: "message"; revision: number; session: SessionId; message: ChatMessage }
+  | {
+      kind: "delta";
+      revision: number;
+      session: SessionId;
+      message_id: string;
+      part_id: string | null;
+      text: string;
+    }
+  | {
+      kind: "done";
+      revision: number;
+      session: SessionId;
+      message_id: string;
+      truncated: boolean;
+    }
+  | { kind: "error"; revision: number; session: SessionId; error: SpiritErrorDto }
+  | { kind: "closed"; revision: number; session: SessionId; reason: ChatCloseReason };
+
 /**
  * What a bridge can honestly supply. The shell reads this map instead of branching on
  * `kind`. Desktop bridges omit it (every capability they implement is assumed present);

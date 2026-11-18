@@ -1,4 +1,4 @@
-import type { SpiritBridge } from "./SpiritBridge";
+import type { ChatBridgeSurface, SpiritBridge } from "./SpiritBridge";
 import type {
   ActionResult,
   AgentPairInput,
@@ -15,6 +15,15 @@ import type {
   BrakeView,
   CapacityTargetView,
   CapacityView,
+  ChatEvent,
+  ChatLogPage,
+  ChatLogQuery,
+  ChatMessage,
+  ChatPanelTarget,
+  ChatSendInput,
+  ChatSendReceipt,
+  ChatSessionView,
+  ChatStartInput,
   ConnectionSnapshot,
   DiskView,
   EngineStatus,
@@ -57,6 +66,7 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionId,
   SetTargetInput,
   SpiritErrorDto,
   StateEvent,
@@ -104,6 +114,16 @@ export const MOCK_SCENARIOS = [
   "gate-d6-incompatible",
   "gate-d6-ready",
   "gate-d6-revoked",
+  "chat-preview",
+  "chat-streaming",
+  "chat-slow",
+  "chat-stop",
+  "chat-error",
+  "chat-reconnect",
+  "chat-engine-stopped",
+  "chat-external-engine",
+  "chat-server-gated",
+  "chat-session-lost",
 ] as const;
 
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
@@ -273,6 +293,12 @@ export class MockBridge implements SpiritBridge {
   private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
+  /** Preview-only chat state. Nothing here talks to an engine, host or model. */
+  private chatSessions = new Map<SessionId, ChatSessionView>();
+  private chatLogs = new Map<SessionId, ChatMessage[]>();
+  private chatTimers = new Map<SessionId, ReturnType<typeof setTimeout>[]>();
+  private chatListeners = new Set<(event: ChatEvent) => void>();
+  private chatSeq = 0;
 
   constructor(options: MockOptions | MockScenario = "fresh") {
     const resolved: MockOptions = typeof options === "string" ? { scenario: options } : options;
@@ -1165,6 +1191,196 @@ export class MockBridge implements SpiritBridge {
     },
   };
 
+  /**
+   * Preview-only orchestrator chat (`docs/ORCHESTRATOR-CHAT.md` §4.3 and §4.7).
+   *
+   * It never talks to an engine, host or model. Assistant messages are always
+   * `origin: "preview"` and say so in their first paragraph; the real path never
+   * constructs this origin.
+   */
+  chatApi: ChatBridgeSurface = {
+    start: async (input: ChatStartInput): Promise<ChatSessionView> => {
+      this.validateChatStart(input);
+      this.requireChatScenario(input.session);
+      if (input.resume === false && input.session !== "setup") {
+        throw errorDto(
+          "chat_not_mirrored",
+          "A new global or project session must be created in VOWP; preview does not create an unmirrored session.",
+          "Create or recreate the orchestrator in VOWP, then attach.",
+        );
+      }
+      const existing = this.chatSessions.get(input.session);
+      if (existing && input.resume !== false) {
+        if (existing.state === "stopped" || existing.state === "error") {
+          return clone(
+            this.updateChatView(input.session, {
+              state: "ready",
+              attached: true,
+              error: null,
+            }),
+          );
+        }
+        return clone(existing);
+      }
+      if (input.resume === false) {
+        this.clearChatTimers(input.session);
+        this.chatLogs.set(input.session, []);
+      } else if (!this.chatLogs.has(input.session)) {
+        this.chatLogs.set(input.session, []);
+      }
+      const view = this.makeChatView(
+        input.session,
+        input.session === "setup" ? "local" : input.location,
+      );
+      this.chatSessions.set(input.session, view);
+      this.emitChat({
+        kind: "session",
+        revision: this.nextRevision(),
+        session: clone(view),
+      });
+      return clone(view);
+    },
+    attach: async (session: SessionId): Promise<ChatSessionView> => {
+      this.validateChatSession(session);
+      if (this.scenario === "chat-session-lost" && session !== "setup") {
+        throw errorDto(
+          "session_lost",
+          "The stored native session no longer exists.",
+          "Recreate the orchestrator session in VOWP, then attach.",
+        );
+      }
+      if (!this.chatSessions.has(session)) {
+        throw errorDto(
+          "chat_not_started",
+          "No session has been started in this app run.",
+          "Call chat.start first.",
+        );
+      }
+      return clone(
+        this.updateChatView(session, { state: "ready", attached: true, error: null }),
+      );
+    },
+    send: async (input: ChatSendInput): Promise<ChatSendReceipt> => {
+      this.validateChatSession(input.session);
+      const text = typeof input.text === "string" ? input.text.trim() : "";
+      if (text.length === 0) {
+        throw errorDto("invalid_input", "message: must not be empty");
+      }
+      if (text.length > 32_000) {
+        throw errorDto(
+          "invalid_input",
+          "message: must be at most 32,000 characters",
+        );
+      }
+      const view = this.chatSessions.get(input.session);
+      if (!view || !view.attached) {
+        throw errorDto(
+          "chat_not_started",
+          "Start or attach the session before sending.",
+          "Call chat.start or chat.attach.",
+        );
+      }
+      if (view.state === "streaming") {
+        throw errorDto(
+          "chat_busy",
+          "A turn is already running; there is no queue.",
+          "Wait for it to finish or stop it.",
+        );
+      }
+      if (view.state !== "ready") {
+        throw errorDto(
+          "chat_not_started",
+          "The session is not ready for another turn.",
+          "Start or attach the session, then send.",
+        );
+      }
+      const message: ChatMessage = {
+        id: this.nextChatId("local"),
+        role: "user",
+        text: [text],
+        created_at: this.now(),
+        origin: "user",
+      };
+      this.chatLogs.set(input.session, [
+        ...(this.chatLogs.get(input.session) ?? []),
+        message,
+      ]);
+      this.updateChatView(input.session, {
+        state: "streaming",
+        attached: true,
+        error: null,
+      });
+      this.emitChat({
+        kind: "message",
+        revision: this.nextRevision(),
+        session: input.session,
+        message: clone(message),
+      });
+      this.scheduleChatReply(input.session, text);
+      return { session: input.session, message: clone(message), accepted: true };
+    },
+    stop: async (session: SessionId): Promise<ChatSessionView> => {
+      this.validateChatSession(session);
+      if (!this.chatSessions.has(session)) {
+        throw errorDto(
+          "chat_not_started",
+          "No session has been started in this app run.",
+          "Call chat.start first.",
+        );
+      }
+      this.clearChatTimers(session);
+      const stopped = this.updateChatView(session, {
+        state: "stopped",
+        attached: false,
+        error: null,
+      });
+      this.emitChat({
+        kind: "closed",
+        revision: this.nextRevision(),
+        session,
+        reason: "stopped",
+      });
+      return clone(stopped);
+    },
+    log: async (
+      session: SessionId,
+      query: ChatLogQuery = {},
+    ): Promise<ChatLogPage> => {
+      this.validateChatSession(session);
+      if (!this.chatSessions.has(session)) {
+        throw errorDto(
+          "chat_not_started",
+          "No session has been started in this app run.",
+          "Call chat.start first.",
+        );
+      }
+      const limit = query.limit ?? 50;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        throw errorDto("invalid_input", "limit: must be an integer between 1 and 200");
+      }
+      const all = this.chatLogs.get(session) ?? [];
+      let end = all.length;
+      if (query.cursor !== undefined && query.cursor !== null) {
+        if (typeof query.cursor !== "string" || !/^\d{1,9}$/.test(query.cursor)) {
+          throw errorDto("invalid_input", "cursor: is not a valid page cursor");
+        }
+        end = Math.min(Number(query.cursor), all.length);
+      }
+      const start = Math.max(0, end - limit);
+      return {
+        messages: all.slice(start, end).map((message) => clone(message)),
+        next: start > 0 ? String(start) : null,
+        truncated: false,
+      };
+    },
+    subscribe: (listener: (event: ChatEvent) => void): (() => void) => {
+      this.chatListeners.add(listener);
+      return () => {
+        this.chatListeners.delete(listener);
+      };
+    },
+  };
+
   hosts = this.hostsApi;
   onboarding = this.onboardingApi;
   secrets = this.secretsApi;
@@ -1172,8 +1388,18 @@ export class MockBridge implements SpiritBridge {
   fleet = this.fleetApi;
   engine = this.engineApi;
   gates = this.gatesApi;
+  chat = this.chatApi;
   sessions = this.sessionsApi;
   localOrchestrators = this.localOrchestratorsApi;
+
+  /** Releases preview chat timers and listeners. Safe to call more than once. */
+  dispose(): void {
+    for (const timers of this.chatTimers.values()) {
+      for (const timer of timers) clearTimeout(timer);
+    }
+    this.chatTimers.clear();
+    this.chatListeners.clear();
+  }
 
   /** Test hook: recorded job actions. */
   recordedActions(): MockJobAction[] {
@@ -1187,6 +1413,314 @@ export class MockBridge implements SpiritBridge {
 
   private recordAsifCall(call: MockAsifCall): void {
     this.asifCalls = [...this.asifCalls, call];
+  }
+
+  private makeChatView(
+    session: SessionId,
+    location: ChatSessionView["location"],
+  ): ChatSessionView {
+    const selected = this.modelChoices[0];
+    return {
+      session,
+      location,
+      state: "ready",
+      attached: true,
+      streaming_supported: true,
+      model: selected
+        ? { id: selected.id, label: selected.label, provider: selected.provider }
+        : null,
+      started_at: this.now(),
+      last_event_at: this.now(),
+      error: null,
+    };
+  }
+
+  private updateChatView(
+    session: SessionId,
+    patch: Partial<ChatSessionView>,
+  ): ChatSessionView {
+    const current = this.chatSessions.get(session);
+    if (!current) {
+      throw errorDto(
+        "chat_not_started",
+        "No session has been started in this app run.",
+        "Call chat.start first.",
+      );
+    }
+    const next: ChatSessionView = {
+      ...current,
+      ...patch,
+      last_event_at: this.now(),
+    };
+    this.chatSessions.set(session, next);
+    this.emitChat({
+      kind: "session",
+      revision: this.nextRevision(),
+      session: clone(next),
+    });
+    return next;
+  }
+
+  private emitChat(event: ChatEvent): void {
+    for (const listener of this.chatListeners) listener(clone(event));
+  }
+
+  private scheduleChat(session: SessionId, delay: number, run: () => void): void {
+    const timer = setTimeout(() => {
+      const timers = this.chatTimers.get(session);
+      if (timers) {
+        this.chatTimers.set(
+          session,
+          timers.filter((candidate) => candidate !== timer),
+        );
+      }
+      const view = this.chatSessions.get(session);
+      if (!view || view.state === "stopped") return;
+      run();
+    }, delay);
+    const timers = this.chatTimers.get(session) ?? [];
+    this.chatTimers.set(session, [...timers, timer]);
+  }
+
+  private clearChatTimers(session: SessionId): void {
+    for (const timer of this.chatTimers.get(session) ?? []) {
+      clearTimeout(timer);
+    }
+    this.chatTimers.delete(session);
+  }
+
+  private scheduleChatReply(session: SessionId, text: string): void {
+    // These scenarios keep a turn open so the Stop action has something to abort.
+    if (this.scenario === "chat-slow" || this.scenario === "chat-stop") {
+      return;
+    }
+    if (this.scenario === "chat-error") {
+      this.scheduleChat(session, 5, () => this.failChatTurn(session));
+      return;
+    }
+    if (this.scenario === "chat-reconnect") {
+      this.scheduleChat(session, 5, () => {
+        this.updateChatView(session, {
+          state: "connecting",
+          attached: true,
+          error: null,
+        });
+      });
+      this.scheduleChat(session, 15, () => this.completeChatTurn(session, text));
+      return;
+    }
+    if (this.scenario === "chat-streaming") {
+      const reply = this.previewChatReply(session, text);
+      const fullText = reply.text.join("\n\n");
+      const first = reply.text[0] ?? "Preview reply.";
+      const remainder = fullText.slice(first.length);
+      const shell: ChatMessage = {
+        ...reply,
+        text: [first],
+        streaming: true,
+        show: null,
+      };
+      this.emitChat({
+        kind: "message",
+        revision: this.nextRevision(),
+        session,
+        message: clone(shell),
+      });
+      let offset = 0;
+      const chunkSize = Math.max(1, Math.ceil(remainder.length / 4));
+      const emitNext = (): void => {
+        if (offset < remainder.length) {
+          const chunk = remainder.slice(offset, offset + chunkSize);
+          offset += chunk.length;
+          this.emitChat({
+            kind: "delta",
+            revision: this.nextRevision(),
+            session,
+            message_id: reply.id,
+            part_id: "preview-part",
+            text: chunk,
+          });
+          this.scheduleChat(session, 5, emitNext);
+          return;
+        }
+        this.finishChatTurn(session, reply);
+      };
+      this.scheduleChat(session, 5, emitNext);
+      return;
+    }
+    this.scheduleChat(session, 5, () => this.completeChatTurn(session, text));
+  }
+
+  private completeChatTurn(session: SessionId, text: string): void {
+    this.finishChatTurn(session, this.previewChatReply(session, text));
+  }
+
+  private finishChatTurn(session: SessionId, reply: ChatMessage): void {
+    const view = this.chatSessions.get(session);
+    if (!view || view.state === "stopped") return;
+    this.chatLogs.set(session, [
+      ...(this.chatLogs.get(session) ?? []),
+      reply,
+    ]);
+    this.emitChat({
+      kind: "message",
+      revision: this.nextRevision(),
+      session,
+      message: clone(reply),
+    });
+    this.emitChat({
+      kind: "done",
+      revision: this.nextRevision(),
+      session,
+      message_id: reply.id,
+      truncated: false,
+    });
+    this.updateChatView(session, {
+      state: "ready",
+      attached: true,
+      error: null,
+    });
+  }
+
+  private failChatTurn(session: SessionId): void {
+    const error = errorDto(
+      "chat_failed",
+      "The preview orchestrator reported a safe error.",
+      "In the real app this is a typed error; no reply is invented.",
+      true,
+    );
+    this.emitChat({
+      kind: "error",
+      revision: this.nextRevision(),
+      session,
+      error: clone(error),
+    });
+    this.updateChatView(session, {
+      state: "error",
+      attached: true,
+      error,
+    });
+  }
+
+  private previewChatReply(session: SessionId, text: string): ChatMessage {
+    const where =
+      session === "global"
+        ? "the global orchestrator"
+        : session === "setup"
+          ? "the setup assistant"
+          : "this project's orchestrator";
+    const preview = `Preview reply. In the real app ${where} answers here.`;
+    let hint: string | null = null;
+    let show: ChatPanelTarget | null = null;
+    if (/running|working|workers|progress/i.test(text)) {
+      hint = "Here's what is running right now. I opened it on the right.";
+      show = { kind: "overview" };
+    } else if (/busy|server|capacity|memory|ram|disk|cpu/i.test(text)) {
+      hint = "Here's the server right now. I opened it on the right.";
+      show = { kind: "server" };
+    } else if (/attention|inbox|question|blocked|waiting/i.test(text)) {
+      hint = "These are waiting for you. I opened your inbox on the right.";
+      show = { kind: "inbox" };
+    }
+    return {
+      id: this.nextChatId("preview"),
+      role: "assistant",
+      text: hint ? [preview, hint] : [preview],
+      created_at: this.now(),
+      origin: "preview",
+      streaming: false,
+      show,
+    };
+  }
+
+  private nextChatId(prefix: "local" | "preview"): string {
+    this.chatSeq += 1;
+    const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let value = this.chatSeq;
+    let suffix = "";
+    for (let index = 0; index < 26; index += 1) {
+      suffix = alphabet.charAt(value % 32) + suffix;
+      value = Math.floor(value / 32);
+    }
+    return `${prefix}:${suffix}`;
+  }
+
+  private validateChatStart(input: ChatStartInput): void {
+    this.validateChatSession(input.session);
+    if (input.location !== "local" && input.location !== "server") {
+      throw errorDto("invalid_input", "location: use `local` or `server`");
+    }
+    if (input.session === "setup" || input.session === "global") {
+      if (input.project !== null) {
+        throw errorDto(
+          "invalid_input",
+          "project: must be null for setup and global sessions",
+        );
+      }
+      return;
+    }
+    if (input.project !== input.session.slice("project:".length)) {
+      throw errorDto(
+        "invalid_input",
+        "project: must match the project:<name> session",
+      );
+    }
+  }
+
+  private validateChatSession(session: SessionId): void {
+    if (session === "setup" || session === "global") return;
+    if (typeof session !== "string" || !session.startsWith("project:")) {
+      throw errorDto(
+        "invalid_input",
+        "session: use `setup`, `global` or `project:<name>`",
+      );
+    }
+    const project = session.slice("project:".length);
+    if (
+      project.length === 0 ||
+      project.length > 64 ||
+      project.startsWith("-") ||
+      project === "." ||
+      project === ".." ||
+      !/^[A-Za-z0-9._-]+$/.test(project)
+    ) {
+      throw errorDto(
+        "invalid_input",
+        "session: project names use 1-64 letters, digits, '.', '-' or '_'",
+      );
+    }
+  }
+
+  private requireChatScenario(session: SessionId): void {
+    if (this.scenario === "chat-engine-stopped") {
+      throw errorDto(
+        "engine_not_ready",
+        "The bundled StackSpirit Engine is stopped.",
+        "Start the engine in Settings → Engine, then retry.",
+        true,
+      );
+    }
+    if (this.scenario === "chat-external-engine") {
+      throw errorDto(
+        "engine_external",
+        "The setup assistant needs the bundled StackSpirit Engine; the external harness is model-only.",
+        "Switch to the bundled engine in Settings → Advanced.",
+      );
+    }
+    if (this.scenario === "chat-server-gated" && session !== "setup") {
+      throw errorDto(
+        "chat_gated",
+        "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`, or an owner-approved SSH forward.",
+        "Update VOWP or approve the forward in Settings → Advanced → Chat.",
+      );
+    }
+    if (this.scenario === "chat-session-lost" && session !== "setup") {
+      throw errorDto(
+        "session_lost",
+        "The stored native session no longer exists.",
+        "Recreate the orchestrator session in VOWP, then attach.",
+      );
+    }
   }
 
   private requireSessionId(sessionId: string): void {

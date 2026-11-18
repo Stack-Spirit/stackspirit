@@ -12,6 +12,13 @@ import type {
   BridgeCapabilities,
   CapacityTargetView,
   CapacityView,
+  ChatEvent,
+  ChatLogPage,
+  ChatLogQuery,
+  ChatSendInput,
+  ChatSendReceipt,
+  ChatSessionView,
+  ChatStartInput,
   ConnectionSnapshot,
   DaemonHealth,
   EngineStatus,
@@ -43,6 +50,7 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionId,
   SetTargetInput,
   StateEvent,
   SurfaceEntryView,
@@ -54,6 +62,49 @@ import type {
   WebBridgeStatus,
   WebFleetView,
 } from "./wire";
+
+/**
+ * The optional orchestrator chat surface (`docs/ORCHESTRATOR-CHAT.md` §4.3).
+ *
+ * Presence is the capability: desktop `TauriBridge` and `MockBridge` implement it;
+ * `HttpSseBridge`/`WebMockBridge` omit it and keep the Web shell read-only.
+ *
+ * Gate semantics: `setup` runs on the bundled StackSpirit Engine. `global` and
+ * `project:<name>` attach only to the orchestrator server VOWP reports. They stay gated
+ * until VOWP 0.5's `vowp orchestrator endpoint` ships or the owner approves the
+ * app-owned SSH forward; a gated call rejects with a typed `chat_gated`/
+ * `chat_not_mirrored`/`chat_not_configured` error and never invents an assistant reply.
+ *
+ * Preview honesty: only `MockBridge` produces `origin: "preview"` messages. Every
+ * preview assistant message says it is a preview in its first paragraph; a real bridge
+ * never constructs that origin.
+ */
+export interface ChatBridgeSurface {
+  /** Ensure the engine/endpoint and attach/create the native session; idempotent. */
+  start(input: ChatStartInput): Promise<ChatSessionView>;
+  /** Reuse the stored native session; never creates one. */
+  attach(session: SessionId): Promise<ChatSessionView>;
+  /**
+   * Accept one user turn; assistant text arrives via `subscribe`. Rejects while the
+   * session is `streaming` with `chat_busy` (there is no queue) and rejects empty or
+   * over-long text with `invalid_input`. `accepted` means accepted locally, not
+   * answered by a model.
+   */
+  send(input: ChatSendInput): Promise<ChatSendReceipt>;
+  /**
+   * Abort the current turn (when supported) and return the stopped view. It never stops
+   * the engine, the VOWP orchestrator or the server, and never deletes a session.
+   */
+  stop(session: SessionId): Promise<ChatSessionView>;
+  /** Read the conversation log; pages move backward from newest, each oldest-first. */
+  log(session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage>;
+  /**
+   * Returns an unsubscribe function; callers must clean up on unmount. This is one
+   * in-process subscription, not a second SSE connection per caller. Each event carries
+   * a monotonic `revision`; a gap means call `log` and replace the messages.
+   */
+  subscribe(listener: (event: ChatEvent) => void): () => void;
+}
 
 /** The only surface the UI may call. Tauri, Mock, and the Web HTTP/SSE bridge implement it. */
 export interface SpiritBridge {
@@ -192,6 +243,13 @@ export interface SpiritBridge {
     get(): Promise<GateSnapshot>;
     probe(): Promise<GateSnapshot>;
   };
+
+  /**
+   * Optional orchestrator chat. Presence is the capability; the Web bridge omits it.
+   * Desktop `TauriBridge` and `MockBridge` implement it. See `ChatBridgeSurface` for
+   * the gate and preview-honesty rules.
+   */
+  chat?: ChatBridgeSurface;
 
   /**
    * Optional read/action surface for VOWP sessions. Present on the desktop and preview
