@@ -3987,22 +3987,51 @@ fn remote_request(name: &str, app: OrchestratorApp, project: Option<&ProjectName
     }
 }
 
-/// Waits for a queued start/resume result to reach the home record.
-fn wait_for_orchestrator_state(manager: &Orchestrator, name: &str, expected: vowp_protocol::OrchestratorNodeState) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+/// Resumes a remote orchestrator until it reaches `Running`.
+///
+/// The gateway auto-starts a `node_offline` orchestrator on the first heartbeat after its
+/// node reconnects. A resume issued in that window reaches the agent while the auto-start
+/// is still preparing and is answered `busy`; the home then marks the record `Failed`.
+/// That is a start/resume ordering race, not a lease failure: retry the same resume on a
+/// bounded deadline until the auto-start has settled and the resume sees a live host.
+fn resume_remote_orchestrator(manager: &Orchestrator, name: &str) {
+    use vowp_protocol::OrchestratorNodeState;
+
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let info = manager.info(name).expect("orchestrator info");
-        let state = info.card.state;
-        if state == expected {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "orchestrator {name} stayed {state:?}, expected {expected:?}; detail: {:?}; last_error: {:?}",
-                info.detail, info.card.last_error
+        manager.resume(name).expect("queue orchestrator resume");
+        loop {
+            let info = manager.info(name).expect("orchestrator info");
+            let state = info.card.state;
+            if state == OrchestratorNodeState::Running {
+                return;
+            }
+            let busy = state == OrchestratorNodeState::Failed
+                && [info.detail.as_deref(), info.card.last_error.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|detail| detail.starts_with("busy:"));
+            if state == OrchestratorNodeState::Failed && !busy {
+                panic!(
+                    "orchestrator {name} failed: detail {:?}; last_error {:?}",
+                    info.detail, info.card.last_error
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "orchestrator {name} stayed {state:?}, expected Running; detail: {:?}; last_error: {:?}",
+                info.detail,
+                info.card.last_error
             );
+            if busy {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
         }
-        thread::sleep(Duration::from_millis(20));
+        // The competing auto-start is still preparing. Give the agent a bounded moment to
+        // settle it, then retry the same resume; once the host is live a duplicate start
+        // reports the existing host instead of spawning a second one.
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -4341,8 +4370,7 @@ fn real_gateway_unbound_orchestrator_pairs_over_socket_and_mirrors_sse() {
     assert_eq!(status.connection, ConnectionState::Connected);
 
     set_node_online(&home, &node);
-    manager.resume("global").expect("resume the unbound orchestrator");
-    wait_for_orchestrator_state(&manager, "global", vowp_protocol::OrchestratorNodeState::Running);
+    resume_remote_orchestrator(&manager, "global");
     let service_path = state_dir.join("orchestrators/global/.opencode/state/opencode/service.json");
     assert!(service_path.is_file(), "the fake opencode service was not materialized");
 
@@ -4466,8 +4494,12 @@ fn real_gateway_project_orchestrator_defaults_job_project_and_enforces_one_lease
     assert!(!handle.is_finished(), "pairing must not supersede the live agent");
 
     set_node_online(&home, &node);
-    manager.resume("bound").expect("resume the project-bound orchestrator");
-    wait_for_orchestrator_state(&manager, "bound", vowp_protocol::OrchestratorNodeState::Running);
+    resume_remote_orchestrator(&manager, "bound");
+    let host: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_dir.join("orchestrators/bound/host.json")).expect("host state"))
+            .expect("host state JSON");
+    assert_eq!(host["state"], "running", "one live host must remain: {host}");
+    assert!(host["pid"].is_u64(), "the live host records one pid: {host}");
 
     let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "fleet_status", serde_json::json!({}));
     assert!(elapsed < Duration::from_secs(1), "fleet_status took {elapsed:?}");
