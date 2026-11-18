@@ -4,6 +4,7 @@ import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
 import { useConnection, useEngine, useFleetStore } from "../state/fleetStore";
 import { PageHeader } from "./PageHeader";
+import { SecretStore } from "./SecretStore";
 import { ServerSecurityCard } from "./ServerSecurity";
 import type { ThemePreference } from "./themePreference";
 
@@ -104,6 +105,7 @@ export function SettingsView({ theme, onTheme, onOpenRaw }: SettingsViewProps) {
                     ) : null}
                   </span>
                 </div>
+                <SecretStore />
                 <HostManager />
                 <EngineView />
               </div>
