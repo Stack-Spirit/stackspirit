@@ -540,6 +540,20 @@ vowp orchestrator move mac --home
   revoked or unmapped target leaves the current host running. Moving to the current placement is
   idempotent, or resumes a stopped record there. The target node must already have a paired surface
   for the session; the home never mints a new session id during a move.
+- The node consumes a move as the landed `Start` command: the command names the orchestrator, app
+  and project, and the home session is carried by the target node's existing paired surface, not
+  by a wire field. The agent's order is: stop a live host for the name and close its bridge first
+  (the stop sends `SurfaceDetach` and releases the lease); read the active `surfaces/<id>/session`
+  pairing, ignoring a revoked or `needs_pair` surface; overwrite a stale local
+  `config.session`/`config.surface` from that pairing; write `config.json`, `AGENTS.md`,
+  `opencode.json` and `orchestrator.json` atomically at 0600; start the app bound to that session;
+  attach the surface and report `running`. A duplicate `Start`/`Resume` for the same binding
+  reports the live host without spawning a second process. A `Resume` whose active pairing names
+  a different binding than the live host is refused with `session_conflict` and leaves the live
+  host and its surface attached. No active pairing is `surface_missing`; more than one active
+  pairing without a configured surface is `surface_ambiguous`. Both refusals start nothing and
+  never mint a session id. The agent never rewrites `surfaces/<id>/session`: the home wrote it
+  when it paired the surface, and it is the home-issued authority for the move.
 - The local `AGENTS.md` template says: you are on a local surface; paths are project-relative; the
   home cannot see the Mac's local files; call `session_resume` if the tool is available; ask before
   public actions; never read a secret. It does not tell the app to open a tunnel; the agent is the

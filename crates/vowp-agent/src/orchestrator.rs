@@ -386,6 +386,35 @@ impl OrchestratorHost {
         read_host_state(&Self::host_path(&self.state_dir, name)?)
     }
 
+    /// Returns the recorded host when its process-group leader is still alive.
+    ///
+    /// A state file whose pid is gone is stale; a caller that must decide between an
+    /// idempotent duplicate and a move never treats it as a live host.
+    pub fn live_state(&self, name: &str) -> Result<Option<OrchestratorHostState>, OrchestratorError> {
+        Ok(self.state(name)?.filter(|state| state.pid.is_some_and(process_alive)))
+    }
+
+    /// Returns the binding the next start or resume would use, without changing the config.
+    ///
+    /// The pairing file written when the surface was paired is the home-issued authority:
+    /// when the local config names a surface, its `surfaces/<id>/session` value wins over a
+    /// stale `config.session`. A revoked, `needs_pair` or missing surface is ignored, and
+    /// the one remaining active pairing is used instead. More than one active pairing
+    /// without a configured surface is `surface_ambiguous`; none is `None`, which a start
+    /// reports as `surface_missing` and never replaces with a locally minted session id.
+    pub fn resolve_current_binding(&self, name: &str) -> Result<Option<SurfaceBinding>, OrchestratorError> {
+        validate_name(name)?;
+        if let Some(config) = self.config(name)? {
+            if let Some(surface) = config.surface.as_ref() {
+                validate_surface_id(surface).map_err(|_| config_error("the configured surface id is not a ULID"))?;
+                if let Some(binding) = pairing_binding(&self.state_dir, surface)? {
+                    return Ok(Some(binding));
+                }
+            }
+        }
+        single_active_pairing(&self.state_dir)
+    }
+
     /// Prepares a `Start` or `Resume` without attaching the surface.
     ///
     /// The method may block while the app writes its `service.json`; the client runs it on a
@@ -437,7 +466,12 @@ impl OrchestratorHost {
         // host instead of spawning a second one.
         match self.state(&name) {
             Ok(Some(state)) if state.pid.is_some_and(process_alive) => {
-                let binding = match binding_from(config.session.clone(), config.surface.clone()) {
+                // The running host's own record is the authority for a duplicate; the
+                // config may already name a newer pairing that a move will apply.
+                let binding = match binding_from(
+                    state.session.clone().or(config.session.clone()),
+                    state.surface.clone().or(config.surface.clone()),
+                ) {
                     Ok(binding) => binding,
                     Err(error) => {
                         return PrepareOutcome::Failed(failed_result(
@@ -888,7 +922,8 @@ impl OrchestratorHost {
                     .to_string(),
             );
         }
-        self.write_config(&config)?;
+        // The caller resolves the pairing before writing, so a move never persists a
+        // stale `session` or `surface` from the previous placement.
         Ok(config)
     }
 
@@ -1133,53 +1168,95 @@ pub fn validate_name(name: &str) -> Result<(), OrchestratorError> {
 }
 
 fn resolve_binding(state_dir: &Path, config: &mut OrchestratorConfig) -> Result<SurfaceBinding, OrchestratorError> {
-    if let (Some(surface), Some(session)) = (config.surface.clone(), config.session.clone()) {
+    // The home-issued pairing file wins over a stale `config.session`: a move keeps the
+    // home's session id and re-materializes the local config around it.
+    if let Some(surface) = config.surface.clone() {
         validate_surface_id(&surface).map_err(|_| config_error("the configured surface id is not a ULID"))?;
-        return Ok(SurfaceBinding { surface, session });
-    }
-    if config.surface.is_some() || config.session.is_some() {
-        return Err(config_error("the local config has only half of a surface binding"));
-    }
-    let mut found = Vec::new();
-    let dir = AgentConfig::surfaces_dir(state_dir);
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(surface) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let surface = SurfaceId(surface.to_owned());
-            if validate_surface_id(&surface).is_err() {
-                continue;
-            }
-            let session = match fs::read_to_string(path.join(crate::config::SURFACE_SESSION_FILE)) {
-                Ok(text) => text,
-                Err(_) => continue,
-            };
-            let Ok(session) = SessionId::parse(session.trim()) else {
-                continue;
-            };
-            found.push(SurfaceBinding { surface, session });
-        }
-    }
-    match found.len() {
-        0 => Err(import_error(
-            "surface_missing",
-            "pair a surface for this orchestrator before starting it",
-        )),
-        1 => {
-            // invariant: `found` has exactly one element here.
-            let binding = found.pop().unwrap_or(SurfaceBinding {
-                surface: SurfaceId(String::new()),
-                session: SessionId::new(),
-            });
+        if let Some(binding) = pairing_binding(state_dir, &surface)? {
             config.surface = Some(binding.surface.clone());
             config.session = Some(binding.session.clone());
-            Ok(binding)
+            return Ok(binding);
         }
+        // A revoked, needs_pair or missing surface is never started again.
+    }
+    config.surface = None;
+    config.session = None;
+    let Some(binding) = single_active_pairing(state_dir)? else {
+        return Err(import_error(
+            "surface_missing",
+            "pair a surface for this orchestrator before starting it",
+        ));
+    };
+    config.surface = Some(binding.surface.clone());
+    config.session = Some(binding.session.clone());
+    Ok(binding)
+}
+
+/// Returns the home-issued binding stored beside one surface, when it is still active.
+fn pairing_binding(state_dir: &Path, surface: &SurfaceId) -> Result<Option<SurfaceBinding>, OrchestratorError> {
+    let dir = AgentConfig::surface_dir(state_dir, surface);
+    if !dir.is_dir() || !pairing_is_active(&dir) {
+        return Ok(None);
+    }
+    let path = dir.join(crate::config::SURFACE_SESSION_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(config_error("the paired surface binding could not be read")),
+    };
+    let Ok(session) = SessionId::parse(text.trim()) else {
+        return Ok(None);
+    };
+    Ok(Some(SurfaceBinding {
+        surface: surface.clone(),
+        session,
+    }))
+}
+
+/// Returns whether one surface directory may be attached by an orchestrator.
+///
+/// A `session` file is written only after a successful pairing, so a directory that has
+/// one is usable even when it predates the local `state` file. An explicit `needs_pair`
+/// or `revoked` state is dead and is never selected, whatever else the directory holds.
+fn pairing_is_active(dir: &Path) -> bool {
+    match fs::read_to_string(dir.join(crate::surface_state::SURFACE_STATE_FILE)) {
+        Ok(text) => !matches!(text.trim(), "needs_pair" | "revoked"),
+        Err(_) => true,
+    }
+}
+
+/// Returns the one active paired surface, or refuses an ambiguous set.
+fn single_active_pairing(state_dir: &Path) -> Result<Option<SurfaceBinding>, OrchestratorError> {
+    let mut found = Vec::new();
+    let dir = AgentConfig::surfaces_dir(state_dir);
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(config_error("the paired surface directory could not be read")),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !pairing_is_active(&path) {
+            continue;
+        }
+        let Some(surface) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let surface = SurfaceId(surface.to_owned());
+        if validate_surface_id(&surface).is_err() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(path.join(crate::config::SURFACE_SESSION_FILE)) else {
+            continue;
+        };
+        let Ok(session) = SessionId::parse(text.trim()) else {
+            continue;
+        };
+        found.push(SurfaceBinding { surface, session });
+    }
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.pop()),
         _ => Err(OrchestratorError::new(
             "surface_ambiguous",
             "more than one paired surface could own this orchestrator; set one in the local config",

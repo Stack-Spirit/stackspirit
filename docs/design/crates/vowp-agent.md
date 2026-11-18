@@ -890,12 +890,33 @@ a custom command that cannot start is `spawn_failed`; a malformed or too-wide fi
 
 The app runs in its own process group with private `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
 `XDG_STATE_HOME` and `XDG_CACHE_HOME` below `<orchestrator>/.opencode/`. The surface binding
-comes from the local config, or from the one paired surface under `surfaces/<id>/session`; no
-pairing is `surface_missing`, and more than one without an explicit choice is
-`surface_ambiguous`. The frame loop sends `SurfaceAttach` and only then writes `running`; a
-failed attach stops a fresh process and removes `host.json`, so no partial host remains. A
-duplicate `Start` or `Resume` finds the live pid and reports the existing state instead of
-spawning a second process; an already-running host is not attached twice.
+comes from the active paired surface named by the local config, or from the one other active
+pairing under `surfaces/<id>/session`. The pairing file written when the home paired the surface
+is authoritative: its session overwrites a stale `config.session`, and a revoked or `needs_pair`
+surface is ignored rather than started. No active pairing is `surface_missing`, and more than one
+without a configured surface is `surface_ambiguous`; neither mints a `SessionId`. The frame loop
+sends `SurfaceAttach` and only then writes `running`; a failed attach stops a fresh process and
+removes `host.json`, so no partial host remains. A duplicate `Start` or `Resume` finds the live
+pid and reports the existing state instead of spawning a second process; an already-running host
+is not attached twice.
+
+A `Start` is also the landed move command. The home's move keeps the session id and expects the
+target node's active pairing to be bound to it; the wire shape carries the name, app and project,
+not a session or surface field. The client stops a live host whose recorded binding differs from
+the active pairing before it starts another: it flushes and closes that host's bridge, sends
+`SurfaceDetach`, signals the old process group and waits for it to exit. The worker then resolves
+the active pairing, overwrites a stale local `config.session`/`config.surface`, rewrites the app
+files and starts the app bound to that session. The agent never rewrites the pairing file itself.
+A duplicate `Start`/`Resume` for the same binding reports the live host; a `Resume` whose active
+pairing names a different binding than the live host is refused with `session_conflict` and leaves
+the live host and its surface attached. Named tests in
+`crates/vowp-agent/tests/orchestrator.rs`:
+`agent_orchestrator_move_preserves_the_home_session_id`,
+`agent_orchestrator_move_overwrites_a_stale_local_binding`,
+`agent_orchestrator_move_stops_the_old_host_before_starting`,
+`agent_orchestrator_move_is_idempotent_and_refuses_a_different_session`,
+`agent_orchestrator_move_never_returns_a_secret_path_or_port`, and
+`agent_orchestrator_move_requires_a_paired_surface`.
 
 `Stop` sends `SurfaceDetach`, signals only that host's process group with SIGTERM, waits
 `ORCHESTRATOR_STOP_GRACE` (2 seconds), then sends SIGKILL and waits briefly. The pid/state file

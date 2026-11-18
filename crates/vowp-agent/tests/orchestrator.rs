@@ -65,6 +65,17 @@ fn write_binding(state: &Path, surface: &SurfaceId, session: &SessionId) {
     fs::create_dir_all(&dir).expect("surface dir");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("surface mode");
     fs::write(dir.join("session"), session.as_str()).expect("session binding");
+    write_surface_state(&dir, "paired");
+}
+
+fn write_surface_state(dir: &Path, state: &str) {
+    let path = dir.join("state");
+    fs::write(&path, state).expect("surface state");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("surface state mode");
+}
+
+fn revoke_binding(state: &Path, surface: &SurfaceId) {
+    write_surface_state(&state.join("surfaces").join(&surface.0), "revoked");
 }
 
 fn write_config(state: &Path, config: &OrchestratorConfig) {
@@ -242,6 +253,7 @@ fn host_with_app(state: &Path, script: &Path, count: &Path, _password: &str) -> 
 }
 
 fn bind(state: &Path, name: &str, surface_id: &str, session_id: &str, working: &Path, script: &Path, count: &Path) {
+    write_binding(state, &surface(surface_id), &session(session_id));
     write_config(
         state,
         &OrchestratorConfig {
@@ -1310,22 +1322,43 @@ impl AgentClock for FixedClock {
 struct FakeState {
     connections: usize,
     received: Vec<AgentFrame>,
+    /// Orchestrator files read at each `OrchestratorResult`, before the run revokes.
+    snapshots: Vec<Vec<(String, Vec<u8>)>>,
 }
+
+type BeforeSend = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 struct FakeHome {
     shared: Arc<Mutex<FakeState>>,
-    command: OrchestratorCommand,
+    commands: Vec<OrchestratorCommand>,
+    pre_send: Vec<Option<BeforeSend>>,
+    snapshot_dir: Option<PathBuf>,
     clock: FixedClock,
 }
 
 impl FakeHome {
     fn new(command: OrchestratorCommand) -> Self {
+        Self::with_commands(None, vec![command])
+    }
+
+    /// Queues every command and snapshots the local host files on each result.
+    fn with_commands(snapshot_dir: Option<PathBuf>, commands: Vec<OrchestratorCommand>) -> Self {
+        assert!(!commands.is_empty(), "a fake home needs at least one command");
+        let pre_send = vec![None; commands.len()];
         Self {
             shared: Arc::new(Mutex::new(FakeState::default())),
-            command,
+            commands,
+            pre_send,
+            snapshot_dir,
             clock: FixedClock(Timestamp::parse("2026-11-14T10:00:00Z").expect("timestamp")),
         }
+    }
+
+    /// Runs `action` before the command at `index` is delivered.
+    fn before(mut self, index: usize, action: impl Fn() + Send + Sync + 'static) -> Self {
+        self.pre_send[index] = Some(Arc::new(action));
+        self
     }
 
     fn frames(&self) -> Vec<AgentFrame> {
@@ -1335,6 +1368,37 @@ impl FakeHome {
             .received
             .clone()
     }
+
+    fn snapshots(&self) -> Vec<Vec<(String, Vec<u8>)>> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshots
+            .clone()
+    }
+}
+
+/// Reads the private orchestrator files at one result boundary.
+fn snapshot_orchestrators(state: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(state.join("orchestrators")) else {
+        return files;
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    for dir in dirs {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        for file in ["config.json", "orchestrator.json", "host.json"] {
+            if let Ok(bytes) = fs::read(dir.join(file)) {
+                files.push((format!("{name}/{file}"), bytes));
+            }
+        }
+    }
+    files
 }
 
 impl Transport for FakeHome {
@@ -1345,22 +1409,30 @@ impl Transport for FakeHome {
         drop(state);
         Ok(Box::new(FakeStream {
             shared: Arc::clone(&self.shared),
-            command: self.command.clone(),
+            commands: self.commands.iter().cloned().collect(),
+            pre_send: self.pre_send.clone(),
+            expected: self.commands.len(),
+            sent: 0,
+            snapshot_dir: self.snapshot_dir.clone(),
+            results: 0,
             clock: self.clock,
             connection,
             outbound: VecDeque::new(),
-            sent_command: false,
         }))
     }
 }
 
 struct FakeStream {
     shared: Arc<Mutex<FakeState>>,
-    command: OrchestratorCommand,
+    commands: VecDeque<OrchestratorCommand>,
+    pre_send: Vec<Option<BeforeSend>>,
+    expected: usize,
+    sent: usize,
+    snapshot_dir: Option<PathBuf>,
+    results: usize,
     clock: FixedClock,
     connection: usize,
     outbound: VecDeque<AgentFrame>,
-    sent_command: bool,
 }
 
 impl FrameStream for FakeStream {
@@ -1368,10 +1440,16 @@ impl FrameStream for FakeStream {
         if let Some(frame) = self.outbound.pop_front() {
             return Ok(FrameRead::Frame(frame));
         }
-        if !self.sent_command {
-            self.sent_command = true;
-            self.outbound
-                .push_back(AgentFrame::OrchestratorCommand(self.command.clone()));
+        // The home sends the next command only after the result of the previous one.
+        if self.sent <= self.results
+            && let Some(command) = self.commands.pop_front()
+        {
+            if let Some(Some(action)) = self.pre_send.get(self.sent) {
+                let action = Arc::clone(action);
+                action();
+            }
+            self.sent += 1;
+            self.outbound.push_back(AgentFrame::OrchestratorCommand(command));
             self.outbound.push_back(AgentFrame::Ping);
             return Ok(FrameRead::Frame(self.outbound.pop_front().expect("the queued command")));
         }
@@ -1399,9 +1477,22 @@ impl FrameStream for FakeStream {
                 node: node(),
                 connection_id: format!("connection-{}", self.connection),
             }),
-            AgentFrame::OrchestratorResult(_) => self.outbound.push_back(AgentFrame::Revoked {
-                reason: "test complete".to_owned(),
-            }),
+            AgentFrame::OrchestratorResult(_) => {
+                self.results += 1;
+                if let Some(dir) = self.snapshot_dir.as_ref() {
+                    let snapshot = snapshot_orchestrators(dir);
+                    self.shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .snapshots
+                        .push(snapshot);
+                }
+                if self.results >= self.expected {
+                    self.outbound.push_back(AgentFrame::Revoked {
+                        reason: "test complete".to_owned(),
+                    });
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1492,4 +1583,487 @@ fn orchestrator_connection_result_is_correlated_and_revoke_cleans_the_host() {
     assert!(!serialized.contains(&password));
     assert!(!serialized.contains("54321"));
     let _ = working;
+}
+
+/// Writes the local settings an earlier placement left behind.
+fn move_host_config(
+    state: &Path,
+    name: &str,
+    script: &Path,
+    count: &Path,
+    app: OrchestratorApp,
+    session_id: Option<SessionId>,
+    surface_id: Option<SurfaceId>,
+) -> OrchestratorConfig {
+    let dir = OrchestratorHost::dir(state, name).expect("dir");
+    OrchestratorConfig {
+        name: name.to_owned(),
+        app,
+        project: Some(project()),
+        session: session_id,
+        surface: surface_id,
+        command: Some(script.display().to_string()),
+        args: vec![count.display().to_string()],
+        working_dir: Some(dir.display().to_string()),
+        service_json: Some(dir.join(".opencode/state/opencode/service.json").display().to_string()),
+    }
+}
+
+/// Runs one fake home connection to completion and returns its recording.
+fn run_fake_home(state: &Path, home: FakeHome) -> FakeHome {
+    let key = NodeKey::generate(state).expect("node key");
+    let config = AgentConfig::new("home-1", node(), state.to_path_buf(), "example.invalid");
+    let mut client = AgentClient::new(
+        state.to_path_buf(),
+        key,
+        config,
+        Box::new(home.clone()),
+        Arc::new(FixedClock(Timestamp::parse("2026-11-14T10:00:00Z").expect("timestamp"))),
+    );
+    let outcome = client.run(&RunOptions::new(AgentRole::Surface)).expect("run outcome");
+    assert!(matches!(outcome, RunOutcome::Revoked { .. }), "{outcome:?}");
+    home
+}
+
+fn orchestrator_results(frames: &[AgentFrame]) -> Vec<vowp_protocol::OrchestratorResult> {
+    frames
+        .iter()
+        .filter_map(|frame| match frame {
+            AgentFrame::OrchestratorResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn snapshot_json(snapshot: &[(String, Vec<u8>)], key: &str) -> serde_json::Value {
+    let (_, bytes) = snapshot
+        .iter()
+        .find(|(name, _)| name == key)
+        .unwrap_or_else(|| panic!("{key} is missing from the snapshot"));
+    serde_json::from_slice(bytes).expect("snapshot json")
+}
+
+fn snapshot_has(snapshot: &[(String, Vec<u8>)], key: &str) -> bool {
+    snapshot.iter().any(|(name, _)| name == key)
+}
+
+#[test]
+fn agent_orchestrator_move_preserves_the_home_session_id() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    // The home paired this node's surface for the orchestrator's exact session before
+    // the move; the landed `Start` command carries the name/app/project only.
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "move-session", &password);
+    // A previous placement left a local config naming the same surface but an old
+    // session. The home-issued pairing file, not the stale config, is authoritative.
+    write_config(
+        &state,
+        &move_host_config(
+            &state,
+            "move-session",
+            &script,
+            &count,
+            OrchestratorApp::Opencode,
+            Some(session(SESSION_TWO)),
+            Some(surface(SURFACE)),
+        ),
+    );
+    let host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_secs(5))
+        .with_stop_grace(Duration::from_millis(300));
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("move-session", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+    assert_eq!(result.state, OrchestratorNodeState::Running);
+    assert_eq!(link.attached.len(), 1);
+    assert_eq!(link.attached[0].session, session(SESSION));
+    assert_eq!(link.attached[0].surface, surface(SURFACE));
+
+    let config = host
+        .config("move-session")
+        .expect("config read")
+        .expect("config exists");
+    assert_eq!(config.session, Some(session(SESSION)));
+    assert_eq!(config.surface, Some(surface(SURFACE)));
+    let dir = OrchestratorHost::dir(&state, "move-session").expect("dir");
+    let record = snapshot_json(
+        &[(
+            "orchestrator.json".to_owned(),
+            fs::read(dir.join("orchestrator.json")).expect("record"),
+        )],
+        "orchestrator.json",
+    );
+    assert_eq!(record["session"], SESSION);
+    assert_eq!(record["surface"], SURFACE);
+    let host_state = host.state("move-session").expect("state read").expect("host state");
+    assert_eq!(host_state.session, Some(session(SESSION)));
+    assert_eq!(host_state.surface, Some(surface(SURFACE)));
+    assert_eq!(host_state.state, OrchestratorNodeState::Running);
+    assert_eq!(pid_count(&count), 1, "the move started exactly one host");
+
+    // No locally minted id: the config, app record and host state all carry the one id.
+    let serialized = serde_json::to_string(&config).expect("config json");
+    assert_eq!(serialized.matches(SESSION).count(), 1, "{serialized}");
+    assert!(
+        !serialized.contains(SESSION_TWO),
+        "the move did not invent or reuse another session: {serialized}"
+    );
+
+    host.stop(&stop_command("move-session"), &mut link);
+}
+
+#[test]
+fn agent_orchestrator_move_overwrites_a_stale_local_binding() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "move-stale", &password);
+    // A previous placement left a dead surface and a config naming it. The home paired
+    // this node's surface for the orchestrator's session; that pairing is authoritative.
+    write_binding(&state, &surface(SURFACE_TWO), &session(SESSION_TWO));
+    revoke_binding(&state, &surface(SURFACE_TWO));
+    write_config(
+        &state,
+        &move_host_config(
+            &state,
+            "move-stale",
+            &script,
+            &count,
+            OrchestratorApp::Opencode,
+            Some(session(SESSION_TWO)),
+            Some(surface(SURFACE_TWO)),
+        ),
+    );
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+
+    let result = host.start(
+        &start_command("move-stale", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(result.accepted, "{result:?}");
+    assert_eq!(link.attached.len(), 1);
+    assert_eq!(link.attached[0].session, session(SESSION));
+    assert_eq!(link.attached[0].surface, surface(SURFACE));
+    assert!(
+        !link
+            .attached
+            .iter()
+            .any(|binding| binding.session == session(SESSION_TWO)),
+        "the dead pairing was never started: {:?}",
+        link.attached
+    );
+
+    let config = host.config("move-stale").expect("config read").expect("config exists");
+    assert_eq!(config.session, Some(session(SESSION)));
+    assert_eq!(config.surface, Some(surface(SURFACE)));
+    let dir = OrchestratorHost::dir(&state, "move-stale").expect("dir");
+    let record = snapshot_json(
+        &[(
+            "orchestrator.json".to_owned(),
+            fs::read(dir.join("orchestrator.json")).expect("record"),
+        )],
+        "orchestrator.json",
+    );
+    assert_eq!(record["session"], SESSION);
+    assert_eq!(record["surface"], SURFACE);
+    let host_state = host.state("move-stale").expect("state read").expect("host state");
+    assert_eq!(host_state.session, Some(session(SESSION)));
+    assert_eq!(host_state.surface, Some(surface(SURFACE)));
+    assert_eq!(pid_count(&count), 1);
+    // The dead surface file is kept for inspection; it is never selected again.
+    let stale = fs::read_to_string(state.join("surfaces").join(SURFACE_TWO).join("session")).expect("stale binding");
+    assert_eq!(stale.trim(), SESSION_TWO);
+
+    host.stop(&stop_command("move-stale"), &mut link);
+}
+
+#[test]
+fn agent_orchestrator_move_stops_the_old_host_before_starting() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "move-old", &password);
+    // The old placement is live on this node under the previous pairing.
+    write_binding(&state, &surface(SURFACE_TWO), &session(SESSION_TWO));
+    write_config(
+        &state,
+        &move_host_config(
+            &state,
+            "move-old",
+            &script,
+            &count,
+            OrchestratorApp::Chat,
+            Some(session(SESSION_TWO)),
+            Some(surface(SURFACE_TWO)),
+        ),
+    );
+    let old_host = OrchestratorHost::new(&state)
+        .with_startup(Duration::from_secs(5))
+        .with_stop_grace(Duration::from_millis(300));
+    let mut old_link = RecordingLink::default();
+    let old = old_host.start(
+        &start_command("move-old", OrchestratorApp::Chat),
+        Some(&working),
+        &mut old_link,
+    );
+    assert!(old.accepted, "{old:?}");
+    let old_pid = last_pid(&count);
+    assert!(process_alive(old_pid));
+
+    // The home paired the target surface for the session and the previous pairing died.
+    revoke_binding(&state, &surface(SURFACE_TWO));
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+
+    let home = FakeHome::with_commands(
+        Some(state.clone()),
+        vec![start_command("move-old", OrchestratorApp::Chat)],
+    );
+    let home = run_fake_home(&state, home);
+    let frames = home.frames();
+    let results = orchestrator_results(&frames);
+    assert_eq!(results.len(), 1, "{frames:?}");
+    assert!(results[0].accepted, "{results:?}");
+    assert_eq!(results[0].state, OrchestratorNodeState::Running);
+
+    let attach_old = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::SurfaceAttach(attach) if attach.session == session(SESSION_TWO)))
+        .unwrap_or_else(|| panic!("the reattached old surface is missing: {frames:?}"));
+    let detach_old = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::SurfaceDetach(detach) if detach.session == session(SESSION_TWO)))
+        .unwrap_or_else(|| panic!("the old surface was not detached: {frames:?}"));
+    let attach_new = frames
+        .iter()
+        .position(|frame| matches!(frame, AgentFrame::SurfaceAttach(attach) if attach.session == session(SESSION)))
+        .unwrap_or_else(|| panic!("the new surface was not attached: {frames:?}"));
+    assert!(
+        attach_old < detach_old && detach_old < attach_new,
+        "the old host must detach before the new host starts: {frames:?}"
+    );
+
+    let pid = last_pid(&count);
+    assert_ne!(pid, old_pid);
+    assert_eq!(pid_count(&count), 2, "one old and one new process were spawned");
+    wait_until(|| !process_alive(old_pid));
+    let snapshot = home.snapshots().pop().expect("result snapshot");
+    let host_state = snapshot_json(&snapshot, "move-old/host.json");
+    assert_eq!(host_state["pid"], pid);
+    assert_eq!(host_state["session"], SESSION);
+    assert_eq!(host_state["state"], "running");
+    let config = snapshot_json(&snapshot, "move-old/config.json");
+    assert_eq!(config["session"], SESSION);
+    assert_eq!(config["surface"], SURFACE);
+    wait_until(|| !process_alive(pid));
+}
+
+#[test]
+fn agent_orchestrator_move_is_idempotent_and_refuses_a_different_session() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "move-idem", &password);
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    write_config(
+        &state,
+        &move_host_config(&state, "move-idem", &script, &count, OrchestratorApp::Chat, None, None),
+    );
+    let hook_state = state.clone();
+    let home = FakeHome::with_commands(
+        Some(state.clone()),
+        vec![
+            start_command("move-idem", OrchestratorApp::Chat),
+            start_command("move-idem", OrchestratorApp::Chat),
+            resume_command("move-idem"),
+        ],
+    )
+    .before(2, move || {
+        // The owner re-paired the node for another session while the old host was live.
+        revoke_binding(&hook_state, &surface(SURFACE));
+        write_binding(&hook_state, &surface(SURFACE_TWO), &session(SESSION_TWO));
+    });
+    let home = run_fake_home(&state, home);
+    let frames = home.frames();
+    let results = orchestrator_results(&frames);
+    assert_eq!(results.len(), 3, "{frames:?}");
+    assert!(results[0].accepted, "{results:?}");
+    assert_eq!(results[0].state, OrchestratorNodeState::Running);
+    assert!(results[1].accepted, "{results:?}");
+    assert_eq!(results[1].state, OrchestratorNodeState::Running);
+    assert!(
+        results[1]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("already running")),
+        "a duplicate reports the live host: {results:?}"
+    );
+    assert!(!results[2].accepted, "{results:?}");
+    assert_eq!(results[2].state, OrchestratorNodeState::Running);
+    assert_eq!(
+        results[2].error.as_ref().map(|error| error.code.as_str()),
+        Some("session_conflict")
+    );
+    assert_eq!(pid_count(&count), 1, "the duplicate and the refusal spawned nothing");
+    let attaches = frames
+        .iter()
+        .filter(|frame| matches!(frame, AgentFrame::SurfaceAttach(_)))
+        .count();
+    assert_eq!(attaches, 1, "the live host was attached exactly once: {frames:?}");
+    assert!(
+        !frames.iter().any(|frame| matches!(frame, AgentFrame::SurfaceDetach(_))),
+        "the refused resume left the live host attached: {frames:?}"
+    );
+
+    let snapshots = home.snapshots();
+    let refused = snapshots.last().expect("refusal snapshot");
+    let host_state = snapshot_json(refused, "move-idem/host.json");
+    assert_eq!(
+        host_state["state"], "running",
+        "the refused resume kept the host running"
+    );
+    assert_eq!(host_state["session"], SESSION);
+    let config = snapshot_json(refused, "move-idem/config.json");
+    assert_eq!(
+        config["session"], SESSION,
+        "the refused resume did not rebind the config"
+    );
+
+    let pid = last_pid(&count);
+    wait_until(|| !process_alive(pid));
+}
+
+#[test]
+fn agent_orchestrator_move_never_returns_a_secret_path_or_port() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "move-redact", &password);
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    write_config(
+        &state,
+        &move_host_config(
+            &state,
+            "move-redact",
+            &script,
+            &count,
+            OrchestratorApp::Chat,
+            None,
+            None,
+        ),
+    );
+    let home = FakeHome::with_commands(
+        Some(state.clone()),
+        vec![start_command("move-redact", OrchestratorApp::Chat)],
+    );
+    let home = run_fake_home(&state, home);
+    let frames = home.frames();
+    let results = orchestrator_results(&frames);
+    assert_eq!(results.len(), 1, "{frames:?}");
+    assert!(results[0].accepted, "{results:?}");
+
+    let state_text = state.display().to_string();
+    let serialized = serde_json::to_string(&results[0]).expect("result json");
+    for text in [&serialized, &format!("{results:?}")] {
+        assert!(!text.contains(&password), "{text}");
+        assert!(!text.contains("54321"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        assert!(!text.contains(&state_text), "{text}");
+    }
+    let snapshot = home.snapshots().pop().expect("result snapshot");
+    let host_state = snapshot
+        .iter()
+        .find(|(name, _)| name == "move-redact/host.json")
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .expect("host state");
+    assert!(!host_state.contains(&password), "{host_state}");
+    assert!(!host_state.contains("54321"), "{host_state}");
+    assert!(!host_state.contains("127.0.0.1"), "{host_state}");
+    assert!(!host_state.contains(&state_text), "{host_state}");
+    let pid = last_pid(&count);
+    wait_until(|| !process_alive(pid));
+}
+
+#[test]
+fn agent_orchestrator_move_requires_a_paired_surface() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "move-missing", &password);
+    write_config(
+        &state,
+        &move_host_config(
+            &state,
+            "move-missing",
+            &script,
+            &count,
+            OrchestratorApp::Chat,
+            None,
+            None,
+        ),
+    );
+    let home = FakeHome::with_commands(
+        Some(state.clone()),
+        vec![start_command("move-missing", OrchestratorApp::Chat)],
+    );
+    let home = run_fake_home(&state, home);
+    let results = orchestrator_results(&home.frames());
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(!results[0].accepted, "{results:?}");
+    assert_eq!(
+        results[0].error.as_ref().map(|error| error.code.as_str()),
+        Some("surface_missing")
+    );
+    assert_eq!(pid_count(&count), 0, "no host was started without a pairing");
+    assert!(
+        !snapshot_has(&home.snapshots()[0], "move-missing/host.json"),
+        "a refused start leaves no host state"
+    );
+
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let (script, count) = fake_app(root.path(), "move-ambiguous", &password);
+    write_config(
+        &state,
+        &move_host_config(
+            &state,
+            "move-ambiguous",
+            &script,
+            &count,
+            OrchestratorApp::Chat,
+            None,
+            None,
+        ),
+    );
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    write_binding(&state, &surface(SURFACE_TWO), &session(SESSION_TWO));
+    let home = FakeHome::with_commands(
+        Some(state.clone()),
+        vec![start_command("move-ambiguous", OrchestratorApp::Chat)],
+    );
+    let home = run_fake_home(&state, home);
+    let results = orchestrator_results(&home.frames());
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(!results[0].accepted, "{results:?}");
+    assert_eq!(
+        results[0].error.as_ref().map(|error| error.code.as_str()),
+        Some("surface_ambiguous")
+    );
+    assert_eq!(pid_count(&count), 0, "no host was started with an ambiguous pairing");
+    assert!(
+        !snapshot_has(&home.snapshots()[0], "move-ambiguous/host.json"),
+        "a refused start leaves no host state"
+    );
 }
