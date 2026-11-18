@@ -9,7 +9,7 @@ import { SessionsDrawer } from "../views/sessions/SessionsDrawer";
 import { AddProjectDialog } from "./AddProjectDialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { ChatView } from "./ChatView";
-import { useConversations } from "./conversations";
+import { initializeConversations, useConversations } from "./conversations";
 import { ContextPanel } from "./ContextPanel";
 import { ServerPage } from "./ServerPage";
 import { SettingsView } from "./SettingsView";
@@ -32,7 +32,7 @@ import "./theme.css";
  *
  * Main views: an orchestrator session, the server page, a project's workers page,
  * or settings. Hosts, connection, fleet and capacity come from the existing store
- * and bridge; orchestrator chat is a design preview (see conversations.ts).
+ * and bridge; orchestrator chat is driven by `bridge.chat` (see conversations.ts).
  */
 export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const initialize = useFleetStore((state) => state.initialize);
@@ -66,6 +66,9 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
+    // Subscribe the conversation cache to the same bridge once. The returned cleanup
+    // removes the chat event listener and the fleet listener together.
+    const closeConversations = initializeConversations(bridge);
     void initialize(bridge).then((cleanup) => {
       if (disposed) cleanup();
       else unsubscribe = cleanup;
@@ -73,6 +76,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     return () => {
       disposed = true;
       unsubscribe?.();
+      closeConversations();
     };
   }, [bridge, initialize]);
 

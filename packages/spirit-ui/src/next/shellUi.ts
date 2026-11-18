@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { SessionId } from "./conversations";
+import type { ChatPanelTarget, SessionId } from "../bridge/wire";
 
 /** What fills the main area, to the right of the sidebar. */
 export type NextView =
@@ -11,13 +11,8 @@ export type NextView =
   /** Full page: one project's workers and jobs as a node map and rows. */
   | { kind: "workers"; project: string };
 
-/** What the slide-in details panel shows. */
-export type PanelContent =
-  /** Default when opened from the toggle: what is running, inbox, server at a glance. */
-  | { kind: "overview" }
-  | { kind: "server" }
-  | { kind: "inbox" }
-  | { kind: "job"; project: string; jobId: string };
+/** What the slide-in details panel shows. The bridge owns the target type. */
+export type PanelContent = ChatPanelTarget;
 
 interface ShellUiState {
   /** null means the panel is closed. It is closed by default. */

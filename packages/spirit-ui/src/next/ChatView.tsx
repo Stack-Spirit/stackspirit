@@ -1,12 +1,11 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
-import type { HostDraft, HostKeyPin, HostKeyScan } from "../bridge/wire";
-import { useEngine, useFleet, useFleetStore } from "../state/fleetStore";
+import type { ChatSessionState, HostDraft, HostKeyPin, HostKeyScan } from "../bridge/wire";
+import { useFleet, useFleetStore } from "../state/fleetStore";
 import {
   useConversations,
-  useSessionLocation,
-  type ChatMessage,
+  type ChatMessageView,
   type SessionId,
 } from "./conversations";
 import { PageHeader } from "./PageHeader";
@@ -26,86 +25,295 @@ function sessionTitle(session: SessionId): string {
   return session.slice("project:".length);
 }
 
+function stateLabel(state: ChatSessionState): string {
+  switch (state) {
+    case "idle":
+      return "Not started";
+    case "connecting":
+      return "Connecting…";
+    case "streaming":
+      return "Replying…";
+    case "ready":
+      return "Ready";
+    case "stopped":
+      return "Stopped";
+    case "error":
+      return "Needs attention";
+  }
+}
+
+function isGateError(code: string | undefined, message: string | null | undefined): boolean {
+  if (code === "gate") return true;
+  if (/^chat_(gated|unavailable|not_configured|not_mirrored|unsupported_app)$/.test(code ?? "")) {
+    return true;
+  }
+  return /chat_(gated|unavailable|not_configured|not_mirrored|unsupported_app)/.test(
+    message ?? "",
+  );
+}
+
+function composerPlaceholder(
+  session: SessionId,
+  state: ChatSessionState,
+  missingModel: boolean,
+): string {
+  if (missingModel) return "Choose a model in Settings → Engine";
+  switch (state) {
+    case "connecting":
+      return session === "setup"
+        ? "Starting the setup assistant…"
+        : "Connecting to the orchestrator…";
+    case "streaming":
+      return "Waiting for the reply… Stop to cancel";
+    case "stopped":
+      return "Stopped. Start to continue.";
+    case "error":
+      return "Resolve the chat error to continue.";
+    case "idle":
+      return "Start the conversation to continue.";
+    case "ready":
+      return session === "setup"
+        ? "Tell me about your server, or ask anything"
+        : `Message the ${session === "global" ? "global" : "project"} orchestrator`;
+  }
+}
+
 export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps) {
   const messages = useConversations((state) => state.messages[session]) ?? [];
+  const view = useConversations((state) => state.views[session]) ?? null;
   const send = useConversations((state) => state.send);
-  const setLocation = useConversations((state) => state.setLocation);
-  const location = useSessionLocation(session);
-  const engine = useEngine();
+  const stop = useConversations((state) => state.stop);
+  const open = useConversations((state) => state.open);
+  const restart = useConversations((state) => state.restart);
+  const loadEarlier = useConversations((state) => state.loadEarlier);
+  const hasEarlier = useConversations((state) => Boolean(state.earlier[session]));
+  const loadingEarlier = useConversations((state) => state.loadingEarlier[session] ?? false);
+  const truncated = useConversations((state) => state.truncated[session] ?? false);
   const endRef = useRef<HTMLDivElement>(null);
   const project = session.startsWith("project:") ? session.slice("project:".length) : null;
+  const state = view?.state ?? "idle";
+
+  useEffect(() => {
+    void open(session, project, session === "setup" ? "local" : "server");
+  }, [open, session, project]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView?.({ block: "end" });
   }, [messages.length]);
 
-  const model = engine?.selected_model?.label ?? engine?.selected_model?.id ?? "StackSpirit Engine";
-  const fixedLocal = session === "setup";
+  const isSetup = session === "setup";
+  const missingModel = isSetup && state === "ready" && !view?.model;
+  const canChat = state === "ready" && !missingModel;
+  const hasConversation = messages.some(
+    (message) =>
+      message.role === "user" ||
+      message.origin === "model" ||
+      message.origin === "preview",
+  );
+  const hasReply = messages.some(
+    (message) => message.origin === "model" || message.origin === "preview",
+  );
+  const error = view?.error ?? null;
+  const gate = isGateError(error?.code, error?.message);
+  const canRetry = Boolean(error?.retryable);
+  const canRestartSetup =
+    isSetup &&
+    (error?.code === "not_found" || /session_lost/.test(error?.message ?? ""));
+
+  // The live text itself is never aria-live. This single polite region only changes on
+  // state transitions, so screen readers do not read every delta.
+  const announcement =
+    state === "streaming"
+      ? "Reply in progress"
+      : state === "connecting"
+        ? "Connecting…"
+        : state === "stopped"
+          ? "Stopped"
+          : state === "error"
+            ? `Error: ${error?.message ?? "Chat error"}`
+            : state === "ready"
+              ? hasReply
+                ? "Reply complete"
+                : "Ready"
+              : "";
+
+  // The chip is derived from the transport view, never from a requested label.
+  // Setup is always local. A gate is not a connected location, even though the view
+  // carries the requested hint; show "Not connected" until a real transport attaches.
+  const chipLocation = isSetup
+    ? view
+      ? "local"
+      : null
+    : view && view.state !== "connecting" && !gate
+      ? view.location
+      : null;
+  const chipLabel =
+    chipLocation === "local"
+      ? "Local · this Mac"
+      : chipLocation === "server"
+        ? `Server · ${serverLabel ?? "server"}`
+        : isSetup
+          ? view
+            ? "Local · this Mac"
+            : "Starting…"
+          : view?.state === "connecting"
+            ? "Connecting…"
+            : "Not connected";
+  const modelLabel =
+    view?.model?.label ??
+    (isSetup ? "Choose a model in Settings → Engine" : "Orchestrator default");
+  const chipTitle =
+    chipLocation === "local"
+      ? isSetup
+        ? "Runs on this Mac; the setup transcript is local to this app."
+        : "Runs on this Mac and mirrors turns to the home log."
+      : chipLocation === "server"
+        ? "Runs on the server. Works while this Mac is closed."
+        : "No chat transport is attached.";
 
   return (
     <section className="nx-main" aria-label={sessionTitle(session)}>
       <PageHeader
         title={sessionTitle(session)}
         actions={
-          <>
-            {fixedLocal ? null : (
-              <button
-                type="button"
-                className="nx-btn nx-btn--quiet nx-btn--sm"
-                onClick={() => setLocation(session, location === "local" ? "server" : "local")}
-              >
-                ⇄ {location === "local" ? "Run on server" : "Run on this Mac"}
-              </button>
-            )}
-            {project && onOpenWorkers ? (
-              <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={() => onOpenWorkers(project)}>
-                Workers
-              </button>
-            ) : null}
-          </>
+          project && onOpenWorkers ? (
+            <button
+              type="button"
+              className="nx-btn nx-btn--quiet nx-btn--sm"
+              onClick={() => onOpenWorkers(project)}
+            >
+              Workers
+            </button>
+          ) : null
         }
       >
         <span
-          className={`nx-chip ${location === "local" ? "nx-chip--local" : "nx-chip--server"}`}
+          className={`nx-chip ${chipLocation === "local" ? "nx-chip--local" : chipLocation === "server" ? "nx-chip--server" : "nx-chip--muted"}`}
           data-testid="session-location"
-          title={
-            location === "local"
-              ? "Runs on this Mac with local context. The session log stays on the server."
-              : "Runs on the server. Works while this Mac is closed."
-          }
+          data-state={state}
+          title={chipTitle}
         >
-          <span aria-hidden="true">{location === "local" ? "▣" : "◉"}</span>
-          {location === "local" ? "Local · this Mac" : `Server · ${serverLabel ?? "server"}`}
+          <span aria-hidden="true">
+            {chipLocation === "local" ? "▣" : chipLocation === "server" ? "◉" : "○"}
+          </span>
+          {chipLabel}
         </span>
+        {view ? (
+          <span
+            className={`nx-chat-state nx-chat-state--${state}`}
+            data-testid="session-state"
+          >
+            {stateLabel(state)}
+          </span>
+        ) : null}
       </PageHeader>
 
       <div className="nx-chat">
-        {messages.length === 0 ? (
-          <EmptySession session={session} onPick={(text) => send(session, text)} />
-        ) : (
-          <div className="nx-chat__inner" aria-live="polite">
+        {hasEarlier || truncated ? (
+          <div className="nx-chat__earlier">
+            {hasEarlier ? (
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={() => void loadEarlier(session)}
+                disabled={loadingEarlier}
+              >
+                {loadingEarlier ? "Loading earlier messages…" : "Load earlier messages"}
+              </button>
+            ) : null}
+            {truncated ? (
+              <span className="nx-chat__note">Older messages may be missing from this transcript.</span>
+            ) : null}
+          </div>
+        ) : null}
+        {!hasConversation ? (
+          <EmptySession
+            session={session}
+            onPick={(text) => void send(session, text)}
+            disabled={!canChat}
+            compact={messages.length > 0}
+          />
+        ) : null}
+        {messages.length > 0 ? (
+          <div className="nx-chat__inner">
             {messages.map((message) => (
               <Message key={message.id} session={session} message={message} />
             ))}
             <div ref={endRef} />
           </div>
+        ) : (
+          <div ref={endRef} />
         )}
       </div>
 
       <Composer
-        placeholder={
-          session === "setup"
-            ? "Tell me about your server, or ask anything"
-            : `Message the ${session === "global" ? "global" : "project"} orchestrator`
+        placeholder={composerPlaceholder(session, state, missingModel)}
+        model={modelLabel}
+        modelMissing={missingModel}
+        disabled={!canChat}
+        streaming={state === "streaming"}
+        stopped={state === "stopped" || state === "idle"}
+        onSend={(text) => void send(session, text)}
+        onStop={() => void stop(session)}
+        onStart={() =>
+          void open(session, project, session === "setup" ? "local" : "server")
         }
-        model={model}
-        onSend={(text) => send(session, text)}
       />
+
+      {error ? (
+        <div
+          className={`nx-chat__error${gate ? " nx-chat__error--gate" : ""}`}
+          role="alert"
+          data-testid="chat-error"
+          data-code={error.code}
+          data-gate={gate ? "true" : "false"}
+        >
+          <strong>{gate ? "A capability gate is not ready" : errorTitle(error)}</strong>
+          <span>{error.message}</span>
+          {error.hint ? <span>{error.hint}</span> : null}
+          <div className="nx-chat__error-actions">
+            {canRetry ? (
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={() =>
+                  void open(session, project, session === "setup" ? "local" : "server")
+                }
+              >
+                Reconnect
+              </button>
+            ) : null}
+            {canRestartSetup ? (
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={() => void restart("setup")}
+              >
+                Start a new conversation
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      <span className="nx-sr" role="status" aria-live="polite">
+        {announcement}
+      </span>
     </section>
   );
 }
 
-function EmptySession({ session, onPick }: { session: SessionId; onPick: (text: string) => void }) {
+function EmptySession({
+  session,
+  onPick,
+  disabled,
+  compact,
+}: {
+  session: SessionId;
+  onPick: (text: string) => void;
+  disabled: boolean;
+  compact: boolean;
+}) {
   const fleet = useFleet();
   let title: string;
   let body: string;
@@ -138,13 +346,13 @@ function EmptySession({ session, onPick }: { session: SessionId; onPick: (text: 
   }
 
   return (
-    <div className="nx-empty-chat">
-      <SpiritMark size={64} />
+    <div className={`nx-empty-chat${compact ? " nx-empty-chat--compact" : ""}`}>
+      <SpiritMark size={compact ? 40 : 64} />
       <h2>{title}</h2>
       <p>{body}</p>
       <div className="nx-suggest">
         {suggestions.map((text) => (
-          <button key={text} type="button" onClick={() => onPick(text)}>
+          <button key={text} type="button" disabled={disabled} onClick={() => onPick(text)}>
             {text}
           </button>
         ))}
@@ -153,7 +361,7 @@ function EmptySession({ session, onPick }: { session: SessionId; onPick: (text: 
   );
 }
 
-function Message({ session, message }: { session: SessionId; message: ChatMessage }) {
+function Message({ session, message }: { session: SessionId; message: ChatMessageView }) {
   if (message.role === "user") {
     return (
       <div className="nx-msg nx-msg--user">
@@ -164,12 +372,19 @@ function Message({ session, message }: { session: SessionId; message: ChatMessag
     );
   }
   const received = message.card?.kind === "secure-received";
+  const preview = message.origin === "preview";
   const card = <MessageCard session={session} message={message} />;
   return (
-    <div className="nx-msg">
+    <div className={`nx-msg${message.streaming ? " nx-msg--streaming" : ""}`}>
       <div className="nx-msg__who">
         <SpiritMark size={20} />
-        StackSpirit
+        <span>StackSpirit</span>
+        {preview ? (
+          <span className="nx-msg__preview" data-testid="preview-tag">
+            Preview
+          </span>
+        ) : null}
+        {message.streaming ? <span className="nx-msg__cursor" aria-hidden="true" /> : null}
       </div>
       {received ? card : null}
       {message.text.map((paragraph, index) => (
@@ -182,7 +397,7 @@ function Message({ session, message }: { session: SessionId; message: ChatMessag
   );
 }
 
-function MessageCard({ session, message }: { session: SessionId; message: ChatMessage }) {
+function MessageCard({ session, message }: { session: SessionId; message: ChatMessageView }) {
   const card = message.card;
   if (!card) return null;
   if (card.kind === "secure-server") {
@@ -607,18 +822,32 @@ function SecureServerCard({ session, messageId }: { session: SessionId; messageI
 function Composer({
   placeholder,
   model,
+  modelMissing,
+  disabled,
+  streaming,
+  stopped,
   onSend,
+  onStop,
+  onStart,
 }: {
   placeholder: string;
   model: string;
+  modelMissing: boolean;
+  disabled: boolean;
+  streaming: boolean;
+  stopped: boolean;
   onSend: (text: string) => void;
+  onStop: () => void;
+  onStart: () => void;
 }) {
   const [text, setText] = useState("");
   const id = useId();
 
   function submit() {
-    if (!text.trim()) return;
-    onSend(text);
+    if (disabled) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    onSend(trimmed);
     setText("");
   }
 
@@ -631,7 +860,7 @@ function Composer({
 
   return (
     <form
-      className="nx-composer"
+      className={`nx-composer${disabled ? " nx-composer--disabled" : ""}`}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -645,15 +874,38 @@ function Composer({
         rows={1}
         value={text}
         placeholder={placeholder}
+        disabled={disabled}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={onKeyDown}
       />
       <div className="nx-composer__bar">
-        <span className="nx-chip" title="Runs on the bundled StackSpirit Engine">
+        <span
+          className={`nx-chip nx-composer__model${modelMissing ? " nx-chip--warn" : ""}`}
+          title={
+            modelMissing
+              ? "No local model is selected for the setup assistant"
+              : "The model the chat session reports"
+          }
+        >
           ◇ {model}
         </span>
         <span className="nx-composer__spacer" />
-        <button type="submit" className="nx-send" aria-label="Send" disabled={!text.trim()}>
+        {stopped ? (
+          <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onStart}>
+            Start
+          </button>
+        ) : null}
+        {streaming ? (
+          <button type="button" className="nx-stop" onClick={onStop}>
+            Stop
+          </button>
+        ) : null}
+        <button
+          type="submit"
+          className="nx-send"
+          aria-label="Send"
+          disabled={disabled || !text.trim()}
+        >
           ↑
         </button>
       </div>

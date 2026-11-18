@@ -406,6 +406,11 @@ button.nx-node:focus-visible {
   color: var(--nx-warn);
 }
 
+.nx-chip--muted {
+  background: var(--nx-raised);
+  color: var(--nx-muted);
+}
+
 .nx-pill {
   padding: 1px 7px;
   border-radius: 999px;
@@ -1115,6 +1120,7 @@ button.nx-node:focus-visible {
 
 .nx-msg p {
   margin: 0;
+  white-space: pre-wrap;
 }
 
 .nx-msg--user {
@@ -1240,6 +1246,183 @@ button.nx-node:focus-visible {
 .nx-send:disabled {
   background: var(--nx-line-strong);
   cursor: not-allowed;
+}
+
+/* Chat state machine, gate and error states. */
+.nx-chat-state {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--nx-raised);
+  color: var(--nx-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.nx-chat-state--connecting {
+  background: var(--nx-warn-soft);
+  color: var(--nx-warn);
+}
+
+.nx-chat-state--streaming {
+  background: var(--nx-accent-soft);
+  color: var(--nx-accent-soft-ink);
+}
+
+.nx-chat-state--ready {
+  color: var(--nx-ok);
+}
+
+.nx-chat-state--error {
+  background: var(--nx-danger-soft);
+  color: var(--nx-danger);
+}
+
+.nx-empty-chat--compact {
+  gap: 6px;
+  padding-top: 24px;
+}
+
+.nx-empty-chat--compact h2 {
+  font-size: 18px;
+}
+
+.nx-empty-chat--compact .nx-suggest {
+  margin-top: 2px;
+}
+
+.nx-suggest button:disabled {
+  border-color: var(--nx-line);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.nx-suggest button:disabled:hover {
+  border-color: var(--nx-line);
+}
+
+.nx-composer--disabled {
+  background: var(--nx-raised);
+}
+
+.nx-composer--disabled textarea {
+  cursor: not-allowed;
+}
+
+.nx-composer--disabled textarea::placeholder {
+  color: var(--nx-muted);
+}
+
+.nx-composer__model {
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nx-stop {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--nx-danger);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--nx-danger);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nx-stop:hover {
+  background: var(--nx-danger-soft);
+}
+
+.nx-msg__preview {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--nx-warn-soft);
+  color: var(--nx-warn);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.nx-msg__cursor {
+  width: 2px;
+  height: 1em;
+  border-radius: 1px;
+  background: var(--nx-accent);
+  animation: nx-chat-cursor 1.1s steps(2, start) infinite;
+}
+
+@keyframes nx-chat-cursor {
+  50% {
+    opacity: 0;
+  }
+}
+
+.nx-chat__earlier {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 20px 0;
+}
+
+.nx-chat__note {
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-chat__error {
+  display: grid;
+  flex: none;
+  gap: 4px;
+  width: min(760px, calc(100% - 40px));
+  margin: 0 auto 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius);
+  background: var(--nx-danger-soft);
+  color: var(--nx-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.nx-chat__error strong {
+  color: var(--nx-danger);
+  font-size: 13px;
+}
+
+.nx-chat__error span {
+  color: var(--nx-text);
+}
+
+.nx-chat__error--gate {
+  border-color: var(--nx-warn);
+  background: var(--nx-warn-soft);
+}
+
+.nx-chat__error--gate strong {
+  color: var(--nx-warn);
+}
+
+.nx-chat__error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.nx-chat__error-actions:empty {
+  display: none;
 }
 
 /* Secure field card: values typed here never enter the conversation. */
@@ -2613,7 +2796,8 @@ button.nx-node:hover {
 @media (prefers-reduced-motion: reduce) {
   .nx-drawer,
   .nx-drawer__inner,
-  .nx-proj__chevron {
+  .nx-proj__chevron,
+  .nx-msg__cursor {
     transition: none;
     animation: none;
   }

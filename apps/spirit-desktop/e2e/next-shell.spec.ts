@@ -40,10 +40,16 @@ test("welcome with no saved server meets WCAG 2.2 AA in light and dark", async (
   }
 });
 
-test("setup assistant keeps the password out of the chat", async ({ page }) => {
+test("setup assistant sends through chat and keeps the password out", async ({ page }) => {
   await page.goto(url("empty"));
   await page.getByRole("button", { name: /Set up with AI/ }).click();
+  await expect(page.getByTestId("session-location")).toContainText("Local");
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
+
   await page.getByRole("button", { name: "I have a new VPS" }).click();
+  await expect(page.getByText(/Preview reply\./)).toBeVisible();
+  await expect(page.getByTestId("preview-tag")).toBeVisible();
+
   const form = page.getByRole("form", { name: "Secure server details" });
   await form.getByLabel("Server address").fill("203.0.113.50");
   await form.getByLabel("One-time password from your provider").fill("not-a-real-secret");
@@ -53,11 +59,27 @@ test("setup assistant keeps the password out of the chat", async ({ page }) => {
   await expect(page.getByText("not-a-real-secret")).toHaveCount(0);
 });
 
+test("server chat shows the honest VOWP gate, not a fake reply", async ({ page }) => {
+  await page.goto(url("chat-server-gated"));
+  await connect(page);
+
+  const gate = page.getByTestId("chat-error");
+  await expect(gate).toBeVisible();
+  await expect(gate).toHaveAttribute("data-gate", "true");
+  await expect(gate).toContainText("Server chat needs VOWP 0.5's `vowp orchestrator endpoint`");
+  await expect(gate).toContainText("or an owner-approved SSH forward");
+  await expect(page.getByTestId("session-location")).toContainText("Not connected");
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeDisabled();
+  await expect(page.getByText(/Preview reply\./)).toHaveCount(0);
+  await expectNoWcagViolations(page);
+});
+
 test("connected shell, details panel and settings menu meet WCAG 2.2 AA", async ({ page }) => {
   for (const theme of ["light", "dark"] as const) {
     await page.goto(url("busy", theme));
     await connect(page);
     await expect(page.getByRole("heading", { name: "Global orchestrator", level: 1 })).toBeVisible();
+    await expect(page.getByTestId("session-location")).toContainText("Server · staging-vps");
     await expect(page.getByTestId("details-panel")).toHaveAttribute("aria-hidden", "true");
     await expectNoWcagViolations(page);
 
