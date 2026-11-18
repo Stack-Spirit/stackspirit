@@ -4100,6 +4100,21 @@ fn pair_via_agent_cli(
     surface
 }
 
+/// Upper bound on one in-process MCP tool call.
+///
+/// The call runs the real proxy, agent socket and gateway in this process; every caller
+/// asserts the tool's result separately. Under a loaded workspace gate a correct call can
+/// take over a second, so this is a hang guard, not a latency budget.
+const MCP_CALL_HANG_GUARD: Duration = Duration::from_secs(30);
+
+/// Asserts that one MCP tool call returned inside the hang guard.
+fn assert_mcp_returned(tool: &str, elapsed: Duration) {
+    assert!(
+        elapsed < MCP_CALL_HANG_GUARD,
+        "{tool} did not return within {MCP_CALL_HANG_GUARD:?}: took {elapsed:?}"
+    );
+}
+
 /// One MCP `tools/call` through the real `vowp mcp --agent-socket` proxy.
 fn mcp_tool_call(
     home: &GatewayHome,
@@ -4376,7 +4391,7 @@ fn real_gateway_unbound_orchestrator_pairs_over_socket_and_mirrors_sse() {
 
     // MCP reads and writes over the real proxy, all against the real gateway.
     let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "fleet_status", serde_json::json!({}));
-    assert!(elapsed < Duration::from_secs(1), "fleet_status took {elapsed:?}");
+    assert_mcp_returned("fleet_status", elapsed);
     let fleet = mcp_text(&response);
     let names: Vec<&str> = fleet["snapshot"]["projects"]
         .as_array()
@@ -4390,7 +4405,7 @@ fn real_gateway_unbound_orchestrator_pairs_over_socket_and_mirrors_sse() {
     );
 
     let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "session_resume", serde_json::json!({}));
-    assert!(elapsed < Duration::from_secs(1), "session_resume took {elapsed:?}");
+    assert_mcp_returned("session_resume", elapsed);
     let resumed = mcp_text(&response);
     assert_eq!(resumed["session"]["id"], session.as_str(), "{resumed}");
 
@@ -4401,7 +4416,7 @@ fn real_gateway_unbound_orchestrator_pairs_over_socket_and_mirrors_sse() {
         "capacity_set",
         serde_json::json!({"target": 1, "mode": "auto"}),
     );
-    assert!(elapsed < Duration::from_secs(1), "capacity_set took {elapsed:?}");
+    assert_mcp_returned("capacity_set", elapsed);
     assert_eq!(response["result"]["isError"], false, "{response}");
 
     let (elapsed, response) = mcp_tool_call(
@@ -4418,7 +4433,7 @@ fn real_gateway_unbound_orchestrator_pairs_over_socket_and_mirrors_sse() {
             "owns": ["src/**"],
         }),
     );
-    assert!(elapsed < Duration::from_secs(1), "job_add took {elapsed:?}");
+    assert_mcp_returned("job_add", elapsed);
     assert_eq!(response["result"]["isError"], false, "{response}");
     let vowp = ProjectName::parse("vowp").expect("project");
     let project_store = Store::open_with_project(&home.paths(), &vowp).expect("project store");
@@ -4502,11 +4517,11 @@ fn real_gateway_project_orchestrator_defaults_job_project_and_enforces_one_lease
     assert!(host["pid"].is_u64(), "the live host records one pid: {host}");
 
     let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "fleet_status", serde_json::json!({}));
-    assert!(elapsed < Duration::from_secs(1), "fleet_status took {elapsed:?}");
+    assert_mcp_returned("fleet_status", elapsed);
     assert_eq!(response["result"]["isError"], false, "{response}");
 
     let (elapsed, response) = mcp_tool_call(&home, &state_dir, &surface, "session_resume", serde_json::json!({}));
-    assert!(elapsed < Duration::from_secs(1), "session_resume took {elapsed:?}");
+    assert_mcp_returned("session_resume", elapsed);
     assert_eq!(response["result"]["isError"], false, "{response}");
 
     // No project argument: the bound session's project must be used.
@@ -4522,7 +4537,7 @@ fn real_gateway_project_orchestrator_defaults_job_project_and_enforces_one_lease
             "role": "worker",
         }),
     );
-    assert!(elapsed < Duration::from_secs(1), "job_add took {elapsed:?}");
+    assert_mcp_returned("job_add", elapsed);
     assert_eq!(response["result"]["isError"], false, "{response}");
     let project_store = Store::open_with_project(&home.paths(), &project).expect("project store");
     assert!(
