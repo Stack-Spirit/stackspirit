@@ -97,7 +97,10 @@ export class TauriBridge implements SpiritBridge {
       }
       return call("onboarding_install_key", { input });
     },
-    installedHosts: (): Promise<string[]> => call("onboarding_installed_hosts"),
+    installedHosts: async (): Promise<string[]> => {
+      const view = await call<AppKeyView>("onboarding_key_status");
+      return view.installed_host_ids ?? [];
+    },
   };
 
   connection = {

@@ -97,4 +97,20 @@ describe("TauriBridge onboarding", () => {
       input: installInput("one-time"),
     });
   });
+
+  it("reads installed host ids from the existing key-status command", async () => {
+    const bridge = new TauriBridge();
+    invoke.mockResolvedValue({
+      exists: true,
+      fingerprint: PIN.sha256,
+      public_key: "ssh-ed25519 AAAA onboarding-test",
+      installed_host_ids: ["host-app", "host-failed-install"],
+    });
+
+    await expect(bridge.onboarding.installedHosts?.()).resolves.toEqual([
+      "host-app",
+      "host-failed-install",
+    ]);
+    expect(invoke).toHaveBeenCalledWith("onboarding_key_status", undefined);
+  });
 });

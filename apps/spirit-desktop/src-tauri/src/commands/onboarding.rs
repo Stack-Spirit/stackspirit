@@ -38,6 +38,11 @@ pub struct AppKeyView {
     pub fingerprint: Option<String>,
     /// One-line OpenSSH public key of the existing key.
     pub public_key: Option<String>,
+    /// Ids of saved profiles that point at the app-owned key.
+    ///
+    /// Only ids cross the bridge. The key path stays inside the host process.
+    #[serde(default)]
+    pub installed_host_ids: Vec<String>,
 }
 
 /// A request to install the app key with the server's one-time password.
@@ -78,17 +83,13 @@ fn app_key_path(state: &AppState) -> PathBuf {
 
 /// Returns the ids of saved profiles that point at the app-owned onboarding key.
 ///
-/// Only ids cross the bridge. The key path stays inside the host process, and a
-/// profile that was saved before an install failed is included on purpose: its
+/// A profile that was saved before an install failed is included on purpose: its
 /// pin is already trusted and the Settings retry may finish the key install.
-#[tauri::command]
-pub fn onboarding_installed_hosts(state: State<'_, AppState>) -> CommandResult<Vec<String>> {
-    let state = state.inner();
-    let key_path = app_key_path(state);
+fn installed_host_ids(state: &AppState, key_path: &Path) -> CommandResult<Vec<String>> {
     let hosts = state.hosts().list()?;
     Ok(hosts
         .into_iter()
-        .filter(|host| host.identity_file.as_deref() == Some(key_path.as_path()))
+        .filter(|host| host.identity_file.as_deref() == Some(key_path))
         .map(|host| host.id.0)
         .collect())
 }
@@ -103,6 +104,7 @@ fn existing_key_view(state: &AppState, path: &Path) -> CommandResult<AppKeyView>
             exists: false,
             fingerprint: None,
             public_key: None,
+            installed_host_ids: Vec::new(),
         });
     }
     let unlocked = unlock_app_key(path, state.engine_keychain())?;
@@ -110,6 +112,7 @@ fn existing_key_view(state: &AppState, path: &Path) -> CommandResult<AppKeyView>
         exists: true,
         fingerprint: Some(unlocked.fingerprint),
         public_key: Some(unlocked.public_key),
+        installed_host_ids: Vec::new(),
     })
 }
 
@@ -159,7 +162,10 @@ fn save_host_profile(
 #[tauri::command]
 pub async fn onboarding_key_status(state: State<'_, AppState>) -> CommandResult<AppKeyView> {
     let state = state.inner();
-    existing_key_view(state, &app_key_path(state))
+    let path = app_key_path(state);
+    let mut view = existing_key_view(state, &path)?;
+    view.installed_host_ids = installed_host_ids(state, &path)?;
+    Ok(view)
 }
 
 /// Creates the app-owned ed25519 key, or returns the existing one.
@@ -168,7 +174,9 @@ pub async fn onboarding_create_key(state: State<'_, AppState>) -> CommandResult<
     let state = state.inner();
     let path = app_key_path(state);
     if path.is_file() {
-        return existing_key_view(state, &path);
+        let mut view = existing_key_view(state, &path)?;
+        view.installed_host_ids = installed_host_ids(state, &path)?;
+        return Ok(view);
     }
     match create_app_key(
         state.app_keys_dir(),
@@ -180,9 +188,14 @@ pub async fn onboarding_create_key(state: State<'_, AppState>) -> CommandResult<
             exists: true,
             fingerprint: Some(key.fingerprint),
             public_key: Some(key.public_key),
+            installed_host_ids: installed_host_ids(state, &path)?,
         }),
         // A concurrent create won the race; the existing key is the idempotent answer.
-        Err(error) if error.code == SpiritErrorCode::Conflict => existing_key_view(state, &path),
+        Err(error) if error.code == SpiritErrorCode::Conflict => {
+            let mut view = existing_key_view(state, &path)?;
+            view.installed_host_ids = installed_host_ids(state, &path)?;
+            Ok(view)
+        }
         Err(error) => Err(error),
     }
 }

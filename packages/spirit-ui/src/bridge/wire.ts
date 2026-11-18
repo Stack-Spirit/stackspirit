@@ -99,6 +99,8 @@ export interface AppKeyView {
   exists: boolean;
   fingerprint: string | null;
   public_key: string | null;
+  /** Ids of saved profiles that point at the app key; never a filesystem location. */
+  installed_host_ids?: string[];
 }
 
 /**
