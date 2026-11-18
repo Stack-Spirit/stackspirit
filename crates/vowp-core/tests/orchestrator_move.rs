@@ -323,51 +323,55 @@ fn move_preserves_the_session_and_keeps_one_log_across_home_and_agent() {
 
 #[test]
 fn moving_between_agent_nodes_releases_the_old_node_lease() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let deps = deps(&tmp, AdapterRegistry::new());
-    let store = store_of(&deps);
-    let first = active_node(&store, "mac-studio", deps.clock.now());
-    let second = active_node(&store, "studio-mini", deps.clock.now());
-    let (orchestrator, _starts, _stops, transport) = manager(deps.clone());
-    let created = orchestrator
-        .create_on_node(&request("night"), Some(first.clone()))
-        .expect("create on the first node");
-    let session = created.session.clone();
-    let now = deps.clock.now();
-    store
-        .take_lease(&Lease {
-            session_id: session.clone(),
-            surface_id: None,
-            surface_kind: SurfaceKind::Opencode,
-            node: first.clone(),
-            holder: "opencode".to_owned(),
-            token: vowp_protocol::surface::new_lease_token(),
-            acquired_at: now,
-            heartbeat_at: now,
-        })
-        .expect("old remote lease");
+    // `vowp surface pair` without `--app` writes the node name as the holder; that is the
+    // pairing command `node_join` prints. With `--app` it writes the app name.
+    for holder in ["mac-studio", "opencode"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deps = deps(&tmp, AdapterRegistry::new());
+        let store = store_of(&deps);
+        let first = active_node(&store, "mac-studio", deps.clock.now());
+        let second = active_node(&store, "studio-mini", deps.clock.now());
+        let (orchestrator, _starts, _stops, transport) = manager(deps.clone());
+        let created = orchestrator
+            .create_on_node(&request("night"), Some(first.clone()))
+            .expect("create on the first node");
+        let session = created.session.clone();
+        let now = deps.clock.now();
+        store
+            .take_lease(&Lease {
+                session_id: session.clone(),
+                surface_id: None,
+                surface_kind: SurfaceKind::Opencode,
+                node: first.clone(),
+                holder: holder.to_owned(),
+                token: vowp_protocol::surface::new_lease_token(),
+                acquired_at: now,
+                heartbeat_at: now,
+            })
+            .expect("old remote lease");
 
-    let moved = orchestrator
-        .move_to_node("night", Some(second.clone()))
-        .expect("move between nodes");
-    assert_eq!(moved.session, session);
-    assert_eq!(moved.card.node.as_ref(), Some(&second));
-    assert!(
-        store.lease(&session).expect("lease lookup").is_none(),
-        "the old node's lease is still a stale writer"
-    );
-    let commands = transport.commands();
-    assert!(
-        matches!(commands.last(), Some(OrchestratorCommand::Start { name, .. }) if name == "night"),
-        "the second node did not receive a start: {commands:?}"
-    );
-    assert!(
-        matches!(
-            commands.get(commands.len().saturating_sub(2)),
-            Some(OrchestratorCommand::Stop { name, .. }) if name == "night"
-        ),
-        "the first node did not receive a stop: {commands:?}"
-    );
+        let moved = orchestrator
+            .move_to_node("night", Some(second.clone()))
+            .expect("move between nodes");
+        assert_eq!(moved.session, session, "holder {holder}");
+        assert_eq!(moved.card.node.as_ref(), Some(&second), "holder {holder}");
+        assert!(
+            store.lease(&session).expect("lease lookup").is_none(),
+            "the old node's lease (holder {holder}) is still a stale writer"
+        );
+        let commands = transport.commands();
+        assert!(
+            matches!(commands.last(), Some(OrchestratorCommand::Start { name, .. }) if name == "night"),
+            "the second node did not receive a start: {commands:?}"
+        );
+        assert!(
+            matches!(
+                commands.get(commands.len().saturating_sub(2)),
+                Some(OrchestratorCommand::Stop { name, .. }) if name == "night"
+            ),
+            "the first node did not receive a stop: {commands:?}"
+        );
+    }
 }
 
 #[test]

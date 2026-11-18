@@ -840,13 +840,16 @@ impl Orchestrator {
     /// A remote host detaches its surface on `Stop`, which releases the lease through the
     /// gateway. When that node is unreachable the row can remain; release it only when it
     /// still belongs to this orchestrator's app on the old node, so a takeover by another
-    /// surface is preserved.
+    /// surface is preserved. A surface paired without `--app` (the command `node_join`
+    /// prints) is held by the node name, so that holder is accepted too.
     fn release_remote_lease(&self, state: &StateFile, node: &NodeName) -> Result<(), CoreError> {
         let store = Store::open_global(&self.deps.paths)?;
         let Some(lease) = store.lease(&state.session_id)? else {
             return Ok(());
         };
-        if lease.node == *node && (lease.holder == state.name || lease.holder == app_name(state.app)) {
+        let own_holder =
+            lease.holder == state.name || lease.holder == app_name(state.app) || lease.holder == node.as_str();
+        if lease.node == *node && own_holder {
             store.release_lease_hash(&state.session_id, &lease.token)?;
         }
         Ok(())
