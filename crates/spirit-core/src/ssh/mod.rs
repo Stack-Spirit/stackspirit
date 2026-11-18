@@ -162,6 +162,41 @@ pub fn ssh_command_with_output_cap(
     timeout: Duration,
     output_cap: usize,
 ) -> Result<CommandSpec, SpiritError> {
+    ssh_command_inner(target, options, remote_argv, timeout, output_cap, false)
+}
+
+/// Builds the local `ssh` command for the one hidden-prompt write.
+///
+/// `-tt` forces a remote pty even though StackSpirit's stdin is a pipe, which is what
+/// `vowp secret set` checks before it hides echo. Every other command keeps
+/// [`ssh_command`]: a pty would merge streams and translate line endings for no reason.
+/// `BatchMode`, strict host-key checking, the app-private `known_hosts`, the normal
+/// timeouts and keepalives, and `IdentitiesOnly` when an identity file is selected are
+/// all preserved.
+pub fn ssh_command_with_pty(
+    target: &SshTarget,
+    options: &SshOptions,
+    remote_argv: &[String],
+    timeout: Duration,
+) -> Result<CommandSpec, SpiritError> {
+    ssh_command_inner(
+        target,
+        options,
+        remote_argv,
+        timeout,
+        OUTPUT_CAP_BYTES,
+        true,
+    )
+}
+
+fn ssh_command_inner(
+    target: &SshTarget,
+    options: &SshOptions,
+    remote_argv: &[String],
+    timeout: Duration,
+    output_cap: usize,
+    force_pty: bool,
+) -> Result<CommandSpec, SpiritError> {
     target.validate()?;
     let mut args = vec![
         "-o".to_owned(),
@@ -182,6 +217,9 @@ pub fn ssh_command_with_output_cap(
         args.push(identity_file.display().to_string());
         args.push("-o".to_owned());
         args.push("IdentitiesOnly=yes".to_owned());
+    }
+    if force_pty {
+        args.push("-tt".to_owned());
     }
     args.push("-p".to_owned());
     args.push(target.port.to_string());
@@ -266,6 +304,22 @@ impl SshRemote {
             ssh_command_with_output_cap(&self.target, &self.options, argv, timeout, output_cap)?
                 .with_stdin(stdin);
         self.runner.run(&spec).await
+    }
+
+    /// Runs a remote argv array that opens a hidden prompt, then writes `input`.
+    ///
+    /// This is the only pty path. The caller validates `input` and owns it in zeroizing
+    /// storage; the runner writes it only after `prompt` appears on the remote output.
+    /// No other command uses `-tt` or this method.
+    pub async fn run_with_prompt(
+        &self,
+        argv: &[String],
+        prompt: &str,
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<CommandOutput, SpiritError> {
+        let spec = ssh_command_with_pty(&self.target, &self.options, argv, timeout)?;
+        self.runner.run_with_prompt(&spec, prompt, input).await
     }
 
     /// Returns the known_hosts path.

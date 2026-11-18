@@ -7,12 +7,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use zeroize::Zeroizing;
 
 use crate::error::{SpiritError, SpiritErrorCode, code_for_exit};
 use crate::ssh::command::{CommandOutput, INITIAL_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT};
 use crate::ssh::{CommandRunner, SshOptions, SshRemote, SshTarget};
 use crate::vowp::asif::{AsifExport, AsifExportOptions, AsifImportOptions, AsifPackage};
 use crate::vowp::local::SurfacePairing;
+use crate::vowp::secret::{
+    SecretListView, SecretRemoveOutcome, SecretSetOutcome, SecretSetRequest, parse_secret_list,
+    parse_secret_remove, parse_secret_set, validate_secret_name,
+};
 use crate::wire::enums::{OrchestratorApp, TargetMode};
 use crate::wire::ids::{InboxId, JobId, NodeName, ProjectName, SessionId};
 use crate::wire::parse_error_document;
@@ -214,6 +219,45 @@ pub trait VowpClient: Send + Sync {
         .with_hint("Connect with a VOWP client that implements the node contract."))
     }
 
+    /// Reads `vowp --json secret ls`.
+    ///
+    /// The read model contains names, the last four characters and timestamps only.
+    /// The default refuses because a client without a server vault must not pretend to
+    /// list one.
+    async fn secret_list(&self) -> Result<SecretListView, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the server secret store is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the server secret store."))
+    }
+
+    /// Stores one secret through `vowp secret set NAME` and the hidden prompt.
+    ///
+    /// The default refuses before it touches the value, so a client that cannot drive
+    /// the prompt can never echo it. The live SSH client implements the pty path.
+    async fn secret_set(
+        &self,
+        _request: SecretSetRequest,
+    ) -> Result<SecretSetOutcome, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the server secret store is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the server secret store."))
+    }
+
+    /// Removes one secret through `vowp --json secret rm NAME --yes`.
+    ///
+    /// The default refuses for the same reason as [`Self::secret_list`].
+    async fn secret_remove(&self, _name: &str) -> Result<SecretRemoveOutcome, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the server secret store is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the server secret store."))
+    }
+
     /// Returns the non-fatal [`WireWarning`]s collected since the last drain.
     ///
     /// The live client records them so the raw-document drawer can show parse
@@ -356,6 +400,82 @@ pub(crate) fn check_command_output(output: CommandOutput) -> Result<CommandOutpu
         Err(error.with_hint("Install VOWP on the host, then re-probe."))
     } else {
         Err(error)
+    }
+}
+
+/// Maps one finished secret command without ever embedding raw stderr.
+///
+/// `check_command_output` includes the first stderr line for general commands. A secret
+/// command's stderr can carry a pty transcript, so this variant classifies the failure
+/// and keeps only a typed message. A missing secret maps to the typed not-found code.
+fn check_secret_output(
+    output: CommandOutput,
+    name: Option<&str>,
+) -> Result<CommandOutput, SpiritError> {
+    if output.success() {
+        return Ok(output);
+    }
+    if output.status == 255 {
+        let stderr = output.stderr_text();
+        if stderr.contains("Host key verification failed") {
+            return Err(SpiritError::new(
+                SpiritErrorCode::HostKeyMismatch,
+                "host key verification failed",
+            )
+            .with_hint("Compare the fingerprint out of band and explicitly re-pin the host."));
+        }
+        if stderr.contains("Permission denied") || stderr.contains("Authentication failed") {
+            return Err(
+                SpiritError::new(SpiritErrorCode::SshAuth, "SSH authentication failed")
+                    .with_hint("Check the SSH agent or the identity file path."),
+            );
+        }
+        return Err(
+            SpiritError::new(SpiritErrorCode::Remote, "SSH transport failed")
+                .retryable()
+                .with_hint("Check the SSH connection and retry."),
+        );
+    }
+    let code = if output.status == 127 {
+        SpiritErrorCode::VowpMissing
+    } else {
+        code_for_exit(output.status)
+    };
+    let error = match code {
+        SpiritErrorCode::NotFound => match name {
+            Some(name) => SpiritError::not_found(&format!("secret {name}")),
+            None => SpiritError::not_found("secret"),
+        },
+        SpiritErrorCode::InvalidInput => SpiritError::new(
+            code,
+            "VOWP rejected the secret request",
+        )
+        .with_hint("Use an uppercase name such as OPENAI_API_KEY."),
+        SpiritErrorCode::Refused => SpiritError::new(
+            code,
+            "VOWP refused the secret operation",
+        )
+        .with_hint(
+            "The remote VOWP needs a terminal for the hidden prompt; check the server's SSH pty policy.",
+        ),
+        SpiritErrorCode::VowpMissing => SpiritError::new(
+            code,
+            "vowp is not installed on the host",
+        )
+        .with_hint("Install VOWP on the host, then re-probe."),
+        _ => SpiritError::new(code, format!("vowp secret exited {}", output.status)),
+    };
+    if matches!(
+        code,
+        SpiritErrorCode::InvalidInput
+            | SpiritErrorCode::NotFound
+            | SpiritErrorCode::Refused
+            | SpiritErrorCode::Conflict
+            | SpiritErrorCode::VowpMissing
+    ) {
+        Err(error)
+    } else {
+        Err(error.retryable())
     }
 }
 
@@ -734,6 +854,61 @@ impl VowpClient for SshVowpClient {
         serde_json::from_slice(&output.stdout).map_err(|err| SpiritError::parse("node show", err))
     }
 
+    async fn secret_list(&self) -> Result<SecretListView, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend(["secret".to_owned(), "ls".to_owned()]);
+        let output = self.run(&argv, READ_TIMEOUT).await?;
+        let output = check_secret_output(output, None)?;
+        parse_secret_list(&output.stdout)
+    }
+
+    async fn secret_set(&self, request: SecretSetRequest) -> Result<SecretSetOutcome, SpiritError> {
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "secret".to_owned(),
+            "set".to_owned(),
+            request.name().to_owned(),
+        ]);
+        let prompt = format!("value for {}: ", request.name());
+        let mut input = Zeroizing::new(Vec::with_capacity(request.expose_value().len() + 1));
+        input.extend_from_slice(request.expose_value().as_bytes());
+        input.push(b'\n');
+        let output = self
+            .remote
+            .run_with_prompt(&argv, &prompt, &input, WRITE_TIMEOUT)
+            .await?;
+        let output = check_secret_output(output, Some(request.name()))?;
+        let outcome = parse_secret_set(&output.stdout)?;
+        if outcome.name != request.name() {
+            return Err(SpiritError::vowp_incompatible(
+                "secret set",
+                format!(
+                    "VOWP stored {:?} instead of {:?}",
+                    outcome.name,
+                    request.name()
+                ),
+            ));
+        }
+        Ok(outcome)
+    }
+
+    async fn secret_remove(&self, name: &str) -> Result<SecretRemoveOutcome, SpiritError> {
+        validate_secret_name(name)?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "secret".to_owned(),
+            "rm".to_owned(),
+            name.to_owned(),
+            "--yes".to_owned(),
+        ]);
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = check_secret_output(output, Some(name))?;
+        parse_secret_remove(&output.stdout)
+    }
+
     async fn asif_export(
         &self,
         project: &str,
@@ -809,6 +984,7 @@ struct MockState {
     orchestrator_stop_calls: Vec<String>,
     orchestrator_resume_calls: Vec<String>,
     node_cards: Vec<NodeCard>,
+    secrets: SecretListView,
 }
 
 /// A programmable in-memory client for tests and previews.
@@ -855,6 +1031,10 @@ impl MockVowpClient {
                 orchestrator_stop_calls: Vec::new(),
                 orchestrator_resume_calls: Vec::new(),
                 node_cards: Vec::new(),
+                secrets: SecretListView {
+                    secrets: Vec::new(),
+                    storage: None,
+                },
             })),
         }
     }
@@ -1006,6 +1186,16 @@ impl MockVowpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .node_cards = cards;
+        self
+    }
+
+    /// Replaces the `vowp secret ls` read model.
+    #[must_use]
+    pub fn with_secrets(self, secrets: SecretListView) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .secrets = secrets;
         self
     }
 
@@ -1375,6 +1565,34 @@ impl VowpClient for MockVowpClient {
             .find(|card| card.name.as_str() == node)
             .cloned()
             .ok_or_else(|| SpiritError::not_found(&format!("node {node}")))
+    }
+
+    async fn secret_list(&self) -> Result<SecretListView, SpiritError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .secrets
+            .clone())
+    }
+
+    async fn secret_set(
+        &self,
+        _request: SecretSetRequest,
+    ) -> Result<SecretSetOutcome, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the mock VOWP client has no server secret store",
+        )
+        .with_hint("Connect to a host to store secrets with `vowp secret set`."))
+    }
+
+    async fn secret_remove(&self, _name: &str) -> Result<SecretRemoveOutcome, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "the mock VOWP client has no server secret store",
+        )
+        .with_hint("Connect to a host to remove secrets with `vowp secret rm`."))
     }
 
     async fn asif_export(
