@@ -6,9 +6,10 @@ graphs, VPS disk/storage limits, recommended worker capacity, active harnesses/p
 sessions.
 
 Under the hood, StackSpirit bundles and supervises `opencode` as the **StackSpirit Engine**, so
-users can run immediately with included models or their own provider API keys (stored in the
-local OS keychain) without needing to install or configure a separate harness—while still
-supporting existing `opencode` or `claude-code` installations for power users.
+users can run immediately with included models or their own provider API keys (in the local OS
+keychain, or optionally in VOWP's vault on the connected server) without needing to install or
+configure a separate harness—while still supporting existing `opencode` or `claude-code`
+installations for power users.
 
 ## Surface Order
 
@@ -63,6 +64,10 @@ and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web
   redesign: owner decisions (brand, layout, naming, sessions, SSH and secrets), real versus
   preview features, and next steps.
 
+- [`SECURITY.md`](SECURITY.md) — the implemented security model: SSH host-key pinning, the
+  app-owned SSH key, one-time-password onboarding, server secrets in VOWP's vault, and the
+  honest limits (VOWP `0.4.0` does not encrypt the vault at rest).
+
 - [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md) — Desktop MVP release and
   closeout note: scope, evidence, limitations, and owner sign-off status.
 - [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) — D5 ASIF release and closeout note:
@@ -97,12 +102,16 @@ to install or configure `opencode` in the normal onboarding path.
 - **Included models are verified.** `engine/models.json` lists the free models generated for the
   pinned build. The view labels a model **Included · no key** only after the running engine reports
   its id. An engine build with no included models shows the BYOK empty state instead.
-- **BYOK stays local.** Provider keys go to the OS keychain through the `Keychain`/`SecretStore`
-  boundary. Status exposes provider names and states only; keys are zeroized, never logged, never
-  written to fixtures or reports, and never sent to the VPS. Verification exercises the key on an
-  isolated loopback engine with a minimal model call. Stored keys reach the sidecar only through
-  its ephemeral `OPENCODE_AUTH_CONTENT` environment; StackSpirit never writes them into the
-  engine's auth file.
+- **BYOK is local by default.** Provider keys go to the OS keychain through the
+  `Keychain`/`SecretStore` boundary. Status exposes provider names and states only; keys are
+  zeroized, never logged, never written to fixtures or reports, and local keys are never sent
+  to the VPS. Verification exercises the key on an isolated loopback engine with a minimal
+  model call. Stored keys reach the sidecar only through its ephemeral
+  `OPENCODE_AUTH_CONTENT` environment; StackSpirit never writes them into the engine's auth
+  file. Provider keys may instead be stored on the connected server in VOWP's own vault
+  through Settings → Advanced → **Server secrets** (`ss-35`, `506d9d2`); the value travels
+  only over verified SSH stdin after VOWP's hidden prompt, and the AI sees names/metadata
+  only. See [`SECURITY.md`](SECURITY.md).
 - **External harnesses are opt-in.** **Scan PATH** checks only the exact names `opencode`, `claude`
   and `claude-code`, probes `--version`, and requires an explicit **Use this installation**. It
   never edits the external configuration and never falls back silently.
@@ -134,12 +143,15 @@ The Engine view ends with two honest VOWP gate cards:
 
 The probes read VOWP command surfaces and exit codes; a version string alone never makes a gate
 Ready. The desktop build enables `features.asif_actions` (the `d5` Cargo feature is on by
-default). D6 is implemented in the core, bridge, and Engine UI: actions enable only when
-`features.local_orchestrator_actions` is on, `LocalOrchestratorGate` is `Ready`, and the local
-agent is `connected`, with the node, protocol, and path-map prerequisites re-checked by the
-backend. On this host the live gate remains **Waiting** because the installed VOWP CLI is `0.3.0`
-and the local agent is not enrolled; live execution remains owner-gated, and no live desktop
-smoke has been recorded.
+default). D6 is implemented in the core, bridge, and Engine UI: actions enable only when the
+published `features.local_orchestrator_actions` flag is on, `LocalOrchestratorGate` is `Ready`,
+and the local agent is `connected`, with the node, protocol, and path-map prerequisites
+re-checked by the backend. The probes now match the installed `vowp 0.4.0` surface (`ss-32`,
+`cd6a975`; live home read `ss-37`, `39d8538`). On this host the live gate remains **Waiting**:
+the live home reports an online `macbook` agent card with protocol `vowp-agent/1`, but the
+Mac-side `vowp agent status` (`connection: connected`) has not been verified from this host and
+the live agent reports `agent_version: 0.3.0`. Live execution remains owner-gated, D6 actions
+are not enabled, and no live desktop smoke has been recorded.
 
 ## Sessions and ASIF (Phase D5)
 
@@ -174,10 +186,13 @@ contracts and milestones in `/home/dev/vowp`:
   import are enabled independently only after the read-only probe proves them; see
   [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md). No live host/desktop smoke has been
   recorded by the owner.
-- **Shipped in D6 behind the live gate:** The merged VOWP source has the Phase 3/4
-  local-orchestrator CLI surface, but the installed build is still stale, the local agent is not
-  enrolled, and D6 live execution and the owner-run smoke remain pending. See
-  [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md).
+- **Shipped in D6 but still gated:** VOWP `0.4.0` is installed and ships the Phase 3/4
+  local-orchestrator CLI surface; StackSpirit's gate probes and live-home evidence were
+  reconciled with it (`ss-32`, `cd6a975`; `ss-37`, `39d8538`). The live `macbook` agent card is
+  online with protocol `vowp-agent/1`, while the home node is offline and non-agent. The
+  Mac-side `vowp agent status` is still an owner check, so D6 actions remain disabled and the
+  owner-run smoke is pending. See [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md) and
+  [`docs/D6-READINESS.md`](docs/D6-READINESS.md).
 
 ## Development gates
 
@@ -200,4 +215,5 @@ keychain round trip remain owner verification. On Linux, `scripts/desktop-build-
 check` compiles and tests the Tauri host in the pinned container without host packages; add
 `tauri-build` for a `--no-bundle` host build. See [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md).
 
-See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the bundled engine license.
+See [`SECURITY.md`](SECURITY.md) for the security model and supported versions, and
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the bundled engine license.

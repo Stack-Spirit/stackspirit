@@ -124,6 +124,14 @@ the current `spirit_core` install API needs one more password login to re-check 
 and apply the sshd drop-in; it is cleared before the call and reports `disabled`,
 `not_supported` or `failed` exactly.
 
+Settings → Advanced → **Server secrets** lists, stores and revokes keys in VOWP's own
+vault (`ss-38`, `bf45d31`; `ss-34`, `def3538`; `ss-35`, `506d9d2`). A value is
+write-only: it leaves the app only over the verified SSH connection on stdin, after
+VOWP's hidden `value for <NAME>: ` prompt, and never through argv, the environment, a
+log or an error. The card shows `name`, `•••• last4`, the update time and a storage mode
+when VOWP reports one; VOWP `0.4.0` reports none, so the card says so instead of
+guessing. See [`SECURITY.md`](../SECURITY.md) for the exact path and limits.
+
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Orchestrator chat replies, and the agent opening the details panel.
 - The Local/Server switch (label only).
@@ -134,17 +142,23 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 1. **Web app alignment** (`apps/spirit-web`) — **landed (`ss-27`, `a0619ae`).** Read-only
    Web cockpit now uses the Meadow tokens and components; classic cockpit hover contrast
    is also fixed (`ss-26`, `88be044`).
-2. **One-time-password onboarding** — **landed (`ss-28`–`ss-31`, `ss-33`).** The
-   secure card auto-selects and connects the saved server right after a verified
-   install (a connection error is shown honestly and keeps the saved profile), and
-   Settings → **Password login** retries the optional `PasswordAuthentication no`
-   step on a server whose profile uses the app key, reporting `disabled`,
-   `not_supported` or `failed`.
-3. **Reconcile D6 local-orchestrator gate probes with VOWP `0.4.0` (ready now):** VOWP
-   `0.4.0` is now shipped and installed on both the Mac and VPS (`surface rotate`, `agent
-   service|doctor|trust`, `orchestrator new --node`, live `macbook` agent). Update
-   `spirit-core`'s gate probes and `docs/D6-READINESS.md` / `docs/VOWP-CONTRACT.md` so
-   StackSpirit recognizes VOWP `0.4.0+` cleanly.
+2. **One-time-password onboarding** — **landed (`ss-28`–`ss-31`, `ss-33`; auto-connect
+   and Settings retry `44356bb`, follow-up `8768daf`).** The secure card auto-selects
+   and connects the saved server right after a verified install (a connection error is
+   shown honestly and keeps the saved profile), and Settings → **Password login**
+   retries the optional `PasswordAuthentication no` step on a server whose profile uses
+   the app key, reporting `disabled`, `not_supported` or `failed`.
+3. **Reconcile D6 local-orchestrator gate probes with VOWP `0.4.0`** — **landed
+   (`ss-32`, `cd6a975`, follow-up `20181a5`; live home evidence `ss-37`, `39d8538`).**
+   VOWP `0.4.0` is shipped and installed, and the gate probes now match its `surface
+   rotate`, `surface pair --replace`, `agent service|doctor|trust`, `orchestrator new
+   --node` and `mcp --agent-socket` surface; `docs/D6-READINESS.md` and
+   `docs/VOWP-CONTRACT.md` cite that verified output. The live home read on 2026-11-18
+   records the `macbook` card as `kind: agent`, `status: active`, `presence: online`,
+   protocol `vowp-agent/1`; the home node is `kind: home` and offline. The Mac-side
+   `vowp agent status` (`connection: connected`) is still an owner check, the live agent
+   reports `agent_version: 0.3.0`, and the gate therefore stays `Waiting` with D6
+   actions disabled.
 4. **Live orchestrator chat via the paired OpenCode engine (`opencode serve`) — owner
    decision (2026-11-18):** do **not** reinvent chat or shell out to `vowp chat` per turn.
    Move `SessionId`, `SessionLocation`, `ChatMessage` and `ProjectRequest` from
@@ -154,11 +168,18 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
    loopback forward when running on the Server; VOWP `0.5` adds `vowp orchestrator
    endpoint` to report the active endpoint cleanly, while VOWP's bridge mirrors every turn
    to the server session log). Keep `MockBridge` scenarios working.
-5. **Server secret store UI over `vowp secret` + `SECURITY.md` (ready now / pairs with
-   VOWP `0.5` encrypted-at-rest vault):** wire `spirit-core` + `TauriBridge` + Settings to
-   `vowp secret ls --json`, `vowp secret set <NAME>` (SSH stdin only, never argv/logs),
-   and `vowp secret rm <NAME> --yes`, with the first-secret confirmation warning, stored
-   keys list (`name`, `last4`, storage mode), Revoke action, and a repository `SECURITY.md`.
+5. **Server secret store over `vowp secret` + `SECURITY.md`** — **landed (`ss-38`,
+   `bf45d31`; `ss-34`, `def3538`; `ss-35`, `506d9d2`).** Settings → Advanced → **Server
+   secrets** reads `vowp --json secret ls`, stores with `vowp --json secret set <NAME>`
+   over prompt-gated SSH stdin, and revokes with `vowp --json secret rm <NAME> --yes`.
+   It has the first-use warning, the stored-key list (`name`, `•••• last4`, update time,
+   storage mode when reported) and an in-card Revoke. The `set` path shipped; it is not
+   a `not_supported` fallback. The value is written only after VOWP's exact hidden
+   `value for <NAME>: ` prompt and never appears in argv, the environment, a log or an
+   error. VOWP `0.4.0` does not report whether the vault is basic or vault-user mode,
+   so the card says that rather than guessing; VOWP `0.5` is the planned
+   encrypted-at-rest upgrade. [`SECURITY.md`](../SECURITY.md) records the exact path and
+   limits.
 6. **Live `Local` / `Server` switch and `＋ Add project` (pairs with VOWP `0.5`):** once
    VOWP `0.5` lands `vowp orchestrator move` (same-session move between `--home` and
    `--node <mac>`) and one-step `vowp project add --git/--init/--orchestrator`, wire the
@@ -171,6 +192,19 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 
 - e2e status (updated 2026-11-18): Meadow desktop specs, web specs (`ss-27`), and classic
   cockpit WCAG contrast specs (`ss-26`, `88be044`) are all green.
+- The newer Settings surfaces have component coverage, not a new Playwright flow:
+  `ss-33`'s Password login card and `ss-35`'s Server secrets card were gated by
+  `npm test`/UI tests, and neither job added or re-ran an e2e spec. The e2e statement
+  above is the last recorded run, not coverage for these cards.
+- VOWP `0.4.0` does not report the vault storage mode and does not encrypt the vault at
+  rest. The Server secrets card shows the mode as not reported, and
+  [`SECURITY.md`](../SECURITY.md) records the exact prompt-gated set path and limits;
+  the app never runs `vowp secret upgrade` on its own.
+- D6 actions remain disabled. The live home read (`ss-37`, `39d8538`) records an online
+  `macbook` agent card with protocol `vowp-agent/1`, but the Mac-side
+  `vowp agent status` is unverified and the live agent reports `agent_version: 0.3.0`;
+  the home node is offline. The gate stays `Waiting`, D6 actions are not enabled, and no
+  live desktop smoke has been recorded.
 
 - The owner has not yet seen the new icon in the Dock (`tauri dev`/`tauri build` not run
   in the design sessions).

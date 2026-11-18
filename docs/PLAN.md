@@ -1753,12 +1753,17 @@ Missing: v4-asif-core · v4-asif-cli
 | D3 | `ss-3-fleet-canvas` | D2 | Fleet canvas, worker ring, job lanes, capacity/storage rail, inbox | Same |
 | D4 | `ss-4-engine-onboarding` | D2, D3 | Bundled StackSpirit Engine, included models, BYOK keychain, external harness picker, gate cards | Same; gate probes are read-only |
 | D5 | ASIF wiring | D4 + VOWP `v4-asif-*` | Live `.asif.zip` export/import | **Gated** |
-| D6 | Local orchestrators | D5 optional + VOWP Phase 2/3/4 `v4-local-3*`/`v4-local-4f-cli-surface` | Live local orchestrator sessions | **Gated** |
+| D6 | Local orchestrators | D5 optional + VOWP Phase 2/3/4 `v4-local-3*`/`v4-local-4f-cli-surface` | Live local orchestrator sessions; core/bridge/UI landed, probes reconciled with VOWP `0.4.0` | **Gated** (VOWP `0.4.0` installed; `ss-32`, `ss-37`) |
 | W1 | Web app | D1–D4 | `apps/spirit-web` over HTTP/SSE | Same, later |
 | C1 | CLI | D1–D4 | `crates/spirit-cli` over `spirit-core` | Same, later |
 
 D1–D4 are the Desktop MVP. D5 and D6 are explicitly gated and must not be implemented
 against an unmerged VOWP contract. W1 and C1 are explicitly after the Desktop MVP.
+
+D6's core, bridge and Engine panel landed in `ss-20`/`ss-21`; `ss-32` and `ss-37`
+reconciled the gate probes and live-home evidence with VOWP `0.4.0`. The published action
+flag still requires `LocalOrchestratorGate = Ready` and a `connected` local agent, so D6
+execution remains gated.
 
 ### 9.2 Ownership boundaries
 
@@ -2349,10 +2354,11 @@ The detailed contract is in `VOWP-CONTRACT.md` §11.2.
 
 ### 9.8 Phase D6 — local orchestrators (gated)
 
-Not implemented until VOWP Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`), and the
-Phase 4 CLI surface (`v4-local-4f-cli-surface`) are merged and a build containing them is
-installed on both the home and the Mac, and the local agent is enrolled and `connected`.
-When `LocalOrchestratorGate` is `Ready` **and**
+VOWP Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`), and the Phase 4 CLI surface
+(`v4-local-4f-cli-surface`) are merged, and the installed `vowp 0.4.0` advertises them
+(`ss-32`, `cd6a975`). D6's core, bridge and Engine panel landed in `ss-20`/`ss-21`, and the
+live home read is recorded (`ss-37`, `39d8538`). The Mac-side local agent must still be
+enrolled and `connected`. When `LocalOrchestratorGate` is `Ready` **and**
 `features.local_orchestrator_actions` is enabled:
 
 - The Engine view creates a local orchestrator through VOWP's own home commands:
@@ -2374,6 +2380,10 @@ When `LocalOrchestratorGate` is `Ready` **and**
 
 The detailed contract, command mapping, and probe are in `VOWP-CONTRACT.md` §11.3.
 
+**Status (2026-11-18):** the live home reports an online `macbook` agent card with protocol
+`vowp-agent/1`, but the Mac-side `vowp agent status` (`connection: connected`) is unverified
+and the live agent reports `agent_version: 0.3.0`. The gate therefore remains `Waiting`, D6
+actions are disabled, and no live desktop smoke has been recorded.
 
 ### 9.9 W1 — Web app (after Desktop MVP)
 
