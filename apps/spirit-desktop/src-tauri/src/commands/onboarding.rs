@@ -76,6 +76,23 @@ fn app_key_path(state: &AppState) -> PathBuf {
     state.app_keys_dir().join(APP_KEY_NAME)
 }
 
+/// Returns the ids of saved profiles that point at the app-owned onboarding key.
+///
+/// Only ids cross the bridge. The key path stays inside the host process, and a
+/// profile that was saved before an install failed is included on purpose: its
+/// pin is already trusted and the Settings retry may finish the key install.
+#[tauri::command]
+pub fn onboarding_installed_hosts(state: State<'_, AppState>) -> CommandResult<Vec<String>> {
+    let state = state.inner();
+    let key_path = app_key_path(state);
+    let hosts = state.hosts().list()?;
+    Ok(hosts
+        .into_iter()
+        .filter(|host| host.identity_file.as_deref() == Some(key_path.as_path()))
+        .map(|host| host.id.0)
+        .collect())
+}
+
 /// Reads the existing key without ever exposing a path.
 ///
 /// A key file without a usable keychain entry is a typed error, not a pretend

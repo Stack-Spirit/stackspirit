@@ -1508,7 +1508,8 @@ button.nx-node:focus-visible {
   min-width: 0;
 }
 
-.nx-field input {
+.nx-field input,
+.nx-field select {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -1522,7 +1523,12 @@ button.nx-node:focus-visible {
   font-weight: 400;
 }
 
-.nx-field input:focus {
+.nx-field select {
+  cursor: pointer;
+}
+
+.nx-field input:focus,
+.nx-field select:focus {
   outline: none;
   border-color: var(--nx-green);
   box-shadow: 0 0 0 3px var(--nx-accent-soft);
@@ -1530,6 +1536,24 @@ button.nx-node:focus-visible {
 
 .nx-field input[aria-invalid="true"] {
   border-color: var(--nx-danger);
+}
+
+/* Settings retry for the optional sshd password-login change. */
+.nx-security {
+  display: grid;
+  gap: 12px;
+}
+
+.nx-security__result--disabled {
+  border-left-color: var(--nx-ok);
+}
+
+.nx-security__result--not_supported {
+  border-left-color: var(--nx-warn);
+}
+
+.nx-security__result--failed {
+  border-left-color: var(--nx-danger);
 }
 
 @media (max-width: 760px) {

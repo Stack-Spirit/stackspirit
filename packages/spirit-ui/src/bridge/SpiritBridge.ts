@@ -99,6 +99,12 @@ export interface SpiritBridge {
      * profile first, so a failed install leaves a profile that can be retried.
      */
     installKey(input: OnboardingInstallInput): Promise<OnboardingInstallOutcome>;
+    /**
+     * Ids of saved hosts whose profile points at the app-owned key, so Settings can
+     * offer the optional password-login retry without exposing the key path. Hosts
+     * saved before a failed install are included; their pin is already trusted.
+     */
+    installedHosts?(): Promise<string[]>;
   };
 
   connection: {

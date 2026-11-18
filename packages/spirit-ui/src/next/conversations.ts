@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
-import type { PasswordAuthOutcome, PasswordAuthUnsupported } from "../bridge/wire";
+import type { PasswordAuthOutcome } from "../bridge/wire";
+import { passwordAuthSummary } from "./passwordAuth";
 import { useShellUi, type PanelContent } from "./shellUi";
 
 /**
@@ -89,30 +90,6 @@ function setupReply(): ChatMessage {
     ],
     card: { kind: "secure-server" },
   };
-}
-
-/** Plain-language copy for why `PasswordAuthentication no` was not applied. */
-const PASSWORD_AUTH_REASON: Record<PasswordAuthUnsupported, string> = {
-  sudo_unavailable: "this server has no usable sudo, so sshd was not changed",
-  no_passwordless_sudo: "this account has no passwordless sudo, so sshd was not changed",
-  sshd_unavailable: "sshd was not available for StackSpirit to check",
-  drop_in_unsupported: "this server has no sshd_config.d drop-in directory",
-  drop_in_ignored: "this server's sshd ignores drop-in configuration",
-  reload_unavailable: "StackSpirit could not reload sshd safely",
-};
-
-/** Honest copy for the optional password-login step. Never includes a secret. */
-function passwordAuthSummary(outcome: PasswordAuthOutcome): string {
-  switch (outcome.state) {
-    case "disabled":
-      return "Password login is now turned off; the StackSpirit key has a verified key-only login.";
-    case "not_requested":
-      return "Password login is still on because you asked to keep it. The new key works.";
-    case "not_supported":
-      return `Password login is still on: ${PASSWORD_AUTH_REASON[outcome.reason]} (${outcome.reason}). The new key works.`;
-    case "failed":
-      return `Password login is still on: the change failed (${outcome.detail}). The new key works; you can retry from Settings.`;
-  }
 }
 
 /**

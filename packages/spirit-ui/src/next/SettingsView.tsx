@@ -4,6 +4,7 @@ import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
 import { useConnection, useEngine, useFleetStore } from "../state/fleetStore";
 import { PageHeader } from "./PageHeader";
+import { ServerSecurityCard } from "./ServerSecurity";
 import type { ThemePreference } from "./themePreference";
 
 export interface SettingsViewProps {
@@ -57,6 +58,8 @@ export function SettingsView({ theme, onTheme, onOpenRaw }: SettingsViewProps) {
               <span className="nx-chip nx-chip--server">◇ {model}</span>
             </div>
           </div>
+
+          <ServerSecurityCard />
 
           <div className="nx-settings__card">
             <div className="nx-settings__row">

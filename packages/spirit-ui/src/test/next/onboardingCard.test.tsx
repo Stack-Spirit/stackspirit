@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SpiritBridge } from "../../bridge/SpiritBridge";
 import type {
   AppKeyView,
+  ConnectionSnapshot,
   HostKeyPin,
   HostKeyScan,
+  HostProfile,
   OnboardingInstallInput,
   OnboardingInstallOutcome,
   PasswordAuthOutcome,
@@ -21,6 +23,37 @@ const FINGERPRINT = "SHA256:onboardingCardFingerprint0000000000000000000";
 const OTHER_FINGERPRINT = "SHA256:onboardingCardEcdsa0000000000000000000000";
 const APP_KEY_FINGERPRINT = "SHA256:onboardingCardAppKey000000000000000000000";
 const SCANNED_AT = "2026-11-18T09:00:00.000Z";
+const PROFILE_ID = "host-onboarding-card";
+
+function savedProfile(): HostProfile {
+  return {
+    id: PROFILE_ID,
+    label: HOST,
+    ssh: { user: "root", host: HOST, port: 22 },
+    identity_file: "/app-data/ssh-keys/stackspirit-onboarding",
+    vowp_home: null,
+    default_project: null,
+    host_key: { algorithm: "ssh-ed25519", sha256: FINGERPRINT, pinned_at: SCANNED_AT },
+    created_at: SCANNED_AT,
+    updated_at: SCANNED_AT,
+    last_connected_at: null,
+  };
+}
+
+function connectionSnapshot(
+  state: ConnectionSnapshot["state"],
+  hostId: string | null,
+  error: ConnectionSnapshot["error"] = null,
+): ConnectionSnapshot {
+  return {
+    state,
+    host_id: hostId,
+    since: state === "connected" ? SCANNED_AT : null,
+    latency: null,
+    last_ok_at: state === "connected" ? SCANNED_AT : null,
+    error,
+  };
+}
 
 function scanResult(scannedAt = SCANNED_AT): HostKeyScan {
   return {
@@ -51,7 +84,7 @@ function outcomeFor(
     password_auth: passwordAuth,
     profile: {
       ...input.draft,
-      id: "host-onboarding-card",
+      id: PROFILE_ID,
       host_key: input.host_key,
       created_at: SCANNED_AT,
       updated_at: SCANNED_AT,
@@ -64,6 +97,9 @@ interface FakeBridgeOptions {
   scan?: () => Promise<HostKeyScan>;
   createKey?: () => Promise<AppKeyView>;
   install?: (input: OnboardingInstallInput) => Promise<OnboardingInstallOutcome>;
+  listHosts?: () => Promise<HostProfile[]>;
+  connect?: (hostId: string) => Promise<ConnectionSnapshot>;
+  status?: () => Promise<ConnectionSnapshot>;
 }
 
 /**
@@ -75,6 +111,7 @@ function fakeBridge(options: FakeBridgeOptions = {}): SpiritBridge {
     kind: "mock",
     preview: true,
     hosts: {
+      list: options.listHosts ?? (async () => [savedProfile()]),
       scanFingerprint: options.scan ?? (async () => scanResult()),
     },
     onboarding: {
@@ -83,6 +120,16 @@ function fakeBridge(options: FakeBridgeOptions = {}): SpiritBridge {
       installKey:
         options.install ??
         (async (input: OnboardingInstallInput) => outcomeFor({ state: "disabled" })(input)),
+    },
+    connection: {
+      connect:
+        options.connect ??
+        (async (hostId: string) => connectionSnapshot("connected", hostId)),
+      status: options.status ?? (async () => connectionSnapshot("disconnected", null)),
+    },
+    fleet: {
+      get: async () => null,
+      rawDocument: async () => null,
     },
   } as unknown as SpiritBridge;
 }
@@ -335,7 +382,8 @@ describe("secure server onboarding card", () => {
     const install = vi.fn(async (input: OnboardingInstallInput) =>
       outcomeFor({ state: "disabled" }, false)(input),
     );
-    renderCard(fakeBridge({ install }));
+    const connect = vi.fn(async (hostId: string) => connectionSnapshot("connected", hostId));
+    renderCard(fakeBridge({ install, connect }));
 
     await confirmAndInstall(user);
 
@@ -344,6 +392,7 @@ describe("secure server onboarding card", () => {
     expect(screen.queryByTestId("secure-received")).not.toBeInTheDocument();
     expect(screen.getByRole("form", { name: "Secure server details" })).toBeInTheDocument();
     expect(screen.getByLabelText("One-time password from your provider")).toHaveValue("");
+    expect(connect).not.toHaveBeenCalled();
   });
 
   const authVariants: Array<{
@@ -383,5 +432,45 @@ describe("secure server onboarding card", () => {
     expect(await screen.findByTestId("secure-received")).toHaveTextContent(FINGERPRINT);
     expect(screen.getByText(copy)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(ONE_TIME_PASSWORD);
+  });
+
+  it("refreshes, selects and connects the saved profile after a verified install", async () => {
+    const user = userEvent.setup();
+    const listHosts = vi.fn(async () => [savedProfile()]);
+    const connect = vi.fn(async (hostId: string) => connectionSnapshot("connected", hostId));
+    renderCard(fakeBridge({ listHosts, connect }));
+
+    await confirmAndInstall(user);
+
+    expect(await screen.findByTestId("secure-received")).toBeInTheDocument();
+    await waitFor(() => expect(connect).toHaveBeenCalledWith(PROFILE_ID));
+    await waitFor(() => expect(useFleetStore.getState().connection.state).toBe("connected"));
+    expect(listHosts).toHaveBeenCalled();
+    expect(useFleetStore.getState().selectedHostId).toBe(PROFILE_ID);
+    expect(useFleetStore.getState().hosts.map((host) => host.id)).toContain(PROFILE_ID);
+    expect(useFleetStore.getState().lastError).toBeNull();
+  });
+
+  it("keeps the saved profile and reports a failed automatic connection", async () => {
+    const user = userEvent.setup();
+    const connectionError = {
+      code: "ssh_auth",
+      message: "SSH authentication failed",
+      hint: "Check the SSH agent or the identity file path.",
+      retryable: true,
+    };
+    const connect = vi.fn(async () => {
+      throw connectionError;
+    });
+    const status = vi.fn(async () => connectionSnapshot("failed", PROFILE_ID, connectionError));
+    renderCard(fakeBridge({ connect, status }));
+
+    await confirmAndInstall(user);
+
+    expect(await screen.findByTestId("secure-received")).toBeInTheDocument();
+    await waitFor(() => expect(useFleetStore.getState().connection.state).toBe("failed"));
+    expect(useFleetStore.getState().lastError).toMatchObject({ code: "ssh_auth" });
+    expect(useFleetStore.getState().hosts.map((host) => host.id)).toContain(PROFILE_ID);
+    expect(useFleetStore.getState().selectedHostId).toBe(PROFILE_ID);
   });
 });

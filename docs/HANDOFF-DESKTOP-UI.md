@@ -115,6 +115,14 @@ OS keychain) and installs it through the `onboarding` bridge (`onboarding.create
 reported honestly (`disabled`, `not_supported` with its reason, `failed` with its
 detail, or `not_requested`), and the one-time password is cleared before the install
 call, never rendered, logged, or stored. Only a verified key-only login is success.
+After a verified install the shell refreshes the hosts store, selects the saved
+`HostProfile`, and connects it automatically; a failed automatic connection stays in
+the error bar and the profile is still saved and retryable. Settings → **Password
+login** repeats the optional `PasswordAuthentication no` step for a saved server whose
+profile uses the app key. That retry also asks for a one-time server password because
+the current `spirit_core` install API needs one more password login to re-check the key
+and apply the sshd drop-in; it is cleared before the call and reports `disabled`,
+`not_supported` or `failed` exactly.
 
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Orchestrator chat replies, and the agent opening the details panel.
@@ -126,10 +134,12 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 1. **Web app alignment** (`apps/spirit-web`) — **landed (`ss-27`, `a0619ae`).** Read-only
    Web cockpit now uses the Meadow tokens and components; classic cockpit hover contrast
    is also fixed (`ss-26`, `88be044`).
-2. **One-time-password onboarding** — **core + card landed (`ss-28`–`ss-31`); small
-   follow-up ready now:** auto-select and connect the saved server right after a
-   successful install, and add a Settings entry point for retrying the optional
-   `PasswordAuthentication no` step.
+2. **One-time-password onboarding** — **landed (`ss-28`–`ss-31`, `ss-33`).** The
+   secure card auto-selects and connects the saved server right after a verified
+   install (a connection error is shown honestly and keeps the saved profile), and
+   Settings → **Password login** retries the optional `PasswordAuthentication no`
+   step on a server whose profile uses the app key, reporting `disabled`,
+   `not_supported` or `failed`.
 3. **Reconcile D6 local-orchestrator gate probes with VOWP `0.4.0` (ready now):** VOWP
    `0.4.0` is now shipped and installed on both the Mac and VPS (`surface rotate`, `agent
    service|doctor|trust`, `orchestrator new --node`, live `macbook` agent). Update

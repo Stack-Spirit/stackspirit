@@ -230,6 +230,9 @@ interface SecureFailure {
  */
 function SecureServerCard({ session, messageId }: { session: SessionId; messageId: string }) {
   const bridge = useFleetStore((state) => state.bridge);
+  const connect = useFleetStore((state) => state.connect);
+  const loadHosts = useFleetStore((state) => state.loadHosts);
+  const selectHost = useFleetStore((state) => state.selectHost);
   const noteScan = useConversations((state) => state.noteSecureServerScan);
   const record = useConversations((state) => state.recordSecureServer);
   const [host, setHost] = useState("");
@@ -352,6 +355,13 @@ function SecureServerCard({ session, messageId }: { session: SessionId; messageI
         fingerprint: pin.sha256,
         password_auth: outcome.password_auth,
       });
+      // The install saved `outcome.profile` before it touched the server. Refresh the
+      // store so that profile is present, select it, and connect without another
+      // manual step. The store reports a connection failure in the error bar; the
+      // profile stays saved so Connect can be retried.
+      await loadHosts();
+      selectHost(outcome.profile.id);
+      await connect(outcome.profile.id);
     } catch (caught) {
       setFailure({ error: toSpiritError(caught), action: "install" });
       resetScan();

@@ -35,6 +35,7 @@ pub fn run() {
             commands::onboarding::onboarding_key_status,
             commands::onboarding::onboarding_create_key,
             commands::onboarding::onboarding_install_key,
+            commands::onboarding::onboarding_installed_hosts,
             commands::connection::connect_host,
             commands::connection::disconnect_host,
             commands::connection::connection_status,
