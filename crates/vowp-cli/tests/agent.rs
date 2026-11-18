@@ -976,8 +976,8 @@ fn node_show_returns_the_redacted_card() {
         .upsert_node_path(&NodePath {
             node: name.clone(),
             project: ProjectName::parse("vowp").expect("project"),
-            local_root: "/Users/owner/private/vowp".to_owned(),
-            worktree_root: "/Users/owner/private/vowp/.vowp/worktrees".to_owned(),
+            local_root: "/Users/me/private/vowp".to_owned(),
+            worktree_root: "/Users/me/private/vowp/.vowp/worktrees".to_owned(),
             allow: vec!["src/**".to_owned()],
             updated_at: now,
         })
@@ -1021,9 +1021,9 @@ fn node_show_returns_the_redacted_card() {
     assert_eq!(value["capacity"]["max_slots"], 4);
     assert!(value["last_seen_at"].is_string());
     let text = serde_json::to_string(&value).expect("json text");
-    assert!(!text.contains("/Users/owner/private"), "path map leaked: {text}");
+    assert!(!text.contains("/Users/me/private"), "path map leaked: {text}");
     assert!(!text.contains("DEPLOY_TOKEN"), "secret name leaked: {text}");
-    assert!(!stderr.contains("/Users/owner/private"), "path map leaked: {stderr}");
+    assert!(!stderr.contains("/Users/me/private"), "path map leaked: {stderr}");
 }
 
 #[test]
@@ -1034,8 +1034,8 @@ fn node_enroll_is_home_only() {
     let config = ControlConfig {
         role: "control".to_owned(),
         home: "home-1".to_owned(),
-        ssh_target: "home.example".to_owned(),
-        remote_home: "/home/dev/.vowp".to_owned(),
+        ssh_target: "fake.example".to_owned(),
+        remote_home: "/home/user/.vowp".to_owned(),
         created_at,
     };
     std::fs::write(
@@ -1645,8 +1645,8 @@ fn surface_commands_are_home_only() {
     let config = ControlConfig {
         role: "control".to_owned(),
         home: "home-1".to_owned(),
-        ssh_target: "home.example".to_owned(),
-        remote_home: "/home/dev/.vowp".to_owned(),
+        ssh_target: "fake.example".to_owned(),
+        remote_home: "/home/user/.vowp".to_owned(),
         created_at,
     };
     std::fs::write(

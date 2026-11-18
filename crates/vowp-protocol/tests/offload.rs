@@ -403,8 +403,8 @@ fn resume_frame_round_trips_runs_and_surfaces() {
 fn path_map_update_round_trips_an_agent_path_map() {
     let map = AgentPathMap {
         project: project("vowp"),
-        local_root: "/Users/dev/vowp".to_owned(),
-        worktree_root: Some("/Users/dev/vowp-wt".to_owned()),
+        local_root: "/Users/me/vowp".to_owned(),
+        worktree_root: Some("/Users/me/vowp-wt".to_owned()),
         allow: vec!["src".to_owned(), "docs".to_owned()],
     };
     let frame = AgentFrame::PathMapUpdate { map: map.clone() };

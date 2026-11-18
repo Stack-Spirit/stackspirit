@@ -66,7 +66,7 @@ impl Default for FixtureOptions {
             online: true,
             busy_slots: 0,
             max_slots: 4,
-            remote_url: Some("https://user:token@example.invalid/acme/alpha.git".to_owned()),
+            remote_url: Some("https://user:test@example.invalid/acme/alpha.git".to_owned()),
         }
     }
 }
@@ -827,16 +827,16 @@ fn second_connection_supersedes_the_first_and_disconnects_runs() {
 #[test]
 fn strip_userinfo_keeps_scp_ssh_urls_and_removes_http_credentials() {
     assert_eq!(
-        dispatch::strip_userinfo("https://user:secret@example.invalid/a/b.git"),
+        dispatch::strip_userinfo("https://user:test@example.invalid/a/b.git"),
         "https://example.invalid/a/b.git"
     );
     assert_eq!(
-        dispatch::strip_userinfo("ssh://git@example.invalid/a/b.git"),
-        "ssh://example.invalid/a/b.git"
+        dispatch::strip_userinfo("ssh://git@example.com/a/b.git"),
+        "ssh://example.com/a/b.git"
     );
     assert_eq!(
-        dispatch::strip_userinfo("git@example.invalid:a/b.git"),
-        "git@example.invalid:a/b.git"
+        dispatch::strip_userinfo("git@example.com:a/b.git"),
+        "git@example.com:a/b.git"
     );
     assert_eq!(
         dispatch::strip_userinfo("https://example.invalid/a/b.git"),

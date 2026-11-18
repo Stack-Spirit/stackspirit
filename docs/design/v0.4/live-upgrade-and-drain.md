@@ -6,9 +6,9 @@
 
 ## 1. Problem statement
 
-During multi-project operation on a shared VOWP home (`vowp`, `vowp-asif`, `northnoir`,
-`stackspirit`), two framework continuity gaps surfaced whenever `vowp` itself was rebuilt with a
-newer schema or binary:
+During multi-project operation on a shared VOWP home (several concurrent repositories on one
+home), two framework continuity gaps surfaced whenever `vowp` itself was rebuilt with a newer
+schema or binary:
 
 1. **Installing a newer `vowp` binary breaks CLI commands while an older supervisor runs.**
    `Store::open_global_unbound` and `Store::create_project_db` immediately attempt an in-place

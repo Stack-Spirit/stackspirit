@@ -671,7 +671,7 @@ Adds or updates one project without re-enrolling. The project name defaults to
 The worktree root defaults to `<checkout>/.vowp/worktrees` and is created when missing.
 `--allow` is a repeatable normalised relative path below the checkout; with no entry the whole
 checkout is allowed. The command validates the roots, writes `agent.json` 0600, and prints the
-owner-only mapping `vowp /Users/owner/src/vowp worktrees /Users/owner/src/vowp/.vowp/worktrees`;
+owner-only mapping `vowp /Users/me/src/vowp worktrees /Users/me/src/vowp/.vowp/worktrees`;
 `--json` prints the `AgentPathMap`. A running `vowp agent run` reloads the file on its next
 heartbeat and sends `PathMapUpdate` on the live connection. The home persists the row before it
 answers `Pong`, so `vowp node show <node> --json` lists the project in `mapped` without a
@@ -751,8 +751,8 @@ seven days prints one warning to stderr. `--json` prints:
   "paths": [
     {
       "project": "vowp",
-      "local_root": "/Users/owner/src/vowp",
-      "worktree_root": "/Users/owner/src/vowp/.vowp/worktrees",
+      "local_root": "/Users/me/src/vowp",
+      "worktree_root": "/Users/me/src/vowp/.vowp/worktrees",
       "allow": []
     }
   ]

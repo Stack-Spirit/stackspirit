@@ -75,8 +75,8 @@ fn capacity() -> AgentCapacity {
 fn path_map() -> AgentPathMap {
     AgentPathMap {
         project: project("vowp"),
-        local_root: "/Users/dev/vowp".to_owned(),
-        worktree_root: Some("/Users/dev/vowp-wt".to_owned()),
+        local_root: "/Users/me/vowp".to_owned(),
+        worktree_root: Some("/Users/me/vowp-wt".to_owned()),
         allow: vec!["src".to_owned(), "docs".to_owned()],
     }
 }
@@ -566,7 +566,7 @@ fn surface_types_round_trip_and_have_stable_wire_names() {
         node: NodeName::parse("mac-studio").expect("node"),
         holder: "mac opencode".to_owned(),
         app: Some("opencode".to_owned()),
-        cwd: Some("/Users/dev/vowp".to_owned()),
+        cwd: Some("/Users/me/vowp".to_owned()),
         metadata: json!({}),
         state: SurfaceState::Attached,
         created_at: at(),

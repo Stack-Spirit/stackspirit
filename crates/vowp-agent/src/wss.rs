@@ -1230,7 +1230,7 @@ mod tests {
             "wss://home.example/",
             "wss://home.example/other",
             "wss://home.example/agent/v1?token=x",
-            "wss://user:pass@home.example/agent/v1",
+            "wss://user:test@example.invalid/agent/v1",
             "wss://home.example:0/agent/v1",
             "wss://",
         ] {

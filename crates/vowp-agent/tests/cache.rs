@@ -67,7 +67,7 @@ fn cache_never_stores_a_write_tool_or_a_secret() {
     let secret = "cache-argument-value-that-must-never-be-written";
     let arguments = json!({
         "token": secret,
-        "path": "/Users/owner/private/notes.md",
+        "path": "/Users/me/private/notes.md",
         "project": "vowp",
     });
 
@@ -106,7 +106,7 @@ fn cache_never_stores_a_write_tool_or_a_secret() {
         .and_then(|name| name.to_str())
         .expect("cache file name");
     let text = fs::read_to_string(&files[0]).expect("cache file");
-    for needle in [secret, "/Users/owner/private/notes.md", "project", "token"] {
+    for needle in [secret, "/Users/me/private/notes.md", "project", "token"] {
         assert!(!name.contains(needle), "the file name contains {needle}: {name}");
         assert!(!text.contains(needle), "the cache file contains {needle}: {text}");
     }

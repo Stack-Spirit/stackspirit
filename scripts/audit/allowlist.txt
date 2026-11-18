@@ -17,6 +17,8 @@ ipv4|*|127.0.0.1|Loopback address, public by definition and used in the security
 ipv4|*|0.0.0.0|Wildcard bind address in a test fixture and the v0.2 design example.
 # RFC 5737 TEST-NET-1 is reserved for documentation and cannot name a real host.
 ipv4|crates/vowp-cli/src/cmd/up.rs|192.0.2.1|RFC 5737 TEST-NET-1 address in a negative web-window test.
+ipv4|crates/vowp-agent/tests/transport.rs|192.0.2.10|RFC 5737 TEST-NET-1 address in a non-loopback bind refusal test.
+ipv4|crates/vowp-protocol/tests/config.rs|192.0.2.10|RFC 5737 TEST-NET-1 address in a non-loopback listen validation test.
 
 # Conventional placeholder homes used by tests and documentation. These are
 # not accounts on any machine.
@@ -46,6 +48,10 @@ email|*|vowp@home.example|The reserved .example TLD in the v0.2 design example.
 ssh_target|*|ssh_target": "fake.example"|Reserved .example placeholder in test fixtures.
 ssh_target|*|ssh_target": "vowp@example.invalid"|Reserved .invalid placeholder in a CLI test.
 ssh_target|*|ssh_target": "vowp@home.example"|The reserved .example TLD in the v0.2 design example.
+# Rust control-config fixtures write the field as `ssh_target: "..."`, without the
+# JSON key quotes, so the exact matched text needs its own narrow entries.
+ssh_target|crates/vowp-cli/tests/agent.rs|ssh_target: "fake.example"|Reserved .example placeholder in a control-config fixture.
+ssh_target|scripts/audit/allowlist.txt|ssh_target: "fake.example"|Text of an allowlist entry, not a real SSH target.
 
 # False positives from the hostname rule: Rust method names and a test path
 # that end in `.local`, not DNS names.
@@ -58,6 +64,7 @@ private_host|crates/vowp-core/tests/gates_secret.rs|env.local|Filename `.env.loc
 private_host|scripts/audit/allowlist.txt|store.local|Text of an allowlist entry, not a hostname.
 private_host|scripts/audit/allowlist.txt|env.local|Text of an allowlist entry, not a hostname.
 ipv4|scripts/audit/allowlist.txt|192.0.2.1|Text of an allowlist entry; TEST-NET-1 is documentation-only.
+ipv4|scripts/audit/allowlist.txt|192.0.2.10|Text of an allowlist entry; TEST-NET-1 is documentation-only.
 
 # The only token-shaped finding in the old history is a fake PEM header in a
 # historical test fixture. History is not published, so it stays informational

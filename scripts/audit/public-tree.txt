@@ -45,6 +45,7 @@ prune vowp.toml
 prune docs/dogfood/
 prune docs/fresh-user/
 prune docs/maintainers/
+prune docs/design/v0.5/
 prune docs/release/0.1.0-rc.1.md
 prune scripts/acceptance/
 prune scripts/audit/

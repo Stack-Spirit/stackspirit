@@ -498,8 +498,8 @@ transport. The Mac sends `LeaseAcquire`, then `TurnBegin { surface, session, lea
 executor, cwd_ref, job, purpose }`; the home validates the paired surface and the lease, calls the
 existing `begin_turn` path, and returns `TurnGrant { run_id, session, lease_token, expires_at,
 tail_seq }`. The grant carries no absolute path: `cwd_ref` is a project-relative `PathRef` and the
-agent resolves it on its own machine. The home therefore records no `/Users/...` path in a frame,
-event or run row.
+agent resolves it on its own machine. The home therefore records no absolute user-home path in a
+frame, event or run row.
 
 Each adapter event becomes `RemoteLine { run_id, epoch, line: RemoteLine::Event }`. The home feeds
 the existing `IngestSession` state machine one line at a time, so `seq` assignment, duplicate

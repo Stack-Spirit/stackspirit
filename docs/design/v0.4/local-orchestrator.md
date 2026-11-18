@@ -442,8 +442,8 @@ transaction as the event index row; a duplicate native id is skipped. The agent 
 cursor for backfill efficiency; the home is the authority on duplicates.
 
 **Path normalization.** The bridge maps the local project root and worktree root to a `PathRef`
-and replaces other absolute paths with `<external>` before spooling or sending. No `/Users/...`
-path appears in a session event, run row or snapshot card. This is a deliberate privacy and
+and replaces other absolute paths with `<external>` before spooling or sending. No absolute
+user-home path appears in a session event, run row or snapshot card. This is a deliberate privacy and
 portability rule, not only cosmetics.
 
 **Secret redaction.** The bridge loads the values it injected for the run from the local
@@ -1123,12 +1123,12 @@ target = "<home-ssh-target>"
 batch_mode = true
 
 [agent.paths.vowp]
-root = "/Users/owner/src/vowp"
-worktrees = "/Users/owner/src/vowp/.vowp/worktrees"
+root = "/Users/me/src/vowp"
+worktrees = "/Users/me/src/vowp/.vowp/worktrees"
 
 [agent.allow]
-cwd = ["/Users/owner/src"]
-write = ["/Users/owner/src/vowp/.vowp", "/tmp/vowp-agent"]
+cwd = ["/Users/me/src"]
+write = ["/Users/me/src/vowp/.vowp", "/tmp/vowp-agent"]
 exec = ["opencode", "claude", "git", "cargo", "npm", "pytest"]
 env_pass = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]   # names only
 deny_read = ["~/.ssh", "~/.aws", "~/.config/gh", "~/Library/Keychains"]
@@ -1536,7 +1536,7 @@ Acceptance:
    appears in a frame, log or spool.
 8. `vowp node revoke mac-studio` closes the connection, fences the run and releases the lease; the
    Mac stops.
-9. No absolute `/Users/...` path appears in a session event, run row or snapshot card.
+9. No absolute user-home path appears in a session event, run row or snapshot card.
 10. The home-only v0.3 flows still pass their tests.
 
 ### 14.3 Test strategy

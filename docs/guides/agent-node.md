@@ -204,8 +204,8 @@ path roots. `--json` adds a `surfaces` array:
   "paths": [
     {
       "project": "vowp",
-      "local_root": "/Users/owner/src/vowp",
-      "worktree_root": "/Users/owner/src/vowp/.vowp/worktrees",
+      "local_root": "/Users/me/src/vowp",
+      "worktree_root": "/Users/me/src/vowp/.vowp/worktrees",
       "allow": []
     }
   ]
@@ -390,7 +390,7 @@ The proxy owns the public port, the certificate and TLS. Terminate TLS 1.3, forw
 
 ```text
 home.example.com {
-  tls owner@example.com
+  tls test@example.com
   @agent path /agent/v1
   handle @agent {
     reverse_proxy 127.0.0.1:8743

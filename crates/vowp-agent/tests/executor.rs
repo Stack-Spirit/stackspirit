@@ -1747,7 +1747,7 @@ fn bundle_summary_waits_for_a_delayed_accept() {
 fn git_init(git: &SystemGit, repo: &Path) {
     git_ok(git, repo, &["init", "-b", "main"]);
     git_ok(git, repo, &["config", "user.name", "vowp test"]);
-    git_ok(git, repo, &["config", "user.email", "vowp-test@example.invalid"]);
+    git_ok(git, repo, &["config", "user.email", "vowp@example.invalid"]);
 }
 
 /// Runs git in `cwd`, asserting success.

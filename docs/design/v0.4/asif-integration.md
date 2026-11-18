@@ -785,16 +785,12 @@ document and the user documentation; E is the independent verification and remai
 per-job owns lists and gates below are the build record, not a claim that every later v0.4
 slice has shipped.
 
-**Audit-gate qualification.** `scripts/audit/scan.sh --worktree` and
-`scripts/audit/public-tree-check.sh --worktree` already exit 1 in this worktree before any
-ASIF change: the scan reports pre-existing findings across the repository, and the
-public-tree check names pre-existing pruned paths (`AGENTS.md`, `docs/maintainers/...`,
-`scripts/acceptance/...`). These two commands are **recording gates**, not pass/fail gates for
-an individual build job. A job runs them, records the exact output in its report, and passes
-this part of its gate only when the output contains no finding in a path the job changed and
-the public-tree check flags no path the job changed. The job does not fix, delete or
-allowlist pre-existing findings outside its owned paths. A new finding or pruned path in the
-job's own diff fails the job.
+**Verification gates.** Every job runs the public gates below and records the exact output in
+its report. The gates are `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+`bash docs/tests/run.sh` and `python3 docs/reference/check-reference.py`. A job passes this
+part of its gate only when every applicable command exits 0 and the output contains no finding
+in a path the job changed. A new finding in the job's own diff fails the job.
 
 ### Job A — `v4-asif-core` (adapter dependency, shared report types, core facade)
 
@@ -891,7 +887,6 @@ cargo build -p vowp-cli --bin vowp
 python3 docs/reference/generate.py --check
 python3 docs/reference/check-reference.py
 python3 scripts/release/generate-third-party-licenses.py --check
-scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job B — `v4-asif-cli` (CLI contract and remote paths)
@@ -929,7 +924,6 @@ cargo test -p vowp-cli --test session
 cargo build -p vowp-cli --bin vowp
 python3 docs/reference/generate.py --check
 python3 docs/reference/check-reference.py
-scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job C — `v4-asif-web` (daemon download/upload)
@@ -968,7 +962,6 @@ cargo test -p vowp-daemon --test asif_export_api
 cargo test -p vowp-daemon --test asif_import_api
 cargo test -p vowp-daemon --test session_page
 cargo test -p vowp-daemon --test pwa
-scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job D — `v4-asif-docs` (user and design documentation)
@@ -994,8 +987,6 @@ conformance, lossless, continuation or native-import claims.
 cargo test --workspace
 cargo build -p vowp-cli --bin vowp
 python3 docs/reference/check-reference.py
-scripts/audit/public-tree-check.sh --worktree  # recording gate, see above
-scripts/audit/scan.sh --worktree  # recording gate, see above
 ```
 
 ### Job E — `v4-asif-verify` (independent verification, no code ownership)
@@ -1013,8 +1004,6 @@ cargo test --workspace
 cargo build -p vowp-cli --bin vowp
 python3 docs/reference/generate.py --check
 python3 docs/reference/check-reference.py
-scripts/audit/scan.sh --worktree  # recording gate, see above
-scripts/audit/public-tree-check.sh --worktree  # recording gate, see above
 ```
 
 Then run the end-to-end test that owns the temporary home and the fake project:

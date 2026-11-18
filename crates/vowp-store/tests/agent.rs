@@ -554,15 +554,15 @@ fn node_path_upsert_is_idempotent() {
     let path = NodePath {
         node: node("mac-studio"),
         project: project("vowp"),
-        local_root: "/Users/owner/src/vowp".to_owned(),
-        worktree_root: "/Users/owner/src/vowp/.vowp/worktrees".to_owned(),
+        local_root: "/Users/me/src/vowp".to_owned(),
+        worktree_root: "/Users/me/src/vowp/.vowp/worktrees".to_owned(),
         allow: vec!["src".to_owned(), "docs".to_owned()],
         updated_at: ts(T0),
     };
     store.upsert_node_path(&path).expect("insert");
     store
         .upsert_node_path(&NodePath {
-            local_root: "/Users/owner/src/vowp-renamed".to_owned(),
+            local_root: "/Users/me/src/vowp-renamed".to_owned(),
             allow: vec!["src".to_owned()],
             updated_at: ts(T1),
             ..path.clone()
@@ -570,7 +570,7 @@ fn node_path_upsert_is_idempotent() {
         .expect("update");
     let paths_for_node = store.list_node_paths(&node("mac-studio")).expect("paths");
     assert_eq!(paths_for_node.len(), 1, "the primary key makes the upsert idempotent");
-    assert_eq!(paths_for_node[0].local_root, "/Users/owner/src/vowp-renamed");
+    assert_eq!(paths_for_node[0].local_root, "/Users/me/src/vowp-renamed");
     assert_eq!(paths_for_node[0].allow, vec!["src".to_owned()]);
     assert_eq!(paths_for_node[0].updated_at, ts(T1));
     assert_eq!(paths_for_node[0].worktree_root, path.worktree_root);
@@ -688,7 +688,7 @@ fn surface(id: &SurfaceId) -> Surface {
         node: node("mac-studio"),
         holder: "mac opencode".to_owned(),
         app: Some("opencode".to_owned()),
-        cwd: Some("/Users/dev/vowp".to_owned()),
+        cwd: Some("/Users/me/vowp".to_owned()),
         metadata: serde_json::json!({"terminal": "tmux"}),
         created_at: ts(T0),
         last_seen_at: ts(T0),

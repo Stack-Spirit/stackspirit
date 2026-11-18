@@ -1436,7 +1436,7 @@ fn chat_agent_is_not_forwarded_from_a_control_machine() {
         serde_json::json!({
             "role": "control",
             "home": "home-1",
-            "ssh_target": "vps.invalid",
+            "ssh_target": "fake.example",
             "remote_home": "/srv/vowp",
             "created_at": "2026-11-14T10:00:00Z",
         })
@@ -1458,7 +1458,7 @@ fn chat_agent_is_not_forwarded_from_a_control_machine() {
     assert!(stdout.contains("the controlled mac turn landed"), "{stdout}");
     let invocations = std::fs::read_to_string(&log).expect("ssh log");
     assert!(
-        !invocations.contains("vps.invalid"),
+        !invocations.contains("fake.example"),
         "chat was forwarded to the home:\n{invocations}"
     );
     assert!(
