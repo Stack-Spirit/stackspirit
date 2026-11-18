@@ -590,7 +590,7 @@ mod tests {
         let mut snapshot = ready_snapshot();
         snapshot.local_orchestrator = LocalOrchestratorGate::WaitingForVowpPhase3 {
             missing: vec!["surface rotation".to_owned()],
-            detected_version: Some("0.3.0".to_owned()),
+            detected_version: Some("0.4.0".to_owned()),
             evidence: vec!["test".to_owned()],
         };
         snapshot.local_agent.state = LocalAgentState::NotEnrolled;

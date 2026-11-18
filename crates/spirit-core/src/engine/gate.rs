@@ -26,9 +26,15 @@ const ORCHESTRATOR_NEW_LOCAL_NODE_TEXT: [&str; 2] =
 
 /// The `surface pair` after-help sentence that proves `--node` is the surface's node.
 /// The top-level `vowp surface --help` sentence is not accepted; the probe reads
-/// `vowp surface pair --help`, where the merged CLI repeats the local meaning.
+/// `vowp surface pair --help`, where the v0.4.0 CLI repeats the local meaning.
 const SURFACE_PAIR_LOCAL_NODE_TEXT: [&str; 2] =
     ["names the node the surface runs on", "not an SSH redirect"];
+
+/// The `vowp agent trust --help` flag that proves the local binary can record a changed
+/// system-mode WSS leaf fingerprint. This is optional evidence, never a `Ready` gate:
+/// the SSH transport does not use it, and a trust confirmation is owner-only after an
+/// out-of-band fingerprint check. The probe never runs `agent trust` itself.
+const AGENT_TRUST_HELP_REQUIRED: &str = "--fingerprint";
 
 /// The complete Phase 3 capability set named by `VOWP-CONTRACT.md` §11.3.
 pub const PHASE3_MILESTONES: [&str; 6] = [
@@ -615,22 +621,41 @@ async fn probe_local_agent_commands(
         }
     }
 
-    // Service and doctor are optional local prerequisites, not Ready gates. Record what
-    // the installed local binary advertises so the details drawer can explain a gap.
-    for (label, args) in [
+    // Service, doctor and trust are optional local prerequisites/security actions, not
+    // Ready gates. Record what the installed local binary advertises so the details drawer
+    // can explain a gap. `agent trust` is only a help probe: a changed system-mode WSS leaf
+    // fingerprint is verified out of band and confirmed by the owner, never automatically.
+    let optional_checks: [(&str, &[&str], &[&str]); 3] = [
         (
             "vowp agent service --help",
-            &["agent", "service", "--help"][..],
+            &["agent", "service", "--help"],
+            &[],
         ),
         (
             "vowp agent doctor --help",
-            &["agent", "doctor", "--help"][..],
+            &["agent", "doctor", "--help"],
+            &[],
         ),
-    ] {
+        (
+            "vowp agent trust --help",
+            &["agent", "trust", "--help"],
+            &[AGENT_TRUST_HELP_REQUIRED],
+        ),
+    ];
+    for (label, args, required) in optional_checks {
         let spec = CommandSpec::new("vowp", args.iter().map(|arg| (*arg).to_owned()).collect())
             .with_timeout(Duration::from_secs(10));
         match runner.run(&spec).await {
-            Ok(output) if output.success() => evidence.push(format!("{label}: exit 0 (optional)")),
+            Ok(output) if output.success() => {
+                if required
+                    .iter()
+                    .all(|needle| output.stdout_text().contains(needle))
+                {
+                    evidence.push(format!("{label}: exit 0 (optional)"));
+                } else {
+                    evidence.push(format!("{label}: required flag not advertised (optional)"));
+                }
+            }
             Ok(output) => evidence.push(format!("{} (optional)", evidence_exit(label, &output))),
             Err(_) => evidence.push(format!("{label}: unavailable (optional)")),
         }
@@ -1104,10 +1129,10 @@ pub async fn probe_local_orchestrator(
         }
     }
 
-    // The merged v0.4 CLI surface. `surface pair`/`rotate` repeat the local-node meaning
+    // The v0.4.0 CLI surface. `surface pair`/`rotate` repeat the local-node meaning
     // in their after-help; the top-level `surface --help` sentence and the global SSH
     // selector are never accepted on their own. `agent surface start|attach|detach` is a
-    // design sketch, not a command in the merged source, so it is not probed.
+    // design sketch, not a command in the shipped CLI, so it is not probed.
     let home_checks: [(&str, &[&str], &[&str], &str); 8] = [
         (
             "vowp surface pair --help",
@@ -1468,5 +1493,28 @@ mod tests {
         cache.put("host-a", snapshot);
         cache.clear();
         assert!(cache.get("host-a", probed).is_none());
+    }
+
+    #[test]
+    fn engine_gate_version_parsing_reads_vowp_0_4_0_lines() {
+        let plain = CommandOutput {
+            status: 0,
+            stdout: b"vowp 0.4.0\n".to_vec(),
+            stderr: Vec::new(),
+            duration_ms: 1,
+            stderr_truncated: false,
+        };
+        assert_eq!(version_from_output(&plain).as_deref(), Some("0.4.0"));
+
+        // `vowp version` appends the build and schema; the parser must still take the
+        // version token, not the hash or schema number.
+        let verbose = CommandOutput {
+            stdout: b"vowp 0.4.0 (abc1234) schema 1\n".to_vec(),
+            ..plain.clone()
+        };
+        assert_eq!(version_from_output(&verbose).as_deref(), Some("0.4.0"));
+
+        let failed = CommandOutput { status: 1, ..plain };
+        assert_eq!(version_from_output(&failed), None);
     }
 }

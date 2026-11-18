@@ -1,9 +1,10 @@
 //! Gate probes: ASIF and local-orchestrator capability evidence, never version-only.
 //!
-//! The D6 probes mirror the merged VOWP v0.4 CLI surface: `surface pair|ls|revoke|rotate`,
-//! `agent pair|run|paths|status`, `orchestrator new|ls|stop|resume`, and
+//! The D6 probes mirror the shipped VOWP v0.4.0 CLI surface: `surface pair|ls|revoke|rotate`,
+//! `agent pair|run|paths|status|service|doctor|trust`, `orchestrator new|ls|stop|resume`, and
 //! `mcp --agent-socket`. `agent surface start|attach|detach` is a design sketch, not a
-//! command in the merged source, so it must never be required or accepted.
+//! command in the shipped CLI, so it must never be required or accepted. `agent trust` is an
+//! optional owner-only security action, never a `Ready` gate and never invoked without `--help`.
 
 use std::sync::Mutex;
 
@@ -23,8 +24,8 @@ const GATE_NODE_LIST_V03: &str = include_str!("../fixtures/vowp/gate-node-list-v
 const GATE_NODE_SHOW_HOME_OFFLINE_V03: &str =
     include_str!("../fixtures/vowp/gate-node-show-v0.3-home-offline.json");
 
-/// The installed `vowp orchestrator new --help` output (2026-11-16): `--node` appears only
-/// as the global SSH selector. `--project`/`--home` values are the CLI defaults, not a host.
+/// A pre-0.4.0 `vowp orchestrator new --help` output: `--node` appears only as the global
+/// SSH selector. `--project`/`--home` values are the CLI defaults, not a host.
 const ORCHESTRATOR_NEW_HELP_GLOBAL_NODE_ONLY: &str = "\
 Create and start an orchestrator
 
@@ -45,41 +46,56 @@ Options:
   -h, --help                 Print help
 ";
 
-/// The merged `vowp orchestrator new --help` output: the local-node after-help is present.
-const ORCHESTRATOR_NEW_HELP_MERGED: &str = "\
+/// The shipped `vowp 0.4.0` `orchestrator new --help` output: the local-node after-help is
+/// present. Captured read-only from the installed binary on 2026-11-18.
+const ORCHESTRATOR_NEW_HELP_0_4_0: &str = "\
 Create and start an orchestrator
 
 Usage: vowp orchestrator new [OPTIONS] --app <APP>
 
 Options:
+      --json                 Print one machine-readable JSON document on stdout
       --name <NAME>          Orchestrator name; defaults to the project name, or `orchestrator`
       --node <NAME>          Run the command on that node over ssh
       --project <NAME>       Project to bind, when any
       --app <APP>            App to run: `opencode`, `claude-code` or `chat`
       --executor <EXECUTOR>  Executor to use
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --force                Replace an orchestrator with the same name
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 
 For `orchestrator new`, --node <name> names the node that runs the app, not an SSH redirect.
 ";
 
-/// The merged `vowp surface pair --help` output, including `--replace` and the local-node
-/// after-help. The installed 0.3.0 build has the after-help but not `--replace`.
-const SURFACE_PAIR_HELP_MERGED: &str = "\
+/// The shipped `vowp 0.4.0` `surface pair --help` output, including `--replace` and the
+/// local-node after-help. Captured read-only from the installed binary on 2026-11-18.
+const SURFACE_PAIR_HELP_0_4_0: &str = "\
 Create a pending surface and print its one-time pairing code
 
 Usage: vowp surface pair [OPTIONS] --session <ID> --kind <KIND>
 
 Options:
+      --json                  Print one machine-readable JSON document on stdout
       --session <ID>          Session the surface will mirror
       --kind <KIND>           Surface kind: `opencode` or `chat`
+      --node <NAME>           Run the command on that node over ssh
       --app <APP>             Application name carried into the token scopes
-      --replace <SURFACE-ID>  Revoke this surface and create the replacement in one transaction
+      --project <NAME|PATH>   Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>            Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --replace <SURFACE-ID>  Revoke this surface and create the replacement pending surface in one transaction
+      --no-color              Disable colour even when stdout is a terminal
+  -q, --quiet                 Suppress non-essential human output
+  -v, --verbose...            Increase log verbosity (`-v`, `-vv`)
+  -h, --help                  Print help
 
 For this command --node <name> names the node the surface runs on, not an SSH redirect.
 ";
 
-/// The installed 0.3.0 `vowp surface pair --help`: no `--replace`.
-const SURFACE_PAIR_HELP_INSTALLED: &str = "\
+/// A pre-0.4.0 `vowp surface pair --help`: the after-help is present but `--replace` is not.
+const SURFACE_PAIR_HELP_PRE_0_4_0: &str = "\
 Create a pending surface and print its one-time pairing code
 
 Usage: vowp surface pair [OPTIONS] --session <ID> --kind <KIND>
@@ -103,18 +119,35 @@ Revoke a surface and every token it holds
 
 Usage: vowp surface revoke [OPTIONS] <ID>
 
+Arguments:
+  <ID>  Surface id
+
 Options:
-      --yes  Revoke without asking for confirmation
+      --json                 Print one machine-readable JSON document on stdout
+      --yes                  Revoke without asking for confirmation
 ";
 
+/// The shipped `vowp 0.4.0` `surface rotate --help`; `--wait`/`--grace` and the command
+/// after-help are the required capability text. Captured read-only on 2026-11-18.
 const SURFACE_ROTATE_HELP: &str = "\
 Rotate a surface token, keeping the old token for a ten-minute overlap
 
 Usage: vowp surface rotate [OPTIONS] <ID>
 
+Arguments:
+  <ID>  Surface id printed by `vowp surface pair`
+
 Options:
-      --wait <DURATION>   Poll the outbox for this long and exit 7 if still queued
-      --grace <DURATION>  Shorten the old tokens to now + grace
+      --json                 Print one machine-readable JSON document on stdout
+      --wait <DURATION>      Poll the outbox for this long and exit 7 with `rotation_pending` if still queued
+      --grace <DURATION>     Shorten the old tokens to `now + grace` instead of the ten-minute default (max 24 h)
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 
 For this command --node <name> names the node the surface runs on, not an SSH redirect.
 ";
@@ -125,10 +158,18 @@ Run the stdio MCP server or the Mac-side proxy
 Usage: vowp mcp [OPTIONS] --surface <ID>
 
 Options:
+      --json                 Print one machine-readable JSON document on stdout
       --session <ID>         Session the server writes to (home mode; not with --agent-socket)
+      --node <NAME>          Run the command on that node over ssh
       --surface <ID>         Surface id this server represents
-      --token-file <FILE>    File that holds the lease token (home mode)
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --token-file <FILE>    File that holds the lease token (home mode; not with --agent-socket)
       --agent-socket <PATH>  Unix socket served by `vowp agent run`; selects the local MCP proxy
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 ";
 
 const ORCHESTRATOR_STOP_HELP: &str = "\
@@ -149,10 +190,18 @@ Redeem a home surface pairing code and store the token
 Usage: vowp agent pair [OPTIONS] --code-file <PATH|-> --surface <ID> --session <ID>
 
 Options:
-      --code-file <PATH|->  File holding the one-time pairing code, or `-` for stdin
-      --surface <ID>        Surface id printed by `vowp surface pair`
-      --session <ID>        Session id printed by `vowp surface pair`
-      --app <APP>           Application name
+      --code-file <PATH|->   File holding the one-time pairing code, or `-` for stdin
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --surface <ID>         Surface id printed by `vowp surface pair`
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --session <ID>         Session id printed by `vowp surface pair`
+      --app <APP>            Application name; defaults to `agent` when the home did not bind one
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 ";
 
 const AGENT_RUN_HELP: &str = "\
@@ -161,8 +210,17 @@ Run the agent client until revoked or superseded
 Usage: vowp agent run [OPTIONS]
 
 Options:
-      --foreground  Keep the process in the terminal
-      --role <ROLE> Agent role: `surface`, `executor` or `both`
+      --foreground           Keep the process in the terminal (the Phase 0 default)
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --role <ROLE>          Agent role: `surface`, `executor` or `both`
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --service              Run under the service manager: write the `run` marker and drain on SIGTERM
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 ";
 
 const AGENT_PATHS_HELP: &str = "\
@@ -174,12 +232,27 @@ Commands:
   add  Add or update one project checkout
   rm   Remove one project from the map
   ls   List the local project path map
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 ";
 
 const AGENT_SERVICE_HELP: &str = "\
 Install, remove or inspect the launchd or systemd-user service
 
 Usage: vowp agent service [OPTIONS] <COMMAND>
+
+Commands:
+  install    Write exactly one launchd plist or systemd user unit
+  uninstall  Stop the unit and remove only a VOWP-generated file
+  status     Show the unit path and the manager's reported state
 ";
 
 const AGENT_DOCTOR_HELP: &str = "\
@@ -187,6 +260,30 @@ Report local agent warnings without failing on them
 
 Usage: vowp agent doctor [OPTIONS]
 ";
+
+/// The shipped `vowp 0.4.0` `agent trust --help` output. Trust is a local-only,
+/// owner-confirmed security action for a changed system-mode WSS leaf fingerprint. The
+/// probe records this help as optional evidence and never runs the command itself.
+const AGENT_TRUST_HELP: &str = "\
+Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band
+
+Usage: vowp agent trust [OPTIONS] --fingerprint <SHA256:HEX>
+
+Options:
+      --fingerprint <SHA256:HEX>  New leaf fingerprint (`sha256:<64 lowercase hex>`), verified through a trusted channel
+      --json                      Print one machine-readable JSON document on stdout
+      --node <NAME>               Run the command on that node over ssh
+      --project <NAME|PATH>       Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>                Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color                  Disable colour even when stdout is a terminal
+  -q, --quiet                     Suppress non-essential human output
+  -v, --verbose...                Increase log verbosity (`-v`, `-vv`)
+  -h, --help                      Print help
+";
+
+/// The shipped `vowp 0.4.0` fresh-home `node show` card for the local home node. Presence is
+/// online, but `kind: home` is not an agent and must not satisfy the gate.
+const NODE_SHOW_V0_4_0_HOME_ONLINE: &str = r#"{"name":"local","kind":"home","status":"active","presence":"online","labels":[],"capacity":null,"runs":0,"mapped":[],"agent_version":null,"protocol":null,"last_error":null,"last_seen_at":"2026-11-18T16:48:56.078Z"}"#;
 
 struct Route {
     needles: Vec<&'static str>,
@@ -268,10 +365,11 @@ fn options() -> GateProbeOptions {
 }
 
 fn version_route() -> Route {
-    // The merged source still reports 0.3.0: a version string is never evidence by itself.
+    // The installed v0.4.0 build reports 0.4.0; a version string is still never evidence
+    // by itself. `parse_version_line` also accepts `vowp version`'s build/schema suffix.
     Route {
         needles: vec!["--version"],
-        output: ok("vowp 0.3.0\n"),
+        output: ok("vowp 0.4.0\n"),
     }
 }
 
@@ -294,12 +392,14 @@ fn home_routes() -> Vec<Route> {
         version_route(),
         Route {
             needles: vec!["node", "ls"],
-            output: ok(r#"[{"name":"mac-studio","ssh_target":"mac@192.0.2.20"}]"#),
+            output: ok(
+                r#"[{"name":"mac-studio","ssh_target":null,"is_local":false,"capabilities":{"vowp":"0.4.0"},"last_seen_at":"2026-11-18T16:48:56.078Z","created_at":"2026-11-18T16:48:56.078Z"}]"#,
+            ),
         },
         Route {
             needles: vec!["node", "show", "mac-studio"],
             output: ok(
-                r##"{"name":"mac-studio","kind":"agent","status":"active","presence":"online","labels":[],"runs":0,"mapped":["vowp"],"agent_version":"0.3.0","protocol":"vowp-agent/1","last_error":null}"##,
+                r##"{"name":"mac-studio","kind":"agent","status":"active","presence":"online","labels":[],"runs":0,"mapped":["vowp"],"agent_version":"0.4.0","protocol":"vowp-agent/1","last_error":null,"last_seen_at":"2026-11-18T16:48:56.078Z"}"##,
             ),
         },
         Route {
@@ -310,7 +410,7 @@ fn home_routes() -> Vec<Route> {
         },
         Route {
             needles: vec!["surface", "pair"],
-            output: ok(SURFACE_PAIR_HELP_MERGED),
+            output: ok(SURFACE_PAIR_HELP_0_4_0),
         },
         Route {
             needles: vec!["surface", "ls"],
@@ -330,7 +430,7 @@ fn home_routes() -> Vec<Route> {
         },
         Route {
             needles: vec!["orchestrator", "new"],
-            output: ok(ORCHESTRATOR_NEW_HELP_MERGED),
+            output: ok(ORCHESTRATOR_NEW_HELP_0_4_0),
         },
         Route {
             needles: vec!["orchestrator", "stop"],
@@ -385,6 +485,10 @@ fn local_routes() -> Vec<Route> {
             needles: vec!["agent", "doctor", "--help"],
             output: ok(AGENT_DOCTOR_HELP),
         },
+        Route {
+            needles: vec!["agent", "trust", "--help"],
+            output: ok(AGENT_TRUST_HELP),
+        },
     ]
 }
 
@@ -422,7 +526,7 @@ async fn gates_asif_probe_waiting_when_export_flag_is_unsupported() {
                 missing,
                 vec!["v4-asif-core".to_owned(), "v4-asif-cli".to_owned()]
             );
-            assert_eq!(detected_version.as_deref(), Some("0.3.0"));
+            assert_eq!(detected_version.as_deref(), Some("0.4.0"));
         }
         other => panic!("expected waiting, got {other:?}"),
     }
@@ -504,7 +608,7 @@ async fn gates_asif_probe_marks_inconsistent_help_as_incompatible() {
 }
 
 #[tokio::test]
-async fn gates_phase3_probe_ready_with_the_merged_vowp_surface() {
+async fn gates_phase3_probe_ready_with_the_installed_vowp_0_4_0_surface() {
     let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
     let agent = local_runner();
     let (gate, local) = probe_local_orchestrator(&runner, Some(&agent), &options()).await;
@@ -558,6 +662,11 @@ async fn gates_phase3_probe_ready_with_the_merged_vowp_surface() {
             assert!(
                 evidence
                     .iter()
+                    .any(|line| line.contains("vowp agent trust --help: exit 0 (optional)"))
+            );
+            assert!(
+                evidence
+                    .iter()
                     .any(|line| line.contains("cache stats reported"))
             );
             assert!(
@@ -576,6 +685,99 @@ async fn gates_phase3_probe_ready_with_the_merged_vowp_surface() {
             .all(|spec| !remote_argv(spec).contains("'agent' 'surface'")),
         "the stale agent surface command must never be invoked"
     );
+    let agent_calls = agent.calls();
+    assert!(
+        agent_calls
+            .iter()
+            .any(|spec| spec.args == ["agent", "trust", "--help"]),
+        "the trust capability is proven from its help only"
+    );
+    assert!(
+        agent_calls
+            .iter()
+            .all(|spec| !spec.args.iter().any(|arg| arg == "trust")
+                || spec.args.iter().any(|arg| arg == "--help")),
+        "the probe must never run `vowp agent trust` without --help"
+    );
+}
+
+#[tokio::test]
+async fn gates_phase3_probe_treats_agent_trust_as_optional_evidence() {
+    // A local build without `agent trust` still has the SSH surface D6 needs.
+    let mut routes = local_routes();
+    routes.retain(|route| route.needles != ["agent", "trust", "--help"]);
+    let agent = RouteRunner::new(routes, failed(2, "unknown command"));
+    let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, Some(&agent), &options()).await;
+    match gate {
+        LocalOrchestratorGate::Ready { evidence, .. } => {
+            assert!(evidence.iter().any(|line| {
+                line.contains("vowp agent trust --help:")
+                    && line.contains("(optional)")
+                    && !line.contains("exit 0 (optional)")
+            }));
+        }
+        other => panic!("expected ready without trust, got {other:?}"),
+    }
+
+    // A help that omits the fingerprint flag is recorded, not accepted as proof.
+    let mut routes = local_routes();
+    for route in &mut routes {
+        if route.needles == ["agent", "trust", "--help"] {
+            route.output = ok(
+                "Confirm a changed system-mode WSS leaf fingerprint\n\nUsage: vowp agent trust [OPTIONS]\n",
+            );
+        }
+    }
+    let agent = RouteRunner::new(routes, failed(2, "unknown command"));
+    let runner = RouteRunner::new(home_routes(), failed(1, "unexpected"));
+    let (gate, _) = probe_local_orchestrator(&runner, Some(&agent), &options()).await;
+    match gate {
+        LocalOrchestratorGate::Ready { evidence, .. } => {
+            assert!(evidence.iter().any(|line| {
+                line.contains("vowp agent trust --help: required flag not advertised (optional)")
+            }));
+        }
+        other => panic!("expected ready with an unproven trust help, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn gates_phase3_probe_rejects_an_online_home_node_from_vowp_0_4_0() {
+    // The shipped 0.4.0 fresh home reports its only node as kind=home, status=active,
+    // presence=online. Presence alone is never proof of a local agent.
+    let routes = vec![
+        version_route(),
+        Route {
+            needles: vec!["node", "ls"],
+            output: ok(
+                r#"[{"name":"local","ssh_target":null,"is_local":true,"capabilities":{"vowp":"0.4.0"},"last_seen_at":"2026-11-18T16:48:56.078Z","created_at":"2026-11-18T16:48:56.078Z"}]"#,
+            ),
+        },
+        Route {
+            needles: vec!["node", "show", "local"],
+            output: ok(NODE_SHOW_V0_4_0_HOME_ONLINE),
+        },
+    ];
+    let runner = RouteRunner::new(routes, failed(2, "unknown command"));
+    let (gate, _) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing,
+            detected_version,
+            evidence,
+        } => {
+            assert_eq!(missing, vec!["no active local agent node".to_owned()]);
+            assert_eq!(detected_version.as_deref(), Some("0.4.0"));
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("kind=home") && line.contains("presence=online")),
+                "{evidence:?}"
+            );
+        }
+        other => panic!("expected waiting on a home node, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -583,7 +785,7 @@ async fn gates_phase3_probe_waits_when_surface_pair_cannot_mint_a_replacement() 
     let mut routes = home_routes();
     for route in &mut routes {
         if route.needles == ["surface", "pair"] {
-            route.output = ok(SURFACE_PAIR_HELP_INSTALLED);
+            route.output = ok(SURFACE_PAIR_HELP_PRE_0_4_0);
         }
     }
     let runner = RouteRunner::new(routes, failed(1, "unexpected"));
@@ -841,11 +1043,12 @@ async fn gates_phase3_probe_never_ready_from_version_alone() {
     let only_version = RouteRunner::new(vec![version_route()], failed(1, "not found"));
     let agent = local_runner();
     let (gate, _) = probe_local_orchestrator(&only_version, Some(&agent), &options()).await;
-    assert!(!matches!(gate, LocalOrchestratorGate::Ready { .. }));
-    assert!(matches!(
-        gate,
-        LocalOrchestratorGate::WaitingForVowpPhase3 { .. }
-    ));
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            detected_version, ..
+        } => assert_eq!(detected_version.as_deref(), Some("0.4.0")),
+        other => panic!("expected waiting from version alone, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -879,7 +1082,7 @@ async fn gates_phase3_probe_waits_on_the_v0_3_offline_home_node() {
 
 #[tokio::test]
 async fn gates_phase3_probe_does_not_accept_an_offline_agent_or_a_missing_agent_version() {
-    let offline_agent = r#"{"name":"mac-studio","kind":"agent","status":"active","presence":"offline","agent_version":"0.3.0","protocol":"vowp-agent/1"}"#;
+    let offline_agent = r#"{"name":"mac-studio","kind":"agent","status":"active","presence":"offline","agent_version":"0.4.0","protocol":"vowp-agent/1"}"#;
     let mut routes = home_routes();
     for route in &mut routes {
         if route.needles.contains(&"show") {

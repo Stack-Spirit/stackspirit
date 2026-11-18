@@ -651,8 +651,8 @@ The summary **omits `body`**; the inbox drawer uses §7 for the full item.
 | `node` | `NodeName` | yes | Node that runs the app; absent/`null` means a v0.2 home-hosted orchestrator. |
 | `join` | object | no | `desktop`, `phone`, `chat` strings. |
 
-The merged `vowp-protocol::surface::OrchestratorCard` has an optional `node`. An installed
-build may still omit it, so StackSpirit must not infer a local node from an absent field.
+The shipped 0.4.0 `vowp-protocol::surface::OrchestratorCard` has an optional `node`. A card
+may still omit it, so StackSpirit must not infer a local node from an absent field.
 The D6 gate's node comes from `vowp node show`, not from `vowp orchestrator ls`; see
 §11.3.3.
 
@@ -1091,14 +1091,14 @@ feature works.
 |---|---|---|---|
 | Host connect, snapshot, fleet canvas, capacity rail, inbox, job actions | Existing VOWP CLI JSON: `fleet status`, `capacity report`, `fleet queue`, `fleet inbox` | **Available now (D0–D4)** | Build and test against fixtures; live against a real home. |
 | StackSpirit Engine, included models, BYOK, external harness | None from VOWP; local sidecar + OS keychain | **Available now (D4)** | Local only; provider/model names stay local until D6. |
-| `.asif.zip` export/import (D5) | `v4-asif-core`, `v4-asif-cli`; `v4-asif-web` for the daemon route | **Gated on `v4-asif-*`** | Build the sessions drawer and gate card; actions disabled until the probe says `Ready`. |
-| Local orchestrator execution (D6) | Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`: local app host, bridge, MCP proxy, orchestrator materialize, backfill, local cache), and Phase 4 `v4-local-4f-cli-surface` | **Gated on an installed Phase 2/3/4 build and an enrolled `connected` local agent** | Build the gate card and evidence UI; never start a local orchestrator or claim a local session. |
+| `.asif.zip` export/import (D5) | `v4-asif-core`, `v4-asif-cli`; both ship in VOWP `0.4.0` (`v4-asif-web` remains optional for the daemon route) | **VOWP 0.4.0 ships the ASIF interchange; the runtime probe still decides `AsifGate`** | Keep the sessions drawer and gate card; actions stay disabled until the probe is `Ready` and the D5 flag is on. No conformance claim. |
+| Local orchestrator execution (D6) | Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`: local app host, bridge, MCP proxy, orchestrator materialize, backfill, local cache), and Phase 4 `v4-local-4f-cli-surface`, all shipped in VOWP `0.4.0` | **VOWP 0.4.0 ships the CLI surface; still gated on a live active agent node and a `connected` local agent** | Build the gate card and evidence UI; never start a local orchestrator or claim a local session. |
 
-The merged VOWP source now contains the Phase 2 offload read model and the Phase 3/4
-local-orchestrator CLI surface; the installed `vowp 0.3.0` build lags it and the local agent
-is not enrolled. This contract does **not** treat source presence as installed capability.
-The runtime probe is the authority, and D6 remains gated until the installed build and the
-connected local agent satisfy §11.3.
+The shipped VOWP `0.4.0` release contains the Phase 2 offload read model and the Phase 3/4
+local-orchestrator CLI surface; the installed CLI under test is `vowp 0.4.0`. This contract
+still does **not** treat a version or source presence as installed capability. The runtime
+probe is the authority, and D6 remains gated until the live home and the connected local agent
+satisfy §11.3.
 
 ### 11.2 ASIF gate (D5)
 
@@ -1400,29 +1400,31 @@ surface** of the v0.4 plan:
 |---|---|---|
 | Phase 2 (`v4-local-2e/2f/2g`) | offload executor: assignment, path map, worktree, events, summary, push/fetch, policy, capacity, waiting reasons | The local node transport, leases, spool, and run fences are prerequisites for a local surface. |
 | Phase 3 (`v4-local-3*`) | local opencode app host, bridge, MCP proxy, orchestrator materialize, backfill, local cache | The actual local orchestrator session, lease, mirror, and backfill. |
-| Phase 4 (`v4-local-4f-cli-surface`) | gateway `--listen`, agent service/doctor, `surface rotate`, `surface pair --replace`, and the CLI/JSON release surface | The commands and flags the gate probes. |
+| Phase 4 (`v4-local-4f-cli-surface`) | gateway `--listen`, agent service/doctor/trust, `surface rotate`, `surface pair --replace`, and the CLI/JSON release surface | The commands and flags the gate probes. |
 
-`v4-local-4f-cli-surface` is **merged in the VOWP source** (commit `121f319`, with the
-follow-ups `d523314` and `3b421ed`); its parent Phase 4 slices are merged or no longer block
-the CLI surface. The installed `vowp 0.3.0` binary on this host is older: it has
-`surface pair|ls|revoke` but no `surface rotate`, no `agent service|doctor`, and no
-`orchestrator new` local-node after-help. Source presence is **not** installed capability.
+The `v0.4.0` release ships every command the D6 gate probes (tag `v0.4.0`, commit
+`828ada6`). The installed CLI under test reports `vowp 0.4.0` (schema 1) and advertises
+`surface rotate`, `surface pair --replace`, `agent service|doctor|trust`, the
+`orchestrator new` local-node after-help, and `mcp --agent-socket`. A version string is never
+evidence by itself; the probes in §11.3.4 are what count.
 
 D6 therefore remains gated until **all** of the following are true:
 
-1. a build containing the merged Phase 3/4 surface is installed on the home **and** the Mac;
-2. the home has an active local-agent node with protocol `vowp-agent/1`;
+1. `vowp 0.4.0+` (or a later build with the same probed commands) is installed on the home
+   **and** the Mac;
+2. the live home has an active local-agent node with protocol `vowp-agent/1`;
 3. the Mac agent is enrolled and `connected`;
 4. `features.local_orchestrator_actions` is enabled by a later D6 build.
 
-The VOWP source still reports version `0.3.0`; a version string is never evidence. The
-probes in §11.3.4 are what count.
+A fresh 0.4.0 home exposes only its `kind: home` node, even when that node is online. The
+runtime probe must not confuse an online home node with an agent node, and it does not accept
+the global SSH `--node` selector as proof of the local-node meaning.
 
 
 #### 11.3.2 VOWP command surface and the agent frames D6 uses
 
-The merged CLI has **no `vowp agent surface start|attach|detach` command**. That spelling in
-`local-orchestrator.md` §12.2 is a design sketch; the merged local app host is created by
+The shipped CLI has **no `vowp agent surface start|attach|detach` command**. That spelling in
+`local-orchestrator.md` §12.2 is a design sketch; the local app host is created by
 the home's `vowp orchestrator new --node <name> --app opencode`, which sends an
 `AgentFrame::OrchestratorCommand(Start)` to the enrolled Mac agent. StackSpirit must never
 require, probe, or display the stale spelling as a capability.
@@ -1473,6 +1475,7 @@ vowp agent run [--foreground] [--role surface|executor|both] [--service]
 vowp agent status --json
 vowp agent service install|uninstall|status
 vowp agent doctor [--json]
+vowp agent trust --fingerprint <sha256:hex>   # owner-only, after an out-of-band check
 vowp chat --agent --session <id>
 vowp mcp --agent-socket <path> --surface <surface-id>
 ```
@@ -1502,15 +1505,19 @@ Which command proves each D6 capability:
 | Backfill | no separate command; it is the `vowp agent run` bridge/cursor behavior, covered by the run help plus a connected agent | Mac | implementation behavior |
 | Service mode | `vowp agent service --help` exits 0 | Mac | optional local prerequisite |
 | Local diagnostics | `vowp agent doctor --help` exits 0 | Mac | optional local prerequisite |
+| Changed WSS fingerprint | `vowp agent trust --help` exits 0 and advertises `--fingerprint` | Mac | optional owner security (never auto-run) |
 | Enrollment | `vowp agent enroll --help` exits 0; `vowp agent status --json` exit 3 before enrollment | Mac | owner setup |
 | Node enrollment code | `vowp node enroll <node> [--label <label>]...` succeeds on the home; a stale `pending` node is recovered with `vowp node enroll <node> --replace`, an `active` node requires an explicit `vowp node revoke <node> --yes` or `vowp node rm <node> --yes` first, and a `revoked` node requires `vowp node rm <node> --yes` first | home | owner setup (write) |
 | Path map setup | `vowp agent paths add` / `rm` / `ls`; the running agent reloads the map on its next heartbeat and reports it as `PathMapUpdate`, which the home persists in `node_paths` | Mac | owner setup |
 
 `--replace` and `--yes` are owner-setup and session-robustness details, not new gate evidence:
-they make a retry explicit but prove no capability. The enrollment and path-map rows keep their
-owner-setup kind; no gate row changes.
+they make a retry explicit but prove no capability. `vowp agent trust --fingerprint` is an
+owner-only security action for a changed system-mode WSS leaf fingerprint: the owner verifies
+the value out of band, StackSpirit probes only its help, and a missing or unconfirmed trust
+never turns into a hidden auto-trust. The enrollment, trust, and path-map rows keep their
+owner-only kind; no gate row changes.
 
-`vowp node paths <node> --json` **does not exist in the merged CLI** and is not a D6
+`vowp node paths <node> --json` **does not exist in the shipped CLI** and is not a D6
 probe. Local cache is a Mac-side read from `vowp agent status --json`. The home persists the
 map the Mac reports in `node_paths`, validates it lexically, and never copies raw roots into a
 card, log, or frame; it exposes only `NodeCard.mapped` project names. There is still no
@@ -1572,8 +1579,8 @@ name. Its raw body is still never copied into shared state or gate evidence:
 | `last_error` | string | yes | Redacted last error. |
 
 `vowp orchestrator ls --json` now returns `OrchestratorCard` with an optional `node`
-(`vowp-protocol::surface`); `None` means a v0.2 home-hosted orchestrator. An installed build
-may still omit it, so the gate's node comes from `node show`, never from this list.
+(`vowp-protocol::surface`); `None` means a v0.2 home-hosted orchestrator. A card may still
+omit it, so the gate's node comes from `node show`, never from this list.
 
 `vowp agent status --json` is a **Mac-side** command, not a home command. It reads
 `~/.vowp-agent/status.json` and prints a CLI-local `AgentStatus` document plus `surfaces`
@@ -1609,10 +1616,10 @@ StackSpirit parses only the fields D6 uses and tolerates additions. It does not 
 
 #### 11.3.3 Contract gaps that keep D6 gated
 
-1. **`OrchestratorCard.node` is optional.** The merged protocol has
-   `Option<NodeName>` (`vowp-protocol::surface`), but an installed build may omit it and a
-   v0.2 card legitimately has `None`. StackSpirit must not infer a local node from an
-   absent field. The gate's node comes from `node show`, not from `orchestrator ls`.
+1. **`OrchestratorCard.node` is optional.** The shipped 0.4.0 protocol has
+   `Option<NodeName>` (`vowp-protocol::surface`), but a card may omit it and a v0.2 card
+   legitimately has `None`. StackSpirit must not infer a local node from an absent field.
+   The gate's node comes from `node show`, not from `orchestrator ls`.
 2. **`vowp fleet status --json` stays the v0.2 snapshot in the MVP.** The plan says the
    human output adds a node summary, but the JSON snapshot does not gain a `nodes` array
    in the MVP. StackSpirit uses `vowp node ls --json` / `node show --json` for nodes and
@@ -1626,8 +1633,8 @@ StackSpirit parses only the fields D6 uses and tolerates additions. It does not 
    command/exit-code probes and conservative help parsing. This is the main reason the
    gate can stay `Waiting` or `Unknown` rather than guess.
 5. **`vowp node paths` is not a CLI command.** The design sketch in
-   `local-orchestrator.md` §12.1 lists `vowp node paths <name> --json`, but the merged
-   `vowp-cli` has no such subcommand. D6 must not probe it. The local cache is a Mac-side
+   `local-orchestrator.md` §12.1 lists `vowp node paths <name> --json`, but the shipped
+   `vowp 0.4.0` `vowp-cli` has no such subcommand. D6 must not probe it. The local cache is a Mac-side
    read from `vowp agent status --json` (`cache_entries`, `cache_bytes`,
    `cache_oldest_at`). The home does persist the map the Mac reports through
    `AgentFrame::PathMapUpdate` in `node_paths`: it validates the map lexically, never
@@ -1645,10 +1652,21 @@ StackSpirit parses only the fields D6 uses and tolerates additions. It does not 
    sentence ("names the node the surface runs on" / "names the node that runs the app",
    plus "not an SSH redirect"). The top-level `vowp surface --help` sentence is not
    accepted for `surface pair`.
-8. **The installed binary can lag the merged source.** The installed `vowp 0.3.0` lacks
-   `surface rotate`, `agent service`, `agent doctor`, and the `orchestrator new` local-node
-   after-help. That is a missing capability, not a false negative. D6 stays `Waiting`
-   until a build containing the merged surface is installed on both machines.
+8. **A changed WSS fingerprint is never silently trusted.** `vowp agent trust
+   --fingerprint <sha256:hex>` is local-only and owner-confirmed; it refuses an SSH
+   transport, refuses a hard `tls = "pin"` change (re-enroll instead), and leaves an
+   unchanged value untouched. StackSpirit probes only `vowp agent trust --help` as optional
+   evidence, never runs the command, and never copies a fingerprint from a status document or
+   connection error. A trust refusal leaves the agent not `connected`, so D6 stays `Waiting`.
+9. **An online home node is not an agent node.** A fresh 0.4.0 home's only node is
+   `kind: home`, `status: active`, `presence: online`, `protocol: null`,
+   `agent_version: null`. Presence is computed for every node. The probe requires
+   `kind == "agent"` and the protocol/version fields, so it does not turn a healthy home node
+   into a local-orchestrator `Ready`.
+10. **The installed binary can lag the release.** A pre-0.4.0 `vowp 0.3.0` lacks
+    `surface rotate`, `agent service`, `agent doctor`, `agent trust`, and the `orchestrator
+    new` local-node after-help. That is a missing capability, not a false negative. D6 stays
+    `Waiting` until a 0.4.0+ build with the probed surface is installed on both machines.
 
 #### 11.3.4 Probe algorithm and `LocalOrchestratorGate`
 
@@ -1725,10 +1743,11 @@ surface and are therefore **not** sufficient evidence on their own.
       bridge/backfill path; there is no separate backfill command);
     - `vowp agent paths --help` advertises `add`, `rm`, `ls`;
     - `vowp agent status --json` reports `cache_entries` and `cache_bytes`.
-    `vowp agent service` and `vowp agent doctor` are optional diagnostics, recorded as
-    evidence but not required. A non-`connected` state, a missing local command, or a
-    missing cache field keeps the gate `Waiting` with the exact missing label; it is never
-    `Ready`.
+    `vowp agent service`, `vowp agent doctor`, and `vowp agent trust` are optional
+    diagnostics/security evidence, recorded but not required. The trust probe is help-only;
+    never run `vowp agent trust` from the gate, and never treat a changed fingerprint from an
+    error string as trusted. A non-`connected` state, a missing local command, or a missing
+    cache field keeps the gate `Waiting` with the exact missing label; it is never `Ready`.
 11. **Result.**
     ```rust
     LocalOrchestratorGate::Ready {
@@ -1760,28 +1779,29 @@ surface and are therefore **not** sufficient evidence on their own.
             "vowp mcp --help: exit 0".into(),
             "vowp orchestrator new --help: exit 0".into(),
             "vowp orchestrator ls --json: exit 0".into(),
+            "vowp agent service --help: exit 0 (optional)".into(),
+            "vowp agent doctor --help: exit 0 (optional)".into(),
+            "vowp agent trust --help: exit 0 (optional)".into(),
             "vowp agent status --json: cache stats reported".into(),
         ],
     }
     ```
-    Missing commands produce:
+    A fresh 0.4.0 home with no agent node produces:
     ```rust
     LocalOrchestratorGate::WaitingForVowpPhase3 {
         missing: vec![
             "no active local agent node".into(),
-            "surface rotation".into(),
-            "orchestrator materialization".into(),
-            "local agent connection".into(),
         ],
-        detected_version: Some("0.3.0".into()),
+        detected_version: Some("0.4.0".into()),
         evidence: vec![
-            "vowp node show --json: kind=home status=active presence=offline".into(),
-            "vowp surface rotate --help: exit 2".into(),
-            "vowp orchestrator new --help: required flags/text not advertised".into(),
-            "vowp agent status --json: not_enrolled".into(),
+            "vowp node ls --json: exit 0".into(),
+            "vowp node show --json: kind=home status=active presence=online".into(),
         ],
     }
     ```
+    A pre-0.4.0 binary can still miss home **commands** (for example `surface rotation` or
+    `orchestrator materialization`); those remain `Waiting` with exact missing labels. The
+    version itself never changes the result.
 12. **Never version-only and never home-only.** A VOWP version that "looks like" Phase 3
     is not evidence. A Phase 0/1 `agent status` success is not evidence, and `agent status`
     is never run against the home. A `Ready` home with a not-installed, not-enrolled, or
@@ -1841,31 +1861,31 @@ The bridge sends the gate states as tagged unions (see `PLAN.md` §5.2). Example
 
 ```json
 {
-  "probed_at": "2026-11-14T12:06:00.000Z",
+  "probed_at": "2026-11-18T12:06:00.000Z",
   "local_orchestrator": {
     "state": "waiting_for_vowp_phase3",
     "missing": [
-      "no active local agent node",
-      "surface rotation",
-      "orchestrator materialization",
-      "local agent connection"
+      "no active local agent node"
     ],
-    "detected_version": "0.3.0",
+    "detected_version": "0.4.0",
     "evidence": [
-      "vowp node show --json: kind=home status=active presence=offline",
-      "vowp surface rotate --help: exit 2",
-      "vowp orchestrator new --help: required flags/text not advertised",
-      "vowp agent status --json: not_enrolled"
+      "vowp node ls --json: exit 0",
+      "vowp node show --json: kind=home status=active presence=online"
     ]
   },
   "asif": {
-    "state": "waiting_for_vowp_asif",
-    "missing": ["v4-asif-core", "v4-asif-cli"],
+    "state": "ready",
+    "export": true,
+    "import": true,
     "detected_version": "0.4.0",
-    "evidence": ["session export --format asif: exit 2 (unsupported)"]
+    "evidence": [
+      "vowp --version: 0.4.0",
+      "session export --format asif: exit 3",
+      "session import --format asif: help lists asif"
+    ]
   },
   "local_agent": {
-    "state": "not_installed",
+    "state": "not_enrolled",
     "node": null,
     "protocol": null,
     "last_heartbeat": null,

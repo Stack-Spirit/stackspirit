@@ -1,19 +1,15 @@
 {
-  "probed_at": "2026-11-14T12:00:00.000Z",
+  "probed_at": "2026-11-18T12:00:00.000Z",
   "local_orchestrator": {
     "state": "waiting_for_vowp_phase3",
     "missing": [
-      "no active local agent node",
-      "surface rotation",
-      "orchestrator materialization",
-      "local agent connection"
+      "no active local agent node"
     ],
-    "detected_version": "0.3.0",
+    "detected_version": "0.4.0",
     "evidence": [
-      "vowp node show --json: kind=home status=active presence=offline",
-      "vowp surface rotate --help: exit 2",
-      "vowp orchestrator new --help: required flags/text not advertised",
-      "vowp agent status --json: not_enrolled"
+      "vowp --version: 0.4.0",
+      "vowp node ls --json: exit 0",
+      "vowp node show --json: kind=home status=active presence=online"
     ]
   },
   "asif": {
@@ -24,7 +20,7 @@
     ],
     "detected_version": "0.4.0",
     "evidence": [
-      "session export --format asif: exit 2 (unsupported)"
+      "session export --format asif: ambiguous result"
     ]
   },
   "local_agent": {
