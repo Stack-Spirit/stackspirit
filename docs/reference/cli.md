@@ -2009,19 +2009,22 @@ Options:
 ```text
 Register a git checkout as a project
 
-Usage: vowp project add [OPTIONS] <PATH>
+Usage: vowp project add [OPTIONS] [PATH]
 
 Arguments:
-  <PATH>  Path of the checkout on the home
+  [PATH]  Path of the checkout, or the explicit clone target with `--git`
 
 Options:
+      --git <URL>            Clone this repository before initialising and registering it
       --json                 Print one machine-readable JSON document on stdout
-      --name <NAME>          Project name; defaults to the directory name
+      --init                 Initialise the checkout when it has no `vowp.toml`
       --node <NAME>          Run the command on that node over ssh
-      --weight <N>           Fairness weight, `1..=100`
+      --orchestrator <APP>   Create the project orchestrator for this app
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --name <NAME>          Project name; defaults to the directory name or the clone URL basename
       --no-color             Disable colour even when stdout is a terminal
+      --weight <N>           Fairness weight, `1..=100`
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help

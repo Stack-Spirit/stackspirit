@@ -53,6 +53,8 @@ In the current git repo: writes `vowp.toml` (a `[node]` table with `tz_offset_mi
 (`AGENTS.md`, `CLAUDE.md` containing `@AGENTS.md`, `.claude/skills/vowp-{worker,planner,verifier,keeper}/SKILL.md`, `opencode.jsonc`, brief/report templates) from the templates **embedded in the binary**,
 appends `.vowp/tmp/` to `.gitignore`, creates the home (global DB, directories), registers the local node and the project, creates `~/.vowp/projects/<name>/project.db`, and creates the project's loop rows (`loops` table, default intervals). Existing files are never overwritten without `--force` (skipped files are listed).
 Human: `initialised project vowp at /path (8 files written, 2 skipped)`. JSON: `{"project":"vowp","path":"…","written":[…],"skipped":[…]}`. Exit 4 if already initialised and not `--force`.
+`vowp project add --init` calls the same initializer at a known checkout root without changing
+the process cwd; see §6.1 and [`v0.5/project-bootstrap.md`](v0.5/project-bootstrap.md).
 
 ### `vowp doctor`
 Checks (each `ok|warn|fail` with detail): `home` writable; `db` opens + `integrity_check` + schema version; `schema` matches the binary; `projects` each have an openable project DB; `snapshot` is writable; `git` version; `tmux` version (warn if absent); harness probes via adapters
@@ -306,7 +308,7 @@ These commands are new in v0.2. Full `--json` shapes are in
 ### 6.1 `vowp project`
 
 ```
-vowp project add <path> [--name <n>] [--weight <1-100>]
+vowp project add [<path>] [--git <url>] [--init] [--orchestrator <app>] [--name <n>] [--weight <1-100>]
 vowp project ls [--all]
 vowp project pause|resume|archive <name>
 vowp project rm <name> --yes
@@ -314,12 +316,30 @@ vowp project weight <name> <1-100>
 ```
 
 `add` registers an existing checkout on the home (idempotent for the same path and name; it does not
-start a supervisor). `ls` prints state, weight, path and update time; `_node` is hidden unless
-`--all`. `pause` stops new dispatch but keeps maintenance; `resume` returns a paused project to
-`active`; `archive` stops every tick and keeps the database; `rm --yes` archives the project
-directory under `~/.vowp/archive/projects/` and removes the registry row (refused while running and
-for `_node`). `weight` sets the fairness weight. JSON: `ProjectEntry` or `[ProjectEntry]`;
-`rm` prints `{name, archive_path, removed}`.
+start a supervisor). At least one of `<path>` or `--git <url>` is required. `--git` clones the
+repository into the explicit `<path>` or `<home-parent>/<name>` first; the name comes from `--name`
+or the URL basename minus a trailing `.git`, and `_node` is refused. The command refuses a missing
+home parent, an existing target, a `..` component, a target outside the canonical home parent, and a
+URL with userinfo in its `scheme://` authority (SCP-style `git@host:path` is allowed). The clone is
+argv-only `git clone -- <url> <target>` with `GIT_TERMINAL_PROMPT=0`,
+`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `GIT_SSH_COMMAND=ssh -oBatchMode=yes`;
+a failure removes only the target it created and redacts the URL from its error.
+`--init` initialises the checkout only when `vowp.toml` is absent, using the same writer as
+`vowp init`; an existing file is left byte-identical and the summary says `initialized: false`.
+`--orchestrator <app>` then creates or reuses the project's same-named orchestrator for `opencode`,
+`claude-code` or `chat`; a same-name card with a different project or app is a conflict. A failure
+after registration keeps the project registered, removes a newly created orchestrator directory and
+names the retry `vowp orchestrator new --name <project> --app <app> --project <project>`.
+With none of `--git`/`--init`/`--orchestrator`, the human output and `ProjectEntry` JSON are
+unchanged. In bootstrap mode `--json` prints one summary
+`{"project","path","initialized","orchestrator"}` where `orchestrator` is an `OrchestratorCard` or
+`null`. Full rules: [`v0.5/project-bootstrap.md`](v0.5/project-bootstrap.md).
+`ls` prints state, weight, path and update time; `_node` is hidden unless `--all`. `pause` stops new
+dispatch but keeps maintenance; `resume` returns a paused project to `active`; `archive` stops every
+tick and keeps the database; `rm --yes` archives the project directory under
+`~/.vowp/archive/projects/` and removes the registry row (refused while running and for `_node`).
+`weight` sets the fairness weight. JSON: `ProjectEntry` or `[ProjectEntry]`; `rm` prints
+`{name, archive_path, removed}`.
 
 ### 6.2 `vowp fleet`
 
@@ -486,7 +506,9 @@ is not an SSH redirect for this command); the node materializes its own private 
 `running` only after the app is healthy. `--app claude-code` records a degraded orchestrator and
 exits non-zero when no claude.ai login exists rather than pretending the host runs. `stop` stops the
 host and releases the lease (the session stays); `resume` starts it again; the supervisor resumes
-running orchestrators after a restart. JSON: `OrchestratorCard`.
+running orchestrators after a restart. JSON: `OrchestratorCard`. `vowp project add --orchestrator
+<app>` creates the same card named after the project and bound to it, reuses an existing card only
+when its project and app match, and starts the keeper for a home app host; `chat` needs none.
 
 `orchestrator move` requires exactly one of `--node <n>` (move to that enrolled local node) or
 `--home` (move back to this home); both or neither is a usage error (exit 2). It validates the

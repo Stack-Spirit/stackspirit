@@ -39,6 +39,18 @@ crates/vowp-cli/
 Every command module in `src/cmd/` is real code. A command that cannot run returns an explicit error (exit code 1, message `not implemented in this build`);
 no command may ship as a stub in a final build: the acceptance test `no_command_returns_not_implemented` iterates every command in `cli.rs` with `--help`-free dry arguments and fails on `NotImplemented`.
 
+`cmd/project.rs` owns the one-step bootstrap behind `project add --git/--init/--orchestrator`.
+It keeps the clone argv builder (`clone_argv`), target validation (`clone_target`), URL
+credential detector (`url_has_credentials`) and stderr redaction (`redacted_clone_stderr`) next
+to the command, so the unit tests run without a home. `cmd/init.rs` exposes
+`run_at(paths, root, name, force, no_framework)`: the whole initializer body without the cwd
+lookup or printing, shared by `vowp init` and `project add --init`. `cmd/orchestrator.rs`
+exports `parse_app`, `app_name` and `ensure_keeper_at(paths, project_root, orchestrator, info)`
+so the bootstrap creates the same card and detached keeper as `orchestrator new`. The bootstrap
+runs node-scoped (`project::run_node`), registers before it touches the orchestrator, and prints
+one `{"project","path","initialized","orchestrator"}` summary; see
+[`../v0.5/project-bootstrap.md`](../v0.5/project-bootstrap.md).
+
 ## 2. Shared API (frozen)
 
 ```rust

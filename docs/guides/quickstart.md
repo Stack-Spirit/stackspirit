@@ -12,6 +12,7 @@ phone. It uses one home for every project; there is no separate "laptop-only" mo
 | Placeholder | Replace with |
 |---|---|
 | `<your-repo>` | The path to the git repository on the **home**. |
+| `<your-url>` | The clone URL of a repository the home can read; never put a password in it. |
 | `<your-project>` | The project name; it names the project database and tmux session too. |
 | `<your-harness>` | `opencode` or `claude-code`, installed and signed in on the home. |
 | `<your-model>` | A model identifier that harness accepts. |
@@ -61,6 +62,19 @@ vowp project ls
 
 The registry commands work from any directory on the home; a path passed to `project add` is a path
 on the home, not on the control machine.
+
+One command can clone, initialise, register and create the orchestrator. The clone lands in
+`<home-parent>/<name>`, where `<home-parent>` is the directory above `~/.vowp`:
+
+```sh
+vowp project add --git <your-url> --init --orchestrator chat --json
+```
+
+The JSON summary names the project, its checkout path, whether this command initialised it and the
+orchestrator card (`null` when `--orchestrator` is omitted). A later `vowp up` starts the supervisor;
+the chat orchestrator is reachable through its printed `join.chat` command. Use
+`--orchestrator opencode` or `--orchestrator claude-code` to start a hosted app and its keeper
+instead of `chat`.
 
 ## 3. Point the profiles at real executors
 

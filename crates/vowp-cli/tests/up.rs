@@ -2618,6 +2618,47 @@ fn up_refuses_on_a_control_machine() {
 }
 
 #[test]
+fn project_add_without_new_flags_keeps_the_legacy_json() {
+    let env = common::TestEnv::new();
+    let second = git_repo();
+    write_project_config(second.path(), "second");
+    let path = second.path().to_str().expect("path");
+
+    let (code, value, stderr) = env.run_json(&["project", "add", path]);
+    assert_eq!(code, 0, "{stderr}");
+    let object = value.as_object().expect("one ProjectEntry object");
+    let keys: std::collections::BTreeSet<&str> = object.keys().map(String::as_str).collect();
+    let expected = [
+        "name",
+        "path",
+        "remote_url",
+        "default_branch",
+        "state",
+        "weight",
+        "paused_reason",
+        "archived_at",
+        "created_at",
+        "updated_at",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(keys, expected, "legacy project add JSON fields changed: {value}");
+    assert_eq!(value["name"], "second", "{value}");
+    assert_eq!(value["state"], "active", "{value}");
+    assert_eq!(
+        Path::new(value["path"].as_str().expect("path"))
+            .canonicalize()
+            .expect("registered path canonicalises"),
+        second.path().canonicalize().expect("checkout canonicalises"),
+        "{value}"
+    );
+    assert!(
+        registry_entry(&env, "second").is_some(),
+        "legacy add still writes the real registry row"
+    );
+}
+
+#[test]
 fn project_registry_add_ls_weight_pause_resume_archive_and_rm() {
     let env = common::TestEnv::new();
     let second = git_repo();

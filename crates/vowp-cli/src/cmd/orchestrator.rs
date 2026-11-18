@@ -17,6 +17,7 @@ use vowp_adapters::proc::{Signal, process_alive, signal_group};
 use vowp_core::CoreError;
 use vowp_core::surface::orchestrator::{KEEPER_PID_FILE, NewOrchestrator, Orchestrator, OrchestratorInfo};
 use vowp_protocol::{Executor, ExecutorRef, OrchestratorApp, OrchestratorCard, ProjectName, VowpConfig};
+use vowp_store::NodePaths;
 
 use crate::output::print_json;
 use crate::{CliError, Ctx, IoStreams};
@@ -280,6 +281,22 @@ fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: 
 /// node orchestrator bound to the home (the `local` row or `deps.node`) still runs the
 /// home host and home lease, so it needs the keeper exactly like a v0.2 record.
 fn ensure_keeper(ctx: &Ctx, orchestrator: &Orchestrator, info: &OrchestratorInfo) -> Result<(), CliError> {
+    let project_root = ctx.project_selected().then(|| ctx.project_root());
+    ensure_keeper_at(ctx.paths(), project_root, orchestrator, info)
+}
+
+/// Starts a detached lease keeper for `info` unless it already has one.
+///
+/// This is the [`ensure_keeper`] body without a [`Ctx`], so `project add` can use it
+/// after registering a checkout. `project_root` is the checkout passed to the keeper's
+/// hidden `__keepalive` child as `--project`; `None` leaves the child to the home's own
+/// project selection.
+pub(crate) fn ensure_keeper_at(
+    paths: &NodePaths,
+    project_root: Option<&Path>,
+    orchestrator: &Orchestrator,
+    info: &OrchestratorInfo,
+) -> Result<(), CliError> {
     if info.card.app == OrchestratorApp::Chat {
         return Ok(());
     }
@@ -294,21 +311,33 @@ fn ensure_keeper(ctx: &Ctx, orchestrator: &Orchestrator, info: &OrchestratorInfo
     }
     let _ = fs::remove_file(dir.join(KEEPER_PID_FILE));
     let exe = std::env::current_exe()?;
-    start_keeper_with(ctx, &info.card.name, &exe, KEEPER_START_TIMEOUT)
+    start_keeper_with(paths, project_root, &info.card.name, &exe, KEEPER_START_TIMEOUT)
 }
 
 /// Starts a keeper from `exe` and waits until it publishes its pid.
 ///
 /// Tests pass the built `vowp` binary explicitly because the test harness's
 /// `current_exe` is not the CLI.
-fn start_keeper_with(ctx: &Ctx, name: &str, exe: &Path, wait: Duration) -> Result<(), CliError> {
-    let _child = spawn_keeper(ctx, name, exe, wait)?;
+fn start_keeper_with(
+    paths: &NodePaths,
+    project_root: Option<&Path>,
+    name: &str,
+    exe: &Path,
+    wait: Duration,
+) -> Result<(), CliError> {
+    let _child = spawn_keeper(paths, project_root, name, exe, wait)?;
     Ok(())
 }
 
 /// Spawns the keeper child and waits until it publishes its pid.
-fn spawn_keeper(ctx: &Ctx, name: &str, exe: &Path, wait: Duration) -> Result<std::process::Child, CliError> {
-    let dir = ctx.paths().root().join("orchestrators").join(name);
+fn spawn_keeper(
+    paths: &NodePaths,
+    project_root: Option<&Path>,
+    name: &str,
+    exe: &Path,
+    wait: Duration,
+) -> Result<std::process::Child, CliError> {
+    let dir = paths.root().join("orchestrators").join(name);
     if keeper_pid(&dir).is_some() {
         return Err(CliError::Conflict(format!(
             "an orchestrator keeper for {name} is already running"
@@ -329,9 +358,9 @@ fn spawn_keeper(ctx: &Ctx, name: &str, exe: &Path, wait: Duration) -> Result<std
         source,
     })?;
     let mut command = Command::new(exe);
-    command.arg("--home").arg(ctx.paths().root());
-    if ctx.project_selected() {
-        command.arg("--project").arg(ctx.project_root());
+    command.arg("--home").arg(paths.root());
+    if let Some(project_root) = project_root {
+        command.arg("--project").arg(project_root);
     }
     let mut child = command
         .arg("orchestrator")
@@ -440,7 +469,7 @@ fn resolve_project(value: &str) -> Result<ProjectName, CliError> {
 }
 
 /// Parses the `--app` value.
-fn parse_app(value: &str) -> Result<OrchestratorApp, CliError> {
+pub(crate) fn parse_app(value: &str) -> Result<OrchestratorApp, CliError> {
     match value {
         "opencode" => Ok(OrchestratorApp::Opencode),
         "claude-code" | "claude_code" | "claude" => Ok(OrchestratorApp::ClaudeCode),
@@ -452,7 +481,7 @@ fn parse_app(value: &str) -> Result<OrchestratorApp, CliError> {
 }
 
 /// Returns the CLI name of an app.
-fn app_name(app: OrchestratorApp) -> &'static str {
+pub(crate) fn app_name(app: OrchestratorApp) -> &'static str {
     match app {
         OrchestratorApp::Opencode => "opencode",
         OrchestratorApp::ClaudeCode => "claude-code",
