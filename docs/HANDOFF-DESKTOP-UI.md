@@ -72,10 +72,23 @@ Mac**) and a one-click switch. The session log always lives on the server. Today
 sessions run on the server; the owner wants **Local by default later**, once VOWP's
 local orchestrator works, so agents get local-machine context.
 
-**Several servers**: independent by default; when a second server is added, suggest
-making a cluster. A cluster has one **home** (source of truth for the global
-orchestrator and database) and worker machines with read-only backups; a worker can be
-promoted if the home dies. Matches VOWP's one-home/one-lease rule. Not built yet.
+**Several servers (Pooled-Compute + Failover Clusters)**: independent by default (sidebar
+lets you switch between saved servers). When a second server is added, offer **"Form a
+cluster"**:
+- Pick **1 Home server** (source of truth for the global orchestrator, databases and
+  session logs) and **1+ Worker/Backup servers**.
+- **Combined cluster compute (not passive standby):** Worker servers are enrolled as
+  active VOWP agent nodes (`vowp node enroll` + `vowp agent enroll` + `vowp agent service
+  install --now`) with `[offload] enabled = true`, `default_placement = "any"`, and
+  `result_transport = "bundle"` so ready worker jobs spread across **both** the Home and
+  all Worker servers simultaneously. Two identical 4-worker (or 8-worker) servers run up
+  to **8 (or 16) concurrent workers** (backed by VOWP `0.5` Slice 6 pooled cluster
+  capacity). The sidebar Server card and Server page display combined cluster Load,
+  combined active/max workers (`home + workers`), and per-server health/node map.
+- **Hot backup & Home promotion:** Home also runs scheduled `vowp backup` snapshots to the
+  Worker/Backup server(s), and if Home goes offline, StackSpirit provides an explicit,
+  confirmation-gated **"Promote backup to Home"** action (`vowp backup --restore` +
+  `vowp up` + repointing active Home). Matches VOWP's one-home/one-lease rule.
 
 **SSH and secrets** (security model the owner approved)
 - Keep the existing OpenSSH model in `crates/spirit-core/src/ssh` (system `ssh`,
@@ -180,13 +193,49 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
    so the card says that rather than guessing; VOWP `0.5` is the planned
    encrypted-at-rest upgrade. [`SECURITY.md`](../SECURITY.md) records the exact path and
    limits.
-6. **Live `Local` / `Server` switch and `＋ Add project` (pairs with VOWP `0.5`):** once
-   VOWP `0.5` lands `vowp orchestrator move` (same-session move between `--home` and
-   `--node <mac>`) and one-step `vowp project add --git/--init/--orchestrator`, wire the
-   session location chip/switch (defaulting to **Local** when the Mac agent is connected)
-   and the sidebar **`＋` Add project** dialog to real VOWP calls.
-7. **Clusters** (home + workers) after the above, then **retire the classic shell** and
-   migrate its remaining e2e coverage.
+6. **Live `Local` / `Server` switch, `＋ Add project`, and live D6 flip (pairs with VOWP
+   `0.5`):** VOWP `0.5` `vowp orchestrator move` (`b85a8de` / `b7a50f8`) and encrypted
+   `vowp secret` (`c601bc6`) are merged, with `project add --git/--init/--orchestrator`
+   and `orchestrator endpoint` landing next, and the Mac agent is now running `vowp 0.4.0`
+   (`connected`). Flip D6 readiness probes on the live `0.4.0+` agent, wire the session
+   location chip/switch to `vowp orchestrator move` (defaulting to **Local** when the Mac
+   agent is connected), wire the sidebar **`＋` Add project** dialog to VOWP's one-step
+   project add + orchestrator creation, and surface the VOWP `0.5` vault storage mode
+   badge (`basic` / `vault_user` / `encrypted`) in Settings → Server secrets.
+7. **Pooled-Compute & Failover Clusters (owner decision 2026-11-18 — Full VOWP-Native
+   Cluster V1):**
+   - Keep multiple saved servers **independent by default** with a clean server switcher
+     in the sidebar Server card / `⋯` menu.
+   - When 2+ servers are saved, offer **"Form a cluster"**: pick **1 Home** (source of
+     truth) and **1+ Worker/Backup servers**.
+   - Orchestrate cluster setup in `spirit-core` over verified SSH using VOWP primitives
+     only (no custom daemon): enroll each Worker server on Home (`vowp node enroll`) and
+     install/start its outbound `vowp agent` user service (`vowp agent enroll` + `vowp
+     agent service install --now`), enable pooled compute (`[offload] enabled = true`,
+     `default_placement = "any"`, `result_transport = "bundle"`) so jobs spread across
+     Home + all Worker servers for **combined worker capacity** (e.g. 2 identical servers
+     = 2× concurrent workers, reading VOWP `0.5`'s pooled `cluster` capacity totals), and
+     configure scheduled `vowp backup` replication from Home → Worker/Backup server(s).
+   - Show cluster topology, combined Load & combined active/total workers (`home +
+     workers`), backup freshness, and per-server health on the sidebar Server card and
+     **Server** page, plus an explicit confirmation-gated **"Promote backup to Home"**
+     recovery action (`vowp backup --restore` + `vowp up` + switching StackSpirit's active
+     Home profile) when Home is unreachable.
+8. **Full Meadow Cutover — retire the classic shell & complete Meadow E2E (owner decision
+   2026-11-18):**
+   - Remove `?ui=classic` / `VITE_SPIRIT_UI=classic` from `apps/spirit-desktop/src/main.tsx`
+     and delete the legacy classic shell frame (`packages/spirit-ui/src/app/AppShell.tsx`,
+     `TopBar.tsx`, `StatusStrip.tsx`, `Drawers.tsx` and unused classic-only styles/tests)
+     so **Meadow (`NextShell.tsx`) is the sole UI**.
+   - Keep and restyle the shared operational drawers/views still used by Meadow
+     (`AddHostWizard`, `InboxDrawer`, `SessionsDrawer`, `RawDocumentDrawer`, and the
+     Workers `Board` lane view) strictly under Meadow tokens (WCAG 2.2 AA in both light
+     and dark themes).
+   - Migrate all Playwright e2e suites (`shell.spec.ts`, `sessions-asif.spec.ts`,
+     `local-orchestrator-gated.spec.ts`, `local-orchestrator-ready.spec.ts`) onto the
+     Meadow shell and add e2e coverage for the new Meadow flows (live chat, onboarding/
+     password-login, server secrets, Local/Server switch, Add project, and cluster view)
+     so `npm run test:e2e` passes 100% on Meadow with axe WCAG 2.2 AA green.
 
 ## 6. Known gaps and cautions
 
