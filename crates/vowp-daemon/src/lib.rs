@@ -10,8 +10,8 @@
 //! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 //! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`,
 //! `/api/v1/sessions/{id}/export/asif`, `/api/v1/sessions/{id}/switch`, `/api/v1/inbox`,
-//! `/api/v1/nodes` and `/api/v1/cost` with the same `vowp-protocol` objects the CLI prints.
-//! The session detail
+//! `/api/v1/inbox/stream`, `/api/v1/nodes`, `/api/v1/nodes/stream`, `/api/v1/cost` and
+//! `/api/v1/cost/stream` with the same `vowp-protocol` objects the CLI prints. The session detail
 //! contains the exact `Session`, its latest capsule and at most 32 parent links, nearest
 //! parent first; the capsule route answers only for a capsule belonging to that session.
 //! The per-session stream sends stored `EventEnvelope` frames with periodic heartbeats and a
@@ -31,10 +31,12 @@
 //! fetches one capsule from `/api/v1/sessions/{id}/capsules/{capsuleId}` and renders its
 //! metadata and structured fields read-only.
 //! The session detail page also carries the token-gated executor switch form. The cost page
-//! renders grouped ledger rows and totals with a `by` selector. The inbox page renders open,
-//! answered and dismissed items with a state selector, and its answer form is one of the two
-//! browser writes. The nodes page fetches the stored nodes from `/api/v1/nodes` on load and
-//! every five seconds and renders them read-only, with no add, remove or probe path.
+//! renders grouped ledger rows and totals with a `by` selector and follows the `cost` stream.
+//! The inbox page renders open, answered and dismissed items with a state selector, follows
+//! the `inbox` stream for one state, and its answer form is one of the two browser writes.
+//! The nodes page fetches the stored nodes from `/api/v1/nodes` on load, follows the `nodes`
+//! stream and renders them read-only, with no add, remove or probe path. All three keep a
+//! visible reconnect state, bounded-backoff retry and a five-second polling fallback.
 //!
 //! ASIF download and import are the v0.4 slice. The session detail page links to the
 //! token-free `GET /api/v1/sessions/{id}/export/asif`, which streams a deterministic

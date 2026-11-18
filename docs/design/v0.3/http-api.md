@@ -2,7 +2,8 @@
 
 Status: the read API (including job detail, session detail, single-capsule reads and the
 node list), the per-session SSE stream, the board snapshot SSE stream, the jobs-list and
-job-detail snapshot SSE streams, the token-gated writes
+job-detail snapshot SSE streams, the cost, inbox and nodes snapshot SSE streams, the
+token-gated writes
 (inbox answer, local session switch, ASIF import and the seven job actions) and the ASIF
 download are implemented in
 `crates/vowp-daemon`, and `vowp up` starts the daemon as a separate child process; the rest of
@@ -94,8 +95,20 @@ Served endpoints; every response is JSON except the SSE streams and the static p
   served project's read-only store; `total` is the item count and `next` is `null`. Node
   registration, removal and probing stay CLI-only: this route is read-only and adds no SSH,
   probe or write path.
+- `/api/v1/nodes/stream` — a `text/event-stream` response. The first frame is `event: nodes`
+  with the exact `NodePage` JSON from `GET /api/v1/nodes`; later frames are sent only when the
+  page changes. Heartbeats, the one-second snapshot poll, the bounded single snapshot per
+  poll, the clean close, the five-second page fallback and `Cache-Control: no-store` are the
+  same as the jobs-list stream. The stream adds no node write, SSH or probe path.
 - `/api/v1/inbox?state=open|answered|dismissed` — an `InboxPage` over the served project;
   `state` defaults to `open`. Token-free.
+- `/api/v1/inbox/stream?state=open|answered|dismissed` — a `text/event-stream` response. The
+  first frame is `event: inbox` with the exact `InboxPage` JSON from `GET /api/v1/inbox` for
+  the same `state` (default `open`); later frames are sent only when that page changes.
+  Heartbeats, the snapshot bounds, the clean close, the five-second page fallback and
+  `Cache-Control: no-store` match the jobs-list stream. An invalid `state` is a normal JSON
+  `400` before streaming. The merged web `all` view stays a client-side three-state poll; the
+  API has no `all` state.
 - `POST /api/v1/inbox/{id}/answer` — one write. The JSON body is
   `InboxAnswerRequest {"answer":"<text>"}`. It requires
   `Authorization: Bearer <VOWP_API_TOKEN>`; a daemon started without a token answers `503`,
@@ -192,6 +205,15 @@ Served endpoints; every response is JSON except the SSE streams and the static p
 - `/api/v1/cost?by=day|job|role|provider|model&since=&until=` — the exact `vowp cost --json`
   document over the served project. `by` defaults to `job`; `since` and `until` accept RFC 3339
   or `YYYY-MM-DD` (UTC midnight), and `until` is inclusive.
+- `/api/v1/cost/stream?by=day|job|role|provider|model&since=&until=` — a `text/event-stream`
+  response. The first frame is `event: cost` with the exact `CostReport` JSON from
+  `GET /api/v1/cost` for the same filters; later frames are sent only when the report
+  changes. Heartbeats, the snapshot bounds, the clean close, the five-second page fallback
+  and `Cache-Control: no-store` match the jobs-list stream. An invalid filter is a normal
+  JSON `400` before streaming.
+
+The whole live-window contract for the six snapshot endpoints (board, jobs list/detail, cost,
+inbox and nodes) is in [`v0.5/live-streams.md`](../v0.5/live-streams.md).
 
 The new wire documents are exported from `vowp_protocol::api` and `schema::all_schemas()`:
 `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page<T>`, `JobPage`, `RunPage`,
@@ -224,15 +246,15 @@ migrates it. The switch is local-node only; a running session needs an explicit 
 the switch drains and stops it. The job actions only queue the CLI's request; none of them
 writes a job row.
 
-Still later: capsule edits, the reconnect UI on the pages that still poll, the cost dashboard
-page, node add/remove/probe, browser chat and the remaining browser pages. There are no
-placeholder routes for any of them.
+Still later: capsule edits, node add/remove/probe, browser chat and the remaining browser
+pages. There are no placeholder routes for any of them.
 The per-session SSE stream is implemented and used by the session detail page; the board
 stream is implemented and used by the board page; the jobs-list and job-detail streams are
-implemented and used by the `/jobs` and `/jobs/{id}` pages; the inbox answer form and the
-session switch form are implemented and use their write routes; the three job action routes
-are implemented for the `/jobs` controls and the four keeper action routes are implemented for
-the `/jobs/{id}` detail page. The session detail page carries
+implemented and used by the `/jobs` and `/jobs/{id}` pages; the cost, inbox and nodes streams
+are implemented and used by the `/cost`, `/inbox` and `/nodes` pages; the inbox answer form
+and the session switch form are implemented and use their write routes; the three job action
+routes are implemented for the `/jobs` controls and the four keeper action routes are
+implemented for the `/jobs/{id}` detail page. The session detail page carries
 the ASIF download link and loss preview, and the separate `/import` page posts one raw
 archive to the token-gated import route.
 
@@ -325,10 +347,16 @@ the cost dashboard and third-party tools do not have to shell out to `vowp`:
   changes, plus `heartbeat` frames; no cursor or resume.
 - `GET /api/v1/inbox` and `POST /api/v1/inbox/{id}/answer` — read and answer; both are
   implemented. The answer is one of the token-gated writes.
+- `GET /api/v1/inbox/stream?state=` — SSE `inbox` frames carrying the exact `InboxPage` when
+  it changes, plus `heartbeat` frames; no cursor or resume and no caching.
 - `GET /api/v1/cost?by=day|job|role|provider|model&since=&until=` — the `vowp cost --json` shape;
   implemented in this slice.
+- `GET /api/v1/cost/stream?by=&since=&until=` — SSE `cost` frames carrying the exact
+  `CostReport` when it changes, plus `heartbeat` frames; no cursor or resume and no caching.
 - `GET /api/v1/nodes` — a `NodePage` of the exact stored nodes, ordered by name; implemented
   read-only in this slice for the web-window `/nodes` page.
+- `GET /api/v1/nodes/stream` — SSE `nodes` frames carrying the exact `NodePage` when it
+  changes, plus `heartbeat` frames; read-only and never cached.
 - `GET /api/v1/sessions/{id}/capsules/{capsuleId}` — one capsule belonging to the session;
   implemented in this slice. The window's capsule view remains later.
 - `POST /api/v1/jobs/{id}/retry|park|cancel` and
@@ -421,11 +449,14 @@ served in their `vowp-protocol` JSON form. The new document and transport types 
   `unknown` or `mixed`.
 - `CostTotal { runs, usd, tokens, source, unknown_entries }` — the totals row.
 - `ApiError { error: { kind, message, hint? } }` — the same shape as `vowp --json` errors.
-- An SSE frame with `event: session` / `event: board` / `event: heartbeat` / `event: resync`
+- An SSE frame with `event: session` / `event: board` / `event: jobs` / `event: job` /
+  `event: cost` / `event: inbox` / `event: nodes` / `event: heartbeat` / `event: resync`
   and the JSON data line. This is a `text/event-stream` frame, not a JSON document, so it has
   no schema of its own: the `data:` line is an exact `EventEnvelope` for `session`, the exact
-  `Board` document for `board`, `{ at }` for `heartbeat`, and `{ after_seq }` for the one
-  recovery `resync` frame. The board stream uses `board` and `heartbeat` only; it has no
+  `Board` document for `board`, the exact `JobPage` for `jobs`, the exact `CostReport` for
+  `cost`, the exact `InboxPage` for `inbox`, the exact `NodePage` for `nodes`, a
+  `JobDetailPage` composition for `job`, `{ at }` for `heartbeat`, and `{ after_seq }` for the
+  one recovery `resync` frame. The board stream uses `board` and `heartbeat` only; it has no
   `resync`.
 
 `vowp schema` remains the source of truth; add `Health`, `Board`, `BoardRun`, `BoardLimit`, `Page`,
@@ -464,12 +495,13 @@ exception above.
 2. **Scope.** One project per daemon, matching one supervisor per project home. `vowp up` passes
    the checkout's project, or the only non-archived project; an ambiguous home leaves the window
    off with a warning. Starting `vowp-daemon` directly still takes `--project`.
-3. **Cursor semantics.** Resolved for the snapshot streams: the board, jobs list and job
-   detail are self-contained snapshots, so `/api/v1/board/stream`, `/api/v1/jobs/stream` and
-   `/api/v1/jobs/{id}/stream` send their exact document whenever its content changes, with no
-   cursor, `after_seq`, event merge or `resync`. `session_events.seq` remains per session for
-   the timeline stream and the ledger has a global autoincrement id; no global event log is
-   introduced.
+3. **Cursor semantics.** Resolved for the snapshot streams: the board, jobs list/detail, cost,
+   inbox and nodes are self-contained snapshots, so `/api/v1/board/stream`,
+   `/api/v1/jobs/stream`, `/api/v1/jobs/{id}/stream`, `/api/v1/cost/stream`,
+   `/api/v1/inbox/stream` and `/api/v1/nodes/stream` send their exact document whenever its
+   content changes, with no cursor, `after_seq`, event merge or `resync`.
+   `session_events.seq` remains per session for the timeline stream and the ledger has a global
+   autoincrement id; no global event log is introduced.
 4. **Token storage.** Resolved for this slice: the daemon reads `VOWP_API_TOKEN` from its
    environment at startup. Missing or empty disables writes; rotating the token means restarting
    the daemon with a new value. There is no token file, rotation service or multi-user account.
@@ -481,7 +513,8 @@ exception above.
    and a clean close. The board and jobs streams collect one snapshot per poll, hold no store
    between polls and send a frame only when the snapshot changes, so a slow client only ever
    waits for the next snapshot; the job-detail stream likewise sends one composite snapshot
-   per poll rather than a frame per run or gate row.
+   per poll rather than a frame per run or gate row. The cost, inbox and nodes streams use the
+   same one-snapshot-per-poll rule and a bounded single page instead of a frame per row.
 
 ## First-issue-sized slice
 
@@ -498,9 +531,11 @@ Implemented: `crates/vowp-daemon` opens an existing node home read-only for read
 `GET /api/v1/sessions/{id}/export/asif?report=`,
 `POST /api/v1/sessions/import/asif?branch=`,
 `POST /api/v1/sessions/{id}/switch`, `GET /api/v1/inbox?state=`,
+`GET /api/v1/inbox/stream?state=`,
 `POST /api/v1/inbox/{id}/answer`,
+`GET /api/v1/nodes`, `GET /api/v1/nodes/stream`,
 `POST /api/v1/jobs/{id}/retry|park|cancel|nudge|restart|replan|fail` and
-`GET /api/v1/cost?by=&since=&until=`. It binds
+`GET /api/v1/cost?by=&since=&until=`, `GET /api/v1/cost/stream?by=&since=&until=`. It binds
 `127.0.0.1:0` in tests, uses a temporary store with jobs in several states, one running job
 and a parent/child session chain with a capsule and a bounded long chain, a limit,
 open/answered inbox items, cost ledger rows from every source and a checkpoint, and asserts
@@ -524,7 +559,15 @@ and pins the `no-store` header and the `400` for an invalid filter. The job-deta
 validates the `job`, `runs` and `gates` members against the `Job`, `RunPage` and
 `GateResultPage` schemas, receives frames after a gate insert, a run insert and a job-state
 change, pins the `no-store` header and pins the JSON `404`/`400` before a stream starts for an
-unknown job and an invalid id. The answer tests pin `503` without a token,
+unknown job and an invalid id. The cost stream test validates a `cost` frame against
+`CostReport`, compares it with `GET /api/v1/cost`, asserts a stable report sends no duplicate
+and receives a second frame after a receipt row is added. The inbox stream test pins the
+`state=open` filter, the exact `InboxPage`, a changed frame after an answer and the JSON `400`
+for an invalid state before streaming. The nodes stream test validates `NodePage`, receives a
+changed frame after a node's last-seen time moves and pins the unchanged-snapshot heartbeat.
+A shared per-row test proves each frame is one whole `CostReport`, `InboxPage` or `NodePage`,
+and one test removes the project database to prove a store error closes the stream cleanly.
+The answer tests pin `503` without a token,
 `401` for a missing or wrong Bearer value (before the body is parsed), `202` with the answered
 `InboxItem` and exactly one `answer_inbox` request row for a job item, `404`, `409`, `400` for
 empty/oversized/malformed answers, unchanged token-free `GET`s, and the store never creating a

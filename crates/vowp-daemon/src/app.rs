@@ -507,7 +507,7 @@ impl ApiState {
     }
 
     /// Returns the served project's registered nodes, ordered by name.
-    fn nodes(&self) -> Result<NodePage, ApiFailure> {
+    pub(crate) fn nodes(&self) -> Result<NodePage, ApiFailure> {
         let store = self.open()?;
         let nodes = store.list_nodes().map_err(|_| store_failure())?;
         Ok(NodePage {
@@ -518,7 +518,7 @@ impl ApiState {
     }
 
     /// Returns the served project's inbox items in `state`.
-    fn inbox(&self, state: InboxState) -> Result<InboxPage, ApiFailure> {
+    pub(crate) fn inbox(&self, state: InboxState) -> Result<InboxPage, ApiFailure> {
         let store = self.open()?;
         let items = store.list_inbox(Some(state)).map_err(|_| store_failure())?;
         Ok(InboxPage {
@@ -529,7 +529,7 @@ impl ApiState {
     }
 
     /// Returns the served project's cost report grouped and bounded by `spec`.
-    fn cost(&self, spec: CostQuerySpec) -> Result<CostReport, ApiFailure> {
+    pub(crate) fn cost(&self, spec: CostQuerySpec) -> Result<CostReport, ApiFailure> {
         let store = self.open()?;
         let rows = store
             .cost_totals(
@@ -738,7 +738,8 @@ fn lineage(store: &Store, session: &Session) -> Result<Vec<SessionId>, ApiFailur
 /// pages at `/cost`, `/inbox`, `/nodes`, `/jobs` and `/jobs/{id}`, the static ASIF import
 /// page at `/import`, the PWA manifest, icon and service worker, plus the API under
 /// `/api/v1`. The only non-GET API routes are the token-gated inbox answer, session switch,
-/// ASIF import and job retry/park/cancel/nudge/restart/replan/fail writes.
+/// ASIF import and job retry/park/cancel/nudge/restart/replan/fail writes. The board, jobs,
+/// cost, inbox and nodes snapshot streams are all read-only `text/event-stream` GETs.
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(board_page))
@@ -785,9 +786,12 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/sessions/{id}/export/asif", get(crate::asif::export_session))
         .route("/api/v1/sessions/{id}/switch", post(switch_session))
         .route("/api/v1/inbox", get(inbox))
+        .route("/api/v1/inbox/stream", get(inbox_stream))
         .route("/api/v1/inbox/{id}/answer", post(answer_inbox))
         .route("/api/v1/nodes", get(nodes))
+        .route("/api/v1/nodes/stream", get(nodes_stream))
         .route("/api/v1/cost", get(cost))
+        .route("/api/v1/cost/stream", get(cost_stream))
         .fallback(unknown_endpoint)
         .with_state(state)
 }
@@ -848,7 +852,8 @@ async fn capsule_page() -> Html<&'static str> {
 /// The embedded static cost shell, served read-only at `/cost`.
 const COST_PAGE: &str = include_str!("../web/cost.html");
 
-/// Serves the static cost shell; it fetches `/api/v1/cost?by=` on load and every five seconds.
+/// Serves the static cost shell; it fetches `/api/v1/cost?by=` on load, follows
+/// `/api/v1/cost/stream?by=` and keeps a five-second polling fallback.
 ///
 /// The `by` selector offers job, day, role, provider and model. The page renders the grouped
 /// rows and totals, shows `?` for an unknown USD total and never treats it as zero, and has no
@@ -860,7 +865,8 @@ async fn cost_page() -> Html<&'static str> {
 /// The embedded static inbox shell, served at `/inbox`.
 const INBOX_PAGE: &str = include_str!("../web/inbox.html");
 
-/// Serves the static inbox shell; it fetches `/api/v1/inbox?state=` on load and every five seconds.
+/// Serves the static inbox shell; it fetches `/api/v1/inbox?state=` on load, follows
+/// `/api/v1/inbox/stream?state=` for a single state and keeps a five-second polling fallback.
 ///
 /// The state selector offers open, all, answered and dismissed; `all` fetches the three API
 /// states and merges their items. Open items carry the answer form: it stores the daemon write
@@ -874,7 +880,8 @@ async fn inbox_page() -> Html<&'static str> {
 /// The embedded static nodes shell, served read-only at `/nodes`.
 const NODES_PAGE: &str = include_str!("../web/nodes.html");
 
-/// Serves the static nodes shell; it fetches `/api/v1/nodes` on load and every five seconds.
+/// Serves the static nodes shell; it fetches `/api/v1/nodes` on load, follows
+/// `/api/v1/nodes/stream` and keeps a five-second polling fallback.
 ///
 /// The page renders each stored node's name, SSH target, local/remote flag, last-seen time,
 /// `capabilities.vowp` version and a compact capabilities/probe summary. It is read-only: no
@@ -1285,11 +1292,40 @@ async fn nodes(State(state): State<ApiState>) -> Result<Json<NodePage>, ApiFailu
     Ok(Json(page))
 }
 
+/// Streams node-page snapshots as server-sent `nodes` frames with heartbeats.
+///
+/// Every `nodes` frame is the exact current `NodePage` from `GET /api/v1/nodes`, sent only
+/// when it changes. The response is marked `Cache-Control: no-store`, has no cursor or
+/// resume, and a failed read ends the stream cleanly so the page reconnects and polls.
+async fn nodes_stream(State(state): State<ApiState>) -> Result<Response, ApiFailure> {
+    let mut response = stream::nodes_response(state).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 /// Lists the served project's inbox items in one state.
 async fn inbox(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Json<InboxPage>, ApiFailure> {
     let filter = filters::inbox_state(query.as_deref()).map_err(ApiFailure::invalid)?;
     let page = blocking(move || state.inbox(filter)).await?;
     Ok(Json(page))
+}
+
+/// Streams inbox-page snapshots as server-sent `inbox` frames with heartbeats.
+///
+/// The `state` filter is the same one `GET /api/v1/inbox` accepts and defaults to `open`; an
+/// invalid value is a normal JSON `400` before the stream starts. Every `inbox` frame is the
+/// exact current `InboxPage` for that state, sent only when it changes. The response is
+/// marked `Cache-Control: no-store`, has no cursor or resume, and a failed read ends the
+/// stream cleanly so the page reconnects and polls.
+async fn inbox_stream(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Response, ApiFailure> {
+    let filter = filters::inbox_state(query.as_deref()).map_err(ApiFailure::invalid)?;
+    let mut response = stream::inbox_response(state, filter).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// Answers one open inbox item and queues the supervisor request.
@@ -1362,6 +1398,22 @@ async fn cost(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Resul
     let spec = filters::cost_query(query.as_deref()).map_err(ApiFailure::invalid)?;
     let report = blocking(move || state.cost(spec)).await?;
     Ok(Json(report))
+}
+
+/// Streams cost-report snapshots as server-sent `cost` frames with heartbeats.
+///
+/// The `by`, `since` and `until` filters are the same ones `GET /api/v1/cost` accepts; an
+/// invalid value is a normal JSON `400` before the stream starts. Every `cost` frame is the
+/// exact current `CostReport`, sent only when it changes. The response is marked
+/// `Cache-Control: no-store`, has no cursor or resume, and a failed read ends the stream
+/// cleanly so the page reconnects and polls.
+async fn cost_stream(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Response, ApiFailure> {
+    let spec = filters::cost_query(query.as_deref()).map_err(ApiFailure::invalid)?;
+    let mut response = stream::cost_response(state, spec).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// Returns one page of a session's exact stored events.
