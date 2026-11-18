@@ -373,7 +373,7 @@ impl ApiState {
     }
 
     /// Returns the jobs matching `filter`.
-    fn jobs(&self, filter: &JobFilter) -> Result<JobPage, ApiFailure> {
+    pub(crate) fn jobs(&self, filter: &JobFilter) -> Result<JobPage, ApiFailure> {
         let store = self.open()?;
         let jobs = store.list_jobs(filter).map_err(|_| store_failure())?;
         Ok(JobPage {
@@ -393,6 +393,35 @@ impl ApiState {
             .job(id)
             .map_err(|_| store_failure())?
             .ok_or_else(|| ApiFailure::not_found(format!("job {id} not found")))
+    }
+
+    /// Returns one job's complete detail snapshot for the SSE stream.
+    ///
+    /// The snapshot reads the job, its runs and its newest-attempt gate results from one
+    /// read-only store handle, so a frame is internally consistent and a poll opens only one
+    /// connection. An unknown job is a `404`; the stream handler checks that before starting
+    /// the response.
+    pub(crate) fn job_detail_page(&self, id: &JobId) -> Result<stream::JobDetailPage, ApiFailure> {
+        let store = self.open()?;
+        let job = store
+            .job(id)
+            .map_err(|_| store_failure())?
+            .ok_or_else(|| ApiFailure::not_found(format!("job {id} not found")))?;
+        let runs = store.runs_of_job(id).map_err(|_| store_failure())?;
+        let gates = store.latest_gate_results(id).map_err(|_| store_failure())?;
+        Ok(stream::JobDetailPage {
+            job,
+            runs: RunPage {
+                total: usize_to_u64(runs.len()),
+                items: runs,
+                next: None,
+            },
+            gates: GateResultPage {
+                total: usize_to_u64(gates.len()),
+                items: gates,
+                next: None,
+            },
+        })
     }
 
     /// Returns one job's runs in the store's order, oldest first (`started_at`, then `id`).
@@ -730,7 +759,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/board", get(board))
         .route("/api/v1/board/stream", get(board_stream))
         .route("/api/v1/jobs", get(jobs))
+        .route("/api/v1/jobs/stream", get(jobs_stream))
         .route("/api/v1/jobs/{id}", get(job_detail))
+        .route("/api/v1/jobs/{id}/stream", get(job_stream))
         .route("/api/v1/jobs/{id}/runs", get(job_runs))
         .route("/api/v1/jobs/{id}/gates", get(job_gates))
         .route("/api/v1/jobs/{id}/retry", post(retry_job))
@@ -855,13 +886,15 @@ async fn nodes_page() -> Html<&'static str> {
 /// The embedded static jobs shell, served at `/jobs`.
 const JOBS_PAGE: &str = include_str!("../web/jobs.html");
 
-/// Serves the static jobs shell; it fetches `/api/v1/jobs` on load and every five seconds.
+/// Serves the static jobs shell; it fetches `/api/v1/jobs` on load, follows
+/// `/api/v1/jobs/stream` and keeps a five-second polling fallback.
 ///
 /// The page renders each job's id, state, kind, role, priority, needs, attempts, updated
 /// time and note. Reads stay token-free. Retry, park and cancel appear only after the daemon
 /// write token is stored in `sessionStorage`; they post to the existing token-gated
-/// `/api/v1/jobs/{id}/retry|park|cancel` routes and refresh the list on `202`. Each job id
-/// links to the read-only `/jobs/{id}` detail page.
+/// `/api/v1/jobs/{id}/retry|park|cancel` routes, refresh the list immediately on `202` and
+/// reconcile the rest from the stream. Each job id links to the read-only `/jobs/{id}` detail
+/// page.
 async fn jobs_page() -> Html<&'static str> {
     Html(JOBS_PAGE)
 }
@@ -871,12 +904,13 @@ const JOB_PAGE: &str = include_str!("../web/job.html");
 
 /// Serves the static job-detail shell.
 ///
-/// The page reads the id from its own path and fetches `/api/v1/jobs/{id}`,
-/// `/api/v1/jobs/{id}/runs` and `/api/v1/jobs/{id}/gates` on load. It carries the shared
+/// The page reads the id from its own path, fetches `/api/v1/jobs/{id}`,
+/// `/api/v1/jobs/{id}/runs` and `/api/v1/jobs/{id}/gates` on load, then follows
+/// `/api/v1/jobs/{id}/stream` with a five-second polling fallback. It carries the shared
 /// `sessionStorage` unlock panel and posts the token-gated keeper actions (`nudge`,
-/// `restart`, `replan`, `fail`) only in the states the graph accepts, refreshing all three
-/// reads on `202`. An unknown job is the API's `404`, which the page shows as a not-found
-/// line while keeping its nav and back link.
+/// `restart`, `replan`, `fail`) only in the states the graph accepts, reloading all three
+/// reads immediately on `202`. An unknown job is the API's `404`, which the page shows as a
+/// not-found line while keeping its nav and back link.
 async fn job_page() -> Html<&'static str> {
     Html(JOB_PAGE)
 }
@@ -964,6 +998,22 @@ async fn jobs(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Resul
     Ok(Json(page))
 }
 
+/// Streams filtered jobs-list snapshots as server-sent `jobs` frames with heartbeats.
+///
+/// The `state`, `kind` and `role` filters are the same ones `GET /api/v1/jobs` accepts; an
+/// invalid value is a normal JSON `400` before the stream starts. Every `jobs` frame is the
+/// exact current `JobPage` for those filters, sent only when it changes. The response is
+/// marked `Cache-Control: no-store`, has no cursor or resume, and a failed read ends the
+/// stream cleanly so the page reconnects and polls.
+async fn jobs_stream(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Result<Response, ApiFailure> {
+    let filter = filters::job_filter(query.as_deref()).map_err(ApiFailure::invalid)?;
+    let mut response = stream::jobs_response(state, filter).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 /// Returns one job.
 ///
 /// An invalid id is `400`, an unknown job is `404`, and a store failure is a path-free
@@ -972,6 +1022,25 @@ async fn job_detail(State(state): State<ApiState>, Path(id): Path<String>) -> Re
     let id = JobId::parse(&id).map_err(|_| ApiFailure::invalid("invalid job id"))?;
     let job = blocking(move || state.job_detail(&id)).await?;
     Ok(Json(job))
+}
+
+/// Streams one job's detail snapshots as server-sent `job` frames with heartbeats.
+///
+/// The id is validated and the job is checked before the SSE response starts, so an invalid
+/// id is a JSON `400` and an unknown job is a JSON `404`. Every `job` frame is a
+/// `JobDetailPage` carrying the exact job, run page and newest-attempt gate page, sent only
+/// when one of them changes. The response is marked `Cache-Control: no-store`, has no
+/// cursor or resume, and a failed read ends the stream cleanly.
+async fn job_stream(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Response, ApiFailure> {
+    let id = JobId::parse(&id).map_err(|_| ApiFailure::invalid("invalid job id"))?;
+    let checked = state.clone();
+    let check_id = id.clone();
+    blocking(move || checked.job_detail(&check_id).map(|_| ())).await?;
+    let mut response = stream::job_response(state, id).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// Returns one job's runs in the store's order, oldest first (`started_at`, then `id`).

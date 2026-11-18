@@ -6,6 +6,7 @@
 //! pages at `GET /cost`, `GET /inbox` and `GET /nodes`, the static ASIF import page at
 //! `GET /import`, and the API endpoints
 //! `GET /api/v1/health`, `/api/v1/board`, `/api/v1/board/stream`, `/api/v1/jobs`,
+//! `/api/v1/jobs/stream`, `/api/v1/jobs/{id}`, `/api/v1/jobs/{id}/stream`,
 //! `/api/v1/sessions`, `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/capsules/{capsuleId}`,
 //! `/api/v1/sessions/{id}/events`, `/api/v1/sessions/{id}/events/stream`,
 //! `/api/v1/sessions/{id}/export/asif`, `/api/v1/sessions/{id}/switch`, `/api/v1/inbox`,
@@ -15,7 +16,11 @@
 //! parent first; the capsule route answers only for a capsule belonging to that session.
 //! The per-session stream sends stored `EventEnvelope` frames with periodic heartbeats and a
 //! bounded per-client batch. The board stream sends the exact running `Board` document when
-//! its content changes, plus heartbeats, and has no cursor or resume.
+//! its content changes, plus heartbeats, and has no cursor or resume. The jobs-list stream
+//! sends the exact filtered `JobPage` when it changes, and the job-detail stream sends one
+//! `JobDetailPage` (`job`, `runs`, `gates`) when the job, its runs or its newest-attempt gate
+//! results change; both send heartbeats, have no cursor, are never cached and keep a
+//! five-second page polling fallback.
 //!
 //! The board page is also the phone board: its card layout is usable at a 360 px viewport.
 //! It loads `/api/v1/board`, follows `/api/v1/board/stream`, and keeps a visible reconnect

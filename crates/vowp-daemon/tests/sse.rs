@@ -14,10 +14,11 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use vowp_daemon::{ApiState, select_project, serve_with_shutdown};
-use vowp_protocol::api::Board;
+use vowp_protocol::api::{Board, JobPage};
 use vowp_protocol::{
-    Actor, Clock, EventBody, EventEnvelope, EventSource, FakeClock, HarnessKind, JobId, JobKind, NewJob, NodeName,
-    Project, ProjectName, Role, Session, SessionId, SessionRole, SessionState, Timestamp, UserMessage, VowpConfig,
+    Actor, Clock, Cost, EventBody, EventEnvelope, EventSource, Evidence, FakeClock, Gate, GateResult, HarnessKind,
+    JobId, JobKind, NewJob, NodeName, Project, ProjectName, Role, Run, RunId, RunPurpose, RunRole, Session, SessionId,
+    SessionRole, SessionState, Timestamp, UserMessage, VowpConfig,
 };
 use vowp_store::session_log::{NewEvent, SessionLog};
 use vowp_store::{NodePaths, StateChange, Store};
@@ -143,10 +144,14 @@ impl Fixture {
 }
 
 /// A temporary home whose board has no live runs, so only a row change moves it.
+///
+/// The same rows back the jobs-list and job-detail stream tests: the pending job changes
+/// state, gains runs and gains gate results through real writable store calls.
 struct BoardStreamFixture {
     _tmp: TempDir,
     paths: NodePaths,
     project: ProjectName,
+    node: NodeName,
     pending_job: JobId,
 }
 
@@ -164,7 +169,7 @@ impl BoardStreamFixture {
         std::fs::create_dir_all(&project_dir).expect("project dir");
 
         let mut config = VowpConfig::with_defaults_for_tests();
-        config.node.name = node;
+        config.node.name = node.clone();
         config.project.name = project.clone();
         config.project.path = Some(project_dir.display().to_string());
         config.validate().expect("valid fixture config");
@@ -202,6 +207,7 @@ impl BoardStreamFixture {
             _tmp: tmp,
             paths,
             project,
+            node,
             pending_job: pending.id,
         }
     }
@@ -219,6 +225,61 @@ impl BoardStreamFixture {
                 },
             )
             .expect("complete pending job");
+        drop(store);
+    }
+
+    /// Adds one unfinished worker run to the pending job.
+    fn add_run(&self) {
+        let store = Store::open(&self.paths).expect("open writable store");
+        store
+            .insert_run(&Run {
+                id: RunId::new(),
+                job_id: Some(self.pending_job.clone()),
+                session_id: None,
+                role: RunRole::Worker,
+                purpose: RunPurpose::Start,
+                profile: None,
+                rung: 0,
+                executor: None,
+                provider: None,
+                node: self.node.clone(),
+                native_session_id: None,
+                pid: None,
+                window: None,
+                cwd: None,
+                started_at: epoch().plus(Duration::from_secs(1)),
+                ended_at: None,
+                exit_code: None,
+                outcome: None,
+                limit_kind: None,
+                cost: Cost::unknown(),
+                detail: String::new(),
+            })
+            .expect("run row");
+        drop(store);
+    }
+
+    /// Adds one passing gate result to the pending job's first attempt.
+    fn add_gate_result(&self) {
+        let store = Store::open(&self.paths).expect("open writable store");
+        store
+            .insert_gate_result(&GateResult {
+                id: None,
+                job_id: self.pending_job.clone(),
+                run_id: None,
+                attempt: 0,
+                gate_index: 0,
+                gate: Gate::OwnsRespected(true),
+                passed: true,
+                evidence: Evidence::OwnsRespected {
+                    changed: Vec::new(),
+                    violations: Vec::new(),
+                },
+                output_blob: None,
+                duration_ms: 1,
+                ts: epoch(),
+            })
+            .expect("gate result row");
         drop(store);
     }
 }
@@ -376,6 +437,7 @@ struct SseClient {
     eof: bool,
     status: u16,
     content_type: Option<String>,
+    headers: Vec<(String, String)>,
 }
 
 enum ChunkState {
@@ -424,6 +486,14 @@ impl SseClient {
         let chunked = head.lines().any(|line| {
             line.to_ascii_lowercase().starts_with("transfer-encoding:") && line.to_ascii_lowercase().contains("chunked")
         });
+        let headers: Vec<(String, String)> = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+            })
+            .collect();
         let raw = raw.split_off(head_end + 4);
         Self {
             stream,
@@ -434,7 +504,16 @@ impl SseClient {
             eof: false,
             status,
             content_type: Some(content_type),
+            headers,
         }
+    }
+
+    /// Returns one response header value, matched case-insensitively.
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     /// Returns the next complete frame, or `None` when the connection closes or `timeout`
@@ -601,6 +680,12 @@ fn assert_no_home_or_token(text: &str, home: &str) {
     );
 }
 
+/// Asserts that `text` contains no home path; a job snapshot legitimately carries token
+/// usage counters, so the word "token" is not a secret marker in this slice.
+fn assert_no_home(text: &str, home: &str) {
+    assert!(!text.contains(home), "response leaked the home path: {text}");
+}
+
 /// Asserts that `value` validates against the exported schema for `name`.
 fn assert_schema(name: &str, value: &Value) {
     let schema =
@@ -715,6 +800,167 @@ fn board_stream_closes_when_a_snapshot_cannot_be_collected() {
         client.next_frame(Duration::from_secs(5)).is_none(),
         "the board stream must close cleanly after a collect error"
     );
+}
+
+#[test]
+fn jobs_stream_sends_initial_changed_snapshots_and_no_store() {
+    let fixture = BoardStreamFixture::new();
+    let server = Server::start_for(&fixture.paths, Duration::from_millis(10), Duration::from_millis(50));
+    let home = fixture.paths.root().display().to_string();
+    let path = "/api/v1/jobs/stream?state=pending";
+
+    let mut client = SseClient::open(server.address, path);
+    assert_eq!(client.status, 200);
+    let content_type = client.content_type.as_deref().unwrap_or_default();
+    assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+    assert_eq!(
+        client.header("cache-control"),
+        Some("no-store"),
+        "the jobs stream must not be cached"
+    );
+
+    let first = client.next_frame(Duration::from_secs(5)).expect("initial jobs frame");
+    assert_eq!(first.event.as_deref(), Some("jobs"));
+    assert_no_home_or_token(&first.data, &home);
+    let first_value = first.json();
+    assert_schema("JobPage", &first_value);
+    let first_page: JobPage = serde_json::from_value(first_value).expect("JobPage");
+    assert_eq!(first_page.total, 1);
+    assert_eq!(first_page.items[0].id, fixture.pending_job);
+    let response = get(server.address, "/api/v1/jobs?state=pending");
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let served: JobPage = serde_json::from_str(&response.body).expect("served JobPage");
+    assert_eq!(
+        first_page, served,
+        "the first frame must be the exact filtered API page"
+    );
+
+    // A moving clock alone never sends a frame; the short heartbeat interval is next.
+    let heartbeat = client.next_frame(Duration::from_secs(2)).expect("first heartbeat");
+    assert_eq!(heartbeat.event.as_deref(), Some("heartbeat"));
+    assert_no_home_or_token(&heartbeat.data, &home);
+
+    fixture.complete_pending_job();
+    let changed = next_snapshot_frame(&mut client, "jobs");
+    assert_no_home_or_token(&changed.data, &home);
+    let changed_value = changed.json();
+    assert_schema("JobPage", &changed_value);
+    let changed_page: JobPage = serde_json::from_value(changed_value).expect("JobPage");
+    assert_eq!(changed_page.total, 0, "the pending job moved out of the filtered list");
+    assert!(changed_page.items.is_empty());
+
+    let response = get(server.address, "/api/v1/jobs?state=pending");
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let current: JobPage = serde_json::from_str(&response.body).expect("current JobPage");
+    assert_eq!(changed_page, current);
+
+    let bad = get(server.address, "/api/v1/jobs/stream?state=nope");
+    assert_eq!(bad.status, 400, "body: {}", bad.body);
+    assert_no_home_or_token(&bad.body, &home);
+    let error: Value = serde_json::from_str(&bad.body).expect("ApiError JSON");
+    assert_eq!(error["error"]["kind"], "invalid_input", "{}", bad.body);
+
+    drop(client);
+}
+
+#[test]
+fn job_stream_sends_snapshots_for_state_run_and_gate_changes() {
+    let fixture = BoardStreamFixture::new();
+    let server = Server::start_for(&fixture.paths, Duration::from_millis(10), Duration::from_millis(50));
+    let home = fixture.paths.root().display().to_string();
+    let path = format!("/api/v1/jobs/{}/stream", fixture.pending_job);
+
+    let mut client = SseClient::open(server.address, &path);
+    assert_eq!(client.status, 200);
+    let content_type = client.content_type.as_deref().unwrap_or_default();
+    assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+    assert_eq!(
+        client.header("cache-control"),
+        Some("no-store"),
+        "the job stream must not be cached"
+    );
+
+    let first = client.next_frame(Duration::from_secs(5)).expect("initial job frame");
+    assert_eq!(first.event.as_deref(), Some("job"));
+    assert_no_home(&first.data, &home);
+    let first_value = first.json();
+    assert_schema("Job", &first_value["job"]);
+    assert_schema("RunPage", &first_value["runs"]);
+    assert_schema("GateResultPage", &first_value["gates"]);
+    assert_eq!(first_value["job"]["id"], fixture.pending_job.as_str());
+    assert_eq!(first_value["job"]["state"], "pending");
+    assert_eq!(first_value["runs"]["total"], 0);
+    assert_eq!(first_value["gates"]["total"], 0);
+
+    let heartbeat = client.next_frame(Duration::from_secs(2)).expect("first heartbeat");
+    assert_eq!(heartbeat.event.as_deref(), Some("heartbeat"));
+    assert_no_home(&heartbeat.data, &home);
+
+    fixture.add_gate_result();
+    let gate_frame = next_snapshot_frame(&mut client, "job");
+    assert_no_home(&gate_frame.data, &home);
+    let gate_value = gate_frame.json();
+    assert_schema("GateResultPage", &gate_value["gates"]);
+    assert_eq!(gate_value["gates"]["total"], 1);
+    assert_eq!(gate_value["runs"]["total"], 0);
+
+    fixture.add_run();
+    let run_frame = next_snapshot_frame(&mut client, "job");
+    assert_no_home(&run_frame.data, &home);
+    let run_value = run_frame.json();
+    assert_schema("RunPage", &run_value["runs"]);
+    assert_eq!(run_value["runs"]["total"], 1);
+    assert_eq!(run_value["gates"]["total"], 1);
+
+    fixture.complete_pending_job();
+    let state_frame = next_snapshot_frame(&mut client, "job");
+    assert_no_home(&state_frame.data, &home);
+    let state_value = state_frame.json();
+    assert_schema("Job", &state_value["job"]);
+    assert_eq!(state_value["job"]["state"], "done");
+    assert_eq!(state_value["runs"]["total"], 1);
+    assert_eq!(state_value["gates"]["total"], 1);
+
+    drop(client);
+}
+
+#[test]
+fn job_stream_rejects_unknown_jobs_and_bad_ids_before_streaming() {
+    let fixture = BoardStreamFixture::new();
+    let server = Server::start_for(&fixture.paths, Duration::from_millis(10), Duration::from_secs(60));
+    let home = fixture.paths.root().display().to_string();
+
+    let missing = get(server.address, "/api/v1/jobs/missing-job/stream");
+    assert_eq!(missing.status, 404, "body: {}", missing.body);
+    assert!(
+        !missing
+            .content_type
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "an unknown job must not start a stream"
+    );
+    assert_no_home_or_token(&missing.body, &home);
+    let error: Value = serde_json::from_str(&missing.body).expect("ApiError JSON");
+    assert_eq!(error["error"]["kind"], "not_found", "{}", missing.body);
+
+    let invalid = get(server.address, "/api/v1/jobs/Not_Valid/stream");
+    assert_eq!(invalid.status, 400, "body: {}", invalid.body);
+    assert_no_home_or_token(&invalid.body, &home);
+    let error: Value = serde_json::from_str(&invalid.body).expect("ApiError JSON");
+    assert_eq!(error["error"]["kind"], "invalid_input", "{}", invalid.body);
+}
+
+/// Returns the next snapshot frame of `event`, ignoring any interleaved heartbeats.
+fn next_snapshot_frame(client: &mut SseClient, event: &str) -> SseFrame {
+    loop {
+        let frame = client.next_frame(Duration::from_secs(5)).expect("snapshot frame");
+        match frame.event.as_deref() {
+            Some("heartbeat") => continue,
+            Some(kind) if kind == event => return frame,
+            other => panic!("unexpected stream frame {other:?}: {}", frame.data),
+        }
+    }
 }
 
 #[test]

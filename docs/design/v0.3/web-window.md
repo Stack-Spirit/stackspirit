@@ -3,7 +3,7 @@
 Status: moved from `docs/design/v0.2/` by the v0.2 spec; planned for v0.3, not v0.2. The static
 board, session, capsule, cost, inbox, nodes, jobs and job-detail pages, the cost chart, the
 token-gated inbox answer, local session switch, job retry/park/cancel and the four keeper
-actions, and the PWA manifest/service-worker
+actions, the board, jobs-list and job-detail live streams, and the PWA manifest/service-worker
 shell are implemented. `vowp up` starts the serving `vowp-daemon` as a separate child process,
 prints the window address and the actual-port `vowp tunnel open window` hint, and the rest of this
 note is design. v0.1 has no browser UI and no listening socket.
@@ -66,8 +66,10 @@ token, and shows the drain and its blocked result.
   unlocking again.
 - SSE with `after_seq` resume and a visible "reconnecting" state; fall back to polling if SSE fails.
   The session timeline uses the per-session stream with `after_seq` resume. The board uses the
-  snapshot `/api/v1/board/stream` with reconnect and polling fallback. The cost, inbox and nodes
-  pages still poll every five seconds.
+  snapshot `/api/v1/board/stream` with reconnect and polling fallback. The jobs list and job
+  detail use the snapshot `/api/v1/jobs/stream` and `/api/v1/jobs/{id}/stream` streams with the
+  same reconnect and polling fallback, and reconcile immediately after a keeper action. The
+  cost, inbox and nodes pages still poll every five seconds.
 
 ## Open questions
 
@@ -251,7 +253,13 @@ cost and inbox, carries `<noscript>The nodes page requires JavaScript.</noscript
 prints a home path, token or provider secret.
 
 The jobs page is `crates/vowp-daemon/web/jobs.html`, served at `GET /jobs`. It fetches
-`GET /api/v1/jobs` on load and every five seconds, and after an action, and renders a table of job
+`GET /api/v1/jobs` on load, then opens `EventSource('/api/v1/jobs/stream')` and renders each
+`jobs` frame's exact `JobPage`; every `jobs` frame replaces the table. A `heartbeat` frame
+updates only the live line. On a stream error or close the page shows "Reconnecting... polling
+every 5 seconds.", starts its five-second `refresh()` fallback, retries the stream with bounded
+exponential backoff and stops the fallback when a stream open or a `jobs` frame succeeds. If
+`EventSource` is unavailable the page polls only. The page fetches again immediately after an
+action. It renders a table of job
 id, state, kind, role, priority, needs, attempts, updated time and note. Each job id links to
 the detail page at `/jobs/{id}`. A long list scrolls
 horizontally inside its own table wrapper, so the page stays usable on a narrow screen. Reads are
@@ -264,32 +272,39 @@ park and cancel for every non-terminal state; no actions for `done`, `cancelled`
 Retry and cancel post to `/api/v1/jobs/{id}/retry` and `/api/v1/jobs/{id}/cancel`; park asks for an
 optional reason and posts `{"reason":"<text>"}` to `/api/v1/jobs/{id}/park`, and cancel asks for
 confirmation first. Every action sends `Authorization: Bearer`, shows the queued `202` outcome,
-refreshes the list and renders the API error message on `4xx`/`5xx`. The page is a consumer only:
-it never writes a job row and adds no API route. It links to the other pages, carries
-`<noscript>The jobs page requires JavaScript.</noscript>`, and never prints a home path, token
-value or provider secret. Job SSE for the list remains later work.
+refreshes the list immediately and renders the API error message on `4xx`/`5xx`. The page is a
+consumer only: it never writes a job row and adds no API route. It links to the other pages,
+carries `<noscript>The jobs page requires JavaScript.</noscript>`, and never prints a home path,
+token value or provider secret.
 
 The job-detail page is `crates/vowp-daemon/web/job.html`, served at `GET /jobs/{id}`. It
 reads the id from its own path and fetches `GET /api/v1/jobs/{id}`,
-`GET /api/v1/jobs/{id}/runs` and `GET /api/v1/jobs/{id}/gates` on load. It renders the job
+`GET /api/v1/jobs/{id}/runs` and `GET /api/v1/jobs/{id}/gates` on load, then opens
+`EventSource('/api/v1/jobs/{id}/stream')`. Each `job` frame is a `JobDetailPage` whose `job`,
+`runs` and `gates` members replace the summary, runs table and gates table together. A
+`heartbeat` frame updates only the live line. On a stream error or close the page shows
+"Reconnecting... polling every 5 seconds.", starts its five-second reload fallback, retries the
+stream with bounded exponential backoff and stops the fallback when a stream open or a `job`
+frame succeeds. If `EventSource` is unavailable the page polls only. It renders the job
 id, state, kind, role, priority, attempts, updated time, needs and note; a runs table with
 run id, role, purpose, executor, provider, node, started, ended, exit, outcome and limit; and
 a gates table with attempt, gate index, kind, passed, duration and timestamp. The job id
 links to its sessions at `/sessions?job=<id>`, and the page links back to `/jobs` and keeps
 the shared nav and a visible "last updated" line. A `404` for an unknown job shows "Job not
-found." while keeping the nav and the back link. The page carries the shared unlock panel:
+found." while keeping the nav and the back link; the page does not start a stream for that
+id. The page carries the shared unlock panel:
 the `VOWP_API_TOKEN` value lives in `sessionStorage` (never the URL), a `401` clears it and
 shows the panel again, and a daemon started without a token shows the disabled `503` line.
 Keeper controls appear only after unlock and only when the graph's state table allows them:
 nudge and restart for `stalled`; replan for `stalled`, `parked` and `failed`; fail for
 `stalled` with a required reason prompt. There is no control for `done`, `cancelled` or
 `replanned`. Every control posts to `/api/v1/jobs/{id}/nudge`, `/restart`, `/replan` or
-`/fail` with `Authorization: Bearer`, shows the queued `202` outcome, refreshes the job and
-its runs and gates, and renders the API error message on `4xx`/`5xx`; fail posts
+`/fail` with `Authorization: Bearer`, shows the queued `202` outcome, reloads the job and
+its runs and gates immediately, and renders the API error message on `4xx`/`5xx`; fail posts
 `{"reason":"<text>"}`. The page never writes a job row itself. It never renders the stored
 `worktree`, `brief`, `owns`, `cwd` or `window` fields, a home path, a token value or a
 provider secret. It carries `<noscript>The job page requires JavaScript.</noscript>`.
-SSE for the jobs list and browser chat remain later work.
+Browser chat remains later work.
 
 ## PWA shell (implemented)
 
@@ -352,22 +367,30 @@ unlock, the queued message, the `401` and `503` lines, and the absence of a toke
 answer API test proves the write itself. The nodes-page test pins the `/api/v1/nodes` fetch, the
 node column labels, the empty and failed-fetch messages and the `<noscript>` fallback, and reads
 the same endpoint to prove the page's data source is a schema-valid `NodePage` of the stored
-local and remote nodes. The jobs-page test pins the `/api/v1/jobs` fetch, the job column labels,
-the five-second and after-action refresh, the state-to-action mapping (retry only for
-failed/stalled/parked, park and cancel for non-terminal states, none for terminal states), the
-cancel confirmation, the `Authorization: Bearer` write header, the shared `sessionStorage` unlock
-panel, the queued `202` and `401`/`503` paths and the `<noscript>` fallback; it also reads the same
-endpoint to prove the page's data source is a schema-valid `JobPage` and proves the existing retry,
-park and cancel routes still answer. The job-detail-page test pins the `/jobs/{id}` shell, the
-`/api/v1/jobs/{id}`, `/runs` and `/gates` fetches, the job and runs/gates column labels, the
-`/sessions?job=` and `/jobs` links, the not-found text, the four keeper controls, the shared
-unlock panel, the exact state lists (nudge/restart/fail only for `stalled`, replan also for
-`parked` and `failed`, none for terminal states), the `Authorization: Bearer` write, the
-queued `202` refresh, the `401` and `503` paths, and the absence of a home path, token value
-or the `worktree`, `brief`, `owns`, `cwd` and `window`
-fields; it reads the same three endpoints to prove the shell's data sources, and the job-detail
-API test pins the single `Job`, the `400` for an invalid id, the `404` for an unknown job, the
-run order (`started_at`, then `id`) and the newest-attempt gate order. The PWA test parses the manifest, pins the three asset content
+local and remote nodes. The jobs-page test pins the `/api/v1/jobs` fetch, the
+`/api/v1/jobs/stream` subscription, the `jobs` and `heartbeat` handlers, the five-second
+polling fallback and reconnect text, and the immediate after-action refresh alongside the job
+column labels, the state-to-action mapping (retry only for failed/stalled/parked, park and
+cancel for non-terminal states, none for terminal states), the cancel confirmation, the
+`Authorization: Bearer` write header, the shared `sessionStorage` unlock panel, the queued
+`202` and `401`/`503` paths and the `<noscript>` fallback; it also reads the same endpoint to
+prove the page's data source is a schema-valid `JobPage` and proves the existing retry, park
+and cancel routes still answer. The job-detail-page test pins the `/jobs/{id}` shell, the
+`/api/v1/jobs/{id}`, `/runs` and `/gates` fetches, the `/api/v1/jobs/{id}/stream`
+subscription, the `job` and `heartbeat` handlers, the five-second polling fallback and
+reconnect text, the job and runs/gates column labels, the `/sessions?job=` and `/jobs` links,
+the not-found text, the four keeper controls, the shared unlock panel, the exact state lists
+(nudge/restart/fail only for `stalled`, replan also for `parked` and `failed`, none for
+terminal states), the `Authorization: Bearer` write, the queued `202` immediate reload, the
+`401` and `503` paths, and the absence of a home path, token value or the `worktree`, `brief`,
+`owns`, `cwd` and `window` fields; it reads the same three endpoints to prove the shell's data
+sources, and the job-detail API test pins the single `Job`, the `400` for an invalid id, the
+`404` for an unknown job, the run order (`started_at`, then `id`) and the newest-attempt gate
+order. The jobs stream tests separately pin the first and changed `jobs` frames against the
+`JobPage` schema, the first and changed `job` frames against the `Job`, `RunPage` and
+`GateResultPage` schemas after a state, run and gate change, heartbeats, the `no-store` header,
+the `400` for an invalid filter or id and the `404` for an unknown job before streaming. The
+PWA test parses the manifest, pins the three asset content
 types and the service-worker headers, checks the bounded `SHELL` list and the API/SSE bypass, and
 asserts every page shell links and registers the service worker without printing a home path or
 token.
@@ -375,11 +398,12 @@ The CLI `up` tests pin the printed window URL and the actual-port
 `vowp tunnel open window --remote-port <port>` hint, and prove a missing daemon warns without
 printing a hint.
 
-Still later: SSE for the jobs list, browser chat, the reconnect UI on the pages that still poll,
-cross-node switching, dismiss and the other write endpoints, and a token rotation service.
-Offline data entry, offline event data and push notifications remain out of scope. Markdown
-rendering, capsule editing and capsule writes remain out of scope. The API routes and their
-fallback are otherwise unchanged; unknown non-API paths still return the API's JSON 404.
+Still later: browser chat, live streams for the cost, inbox and nodes pages, the reconnect UI
+on the pages that still poll, cross-node switching, dismiss and the other write endpoints, and
+a token rotation service. Offline data entry, offline event data and push notifications remain
+out of scope. Markdown rendering, capsule editing and capsule writes remain out of scope. The
+API routes and their fallback are otherwise unchanged; unknown non-API paths still return the
+API's JSON 404.
 
 The app must never print a token value, a home path or a provider secret; the board only contains the
 fields already shown by `vowp board`, and the session pages only the fields already shown by
