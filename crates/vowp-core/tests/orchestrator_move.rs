@@ -22,7 +22,7 @@ use vowp_protocol::{
     VowpConfig,
 };
 use vowp_store::session_log::{NewEvent, SessionLog, index_row};
-use vowp_store::{NodePaths, Store};
+use vowp_store::{NodePath, NodePaths, Store};
 
 fn ts() -> Timestamp {
     Timestamp::parse("2026-11-18T18:00:00Z").expect("test timestamp")
@@ -100,6 +100,29 @@ fn active_node(store: &Store, name: &str, now: Timestamp) -> NodeName {
         .touch_node(&node, now, Some("0.4.0"), Some("vowp-agent/1"), &serde_json::json!({}))
         .expect("node heartbeat");
     node
+}
+
+/// An active node whose last heartbeat is past the offline threshold.
+fn offline_node(store: &Store, name: &str, now: Timestamp) -> NodeName {
+    let node = agent_node(name);
+    store
+        .insert_pending_node(&node, &["darwin-arm64".to_owned()], now)
+        .expect("pending node");
+    // `set_node_status` also stamps `last_seen_at`; keep it older than the offline
+    // threshold so the active node is present but offline.
+    let last_seen = now.minus(std::time::Duration::from_secs(120));
+    store
+        .set_node_status(&node, vowp_protocol::NodeStatus::Active, "", last_seen)
+        .expect("active node");
+    node
+}
+
+/// Reads the session index row from the project store that owns it.
+fn session_row(deps: &Deps, session: &SessionId) -> vowp_protocol::Session {
+    deps.open_store()
+        .expect("project store")
+        .require_session(session)
+        .expect("session row")
 }
 
 fn request(name: &str) -> NewOrchestrator {
@@ -319,6 +342,179 @@ fn move_preserves_the_session_and_keeps_one_log_across_home_and_agent() {
         .expect("the home holds the lease again");
     assert_eq!(lease.node, home_node());
     assert!(store.require_session(&session).expect("session row").last_seq > 1);
+}
+
+#[test]
+fn orchestrator_move_updates_the_session_location_to_the_target_node() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let deps = deps(&tmp, AdapterRegistry::new());
+    let store = store_of(&deps);
+    let node = active_node(&store, "mac-studio", deps.clock.now());
+    let (orchestrator, _starts, _stops, transport) = manager(deps.clone());
+    let created = orchestrator.create(&request("night")).expect("create orchestrator");
+    let session = created.session.clone();
+
+    let before = session_row(&deps, &session);
+    assert_eq!(before.node, home_node(), "the fresh session must start on the home");
+    assert_eq!(before.cwd, created.dir.display().to_string());
+    let log_path = deps.paths.log_path(&session);
+    let log_before = std::fs::read(&log_path).expect("session log");
+
+    let moved = orchestrator
+        .move_to_node("night", Some(node.clone()))
+        .expect("move to the agent node");
+    assert_eq!(moved.session, session, "the move minted a new session");
+
+    let after = session_row(&deps, &session);
+    assert_eq!(after.node, node, "the session row still names the home");
+    assert_eq!(after.cwd, ".", "a remote node resolves its own checkout");
+    assert_eq!(after.last_seq, before.last_seq, "the move changed last_seq");
+    assert_eq!(
+        std::fs::read(&log_path).expect("session log"),
+        log_before,
+        "the move rewrote the session log"
+    );
+    let commands = transport.commands();
+    assert!(
+        matches!(commands.last(), Some(OrchestratorCommand::Start { name, .. }) if name == "night"),
+        "the target did not receive a start: {commands:?}"
+    );
+}
+
+#[test]
+fn orchestrator_move_home_restores_the_session_location() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let deps = deps(&tmp, AdapterRegistry::new());
+    let store = store_of(&deps);
+    let node = active_node(&store, "mac-studio", deps.clock.now());
+    let (orchestrator, _starts, _stops, _transport) = manager(deps.clone());
+    let created = orchestrator
+        .create_on_node(&request("night"), Some(node.clone()))
+        .expect("create orchestrator on the node");
+    let session = created.session.clone();
+
+    let before = session_row(&deps, &session);
+    assert_eq!(before.node, node, "the fresh remote session must name the node");
+    assert_eq!(before.cwd, ".", "the remote create stores the relative marker");
+
+    let home = orchestrator.move_to_node("night", None).expect("move back to the home");
+    assert_eq!(home.session, session, "the move home minted a new session");
+
+    let after = session_row(&deps, &session);
+    assert_eq!(after.node, home_node(), "the session row still names the node");
+    assert_eq!(
+        after.cwd,
+        created.dir.display().to_string(),
+        "a home placement uses the orchestrator directory"
+    );
+}
+
+#[test]
+fn orchestrator_move_to_an_unmapped_or_offline_node_leaves_the_session_row_unchanged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let deps = deps(&tmp, AdapterRegistry::new());
+    let store = store_of(&deps);
+    let unmapped = active_node(&store, "unmapped-host", deps.clock.now());
+    let offline = offline_node(&store, "offline-host", deps.clock.now());
+    let now = deps.clock.now();
+    let project = vowp_protocol::ProjectName::parse("checkout").expect("project");
+    store
+        .upsert_project(&vowp_protocol::Project {
+            name: project.clone(),
+            path: tmp.path().join("project").display().to_string(),
+            remote_url: None,
+            default_branch: "main".to_owned(),
+            config: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("project row");
+    // The offline target is mapped, so only its presence can refuse the move.
+    store
+        .upsert_node_path(&NodePath {
+            node: offline.clone(),
+            project: project.clone(),
+            local_root: tmp.path().join("node-project").display().to_string(),
+            worktree_root: tmp.path().join("node-worktrees").display().to_string(),
+            allow: Vec::new(),
+            updated_at: now,
+        })
+        .expect("offline node path");
+
+    let (orchestrator, starts, stops, _transport) = manager(deps.clone());
+    let mut req = request("night");
+    req.project = Some(project);
+    let created = orchestrator.create(&req).expect("create project orchestrator");
+    let before = session_row(&deps, &created.session);
+
+    let error = orchestrator
+        .move_to_node("night", Some(unmapped))
+        .expect_err("an unmapped target is refused");
+    assert!(matches!(error, CoreError::Refused(_)), "{error}");
+    assert_eq!(
+        session_row(&deps, &created.session),
+        before,
+        "an unmapped target changed the session row"
+    );
+
+    let error = orchestrator
+        .move_to_node("night", Some(offline))
+        .expect_err("an offline target is refused");
+    assert!(matches!(error, CoreError::Refused(_)), "{error}");
+    assert_eq!(
+        session_row(&deps, &created.session),
+        before,
+        "an offline target changed the session row"
+    );
+
+    let info = orchestrator.info("night").expect("still exists");
+    assert_eq!(info.card.node, None, "a refused move changed the placement");
+    assert_eq!(info.card.state, OrchestratorNodeState::Running);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(stops.load(Ordering::SeqCst), 0, "a refused move stopped the host");
+}
+
+#[test]
+fn orchestrator_move_does_not_clobber_last_seq_or_log_bytes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let deps = deps(&tmp, AdapterRegistry::new());
+    let store = store_of(&deps);
+    let node = active_node(&store, "mac-studio", deps.clock.now());
+    let (orchestrator, _starts, _stops, _transport) = manager(deps.clone());
+    let created = orchestrator.create(&request("night")).expect("create orchestrator");
+    let session = created.session.clone();
+
+    let before = session_row(&deps, &session);
+    assert!(before.last_seq > 0, "the fixture must exercise a non-zero last_seq");
+    assert!(before.log_bytes > 0, "the fixture must exercise non-zero log_bytes");
+    let log_path = deps.paths.log_path(&session);
+    let log_before = std::fs::read(&log_path).expect("session log");
+    let events_before = deps
+        .open_store()
+        .expect("project store")
+        .event_rows(&session, 0, 100)
+        .expect("indexed events");
+
+    orchestrator
+        .move_to_node("night", Some(node))
+        .expect("move to the agent node");
+
+    let after = session_row(&deps, &session);
+    assert_eq!(after.last_seq, before.last_seq, "the move changed last_seq");
+    assert_eq!(after.log_bytes, before.log_bytes, "the move changed log_bytes");
+    assert_eq!(
+        std::fs::read(&log_path).expect("session log"),
+        log_before,
+        "the move rewrote the session log"
+    );
+    assert_eq!(
+        deps.open_store()
+            .expect("project store")
+            .event_rows(&session, 0, 100)
+            .expect("indexed events"),
+        events_before,
+        "the move changed the indexed events"
+    );
 }
 
 #[test]

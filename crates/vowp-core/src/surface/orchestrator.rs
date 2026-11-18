@@ -695,10 +695,14 @@ impl Orchestrator {
     /// orchestrator already occupies is idempotent: a live record is returned unchanged and
     /// a stopped or degraded record is resumed there.
     ///
-    /// The target is validated before anything is stopped. An unknown, pending or revoked
-    /// node, or a project that the target node has not mapped, is refused with the current
-    /// host left running. A capsule failure is logged and does not abort the move, because
-    /// the home session log remains the authoritative context.
+    /// The target is validated before anything is stopped. An unknown, pending, revoked or
+    /// offline node, or a project that the target node has not mapped, is refused with the
+    /// current host left running. A capsule failure is logged and does not abort the move,
+    /// because the home session log remains the authoritative context.
+    ///
+    /// After the old host is stopped, the session index row follows the move: `sessions.node`
+    /// and `sessions.cwd` name the target, while `last_seq`, `log_bytes`, the log and every
+    /// event stay exactly as they were. A no-op move writes no row.
     pub fn move_to_node(&self, name: &str, target: Option<NodeName>) -> Result<OrchestratorInfo, CoreError> {
         validate_name(name)?;
         let dir = self.dir(name);
@@ -720,6 +724,14 @@ impl Orchestrator {
         let target_card = match target_node.as_ref() {
             Some(node) => {
                 let card = self.require_active_node(node)?;
+                // The move stops the old host before the target starts. A target that cannot
+                // start now would leave no live placement, so refuse it before stopping.
+                if card.presence != NodePresence::Online {
+                    return Err(CoreError::Refused(format!(
+                        "node_offline: node {node} is {}; `vowp orchestrator move` needs the node online",
+                        presence_name(card.presence)
+                    )));
+                }
                 let global = Store::open_global(&self.deps.paths)?;
                 self.prepare_project(&global, state.project.as_ref())?;
                 if let Some(project) = state.project.as_ref()
@@ -745,6 +757,25 @@ impl Orchestrator {
             self.release_remote_lease(&state, node)?;
         }
         self.write_move_capsule(&state);
+
+        // The session index row is what `session ls`, the snapshot and a session lookup
+        // read. Follow the placement with a location-only write so the log position and
+        // the log itself do not move. A row that still names the old placement must not
+        // start the target.
+        let (location_node, location_cwd) = match target_card.as_ref() {
+            Some(card) => (card.name.clone(), ".".to_owned()),
+            None => (self.deps.node.clone(), dir.display().to_string()),
+        };
+        let scoped = self.scoped_deps(state.project.as_ref())?;
+        let store = scoped.open_store()?;
+        store
+            .set_session_location(&state.session_id, &location_node, &location_cwd)
+            .map_err(|error| {
+                CoreError::Store(StoreError::Conflict(format!(
+                    "session {} location was not updated after stopping the old host: {error}",
+                    state.session_id
+                )))
+            })?;
 
         match target_card {
             Some(card) => self.start_move_on_remote_node(&dir, state, card),

@@ -369,6 +369,10 @@ pub fn session(&self, id: &SessionId) -> Result<Option<Session>, StoreError>;
 pub fn require_session(&self, id: &SessionId) -> Result<Session, StoreError>;
 pub fn list_sessions(&self, f: &SessionFilter) -> Result<Vec<Session>, StoreError>;        // updated_at DESC
 pub fn set_session_state(&self, id: &SessionId, state: SessionState, executor: Option<&Executor>) -> Result<(), StoreError>;
+/// Placement-only update for an orchestrator move: writes `node`, `cwd` and `updated_at`, and leaves
+/// `last_seq`, `last_capsule_id`, `log_bytes`, `state`, `executor` and every project/job column alone.
+/// Separate from `upsert_session`, which rewrites every column; an unknown id is `NotFound` and inserts no row.
+pub fn set_session_location(&self, id: &SessionId, node: &NodeName, cwd: &str) -> Result<(), StoreError>;
 pub fn index_event(&self, row: &EventIndexRow) -> Result<(), StoreError>;             // also bumps sessions.last_seq / updated_at / log_bytes in the same tx
 pub fn event_rows(&self, id: &SessionId, after_seq: u64, limit: u32) -> Result<Vec<EventIndexRow>, StoreError>;
 pub fn event_row_by_id(&self, id: &EventId) -> Result<Option<EventIndexRow>, StoreError>;
