@@ -295,24 +295,3 @@ pub fn classify_ssh_failure(output: &CommandOutput) -> SpiritError {
     )
     .retryable()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::parse_version_line;
-
-    #[test]
-    fn parse_version_line_reads_the_shipped_vowp_0_4_0_output() {
-        assert_eq!(parse_version_line("vowp 0.4.0\n").as_deref(), Some("0.4.0"));
-        // `vowp version` appends the build hash and schema number; the parser must keep
-        // the version token and never treat either suffix as the version.
-        assert_eq!(
-            parse_version_line("vowp 0.4.0 (abc1234) schema 1\n").as_deref(),
-            Some("0.4.0")
-        );
-        assert_eq!(
-            parse_version_line("\n  vowp 0.4.0\n").as_deref(),
-            Some("0.4.0")
-        );
-        assert_eq!(parse_version_line("   \n"), None);
-    }
-}

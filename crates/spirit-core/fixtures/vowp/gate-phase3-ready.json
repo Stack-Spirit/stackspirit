@@ -30,9 +30,6 @@
       "vowp mcp --help: exit 0",
       "vowp orchestrator new --help: exit 0",
       "vowp orchestrator ls --json: exit 0",
-      "vowp agent service --help: exit 0 (optional)",
-      "vowp agent doctor --help: exit 0 (optional)",
-      "vowp agent trust --help: exit 0 (optional)",
       "vowp agent status --json: cache stats reported"
     ]
   },
