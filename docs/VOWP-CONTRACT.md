@@ -1092,13 +1092,14 @@ feature works.
 | Host connect, snapshot, fleet canvas, capacity rail, inbox, job actions | Existing VOWP CLI JSON: `fleet status`, `capacity report`, `fleet queue`, `fleet inbox` | **Available now (D0–D4)** | Build and test against fixtures; live against a real home. |
 | StackSpirit Engine, included models, BYOK, external harness | None from VOWP; local sidecar + OS keychain | **Available now (D4)** | Local only; provider/model names stay local until D6. |
 | `.asif.zip` export/import (D5) | `v4-asif-core`, `v4-asif-cli`; both ship in VOWP `0.4.0` (`v4-asif-web` remains optional for the daemon route) | **VOWP 0.4.0 ships the ASIF interchange; the runtime probe still decides `AsifGate`** | Keep the sessions drawer and gate card; actions stay disabled until the probe is `Ready` and the D5 flag is on. No conformance claim. |
-| Local orchestrator execution (D6) | Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`: local app host, bridge, MCP proxy, orchestrator materialize, backfill, local cache), and Phase 4 `v4-local-4f-cli-surface`, all shipped in VOWP `0.4.0` | **VOWP 0.4.0 ships the CLI surface; still gated on a live active agent node and a `connected` local agent** | Build the gate card and evidence UI; never start a local orchestrator or claim a local session. |
+| Local orchestrator execution (D6) | Phase 2 (`v4-local-2e/2f/2g`), Phase 3 (`v4-local-3*`: local app host, bridge, MCP proxy, orchestrator materialize, backfill, local cache), and Phase 4 `v4-local-4f-cli-surface`, all shipped in VOWP `0.4.0` | **VOWP 0.4.0 ships the CLI surface; the live home has an active agent card, but D6 is still gated on the Mac-side `connected` local agent and cache read** | Build the gate card and evidence UI; never start a local orchestrator or claim a local session. |
 
 The shipped VOWP `0.4.0` release contains the Phase 2 offload read model and the Phase 3/4
 local-orchestrator CLI surface; the installed CLI under test is `vowp 0.4.0`. This contract
 still does **not** treat a version or source presence as installed capability. The runtime
-probe is the authority, and D6 remains gated until the live home and the connected local agent
-satisfy §11.3.
+probe is the authority, and D6 remains gated until the live home agent card and the Mac-side
+`connected` local agent both satisfy §11.3. The 2026-11-18 live home read satisfies the
+home card but not the Mac half.
 
 ### 11.2 ASIF gate (D5)
 
@@ -1416,9 +1417,19 @@ D6 therefore remains gated until **all** of the following are true:
 3. the Mac agent is enrolled and `connected`;
 4. `features.local_orchestrator_actions` is enabled by a later D6 build.
 
+On 2026-11-18 the job host read the live home read-only: `macbook` reported `kind: agent`,
+`status: active`, `presence: online`, `protocol: vowp-agent/1` and `agent_version: 0.3.0`,
+while the home node reported `kind: home`, `status: active`, `presence: offline`. That
+satisfies the home-side node/protocol/version fields of item 2, but it is **not** Mac
+evidence and does not satisfy item 3: the Mac-side `vowp agent status` was not read from
+this Linux host and remains an owner check. The home card alone never makes the gate
+`Ready`, and it never flips `features.local_orchestrator_actions = true`. The reported
+`0.3.0` agent version is an owner update item, not 0.4.0 agent evidence.
+
 A fresh 0.4.0 home exposes only its `kind: home` node, even when that node is online. The
-runtime probe must not confuse an online home node with an agent node, and it does not accept
-the global SSH `--node` selector as proof of the local-node meaning.
+live home adds an agent card and keeps a home card that can be offline. The runtime probe
+must not confuse either home card with an agent node, and it does not accept the global SSH
+`--node` selector as proof of the local-node meaning.
 
 
 #### 11.3.2 VOWP command surface and the agent frames D6 uses
@@ -1697,12 +1708,17 @@ surface and are therefore **not** sufficient evidence on their own.
    one card with `kind == "agent"`, `status == "active"`, and `presence == "online"`.
    `degraded` is honest but keeps the gate `Waiting`; an offline agent card is never
    `Ready`. If none, ⇒ `WaitingForVowpPhase3` ("no active local agent node"). If a card is
-   missing `kind`/`status`/`presence`, or is not a `NodeCard`, ⇒ `Incompatible`.
+   missing `kind`/`status`/`presence`, or is not a `NodeCard`, ⇒ `Incompatible`. The live
+   2026-11-18 home returned an offline `kind: home` card alongside an online `kind: agent`
+   card; the scan must continue past the home card and select the agent, but the home card
+   is not Mac evidence and is not sufficient for `Ready`.
 5. **Protocol and version.** From the selected `NodeCard.protocol`:
    - `vowp-agent/1` ⇒ compatible so far;
    - any other value ⇒ `Incompatible { detected, required: "vowp-agent/1" }`;
    - missing ⇒ `WaitingForVowpPhase3` ("agent protocol not reported"), never `Ready`.
-   A missing `agent_version` adds "agent version not reported".
+   A missing `agent_version` adds "agent version not reported". The live card's
+   `agent_version: 0.3.0` satisfies the presence rule while the home CLI is 0.4.0; record
+   the version skew as an owner update item, not as 0.4.0 agent evidence.
 6. **Phase 2 offload executor.** `vowp offload status --json` exits 0 with the documented
    `nodes`, `assignments`, and `ready` arrays. A malformed document adds "offload executor
    (Phase 2)" and stays `Waiting`; it is not a transport failure.
@@ -1786,19 +1802,26 @@ surface and are therefore **not** sufficient evidence on their own.
         ],
     }
     ```
-    A fresh 0.4.0 home with no agent node produces:
+    A live home with an online agent card but no Mac-side connection produces:
     ```rust
     LocalOrchestratorGate::WaitingForVowpPhase3 {
         missing: vec![
-            "no active local agent node".into(),
+            "local agent connection".into(),
         ],
         detected_version: Some("0.4.0".into()),
         evidence: vec![
             "vowp node ls --json: exit 0".into(),
-            "vowp node show --json: kind=home status=active presence=online".into(),
+            "vowp node show --json: kind=home status=active presence=offline".into(),
+            "vowp node show --json: kind=agent status=active presence=online".into(),
+            "node agent version: 0.3.0".into(),
+            "vowp agent status --json: not_enrolled".into(),
         ],
     }
     ```
+    The live home card is allowed evidence, but it is not sufficient: the missing Mac
+    connection keeps the gate `Waiting`, so `features.local_orchestrator_actions` is
+    `false`. A fresh 0.4.0 home with no agent node instead stays `Waiting` with
+    "no active local agent node".
     A pre-0.4.0 binary can still miss home **commands** (for example `surface rotation` or
     `orchestrator materialization`); those remain `Waiting` with exact missing labels. The
     version itself never changes the result.
@@ -1865,12 +1888,15 @@ The bridge sends the gate states as tagged unions (see `PLAN.md` §5.2). Example
   "local_orchestrator": {
     "state": "waiting_for_vowp_phase3",
     "missing": [
-      "no active local agent node"
+      "local agent connection"
     ],
     "detected_version": "0.4.0",
     "evidence": [
       "vowp node ls --json: exit 0",
-      "vowp node show --json: kind=home status=active presence=online"
+      "vowp node show --json: kind=home status=active presence=offline",
+      "vowp node show --json: kind=agent status=active presence=online",
+      "node agent version: 0.3.0",
+      "vowp agent status --json: not_enrolled"
     ]
   },
   "asif": {
@@ -1900,6 +1926,9 @@ The bridge sends the gate states as tagged unions (see `PLAN.md` §5.2). Example
 
 `evidence` strings contain commands, exit codes, versions, and capability names. They
 never contain a token, a key, a session body, an absolute local path, or a home path.
+The live home card in this example is allowed evidence but is not sufficient by itself:
+the missing Mac `agent status` keeps `local_agent` not enrolled and
+`features.local_orchestrator_actions = false`.
 
 ### 11.5 Probe lifecycle and failure handling
 

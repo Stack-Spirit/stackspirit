@@ -6,17 +6,19 @@ flag is derived by `spirit-core` and is true only when `LocalOrchestratorGate` i
 the local agent is `connected`, and the build flag is on. The Engine view can pair,
 create, inspect, stop, resume, rotate, and revoke a local orchestrator/surface; every
 action re-checks the gate, agent, node, protocol and path map on the backend. **Live
-execution is still owner-gated**: the installed `vowp 0.4.0` CLI now advertises the full
-Phase 3/4 surface, but this job did not verify a live active agent node or a `connected`
-Mac agent, and it performed no owner writes.
+execution is still owner-gated**: the installed `vowp 0.4.0` CLI advertises the full
+Phase 3/4 surface, and the live home now reports an online `macbook` agent card, but this
+Linux host cannot verify the Mac-side `vowp agent status` (`connection: connected`), so the
+gate is not claimed `Ready` and no owner write was performed.
 
 The **shipped `vowp 0.4.0` release** contains the Phase 3/4 local-orchestrator CLI surface:
 `vowp surface pair|ls|revoke|rotate`, `vowp agent enroll|paths|pair|run|status|service|doctor|trust`,
 `vowp orchestrator new|ls|stop|resume` with the local-node `--node` meaning, and
 `vowp mcp --agent-socket`. The installed binary on this host reports `vowp 0.4.0` (schema 1)
 and every read-only help probe used by the D6 gate in §1/§2 passes. A VOWP version string is
-**still not** evidence: the probes in §1 and §2 are what count, and the runtime gate remains
-`Waiting` until a live home has an active `agent` node and the Mac agent is `connected`.
+**still not** evidence: the probes in §1 and §2 are what count. The live home card in §1.2
+proves the home-side agent node; the runtime gate still stays `Waiting` until the Mac-side
+local `vowp agent status` is `connected` and the desktop re-probe passes both halves.
 
 `vowp agent trust --fingerprint <sha256:hex>` is new in 0.4.0. It is a **local-only,
 owner-confirmed** security action for a changed system-mode WSS leaf fingerprint: the owner
@@ -29,45 +31,54 @@ That spelling was a design sketch. The local app host is created by the home-sid
 `vowp orchestrator new --node <node> --app opencode`; the Mac agent materializes it.
 
 - **Evidence date:** 2026-11-18.
-- **Job:** `ss-32-d6-v04-reconcile`; this document and `docs/VOWP-CONTRACT.md` are the tracked
-  docs changed. The §1–§3 command evidence is read-only CLI evidence from the installed
-  `vowp 0.4.0` binary plus a disposable temp home/agent home; no owner write was performed.
+- **Jobs:** `ss-32-d6-v04-reconcile` (installed-CLI and temp-home/agent-home evidence) and
+  `ss-37-d6-live-agent-evidence` (live read-only home node and orchestrator reads). This
+  document and `docs/VOWP-CONTRACT.md` are the tracked docs changed. All command evidence is
+  read-only CLI evidence from the installed `vowp 0.4.0` binary; §1.2 adds the live home read
+  and keeps the hermetic probes. No owner write was performed.
 - **VOWP release under test:** `v0.4.0` (tag `v0.4.0`, commit `828ada6`), installed binary
   reports `vowp 0.4.0`; earlier source checkpoints are superseded by the release.
 - **VOWP CLI installed under test:** `vowp 0.4.0`.
-- **Writes performed by this job:** none to the live VOWP home, the local agent, or the
-  owner's node/surfaces. Hermetic `vowp init`/`node ls`/`node show`/`offload status`/
-  `surface ls`/`orchestrator ls` probes ran under a disposable temp home; `agent status`/
-  `agent paths ls`/`agent doctor` ran under a disposable `VOWP_AGENT_HOME`. No
-  `vowp agent enroll`, `vowp agent trust`, `vowp surface pair`, `vowp surface rotate`, or
+- **Writes performed by these jobs:** none to the live VOWP home, the local agent, or the
+  owner's node/surfaces. The live read was limited to `vowp --version`, `node ls`,
+  `node show` and `orchestrator ls`. Hermetic `vowp init`/`node ls`/`node show`/
+  `offload status`/`surface ls`/`orchestrator ls` probes ran under a disposable temp home;
+  `agent status`/`agent paths ls`/`agent doctor` ran under a disposable `VOWP_AGENT_HOME`.
+  No `vowp agent enroll`, `vowp agent trust`, `vowp surface pair`, `vowp surface rotate`, or
   `vowp orchestrator new` was run.
-- **Redaction:** no real host, hostname, key, token, home path, session id, surface id, or
-  one-time code value appears in this document; placeholders are used instead.
+- **Redaction:** no real SSH host, hostname, key, token, home path, session id, surface id,
+  or one-time code value appears in this document; placeholders are used instead. The
+  owner-facing agent node name `macbook` is already recorded in
+  `docs/HANDOFF-DESKTOP-UI.md`; the home node name and every runtime id stay redacted.
 
 ## 1. Current evidence
 
 ### 1.1 Probe scope
 
 All commands below were run read-only against the **installed** `vowp` binary on the job
-host. No real SSH host was contacted and the owner's live VOWP home was not opened. The
-home-shape rows use a disposable `vowp init` temp home (`--home <temp-home>`), and the
-agent-shape rows use a disposable `VOWP_AGENT_HOME`; both were deleted after the probe. The
-desktop's real D6 probe runs the home half over SSH; these local commands exercise the same
-CLI surface and are enough to prove the shipped help/JSON shapes, not a live desktop probe.
+host. No SSH host was contacted by these jobs. Rows 1–28 are the `ss-32` hermetic probes:
+the home-shape rows use a disposable `vowp init` temp home (`--home <temp-home>`), and the
+agent-shape rows use a disposable `VOWP_AGENT_HOME`; both were deleted after the probe.
+Rows 29–32 are the `ss-37` live home read: the installed CLI read the active project's node
+and orchestrator models read-only on the job host. That is a live **home-store** read, not
+the desktop's SSH probe and not a Mac-side `vowp agent status`. The desktop's real D6 probe
+runs the home half over SSH; these local commands exercise the same CLI surface.
 The VOWP release citation is tag `v0.4.0`; it is not installed evidence by itself.
 
 `vowp agent status` is a **Mac-side** command. This job host is the home/control side, so its
 hermetic `agent status` result says only that a fresh agent home is not enrolled. The owner
-must run the same command on the Mac for the local-agent half. It is never valid home
-evidence.
+must run the same command on the Mac for the local-agent half. The live `macbook` home-store
+card does not change that and is never Mac evidence.
 
 Runtime claims below cite a command and exit code. Source claims cite the v0.4.0 release
 and the protocol files in §7; a source file is not installed evidence.
 
 ### 1.2 Command evidence (2026-11-18)
 
-`<project>`, `<node>`, `<surface>`, `<temp-home>`, and `<temp-agent-home>` are redaction
-placeholders. The actual names are deliberately omitted.
+`<project>`, `<node>`, `<home-node>`, `<agent-node>`, `<surface>`, `<temp-home>`, and
+`<temp-agent-home>` are redaction placeholders. The actual names are deliberately omitted.
+Rows 1–28 are the `ss-32` hermetic probes; rows 29–32 are the `ss-37` live home read on the
+same date.
 
 | # | Exact command | Exit | Parsed result (redacted) | What it proves |
 |---:|---|---:|---|---|
@@ -99,6 +110,13 @@ placeholders. The actual names are deliberately omitted.
 | 26 | `VOWP_AGENT_HOME=<temp-agent-home> vowp --json agent paths ls` | 3 | Same `not_found` enrollment error | No local path map is available without enrollment. |
 | 27 | `vowp --project <project> session export 00000000000000000000000000 --format asif --out -` | 3 | Session not found; stdout empty | ASIF export is supported (the flag parsed; the nil session is absent). |
 | 28 | `vowp session import --help` | 0 | `--format` lists `bundle` and `asif` | ASIF import capability is advertised. |
+| 29 | `vowp --json --project <project> node ls` | 0 | 2 nodes. First: `is_local: false`, `capabilities.agent_version: "0.3.0"`, projects `[stackspirit, vowp]`. Second: `is_local: true`, `capabilities.role: "home"` | The live home lists both an agent node and the home node. `node ls` remains the v0.3 `Node` shape with **no `kind` or `status`**, so it is necessary but not sufficient. |
+| 30 | `vowp --json --project <project> node show macbook` | 0 | `kind: agent`, `status: active`, `presence: online`, `protocol: "vowp-agent/1"`, `agent_version: "0.3.0"`, `runs: 0`, `mapped: [stackspirit, vowp]`; `last_error: null` | The live agent card. The home-side node/status/presence, protocol and version fields pass. The reported `0.3.0` agent version is an owner update item, not 0.4.0 agent evidence. |
+| 31 | `vowp --json --project <project> node show <home-node>` | 0 | `kind: home`, `status: active`, `presence: offline`, `protocol: null`, `agent_version: null`, `runs: 0`, `mapped: []` | The home node is not an agent and can be offline while the agent is online. Node selection must keep scanning past it. |
+| 32 | `vowp --json --project <project> orchestrator ls` | 0 | JSON array with 6 cards; 1 `running` card carries `node: <agent-node>`; 5 are `stopped` (2 of those carry a `node` field for a node not in the current inventory) | The live orchestrator read model exists. It is supporting evidence only, not proof of a live orchestrator, and its card ids are not recorded. |
+
+`vowp --version` was re-run during the live read: exit 0, `vowp 0.4.0`. A version string is
+still not evidence by itself.
 
 ### 1.3 Installed `vowp 0.4.0` versus the D6 probe
 
@@ -117,15 +135,28 @@ host matches that surface:
 | `vowp agent surface start` / `attach` / `detach` | **absent** (design sketch only) | exit 2 |
 | `vowp node paths` | **absent** | exit 2 |
 | `vowp orchestrator new` | `--node` has the local-node after-help | exit 0 |
-| `vowp orchestrator ls` / `stop` / `resume` | present; `OrchestratorCard.node` is optional | exit 0; empty array in the temp home |
+| `vowp orchestrator ls` / `stop` / `resume` | present; `OrchestratorCard.node` is optional | exit 0; empty array in the temp home, 6 cards in the live home |
 | `vowp mcp --agent-socket` | present | exit 0 |
+
+The live home read on 2026-11-18 used the same installed binary. `node show macbook`
+returned `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1` and
+`agent_version: 0.3.0`; `node show <home-node>` returned `kind: home`, `presence: offline`,
+`protocol: null`; and `orchestrator ls` returned an array. That is live home-store evidence
+for the node/protocol/version rows and the read models, not a Mac-side `agent status` read
+and not a `Ready` claim.
+
+The live agent reports `agent_version: "0.3.0"` while the home CLI is `0.4.0`. The gate
+requires a present, non-empty agent version, not the 0.4.0 string, so this is valid
+home-card evidence; it is not evidence that a 0.4.0 agent is running. Upgrading or
+restarting the Mac agent, and then reading the Mac-side `vowp agent status`, is an owner
+update item.
 
 The 0.4.0 release also retains `vowp node enroll --replace` (rotate a pending node's code in one
 transaction), `vowp node rm --yes` (remove a node and purge its enrollment codes), and
 authenticated `PathMapUpdate` persistence: the home validates the reported map lexically and
 stores it in `node_paths`, replying `Pong`, and an invalid map returns a typed `Error` without
 closing the session. These are owner-setup and session-robustness details, not gate evidence;
-the §2 probe table is unchanged.
+the §2 gate rules are unchanged.
 
 The release reports its own version as `0.4.0`, but a version string is still not evidence.
 The gate uses command/flag/after-help probes so an older or newer binary cannot pass on a
@@ -135,16 +166,18 @@ without an active agent node and a connected Mac agent.
 ### 1.4 Historical Phase 4 job evidence
 
 The earlier `v4-local-4f-cli-surface`/`v4-local-4g-hardening-docs` job reads recorded on
-2026-11-16 are superseded by the `v0.4.0` release. They were not re-run by this job because a
+2026-11-16 are superseded by the `v0.4.0` release. They were not re-run by `ss-32` because a
 live VOWP job read would touch the owner's home; they were never capability probes. Use §1.2
 and §2 for the current CLI evidence.
 
 **Conclusion of §1:** the **installed** `vowp 0.4.0` CLI advertises the full D6 command
-surface. The remaining D6 blockers are runtime/owner state, not missing CLI commands: a live
-home needs an active `agent` node with protocol `vowp-agent/1`, and the Mac agent must be
-enrolled and `connected`. A fresh 0.4.0 home's only node is `kind: home`, even when online, so
-`vowp node show`, `vowp offload status`, and an `orchestrator ls` exit 0 are necessary but not
-sufficient.
+surface. The live home now also has an active `agent` node with protocol `vowp-agent/1`, so
+the remaining D6 blocker is the Mac half: the local `vowp agent status` must be
+`connected`. A fresh 0.4.0 home's only node is `kind: home`, even when online, so
+`vowp node show`, `vowp offload status`, and an `orchestrator ls` exit 0 are necessary but
+not sufficient. The live home demonstrates why: its home node is `kind: home` and
+`offline` while its agent card is online, and the gate must select the agent card without
+treating either read as the Mac half.
 
 ## 2. Gate contract: what `LocalOrchestratorGate=Ready` requires
 
@@ -159,11 +192,11 @@ still false unless the gate is `Ready` and the local agent is `connected`.
 | # | Requirement | Exact probe | Pass condition | Current result (2026-11-18) |
 |---:|---|---|---|---|
 | 1 | Home reachable | `vowp --version` over SSH | Exit 0 and a parseable version; **evidence only, never a gate by itself** | Exit 0, `vowp 0.4.0` |
-| 2 | Selected project | Active project from the last snapshot | A safe project token; otherwise `Waiting` ("active project") and no bare node read | Owner snapshot value; not re-probed live |
-| 3 | Node inventory | `vowp --project <project> node ls --json` over SSH | Exit 0 and a JSON array with at least one node; malformed ⇒ `Incompatible` | Exit 0 in the temp home; 1 node, v0.3 `Node` shape |
-| 4 | Active local-agent node | `vowp --project <project> node show <node> --json` for each node (bounded, in order) | A `NodeCard` with `kind`, `status`, and `presence`; `kind == "agent"`, `status == "active"`, `presence == "online"` | Temp home: only `kind: home`, `status: active`, `presence: online`; live home not read |
-| 5 | Agent protocol | The selected `NodeCard.protocol` | Exactly `vowp-agent/1`; another value is `Incompatible`; missing is `Waiting` | `protocol: null` on the temp home node |
-| 6 | Agent version | The selected `NodeCard.agent_version` | Present and non-empty; missing is `Waiting` | `agent_version: null` on the temp home node |
+| 2 | Selected project | Active project from the last snapshot | A safe project token; otherwise `Waiting` ("active project") and no bare node read | Live read passed `<project>`; the snapshot value remains owner state |
+| 3 | Node inventory | `vowp --project <project> node ls --json` over SSH | Exit 0 and a JSON array with at least one node; malformed ⇒ `Incompatible` | Live home: exit 0, 2 nodes; temp home: exit 0, 1 node, v0.3 `Node` shape |
+| 4 | Active local-agent node | `vowp --project <project> node show <node> --json` for each node (bounded, in order) | A `NodeCard` with `kind`, `status`, and `presence`; `kind == "agent"`, `status == "active"`, `presence == "online"` | Live home: `macbook` is `kind: agent`, `status: active`, `presence: online`; `<home-node>` is `kind: home`, `presence: offline` |
+| 5 | Agent protocol | The selected `NodeCard.protocol` | Exactly `vowp-agent/1`; another value is `Incompatible`; missing is `Waiting` | Live `macbook` card: `vowp-agent/1`; temp home node: `null` |
+| 6 | Agent version | The selected `NodeCard.agent_version` | Present and non-empty; missing is `Waiting` | Live `macbook` card: `0.3.0` present (owner update item); temp home node: `null` |
 | 7 | Phase 2 offload executor | `vowp offload status --json` | Exit 0 with `nodes`, `assignments`, and `ready` arrays | Exit 0; 1 node, 0 assignments, 0 ready |
 | 8 | Surface pairing | `vowp surface pair --help` | Exit 0; `--session`, `--kind`, `--app`, `--replace`, and the command-specific local-node after-help | Exit 0; all required flags and the after-help present |
 | 9 | Surface read model | `vowp surface ls --help` | Exit 0 | Exit 0 |
@@ -172,19 +205,20 @@ still false unless the gate is `Ready` and the local agent is `connected`.
 | 12 | MCP proxy | `vowp mcp --help` | Exit 0; `--surface` and `--agent-socket` advertised | Exit 0; both present |
 | 13 | Orchestrator materialization | `vowp orchestrator new --help` | Exit 0; `--app`, `--force`, and the local-node after-help | Exit 0; all required text present |
 | 14 | Orchestrator lifecycle | `vowp orchestrator stop --help` and `resume --help` | Both exit 0 | Both exit 0 |
-| 15 | Orchestrator read model | `vowp orchestrator ls --json` | Exit 0 with a JSON array | Exit 0; `[]` in the temp home |
-| 16 | Local agent connection | `vowp agent status --json` on the Mac | Exit 0; `connection: "connected"`; protocol `vowp-agent/1`; node captured | Exit 3 in the temp agent home; live Mac not verified |
+| 15 | Orchestrator read model | `vowp orchestrator ls --json` | Exit 0 with a JSON array | Live home: exit 0, 6 cards; temp home: `[]` |
+| 16 | Local agent connection | `vowp agent status --json` on the Mac | Exit 0; `connection: "connected"`; protocol `vowp-agent/1`; node captured | Not verified from this Linux host; temp agent home exits 3, not enrolled |
 | 17 | Local surface pairing | `vowp agent pair --help` on the Mac | Exit 0; `--code-file`, `--surface`, `--session` | Exit 0 help; no live pairing |
 | 18 | Local agent run | `vowp agent run --help` on the Mac | Exit 0; `--foreground` and `--role`; this is also the bridge/backfill path | Exit 0 help; no live run |
 | 19 | Local path map | `vowp agent paths --help` on the Mac | Exit 0; `add`, `rm`, `ls` | Exit 0 help; `paths ls` exits 3 in the temp agent home |
-| 20 | Local cache | `vowp agent status --json` on the Mac | `cache_entries` and `cache_bytes` present | Unavailable: exit 3 before a status document |
+| 20 | Local cache | `vowp agent status --json` on the Mac | `cache_entries` and `cache_bytes` present | Not verified from this Linux host; exit 3 before a status document in the temp agent home |
 | 21 | Optional service/diagnostics/trust | `vowp agent service --help` / `doctor --help` / `trust --help` | Exit 0, recorded as evidence only; not a Ready gate | All exit 0 on 0.4.0; `trust` advertises `--fingerprint`; never run without `--help` |
 
-The node-row “current result” above was obtained in a disposable temp home, not the owner's
-live home. The shipped probe adds `--project` when the active project is known; if it is not
-known, the gate is `Waiting` ("active project") and no bare global node read runs (§2.2, item 1).
-The temp home's online home node proves that presence alone is not accepted: `kind` must be
-`agent`, and the Mac agent must independently be `connected`.
+The live rows above come from the read-only home-store reads in §1.2; the negative cases come
+from the disposable temp home. The shipped probe adds `--project` when the active project is
+known; if it is not known, the gate is `Waiting` ("active project") and no bare global node
+read runs (§2.2, item 1). The live home's offline home node and online agent card together
+prove that presence alone is not accepted and that the probe must select the `kind: agent`
+card; the Mac agent must still independently be `connected`.
 
 ### 2.1 Local-agent state mapping
 
@@ -246,12 +280,15 @@ These are not optional footnotes; each one can make a naive probe report the wro
    subcommand. The local cache is a **Mac-side** read from `vowp agent status --json`
    (`cache_entries`, `cache_bytes`, `cache_oldest_at`). Do not substitute
    `vowp agent paths ls --json` as home evidence and do not require `node paths`.
-4. **A fresh 0.4.0 home's only node is `kind: home`, even when online.** The temp-home probe
-   returns `kind: home`, `status: active`, `presence: online`, `protocol: null`,
-   `agent_version: null`. Presence is computed for every node, so an online home node is not an
-   agent. The gate requires `kind == "agent"`, and the selected card must also carry
-   `protocol: "vowp-agent/1"` and a non-empty `agent_version`. The gate's node comes from
-   `vowp node show`; the UI must not infer one from an absent `orchestrator ls` field.
+4. **An online home node is not an agent node.** A fresh 0.4.0 home's only node is
+   `kind: home`, even when online: `status: active`, `presence: online`, `protocol: null`,
+   `agent_version: null`. The live home adds an online agent card but still returns a
+   `<home-node>` card that is `kind: home` and `offline`. Presence is computed for every
+   node, so neither home card is an agent. The gate requires `kind == "agent"`, and the
+   selected card must also carry `protocol: "vowp-agent/1"` and a non-empty
+   `agent_version`. The scan must continue past the home card and select the agent card.
+   The gate's node comes from `vowp node show`; the UI must not infer one from an absent
+   `orchestrator ls` field.
 5. **Help probes are weaker than a capability document.** If a help output is ambiguous, the
    gate is `Waiting` (or `Unknown`), never `Ready`.
 6. **A non-connected local agent is not Ready.** `LocalAgentStatus` is displayed separately,
@@ -274,6 +311,9 @@ These are not optional footnotes; each one can make a naive probe report the wro
    binary lacks `surface rotate`, `agent service|doctor|trust`, and the `orchestrator new`
    local-node after-help. That is a missing capability, not a reason to relax a check or fall
    back to the stale `agent surface start|attach` spelling (which exists in neither build).
+   The live agent card reports `agent_version: 0.3.0` while the home CLI is `0.4.0`; the
+   gate accepts a present version, but the owner still needs to update the Mac agent and
+   read the Mac-side `vowp agent status`. Do not call the card 0.4.0 agent evidence.
 
 ## 3. Owner setup steps (on `vowp 0.4.0+`)
 
@@ -412,8 +452,9 @@ vowp orchestrator ls --json
 Expected parsed fields:
 
 - `node show`: `kind: "agent"`, `status: "active"`, `presence: "online"` (degraded is honest but
-  not a live-action state), `protocol: "vowp-agent/1"`, `agent_version` present, `mapped`
-  includes the project, and `runs` is whatever it is.
+  not a live-action state), `protocol: "vowp-agent/1"`, `agent_version` present (the live
+  2026-11-18 card reported `0.3.0`; update the Mac agent, but the gate requires a present
+  version, not the 0.4.0 string), `mapped` includes the project, and `runs` is whatever it is.
 - `offload status`: exit 0 with `nodes`, `assignments`, and `ready`; the local node's `presence`
   is `online` or `degraded`; no offline node is used for a live action.
 - `surface ls`: exit 0. A pending/paired surface row is enough after pairing; do not record
@@ -550,10 +591,12 @@ guard, secret or path handling moved out of `spirit-core`.
 | Pairing secret | The one-time pairing code is returned only by the direct `local_surface_pair` result so the owner can copy it once or redeem it locally. It is not in a view, an event, or a log; the preview fixture uses a placeholder, never a real code. |
 | Tests | Vitest covers MockBridge refusals, cleanup, create/pair/rotate/revoke/stop/resume and the gated-off/Ready Engine panel. Playwright covers `Waiting`, `Incompatible` and `Ready` MockBridge flows, including the honest session states and WCAG 2.2 AA. |
 
-Live execution remains blocked on the owner setup in §3: the installed `vowp 0.4.0` CLI now
-advertises the full surface, but this job did not verify an active local-agent node or an
-enrolled/`connected` Mac agent, and it performed no owner writes. The UI and backend behave
-honestly in that state by keeping the gate `Waiting` and every start action disabled.
+Live execution remains blocked on the Mac half of the owner setup in §3: the installed
+`vowp 0.4.0` CLI advertises the full surface and the live home now has an online `macbook`
+agent card, but this Linux host cannot run the Mac-side `vowp agent status` and did not
+verify `connection: connected` or the local cache. No owner write was performed. The UI and
+backend behave honestly in that state by keeping the gate `Waiting` and every start action
+disabled.
 
 ## 5. What not to do now
 
@@ -577,6 +620,10 @@ honestly in that state by keeping the gate `Waiting` and every start action disa
   No value crosses.
 - **Do not claim a live orchestrator from a synthetic fixture.** `gate-phase3-ready` proves the
   disabled-action copy, not a running local orchestrator.
+- **Do not treat the live home card as the whole gate.** The 2026-11-18 `macbook` card proves
+  only the home-side agent node, protocol and version field. `vowp agent status` must run on
+  the Mac and report `connection: connected`; the desktop re-probe must pass both halves.
+  D6 actions stay disabled until then.
 - **Do not treat Phase 1 commands as the local surface.** `vowp surface pair`, `vowp surface ls`,
   `vowp surface revoke`, `vowp node ls`, `vowp node show`, and `vowp orchestrator ls` exist
   before the full local host; they are necessary but not sufficient. `vowp surface rotate`,
@@ -599,14 +646,15 @@ not the UI.
 | Missing or unproven | Action (owner or StackSpirit) | Exact probe that proves it | Current (2026-11-18) |
 |---|---|---|---|
 | D6 Desktop actions and honest Engine panel | Implemented in `ss-21-d6-bridge-ui`; no owner action. | `npm test`, `npm run test:e2e`, `cargo test -p spirit-core --features fixtures`, `cargo clippy -p spirit-core --all-targets -- -D warnings` | Implemented behind the `Ready` + `connected` gate; gated-off and Ready MockBridge flows covered. |
-| Install the `vowp 0.4.0+` CLI on the home and Mac | Use VOWP's documented 0.4.0 install/upgrade path on both machines. Do not substitute a source checkout. | `vowp --version` → `vowp 0.4.0`; every §3.1 help probe exits 0 | Job host: installed `vowp 0.4.0`; every help probe passes. Mac not verified by this job. |
+| Install the `vowp 0.4.0+` CLI on the home and Mac | Use VOWP's documented 0.4.0 install/upgrade path on both machines. Do not substitute a source checkout. | `vowp --version` → `vowp 0.4.0`; every §3.1 help probe exits 0 | Job host: installed `vowp 0.4.0`; every help probe passes. The live home card reports agent `0.3.0`, so the Mac binary still needs an owner check/update. |
 | Surface lifecycle `surface rotate` and `surface pair --replace` | No owner action on 0.4.0; confirm the Mac binary is also 0.4.0. | `vowp surface rotate --help` → exit 0 with `--wait`/`--grace`; `vowp surface pair --help` → `--replace` present | Both present on the job host. |
-| Active local-agent node with protocol `vowp-agent/1` | On the home, create the pending node (a stale `pending` node is recovered with `node enroll <node> --replace`; revoke or remove an `active`/`revoked` node first); on the Mac, enroll with the private code file, map paths, and run one agent. | `vowp --project <project> node show <node> --json` → `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version` present | Temp home: only `kind: home`, `status: active`, `presence: online`, `protocol: null`. Live home not read. |
-| Local agent state `connected` | Enroll and run the agent as above; keep it running. | `vowp agent status --json` → exit 0, `connection: connected`, `protocol: vowp-agent/1`, `last_heartbeat`, `cache_entries`, `cache_bytes` present | Temp agent home: exit 3, not enrolled. Live Mac not verified. |
+| Active local-agent node with protocol `vowp-agent/1` | Home half is now present; the remaining action is the Mac enrollment/run below. | `vowp --project <project> node show <node> --json` → `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version` present | Live home (2026-11-18): `macbook` is `kind: agent`, `status: active`, `presence: online`, `protocol: vowp-agent/1`, `agent_version: 0.3.0`; `<home-node>` is `kind: home`, `presence: offline`. |
+| Local agent state `connected` | Enroll and run the agent as above; keep it running. | `vowp agent status --json` → exit 0, `connection: connected`, `protocol: vowp-agent/1`, `last_heartbeat`, `cache_entries`, `cache_bytes` present | Temp agent home: exit 3, not enrolled. Live Mac not verified from this Linux host. |
+| Mac agent binary version matches the home CLI | On the Mac, update the agent to `vowp 0.4.0+` and restart one `vowp agent run` (owner action). | Home card `agent_version`; Mac `vowp agent status --json` | Home card reports `0.3.0` while the home CLI is `0.4.0`. Owner update item, not 0.4.0 agent evidence. |
 | Mac command surface `agent pair` / `run` / `paths` | No owner action on 0.4.0; confirm the Mac binary is also 0.4.0. | `vowp agent pair --help`, `vowp agent run --help`, `vowp agent paths --help` → exit 0 with their documented flags/subcommands | All exit 0 on the job host; no live pairing/run. |
 | Phase 3 local-node meaning of `vowp orchestrator new --node` | No owner action on 0.4.0. Do not create an orchestrator yet. | `vowp orchestrator new --help` contains “names the node that runs the app” and “not an SSH redirect” | Both phrases present. |
 | StackSpirit probe passes a project for `vowp node ls --json` and `vowp node show <node> --json` | Fixed in `ss-19-d6-probe-fix`; re-run the gate on a multi-project home. | Gate evidence includes `vowp node ls --json: exit 0` and a `vowp node show --json` card (or the documented `--project`-qualified commands) | Probe passes `--project`; bare commands exit 2, with `--project` they exit 0. |
-| Orchestrator card carries the local `node` for display (optional) | Only after a local orchestrator exists, verify the card. The gate node comes from `node show`; this is not a reason to fake `Ready`. | `vowp --project <project> orchestrator ls --json` → exit 0 and the local card has `node: <node>` | Temp home: exit 0, `[]`. Live cards not read. |
+| Orchestrator card carries the local `node` for display (optional) | Only after a local orchestrator exists, verify the card. The gate node comes from `node show`; this is not a reason to fake `Ready`. | `vowp --project <project> orchestrator ls --json` → exit 0 and the local card has `node: <node>` | Live home: exit 0, 6 cards, 1 running with `node: <agent-node>`; temp home: `[]`. |
 | Optional `agent service` / `agent doctor` / `agent trust` | No owner action unless service mode, diagnostics, or a changed WSS fingerprint is wanted. Foreground `agent run` does not need service mode. | `vowp agent service --help`, `vowp agent doctor --help`, `vowp agent trust --help` → exit 0 (`trust` lists `--fingerprint`) | All exit 0; `trust` is never run by the probe. |
 
 A `Ready` gate alone is not the finish line. The D6 build proves that the flag-off copy

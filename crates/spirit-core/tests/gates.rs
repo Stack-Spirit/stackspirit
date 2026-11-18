@@ -23,6 +23,10 @@ const GATE_ASIF_READY: &str = include_str!("../fixtures/vowp/gate-asif-ready.jso
 const GATE_NODE_LIST_V03: &str = include_str!("../fixtures/vowp/gate-node-list-v0.3.json");
 const GATE_NODE_SHOW_HOME_OFFLINE_V03: &str =
     include_str!("../fixtures/vowp/gate-node-show-v0.3-home-offline.json");
+const GATE_PHASE3_AGENT_ONLINE: &str =
+    include_str!("../fixtures/vowp/gate-phase3-agent-online.json");
+const GATE_PHASE3_HOME_OFFLINE: &str =
+    include_str!("../fixtures/vowp/gate-phase3-home-offline.json");
 
 /// A pre-0.4.0 `vowp orchestrator new --help` output: `--node` appears only as the global
 /// SSH selector. `--project`/`--home` values are the CLI defaults, not a host.
@@ -447,6 +451,33 @@ fn home_routes() -> Vec<Route> {
     ]
 }
 
+/// The live 2026-11-18 home read: the home node comes before the online `kind: agent`
+/// node, and the agent reports `agent_version: "0.3.0"` while the home CLI is 0.4.0.
+/// The home card is allowed evidence, but only the Mac `vowp agent status` proves the
+/// local connection.
+fn live_home_routes() -> Vec<Route> {
+    let mut routes = home_routes();
+    for route in &mut routes {
+        if route.needles == ["node", "ls"] {
+            route.output = ok(
+                r#"[{"name":"home-node","ssh_target":null,"is_local":true,"capabilities":{"role":"home","vowp":"0.4.0"},"last_seen_at":"2026-11-13T00:00:00.000Z","created_at":"2026-11-13T00:00:00.000Z"},{"name":"agent-node","ssh_target":null,"is_local":false,"capabilities":{"agent_version":"0.3.0"},"last_seen_at":"2026-11-18T00:00:00.000Z","created_at":"2026-11-17T00:00:00.000Z"}]"#,
+            );
+        }
+        if route.needles == ["node", "show", "mac-studio"] {
+            route.needles = vec!["node", "show", "agent-node"];
+            route.output = ok(GATE_PHASE3_AGENT_ONLINE);
+        }
+    }
+    routes.insert(
+        2,
+        Route {
+            needles: vec!["node", "show", "home-node"],
+            output: ok(GATE_PHASE3_HOME_OFFLINE),
+        },
+    );
+    routes
+}
+
 fn status_json(connection: &str, protocol: Option<&str>, cache: bool) -> String {
     let protocol = protocol.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
     let cache = if cache {
@@ -778,6 +809,75 @@ async fn gates_phase3_probe_rejects_an_online_home_node_from_vowp_0_4_0() {
         }
         other => panic!("expected waiting on a home node, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn gates_phase3_probe_selects_the_live_agent_card_but_still_requires_the_local_connection() {
+    // The live home card is home-side evidence only. The probe must select the online
+    // `kind: agent` card even when the offline home node is listed first, and must still
+    // report Waiting until the Mac-side `vowp agent status` is connected.
+    let runner = RouteRunner::new(live_home_routes(), failed(1, "unexpected"));
+    let (gate, local) = probe_local_orchestrator(&runner, None, &options()).await;
+    match gate {
+        LocalOrchestratorGate::WaitingForVowpPhase3 {
+            missing, evidence, ..
+        } => {
+            assert_eq!(missing, vec!["local agent connection".to_owned()]);
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("kind=agent") && line.contains("presence=online")),
+                "{evidence:?}"
+            );
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("kind=home") && line.contains("presence=offline")),
+                "{evidence:?}"
+            );
+            assert!(
+                evidence
+                    .iter()
+                    .any(|line| line.contains("node agent version: 0.3.0")),
+                "{evidence:?}"
+            );
+        }
+        other => panic!("expected waiting on the Mac half, got {other:?}"),
+    }
+    assert_eq!(local.state, LocalAgentState::NotInstalled);
+    let shows: Vec<String> = runner
+        .calls()
+        .iter()
+        .map(remote_argv)
+        .filter(|command| command.contains("'node' 'show'"))
+        .collect();
+    assert!(
+        shows.iter().any(|command| command.contains("'home-node'")),
+        "the offline home card must not stop the scan: {shows:?}"
+    );
+    assert!(
+        shows.iter().any(|command| command.contains("'agent-node'")),
+        "the online agent card must be selected: {shows:?}"
+    );
+
+    // The same home card reaches Ready only with the Mac half connected. The 0.3.0
+    // agent version is accepted because the gate requires a present version, not 0.4.0;
+    // it stays an owner update item in the docs, not 0.4.0 agent evidence.
+    let agent = local_runner();
+    let runner = RouteRunner::new(live_home_routes(), failed(1, "unexpected"));
+    let (gate, local) = probe_local_orchestrator(&runner, Some(&agent), &options()).await;
+    match gate {
+        LocalOrchestratorGate::Ready {
+            agent_protocol,
+            node,
+            ..
+        } => {
+            assert_eq!(agent_protocol, "vowp-agent/1");
+            assert_eq!(node.as_deref(), Some("agent-node"));
+        }
+        other => panic!("expected ready with the Mac half connected, got {other:?}"),
+    }
+    assert_eq!(local.state, LocalAgentState::Connected);
 }
 
 #[tokio::test]

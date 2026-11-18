@@ -1,0 +1,14 @@
+{
+  "name": "home-node",
+  "kind": "home",
+  "status": "active",
+  "presence": "offline",
+  "labels": [],
+  "capacity": null,
+  "runs": 0,
+  "mapped": [],
+  "agent_version": null,
+  "protocol": null,
+  "last_error": null,
+  "last_seen_at": "2026-11-13T00:00:00.000Z"
+}
