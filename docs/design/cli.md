@@ -472,6 +472,7 @@ exit 5 instead of working around it. Answers are names only: `--harness`, `--pro
 ```
 vowp orchestrator new [--name <n>] [--project <p>] --app opencode|claude-code|chat [--node <n>] [--executor <e>] [--force]
 vowp orchestrator ls
+vowp orchestrator move <name> (--node <n> | --home)
 vowp orchestrator stop <name>
 vowp orchestrator resume <name>
 ```
@@ -486,6 +487,19 @@ is not an SSH redirect for this command); the node materializes its own private 
 exits non-zero when no claude.ai login exists rather than pretending the host runs. `stop` stops the
 host and releases the lease (the session stays); `resume` starts it again; the supervisor resumes
 running orchestrators after a restart. JSON: `OrchestratorCard`.
+
+`orchestrator move` requires exactly one of `--node <n>` (move to that enrolled local node) or
+`--home` (move back to this home); both or neither is a usage error (exit 2). It validates the
+target before stopping anything: an unknown, pending or revoked node is refused (exit 3 or 5), and
+a project-bound orchestrator needs a path map for its project on the target node. The current host
+is then stopped and its surface lease released, a handoff capsule is written on the existing session
+when it has content beyond its creation and placement notes, and the orchestrator is materialized on
+the target **with the same `SessionId`** and the same session log on the home. A capsule failure is
+logged and does not abort the move. Moving to the placement the orchestrator already occupies is
+idempotent: a live host is returned unchanged and a stopped or degraded one is resumed there.
+`--json` prints the `OrchestratorCard`, whose `session_id` is the preserved id. On `move`, `--node`
+names the target node for the orchestrator, not an SSH redirect. The global `--home <DIR>` flag is
+accepted before the command; after `orchestrator move`, `--home` is the target switch.
 
 An opencode app may write its own 0600 `service.json` or, on macOS, print its readiness on stdout
 (`server listening on http://127.0.0.1:<port>` and `server password <secret>`); the agent parses

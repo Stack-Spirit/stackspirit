@@ -42,6 +42,12 @@ pub enum OrchestratorCommand {
     New(OrchestratorNewArgs),
     /// List orchestrators.
     Ls,
+    /// Move an orchestrator between the home and an agent node, keeping its session.
+    #[command(
+        override_usage = "vowp orchestrator move <NAME> (--node <NAME> | --home)",
+        after_help = "For `orchestrator move`, --node <name> names the target node that runs the orchestrator, not an SSH redirect; use --home to move it back to this home. Exactly one of --node or --home is required."
+    )]
+    Move(OrchestratorMoveArgs),
     /// Stop an orchestrator's host and release its lease.
     Stop(OrchestratorNameArgs),
     /// Start an orchestrator's host again.
@@ -49,6 +55,22 @@ pub enum OrchestratorCommand {
     /// Hidden: keep one orchestrator's lease alive after the CLI exits.
     #[command(name = "__keepalive", hide = true)]
     KeepAlive(OrchestratorNameArgs),
+}
+
+/// Arguments for `vowp orchestrator move`.
+#[derive(Debug, Clone, Args)]
+pub struct OrchestratorMoveArgs {
+    /// Orchestrator name.
+    pub name: String,
+    /// Target node that runs the orchestrator; taken from the global `--node` flag, not an SSH redirect.
+    #[arg(skip)]
+    pub node: Option<String>,
+    /// Move the orchestrator back to this home.
+    ///
+    /// `cli.rs` rewrites the bare `--home` spelling to this hidden switch because the
+    /// global `--home <DIR>` flag already owns that long name in clap.
+    #[arg(long = "move-home", hide = true)]
+    pub to_home: bool,
 }
 
 /// Arguments for `vowp orchestrator new`.
@@ -76,15 +98,19 @@ pub struct OrchestratorNewArgs {
 }
 
 impl OrchestratorArgs {
-    /// Moves the global `--node` value into `orchestrator new`, where it names the
-    /// orchestrator's node instead of an SSH redirect.
+    /// Moves the global `--node` value into `orchestrator new` or `orchestrator move`,
+    /// where it names the orchestrator's node instead of an SSH redirect.
     ///
     /// Every other `vowp orchestrator` subcommand keeps the global meaning. `cli.rs`
     /// calls this immediately after parsing and returns the value only when the command
-    /// is `new`.
-    pub fn take_new_node(&mut self, node: Option<String>) -> Option<String> {
+    /// takes a target node.
+    pub fn take_orchestrator_node(&mut self, node: Option<String>) -> Option<String> {
         match &mut self.command {
             OrchestratorCommand::New(args) => {
+                args.node = node;
+                None
+            }
+            OrchestratorCommand::Move(args) => {
                 args.node = node;
                 None
             }
@@ -106,6 +132,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &OrchestratorArgs) -> Result
     match &args.command {
         OrchestratorCommand::New(args) => create(ctx, io, &orchestrator, args),
         OrchestratorCommand::Ls => list(ctx, io, &orchestrator),
+        OrchestratorCommand::Move(args) => move_orchestrator(ctx, io, &orchestrator, args),
         OrchestratorCommand::Stop(args) => stop(ctx, io, &orchestrator, &args.name),
         OrchestratorCommand::Resume(args) => resume(ctx, io, &orchestrator, &args.name),
         OrchestratorCommand::KeepAlive(args) => {
@@ -156,6 +183,34 @@ fn create(
             },
             node,
         )
+        .map_err(map_orchestrator_error)?;
+    ensure_keeper(ctx, orchestrator, &info)?;
+    print_info(ctx, io, &info)
+}
+
+/// Runs `orchestrator move`.
+fn move_orchestrator(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    orchestrator: &Orchestrator,
+    args: &OrchestratorMoveArgs,
+) -> Result<i32, CliError> {
+    let node = match (args.node.as_deref(), args.to_home) {
+        (Some(_), true) => {
+            return Err(CliError::Invalid(
+                "orchestrator move takes exactly one of --node <NAME> or --home, not both".to_owned(),
+            ));
+        }
+        (None, false) => {
+            return Err(CliError::Invalid(
+                "orchestrator move needs exactly one of --node <NAME> or --home".to_owned(),
+            ));
+        }
+        (Some(value), false) => Some(vowp_protocol::NodeName::parse(value)?),
+        (None, true) => None,
+    };
+    let info = orchestrator
+        .move_to_node(&args.name, node)
         .map_err(map_orchestrator_error)?;
     ensure_keeper(ctx, orchestrator, &info)?;
     print_info(ctx, io, &info)

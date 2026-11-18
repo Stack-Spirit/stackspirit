@@ -298,6 +298,8 @@ injection path and the redaction coverage are in the [security model](../securit
 vowp orchestrator new --name main --app chat --executor <executor>
 vowp orchestrator new --name main --app opencode --project <project>
 vowp orchestrator ls
+vowp orchestrator move main --node <node>
+vowp orchestrator move main --home
 vowp orchestrator stop main
 vowp orchestrator resume main
 ```
@@ -310,6 +312,17 @@ supports it (an opencode server that binds loopback, or Claude Remote Control, w
 port and connects outbound to claude.ai) and prints desktop, phone and `vowp chat` join
 instructions. `stop` stops the host and releases the lease; the session stays. `resume` starts it
 again. A host that cannot start is marked `degraded` and does not stop the supervisor.
+
+`move` switches an existing orchestrator between this home and an enrolled local agent node without
+changing its `SessionId` or its session log on the home. Use `--node <node>` to run the app on that
+node and `--home` to bring it back; exactly one is required. The current host stops, its lease is
+released, a handoff capsule is written on the same session when it has context, and the app is
+started at the target. The target is checked before anything stops, so an unknown, pending or
+revoked node, or a project the node has not mapped, leaves the current host running. Moving to the
+placement the orchestrator already uses is a no-op, or resumes a stopped record there. A
+project-bound orchestrator needs its project path mapped on the target node, and the node needs a
+paired surface for the session. Put the global `--home <DIR>` flag before `orchestrator move`;
+after the command, `--home` is the target switch.
 
 The join instructions use generic `<home-ssh-target>` and `<session>` placeholders; the control
 machine supplies the concrete target. The fallback is always `vowp chat <session-id>`.

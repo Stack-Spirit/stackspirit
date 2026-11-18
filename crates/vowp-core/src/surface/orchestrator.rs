@@ -22,10 +22,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
-    AgentFrame, ExecutorRef, JoinInstructions, Lease, Level, NewSession, NodeName, NodePresence, NodeStatus,
-    OrchestratorApp, OrchestratorCard, OrchestratorCommand, OrchestratorError, OrchestratorNodeState,
-    OrchestratorResult, Project, ProjectName, SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp,
+    AgentFrame, CapsuleTrigger, EventType, ExecutorRef, JoinInstructions, Lease, Level, NewSession, NodeName,
+    NodePresence, NodeStatus, OrchestratorApp, OrchestratorCard, OrchestratorCommand, OrchestratorError,
+    OrchestratorNodeState, OrchestratorResult, Project, ProjectName, SessionId, SessionRole, Surface, SurfaceId,
+    SurfaceKind, Timestamp,
 };
+use vowp_store::session_log::SessionLog;
 use vowp_store::{Store, StoreError, hash_lease_token};
 
 use super::claude_remote::ClaudeRemoteHost;
@@ -681,6 +683,204 @@ impl Orchestrator {
                 );
                 Ok(info_from_state(state, dir, None))
             }
+        }
+    }
+
+    /// Moves an orchestrator between the home and an enrolled agent node.
+    ///
+    /// The session id, the home session log and the project binding are preserved: the
+    /// current host is stopped and its lease released, a handoff capsule is written on the
+    /// existing session when it has events beyond its creation and placement notes, and the
+    /// orchestrator is re-materialized on the target bound to the same session. Moving to the placement the
+    /// orchestrator already occupies is idempotent: a live record is returned unchanged and
+    /// a stopped or degraded record is resumed there.
+    ///
+    /// The target is validated before anything is stopped. An unknown, pending or revoked
+    /// node, or a project that the target node has not mapped, is refused with the current
+    /// host left running. A capsule failure is logged and does not abort the move, because
+    /// the home session log remains the authoritative context.
+    pub fn move_to_node(&self, name: &str, target: Option<NodeName>) -> Result<OrchestratorInfo, CoreError> {
+        validate_name(name)?;
+        let dir = self.dir(name);
+        let state = read_state(&dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
+        let target_node = match target {
+            Some(node) if !self.is_home_node(&node)? => Some(node),
+            _ => None,
+        };
+        let currently_remote = self.state_is_remote(&state)?;
+
+        // A no-op move must not stop or restart a healthy host. A stopped record on the
+        // requested placement is resumed there.
+        if currently_remote == target_node.is_some()
+            && (target_node.is_none() || state.node.as_ref() == target_node.as_ref())
+        {
+            return self.resume_or_return(name, state, dir);
+        }
+
+        let target_card = match target_node.as_ref() {
+            Some(node) => {
+                let card = self.require_active_node(node)?;
+                let global = Store::open_global(&self.deps.paths)?;
+                self.prepare_project(&global, state.project.as_ref())?;
+                if let Some(project) = state.project.as_ref()
+                    && !global
+                        .list_node_paths(node)?
+                        .iter()
+                        .any(|path| path.project == *project)
+                {
+                    return Err(CoreError::Refused(format!(
+                        "project {project} is not mapped on node {node}; add the local checkout on that node first"
+                    )));
+                }
+                drop(global);
+                Some(card)
+            }
+            None => None,
+        };
+
+        let old_node = state.node.clone();
+        self.stop(name)?;
+        let mut state = read_state(&dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
+        if let Some(node) = old_node.as_ref() {
+            self.release_remote_lease(&state, node)?;
+        }
+        self.write_move_capsule(&state);
+
+        match target_card {
+            Some(card) => self.start_move_on_remote_node(&dir, state, card),
+            None => {
+                state.node = None;
+                state.surface_id = None;
+                state.last_request_id = None;
+                state.join = None;
+                state.state = OrchestratorNodeState::Stopped;
+                state.detail = None;
+                state.last_error = None;
+                write_state(&dir, &state)?;
+                self.resume(name)
+            }
+        }
+    }
+
+    /// Returns a live orchestrator unchanged, or resumes one that is stopped or degraded.
+    fn resume_or_return(&self, name: &str, state: StateFile, dir: PathBuf) -> Result<OrchestratorInfo, CoreError> {
+        let info = self.info_from_dir(state, dir);
+        if matches!(
+            info.card.state,
+            OrchestratorNodeState::Running | OrchestratorNodeState::Starting
+        ) {
+            return Ok(info);
+        }
+        self.resume(name)
+    }
+
+    /// Re-materializes one moved orchestrator on an active local node.
+    ///
+    /// `Start` is used rather than `Resume` so a node that has never hosted this
+    /// orchestrator writes its own private copy. The home record keeps the existing
+    /// session id; the node's paired surface must already be bound to that session.
+    fn start_move_on_remote_node(
+        &self,
+        dir: &Path,
+        mut state: StateFile,
+        card: vowp_protocol::NodeCard,
+    ) -> Result<OrchestratorInfo, CoreError> {
+        let request_id = new_request_id();
+        let online = card.presence == NodePresence::Online;
+        state.node = Some(card.name.clone());
+        state.surface_id = None;
+        state.last_request_id = Some(request_id.clone());
+        state.state = if online {
+            OrchestratorNodeState::Starting
+        } else {
+            OrchestratorNodeState::NodeOffline
+        };
+        state.detail = if online {
+            None
+        } else {
+            Some(format!("node {} is {}", card.name, presence_name(card.presence)))
+        };
+        state.last_error = None;
+        state.join = Some(node_join(state.app, &card.name, &state.session_id));
+        write_state(dir, &state)?;
+        if !online {
+            return Ok(info_from_state(state, dir.to_path_buf(), None));
+        }
+        let command = OrchestratorCommand::Start {
+            request_id,
+            name: state.name.clone(),
+            app: state.app,
+            project: state.project.clone(),
+        };
+        let result = self.send_command(&card.name, &command, &mut state);
+        if !matches!(&result, Ok(CommandDelivery::Queued)) {
+            write_state(dir, &state)?;
+        }
+        match result {
+            Ok(CommandDelivery::Applied) if state.state == OrchestratorNodeState::Failed => {
+                Err(refused_by_node(&card.name, "start", &state))
+            }
+            Ok(_) => Ok(info_from_state(state, dir.to_path_buf(), None)),
+            Err(error) => {
+                self.deps.log.log(
+                    Level::Warn,
+                    "orchestrator",
+                    &format!(
+                        "cannot deliver move start for {} to node {}: {error}",
+                        state.name, card.name
+                    ),
+                );
+                Ok(info_from_state(state, dir.to_path_buf(), None))
+            }
+        }
+    }
+
+    /// Releases a lease left on the node an orchestrator just left.
+    ///
+    /// A remote host detaches its surface on `Stop`, which releases the lease through the
+    /// gateway. When that node is unreachable the row can remain; release it only when it
+    /// still belongs to this orchestrator's app on the old node, so a takeover by another
+    /// surface is preserved.
+    fn release_remote_lease(&self, state: &StateFile, node: &NodeName) -> Result<(), CoreError> {
+        let store = Store::open_global(&self.deps.paths)?;
+        let Some(lease) = store.lease(&state.session_id)? else {
+            return Ok(());
+        };
+        if lease.node == *node && (lease.holder == state.name || lease.holder == app_name(state.app)) {
+            store.release_lease_hash(&state.session_id, &lease.token)?;
+        }
+        Ok(())
+    }
+
+    /// Writes a handoff capsule on the existing session after a real placement change.
+    ///
+    /// A session with only its creation and placement notes has no context to hand off, so
+    /// no capsule turn runs. The move continues when the capsule writer fails; the session
+    /// log on the home is still the authoritative record the new host resumes from.
+    fn write_move_capsule(&self, state: &StateFile) {
+        let result = (|| -> Result<(), CoreError> {
+            let scoped = self.scoped_deps(state.project.as_ref())?;
+            let store = scoped.open_store()?;
+            store.require_session(&state.session_id)?;
+            let events = SessionLog::open_read(&self.deps.paths, &state.session_id)?.read_all()?;
+            if !events
+                .iter()
+                .any(|event| !matches!(event.event_type, EventType::SessionCreated | EventType::Note))
+            {
+                return Ok(());
+            }
+            SessionService::new(scoped).write_capsule(&state.session_id, CapsuleTrigger::Manual)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.deps.log.log(
+                Level::Warn,
+                "orchestrator",
+                &format!(
+                    "cannot write handoff capsule for {} on {}: {error}",
+                    state.name, state.session_id
+                ),
+            );
         }
     }
 

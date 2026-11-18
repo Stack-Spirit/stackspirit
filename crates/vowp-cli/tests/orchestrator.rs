@@ -25,7 +25,7 @@ use vowp_protocol::{
     OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult, Project,
     ProjectName, SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp, VowpConfig,
 };
-use vowp_store::{NodeCredential, NodePaths, Store, hash_lease_token};
+use vowp_store::{NodeCredential, NodePath, NodePaths, Store, hash_lease_token};
 
 use vowp_core::CoreError;
 use vowp_core::agent::auth;
@@ -167,6 +167,22 @@ impl TestEnv {
         store
             .set_node_status(node, NodeStatus::Revoked, "", store.clock().now())
             .expect("revoked node");
+    }
+
+    /// Reports the test project's checkout on `node`, as a live agent would.
+    fn map_project(&self, node: &NodeName) {
+        let store = self.store();
+        let root = self.project_path().display().to_string();
+        store
+            .upsert_node_path(&NodePath {
+                node: node.clone(),
+                project: self.project_name().clone(),
+                local_root: root.clone(),
+                worktree_root: root,
+                allow: Vec::new(),
+                updated_at: store.clock().now(),
+            })
+            .expect("node path map");
     }
 
     /// Returns one orchestrator's directory below the temporary home.
@@ -1924,6 +1940,100 @@ fn orchestrator_chat_cli_round_trip() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("(chat, running)"), "{stdout}");
     assert_eq!(read_json(&state_path(&dir))["state"], "running");
+}
+
+#[test]
+fn orchestrator_move_requires_exactly_one_target_and_never_ssh_redirects() {
+    let env = TestEnv::new();
+    let (code, stdout, stderr) = env.run(&["orchestrator", "move", "missing"]);
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("exactly one of --node <NAME> or --home"), "{stderr}");
+
+    let (code, stdout, stderr) = env.run(&["orchestrator", "move", "missing", "--home", "--node", "mac-studio"]);
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("not both"), "{stderr}");
+
+    // The global `--node` is the move target, not an SSH redirect: an unknown orchestrator
+    // is a local NotFound (exit 3), not a remote SSH failure (exit 7).
+    let (code, stdout, stderr) = env.run(&["orchestrator", "move", "missing", "--node", "mac-studio"]);
+    assert_eq!(code, 3, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("orchestrator missing"), "{stderr}");
+    assert!(
+        !stderr.starts_with("remote:"),
+        "the command was SSH-redirected: {stderr}"
+    );
+}
+
+#[test]
+fn orchestrator_move_preserves_the_session_between_home_and_an_agent() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    env.map_project(&node);
+    let agent = FakeAgent::start(env.home_path(), &node);
+
+    let (code, stdout, stderr) = env.run(&["orchestrator", "new", "--name", "mover", "--app", "chat"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let dir = env.orchestrator_dir("mover");
+    let session = read_json(&state_path(&dir))["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let (code, card, stderr) = env.run_json(&["orchestrator", "move", "mover", "--node", node.as_str()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(card["name"], "mover");
+    assert_eq!(card["session_id"], session);
+    assert_eq!(card["node"], "mac-studio");
+    assert_eq!(card["state"], "running");
+    let state = read_json(&state_path(&dir));
+    assert_eq!(state["session_id"], session);
+    assert_eq!(state["node"], "mac-studio");
+    assert_eq!(state["state"], "running");
+    assert!(matches!(
+        agent.commands().last(),
+        Some(OrchestratorCommand::Start { name, .. }) if name == "mover"
+    ));
+
+    let (code, card, stderr) = env.run_json(&["orchestrator", "move", "mover", "--home"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(card["name"], "mover");
+    assert_eq!(card["session_id"], session);
+    assert!(card["node"].is_null(), "the moved card still names a node: {card}");
+    assert_eq!(card["state"], "running");
+    let state = read_json(&state_path(&dir));
+    assert_eq!(state["session_id"], session);
+    assert!(state["node"].is_null(), "the state still names a node: {state}");
+    assert_eq!(state["state"], "running");
+    let commands = agent.commands();
+    assert!(matches!(
+        commands.first(),
+        Some(OrchestratorCommand::Start { name, .. }) if name == "mover"
+    ));
+    assert!(matches!(
+        commands.last(),
+        Some(OrchestratorCommand::Stop { name, .. }) if name == "mover"
+    ));
+}
+
+#[test]
+fn orchestrator_move_to_a_revoked_node_keeps_the_home_host_running() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let (code, stdout, stderr) = env.run(&["orchestrator", "new", "--name", "mover", "--app", "chat"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let dir = env.orchestrator_dir("mover");
+    let session = read_json(&state_path(&dir))["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    env.revoke_node(&node);
+
+    let (code, stdout, stderr) = env.run(&["orchestrator", "move", "mover", "--node", node.as_str()]);
+    assert_eq!(code, 5, "stdout: {stdout}\nstderr: {stderr}");
+    let state = read_json(&state_path(&dir));
+    assert_eq!(state["session_id"], session);
+    assert!(state["node"].is_null(), "a refused move changed the placement: {state}");
+    assert_eq!(state["state"], "running");
 }
 
 #[test]

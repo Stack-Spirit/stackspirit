@@ -123,13 +123,15 @@ impl Parser for Cli {
         let mut args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         record_agent_chat(false);
         inject_agent_chat_id(&mut args);
+        rewrite_move_home(&mut args);
         ParsedCli::try_parse_from(args).map(|mut parsed| {
-            // `orchestrator new --node <name>` names the node that runs the app, not an
-            // SSH redirect. Move the global value into the subcommand before
-            // `remote::maybe_run` sees it; every other command keeps the global meaning.
+            // `orchestrator new --node <name>` and `orchestrator move --node <name>`
+            // name the node that runs the orchestrator, not an SSH redirect. Move the
+            // global value into the subcommand before `remote::maybe_run` sees it; every
+            // other command keeps the global meaning.
             let node = parsed.global.node.take();
             if let Command::Orchestrator(args) = &mut parsed.command {
-                parsed.global.node = args.take_new_node(node);
+                parsed.global.node = args.take_orchestrator_node(node);
             } else {
                 parsed.global.node = node;
             }
@@ -138,6 +140,26 @@ impl Parser for Cli {
                 command: parsed.command,
             }
         })
+    }
+}
+
+/// Rewrites `--home` after `orchestrator move` to its hidden switch.
+///
+/// `--home <DIR>` is a global flag, and clap rejects a second argument with the same long
+/// name on a subcommand. For `orchestrator move` the owner spelling is the target switch,
+/// so every `--home` after the subcommand is rewritten; a global home directory still goes
+/// before the command. The user-facing spelling remains `--home`.
+fn rewrite_move_home(args: &mut [OsString]) {
+    let Some(orchestrator) = args.iter().position(|arg| arg == "orchestrator") else {
+        return;
+    };
+    if args.get(orchestrator + 1).and_then(|arg| arg.to_str()) != Some("move") {
+        return;
+    }
+    for arg in args.iter_mut().skip(orchestrator + 2) {
+        if arg == "--home" {
+            *arg = OsString::from("--move-home");
+        }
     }
 }
 

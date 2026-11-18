@@ -518,6 +518,8 @@ prints them, and never logs the port or password. The pair link is a secret.
 
 ```sh
 vowp orchestrator new --name mac --app opencode --node mac-studio --project vowp
+vowp orchestrator move mac --node mac-studio
+vowp orchestrator move mac --home
 ```
 
 - The home creates the orchestrator session and card, with `node=mac-studio` in the card. The home
@@ -531,6 +533,13 @@ vowp orchestrator new --name mac --app opencode --node mac-studio --project vowp
   `SurfaceAttach`/`Start`. If the node is offline, `resume` fails with `node_offline` in the MVP
   (queueing is Phase 3). `resume_all` marks a local orchestrator `degraded` when its node is
   offline; it never starts it on the home.
+- `orchestrator move <name> --node <node>` stops the current host, releases its lease, writes a
+  handoff capsule on the existing session and starts the orchestrator on that node; `--home`
+  reverses the direction. The exact same `SessionId` and the single session log on the home are
+  preserved. The target is validated first (active node, mapped project), so an unknown, pending,
+  revoked or unmapped target leaves the current host running. Moving to the current placement is
+  idempotent, or resumes a stopped record there. The target node must already have a paired surface
+  for the session; the home never mints a new session id during a move.
 - The local `AGENTS.md` template says: you are on a local surface; paths are project-relative; the
   home cannot see the Mac's local files; call `session_resume` if the tool is available; ask before
   public actions; never read a secret. It does not tell the app to open a tunnel; the agent is the

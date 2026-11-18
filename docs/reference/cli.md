@@ -138,6 +138,7 @@ python3 docs/reference/check-reference.py
 | [`vowp orchestrator`](#vowp-orchestrator) | Create and manage orchestrator sessions |
 | [`vowp orchestrator new`](#vowp-orchestrator-new) | Create and start an orchestrator |
 | [`vowp orchestrator ls`](#vowp-orchestrator-ls) | List orchestrators |
+| [`vowp orchestrator move`](#vowp-orchestrator-move) | Move an orchestrator between the home and an agent node, keeping its session |
 | [`vowp orchestrator stop`](#vowp-orchestrator-stop) | Stop an orchestrator's host and release its lease |
 | [`vowp orchestrator resume`](#vowp-orchestrator-resume) | Start an orchestrator's host again |
 | [`vowp orchestrator __keepalive`](#vowp-orchestrator-__keepalive) | Hidden: keep one orchestrator's lease alive after the CLI exits |
@@ -2824,6 +2825,7 @@ Usage: vowp orchestrator [OPTIONS] <COMMAND>
 Commands:
   new     Create and start an orchestrator
   ls      List orchestrators
+  move    Move an orchestrator between the home and an agent node, keeping its session
   stop    Stop an orchestrator's host and release its lease
   resume  Start an orchestrator's host again
 
@@ -2878,6 +2880,29 @@ Options:
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
+```
+
+#### `vowp orchestrator move`
+
+```text
+Move an orchestrator between the home and an agent node, keeping its session
+
+Usage: vowp orchestrator move <NAME> (--node <NAME> | --home)
+
+Arguments:
+  <NAME>  Orchestrator name
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+For `orchestrator move`, --node <name> names the target node that runs the orchestrator, not an SSH redirect; use --home to move it back to this home. Exactly one of --node or --home is required.
 ```
 
 #### `vowp orchestrator stop`
