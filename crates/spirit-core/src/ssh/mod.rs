@@ -2,6 +2,7 @@
 
 pub mod command;
 pub mod fingerprint;
+pub mod keygen;
 pub mod known_hosts;
 pub mod password_install;
 pub(crate) mod remote_file;
@@ -19,6 +20,9 @@ use crate::ssh::command::{
 };
 pub use command::{WRITE_TIMEOUT, quote_arg};
 pub use fingerprint::{HostKeyScan, ScannedHostKey, scan_host_keys};
+pub use keygen::{
+    AppKey, AppKeyOptions, SSH_KEYCHAIN_PREFIX, UnlockedAppKey, create_app_key, unlock_app_key,
+};
 pub use password_install::{
     AuthorizedKeysMerge, PasswordAuthOutcome, PasswordAuthUnsupported, PasswordInstallOutcome,
     PasswordInstallRequest, install_public_key_with_password, merge_authorized_keys,

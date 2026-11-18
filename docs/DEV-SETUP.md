@@ -259,6 +259,49 @@ typed `NotSupported` outcome and the key install itself stays successful. The de
 card and Tauri command that call this API are a later job; nothing in the UI installs
 a key yet.
 
+## App-owned SSH keys (`spirit-core`)
+
+`crates/spirit-core/src/ssh/keygen.rs` creates the key pair that the secure onboarding
+flow installs. One call writes an app-private ed25519 pair and stores its passphrase in
+the local OS keychain:
+
+```rust
+let key = spirit_core::ssh::create_app_key(
+    keys_dir,     // app-private directory; created/chmodded 0700 on Unix
+    "id_ed25519", // key name; also the file name and keychain account suffix
+    &keychain,    // Keychain trait; OsKeychain in the app
+    &spirit_core::ssh::AppKeyOptions::default(), // force: false
+)?;
+
+let unlocked = spirit_core::ssh::unlock_app_key(&key.private_key_path, &keychain)?;
+```
+
+The private key is written in OpenSSH format and encrypted with a generated 32-byte
+random passphrase. The passphrase is stored only in the OS keychain under
+`ssh-key:<name>`; it never enters argv, a log, a config file, or the returned structs.
+`<dir>/<name>` and `<dir>/<name>.pub` are written `0600`, and `<dir>` is `0700` on
+Unix. `create_app_key` returns the public-key line, the `SHA256:...` fingerprint, and
+the key paths. It refuses to replace an existing pair unless `force` is set, in which
+case both files and the keychain entry are replaced. `unlock_app_key` reads the stored
+passphrase, decrypts the key, and returns the public line and fingerprint. A missing
+keychain entry is a typed `keychain` error; a wrong passphrase is a typed `ssh_auth`
+error, and neither message contains secret bytes.
+
+The real keychain (`OsKeychain`) is behind the `keychain` feature. The module itself
+compiles without it, and tests use a fake keychain. Exercise key creation without an
+OS keychain or a server:
+
+```sh
+cargo test -p spirit-core --test ssh_keygen
+```
+
+The tests cover OpenSSH parsing and ed25519 key shape, public/private matching, file and
+directory modes, one keychain write per create with no passphrase in the file or
+`Debug` output, unlock success, missing/wrong passphrase typed errors, no-force refusal
+with the first key untouched, force replacement, and stable/changing fingerprints. The
+Tauri command, bridge methods and onboarding-card wiring are a later job; nothing in
+the UI creates a key yet.
+
 ## What remains a native, macOS, or CI check
 
 The Docker workflow is a Linux compile and test environment, not a release pipeline.
