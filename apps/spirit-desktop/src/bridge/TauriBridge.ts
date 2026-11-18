@@ -16,6 +16,13 @@ import type {
   AsifImportResult,
   CapacityTargetView,
   CapacityView,
+  ChatEvent,
+  ChatLogPage,
+  ChatLogQuery,
+  ChatSendInput,
+  ChatSendReceipt,
+  ChatSessionView,
+  ChatStartInput,
   ConnectionSnapshot,
   EngineStatus,
   ExternalHarness,
@@ -45,6 +52,7 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionId,
   SetTargetInput,
   StateEvent,
   SurfaceEntryView,
@@ -207,6 +215,47 @@ export class TauriBridge implements SpiritBridge {
   gates = {
     get: (): Promise<GateSnapshot> => call("gates_get"),
     probe: (): Promise<GateSnapshot> => call("probe_gates"),
+  };
+
+  chat = {
+    start: (input: ChatStartInput): Promise<ChatSessionView> =>
+      call("chat_start", { input }),
+    attach: (session: SessionId): Promise<ChatSessionView> =>
+      call("chat_attach", { session }),
+    send: async (input: ChatSendInput): Promise<ChatSendReceipt> => {
+      // Blank text never leaves the renderer: the guard throws the normal typed error
+      // shape and nothing is invoked.
+      if (typeof input.text !== "string" || input.text.trim().length === 0) {
+        throw toSpiritError({
+          code: "invalid_input",
+          message: "invalid_text: enter a message before sending",
+          hint: "Type a message, then retry.",
+          retryable: false,
+        });
+      }
+      return call("chat_send", { input });
+    },
+    stop: (session: SessionId): Promise<ChatSessionView> =>
+      call("chat_stop", { session }),
+    log: (session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage> =>
+      call("chat_log", { session, query: query ?? null }),
+    subscribe: (listener: (event: ChatEvent) => void): (() => void) => {
+      let disposed = false;
+      let unlisten: UnlistenFn | undefined;
+      void listen<ChatEvent>("spirit://chat", (event) => listener(event.payload))
+        .then((stop) => {
+          if (disposed) stop();
+          else unlisten = stop;
+        })
+        .catch(() => {
+          // The window can close while the subscription is still starting.
+        });
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        unlisten?.();
+      };
+    },
   };
 
   sessions = {

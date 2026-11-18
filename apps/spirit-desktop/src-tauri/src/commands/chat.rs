@@ -1,0 +1,73 @@
+//! Chat command adapters for the bundled StackSpirit Engine.
+//!
+//! Every rule (session map, state machine, HTTP/SSE transport, event pump, log paging
+//! and the typed error map) lives in `spirit_core::engine::chat`. These commands only
+//! resolve the one `LocalChatProvider` from [`AppState`] and forward the safe request.
+//! No reply contains an endpoint URL, port, credential, native session id, workspace or
+//! binary path; none is logged here.
+//!
+//! `global` and `project:<name>` stay gated in core until VOWP 0.5's orchestrator
+//! endpoint (or the owner-approved forward) lands; these adapters do not special-case
+//! them.
+
+use spirit_core::engine::chat::{
+    ChatLogPage, ChatLogQuery, ChatSendInput, ChatSendReceipt, ChatSessionId, ChatSessionView,
+    ChatStartInput,
+};
+use tauri::State;
+
+use crate::error::CommandResult;
+use crate::state::AppState;
+
+/// Ensures the engine and creates or resumes the native session, idempotently.
+#[tauri::command]
+pub async fn chat_start(
+    state: State<'_, AppState>,
+    input: ChatStartInput,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    chat.start(&input).await
+}
+
+/// Reuses the stored native session. Core never creates a session here.
+#[tauri::command]
+pub async fn chat_attach(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    chat.attach(&session).await
+}
+
+/// Accepts one user turn and returns the immediate receipt. Assistant text arrives on
+/// `spirit://chat`.
+#[tauri::command]
+pub async fn chat_send(
+    state: State<'_, AppState>,
+    input: ChatSendInput,
+) -> CommandResult<ChatSendReceipt> {
+    let chat = state.chat();
+    chat.send(&input.session, &input.text).await
+}
+
+/// Aborts the current turn when supported and returns the stopped view.
+#[tauri::command]
+pub async fn chat_stop(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    chat.stop(&session).await
+}
+
+/// Reads one backward conversation page from the active native log.
+#[tauri::command]
+pub async fn chat_log(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+    query: Option<ChatLogQuery>,
+) -> CommandResult<ChatLogPage> {
+    let chat = state.chat();
+    let query = query.unwrap_or_default();
+    chat.log(&session, &query).await
+}

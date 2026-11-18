@@ -21,6 +21,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let (state, events) = AppState::new(app_data_dir)?;
             events::spawn_event_forwarder(app.handle().clone(), events);
+            events::spawn_chat_event_forwarder(app.handle().clone(), state.chat().subscribe());
             app.manage(state);
             Ok(())
         })
@@ -59,6 +60,11 @@ pub fn run() {
             commands::engine::select_external,
             commands::engine::use_bundled,
             commands::engine::restart_engine,
+            commands::chat::chat_start,
+            commands::chat::chat_attach,
+            commands::chat::chat_send,
+            commands::chat::chat_stop,
+            commands::chat::chat_log,
             commands::asif::gates_get_with_build_flags,
             commands::asif::probe_gates_with_build_flags,
             commands::asif::asif_export,

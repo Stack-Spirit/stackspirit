@@ -1,18 +1,22 @@
 //! Process-wide app state. All remote work is delegated to `spirit-core`; this module
-//! only owns paths, the active client and the one host connection.
+//! only owns paths, the active client, the one host connection, the shared engine
+//! handles and the one chat service.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
+use spirit_core::engine::chat::{ChatEngine, ChatModelView, LocalChatProvider};
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
     EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateFeatureFlags, GateSnapshot,
     HostGateCache, JsonEnginePreferences, Keychain, ModelCatalog, ModelChoice, OsKeychain,
-    ProcessEngineRuntime, bundled_catalog,
+    PrivateEngineTree, ProcessEngineRuntime, bundled_catalog,
 };
-use spirit_core::error::SpiritError;
+use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
 use spirit_core::ssh::{CommandRunner, SshOptions, SystemCommandRunner};
 use spirit_core::time::Timestamp;
@@ -59,9 +63,223 @@ pub(crate) fn default_gate_snapshot() -> GateSnapshot {
     with_build_gate_features(GateSnapshot::default())
 }
 
+/// The engine boundary shared by the existing engine commands and the chat adapter.
+///
+/// Both paths hold clones of the same handles, so chat resolves the one supervisor,
+/// runtime, catalog and preferences store and never starts a second engine.
+#[derive(Clone)]
+struct EngineHost {
+    core: Arc<AsyncMutex<SpiritCore>>,
+    runtime: Arc<dyn EngineRuntime>,
+    catalog: ModelCatalog,
+    preferences: Arc<dyn EnginePreferencesStore>,
+}
+
+impl EngineHost {
+    fn load_preferences(&self) -> EnginePreferences {
+        self.preferences.load().unwrap_or_default()
+    }
+
+    fn save_preferences(&self, preferences: &EnginePreferences) -> CommandResult<()> {
+        self.preferences
+            .save(preferences)
+            .map_err(|error| error.with_hint("The engine selection was not saved locally."))
+    }
+
+    /// Starts the bundled engine on first run and restores the saved model when the
+    /// runtime still reports it. An external choice is never started by this app.
+    async fn ensure_setup(&self) -> EngineStatus {
+        {
+            let mut core = self.core.lock().await;
+            let status = core.engine_status();
+            if matches!(status.choice, EngineChoice::Bundled) {
+                if matches!(status.state, EngineState::NotConfigured) {
+                    core.start_engine().await;
+                } else if matches!(status.state, EngineState::Ready)
+                    && let Some(port) = status.port
+                {
+                    let info = spirit_core::engine::EngineRuntimeInfo {
+                        pid: None,
+                        port,
+                        version: status.version.clone(),
+                        binary_path: status.binary_path.clone(),
+                    };
+                    if self.runtime.probe_health(&info).await.is_err() {
+                        core.restart_engine().await;
+                    }
+                }
+            }
+        }
+        self.apply_saved_model().await;
+        let status = self.core.lock().await.engine_status();
+        self.status_with_preferences(status)
+    }
+
+    /// Reuses [`Self::ensure_setup`], then starts a stopped or failed bundled engine
+    /// once, matching the chat table in `docs/ORCHESTRATOR-CHAT.md` §2.1.4.
+    async fn ensure_chat_ready(&self) -> EngineStatus {
+        let status = self.ensure_setup().await;
+        if matches!(status.choice, EngineChoice::Bundled)
+            && matches!(
+                status.state,
+                EngineState::Stopped | EngineState::Degraded { .. } | EngineState::Failed { .. }
+            )
+        {
+            let status = self.core.lock().await.restart_engine().await;
+            self.apply_saved_model().await;
+            return self.status_with_preferences(status);
+        }
+        status
+    }
+
+    /// Re-applies the saved model id only when the runtime verifies it. A currently
+    /// selected model is re-verified too; a model the engine no longer reports is left
+    /// unselected, and no replacement is selected automatically.
+    async fn apply_saved_model(&self) {
+        let status = self.core.lock().await.engine_status();
+        if !matches!(status.state, EngineState::Ready) {
+            return;
+        }
+        let models = self.verified_models(&status).await;
+        let current_selected_is_live = status
+            .selected_model
+            .as_ref()
+            .is_some_and(|selected| models.iter().any(|model| model.id == selected.id));
+        if current_selected_is_live {
+            return;
+        }
+        let preferences = self.load_preferences();
+        let Some(model_id) = preferences.selected_model_id else {
+            return;
+        };
+        if let Some(model) = models.into_iter().find(|model| model.id == model_id) {
+            self.core.lock().await.select_model(model);
+        }
+    }
+
+    /// Adds the persisted local first-run flag to an engine status reply.
+    fn status_with_preferences(&self, mut status: EngineStatus) -> EngineStatus {
+        status.onboarding_complete = self.load_preferences().onboarding_complete;
+        status
+    }
+
+    /// Returns the build-time catalog entries the running engine actually reports.
+    async fn verified_models(&self, status: &EngineStatus) -> Vec<ModelChoice> {
+        if !matches!(status.state, EngineState::Ready) {
+            return Vec::new();
+        }
+        let Some(port) = status.port else {
+            return Vec::new();
+        };
+        let runtime_models = self.runtime.models(port).await.unwrap_or_default();
+        self.catalog
+            .verify_runtime(&runtime_models, Timestamp::now())
+            .models
+    }
+}
+
+/// The last observed selected model, used when the core lock is briefly busy.
+#[derive(Default)]
+struct ChatModelCache {
+    selected_model: Option<ChatModelView>,
+}
+
+/// The desktop [`ChatEngine`] adapter over the shared [`EngineHost`].
+///
+/// Chat asks this adapter for the bundled engine; the adapter reuses the existing
+/// `ensure_engine_setup` semantics and never spawns a process itself. The status and
+/// selected model are core-only and are never serialized into a chat DTO.
+struct DesktopChatEngine {
+    engine: EngineHost,
+    cache: Mutex<ChatModelCache>,
+}
+
+impl DesktopChatEngine {
+    fn new(engine: EngineHost) -> Self {
+        Self {
+            engine,
+            cache: Mutex::new(ChatModelCache::default()),
+        }
+    }
+
+    fn remember(&self, status: &EngineStatus) {
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.selected_model = status.selected_model.as_ref().map(|model| ChatModelView {
+            id: model.id.clone(),
+            label: model.label.clone(),
+            provider: model.provider.clone(),
+        });
+    }
+
+    fn cached(&self) -> std::sync::MutexGuard<'_, ChatModelCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl ChatEngine for DesktopChatEngine {
+    fn ensure_ready<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<u16, SpiritError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let status = self.engine.ensure_chat_ready().await;
+            self.remember(&status);
+            if matches!(status.choice, EngineChoice::External { .. }) {
+                return Err(SpiritError::new(
+                    SpiritErrorCode::Engine,
+                    "engine_external: the setup assistant needs the bundled StackSpirit Engine",
+                )
+                .with_hint("Switch to the bundled engine in Settings → Advanced."));
+            }
+            if matches!(status.state, EngineState::Ready)
+                && let Some(port) = status.port
+            {
+                return Ok(port);
+            }
+            Err(SpiritError::new(
+                SpiritErrorCode::Engine,
+                "engine_not_ready: the StackSpirit Engine is not ready",
+            )
+            .retryable()
+            .with_hint("Restart StackSpirit Engine in Settings → Advanced and retry."))
+        })
+    }
+
+    fn selected_model(&self) -> Option<ChatModelView> {
+        match self.engine.core.try_lock() {
+            Ok(core) => core
+                .engine_status()
+                .selected_model
+                .map(|model| ChatModelView {
+                    id: model.id,
+                    label: model.label,
+                    provider: model.provider,
+                }),
+            Err(_) => self.cached().selected_model.clone(),
+        }
+    }
+
+    fn status(&self) -> EngineStatus {
+        // A busy core lock falls back to the default bundled status; the following
+        // `ensure_ready` re-reads the real choice before any engine action.
+        match self.engine.core.try_lock() {
+            Ok(core) => core.engine_status(),
+            Err(_) => EngineStatus::default(),
+        }
+    }
+}
+
 /// Everything a Tauri command may touch.
 pub struct AppState {
-    core: AsyncMutex<SpiritCore>,
+    core: Arc<AsyncMutex<SpiritCore>>,
     hosts: Arc<dyn HostStore>,
     known_hosts: PathBuf,
     /// App-private directory for keys StackSpirit creates and owns.
@@ -69,10 +287,9 @@ pub struct AppState {
     runner: Arc<dyn CommandRunner>,
     client: Mutex<Option<Arc<dyn VowpClient>>>,
     active_host: Mutex<Option<HostProfile>>,
-    engine_runtime: Arc<dyn EngineRuntime>,
-    engine_catalog: ModelCatalog,
-    engine_preferences: Arc<dyn EnginePreferencesStore>,
+    engine: EngineHost,
     engine_keychain: Arc<dyn Keychain>,
+    chat: Arc<LocalChatProvider>,
     local_agent: Arc<dyn LocalAgentClient>,
     gate_cache: HostGateCache,
     connection: ConnectionManager,
@@ -108,30 +325,51 @@ impl AppState {
         // The bundled choice resolves only the sidecar next to the application binary or
         // in its resource directory. It never consults PATH. Stored BYOK keys are read
         // from the same keychain and passed to the child through its ephemeral env only.
-        let runtime: Arc<dyn EngineRuntime> =
-            Arc::new(ProcessEngineRuntime::for_current_exe().with_key_source(keychain.clone()));
-        let engine = EngineSupervisor::new(runtime.clone(), EngineSupervisorConfig::default());
-        let preferences = JsonEnginePreferences::new(app_data_dir.join("engine.json"));
+        // The private XDG tree keeps chat and models away from the owner's own OpenCode
+        // state (`docs/ORCHESTRATOR-CHAT.md` §2.1.3).
+        let runtime: Arc<dyn EngineRuntime> = Arc::new(
+            ProcessEngineRuntime::for_current_exe()
+                .with_key_source(keychain.clone())
+                .with_private_state(app_data_dir.clone()),
+        );
+        let supervisor = EngineSupervisor::new(runtime.clone(), EngineSupervisorConfig::default());
+        let preferences: Arc<dyn EnginePreferencesStore> =
+            Arc::new(JsonEnginePreferences::new(app_data_dir.join("engine.json")));
         let saved = preferences.load().unwrap_or_default();
-        let mut core = SpiritCore::desktop(hosts.clone(), engine, KEYCHAIN_SERVICE);
+        let mut core = SpiritCore::desktop(hosts.clone(), supervisor, KEYCHAIN_SERVICE);
         core.select_engine(saved.choice.clone());
         core.set_gates(default_gate_snapshot());
         let events = core.subscribe();
         let connection = core.connection().clone();
+        let core = Arc::new(AsyncMutex::new(core));
+
+        let engine = EngineHost {
+            core: core.clone(),
+            runtime,
+            catalog: bundled_catalog(),
+            preferences,
+        };
+
+        // The chat provider shares the engine host and uses the setup workspace the
+        // private tree creates; it never spawns an engine and never receives a key.
+        let setup_workspace = PrivateEngineTree::prepare(&app_data_dir)?.setup_workspace;
+        let chat = Arc::new(LocalChatProvider::new(
+            Arc::new(DesktopChatEngine::new(engine.clone())),
+            setup_workspace,
+        ));
 
         Ok((
             Self {
-                core: AsyncMutex::new(core),
+                core,
                 hosts,
                 known_hosts,
                 app_keys_dir,
                 runner: Arc::new(SystemCommandRunner),
                 client: Mutex::new(None),
                 active_host: Mutex::new(None),
-                engine_runtime: runtime,
-                engine_catalog: bundled_catalog(),
-                engine_preferences: Arc::new(preferences),
+                engine,
                 engine_keychain: keychain,
+                chat,
                 local_agent,
                 gate_cache: HostGateCache::new(),
                 connection,
@@ -142,6 +380,11 @@ impl AppState {
 
     pub(crate) async fn core(&self) -> tokio::sync::MutexGuard<'_, SpiritCore> {
         self.core.lock().await
+    }
+
+    /// The one chat service. Command adapters call it; they never own session logic.
+    pub(crate) fn chat(&self) -> Arc<LocalChatProvider> {
+        self.chat.clone()
     }
 
     pub(crate) fn hosts(&self) -> Arc<dyn HostStore> {
@@ -171,7 +414,7 @@ impl AppState {
     }
 
     pub(crate) fn engine_runtime(&self) -> Arc<dyn EngineRuntime> {
-        self.engine_runtime.clone()
+        self.engine.runtime.clone()
     }
 
     pub(crate) fn engine_keychain(&self) -> &dyn Keychain {
@@ -198,90 +441,35 @@ impl AppState {
     }
 
     pub(crate) fn load_engine_preferences(&self) -> EnginePreferences {
-        self.engine_preferences.load().unwrap_or_default()
+        self.engine.load_preferences()
     }
 
     pub(crate) fn save_engine_preferences(
         &self,
         preferences: &EnginePreferences,
     ) -> CommandResult<()> {
-        self.engine_preferences
-            .save(preferences)
-            .map_err(|error| error.with_hint("The engine selection was not saved locally."))
+        self.engine.save_preferences(preferences)
     }
 
     /// Starts the bundled engine on first run and restores the saved model when the
     /// runtime still reports it. An external choice is never started by this app.
     pub(crate) async fn ensure_engine_setup(&self) -> EngineStatus {
-        {
-            let mut core = self.core().await;
-            let status = core.engine_status();
-            if matches!(status.choice, EngineChoice::Bundled) {
-                if matches!(status.state, EngineState::NotConfigured) {
-                    core.start_engine().await;
-                } else if matches!(status.state, EngineState::Ready)
-                    && let Some(port) = status.port
-                {
-                    let info = spirit_core::engine::EngineRuntimeInfo {
-                        pid: None,
-                        port,
-                        version: status.version.clone(),
-                        binary_path: status.binary_path.clone(),
-                    };
-                    if self.engine_runtime.probe_health(&info).await.is_err() {
-                        core.restart_engine().await;
-                    }
-                }
-            }
-        }
-        self.apply_saved_model().await;
-        let status = self.core().await.engine_status();
-        self.engine_status_with_preferences(status)
+        self.engine.ensure_setup().await
     }
 
-    /// Re-applies the saved model id only when the runtime verifies it. A currently
-    /// selected model is re-verified too; a model the engine no longer reports is left
-    /// unselected, and no replacement is selected automatically.
+    /// Re-applies the saved model id only when the runtime verifies it.
     pub(crate) async fn apply_saved_model(&self) {
-        let status = self.core().await.engine_status();
-        if !matches!(status.state, EngineState::Ready) {
-            return;
-        }
-        let models = self.verified_engine_models(&status).await;
-        let current_selected_is_live = status
-            .selected_model
-            .as_ref()
-            .is_some_and(|selected| models.iter().any(|model| model.id == selected.id));
-        if current_selected_is_live {
-            return;
-        }
-        let preferences = self.load_engine_preferences();
-        let Some(model_id) = preferences.selected_model_id else {
-            return;
-        };
-        if let Some(model) = models.into_iter().find(|model| model.id == model_id) {
-            self.core().await.select_model(model);
-        }
+        self.engine.apply_saved_model().await;
     }
 
     /// Adds the persisted local first-run flag to an engine status reply.
-    pub(crate) fn engine_status_with_preferences(&self, mut status: EngineStatus) -> EngineStatus {
-        status.onboarding_complete = self.load_engine_preferences().onboarding_complete;
-        status
+    pub(crate) fn engine_status_with_preferences(&self, status: EngineStatus) -> EngineStatus {
+        self.engine.status_with_preferences(status)
     }
 
     /// Returns the build-time catalog entries the running engine actually reports.
     pub(crate) async fn verified_engine_models(&self, status: &EngineStatus) -> Vec<ModelChoice> {
-        if !matches!(status.state, EngineState::Ready) {
-            return Vec::new();
-        }
-        let Some(port) = status.port else {
-            return Vec::new();
-        };
-        let runtime_models = self.engine_runtime.models(port).await.unwrap_or_default();
-        self.engine_catalog
-            .verify_runtime(&runtime_models, Timestamp::now())
-            .models
+        self.engine.verified_models(status).await
     }
 
     pub(crate) fn set_client(&self, client: Option<Arc<dyn VowpClient>>) {
