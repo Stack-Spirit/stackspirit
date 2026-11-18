@@ -24,7 +24,7 @@
 #
 # The resulting branch is `public-main`, with author and committer
 #   Syver-August <92798051+syver777@users.noreply.github.com>
-# and the single commit message `VOWP 0.1.0`.
+# and the single commit message `VOWP 0.4.0`.
 
 set -u
 
@@ -35,7 +35,7 @@ cd "$root" || { echo "squash: cannot enter repository root" >&2; exit 2; }
 branch=public-main
 author_name='Syver-August'
 author_email='92798051+syver777@users.noreply.github.com'
-commit_message='VOWP 0.1.0'
+commit_message='VOWP 0.4.0'
 manifest=$script_dir/public-tree.txt
 force=0
 
@@ -185,8 +185,8 @@ echo "  git remote add public git@github.com:syver777/vowp.git   # or: git remot
 echo "  git push public $branch:main"
 echo
 echo "  # 4. Tag the release and push the tag (this starts the draft-release workflow):"
-echo "  git tag -a v0.1.0 -m 'VOWP 0.1.0' $branch"
-echo "  git push public v0.1.0"
+echo "  git tag -a v0.4.0 -m 'VOWP 0.4.0' $branch"
+echo "  git push public v0.4.0"
 echo
 echo "  # 5. Follow the rest of scripts/audit/go-public.md (release, crates, npm)."
 echo
