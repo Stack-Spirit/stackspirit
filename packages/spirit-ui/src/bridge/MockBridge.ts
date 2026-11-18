@@ -5,6 +5,7 @@ import type {
   AgentPairing,
   AgentPathAddInput,
   AgentPathView,
+  AppKeyView,
   AsifExportOptions,
   AsifExportResult,
   AsifGate,
@@ -45,6 +46,8 @@ import type {
   ModelChoice,
   NewHostProfile,
   NodeCardView,
+  OnboardingInstallInput,
+  OnboardingInstallOutcome,
   OrchestratorNewInput,
   OrchestratorView,
   ProjectView,
@@ -122,6 +125,18 @@ function errorDto(
   retryable = false,
 ): SpiritErrorDto {
   return { code, message, hint, retryable };
+}
+
+/**
+ * Preview mode has no host process: onboarding must fail honestly instead of
+ * pretending that a key was created or that a server was changed.
+ */
+function previewUnavailable(): SpiritErrorDto {
+  return errorDto(
+    "preview_unavailable",
+    "One-time-password onboarding needs the desktop host; preview mode does not create or install keys.",
+    "Run the desktop app without VITE_SPIRIT_MOCK to use onboarding.",
+  );
 }
 
 interface MockOptions {
@@ -438,6 +453,20 @@ export class MockBridge implements SpiritBridge {
         latency_ms: 42,
         stages,
       };
+    },
+  };
+
+  onboardingApi = {
+    keyStatus: async (): Promise<AppKeyView> => {
+      throw previewUnavailable();
+    },
+    createKey: async (): Promise<AppKeyView> => {
+      throw previewUnavailable();
+    },
+    installKey: async (input: OnboardingInstallInput): Promise<OnboardingInstallOutcome> => {
+      // Preview mode has no host, so it never reads the one-time password.
+      void input;
+      throw previewUnavailable();
     },
   };
 
@@ -1106,6 +1135,7 @@ export class MockBridge implements SpiritBridge {
   };
 
   hosts = this.hostsApi;
+  onboarding = this.onboardingApi;
   connection = this.connectionApi;
   fleet = this.fleetApi;
   engine = this.engineApi;

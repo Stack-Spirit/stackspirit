@@ -64,6 +64,8 @@ pub struct AppState {
     core: AsyncMutex<SpiritCore>,
     hosts: Arc<dyn HostStore>,
     known_hosts: PathBuf,
+    /// App-private directory for keys StackSpirit creates and owns.
+    app_keys_dir: PathBuf,
     runner: Arc<dyn CommandRunner>,
     client: Mutex<Option<Arc<dyn VowpClient>>>,
     active_host: Mutex<Option<HostProfile>>,
@@ -92,6 +94,7 @@ impl AppState {
         let host_store = Arc::new(JsonHostStore::new(app_data_dir.join("hosts.json")));
         let hosts: Arc<dyn HostStore> = host_store;
         let known_hosts = app_data_dir.join("known_hosts");
+        let app_keys_dir = app_data_dir.join("ssh-keys");
 
         let keychain: Arc<dyn Keychain> = Arc::new(
             OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
@@ -121,6 +124,7 @@ impl AppState {
                 core: AsyncMutex::new(core),
                 hosts,
                 known_hosts,
+                app_keys_dir,
                 runner: Arc::new(SystemCommandRunner),
                 client: Mutex::new(None),
                 active_host: Mutex::new(None),
@@ -146,6 +150,12 @@ impl AppState {
 
     pub(crate) fn known_hosts(&self) -> &Path {
         &self.known_hosts
+    }
+
+    /// App-private directory for the ed25519 key StackSpirit creates for onboarding.
+    /// The renderer never receives this path.
+    pub(crate) fn app_keys_dir(&self) -> &Path {
+        &self.app_keys_dir
     }
 
     pub(crate) fn runner(&self) -> Arc<dyn CommandRunner> {

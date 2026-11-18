@@ -89,6 +89,60 @@ export interface HostProbe {
   stages: HostProbeStage[];
 }
 
+/**
+ * The app-owned SSH key as the renderer may see it.
+ *
+ * Deliberately path-free: the host process resolves the key inside its own app-data
+ * directory, and the private half never crosses the bridge.
+ */
+export interface AppKeyView {
+  exists: boolean;
+  fingerprint: string | null;
+  public_key: string | null;
+}
+
+/**
+ * A one-time-password onboarding install.
+ *
+ * `password` is the server's one-time login password. The host command consumes it
+ * once, never stores it, never returns it, and never includes it in an error. The
+ * host resolves the app key path itself; the renderer never supplies one.
+ */
+export interface OnboardingInstallInput {
+  draft: HostDraft;
+  host_key: HostKeyPin;
+  password: string;
+  disable_password_auth: boolean;
+}
+
+/** Why `PasswordAuthentication no` was not applied. Mirrors the core enum exactly. */
+export type PasswordAuthUnsupported =
+  | "sudo_unavailable"
+  | "no_passwordless_sudo"
+  | "sshd_unavailable"
+  | "drop_in_unsupported"
+  | "drop_in_ignored"
+  | "reload_unavailable";
+
+/** The tagged outcome of the optional password-login step. */
+export type PasswordAuthOutcome =
+  | { state: "not_requested" }
+  | { state: "disabled" }
+  | { state: "not_supported"; reason: PasswordAuthUnsupported }
+  | { state: "failed"; detail: string };
+
+/**
+ * The result of one successful install. The one-time password is already gone.
+ * `profile` is the saved host profile that now points at the app key.
+ */
+export interface OnboardingInstallOutcome {
+  installed: boolean;
+  fingerprint: string;
+  password_login_disabled: boolean;
+  password_auth: PasswordAuthOutcome;
+  profile: HostProfile;
+}
+
 export interface ConnectionSnapshot {
   state:
     | "disconnected"

@@ -9,6 +9,7 @@ import type {
   AgentPairing,
   AgentPathAddInput,
   AgentPathView,
+  AppKeyView,
   AsifExportOptions,
   AsifExportResult,
   AsifImportOptions,
@@ -34,6 +35,8 @@ import type {
   LocalOrchestratorOverview,
   ModelChoice,
   NewHostProfile,
+  OnboardingInstallInput,
+  OnboardingInstallOutcome,
   OrchestratorNewInput,
   OrchestratorView,
   RawDocument,
@@ -76,6 +79,24 @@ export class TauriBridge implements SpiritBridge {
       call("trust_fingerprint", { id, pin }),
     probe: (input: HostDraft, pin?: HostKeyPin | null): Promise<HostProbe> =>
       call("probe_host", { draft: input, pin: pin ?? null }),
+  };
+
+  onboarding = {
+    keyStatus: (): Promise<AppKeyView> => call("onboarding_key_status"),
+    createKey: (): Promise<AppKeyView> => call("onboarding_create_key"),
+    installKey: async (input: OnboardingInstallInput): Promise<OnboardingInstallOutcome> => {
+      // The one-time password never leaves the renderer on an invalid request. The
+      // guard throws the normal typed error shape; nothing is invoked.
+      if (typeof input.password !== "string" || input.password.trim().length === 0) {
+        throw toSpiritError({
+          code: "invalid_input",
+          message: "password: must not be empty",
+          hint: "Enter the one-time server password, then retry.",
+          retryable: false,
+        });
+      }
+      return call("onboarding_install_key", { input });
+    },
   };
 
   connection = {

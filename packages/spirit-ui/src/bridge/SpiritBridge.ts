@@ -4,6 +4,7 @@ import type {
   AgentPairing,
   AgentPathAddInput,
   AgentPathView,
+  AppKeyView,
   AsifExportOptions,
   AsifExportResult,
   AsifImportOptions,
@@ -32,6 +33,8 @@ import type {
   LocalOrchestratorOverview,
   ModelChoice,
   NewHostProfile,
+  OnboardingInstallInput,
+  OnboardingInstallOutcome,
   OrchestratorNewInput,
   OrchestratorView,
   RawDocument,
@@ -74,6 +77,28 @@ export interface SpiritBridge {
      * `known_hosts` entry after verifying the pin against a fresh scan.
      */
     probe(input: HostDraft, pin?: HostKeyPin | null): Promise<HostProbe>;
+  };
+
+  /**
+   * Optional one-time-password onboarding for the app-owned SSH key. Present on the
+   * desktop host and on the preview bridge, which reports a typed `preview_unavailable`
+   * error instead of pretending to install anything.
+   *
+   * `installKey` receives the owner's one-time server password. The host command
+   * consumes it once for the password bootstrap, then forgets it: it is never stored,
+   * never returned, and never included in an error. The renderer never supplies the
+   * app key path; the host resolves its own app-private key.
+   */
+  onboarding?: {
+    /** Returns the existing app key, or `exists: false` when none was created yet. */
+    keyStatus(): Promise<AppKeyView>;
+    /** Idempotent: returns the existing app key or creates one. */
+    createKey(): Promise<AppKeyView>;
+    /**
+     * Installs the app key with the one-time password and saves the pinned host
+     * profile first, so a failed install leaves a profile that can be retried.
+     */
+    installKey(input: OnboardingInstallInput): Promise<OnboardingInstallOutcome>;
   };
 
   connection: {
