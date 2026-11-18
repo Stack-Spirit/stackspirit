@@ -80,6 +80,10 @@ live Mac smoke test is still pending; no 0.4 release or date is promised.
   transport. The home's `[ingress.wss]` table starts a loopback WebSocket listener behind the
   owner's TLS reverse proxy; `vowp up` starts and stops the hidden `agent gateway --listen`
   child. TLS, ACME and the public port stay outside VOWP.
+- `vowp agent trust --fingerprint <sha256:…>` confirms a changed system-mode WSS leaf
+  fingerprint after the owner verifies it through a trusted channel; it rewrites only the private
+  `agent.json` and never connects. A `tls = "pin"` transport stays a hard pin, so a changed pinned
+  certificate still requires re-enrollment with `--tls-fingerprint`.
 - `vowp agent service install|uninstall|status` writes or removes exactly one 0600 launchd
   `LaunchAgent` or systemd user unit for the current user. `agent run --service` writes the
   launchd restart marker and drains the spool and leases on SIGTERM. `agent doctor` reports

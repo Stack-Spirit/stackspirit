@@ -1748,6 +1748,10 @@ impl ExecFixture {
             &root,
             &["init", "-q", "-b", "main", checkout.to_str().expect("utf-8 checkout")],
         );
+        // The agent accepts a checkout that is group/world readable but not writable; set the
+        // shape explicitly so the fixture is independent of the runner's umask.
+        std::fs::set_permissions(&checkout, std::fs::Permissions::from_mode(0o755)).expect("checkout mode");
+        std::fs::set_permissions(checkout.join(".git"), std::fs::Permissions::from_mode(0o755)).expect("git dir mode");
         git(&checkout, &["config", "user.email", "test@example.invalid"]);
         git(&checkout, &["config", "user.name", "VOWP Test"]);
         std::fs::write(checkout.join("a.txt"), "base\n").expect("base file");
@@ -1782,6 +1786,7 @@ impl ExecFixture {
 
         let worktrees = root.join("worktrees");
         std::fs::create_dir_all(&worktrees).expect("worktree root");
+        std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o700)).expect("worktree root mode");
         let state_dir = root.join(".vowp-agent");
         std::fs::create_dir_all(&state_dir).expect("agent state dir");
         let project = ProjectName::parse("vowp").expect("project");
@@ -2527,6 +2532,283 @@ fn agent_enroll_without_target_or_wss_exits_two() {
     let (code, _stdout, stderr) = run_binary(home.path(), &["agent", "enroll", "--code-file", "-"]);
     assert_eq!(code, 2, "a missing transport is invalid input: {stderr}");
     assert!(stderr.contains("--target") || stderr.contains("--wss"), "{stderr}");
+}
+
+/// Returns a syntactically valid `sha256:<64 lowercase hex>` fingerprint.
+fn wss_fingerprint(fill: char) -> String {
+    format!("sha256:{}", fill.to_string().repeat(64))
+}
+
+/// Writes `agent.json` with a WSS transport under a private temporary state directory.
+fn write_wss_agent_config(state_dir: &Path, tls: WssTlsMode, fingerprint: Option<&str>) -> PathBuf {
+    std::fs::create_dir_all(state_dir).expect("state dir");
+    std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o700)).expect("state mode");
+    let config = AgentConfig {
+        home: "home-1".to_owned(),
+        node: NodeName::parse("mac-studio").expect("node slug"),
+        state_dir: state_dir.to_path_buf(),
+        transport: TransportConfig::Wss {
+            url: "wss://home.example/agent/v1".to_owned(),
+            tls,
+            fingerprint: fingerprint.map(str::to_owned),
+        },
+        path_maps: Vec::new(),
+    };
+    config.write().expect("agent.json");
+    AgentConfig::file_path(state_dir)
+}
+
+/// Runs one agent command against a private `VOWP_AGENT_HOME`, never the real one.
+fn run_agent_command(home: &Path, state_dir: &Path, args: &[&str]) -> (i32, String, String) {
+    run_binary_with(home, args, &[("VOWP_AGENT_HOME", state_dir.display().to_string())])
+}
+
+/// Writes fake key and surface material that no `agent trust` output may print.
+fn write_fake_agent_secrets(state_dir: &Path) -> (String, String) {
+    let key = "FAKE-NODE-KEY-MATERIAL-DO-NOT-PRINT".to_owned();
+    let token = "vowp_surf_FAKE_TOKEN_DO_NOT_PRINT".to_owned();
+    std::fs::write(state_dir.join("node.key"), &key).expect("fake node key");
+    let surface_dir = state_dir.join("surfaces/01ARZ3NDEKTSV4RRFFQ69G5FAW");
+    std::fs::create_dir_all(&surface_dir).expect("fake surface dir");
+    std::fs::write(surface_dir.join("token"), &token).expect("fake surface token");
+    (key, token)
+}
+
+#[test]
+fn agent_trust_updates_a_changed_system_fingerprint() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let old = wss_fingerprint('a');
+    let new = wss_fingerprint('b');
+    let path = write_wss_agent_config(&state_dir, WssTlsMode::System, Some(&old));
+    let (key, token) = write_fake_agent_secrets(&state_dir);
+
+    let (code, stdout, stderr) = run_agent_command(home.path(), &state_dir, &["agent", "trust", "--fingerprint", &new]);
+    assert_eq!(code, 0, "trust failed: {stdout} {stderr}");
+    assert!(stdout.contains(&old), "the old fingerprint is named: {stdout}");
+    assert!(stdout.contains(&new), "the new fingerprint is named: {stdout}");
+    assert!(stdout.contains("recorded"), "the write is confirmed: {stdout}");
+    assert!(
+        !stdout.contains(&key) && !stderr.contains(&key),
+        "the node key must never be printed"
+    );
+    assert!(
+        !stdout.contains(&token) && !stderr.contains(&token),
+        "the surface token must never be printed"
+    );
+    assert!(
+        !stdout.contains(state_dir.to_str().expect("utf-8 state dir")),
+        "the command prints no state path: {stdout}"
+    );
+
+    let config = AgentConfig::load(&state_dir).expect("reload agent.json");
+    match &config.transport {
+        TransportConfig::Wss { tls, fingerprint, .. } => {
+            assert_eq!(*tls, WssTlsMode::System);
+            assert_eq!(fingerprint.as_deref(), Some(new.as_str()));
+        }
+        other => panic!("expected a wss transport, got {other:?}"),
+    }
+    let mode = std::fs::metadata(&path).expect("agent.json").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "agent.json stays private");
+}
+
+#[test]
+fn agent_trust_refuses_a_pin_transport() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let old = wss_fingerprint('a');
+    let new = wss_fingerprint('b');
+    let path = write_wss_agent_config(&state_dir, WssTlsMode::Pin, Some(&old));
+    let before = std::fs::read(&path).expect("agent.json");
+
+    let (code, stdout, stderr) = run_agent_command(home.path(), &state_dir, &["agent", "trust", "--fingerprint", &new]);
+    assert_eq!(code, 5, "a pin is a hard pin: {stdout} {stderr}");
+    assert!(stdout.is_empty(), "a refusal prints no document: {stdout}");
+    assert!(
+        stderr.contains("re-enroll"),
+        "the refusal names re-enrollment: {stderr}"
+    );
+    assert!(
+        stderr.contains("--tls-fingerprint"),
+        "the refusal names the enrollment flag: {stderr}"
+    );
+    assert_eq!(std::fs::read(&path).expect("agent.json"), before, "nothing is written");
+}
+
+#[test]
+fn agent_trust_refuses_a_malformed_fingerprint() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let old = wss_fingerprint('a');
+    let path = write_wss_agent_config(&state_dir, WssTlsMode::System, Some(&old));
+    let before = std::fs::read(&path).expect("agent.json");
+
+    for malformed in [
+        format!("sha256:{}", "A".repeat(64)),
+        "sha256:abc".to_owned(),
+        "a".repeat(64),
+    ] {
+        let (code, stdout, stderr) = run_agent_command(
+            home.path(),
+            &state_dir,
+            &["agent", "trust", "--fingerprint", &malformed],
+        );
+        assert_eq!(code, 5, "{malformed} must be refused: {stdout} {stderr}");
+        assert!(stdout.is_empty(), "a refusal prints no document: {stdout}");
+        assert!(
+            stderr.contains("sha256:<64 lowercase hex>"),
+            "the refusal names the accepted shape: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("agent.json"),
+            before,
+            "{malformed} must not write"
+        );
+    }
+}
+
+#[test]
+fn agent_trust_is_idempotent_for_the_same_fingerprint() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let fingerprint = wss_fingerprint('a');
+    let path = write_wss_agent_config(&state_dir, WssTlsMode::System, Some(&fingerprint));
+    let before = std::fs::read(&path).expect("agent.json");
+
+    let (code, stdout, stderr) = run_agent_command(
+        home.path(),
+        &state_dir,
+        &["agent", "trust", "--fingerprint", &fingerprint],
+    );
+    assert_eq!(code, 0, "the same value succeeds: {stdout} {stderr}");
+    assert!(
+        stdout.lines().any(|line| line.trim() == "fingerprint unchanged"),
+        "the unchanged value is named: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("agent.json"),
+        before,
+        "the file is not rewritten"
+    );
+}
+
+#[test]
+fn agent_trust_records_a_missing_system_fingerprint_explicitly() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let fingerprint = wss_fingerprint('c');
+    let path = write_wss_agent_config(&state_dir, WssTlsMode::System, None);
+
+    let (code, stdout, stderr) = run_agent_command(
+        home.path(),
+        &state_dir,
+        &["agent", "trust", "--fingerprint", &fingerprint],
+    );
+    assert_eq!(code, 0, "a first record succeeds: {stdout} {stderr}");
+    assert!(stdout.contains("old fingerprint: none"), "{stdout}");
+    assert!(stdout.contains(&fingerprint), "{stdout}");
+    assert!(
+        stdout.contains("first record"),
+        "the explicit first record is named: {stdout}"
+    );
+    assert!(
+        stdout.contains("not a silent trust reset"),
+        "the write is not a silent reset: {stdout}"
+    );
+
+    let config = AgentConfig::load(&state_dir).expect("reload agent.json");
+    match &config.transport {
+        TransportConfig::Wss {
+            tls,
+            fingerprint: stored,
+            ..
+        } => {
+            assert_eq!(*tls, WssTlsMode::System);
+            assert_eq!(stored.as_deref(), Some(fingerprint.as_str()));
+        }
+        other => panic!("expected a wss transport, got {other:?}"),
+    }
+    let mode = std::fs::metadata(&path).expect("agent.json").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "agent.json stays private");
+}
+
+#[test]
+fn agent_trust_json_document_is_path_free_and_secret_free() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let old = wss_fingerprint('a');
+    let new = wss_fingerprint('b');
+    write_wss_agent_config(&state_dir, WssTlsMode::System, Some(&old));
+    let (key, token) = write_fake_agent_secrets(&state_dir);
+
+    let (code, stdout, stderr) = run_agent_command(
+        home.path(),
+        &state_dir,
+        &["--json", "agent", "trust", "--fingerprint", &new],
+    );
+    assert_eq!(code, 0, "json trust failed: {stdout} {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("trust JSON");
+    let object = value.as_object().expect("trust JSON object");
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["changed", "new", "old", "tls", "trusted"],
+        "the document has exactly the documented fields"
+    );
+    assert_eq!(value["trusted"], true);
+    assert_eq!(value["changed"], true);
+    assert_eq!(value["old"], old);
+    assert_eq!(value["new"], new);
+    assert_eq!(value["tls"], "system");
+    assert!(!stdout.contains(&key), "the node key is absent: {stdout}");
+    assert!(!stdout.contains(&token), "the surface token is absent: {stdout}");
+    assert!(
+        !stdout.contains(state_dir.to_str().expect("utf-8 state dir")),
+        "the state path is absent: {stdout}"
+    );
+}
+
+#[test]
+fn agent_trust_refuses_an_ssh_transport() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+    let node = NodeName::parse("mac-studio").expect("node slug");
+    let config = AgentConfig::new("home-1", node, state_dir.clone(), "home.example");
+    config.write().expect("agent.json");
+    let path = AgentConfig::file_path(&state_dir);
+    let before = std::fs::read(&path).expect("agent.json");
+
+    let (code, _stdout, stderr) = run_agent_command(
+        home.path(),
+        &state_dir,
+        &["agent", "trust", "--fingerprint", &wss_fingerprint('a')],
+    );
+    assert_eq!(code, 5, "ssh is refused: {stderr}");
+    assert!(
+        stderr.contains("agent transport is ssh; trust applies to wss"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&path).expect("agent.json"), before, "nothing is written");
+}
+
+#[test]
+fn agent_trust_without_enrollment_does_not_create_a_file() {
+    let home = TempDir::new().expect("temp home");
+    let state_dir = home.path().join(".vowp-agent");
+
+    let (code, _stdout, stderr) = run_agent_command(
+        home.path(),
+        &state_dir,
+        &["agent", "trust", "--fingerprint", &wss_fingerprint('a')],
+    );
+    assert_eq!(code, 5, "a missing enrollment is refused: {stderr}");
+    assert!(stderr.contains("not enrolled"), "{stderr}");
+    assert!(
+        !AgentConfig::file_path(&state_dir).exists(),
+        "the command must not create agent.json"
+    );
 }
 
 #[test]

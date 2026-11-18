@@ -34,7 +34,7 @@ use crate::agent_exec::CoreRunHandler;
 use crate::cli::{
     AgentCommand, AgentDoctorArgs, AgentEnrollArgs, AgentGatewayArgs, AgentPairArgs, AgentPathsAddArgs, AgentPathsArgs,
     AgentPathsCommand, AgentPathsRmArgs, AgentRunArgs, AgentServiceArgs, AgentServiceCommand, AgentServiceInstallArgs,
-    AgentServiceStatusArgs, AgentServiceUninstallArgs, AgentStatusArgs,
+    AgentServiceStatusArgs, AgentServiceUninstallArgs, AgentStatusArgs, AgentTrustArgs,
 };
 use crate::node_ctx::{self, NodeRole};
 use crate::output::print_json;
@@ -53,6 +53,7 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, command: &AgentCommand) -> R
         AgentCommand::Status(args) => status(global, io, args),
         AgentCommand::Service(args) => service(global, io, args),
         AgentCommand::Doctor(args) => doctor(global, io, args),
+        AgentCommand::Trust(args) => trust(global, io, args),
         AgentCommand::Gateway(args) => gateway(global, io, args),
     }
 }
@@ -336,6 +337,98 @@ fn enrollment_path_maps(state_dir: &Path, args: &AgentEnrollArgs) -> Result<Vec<
     };
     AgentConfig::validate_path_maps(state_dir, &path_maps).map_err(map_agent_error)?;
     Ok(path_maps)
+}
+
+/// Runs `vowp agent trust`: records a verified system-mode WSS leaf fingerprint.
+///
+/// The command is local-only. It never opens a connection, runs the agent or reads `node.key`,
+/// a surface token or any other secret; it only loads and rewrites the private `agent.json`.
+/// Spec: `docs/design/v0.4/hardening.md` §2.2.
+fn trust(global: &Global, io: &mut dyn IoStreams, args: &AgentTrustArgs) -> Result<i32, CliError> {
+    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let mut config = load_trust_config(&state_dir)?;
+    let TransportConfig::Wss { tls, fingerprint, .. } = &mut config.transport else {
+        return Err(CliError::Guard(
+            "agent transport is ssh; trust applies to wss".to_owned(),
+        ));
+    };
+    if *tls == WssTlsMode::Pin {
+        return Err(CliError::Guard(
+            "agent transport is pinned (tls = \"pin\"); a changed pin is a hard pin, so re-enroll with the new --tls-fingerprint"
+                .to_owned(),
+        ));
+    }
+    if !vowp_agent::wss::is_fingerprint(&args.fingerprint) {
+        return Err(CliError::Guard(
+            "--fingerprint must be sha256:<64 lowercase hex>".to_owned(),
+        ));
+    }
+    let old = fingerprint.clone();
+    if old.as_deref() == Some(args.fingerprint.as_str()) {
+        if global.json {
+            print_json(
+                io,
+                &TrustDocument {
+                    trusted: true,
+                    changed: false,
+                    old: old.as_deref(),
+                    new: &args.fingerprint,
+                    tls: "system",
+                },
+            )?;
+        } else {
+            writeln!(io.out(), "fingerprint unchanged")?;
+        }
+        return Ok(0);
+    }
+    *fingerprint = Some(args.fingerprint.clone());
+    config.write().map_err(map_agent_error)?;
+    if global.json {
+        print_json(
+            io,
+            &TrustDocument {
+                trusted: true,
+                changed: true,
+                old: old.as_deref(),
+                new: &args.fingerprint,
+                tls: "system",
+            },
+        )?;
+    } else {
+        writeln!(io.out(), "old fingerprint: {}", old.as_deref().unwrap_or("none"))?;
+        writeln!(io.out(), "new fingerprint: {}", args.fingerprint)?;
+        writeln!(
+            io.out(),
+            "warning: verify the new fingerprint through a trusted channel (out of band, not from the same connection)"
+        )?;
+        if old.is_none() {
+            writeln!(
+                io.out(),
+                "no fingerprint was recorded; this is an explicit first record, not a silent trust reset"
+            )?;
+        }
+        writeln!(io.out(), "recorded")?;
+    }
+    Ok(0)
+}
+
+/// Loads `agent.json` for `trust`; a missing file is the not-enrolled guard and creates nothing.
+fn load_trust_config(state_dir: &Path) -> Result<AgentConfig, CliError> {
+    match load_agent_config(state_dir) {
+        Ok(config) => Ok(config),
+        Err(CliError::NotFound(message)) => Err(CliError::Guard(message)),
+        Err(error) => Err(error),
+    }
+}
+
+/// The `vowp agent trust --json` document; path-free and secret-free.
+#[derive(Debug, Serialize)]
+struct TrustDocument<'a> {
+    trusted: bool,
+    changed: bool,
+    old: Option<&'a str>,
+    new: &'a str,
+    tls: &'static str,
 }
 
 fn paths(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsArgs) -> Result<i32, CliError> {

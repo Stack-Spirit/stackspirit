@@ -100,9 +100,10 @@ vowp agent enroll --wss wss://home.example.com/agent/v1 \
 A pin mismatch is a refusal (exit 5), never a warning. In system mode the first successful
 connection records the leaf fingerprint in `agent.json`; a later certificate that does not match
 that recorded value is refused before the first frame and the error names the old and new
-fingerprint. The confirmation command the error suggests is not implemented in this tree;
-re-enrolling the node is the shipped recovery. A normal certificate renewal therefore needs that
-one owner action. Do not edit `agent.json` while the agent is running.
+fingerprint. After checking the new value through a trusted channel, confirm it with the
+owner-confirmation command (see
+[Changed certificate fingerprint](#changed-certificate-fingerprint)); a normal certificate renewal
+therefore needs that one owner action. Do not edit `agent.json` while the agent is running.
 
 There is no fallback between the transports. A WSS agent whose proxy is down reconnects with
 backoff and spools events; it never dials SSH behind the configuration's back. The reverse-proxy
@@ -431,9 +432,26 @@ the upgrade is `426`, and a binary message is refused. The WebSocket carries one
 same node supersedes the first.
 
 The first system-mode connection records the leaf certificate fingerprint. A later change is
-refused until you re-enroll; a pinned deployment (`tls = "pin"`) refuses any mismatch as a hard
-error. See [the WSS trust boundary](../security.md#the-wss-trust-boundary) for the full security
-property.
+refused until you confirm the new value with the owner command; a pinned deployment
+(`tls = "pin"`) refuses any mismatch as a hard error and still needs re-enrollment. See
+[Changed certificate fingerprint](#changed-certificate-fingerprint) and
+[the WSS trust boundary](../security.md#the-wss-trust-boundary) for the full security property.
+
+### Changed certificate fingerprint
+
+In system mode, a proxy certificate whose fingerprint differs from the value recorded in
+`agent.json` is refused before the first frame, and the error names both values. Verify the new
+value through a trusted channel first — out of band, not from the same connection and not from a
+page served by that host. Then record it as your normal user:
+
+    vowp agent trust --fingerprint sha256:<64-lowercase-hex>
+
+The command is local-only: it reads and rewrites only the private `agent.json` (0600), never
+connects to the home, never runs the agent, and never reads or prints `node.key`, a surface token
+or another secret. A missing recorded value is an explicit first record, not a silent
+trust-on-first-use reset; the same value prints `fingerprint unchanged` and writes nothing. A
+`tls = "pin"` transport is a hard pin: the command refuses it (exit 5), and a changed pinned
+certificate needs re-enrollment with the new `--tls-fingerprint`.
 
 ## Bundle result
 

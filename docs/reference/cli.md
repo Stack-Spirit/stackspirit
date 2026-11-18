@@ -157,6 +157,7 @@ python3 docs/reference/check-reference.py
 | [`vowp agent service uninstall`](#vowp-agent-service-uninstall) | Stop the unit and remove only a VOWP-generated file |
 | [`vowp agent service status`](#vowp-agent-service-status) | Show the unit path and the manager's reported state |
 | [`vowp agent doctor`](#vowp-agent-doctor) | Report local agent warnings without failing on them |
+| [`vowp agent trust`](#vowp-agent-trust) | Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band |
 | [`vowp surface`](#vowp-surface) | Create, list or revoke a paired local surface; `--node` names the surface's node |
 | [`vowp surface pair`](#vowp-surface-pair) | Create a pending surface and print its one-time pairing code |
 | [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
@@ -3000,6 +3001,7 @@ Commands:
   status   Show the last local agent status
   service  Install, remove or inspect the launchd or systemd-user service
   doctor   Report local agent warnings without failing on them
+  trust    Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -3276,6 +3278,25 @@ Options:
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
   -h, --help                 Print help
+```
+
+#### `vowp agent trust`
+
+```text
+Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band
+
+Usage: vowp agent trust [OPTIONS] --fingerprint <SHA256:HEX>
+
+Options:
+      --fingerprint <SHA256:HEX>  New leaf fingerprint (`sha256:<64 lowercase hex>`), verified through a trusted channel
+      --json                      Print one machine-readable JSON document on stdout
+      --node <NAME>               Run the command on that node over ssh
+      --project <NAME|PATH>       Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>                Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color                  Disable colour even when stdout is a terminal
+  -q, --quiet                     Suppress non-essential human output
+  -v, --verbose...                Increase log verbosity (`-v`, `-vv`)
+  -h, --help                      Print help
 ```
 
 ### `vowp surface`

@@ -43,14 +43,12 @@ The shipped tree contains:
 - Bundle result: the five frames, the assignment `result_transport`, the node-side bundle and the
   home staging/verification path.
 - The separate-user checks (`isolation.rs`), `agent doctor` and the documented ownership rules.
+- Owner confirmation for a changed system-mode WSS leaf fingerprint: `vowp agent trust`.
 - Metrics history: global schema v7 `capacity_rollups`, the rollup writer/pruner and
   `vowp capacity history`.
 
 Known deviations from the text below:
 
-- The owner-confirmation command named by a changed system-mode certificate fingerprint
-  (`vowp agent trust`) is **not implemented**. The agent refuses the change; re-enrolling the node
-  is the shipped recovery. `tls = "pin"` remains the hard-pin mode.
 - `agent service status` has no command-specific `--json`; the global `--json` flag prints the
   documented document.
 - `CapacityHistory` also carries `until` and `retention_secs`, and `vowp capacity history` has no
@@ -209,11 +207,18 @@ late frame. A replay of a challenge nonce fails exactly as it does over SSH.
   application identity, so a certificate for the wrong home is refused even when the host resolves.
 - At the first WSS connection the agent records the leaf/SPKI fingerprint in `agent.json` as an
   informational value. A later connection that presents a different fingerprint prints a warning and
-  is refused until the owner confirms it with `vowp agent trust --fingerprint <sha256:…>` *(planned)*
-  or re-enrolls. There is no silent trust-on-first-use reset. A normal certificate renewal therefore
-  needs one owner confirmation; that is deliberate.
+  is refused until the owner confirms it with
+  `vowp agent trust --fingerprint <sha256:…>` or re-enrolls. The confirmation is local-only: it
+  loads `agent.json`, accepts only a `sha256:<64 lowercase hex>` value, and rewrites the private
+  0600 file without connecting to the home, running the agent or reading `node.key` or a surface
+  token. A missing recorded value is an explicit first record, not a silent trust reset; the same
+  value prints `fingerprint unchanged` and does not rewrite the file. There is no silent
+  trust-on-first-use reset. A normal certificate renewal therefore needs one owner confirmation;
+  that is deliberate.
 - `tls = "pin"` with `--tls-fingerprint` is the self-signed deployment: the fingerprint is a hard
-  pin, and a mismatch is a refusal (exit 5), never a warning. It is not the default.
+  pin, and a mismatch is a refusal (exit 5), never a warning. `vowp agent trust` refuses a pin
+  transport (exit 5), so a changed pinned certificate needs re-enrollment with the new
+  `--tls-fingerprint`. Pin mode is not the default.
 - mTLS is optional defense in depth: a proxy can require a client certificate in addition to the
   node-key challenge. It is not the primary authentication and is not required.
 
@@ -252,7 +257,7 @@ identity.
 |---|---|---|---|
 | Proxy down or DNS failure | reconnect with backoff; spool events; no SSH fallback | listener idle | `wss: connection refused` in `agent status` |
 | Certificate expired or hostname mismatch | refuse before `AgentHello`; exit 5 on enroll, retry with backoff when running | — | a clear TLS error naming the host and the reason, never a token |
-| Fingerprint changed | refuse; require `agent trust` or re-enroll | — | a warning naming the old and new fingerprint |
+| Fingerprint changed | refuse; require `agent trust` (system) or re-enroll (pin) | — | a warning naming the old and new fingerprint |
 | Unknown path or subprotocol | clear HTTP/WebSocket error | `404`/`400`, no frame processed | `wss: 404 /agent/v1` |
 | Frame over the cap | close; reconnect | close `1009`, no partial frame | `frame too large` |
 | Second connection for one node | old connection gets `Superseded` | old connection closed | one active agent |

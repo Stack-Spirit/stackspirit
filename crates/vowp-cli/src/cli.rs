@@ -1289,6 +1289,8 @@ pub enum AgentCommand {
     Service(AgentServiceArgs),
     /// Report local agent warnings without failing on them.
     Doctor(AgentDoctorArgs),
+    /// Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band.
+    Trust(AgentTrustArgs),
     /// Hidden: serve the home side of one agent stdio or WebSocket connection.
     #[command(hide = true)]
     Gateway(AgentGatewayArgs),
@@ -1462,6 +1464,14 @@ pub struct AgentServiceStatusArgs {}
 /// Arguments for `vowp agent doctor`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct AgentDoctorArgs {}
+
+/// Arguments for `vowp agent trust`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentTrustArgs {
+    /// New leaf fingerprint (`sha256:<64 lowercase hex>`), verified through a trusted channel.
+    #[arg(long, value_name = "SHA256:HEX")]
+    pub fingerprint: String,
+}
 
 /// `vowp surface` subcommands.
 #[derive(Debug, Clone, Subcommand)]
