@@ -272,17 +272,21 @@ fn bootstrap_project(
     };
 
     let mut initialized = false;
-    if args.init && !root.join("vowp.toml").is_file() {
+    if args.init {
         // `init` writes at the git root, not at whichever subdirectory the caller named.
+        // Resolve it before the skip check: a subdirectory of an initialised checkout must
+        // report `initialized: false` rather than let `init` conflict on the same file.
         root = git_checkout_root(&root)?;
-        crate::cmd::init::run_at(
-            registry.paths,
-            &root,
-            name.as_ref().map(ProjectName::as_str),
-            false,
-            false,
-        )?;
-        initialized = true;
+        if !root.join("vowp.toml").is_file() {
+            crate::cmd::init::run_at(
+                registry.paths,
+                &root,
+                name.as_ref().map(ProjectName::as_str),
+                false,
+                false,
+            )?;
+            initialized = true;
+        }
     }
 
     let (entry, _created) = register_checkout(registry.paths, registry.deps, &root, args.name.as_deref(), args.weight)?;

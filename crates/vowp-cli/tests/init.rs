@@ -494,6 +494,41 @@ fn project_add_init_is_skipped_when_vowp_toml_exists() {
 }
 
 #[test]
+fn project_add_init_skips_an_initialised_checkout_named_by_a_subdirectory() {
+    let env = BootstrapEnv::new();
+    let checkout = env.parent().join("kept");
+    real_git_repo(&checkout);
+    write_named_project_config(&checkout, "kept");
+    let config_path = checkout.join("vowp.toml");
+    let before = std::fs::read(&config_path).expect("original vowp.toml");
+    let subdirectory = checkout.join("sub");
+    std::fs::create_dir(&subdirectory).expect("subdirectory");
+
+    let (code, value, stderr) = env.run_json(&[
+        "project",
+        "add",
+        subdirectory.to_str().expect("subdirectory path"),
+        "--init",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["project"], "kept", "{value}");
+    assert_eq!(value["initialized"], false, "{value}");
+    assert_eq!(
+        Path::new(value["path"].as_str().expect("path"))
+            .canonicalize()
+            .expect("summary path canonicalises"),
+        checkout.canonicalize().expect("checkout canonicalises"),
+        "a subdirectory registers its checkout root: {value}"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("vowp.toml after add"),
+        before,
+        "an existing vowp.toml must stay byte-identical"
+    );
+    assert!(registry_project(env.home_path(), "kept").is_some());
+}
+
+#[test]
 fn project_add_git_failure_leaves_no_partial_checkout_or_registry_row() {
     let env = BootstrapEnv::new();
     let missing = env.parent().join("origins").join("missing-demo.git");
