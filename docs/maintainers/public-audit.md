@@ -1,6 +1,7 @@
 # Public-readiness audit
 
 - **Audit date:** 2026-11-09
+- **Last updated:** 2026-11-18 (current public-tree counts and the explainer-video allowlist)
 - **Audited commit:** `d5f357d` on `job/p01-public-audit` (based on `origin/main`)
 - **Scope:** tracked files in the working tree; every commit reachable from `git rev-list --all`;
   dependency licences; the `LICENSE` year/owner line; `SECURITY.md`; `.gitignore`.
@@ -13,10 +14,23 @@
 | Area | Result |
 |---|---|
 | p01-owned paths | Clean. No secret, private path or token shape in the current versions of the files this job owns. |
-| Current tree | Clean on the merged tree. The six unowned files were fixed after this audit; `scripts/audit/scan.sh --worktree` exits 0 with every finding allowlisted. |
+| Current tree | Public-tree scan clean: `scripts/audit/scan.sh --public-tree` exits 0 with 475 findings allowlisted and none blocked. The worktree-only scan still reports 60 pre-existing findings in internal acceptance fixtures, internal docs and the allowlist's own explanatory text, all outside the public tree. See [Current public-tree status](#current-public-tree-status-2026-11-18). |
 | Old history | 11,351 findings: 1,835 real home paths and 5 fake PEM/allowlist-text token matches. No real token, key, `.env`, SSH-key or large-blob finding. History is informational because `public-main` is a fresh commit; the old history is never published. |
 | Licences | Clean: project MIT, `LICENSE` 2026 Syver-August Meyer, all 7 workspace crates MIT, 160 third-party packages within MIT/Apache-2.0/BSD/ISC/Unicode/Zlib. |
-| Publication gate | `scripts/audit/scan.sh --worktree` and `scripts/audit/scan.sh --rev public-main` must both exit 0. The working-tree gate is clean; the public branch is built and scanned separately. |
+| Publication gate | `scripts/audit/scan.sh --public-tree` and `scripts/audit/scan.sh --rev public-main` must both exit 0. The public-tree gate is clean; the public branch is built and scanned separately. |
+
+## Current public-tree status (2026-11-18)
+
+`scripts/audit/scan.sh --public-tree` exits 0 on the current branch: 475 findings, 475 allowlisted,
+0 not allowlisted. The public tree contains exactly one large blob above 1 MiB, the intentional
+checked-in explainer video `docs/media/vowp-explainer.mp4` at 12,790,922 bytes. It is allowlisted by
+its exact path in `scripts/audit/allowlist.txt`; no other large blob exists. An intentional large
+media file that belongs to the public documentation may be allowlisted this way, by exact path,
+without changing the scanner's 1 MiB default threshold.
+
+`scripts/audit/scan.sh --worktree` still exits 1 on 60 non-allowlisted findings in internal
+acceptance fixtures, internal docs and the audit allowlist's own explanatory text. They are a
+pre-existing baseline outside the public tree and are deliberately not allowlisted here.
 
 ## What the scanner checks
 
@@ -39,10 +53,14 @@ The scanner never prints a matched value in full: every finding shows `file:comm
 <first four characters>***`. Values are checked against `scripts/audit/allowlist.txt`; every entry has a
 `rule|path|value|reason` line and an empty reason is rejected. The current allowlist covers only
 loopback, conventional placeholder paths, reserved `example.com`/`example.invalid` addresses, a Git SSH
-`user@host` address, three false-positive Rust identifiers, and one fake PEM header in an old test
-fixture.
+`user@host` address, three false-positive Rust identifiers, and one intentional media file, the
+explainer video allowlisted by its exact path.
 
 ## Findings: working tree
+
+The counts below are the 2026-11-09 p01 snapshot. The large-blob row was updated on 2026-11-18 for
+the checked-in explainer video; see [Current public-tree status](#current-public-tree-status-2026-11-18)
+for the current scanner totals.
 
 | Category | Before owner fix | After p01 + owner fix | Notes |
 |---|---:|---:|---|
@@ -54,7 +72,7 @@ fixture.
 | Private hostnames | 0 real; 12 false positives | 12 allowlisted | Rust/filename identifiers ending in `.local`, plus allowlist text. |
 | SSH-key paths | 0 | 0 | No tracked key files. |
 | `.env` paths | 0 | 0 | `.env` and `.env.*` are ignored; no tracked file. |
-| Large blobs (>1 MiB) | 0 | 0 | Largest tracked blob is about 100 KB. |
+| Large blobs (>1 MiB) | 0 | 1 allowlisted | Current tree: one large blob, the intentional explainer video `docs/media/vowp-explainer.mp4`, 12,790,922 bytes, allowlisted by its exact path; no other large blob. The p01 audit found none, when the largest tracked blob was about 100 KB. |
 | **Total** | **150 findings, 136 allowlisted, 14 blocked** | **150 allowlisted, 0 blocked** | The 14 are the six unowned files below. |
 
 The six files that needed the owner's edit (fixed after this audit; no private value is repeated here):
@@ -69,8 +87,9 @@ The six files that needed the owner's edit (fixed after this audit; no private v
 | `docs/design/types.md` | 4 lines (5 occurrences) | Same. |
 
 `scripts/audit/fix-unowned-private-paths.sh` is dry-run by default and prints the six files. The paths
-were fixed by the follow-up code and docs jobs; `scan.sh --worktree` now exits 0. p01 did not edit or
-commit them.
+were fixed by the follow-up code and docs jobs; `scan.sh --public-tree` now exits 0. A worktree-only
+scan still reports the pre-existing findings described in the current-status section above. p01 did
+not edit or commit the six files.
 
 ## Findings: old history (informational)
 
@@ -87,7 +106,7 @@ repository, so the count grows while other jobs commit; this is a snapshot, not 
 | Private host | 430 | 430 | 0 | The same two Rust/filename false positives and allowlist text. |
 | SSH-key paths | 0 | 0 | 0 | — |
 | `.env` paths | 0 | 0 | 0 | — |
-| Large blobs | 0 | 0 | 0 | No history blob above 1 MiB. |
+| Large blobs | 0 | 0 | 0 | No history blob above 1 MiB at the audit date. The baseline predates the explainer video, added 2026-11-18, which is now one allowlisted large blob in later commits. |
 | **Total** | **11,351** | **9,511** | **1,840** | The blocked history findings are old real home paths and fake PEM text. |
 
 No real credential, private key, token, `.env` file or large binary was found in history. The history
@@ -112,7 +131,11 @@ fatal scan:
 Run from the repository root.
 
 ```sh
-# Working-tree gate (fatal). This is the first command to run before publication.
+# Public-tree gate (fatal). This is the first command to run before publication.
+scripts/audit/scan.sh --public-tree
+
+# Whole worktree, including internal acceptance paths. Also fatal; it currently
+# reports the pre-existing internal baseline described above.
 scripts/audit/scan.sh --worktree
 
 # The whole audit: working tree plus old history. History is informational by default.
@@ -197,7 +220,7 @@ package an archive when the bundle, `LICENSE`, `README.md` or the `vowp` binary 
 
 ## Checklist: before you click "Make public"
 
-- [ ] `scripts/audit/scan.sh --worktree` exits 0.
+- [ ] `scripts/audit/scan.sh --public-tree` exits 0.
 - [ ] The manual review above is resolved: the owner accepts or renames the remaining `vowp-night`
       reference.
 - [ ] `scripts/audit/scan.sh --rev public-main` exits 0 after `squash-for-public.sh`.
@@ -208,7 +231,8 @@ package an archive when the bundle, `LICENSE`, `README.md` or the `vowp` binary 
       repository settings.
 - [ ] Version 0.1.0 is used by every crate, the npm package and the release tag; README says it is an
       early release and does not link to a site.
-- [ ] No `.env`, private key, token, private hostname or large binary is in the tree.
+- [ ] No `.env`, private key, token or private hostname is in the public tree; every large blob is
+      allowlisted by its exact path.
 - [ ] The old private repository is renamed (or backed up) before the new public repository is created.
 - [ ] The release workflow's draft release is checked (assets, checksums, `vowp --version`) before it is
       published.
