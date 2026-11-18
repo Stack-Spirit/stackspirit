@@ -52,6 +52,10 @@ import type {
   OrchestratorView,
   ProjectView,
   RawDocument,
+  SecretListView,
+  SecretRemoveOutcome,
+  SecretSetInput,
+  SecretSetOutcome,
   SessionCardView,
   SetTargetInput,
   SpiritErrorDto,
@@ -136,6 +140,18 @@ function previewUnavailable(): SpiritErrorDto {
     "preview_unavailable",
     "One-time-password onboarding needs the desktop host; preview mode does not create or install keys.",
     "Run the desktop app without VITE_SPIRIT_MOCK to use onboarding.",
+  );
+}
+
+/**
+ * Preview mode has no host and no server vault: every server-secret call must fail
+ * honestly instead of faking a list or storing a key in the renderer.
+ */
+function previewSecretsUnavailable(): SpiritErrorDto {
+  return errorDto(
+    "preview_unavailable",
+    "The server secret vault needs the desktop host; preview mode has no host and does not store keys.",
+    "Run the desktop app without VITE_SPIRIT_MOCK to manage server secrets.",
   );
 }
 
@@ -467,6 +483,21 @@ export class MockBridge implements SpiritBridge {
       // Preview mode has no host, so it never reads the one-time password.
       void input;
       throw previewUnavailable();
+    },
+  };
+
+  secretsApi = {
+    list: async (): Promise<SecretListView> => {
+      throw previewSecretsUnavailable();
+    },
+    set: async (input: SecretSetInput): Promise<SecretSetOutcome> => {
+      // Preview mode has no host, so it never reads the write-only value.
+      void input;
+      throw previewSecretsUnavailable();
+    },
+    remove: async (name: string): Promise<SecretRemoveOutcome> => {
+      void name;
+      throw previewSecretsUnavailable();
     },
   };
 
@@ -1136,6 +1167,7 @@ export class MockBridge implements SpiritBridge {
 
   hosts = this.hostsApi;
   onboarding = this.onboardingApi;
+  secrets = this.secretsApi;
   connection = this.connectionApi;
   fleet = this.fleetApi;
   engine = this.engineApi;

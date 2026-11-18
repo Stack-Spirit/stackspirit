@@ -38,6 +38,10 @@ import type {
   OrchestratorNewInput,
   OrchestratorView,
   RawDocument,
+  SecretListView,
+  SecretRemoveOutcome,
+  SecretSetInput,
+  SecretSetOutcome,
   SessionCardView,
   SetTargetInput,
   StateEvent,
@@ -105,6 +109,25 @@ export interface SpiritBridge {
      * saved before a failed install are included; their pin is already trusted.
      */
     installedHosts?(): Promise<string[]>;
+  };
+
+  /**
+   * Optional server secret vault over VOWP's `vowp secret` commands. Present on the
+   * desktop host; the preview bridge reports a typed `preview_unavailable` error because
+   * preview mode has no host and never pretends to store a key.
+   *
+   * The value is **write-only**: `set` accepts it once, the host moves it into zeroizing
+   * storage and sends it over verified SSH stdin, and no read ever returns it. The
+   * renderer only receives names, the last four characters and timestamps. A secret is
+   * always sent on stdin, never argv or a log, and the AI only ever sees metadata.
+   */
+  secrets?: {
+    /** Reads `vowp --json secret ls`; metadata only, never a value. */
+    list(): Promise<SecretListView>;
+    /** Stores one secret and returns only `{name,last4}`. */
+    set(input: SecretSetInput): Promise<SecretSetOutcome>;
+    /** Removes one secret through `vowp secret rm NAME --yes`. */
+    remove(name: string): Promise<SecretRemoveOutcome>;
   };
 
   connection: {

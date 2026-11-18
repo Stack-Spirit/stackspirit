@@ -40,6 +40,10 @@ import type {
   OrchestratorNewInput,
   OrchestratorView,
   RawDocument,
+  SecretListView,
+  SecretRemoveOutcome,
+  SecretSetInput,
+  SecretSetOutcome,
   SessionCardView,
   SetTargetInput,
   StateEvent,
@@ -100,6 +104,43 @@ export class TauriBridge implements SpiritBridge {
     installedHosts: async (): Promise<string[]> => {
       const view = await call<AppKeyView>("onboarding_key_status");
       return view.installed_host_ids ?? [];
+    },
+  };
+
+  secrets = {
+    list: (): Promise<SecretListView> => call("secrets_list"),
+    set: async (input: SecretSetInput): Promise<SecretSetOutcome> => {
+      // The write-only value never leaves the renderer on an invalid request. The guard
+      // throws the normal typed error shape; nothing is invoked and the value is not
+      // included in the error.
+      if (typeof input.name !== "string" || input.name.trim().length === 0) {
+        throw toSpiritError({
+          code: "invalid_input",
+          message: "name: must not be empty",
+          hint: "Use an uppercase name such as OPENAI_API_KEY.",
+          retryable: false,
+        });
+      }
+      if (typeof input.value !== "string" || input.value.trim().length === 0) {
+        throw toSpiritError({
+          code: "invalid_input",
+          message: "value: must not be empty",
+          hint: "Enter the secret value, then retry.",
+          retryable: false,
+        });
+      }
+      return call("secrets_set", { input });
+    },
+    remove: async (name: string): Promise<SecretRemoveOutcome> => {
+      if (typeof name !== "string" || name.trim().length === 0) {
+        throw toSpiritError({
+          code: "invalid_input",
+          message: "name: must not be empty",
+          hint: "Choose a stored secret to remove.",
+          retryable: false,
+        });
+      }
+      return call("secrets_remove", { name });
     },
   };
 

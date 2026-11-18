@@ -145,6 +145,58 @@ export interface OnboardingInstallOutcome {
   profile: HostProfile;
 }
 
+/**
+ * One stored server secret's metadata. The value itself is never part of this type.
+ */
+export interface SecretEntryView {
+  /** Validated secret name (`^[A-Z][A-Z0-9_]{0,63}$`). */
+  name: string;
+  /** The last four characters of the value, at most four characters. */
+  last4: string;
+  /** When VOWP first stored the secret. */
+  created_at: Timestamp;
+  /** When VOWP last replaced the secret. */
+  updated_at: Timestamp;
+}
+
+/**
+ * The `vowp secret ls` read model.
+ *
+ * `storage` is `null` when VOWP does not report a storage mode; it never means "basic"
+ * (VOWP `0.4.0` reports none, and the UI must stay honest about that).
+ */
+export interface SecretListView {
+  /** Secrets in the exact order VOWP returned them. */
+  secrets: SecretEntryView[];
+  storage: string | null;
+}
+
+/**
+ * A write-only request to store one secret on the server.
+ *
+ * The host consumes `value` once, moves it into zeroizing storage and sends it over
+ * verified SSH stdin only. It is never returned, logged, put in argv or included in an
+ * error.
+ */
+export interface SecretSetInput {
+  /** Validated secret name (`^[A-Z][A-Z0-9_]{0,63}$`). */
+  name: string;
+  /** The secret value. Write-only: no read ever returns it. */
+  value: string;
+}
+
+/** The safe summary of one stored secret. Never the value. */
+export interface SecretSetOutcome {
+  name: string;
+  last4: string;
+}
+
+/** The `vowp secret rm NAME --yes` result. */
+export interface SecretRemoveOutcome {
+  name: string;
+  removed: boolean;
+}
+
 export interface ConnectionSnapshot {
   state:
     | "disconnected"
