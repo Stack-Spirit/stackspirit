@@ -86,12 +86,13 @@ promoted if the home dies. Matches VOWP's one-home/one-lease rule. Not built yet
   in once, installs a fresh key, optionally turns off password login, and forgets the
   password. Never saved, never shown to the AI.
 - Provider keys **may** now live on the server (this replaces the old "keys never leave
-  the Mac" rule): sent only over the verified SSH connection on **stdin** (never argv or
-  logs), stored encrypted on the server (`systemd-creds` or an `age` file on Linux, the
-  user's Keychain on a Mac server), readable only by the VOWP service user. The AI only
-  ever sees "stored ✓". Plan a small server-side proxy that injects keys into API calls
-  so agents never hold them. Show a warning the user confirms before the first secret
-  is stored, plus a list with Revoke.
+  the Mac" rule), **reusing VOWP's `vowp secret` vault (`set` over verified SSH stdin,
+  `ls --json` returning only `name` + `last4`, `rm --yes`, `upgrade` / v0.5 encrypted-at-rest
+  vault)** — never invent a second custom secret store in StackSpirit. Keys are sent only
+  over the verified SSH connection on **stdin** (never argv or logs), never visible to the
+  AI (which only sees names / "stored ✓"), and automatically `[REDACTED:<NAME>]`-scrubbed by
+  VOWP. Show a warning the user confirms before the first secret is stored, plus a list
+  with Revoke.
 - Legal/positioning: MIT "as is" covers liability; promise *design* in a `SECURITY.md`,
   not liability. A paid service needs its own terms (lawyer).
 
@@ -120,37 +121,46 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - The Local/Server switch (label only).
 - Add project (hands a message to the global orchestrator; no VOWP call).
 
-## 5. Next steps (suggested order)
+## 5. Next steps (suggested order, updated 2026-11-18)
 
-1. **Web app alignment** (`apps/spirit-web`): reuse the Meadow tokens and, where it fits,
-   the `next/` components for the read-only cockpit. Planned for a cheaper worker.
-2. **Bridge contracts** for the preview parts: move `SessionId`, `SessionLocation`,
-   `ChatMessage` and `ProjectRequest` from `next/conversations.ts` into
-   `packages/spirit-ui/src/bridge/wire.ts`, add optional `SpiritBridge` methods, implement
-   in `TauriBridge` + Tauri commands + `spirit-core`, keep `MockBridge` scenarios.
-3. **One-time-password onboarding** — **landed (ss-31).** The setup assistant's secure
-   card now scans the host keys and requires an explicit fingerprint confirmation, then
-   creates the app-owned key and installs it with the one-time password, optionally
-   applying `PasswordAuthentication no`. The plan wording about installing "a fresh key"
-   is now true: the app creates its own ed25519 key (passphrase in the OS keychain)
-   rather than borrowing the owner's SSH agent. Remaining follow-up: show the saved
-   server and connect it automatically after the install, and add a Settings entry point
-   for retrying the password-login step.
-4. **Server secret store** (stdin transport, encrypted store, warning, revoke list) and a
-   `SECURITY.md`.
-5. **Local orchestrator** once VOWP fixes land (path-map updates, macOS `opencode serve`
-   `service.json`, chat app spawn, failure reasons on cards; see the VOWP repository's
-   local-orchestrator brief). Then make Local the default and wire the switch.
-6. Clusters (home + workers) after the above.
-7. Remove the classic shell once nothing depends on it, and move its e2e coverage over.
+1. **Web app alignment** (`apps/spirit-web`) — **landed (`ss-27`, `a0619ae`).** Read-only
+   Web cockpit now uses the Meadow tokens and components; classic cockpit hover contrast
+   is also fixed (`ss-26`, `88be044`).
+2. **One-time-password onboarding** — **core + card landed (`ss-28`–`ss-31`); small
+   follow-up ready now:** auto-select and connect the saved server right after a
+   successful install, and add a Settings entry point for retrying the optional
+   `PasswordAuthentication no` step.
+3. **Reconcile D6 local-orchestrator gate probes with VOWP `0.4.0` (ready now):** VOWP
+   `0.4.0` is now shipped and installed on both the Mac and VPS (`surface rotate`, `agent
+   service|doctor|trust`, `orchestrator new --node`, live `macbook` agent). Update
+   `spirit-core`'s gate probes and `docs/D6-READINESS.md` / `docs/VOWP-CONTRACT.md` so
+   StackSpirit recognizes VOWP `0.4.0+` cleanly.
+4. **Live orchestrator chat via the paired OpenCode engine (`opencode serve`) — owner
+   decision (2026-11-18):** do **not** reinvent chat or shell out to `vowp chat` per turn.
+   Move `SessionId`, `SessionLocation`, `ChatMessage` and `ProjectRequest` from
+   `next/conversations.ts` into `packages/spirit-ui/src/bridge/wire.ts`, and connect
+   `spirit-core` / `TauriBridge` / `ChatView.tsx` to the orchestrator's OpenCode server
+   (`opencode serve` locally on the Mac when running Local, or over StackSpirit's SSH
+   loopback forward when running on the Server; VOWP `0.5` adds `vowp orchestrator
+   endpoint` to report the active endpoint cleanly, while VOWP's bridge mirrors every turn
+   to the server session log). Keep `MockBridge` scenarios working.
+5. **Server secret store UI over `vowp secret` + `SECURITY.md` (ready now / pairs with
+   VOWP `0.5` encrypted-at-rest vault):** wire `spirit-core` + `TauriBridge` + Settings to
+   `vowp secret ls --json`, `vowp secret set <NAME>` (SSH stdin only, never argv/logs),
+   and `vowp secret rm <NAME> --yes`, with the first-secret confirmation warning, stored
+   keys list (`name`, `last4`, storage mode), Revoke action, and a repository `SECURITY.md`.
+6. **Live `Local` / `Server` switch and `＋ Add project` (pairs with VOWP `0.5`):** once
+   VOWP `0.5` lands `vowp orchestrator move` (same-session move between `--home` and
+   `--node <mac>`) and one-step `vowp project add --git/--init/--orchestrator`, wire the
+   session location chip/switch (defaulting to **Local** when the Mac agent is connected)
+   and the sidebar **`＋` Add project** dialog to real VOWP calls.
+7. **Clusters** (home + workers) after the above, then **retire the classic shell** and
+   migrate its remaining e2e coverage.
 
 ## 6. Known gaps and cautions
 
-- e2e status on 2026-11-17: desktop 11 passed, 2 failed; web 10 passed. All 5 Meadow
-  shell specs pass. The 2 failures are in the **classic** shell (`e2e/shell.spec.ts`:
-  "preview shell" and "host manager"): axe color-contrast on hovered classic buttons
-  (ratios 1.8–4.4). They fail the same way on `93e8387`, before this redesign, so they are
-  pre-existing. Fix the classic hover tokens or retire the classic shell (step 7).
+- e2e status (updated 2026-11-18): Meadow desktop specs, web specs (`ss-27`), and classic
+  cockpit WCAG contrast specs (`ss-26`, `88be044`) are all green.
 
 - The owner has not yet seen the new icon in the Dock (`tauri dev`/`tauri build` not run
   in the design sessions).

@@ -17,11 +17,11 @@
      code and UI until the StackSpirit wiring in `docs/HANDOFF-DESKTOP-UI.md` §5 lands; do not
      claim a feature is live before then.
 3. **No Secret Leaks:** Never read, print, log, or commit any `.env` file, API key, or token.
-   Provider API keys belong in the local OS keychain trait. The owner has approved storing
-   keys on the user's own server only through the planned server secret store (verified SSH
-   connection, stdin only, encrypted at rest, never shown to the AI; see
-   `docs/HANDOFF-DESKTOP-UI.md` §3). Until that store is implemented, the VPS only ever
-   receives provider/model names.
+   Provider API keys belong in the local OS keychain trait or on the user's own server through
+   VOWP's `vowp secret` vault (`vowp secret set <NAME>` over verified SSH stdin, `ls --json`,
+   `rm --yes`; never invent a second custom server secret store — see
+   `docs/HANDOFF-DESKTOP-UI.md` §3 and §5). The AI only ever sees secret names/metadata, never
+   secret values.
 4. **Never Push:** Commit on your job branch (`job/<id>`) and write the VOWP report at
    `.vowp/jobs/<id>/report.md` with required front-matter (`job`, `status`, `branch`, `commits`,
    `tests`). The supervisor merge queue merges onto local `main`.
