@@ -7,7 +7,10 @@ import { MOCK_SCENARIOS, MockBridge, type MockScenario } from "@stackspirit/ui";
  */
 export async function createBridge(): Promise<SpiritBridge> {
   if (import.meta.env.VITE_SPIRIT_MOCK === "1") {
-    const requested = import.meta.env.VITE_SPIRIT_MOCK_SCENARIO;
+    // In preview only, ?scenario= switches the mock data without a restart.
+    const requested =
+      new URLSearchParams(window.location.search).get("scenario") ??
+      import.meta.env.VITE_SPIRIT_MOCK_SCENARIO;
     const scenario: MockScenario =
       typeof requested === "string" &&
       (MOCK_SCENARIOS as readonly string[]).includes(requested)

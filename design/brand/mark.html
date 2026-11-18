@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSpirit Mark</title>
+<style>
+  :root { --dark:#0D120F; --light:#F5F7F0; --deep:#1E5B36; --main:#43A85A; --pale:#CDEDB0; --line:#24302a; --card:#131a16; --muted:#93a39a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--dark); color:#eef3ee; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; padding:40px 32px 96px; }
+  .wrap { max-width:1200px; margin:0 auto; display:grid; gap:28px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:0 0 12px; }
+  p { margin:0; }
+  .muted { color:var(--muted); }
+  .mono { font-family:"SF Mono","JetBrains Mono",Menlo,monospace; font-size:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px; }
+  .row { display:grid; gap:16px; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); }
+  .tile { border-radius:12px; display:grid; place-items:center; padding:20px; aspect-ratio:1; }
+  .tile img, .tile canvas { max-width:100%; max-height:100%; }
+  canvas, img.px { image-rendering:pixelated; image-rendering:crisp-edges; }
+  .label { margin-top:8px; }
+  .lockup { display:flex; align-items:center; gap:18px; padding:28px; border-radius:14px; }
+  .lockup canvas { height:72px; }
+  .word { font-size:38px; font-weight:700; letter-spacing:-0.02em; }
+  .word small { display:block; font-size:13px; font-weight:500; letter-spacing:0; opacity:.7; }
+  .sizes { display:flex; align-items:flex-end; gap:22px; flex-wrap:wrap; padding:20px; border-radius:12px; }
+  .sizes figure { margin:0; display:grid; gap:6px; justify-items:center; }
+  .chrome { display:flex; align-items:center; gap:8px; background:#2a2f2c; color:#ddd; border-radius:10px 10px 0 0; padding:8px 12px; width:260px; font-size:12px; }
+  a { color:var(--pale); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>StackSpirit mark · Sprout face</h1>
+    <p class="muted">Traced from the generated image into an exact pixel grid in the Meadow palette. Every cell is one of 8 palette colours; the background is transparent. Icons at 32 and 16 px are drawn natively, not shrunk.</p>
+  </div>
+
+  <section class="card">
+    <h2>Source vs. traced</h2>
+    <div class="row">
+      <div><div class="tile" style="background:var(--dark)"><img class="px" src="gen/r2-sprout.png" alt="Generated source image"></div><p class="label muted">Generated (Sunburst 2.6)</p></div>
+      <div><div class="tile" style="background:var(--dark)"><img class="px" src="mark/stackspirit-mark-master.png" alt="Exact master"></div><p class="label muted">Exact master · the logo file (matches the image)</p></div>
+      <div><div class="tile" style="background:var(--dark)"><canvas id="trace-dark"></canvas></div><p class="label muted" id="trace-meta">Traced grid</p></div>
+      <div><div class="tile" style="background:var(--light)"><canvas id="trace-light"></canvas></div><p class="label muted">Traced, on light</p></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Lockup</h2>
+    <div class="row">
+      <div class="lockup" style="background:var(--dark)"><canvas data-grid="mark"></canvas><div class="word" style="color:var(--light)">StackSpirit<small>Always-on AI infrastructure</small></div></div>
+      <div class="lockup" style="background:var(--light)"><canvas data-grid="mark"></canvas><div class="word" style="color:var(--deep)">StackSpirit<small style="color:#0D120F">Always-on AI infrastructure</small></div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Small sizes</h2>
+    <div class="row">
+      <div class="sizes" style="background:var(--dark)">
+        <figure><canvas data-grid="icon-32" data-scale="4"></canvas><figcaption class="mono muted">32 · ×4</figcaption></figure>
+        <figure><canvas data-grid="icon-32" data-scale="2"></canvas><figcaption class="mono muted">64</figcaption></figure>
+        <figure><canvas data-grid="icon-32" data-scale="1"></canvas><figcaption class="mono muted">32</figcaption></figure>
+        <figure><canvas data-grid="icon-16" data-scale="4"></canvas><figcaption class="mono muted">16 · ×4</figcaption></figure>
+        <figure><canvas data-grid="icon-16" data-scale="1"></canvas><figcaption class="mono muted">16</figcaption></figure>
+      </div>
+      <div class="sizes" style="background:var(--light)">
+        <figure><canvas data-grid="icon-32" data-scale="4"></canvas><figcaption class="mono" style="color:#555">32 · ×4</figcaption></figure>
+        <figure><canvas data-grid="icon-32" data-scale="1"></canvas><figcaption class="mono" style="color:#555">32</figcaption></figure>
+        <figure><canvas data-grid="icon-16" data-scale="4"></canvas><figcaption class="mono" style="color:#555">16 · ×4</figcaption></figure>
+        <figure><canvas data-grid="icon-16" data-scale="1"></canvas><figcaption class="mono" style="color:#555">16</figcaption></figure>
+      </div>
+    </div>
+    <div style="margin-top:16px">
+      <div class="chrome"><canvas data-grid="icon-16" data-scale="1"></canvas> StackSpirit · Fleet</div>
+      <p class="muted" style="margin-top:6px">Favicon in a browser tab, at real size.</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Files</h2>
+    <p class="muted">In <span class="mono">design/brand/mark/</span>:
+      <a href="mark/stackspirit-mark-master.png">stackspirit-mark-master.png</a> (the logo: exact match to the image, 8 colours, transparent) ·
+      <a href="mark/stackspirit-mark.svg">stackspirit-mark.svg</a> (clean 8 px grid as vector) ·
+      <a href="mark/stackspirit-mark-1024.png">stackspirit-mark-1024.png</a> ·
+      <a href="mark/icon-32.svg">icon-32.svg</a> · <a href="mark/icon-32.png">icon-32.png</a> ·
+      <a href="mark/icon-16.svg">icon-16.svg</a> · <a href="mark/icon-16.png">icon-16.png</a> ·
+      grids: <a href="mark/grid.json">grid.json</a>, <a href="mark/icon-32.json">icon-32.json</a>, <a href="mark/icon-16.json">icon-16.json</a></p>
+  </section>
+</div>
+
+<script>
+async function load(name) {
+  const res = await fetch(`mark/${name === "mark" ? "grid" : name}.json`);
+  return res.json();
+}
+
+function paint(canvas, data, scale) {
+  const rows = data.rows;
+  canvas.width = rows[0].length * scale;
+  canvas.height = rows.length * scale;
+  const ctx = canvas.getContext("2d");
+  rows.forEach((line, r) => {
+    [...line].forEach((ch, c) => {
+      if (ch === data.background) return;
+      ctx.fillStyle = data.palette[ch].hex;
+      ctx.fillRect(c * scale, r * scale, scale, scale);
+    });
+  });
+}
+
+(async () => {
+  const grids = { mark: await load("mark"), "icon-32": await load("icon-32"), "icon-16": await load("icon-16") };
+  paint(document.getElementById("trace-dark"), grids.mark, 4);
+  paint(document.getElementById("trace-light"), grids.mark, 4);
+  document.getElementById("trace-meta").textContent =
+    `Traced grid · ${grids.mark.grid.cols}×${grids.mark.grid.rows} cells`;
+  document.querySelectorAll("canvas[data-grid]").forEach((canvas) => {
+    const data = grids[canvas.dataset.grid];
+    const scale = Number(canvas.dataset.scale || 1);
+    paint(canvas, data, scale);
+    if (canvas.dataset.grid === "mark") canvas.style.width = "auto";
+  });
+})();
+</script>
+</body>
+</html>

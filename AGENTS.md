@@ -17,8 +17,15 @@
      `.asif.zip` export/import is gated on VOWP `v4-asif-*`; represent those gates explicitly in
      code and UI (`LocalOrchestratorGate`, `AsifGate`) rather than faking completion.
 3. **No Secret Leaks:** Never read, print, log, or commit any `.env` file, API key, or token.
-   Provider API keys belong only in the local OS keychain trait; the VPS only ever receives
-   provider/model names.
+   Provider API keys belong in the local OS keychain trait. The owner has approved storing
+   keys on the user's own server only through the planned server secret store (verified SSH
+   connection, stdin only, encrypted at rest, never shown to the AI; see
+   `docs/HANDOFF-DESKTOP-UI.md` §3). Until that store is implemented, the VPS only ever
+   receives provider/model names.
 4. **Never Push:** Commit on your job branch (`job/<id>`) and write the VOWP report at
    `.vowp/jobs/<id>/report.md` with required front-matter (`job`, `status`, `branch`, `commits`,
    `tests`). The supervisor merge queue merges onto local `main`.
+5. **Desktop UI and brand:** Before changing the desktop UI, the web app's look, the logo, or
+   anything in `design/brand`, read `docs/HANDOFF-DESKTOP-UI.md`. It records the owner's
+   design, naming, session and security decisions, what is real versus preview, and the
+   planned next steps.

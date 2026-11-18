@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSpirit Brand</title>
+<style>
+  :root { --bg:#0c100e; --card:#131a16; --line:#24302a; --fg:#eef3ee; --muted:#93a39a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; padding:40px 32px 96px; }
+  h1 { font-size:28px; margin:0 0 6px; letter-spacing:-0.01em; }
+  h2 { font-size:22px; margin:0 0 4px; }
+  h3 { font-size:15px; margin:0; }
+  p { margin:0; }
+  .muted { color:var(--muted); }
+  .wrap { max-width:1280px; margin:0 auto; }
+  .intro { margin-bottom:40px; max-width:760px; }
+  section.palette { border-top:1px solid var(--line); padding-top:32px; margin-top:40px; }
+  .swatches { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:12px; margin:20px 0; }
+  .sw { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--card); }
+  .sw__chip { height:84px; }
+  .sw__meta { padding:10px 12px; font-size:12px; }
+  .sw__meta strong { display:block; font-size:13px; }
+  .mono { font-family:"SF Mono","JetBrains Mono",Menlo,monospace; }
+  .ui { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:24px; }
+  .ui__panel { border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px; border:1px solid var(--line); }
+  .ui__brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; }
+  .ui__brand canvas { width:32px; height:32px; }
+  .ui__row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .btn { border-radius:9px; padding:7px 14px; font-weight:600; font-size:13px; border:1px solid transparent; }
+  .badge { border-radius:999px; padding:2px 10px; font-size:12px; font-weight:600; }
+  .logos { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:16px; }
+  .logo { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  .logo__stage { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .logo__stage div { border-radius:12px; display:grid; place-items:center; aspect-ratio:1; }
+  .logo__stage canvas { width:92%; height:auto; }
+  canvas { image-rendering:pixelated; image-rendering:crisp-edges; display:block; }
+  .logo__small { display:flex; align-items:center; gap:14px; padding:10px 12px; border-radius:12px; }
+  .logo__small canvas.s64 { width:64px; height:64px; }
+  .logo__small canvas.s32 { width:32px; height:32px; }
+  .logo__small canvas.s16 { width:16px; height:16px; }
+  .logo__foot { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .dl { background:none; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  .dl:hover { border-color:var(--muted); }
+  .cmp { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; margin-top:16px; }
+  .cmp figure { margin:0; display:grid; gap:6px; }
+  .cmp figcaption { color:var(--muted); font-size:12px; }
+  .cmp__box { background:#0D120F; border:1px solid var(--line); border-radius:12px; overflow:hidden; aspect-ratio:1; }
+  .cmp__box img, .cmp__box canvas { width:100%; height:100%; display:block; image-rendering:pixelated; }
+  .ver { display:grid; gap:6px; margin-top:14px; font-size:13px; }
+  .ver label { display:flex; gap:8px; align-items:baseline; cursor:pointer; }
+  .wipe { margin-top:16px; display:grid; gap:10px; justify-items:start; }
+  .wipe__stage { position:relative; width:min(640px, 100%); aspect-ratio:1; border-radius:12px; overflow:hidden; border:1px solid var(--line); background:#0D120F; }
+  .wipe__stage img, .wipe__stage canvas { position:absolute; inset:0; width:100%; height:100%; image-rendering:pixelated; }
+  .wipe__line { position:absolute; top:0; bottom:0; width:2px; background:#CDEDB0; box-shadow:0 0 0 1px #0D120F; pointer-events:none; }
+  .wipe__tag { position:absolute; top:10px; font-size:11px; font-weight:600; background:rgb(13 18 15 / .8); padding:2px 8px; border-radius:999px; }
+  .wipe__ctl { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }
+  .wipe__ctl input[type=range] { width:min(520px, 70vw); }
+  .stats { margin-top:16px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; font-size:13px; line-height:1.7; }
+  .stats strong { color:#eef3ee; }
+  @media (max-width:1000px) { .cmp { grid-template-columns:1fr; } }
+  @media (max-width:1000px) { .logos { grid-template-columns:1fr; } .swatches { grid-template-columns:repeat(2,1fr); } .ui { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="intro">
+    <h1>StackSpirit: spirit mark and greens</h1>
+    <p class="muted">Two palettes, three spirits each. Every spirit is drawn pixel by pixel in code on a 128×128 grid (shading, 4×4 Bayer dithering, colored outlines). The same drawing is then rendered natively at 32×32 for the app icon and favicon sizes. Click <em>PNG</em> to save a 1024 px copy.</p>
+  </div>
+  <section class="palette" id="compare" style="border-top:none;margin-top:0;padding-top:0">
+    <h2>Sprout face: image vs. code</h2>
+    <p class="muted">The generated image and a code version drawn at the same size and position on a 1024 px canvas. Drag the slider to wipe between them, or tick blink. The difference map is black where they match.</p>
+    <div class="ver" role="radiogroup" aria-label="Code version">
+      <label><input type="radio" name="ver" value="master" checked> <strong>Exact master</strong> <span class="muted">· the image itself, every pixel snapped to the 8 brand colours, transparent background (<span class="mono">mark/stackspirit-mark-master.png</span>)</span></label>
+      <label><input type="radio" name="ver" value="grid"> <strong>Pixel grid</strong> <span class="muted">· rebuilt as clean 8 px blocks (<span class="mono">mark/grid.json</span>, <span class="mono">stackspirit-mark.svg</span>)</span></label>
+    </div>
+    <div class="cmp">
+      <figure><div class="cmp__box"><img id="cmp-img" src="gen/r2-sprout.png" alt="Generated sprout face"></div><figcaption>Image (Sunburst 2.6)</figcaption></figure>
+      <figure><div class="cmp__box"><canvas id="cmp-code" width="1024" height="1024"></canvas></div><figcaption id="cmp-code-label">Code</figcaption></figure>
+      <figure><div class="cmp__box"><canvas id="cmp-diff" width="1024" height="1024"></canvas></div><figcaption>Difference ×4 · <span style="color:#ff5c5c">red box</span> = cell off by a visible amount</figcaption></figure>
+    </div>
+    <div class="wipe">
+      <div class="wipe__stage">
+        <img id="wipe-img" src="gen/r2-sprout.png" alt="">
+        <canvas id="wipe-code" width="1024" height="1024"></canvas>
+        <div class="wipe__line" id="wipe-line"></div>
+        <span class="wipe__tag" style="left:12px">Code</span><span class="wipe__tag" style="right:12px">Image</span>
+      </div>
+      <label class="wipe__ctl">Wipe <input type="range" id="wipe-range" min="0" max="100" value="50"></label>
+      <label class="wipe__ctl"><input type="checkbox" id="blink"> Blink between them every 0.6 s</label>
+    </div>
+    <div class="stats" id="cmp-stats">Comparing…</div>
+  </section>
+
+  <div id="root"></div>
+
+  <section class="palette">
+    <h2>Round 2 · Meadow, with your references</h2>
+    <p class="muted">Generated with <span class="mono">gpt-image-2.6-sunburst</span> and three reference images: the deadpan white figure (expression and body), the pixel-art cartoon (pixel technique only) and the frog painting (eyes only). Next step: trace the chosen one into exact code.</p>
+    <div class="logos" style="margin-top:20px">
+      <div class="logo"><h3>Body · deadpan spirit</h3><div style="background:#0D120F;border-radius:12px;overflow:hidden"><img src="gen/r2-body.png" alt="Full-body green spirit" style="width:100%;display:block;image-rendering:pixelated"></div></div>
+      <div class="logo"><h3>Face only</h3><div style="background:#0D120F;border-radius:12px;overflow:hidden"><img src="gen/r2-face.png" alt="Green spirit face" style="width:100%;display:block;image-rendering:pixelated"></div></div>
+      <div class="logo"><h3>Face with sprout · recommended</h3><div style="background:#0D120F;border-radius:12px;overflow:hidden"><img src="gen/r2-sprout.png" alt="Green spirit face with a sprout" style="width:100%;display:block;image-rendering:pixelated"></div></div>
+      <div class="logo"><h3>Deadpan Gazer</h3><div style="background:#0D120F;border-radius:12px;overflow:hidden"><img src="gen/r3-gazer.png" alt="Chubby green spirit gazing up" style="width:100%;display:block;image-rendering:pixelated"></div></div>
+      <div class="logo"><h3>Body · thicker</h3><div style="background:#0D120F;border-radius:12px;overflow:hidden"><img src="gen/r3-thick.png" alt="Thicker full-body green spirit" style="width:100%;display:block;image-rendering:pixelated"></div></div>
+    </div>
+  </section>
+
+  <section class="palette">
+    <h2>Round 1 · image model versions (no references)</h2>
+    <p class="muted">Generated with <span class="mono">gpt-image-2.6-sunburst</span> from the same six briefs (2026-11-17). For mood only: these are not on a real pixel grid and drift off the palette, so they are not usable as the logo file. Left: generated. Right: the code version.</p>
+    <div class="logos" id="gen" style="margin-top:20px"></div>
+  </section>
+</div>
+
+<script>
+/* ---------- palettes ---------- */
+const PALETTES = [
+  {
+    id: "meadow",
+    name: "A · Meadow",
+    blurb: "Warm grass greens with a yellow lean, from the frog painting and the cloud-shadow fields. Earthy and friendly.",
+    greens: [
+      { role: "Primary", key: "main", note: "Buttons, focus, the mark" },
+      { role: "Deep", key: "deep", note: "Light-theme accent, outlines" },
+      { role: "Sprout", key: "pale", note: "Highlights, success tint" },
+    ],
+    dark: "#0D120F", light: "#F5F7F0",
+    outline: "#123321", deep: "#1E5B36", shadow: "#2E7F48", main: "#43A85A", light2: "#7CCB6B", pale: "#CDEDB0",
+    eye: "#0A0E0B", eyeRim: "#1E3A27",
+  },
+  {
+    id: "spectral",
+    name: "B · Spectral",
+    blurb: "Cool jade and mint with a faint blue glow, from the glowing forest spirit. More 'spirit', more night-time.",
+    greens: [
+      { role: "Primary", key: "main", note: "Buttons, focus, the mark" },
+      { role: "Pine", key: "deep", note: "Light-theme accent, outlines" },
+      { role: "Mist", key: "pale", note: "Glow, highlights" },
+    ],
+    dark: "#081010", light: "#F2F8F6",
+    outline: "#052A25", deep: "#0B4A40", shadow: "#127A62", main: "#1FC28B", light2: "#5FE6B0", pale: "#C8FAE3",
+    eye: "#050B0A", eyeRim: "#0F3A33",
+  },
+];
+
+/* ---------- designs (coordinates are 0..1 of the canvas) ---------- */
+const DESIGNS = {
+  meadow: [
+    {
+      name: "Sprout",
+      note: "Face only. Frog eye bumps on a round spirit head, a soft smile, and a two-leaf sprout.",
+      head: { cx: .5, cy: .6, rx: .34, ry: .27 }, bulbs: { y: .385, dx: .165, r: .13, k: .07 },
+      eyeScale: .66, look: [.2, .15], lid: 0,
+      mouth: { type: "smile", cx: .5, y: .72, w: .14, curve: .028 },
+      cheeks: { dx: .215, y: .68, rx: .055, ry: .03 },
+      leaves: [ { cx: .435, cy: .175, rx: .08, ry: .036, rot: -.55 }, { cx: .575, cy: .155, rx: .09, ry: .04, rot: .5 } ],
+      stem: [ .5, .34, .505, .2, .011 ],
+      sparks: [ [.13, .3, 2], [.86, .22, 3], [.9, .62, 1], [.1, .7, 1] ],
+    },
+    {
+      name: "Gazer",
+      note: "The frog painting as a spirit: heavy jowls, half-closed eyes looking up, a long satisfied mouth.",
+      head: { cx: .5, cy: .57, rx: .31, ry: .24 }, jowl: { cx: .5, cy: .73, rx: .39, ry: .18 },
+      bulbs: { y: .355, dx: .15, r: .12, k: .06 },
+      eyeScale: .72, look: [-.45, -.8], lid: .36,
+      mouth: { type: "smile", cx: .5, y: .64, w: .27, curve: .022 },
+      refR: .2,
+    },
+    {
+      name: "Meadow tile",
+      note: "App-icon tile: the spirit standing on a pixel hill, eyes wide and mouth open, with a Smiling Friends feel.",
+      tile: { shape: "box", hw: .46, rr: .13, style: "meadow" },
+      head: { cx: .5, cy: .645, rx: .29, ry: .23 }, bulbs: { y: .455, dx: .14, r: .115, k: .06 },
+      eyeScale: .74, look: [0, .05], lid: 0,
+      mouth: { type: "open", cx: .5, y: .75, rx: .07, ry: .048 },
+      cheeks: { dx: .19, y: .72, rx: .045, ry: .026 },
+      sparks: [ [.2, .2, 2], [.8, .17, 1], [.73, .3, 1] ],
+    },
+  ],
+  spectral: [
+    {
+      name: "Wisp",
+      note: "Face only, with a dithered glow halo and drifting sparks. Calm eyes, a small smile.",
+      head: { cx: .5, cy: .59, rx: .3, ry: .26 }, bulbs: { y: .4, dx: .148, r: .118, k: .07 },
+      eyeScale: .64, look: [0, .2], lid: .16,
+      mouth: { type: "smile", cx: .5, y: .71, w: .075, curve: .016 },
+      aura: .1, rim: true,
+      sparks: [ [.12, .2, 3], [.88, .3, 2], [.1, .78, 1], [.86, .85, 2], [.78, .1, 1] ],
+    },
+    {
+      name: "Drift",
+      note: "The whole spirit: a ghost head trailing a tapering wisp, glancing back over its shoulder.",
+      head: { cx: .45, cy: .46, rx: .27, ry: .23 }, bulbs: { y: .285, dx: .13, r: .105, k: .06 },
+      tail: { pts: [ [.45, .58], [.56, .9], [.9, .78] ], r0: .21, r1: .022 },
+      eyeScale: .7, look: [-.55, .05], lid: .22,
+      mouth: { type: "smile", cx: .45, y: .565, w: .075, curve: .018 },
+      aura: .07, rim: true,
+      sparks: [ [.15, .82, 2], [.86, .2, 2], [.92, .55, 1] ],
+    },
+    {
+      name: "Peek",
+      note: "Round badge: the spirit rising over the edge at night, only eyes and crown showing, looking up.",
+      tile: { shape: "circle", r: .46, style: "night" },
+      head: { cx: .5, cy: .9, rx: .37, ry: .3 }, bulbs: { y: .6, dx: .17, r: .13, k: .07 },
+      eyeScale: .7, look: [.35, -.65], lid: 0,
+      mouth: { type: "none" },
+      aura: .06, rim: true,
+      sparks: [ [.3, .22, 2], [.7, .27, 1], [.52, .14, 1], [.22, .42, 1], [.8, .45, 1] ],
+    },
+  ],
+};
+
+/* ---------- pixel renderer ---------- */
+const BAYER = [0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5].map((v) => (v + .5) / 16);
+const bay = (i, j) => BAYER[(j & 3) * 4 + (i & 3)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const hash = (i, j) => { const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return s - Math.floor(s); };
+const smin = (a, b, k) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - h * h * k * .25; };
+const sCircle = (x, y, cx, cy, r) => Math.hypot(x - cx, y - cy) - r;
+function sEllipse(x, y, cx, cy, rx, ry, rot = 0) {
+  let dx = x - cx, dy = y - cy;
+  if (rot) { const c = Math.cos(rot), s = Math.sin(rot); [dx, dy] = [c * dx + s * dy, -s * dx + c * dy]; }
+  return (Math.hypot(dx / rx, dy / ry) - 1) * Math.min(rx, ry);
+}
+function sRoundBox(x, y, cx, cy, hw, hh, r) {
+  const qx = Math.abs(x - cx) - hw + r, qy = Math.abs(y - cy) - hh + r;
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r;
+}
+function sCapsule(x, y, ax, ay, bx, by, r) {
+  const pax = x - ax, pay = y - ay, bax = bx - ax, bay2 = by - ay;
+  const h = clamp((pax * bax + pay * bay2) / (bax * bax + bay2 * bay2), 0, 1);
+  return Math.hypot(pax - bax * h, pay - bay2 * h) - r;
+}
+const L = (() => { const v = [-.5, -.68, .54]; const l = Math.hypot(...v); return v.map((c) => c / l); })();
+
+function spirit(D) {
+  const H = D.head, B = D.bulbs;
+  const bl = [H.cx - B.dx, B.y], br = [H.cx + B.dx, B.y];
+  // The tail is sampled densely along a quadratic curve so it tapers smoothly.
+  const tail = [];
+  if (D.tail) {
+    const [p0, p1, p2] = D.tail.pts;
+    for (let k = 0; k <= 40; k++) {
+      const t = k / 40, u = 1 - t;
+      tail.push([
+        u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+        u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
+        D.tail.r1 + (D.tail.r0 - D.tail.r1) * Math.pow(u, 1.6),
+      ]);
+    }
+  }
+  const head = (x, y) => {
+    let d = sEllipse(x, y, H.cx, H.cy, H.rx, H.ry);
+    if (D.jowl) d = smin(d, sEllipse(x, y, D.jowl.cx, D.jowl.cy, D.jowl.rx, D.jowl.ry), .09);
+    if (tail.length) {
+      let td = Infinity;
+      for (const t of tail) td = Math.min(td, sCircle(x, y, t[0], t[1], t[2]));
+      d = smin(d, td, .06);
+    }
+    return d;
+  };
+  const bulbL = (x, y) => sCircle(x, y, bl[0], bl[1], B.r);
+  const bulbR = (x, y) => sCircle(x, y, br[0], br[1], B.r);
+  const body = (x, y) => smin(smin(head(x, y), bulbL(x, y), B.k), bulbR(x, y), B.k);
+  return { head, body, bulbs: [[bl, bulbL], [br, bulbR]] };
+}
+
+function renderDesign(D, P, N) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = N;
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(N, N);
+  const px = 1 / N;
+  const S = spirit(D);
+  const B = D.bulbs;
+  const ramp = [P.deep, P.shadow, P.main, P.light2, P.pale];
+  const edge = (f, x, y) => f(x + px, y) > 0 || f(x - px, y) > 0 || f(x, y + px) > 0 || f(x, y - px) > 0;
+
+  const tileF = D.tile
+    ? D.tile.shape === "circle"
+      ? (x, y) => sCircle(x, y, .5, .5, D.tile.r)
+      : (x, y) => sRoundBox(x, y, .5, .5, D.tile.hw, D.tile.hw, D.tile.rr)
+    : null;
+  const leafF = D.leaves
+    ? (x, y) => {
+        let d = sCapsule(x, y, ...D.stem);
+        for (const l of D.leaves) d = Math.min(d, sEllipse(x, y, l.cx, l.cy, l.rx, l.ry, l.rot));
+        return d;
+      }
+    : null;
+
+  function shade(i, j, x, y, f, refR, bias = 0) {
+    const e = .0015;
+    let gx = f(x + e, y) - f(x - e, y), gy = f(x, y + e) - f(x, y - e);
+    const gl = Math.hypot(gx, gy) || 1; gx /= gl; gy /= gl;
+    const d = f(x, y);
+    const t = 1 - clamp(-d / refR, 0, 1);
+    let nx = gx * t, ny = gy * t, nz = Math.sqrt(Math.max(0, 1 - t * t)) + .04;
+    const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+    let v = .08 + .86 * Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]) + bias;
+    if (D.rim && d > -3.2 * px && gx * .55 + gy * .7 > .5) v += .3;
+    const tt = clamp(v, 0, 1) * (ramp.length - 1);
+    let b = Math.floor(tt);
+    if (tt - b > .5 + (bay(i, j) - .5) * .6) b++;
+    return ramp[clamp(b, 0, ramp.length - 1)];
+  }
+
+  function tileBg(i, j, x, y) {
+    if (D.tile.style === "meadow") {
+      const hd = sCircle(x, y, .5, 1.62, .8);
+      if (hd < 0) {
+        if (hd > -1.5 * px) return P.light2;
+        if (N >= 64 && hash(i, j) > .9 && hash(i, j - 1) <= .9) return P.main;
+        if (N >= 64 && hash(i, j + 1) > .9) return P.main;
+        return P.shadow;
+      }
+      const sky = (y - .1) / .7;
+      return sky > .55 && bay(i, j) < (sky - .55) * 1.6 ? P.outline : P.deep;
+    }
+    // night badge
+    const r = Math.hypot(x - .5, y - .5);
+    if (N >= 64 && hash(i, j) > .994) return P.pale;
+    if (N >= 64 && hash(i, j) > .985) return P.shadow;
+    if (r > .34 && bay(i, j) < (r - .34) / .12) return P.outline;
+    return P.deep;
+  }
+
+  function face(i, j, x, y) {
+    const er = B.r * D.eyeScale;
+    for (const [c, fb] of S.bulbs) {
+      const m = B.r - er - 1.4 * px;
+      const ex = c[0] + D.look[0] * m, ey = c[1] + D.look[1] * m;
+      const de = sCircle(x, y, ex, ey, er);
+      if (de < 0) {
+        if (D.lid > 0) {
+          const ly = ey - er + 2 * er * D.lid;
+          if (y < ly) return ly - y < px * 1.1 ? P.outline : shade(i, j, x, y, fb, B.r * .9, .05);
+        }
+        if (sCircle(x, y, ex - er * .36, ey - er * .36, er * .25) < 0) return "#FFFFFF";
+        if (N >= 64 && sCircle(x, y, ex + er * .4, ey + er * .36, er * .1) < 0) return P.pale;
+        if (de > -1.8 * px && (x - ex) + (y - ey) > er * .5) return P.eyeRim;
+        return P.eye;
+      }
+      // the eye bump crease where the bulb meets the face
+      const db = fb(x, y);
+      if (Math.abs(db) < px * .55 && y > c[1] + B.r * .2 && S.head(x, y) < -1.5 * px) return P.deep;
+    }
+    const M = D.mouth;
+    if (M && M.type === "smile") {
+      const t = (x - M.cx) / M.w;
+      if (Math.abs(t) <= 1) {
+        const yc = M.y - M.curve * t * t;
+        const slope = Math.abs(2 * M.curve * t / M.w);
+        if (Math.abs(y - yc) < px * .5 * Math.max(1, slope * 1.2 + .4)) return P.outline;
+      }
+      // little tucks at the mouth corners
+      if (N >= 64) for (const s of [-1, 1]) {
+        const cx = M.cx + s * M.w, cy = M.y - M.curve;
+        if (Math.abs(x - (cx + s * px)) < px * .5 && Math.abs(y - (cy - px)) < px * .5) return P.outline;
+      }
+    }
+    if (M && M.type === "open") {
+      const d = sEllipse(x, y, M.cx, M.y, M.rx, M.ry);
+      if (d < 0) {
+        if (d > -px) return P.outline;
+        if (y < M.y - M.ry * .35) return "#FFFFFF";
+        if (y > M.y + M.ry * .25) return P.shadow;
+        return P.eye;
+      }
+    }
+    if (D.cheeks && N >= 48) {
+      const C = D.cheeks;
+      for (const s of [-1, 1]) {
+        if (sEllipse(x, y, D.head.cx + s * C.dx, C.y, C.rx, C.ry) < 0 && bay(i, j) < .5) return P.pale;
+      }
+    }
+    for (const [, fb] of S.bulbs) if (fb(x, y) < 0) return shade(i, j, x, y, fb, B.r * .9);
+    return shade(i, j, x, y, S.body, D.refR || .17);
+  }
+
+  function spark(i, j) {
+    if (N < 64) return null;
+    for (const s of D.sparks || []) {
+      const ci = Math.round(s[0] * N), cj = Math.round(s[1] * N);
+      const arm = Math.max(1, Math.round(s[2] * N / 128));
+      if (i === ci && j === cj) return P.pale;
+      if ((i === ci && Math.abs(j - cj) <= arm) || (j === cj && Math.abs(i - ci) <= arm)) return P.light2;
+    }
+    return null;
+  }
+
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const x = (i + .5) / N, y = (j + .5) / N;
+      let col = null;
+      if (tileF) {
+        const td = tileF(x, y);
+        if (td >= 0) { put(i, j, null); continue; }
+        if (edge(tileF, x, y)) { put(i, j, P.outline); continue; }
+        col = tileBg(i, j, x, y);
+      }
+      const bd = S.body(x, y);
+      if (bd < 0) {
+        col = edge(S.body, x, y) ? P.outline : face(i, j, x, y);
+      } else {
+        const ld = leafF ? leafF(x, y) : 1;
+        if (ld < 0) {
+          col = edge(leafF, x, y) ? P.outline : shade(i, j, x, y, leafF, .035, .12);
+        } else {
+          if (D.aura && bd < D.aura) {
+            const f = 1 - bd / D.aura;
+            if (f * f * 1.15 > bay(i, j)) col = f > .6 ? P.light2 : P.pale;
+          }
+          col = spark(i, j) || col;
+        }
+      }
+      put(i, j, col);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+
+  function put(i, j, hex) {
+    const o = (j * N + i) * 4;
+    if (!hex) { img.data[o + 3] = 0; return; }
+    const n = parseInt(hex.slice(1), 16);
+    img.data[o] = n >> 16; img.data[o + 1] = (n >> 8) & 255; img.data[o + 2] = n & 255; img.data[o + 3] = 255;
+  }
+}
+
+function copyCanvas(src) {
+  const c = document.createElement("canvas");
+  c.width = src.width; c.height = src.height;
+  c.getContext("2d").drawImage(src, 0, 0);
+  return c;
+}
+
+function downloadPng(src, name) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 1024;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0, 1024, 1024);
+  const a = document.createElement("a");
+  a.href = c.toDataURL("image/png");
+  a.download = name;
+  a.click();
+}
+
+/* ---------- page ---------- */
+const root = document.getElementById("root");
+for (const P of PALETTES) {
+  const designs = DESIGNS[P.id];
+  const sec = document.createElement("section");
+  sec.className = "palette";
+  sec.innerHTML = `
+    <h2>${P.name}</h2>
+    <p class="muted">${P.blurb}</p>
+    <div class="swatches">
+      ${P.greens.map((g) => `
+        <div class="sw"><div class="sw__chip" style="background:${P[g.key]}"></div>
+        <div class="sw__meta"><strong>${g.role}</strong><span class="mono">${P[g.key]}</span><br><span class="muted">${g.note}</span></div></div>`).join("")}
+      <div class="sw"><div class="sw__chip" style="background:${P.light}"></div>
+        <div class="sw__meta"><strong>Light</strong><span class="mono">${P.light}</span><br><span class="muted">Light-theme background</span></div></div>
+      <div class="sw"><div class="sw__chip" style="background:${P.dark}"></div>
+        <div class="sw__meta"><strong>Dark</strong><span class="mono">${P.dark}</span><br><span class="muted">Dark-theme background</span></div></div>
+    </div>
+    <div class="ui">
+      ${["dark", "light"].map((mode) => {
+        const bg = mode === "dark" ? P.dark : P.light;
+        const fg = mode === "dark" ? P.light : P.dark;
+        const accent = mode === "dark" ? P.main : P.shadow;
+        const accentInk = mode === "dark" ? P.dark : "#FFFFFF";
+        const soft = mode === "dark" ? P.deep : P.pale;
+        const softInk = mode === "dark" ? P.pale : P.deep;
+        return `<div class="ui__panel" style="background:${bg};color:${fg}">
+          <div class="ui__brand"><span data-mark="${mode}"></span>StackSpirit <span class="badge" style="background:${soft};color:${softInk}">${mode} theme</span></div>
+          <div class="ui__row">
+            <span class="btn" style="background:${accent};color:${accentInk}">Connect</span>
+            <span class="btn" style="border-color:${accent};color:${mode === "dark" ? P.light2 : P.deep}">Re-probe</span>
+            <span class="badge" style="background:${soft};color:${softInk}">Ready</span>
+            <span class="badge" style="border:1px solid ${accent};color:${mode === "dark" ? P.light2 : P.deep}">3 / 8 workers</span>
+          </div>
+          <p style="opacity:.72;font-size:13px">Local orchestrator is waiting for the agent on this Mac.</p>
+        </div>`;
+      }).join("")}
+    </div>
+    <div class="logos"></div>`;
+  root.appendChild(sec);
+
+  const mark = renderDesign(designs[0], P, 32);
+  sec.querySelectorAll("[data-mark]").forEach((slot) => slot.replaceWith(copyCanvas(mark)));
+
+  const grid = sec.querySelector(".logos");
+  designs.forEach((D, index) => {
+    const big = renderDesign(D, P, 128);
+    const small = renderDesign(D, P, 32);
+    const card = document.createElement("div");
+    card.className = "logo";
+    card.innerHTML = `
+      <div><h3>${P.name.split(" ")[0]}${index + 1} · ${D.name}</h3><p class="muted small">${D.note}</p></div>
+      <div class="logo__stage">
+        <div style="background:${P.dark}" data-slot="dark"></div>
+        <div style="background:${P.light}" data-slot="light"></div>
+      </div>
+      <div class="logo__small" style="background:${P.dark}" data-slot="small"></div>
+      <div class="logo__foot"><span class="muted mono" style="font-size:12px">128 px grid · 32 px native icon</span>
+        <button class="dl" type="button">PNG</button></div>`;
+    card.querySelector('[data-slot="dark"]').appendChild(big);
+    card.querySelector('[data-slot="light"]').appendChild(copyCanvas(big));
+    const smallRow = card.querySelector('[data-slot="small"]');
+    for (const cls of ["s64", "s32", "s16"]) {
+      const c = copyCanvas(small);
+      c.className = cls;
+      smallRow.appendChild(c);
+    }
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.style.fontSize = "12px";
+    label.textContent = "64 · 32 · 16 px";
+    smallRow.appendChild(label);
+    card.querySelector(".dl").addEventListener("click", () => downloadPng(big, `stackspirit-${P.id}-${D.name.toLowerCase().replace(/\s+/g, "-")}.png`));
+    grid.appendChild(card);
+  });
+}
+
+/* ---------- image vs. code comparison ---------- */
+async function compareSprout() {
+  const stats = document.getElementById("cmp-stats");
+  const grid = await (await fetch("mark/grid.json")).json();
+  const img = document.getElementById("cmp-img");
+  if (!img.complete) await new Promise((ok) => img.addEventListener("load", ok, { once: true }));
+
+  // The source pixels, to read the background colour and per-cell colours.
+  const src = document.createElement("canvas");
+  src.width = src.height = 1024;
+  const sctx = src.getContext("2d");
+  sctx.drawImage(img, 0, 0, 1024, 1024);
+  const srcData = sctx.getImageData(0, 0, 1024, 1024).data;
+  const at = (x, y) => { const o = (y * 1024 + x) * 4; return [srcData[o], srcData[o + 1], srcData[o + 2]]; };
+
+  // Background: median of the four corner cells, so the code canvas sits on the same colour.
+  const corners = [at(4, 4), at(1019, 4), at(4, 1019), at(1019, 1019)];
+  const bg = [0, 1, 2].map((k) => corners.map((c) => c[k]).sort((a, b) => a - b)[2]);
+  const bgCss = `rgb(${bg.join(",")})`;
+
+  const CELL = 8;
+  const { row: r0, col: c0 } = grid.source_offset;
+  const master = new Image();
+  master.src = "mark/stackspirit-mark-master.png";
+  await master.decode();
+
+  // Both code versions are drawn on the image's background colour; their own
+  // background is transparent.
+  function drawCode(canvas, mode) {
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = bgCss;
+    ctx.fillRect(0, 0, 1024, 1024);
+    if (mode === "master") {
+      ctx.drawImage(master, 0, 0, 1024, 1024);
+      return;
+    }
+    grid.rows.forEach((line, r) => {
+      [...line].forEach((ch, c) => {
+        if (ch === grid.background) return;
+        ctx.fillStyle = grid.palette[ch].hex;
+        ctx.fillRect((c0 + c) * CELL, (r0 + r) * CELL, CELL, CELL);
+      });
+    });
+  }
+
+  const code = document.getElementById("cmp-code");
+  const diff = document.getElementById("cmp-diff");
+  const dctx = diff.getContext("2d");
+
+  function compare(mode) {
+    drawCode(code, mode);
+    drawCode(document.getElementById("wipe-code"), mode);
+    document.getElementById("cmp-code-label").textContent =
+      mode === "master" ? "Code · exact master (stackspirit-mark-master.png)" : "Code · pixel grid (grid.json)";
+
+    // Pixel difference, amplified ×4 so small drift is visible. A cell is boxed
+    // when more than a quarter of its 64 pixels differ visibly.
+    const codeData = code.getContext("2d").getImageData(0, 0, 1024, 1024).data;
+    const out = dctx.createImageData(1024, 1024);
+    const VISIBLE = 30; // average channel difference that is noticeable side by side
+    let sum = 0, same = 0, slight = 0, offPx = 0;
+    const offPerCell = new Uint16Array(128 * 128);
+    for (let y = 0; y < 1024; y++) {
+      for (let x = 0; x < 1024; x++) {
+        const i = (y * 1024 + x) * 4;
+        const d = (Math.abs(srcData[i] - codeData[i]) + Math.abs(srcData[i + 1] - codeData[i + 1]) + Math.abs(srcData[i + 2] - codeData[i + 2])) / 3;
+        sum += d;
+        const v = Math.min(255, d * 4);
+        out.data[i] = v; out.data[i + 1] = v; out.data[i + 2] = v; out.data[i + 3] = 255;
+        if (d < 8) same++;
+        else if (d < VISIBLE) slight++;
+        else { offPx++; offPerCell[(y >> 3) * 128 + (x >> 3)]++; }
+      }
+    }
+    dctx.putImageData(out, 0, 0);
+    let split = 0;
+    dctx.strokeStyle = "#ff5c5c";
+    dctx.lineWidth = 2;
+    for (let k = 0; k < offPerCell.length; k++) {
+      if (offPerCell[k] > 16) {
+        split++;
+        dctx.strokeRect((k % 128) * CELL - 2, Math.floor(k / 128) * CELL - 2, CELL + 4, CELL + 4);
+      }
+    }
+
+    const total = 1024 * 1024;
+    const pct = (n) => `${((n / total) * 100).toFixed(2)}%`;
+    const note = mode === "master"
+      ? "The exact master keeps the image's own shapes, so the eyes and mouth match exactly; only the soft edge pixels between blocks are snapped to the nearest of the 8 colours."
+      : "These are spots where the generated image has a blurred edge or a block that drifted half a block off its own grid, like the mouth; a clean grid has to pick one colour there.";
+    stats.innerHTML = `
+      <strong>${total.toLocaleString()} pixels compared</strong> (1024 × 1024, the whole image).<br>
+      Same colour: <strong>${pct(same)}</strong> · slightly different shade, hard to see: <strong>${pct(slight)}</strong> · visibly different: <strong>${pct(offPx)}</strong><br>
+      Cells where over a quarter of the pixels differ: <strong>${split}</strong> of 16,384 (boxed in red). ${note}<br>
+      Average difference: <strong>${(sum / total).toFixed(1)}</strong> of 255.`;
+  }
+
+  document.querySelectorAll('input[name="ver"]').forEach((input) => {
+    input.addEventListener("change", () => compare(input.value));
+  });
+  compare(document.querySelector('input[name="ver"]:checked').value);
+
+  // Wipe and blink.
+  const range = document.getElementById("wipe-range");
+  const wipeCode = document.getElementById("wipe-code");
+  const line = document.getElementById("wipe-line");
+  const setWipe = (v) => {
+    wipeCode.style.clipPath = `inset(0 ${100 - v}% 0 0)`;
+    line.style.left = `calc(${v}% - 1px)`;
+  };
+  range.addEventListener("input", () => setWipe(Number(range.value)));
+  setWipe(50);
+  let timer = null;
+  document.getElementById("blink").addEventListener("change", (event) => {
+    clearInterval(timer);
+    if (!event.target.checked) { setWipe(Number(range.value)); return; }
+    let on = true;
+    timer = setInterval(() => { on = !on; setWipe(on ? 100 : 0); }, 600);
+  });
+}
+compareSprout().catch((error) => {
+  document.getElementById("cmp-stats").textContent = `Comparison failed: ${error.message}`;
+});
+
+const GEN = [
+  ["meadow", 0, "gen/a1-sprout.png"], ["meadow", 1, "gen/a2-gazer.png"], ["meadow", 2, "gen/a3-tile.png"],
+  ["spectral", 0, "gen/b1-wisp.png"], ["spectral", 1, "gen/b2-drift.png"], ["spectral", 2, "gen/b3-peek.png"],
+];
+const genGrid = document.getElementById("gen");
+for (const [pid, index, src] of GEN) {
+  const P = PALETTES.find((p) => p.id === pid);
+  const D = DESIGNS[pid][index];
+  const card = document.createElement("div");
+  card.className = "logo";
+  card.innerHTML = `
+    <div><h3>${P.name.split(" ")[0]}${index + 1} · ${D.name}</h3></div>
+    <div class="logo__stage">
+      <div style="background:${P.dark};overflow:hidden"><img src="${src}" alt="Generated ${D.name} spirit" style="width:100%;height:100%;object-fit:cover;border-radius:12px"></div>
+      <div style="background:${P.dark}" data-slot="code"></div>
+    </div>`;
+  card.querySelector('[data-slot="code"]').appendChild(renderDesign(D, P, 128));
+  genGrid.appendChild(card);
+}
+</script>
+</body>
+</html>
