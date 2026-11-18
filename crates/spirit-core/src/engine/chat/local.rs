@@ -1,0 +1,2082 @@
+//! The bundled-engine local transport: health, session, message, log, abort and pump.
+//!
+//! The transport never spawns an engine. It calls the injected [`ChatEngine`], which
+//! the desktop wires to the existing `EngineSupervisor` singleton. The loopback port,
+//! workspace and native session ids stay in this module: no serialized DTO or error
+//! carries an endpoint URL, port, credential or path.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, mpsc};
+use ulid::Ulid;
+
+use crate::engine::chat::model::{
+    ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
+    ChatModelView, ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState,
+    ChatSessionView, ChatStartInput, MAX_MESSAGE_CHARS, cap_text, normalize_text,
+    validate_user_text,
+};
+use crate::engine::chat::pump::{
+    ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper,
+};
+use crate::engine::chat::sse::{
+    SseFrame, SseParser, StreamSupport, error_status, parse_engine_event,
+};
+use crate::engine::{EngineChoice, EngineStatus};
+use crate::error::{SpiritError, SpiritErrorCode};
+use crate::time::{Clock, SystemClock, Timestamp};
+
+/// The 10-minute turn cap from `docs/ORCHESTRATOR-CHAT.md` §2.2.4.
+const TURN_CAP: Duration = Duration::from_secs(10 * 60);
+/// Loopback TCP connect budget.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(700);
+/// Health read budget.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Session/metadata read budget.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(3);
+/// Abort read budget; the caller retries once.
+const ABORT_TIMEOUT: Duration = Duration::from_secs(3);
+/// SSE response-header budget.
+const SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+/// One SSE idle read slice. Sixty slices make the 60 s idle rule.
+const SSE_READ_TIMEOUT: Duration = Duration::from_secs(1);
+/// The SSE idle cap from §2.2.4.
+const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The largest accepted local response body.
+const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
+/// SSE reconnect attempts before `stream_lost`.
+const MAX_SSE_ATTEMPTS: usize = 5;
+/// The bounded reconnects from §2.2.4.
+const SSE_BACKOFF: [Duration; 5] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+/// Broadcast capacity for chat events.
+const EVENT_CAPACITY: usize = 256;
+/// SSE signal channel capacity.
+const SSE_CAPACITY: usize = 64;
+/// The title of the single local setup session.
+const SETUP_TITLE: &str = "StackSpirit setup";
+
+/// The only local chat is the v1 API of the bundled engine.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ChatEndpoint {
+    port: u16,
+}
+
+/// The engine boundary the chat transport needs.
+///
+/// The desktop implements this by delegating to the existing engine supervisor; chat
+/// never calls `spawn`, `reserve_loopback_port` or `Command::new` itself.
+#[async_trait]
+pub trait ChatEngine: Send + Sync {
+    /// Ensures the bundled engine is healthy and returns its current loopback port.
+    async fn ensure_ready(&self) -> Result<u16, SpiritError>;
+
+    /// Returns the locally selected model, if any.
+    fn selected_model(&self) -> Option<ChatModelView> {
+        None
+    }
+
+    /// Returns the engine status for the external-engine gate.
+    ///
+    /// This is core-only and is never serialized into a chat DTO.
+    fn status(&self) -> EngineStatus {
+        EngineStatus::default()
+    }
+}
+
+/// The chat transport boundary. The desktop command layer and the future server
+/// transport share this trait.
+#[async_trait]
+pub trait ChatTransport: Send + Sync {
+    /// Ensures the engine and creates/attaches the native session.
+    async fn start(&self, input: ChatStartInput) -> Result<ChatSessionView, SpiritError>;
+    /// Reuses the stored native session; never creates one.
+    async fn attach(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError>;
+    /// Accepts one user turn and returns immediately.
+    async fn send(
+        &self,
+        session: &ChatSessionId,
+        text: &str,
+    ) -> Result<ChatSendReceipt, SpiritError>;
+    /// Aborts the turn when supported and returns the stopped view.
+    async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError>;
+    /// Reads one backward log page.
+    async fn log(
+        &self,
+        session: &ChatSessionId,
+        query: &ChatLogQuery,
+    ) -> Result<ChatLogPage, SpiritError>;
+}
+
+/// A core-only native session summary. It is never a serialized chat DTO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSession {
+    /// Native session id, core-only.
+    pub id: String,
+    /// Native title, when reported.
+    pub title: String,
+}
+
+/// The local chat provider for the bundled StackSpirit Engine.
+pub struct LocalChatProvider {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    engine: Arc<dyn ChatEngine>,
+    workspace: PathBuf,
+    stream_support: StreamSupport,
+    bus: ChatEventBus,
+    state: Mutex<ProviderState>,
+    pump: std::sync::Mutex<PumpSlot>,
+    clock: Arc<dyn Clock>,
+}
+
+#[derive(Default)]
+struct ProviderState {
+    endpoint: Option<ChatEndpoint>,
+    sessions: HashMap<ChatSessionId, SessionRecord>,
+}
+
+struct SessionRecord {
+    native_session_id: String,
+    state: ChatSessionState,
+    attached: bool,
+    started_at: Option<Timestamp>,
+    last_event_at: Option<Timestamp>,
+    error: Option<SpiritError>,
+    applier: ChatEventApplier,
+    mapper: SseEventMapper,
+    active_turn: Option<String>,
+    turn_completed: bool,
+}
+
+impl SessionRecord {
+    fn new(native_session_id: String) -> Self {
+        Self {
+            native_session_id,
+            state: ChatSessionState::Idle,
+            attached: false,
+            started_at: None,
+            last_event_at: None,
+            error: None,
+            applier: ChatEventApplier::new(),
+            mapper: SseEventMapper::new(),
+            active_turn: None,
+            turn_completed: false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PumpSlot {
+    port: Option<u16>,
+    cancel: Option<Arc<AtomicBool>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let mut slot = self
+            .pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cancel) = slot.cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        if let Some(handle) = slot.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl LocalChatProvider {
+    /// Builds a local provider around an injected engine and private setup workspace.
+    #[must_use]
+    pub fn new(engine: Arc<dyn ChatEngine>, workspace: PathBuf) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                engine,
+                workspace,
+                stream_support: StreamSupport::default(),
+                bus: ChatEventBus::new(EVENT_CAPACITY),
+                state: Mutex::new(ProviderState::default()),
+                pump: std::sync::Mutex::new(PumpSlot::default()),
+                clock: Arc::new(SystemClock),
+            }),
+        }
+    }
+
+    /// Replaces the clock. Tests use it; production uses the system clock.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.clock = clock;
+        }
+        self
+    }
+
+    /// Enables the SSE path only when probe evidence pinned the frames.
+    ///
+    /// The production constructor always starts [`StreamSupport::Unpinned`]; fake
+    /// engine tests explicitly opt in to the contract shape.
+    #[must_use]
+    pub fn with_stream_support(mut self, support: StreamSupport) -> Self {
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("stream support must be configured before the provider is shared");
+        inner.stream_support = support;
+        self
+    }
+
+    /// Subscribes to the revisioned event fan-out.
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChatEvent> {
+        self.inner.bus.subscribe()
+    }
+
+    /// Returns the honest live-text capability.
+    #[must_use]
+    pub fn streaming_support(&self) -> &StreamSupport {
+        &self.inner.stream_support
+    }
+
+    /// Returns the exact safe reason live text is disabled, when it is.
+    #[must_use]
+    pub fn streaming_support_reason(&self) -> Option<&str> {
+        self.inner.stream_support.reason()
+    }
+
+    /// Lists the native engine sessions. Core-only; the renderer never receives these ids.
+    pub async fn native_sessions(&self) -> Result<Vec<NativeSession>, SpiritError> {
+        let endpoint = {
+            let state = self.inner.state.lock().await;
+            state.endpoint
+        }
+        .ok_or_else(chat_not_started_error)?;
+        let response = self
+            .inner
+            .request(
+                "GET",
+                endpoint,
+                "/session".to_owned(),
+                None,
+                SESSION_TIMEOUT,
+            )
+            .await?;
+        ensure_success(&response)?;
+        Ok(parse_native_sessions(&response.body))
+    }
+
+    /// Ensures the engine and creates or reuses the setup native session.
+    pub async fn start(&self, input: &ChatStartInput) -> Result<ChatSessionView, SpiritError> {
+        validate_start(input)?;
+        let port = self.inner.ensure_engine().await?;
+        self.inner.check_health(port).await?;
+
+        let existing = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(&input.session)
+                .map(|record| record.native_session_id.clone())
+        };
+        let native = if input.resumes() {
+            if let Some(native) = existing {
+                match self.inner.get_native_session(port, &native).await {
+                    Ok(()) => native,
+                    Err(error) if error.code == SpiritErrorCode::NotFound => {
+                        self.inner.remove_session(&input.session).await;
+                        return Err(session_lost_error());
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                self.inner.create_native_session(port).await?
+            }
+        } else {
+            self.inner.create_native_session(port).await?
+        };
+        let body = self.inner.read_log(port, &native).await?;
+        let now = self.inner.clock.now();
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            state.endpoint = Some(ChatEndpoint { port });
+            let record = state
+                .sessions
+                .entry(input.session.clone())
+                .or_insert_with(|| SessionRecord::new(native.clone()));
+            let preserve_turn =
+                record.native_session_id == native && record.state == ChatSessionState::Streaming;
+            record.native_session_id = native;
+            if !preserve_turn {
+                record.state = ChatSessionState::Ready;
+                record.active_turn = None;
+                record.turn_completed = false;
+            }
+            record.attached = true;
+            record.started_at.get_or_insert(now);
+            record.last_event_at = Some(now);
+            record.error = None;
+            record
+                .applier
+                .replace_log(parse_log(&body, self.inner.clock.now()));
+            record.applier.observe_revision(self.inner.bus.revision());
+            record.mapper.reset_from_messages(record.applier.messages());
+            self.inner.view_for(&input.session, record)
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        ensure_pump(&self.inner, port);
+        Ok(view)
+    }
+
+    /// Reuses the stored native session. It never creates one.
+    pub async fn attach(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
+        validate_local_session(session)?;
+        let native = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(session)
+                .map(|record| record.native_session_id.clone())
+        }
+        .ok_or_else(chat_not_started_error)?;
+        let port = self.inner.ensure_engine().await?;
+        self.inner.check_health(port).await?;
+        match self.inner.get_native_session(port, &native).await {
+            Ok(()) => {}
+            Err(error) if error.code == SpiritErrorCode::NotFound => {
+                self.inner.remove_session(session).await;
+                return Err(session_lost_error());
+            }
+            Err(error) => return Err(error),
+        }
+        let body = self.inner.read_log(port, &native).await?;
+        let now = self.inner.clock.now();
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            state.endpoint = Some(ChatEndpoint { port });
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            if record.native_session_id != native {
+                return Err(session_lost_error());
+            }
+            let preserve_turn = record.state == ChatSessionState::Streaming;
+            if !preserve_turn {
+                record.state = ChatSessionState::Ready;
+                record.active_turn = None;
+                record.turn_completed = false;
+            }
+            record.attached = true;
+            record.started_at.get_or_insert(now);
+            record.last_event_at = Some(now);
+            record.error = None;
+            record
+                .applier
+                .replace_log(parse_log(&body, self.inner.clock.now()));
+            record.applier.observe_revision(self.inner.bus.revision());
+            record.mapper.reset_from_messages(record.applier.messages());
+            self.inner.view_for(session, record)
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        ensure_pump(&self.inner, port);
+        Ok(view)
+    }
+
+    /// Accepts one user turn and returns immediately. Assistant text arrives as events.
+    pub async fn send(
+        &self,
+        session: &ChatSessionId,
+        text: &str,
+    ) -> Result<ChatSendReceipt, SpiritError> {
+        let text = validate_user_text(text)?;
+        let (native, previous_port) = {
+            let state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?;
+            if !record.attached {
+                return Err(chat_not_started_error());
+            }
+            match record.state {
+                ChatSessionState::Streaming => return Err(chat_busy_error()),
+                ChatSessionState::Ready => {}
+                _ => return Err(chat_not_started_error()),
+            }
+            let endpoint = state
+                .endpoint
+                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
+            (record.native_session_id.clone(), endpoint.port)
+        };
+        let port = self.inner.ensure_engine().await?;
+        self.inner.check_health(port).await?;
+        if port != previous_port {
+            match self.inner.get_native_session(port, &native).await {
+                Ok(()) => {}
+                Err(error) if error.code == SpiritErrorCode::NotFound => {
+                    self.inner.remove_session(session).await;
+                    return Err(session_lost_error());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let model = self
+            .inner
+            .engine
+            .selected_model()
+            .ok_or_else(no_model_error)?;
+
+        let now = self.inner.clock.now();
+        let user = ChatMessage::user(format!("local:{}", Ulid::generate()), &text, now);
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            state.endpoint = Some(ChatEndpoint { port });
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            match record.state {
+                ChatSessionState::Streaming => return Err(chat_busy_error()),
+                ChatSessionState::Ready => {}
+                _ => return Err(chat_not_started_error()),
+            }
+            record.state = ChatSessionState::Streaming;
+            record.error = None;
+            record.active_turn = Some(user.id.clone());
+            record.turn_completed = false;
+            record.last_event_at = Some(now);
+            self.inner.view_for(session, record)
+        };
+        self.inner.clone().emit_session(view).await;
+        let user_event = user.clone();
+        let session_for_event = session.clone();
+        self.inner
+            .clone()
+            .emit_with(move |events| events.message(session_for_event, user_event))
+            .await;
+
+        let body = message_body(&model, &text, &user.id);
+        ensure_pump(&self.inner, port);
+        spawn_turn(self.inner.clone(), port, native, session.clone(), body);
+        Ok(ChatSendReceipt {
+            session: session.clone(),
+            message: user,
+            accepted: true,
+        })
+    }
+
+    /// Aborts the current turn when supported and returns the stopped view.
+    pub async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
+        let now = self.inner.clock.now();
+        let (native, port, streaming) = {
+            let mut state = self.inner.state.lock().await;
+            let endpoint = state
+                .endpoint
+                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            let streaming = record.state == ChatSessionState::Streaming;
+            // Mark the session stopped before the abort request so a racing send cannot
+            // start a second turn while the first abort is in flight.
+            record.state = ChatSessionState::Stopped;
+            record.attached = true;
+            record.active_turn = None;
+            record.turn_completed = true;
+            record.last_event_at = Some(now);
+            record.error = None;
+            (record.native_session_id.clone(), endpoint.port, streaming)
+        };
+        let confirmed = if streaming {
+            self.inner.abort(port, &native).await.unwrap_or(false)
+        } else {
+            true
+        };
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            record.error = if confirmed {
+                None
+            } else {
+                Some(stop_unconfirmed_error())
+            };
+            self.inner.view_for(session, record)
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        self.inner
+            .clone()
+            .emit_with(|events| events.closed(session.clone(), ChatCloseReason::Stopped))
+            .await;
+        Ok(view)
+    }
+
+    /// Reads the active native log, newest page first.
+    pub async fn log(
+        &self,
+        session: &ChatSessionId,
+        query: &ChatLogQuery,
+    ) -> Result<ChatLogPage, SpiritError> {
+        let (native, port) = {
+            let state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?;
+            let endpoint = state
+                .endpoint
+                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
+            (record.native_session_id.clone(), endpoint.port)
+        };
+        let body = match self.inner.read_log(port, &native).await {
+            Ok(body) => body,
+            Err(error) if error.code == SpiritErrorCode::NotFound => {
+                self.inner.remove_session(session).await;
+                return Err(session_lost_error());
+            }
+            Err(error) => return Err(error),
+        };
+        let messages = parse_log(&body, self.inner.clock.now());
+        page_messages(messages, query)
+    }
+}
+
+#[async_trait]
+impl ChatTransport for LocalChatProvider {
+    async fn start(&self, input: ChatStartInput) -> Result<ChatSessionView, SpiritError> {
+        LocalChatProvider::start(self, &input).await
+    }
+
+    async fn attach(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
+        LocalChatProvider::attach(self, session).await
+    }
+
+    async fn send(
+        &self,
+        session: &ChatSessionId,
+        text: &str,
+    ) -> Result<ChatSendReceipt, SpiritError> {
+        LocalChatProvider::send(self, session, text).await
+    }
+
+    async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
+        LocalChatProvider::stop(self, session).await
+    }
+
+    async fn log(
+        &self,
+        session: &ChatSessionId,
+        query: &ChatLogQuery,
+    ) -> Result<ChatLogPage, SpiritError> {
+        LocalChatProvider::log(self, session, query).await
+    }
+}
+
+impl Inner {
+    fn view_for(&self, session: &ChatSessionId, record: &SessionRecord) -> ChatSessionView {
+        ChatSessionView {
+            session: session.clone(),
+            location: ChatSessionLocation::Local,
+            state: record.state,
+            attached: record.attached,
+            streaming_supported: self.stream_support.is_supported(),
+            model: self.engine.selected_model(),
+            started_at: record.started_at,
+            last_event_at: record.last_event_at,
+            error: record.error.clone(),
+        }
+    }
+
+    async fn ensure_engine(&self) -> Result<u16, SpiritError> {
+        if matches!(self.engine.status().choice, EngineChoice::External { .. }) {
+            return Err(engine_external_error());
+        }
+        self.engine.ensure_ready().await
+    }
+
+    async fn check_health(&self, port: u16) -> Result<(), SpiritError> {
+        let response = self
+            .request(
+                "GET",
+                ChatEndpoint { port },
+                "/global/health".to_owned(),
+                None,
+                HEALTH_TIMEOUT,
+            )
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(engine_not_ready_error(format!(
+                "engine health returned HTTP {}",
+                response.status
+            )));
+        }
+        let Ok(document) = serde_json::from_slice::<Value>(&response.body) else {
+            return Err(engine_not_ready_error(
+                "engine health returned invalid JSON",
+            ));
+        };
+        if document.get("healthy").and_then(Value::as_bool) != Some(true) {
+            return Err(engine_not_ready_error("engine health reported unhealthy"));
+        }
+        Ok(())
+    }
+
+    async fn request(
+        &self,
+        method: &'static str,
+        endpoint: ChatEndpoint,
+        path: String,
+        body: Option<Vec<u8>>,
+        read_timeout: Duration,
+    ) -> Result<ChatResponse, SpiritError> {
+        let workspace = self.workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            http_request(
+                &workspace,
+                endpoint.port,
+                method,
+                &path,
+                body.as_deref(),
+                read_timeout,
+            )
+        })
+        .await
+        .map_err(|_| {
+            SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the local chat request could not run",
+            )
+        })?
+    }
+
+    async fn create_native_session(&self, port: u16) -> Result<String, SpiritError> {
+        let body = serde_json::to_vec(&json!({ "title": SETUP_TITLE })).map_err(|_| {
+            SpiritError::new(
+                SpiritErrorCode::Internal,
+                "the setup session request could not be encoded",
+            )
+        })?;
+        let response = self
+            .request(
+                "POST",
+                ChatEndpoint { port },
+                "/session".to_owned(),
+                Some(body),
+                SESSION_TIMEOUT,
+            )
+            .await?;
+        ensure_success(&response)?;
+        let Ok(document) = serde_json::from_slice::<Value>(&response.body) else {
+            return Err(engine_request_error(
+                "the local engine returned an unreadable session",
+            ));
+        };
+        document
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| safe_native_id(id).is_ok())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                engine_request_error("the local engine did not return a usable session id")
+            })
+    }
+
+    async fn get_native_session(&self, port: u16, native: &str) -> Result<(), SpiritError> {
+        let path = format!("/session/{}", safe_native_id(native)?);
+        let response = self
+            .request("GET", ChatEndpoint { port }, path, None, SESSION_TIMEOUT)
+            .await?;
+        if response.status == 404 {
+            return Err(session_lost_error());
+        }
+        ensure_success(&response)
+    }
+
+    async fn read_log(&self, port: u16, native: &str) -> Result<Vec<u8>, SpiritError> {
+        let path = format!("/session/{}/message", safe_native_id(native)?);
+        let response = self
+            .request("GET", ChatEndpoint { port }, path, None, SESSION_TIMEOUT)
+            .await?;
+        if response.status == 404 {
+            return Err(session_lost_error());
+        }
+        ensure_success(&response)?;
+        Ok(response.body)
+    }
+
+    async fn abort(&self, port: u16, native: &str) -> Result<bool, SpiritError> {
+        let path = format!("/session/{}/abort", safe_native_id(native)?);
+        for attempt in 0..2 {
+            let result = self
+                .request(
+                    "POST",
+                    ChatEndpoint { port },
+                    path.clone(),
+                    Some(Vec::new()),
+                    ABORT_TIMEOUT,
+                )
+                .await;
+            match result {
+                Ok(response) if (200..300).contains(&response.status) => return Ok(true),
+                Ok(response) if matches!(response.status, 404 | 405) => return Ok(false),
+                Ok(response) => return Err(map_http_status(response.status)),
+                Err(_) if attempt == 0 => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(engine_request_error(
+            "the local engine did not answer the abort request",
+        ))
+    }
+
+    async fn remove_session(&self, session: &ChatSessionId) {
+        self.state.lock().await.sessions.remove(session);
+    }
+
+    fn project_and_publish_locked(
+        &self,
+        state: &mut ProviderState,
+        event: &ChatEvent,
+    ) -> Option<ChatSessionId> {
+        let target = event.session().clone();
+        let now = self.clock.now();
+        let mut backfill = false;
+        for (session, record) in &mut state.sessions {
+            if *session == target {
+                if record.applier.apply(event, now) == ApplyOutcome::Backfill {
+                    backfill = true;
+                }
+            } else {
+                record.applier.observe_revision(event.revision());
+            }
+        }
+        let _ = self.bus.publish(event.clone());
+        if backfill { Some(target) } else { None }
+    }
+
+    async fn emit_session(self: Arc<Self>, view: ChatSessionView) -> ChatSessionView {
+        let mut state = self.state.lock().await;
+        let event = self.bus.session(view.clone());
+        let backfill = self.project_and_publish_locked(&mut state, &event);
+        drop(state);
+        if let Some(session) = backfill {
+            schedule_reload(&self, session);
+        }
+        view
+    }
+
+    async fn emit_with(self: Arc<Self>, build: impl FnOnce(&ChatEventBus) -> ChatEvent + Send) {
+        let mut state = self.state.lock().await;
+        let event = build(&self.bus);
+        let backfill = self.project_and_publish_locked(&mut state, &event);
+        drop(state);
+        if let Some(session) = backfill {
+            schedule_reload(&self, session);
+        }
+    }
+
+    async fn emit_message(self: Arc<Self>, session: &ChatSessionId, message: ChatMessage) {
+        let session = session.clone();
+        self.emit_with(move |events| events.message(session, message))
+            .await;
+    }
+
+    async fn emit_delta(
+        self: Arc<Self>,
+        session: &ChatSessionId,
+        message_id: &str,
+        part_id: Option<String>,
+        text: &str,
+    ) {
+        let session = session.clone();
+        let message_id = message_id.to_owned();
+        let text = text.to_owned();
+        self.emit_with(move |events| events.delta(session, message_id, part_id, text))
+            .await;
+    }
+
+    async fn emit_done(
+        self: Arc<Self>,
+        session: &ChatSessionId,
+        message_id: &str,
+        truncated: bool,
+    ) {
+        let session = session.clone();
+        let message_id = message_id.to_owned();
+        self.emit_with(move |events| events.done(session, message_id, truncated))
+            .await;
+    }
+
+    async fn fail_session(self: Arc<Self>, session: &ChatSessionId, error: SpiritError) {
+        let now = self.clock.now();
+        let view = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if record.state == ChatSessionState::Stopped {
+                return;
+            }
+            record.state = ChatSessionState::Error;
+            record.error = Some(error.clone());
+            record.active_turn = None;
+            record.turn_completed = true;
+            record.last_event_at = Some(now);
+            self.view_for(session, record)
+        };
+        let session_for_error = session.clone();
+        self.clone()
+            .emit_with(move |events| events.error(session_for_error, error))
+            .await;
+        self.emit_session(view).await;
+    }
+
+    async fn reload_session(self: Arc<Self>, session: &ChatSessionId) {
+        let (port, native) = {
+            let state = self.state.lock().await;
+            let Some(record) = state.sessions.get(session) else {
+                return;
+            };
+            if record.state == ChatSessionState::Stopped {
+                return;
+            }
+            let Some(endpoint) = state.endpoint else {
+                return;
+            };
+            (endpoint.port, record.native_session_id.clone())
+        };
+        let body = match self.read_log(port, &native).await {
+            Ok(body) => body,
+            Err(error) => {
+                self.fail_session(session, error).await;
+                return;
+            }
+        };
+        let messages = parse_log(&body, self.clock.now());
+        let changed = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if record.native_session_id != native {
+                return;
+            }
+            let old = record.applier.messages().to_vec();
+            record.applier.replace_log(messages.clone());
+            record.applier.observe_revision(self.bus.revision());
+            record.mapper.reset_from_messages(record.applier.messages());
+            changed_messages(&old, &messages)
+        };
+        for message in changed {
+            self.clone().emit_message(session, message).await;
+        }
+    }
+
+    async fn handle_frame(self: Arc<Self>, frame: SseFrame) {
+        let event = parse_engine_event(&frame);
+        let Some(native) = event.session_id().map(str::to_owned) else {
+            return;
+        };
+        let now = self.clock.now();
+        let (session, mapped) = {
+            let mut state = self.state.lock().await;
+            let Some(session) = state
+                .sessions
+                .iter()
+                .find(|(_, record)| record.native_session_id == native)
+                .map(|(session, _)| session.clone())
+            else {
+                return;
+            };
+            let Some(record) = state.sessions.get_mut(&session) else {
+                return;
+            };
+            if matches!(
+                record.state,
+                ChatSessionState::Stopped | ChatSessionState::Error
+            ) {
+                return;
+            }
+            record.last_event_at = Some(now);
+            let mapped = record.mapper.map(&event, now);
+            (session, mapped)
+        };
+        match mapped {
+            Mapped::None => {}
+            Mapped::Message(message) => self.emit_message(&session, message).await,
+            Mapped::Delta {
+                message_id,
+                part_id,
+                text,
+            } => self.emit_delta(&session, &message_id, part_id, &text).await,
+            Mapped::Done {
+                message_id,
+                truncated,
+            } => self.handle_idle(&session, &message_id, truncated).await,
+            Mapped::Error { status } => {
+                self.fail_session(&session, map_provider_error(status))
+                    .await;
+            }
+            Mapped::PermissionRequired => {
+                self.clone()
+                    .fail_session(&session, permission_required_error())
+                    .await;
+                self.abort_best_effort(&session).await;
+            }
+        }
+    }
+
+    async fn abort_best_effort(self: Arc<Self>, session: &ChatSessionId) {
+        let (port, native) = {
+            let state = self.state.lock().await;
+            let Some(record) = state.sessions.get(session) else {
+                return;
+            };
+            let Some(endpoint) = state.endpoint else {
+                return;
+            };
+            (endpoint.port, record.native_session_id.clone())
+        };
+        let _ = self.abort(port, &native).await;
+    }
+
+    async fn handle_idle(
+        self: Arc<Self>,
+        session: &ChatSessionId,
+        message_id: &str,
+        truncated: bool,
+    ) {
+        self.clone().reload_session(session).await;
+        let now = self.clock.now();
+        let (view, done) = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if matches!(
+                record.state,
+                ChatSessionState::Stopped | ChatSessionState::Error
+            ) {
+                return;
+            }
+            let done_id = if message_id.is_empty() {
+                record
+                    .applier
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == ChatRole::Assistant)
+                    .map(|message| message.id.clone())
+                    .unwrap_or_default()
+            } else {
+                message_id.to_owned()
+            };
+            record.state = ChatSessionState::Ready;
+            record.error = None;
+            record.active_turn = None;
+            record.turn_completed = true;
+            record.last_event_at = Some(now);
+            let truncated = truncated || record.applier.is_truncated(&done_id);
+            (self.view_for(session, record), (done_id, truncated))
+        };
+        self.clone().emit_done(session, &done.0, done.1).await;
+        self.emit_session(view).await;
+    }
+
+    async fn mark_reconnecting(self: Arc<Self>) {
+        let now = self.clock.now();
+        let views = {
+            let mut state = self.state.lock().await;
+            let mut views = Vec::new();
+            for (session, record) in &mut state.sessions {
+                if record.attached
+                    && matches!(
+                        record.state,
+                        ChatSessionState::Ready | ChatSessionState::Streaming
+                    )
+                {
+                    record.state = ChatSessionState::Connecting;
+                    record.last_event_at = Some(now);
+                    views.push(self.view_for(session, record));
+                }
+            }
+            views
+        };
+        for view in views {
+            self.clone().emit_session(view).await;
+        }
+    }
+
+    async fn on_sse_connected(self: Arc<Self>, port: u16) {
+        let sessions = {
+            let mut state = self.state.lock().await;
+            state.endpoint = Some(ChatEndpoint { port });
+            state.sessions.keys().cloned().collect::<Vec<_>>()
+        };
+        for session in sessions {
+            self.clone().reload_session(&session).await;
+        }
+        let now = self.clock.now();
+        let views = {
+            let mut state = self.state.lock().await;
+            let mut views = Vec::new();
+            for (session, record) in &mut state.sessions {
+                if record.attached
+                    && !matches!(
+                        record.state,
+                        ChatSessionState::Idle
+                            | ChatSessionState::Stopped
+                            | ChatSessionState::Error
+                    )
+                {
+                    record.state = if record.active_turn.is_some() {
+                        ChatSessionState::Streaming
+                    } else {
+                        ChatSessionState::Ready
+                    };
+                    record.error = None;
+                    record.last_event_at = Some(now);
+                    views.push(self.view_for(session, record));
+                }
+            }
+            views
+        };
+        for view in views {
+            self.clone().emit_session(view).await;
+        }
+    }
+
+    async fn stream_lost(self: Arc<Self>) {
+        let error = stream_lost_error();
+        let now = self.clock.now();
+        let views = {
+            let mut state = self.state.lock().await;
+            let mut views = Vec::new();
+            for (session, record) in &mut state.sessions {
+                if record.attached
+                    && matches!(
+                        record.state,
+                        ChatSessionState::Connecting
+                            | ChatSessionState::Streaming
+                            | ChatSessionState::Ready
+                    )
+                {
+                    record.state = ChatSessionState::Error;
+                    record.error = Some(error.clone());
+                    record.active_turn = None;
+                    record.turn_completed = true;
+                    record.last_event_at = Some(now);
+                    views.push(self.view_for(session, record));
+                }
+            }
+            views
+        };
+        for view in views {
+            let session = view.session.clone();
+            let error = error.clone();
+            self.clone()
+                .emit_with(move |events| events.error(session, error))
+                .await;
+            self.clone().emit_session(view).await;
+        }
+    }
+}
+
+type BoxedTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+fn schedule_reload(inner: &Arc<Inner>, session: ChatSessionId) {
+    let inner = Arc::clone(inner);
+    let future: BoxedTask = Box::pin(async move {
+        inner.reload_session(&session).await;
+    });
+    tokio::spawn(future);
+}
+
+fn spawn_turn(inner: Arc<Inner>, port: u16, native: String, session: ChatSessionId, body: Vec<u8>) {
+    tokio::spawn(async move {
+        let path = match safe_native_id(&native) {
+            Ok(path) => format!("/session/{path}/message"),
+            Err(error) => {
+                inner.fail_session(&session, error).await;
+                return;
+            }
+        };
+        let result = inner
+            .request("POST", ChatEndpoint { port }, path, Some(body), TURN_CAP)
+            .await;
+        inner.finish_turn(&session, &native, result).await;
+    });
+}
+
+impl Inner {
+    async fn finish_turn(
+        self: Arc<Self>,
+        session: &ChatSessionId,
+        native: &str,
+        result: Result<ChatResponse, SpiritError>,
+    ) {
+        let now = self.clock.now();
+        let outcome = match result {
+            Ok(response) if (200..300).contains(&response.status) => {
+                parse_assistant_response(&response.body, now)
+            }
+            Ok(response) => AssistantOutcome::Failed(map_http_status(response.status)),
+            Err(error) => AssistantOutcome::Failed(error),
+        };
+        let (view, emits) = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if record.native_session_id != native
+                || matches!(
+                    record.state,
+                    ChatSessionState::Stopped | ChatSessionState::Error
+                )
+            {
+                return;
+            }
+            let active = record.active_turn.take();
+            if active.is_none() && !record.turn_completed {
+                return;
+            }
+            let mut emits = Vec::new();
+            match outcome {
+                AssistantOutcome::Failed(error) => {
+                    record.state = ChatSessionState::Error;
+                    record.error = Some(error.clone());
+                    record.turn_completed = true;
+                    record.last_event_at = Some(now);
+                    emits.push(TurnEmit::Error(error));
+                }
+                AssistantOutcome::Empty => {
+                    if active.is_some() {
+                        emits.push(TurnEmit::Done {
+                            message_id: String::new(),
+                            truncated: false,
+                        });
+                    }
+                    record.state = ChatSessionState::Ready;
+                    record.error = None;
+                    record.turn_completed = true;
+                    record.last_event_at = Some(now);
+                }
+                AssistantOutcome::Text {
+                    id,
+                    text,
+                    created_at,
+                    truncated,
+                } => {
+                    if !record.applier.has_text(&id) {
+                        let mut message = ChatMessage::model(id.clone(), &text, created_at);
+                        message.streaming = false;
+                        emits.push(TurnEmit::Message(message));
+                    }
+                    if active.is_some() {
+                        let done_truncated = truncated || record.applier.is_truncated(&id);
+                        emits.push(TurnEmit::Done {
+                            message_id: id,
+                            truncated: done_truncated,
+                        });
+                    }
+                    record.state = ChatSessionState::Ready;
+                    record.error = None;
+                    record.turn_completed = true;
+                    record.last_event_at = Some(now);
+                }
+            }
+            record.active_turn = None;
+            (self.view_for(session, record), emits)
+        };
+        for emit in emits {
+            match emit {
+                TurnEmit::Message(message) => self.clone().emit_message(session, message).await,
+                TurnEmit::Done {
+                    message_id,
+                    truncated,
+                } => {
+                    self.clone()
+                        .emit_done(session, &message_id, truncated)
+                        .await;
+                }
+                TurnEmit::Error(error) => {
+                    let session_for_error = session.clone();
+                    self.clone()
+                        .emit_with(move |events| events.error(session_for_error, error))
+                        .await;
+                }
+            }
+        }
+        self.emit_session(view).await;
+    }
+}
+
+enum TurnEmit {
+    Message(ChatMessage),
+    Done { message_id: String, truncated: bool },
+    Error(SpiritError),
+}
+
+fn ensure_pump(inner: &Arc<Inner>, port: u16) {
+    if !inner.stream_support.is_supported() {
+        return;
+    }
+    let mut slot = inner
+        .pump
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.port == Some(port)
+        && slot
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+    {
+        return;
+    }
+    if let Some(cancel) = slot.cancel.take() {
+        cancel.store(true, Ordering::SeqCst);
+    }
+    if let Some(handle) = slot.handle.take() {
+        handle.abort();
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let weak = Arc::downgrade(inner);
+    let handle = tokio::spawn(run_pump(weak, port, Arc::clone(&cancel)));
+    slot.port = Some(port);
+    slot.cancel = Some(cancel);
+    slot.handle = Some(handle);
+}
+
+async fn run_pump(inner: Weak<Inner>, port: u16, cancel: Arc<AtomicBool>) {
+    let mut attempts = 0_usize;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(provider) = inner.upgrade() else {
+            return;
+        };
+        if attempts > 0 {
+            provider.clone().mark_reconnecting().await;
+        }
+        let (sender, mut receiver) = mpsc::channel(SSE_CAPACITY);
+        let workspace = provider.workspace.clone();
+        let reader_cancel = Arc::clone(&cancel);
+        let reader = tokio::task::spawn_blocking(move || {
+            read_sse(&workspace, port, sender, reader_cancel);
+        });
+        while let Some(signal) = receiver.recv().await {
+            match signal {
+                SseSignal::Connected => {
+                    attempts = 0;
+                    provider.clone().on_sse_connected(port).await;
+                }
+                SseSignal::Frame(frame) => provider.clone().handle_frame(frame).await,
+                SseSignal::Failed => {}
+            }
+        }
+        let _ = reader.await;
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        attempts = attempts.saturating_add(1);
+        if attempts > MAX_SSE_ATTEMPTS {
+            provider.stream_lost().await;
+            return;
+        }
+        let delay = SSE_BACKOFF[attempts.saturating_sub(1).min(SSE_BACKOFF.len() - 1)];
+        tokio::time::sleep(delay).await;
+    }
+}
+
+enum SseSignal {
+    Connected,
+    Frame(SseFrame),
+    Failed,
+}
+
+fn read_sse(workspace: &Path, port: u16, sender: mpsc::Sender<SseSignal>, cancel: Arc<AtomicBool>) {
+    let Some(mut stream) = connect_sse(workspace, port) else {
+        let _ = sender.blocking_send(SseSignal::Failed);
+        return;
+    };
+    let Some(remainder) = sse_headers(&mut stream) else {
+        let _ = sender.blocking_send(SseSignal::Failed);
+        return;
+    };
+    if sender.blocking_send(SseSignal::Connected).is_err() {
+        return;
+    }
+    if stream.set_read_timeout(Some(SSE_READ_TIMEOUT)).is_err() {
+        return;
+    }
+    let mut parser = SseParser::new();
+    let mut frames = parser.push(&remainder);
+    for frame in frames.drain(..) {
+        if sender.blocking_send(SseSignal::Frame(frame)).is_err() {
+            return;
+        }
+    }
+    let mut idle = Duration::ZERO;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                if let Some(frame) = parser.flush()
+                    && sender.blocking_send(SseSignal::Frame(frame)).is_err()
+                {
+                    return;
+                }
+                return;
+            }
+            Ok(read) => {
+                idle = Duration::ZERO;
+                for frame in parser.push(&buffer[..read]) {
+                    if sender.blocking_send(SseSignal::Frame(frame)).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                idle = idle.saturating_add(SSE_READ_TIMEOUT);
+                if idle >= SSE_IDLE_TIMEOUT {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn connect_sse(workspace: &Path, port: u16) -> Option<TcpStream> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).ok()?;
+    stream.set_read_timeout(Some(SSE_HEADER_TIMEOUT)).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .ok()?;
+    let workspace = header_value(workspace);
+    let request = format!(
+        "GET /event HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nx-opencode-directory: {workspace}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    Some(stream)
+}
+
+fn sse_headers(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut chunk = [0_u8; 4 * 1024];
+    loop {
+        let boundary = raw.windows(4).position(|window| window == b"\r\n\r\n");
+        if let Some(boundary) = boundary {
+            let status = String::from_utf8_lossy(&raw[..boundary])
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|code| code.parse::<u16>().ok());
+            if !matches!(status, Some(200..=299)) {
+                return None;
+            }
+            return Some(raw[boundary + 4..].to_vec());
+        }
+        if raw.len() > 64 * 1024 {
+            return None;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(read) => raw.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ChatResponse {
+    status: u16,
+    body: Vec<u8>,
+}
+
+fn http_request(
+    workspace: &Path,
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    read_timeout: Duration,
+) -> Result<ChatResponse, SpiritError> {
+    if !path.starts_with('/') {
+        return Err(SpiritError::new(
+            SpiritErrorCode::Internal,
+            "the local chat path is invalid",
+        ));
+    }
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+        .map_err(|_| engine_unavailable_error())?;
+    stream
+        .set_read_timeout(Some(read_timeout))
+        .map_err(|_| engine_request_error("the local engine read timeout could not be set"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| engine_request_error("the local engine write timeout could not be set"))?;
+    let body = body.unwrap_or_default();
+    let workspace = header_value(workspace);
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nx-opencode-directory: {workspace}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| request_io_error(&error))?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .map_err(|error| request_io_error(&error))?;
+    }
+    let mut raw = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| request_io_error(&error))?;
+        if read == 0 {
+            break;
+        }
+        if raw.len() + read > MAX_HTTP_BODY {
+            return Err(engine_request_error(
+                "the local engine response exceeded the local size cap",
+            ));
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    parse_http_response(&raw)
+}
+
+fn parse_http_response(raw: &[u8]) -> Result<ChatResponse, SpiritError> {
+    let boundary = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| engine_request_error("the local engine response has no HTTP headers"))?;
+    let headers = String::from_utf8_lossy(&raw[..boundary]);
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| engine_request_error("the local engine response has no HTTP status"))?;
+    let body = &raw[boundary + 4..];
+    let chunked = headers.lines().skip(1).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    });
+    let body = if chunked {
+        decode_chunked(body)?
+    } else {
+        body.to_vec()
+    };
+    Ok(ChatResponse { status, body })
+}
+
+fn decode_chunked(input: &[u8]) -> Result<Vec<u8>, SpiritError> {
+    let mut output = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let line_end = input[cursor..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| engine_request_error("the local engine response is malformed"))?;
+        let header = std::str::from_utf8(&input[cursor..cursor + line_end])
+            .map_err(|_| engine_request_error("the local engine response is malformed"))?;
+        let size = usize::from_str_radix(header.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|_| engine_request_error("the local engine response is malformed"))?;
+        cursor += line_end + 2;
+        if size == 0 {
+            break;
+        }
+        if cursor + size > input.len() {
+            return Err(engine_request_error(
+                "the local engine response is truncated",
+            ));
+        }
+        output.extend_from_slice(&input[cursor..cursor + size]);
+        cursor += size;
+        if input.get(cursor..cursor + 2) == Some(b"\r\n") {
+            cursor += 2;
+        }
+    }
+    Ok(output)
+}
+
+fn request_io_error(error: &std::io::Error) -> SpiritError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => turn_timeout_error(),
+        std::io::ErrorKind::ConnectionRefused
+        | std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::NotFound => engine_unavailable_error(),
+        _ => engine_request_error("the local engine request failed"),
+    }
+}
+
+fn header_value(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
+fn safe_native_id(native: &str) -> Result<String, SpiritError> {
+    if native.is_empty()
+        || native.len() > 200
+        || !native
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(engine_request_error(
+            "the local engine returned an unusable session id",
+        ));
+    }
+    Ok(native.to_owned())
+}
+
+fn ensure_success(response: &ChatResponse) -> Result<(), SpiritError> {
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else {
+        Err(map_http_status(response.status))
+    }
+}
+
+fn message_body(model: &ChatModelView, text: &str, message_id: &str) -> Vec<u8> {
+    let (provider, model_id) = model
+        .id
+        .split_once('/')
+        .unwrap_or(("opencode", model.id.as_str()));
+    serde_json::to_vec(&json!({
+        "messageID": message_id,
+        "model": {
+            "providerID": provider,
+            "modelID": model_id,
+        },
+        "parts": [{
+            "type": "text",
+            "text": text,
+        }],
+    }))
+    .unwrap_or_default()
+}
+
+fn parse_log(body: &[u8], now: Timestamp) -> Vec<ChatMessage> {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let Value::Array(entries) = document else {
+        return Vec::new();
+    };
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let info = entry.get("info").unwrap_or(entry);
+        let Some(role) = info.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        let (role, origin) = match role {
+            "user" => (ChatRole::User, ChatMessageOrigin::User),
+            "assistant" => (ChatRole::Assistant, ChatMessageOrigin::Model),
+            _ => continue,
+        };
+        let text = entry
+            .get("parts")
+            .and_then(Value::as_array)
+            .map(|parts| render_parts(parts))
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let id = info
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map_or_else(|| format!("log:{index}"), str::to_owned);
+        let created_at = info
+            .get("time")
+            .and_then(|time| time.get("created"))
+            .and_then(Value::as_i64)
+            .map_or(now, Timestamp::from_unix_millis);
+        let message = ChatMessage::from_text(id.clone(), role, origin, &text, created_at);
+        if let Some(existing) = messages.iter_mut().find(|existing| existing.id == id) {
+            *existing = message;
+        } else {
+            messages.push(message);
+        }
+    }
+    messages
+}
+
+fn render_parts(parts: &[Value]) -> String {
+    let mut text = String::new();
+    for part in parts {
+        if part.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        let Some(value) = part.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(value);
+    }
+    let (text, _) = cap_text(&normalize_text(&text), MAX_MESSAGE_CHARS);
+    text
+}
+
+enum AssistantOutcome {
+    Text {
+        id: String,
+        text: String,
+        created_at: Timestamp,
+        truncated: bool,
+    },
+    Empty,
+    Failed(SpiritError),
+}
+
+fn parse_assistant_response(body: &[u8], now: Timestamp) -> AssistantOutcome {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return AssistantOutcome::Failed(engine_request_error(
+            "the local engine returned an unreadable message",
+        ));
+    };
+    if let Some(error) = document.get("error").filter(|error| !error.is_null()) {
+        return AssistantOutcome::Failed(map_provider_error(error_status(error)));
+    }
+    let info = document.get("info").unwrap_or(&document);
+    if let Some(error) = info.get("error").filter(|error| !error.is_null()) {
+        return AssistantOutcome::Failed(map_provider_error(error_status(error)));
+    }
+    let text = document
+        .get("parts")
+        .and_then(Value::as_array)
+        .map(|parts| render_parts(parts))
+        .unwrap_or_default();
+    if text.is_empty() {
+        return AssistantOutcome::Empty;
+    }
+    let (text, truncated) = cap_text(&text, MAX_MESSAGE_CHARS);
+    let id = info
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| format!("assistant:{}", Ulid::generate()), str::to_owned);
+    let created_at = info
+        .get("time")
+        .and_then(|time| time.get("created"))
+        .and_then(Value::as_i64)
+        .map_or(now, Timestamp::from_unix_millis);
+    AssistantOutcome::Text {
+        id,
+        text,
+        created_at,
+        truncated,
+    }
+}
+
+fn parse_native_sessions(body: &[u8]) -> Vec<NativeSession> {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let Value::Array(entries) = document else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(Value::as_str)?;
+            if safe_native_id(id).is_err() {
+                return None;
+            }
+            let title = entry
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            Some(NativeSession {
+                id: id.to_owned(),
+                title,
+            })
+        })
+        .collect()
+}
+
+fn page_messages(
+    messages: Vec<ChatMessage>,
+    query: &ChatLogQuery,
+) -> Result<ChatLogPage, SpiritError> {
+    let limit = query.limit();
+    let offset = match query.cursor.as_deref() {
+        Some(cursor) => cursor
+            .parse::<usize>()
+            .map_err(|_| SpiritError::invalid_input("cursor", "invalid log cursor"))?,
+        None => 0,
+    };
+    if offset >= messages.len() {
+        return Ok(ChatLogPage {
+            messages: Vec::new(),
+            next: None,
+            truncated: false,
+        });
+    }
+    let end = messages.len().saturating_sub(offset);
+    let start = end.saturating_sub(limit);
+    let page = messages[start..end].to_vec();
+    let next = if start > 0 {
+        Some((offset + page.len()).to_string())
+    } else {
+        None
+    };
+    Ok(ChatLogPage {
+        messages: page,
+        next,
+        truncated: false,
+    })
+}
+
+fn changed_messages(old: &[ChatMessage], new: &[ChatMessage]) -> Vec<ChatMessage> {
+    new.iter()
+        .filter(|message| {
+            old.iter()
+                .find(|existing| existing.id == message.id)
+                .is_none_or(|existing| {
+                    existing.text != message.text || existing.streaming != message.streaming
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn validate_start(input: &ChatStartInput) -> Result<(), SpiritError> {
+    match (&input.session, input.location) {
+        (ChatSessionId::Setup, ChatSessionLocation::Local) => {
+            if input.project.is_some() {
+                return Err(SpiritError::invalid_input(
+                    "project",
+                    "the setup session does not take a project",
+                ));
+            }
+            Ok(())
+        }
+        (ChatSessionId::Setup, ChatSessionLocation::Server) => Err(chat_gated_error(
+            "the setup assistant uses the bundled StackSpirit Engine on this Mac",
+        )),
+        (ChatSessionId::Global | ChatSessionId::Project(_), _) => Err(chat_gated_error(
+            "local global/project chat needs VOWP 0.5's orchestrator endpoint; this transport only serves the setup assistant",
+        )),
+    }
+}
+
+fn validate_local_session(session: &ChatSessionId) -> Result<(), SpiritError> {
+    if matches!(session, ChatSessionId::Setup) {
+        Ok(())
+    } else {
+        Err(chat_gated_error(
+            "local global/project chat needs VOWP 0.5's orchestrator endpoint; this transport only serves the setup assistant",
+        ))
+    }
+}
+
+/// Maps an HTTP status to a safe typed error. It never includes a URL, port or body.
+#[must_use]
+pub fn map_http_status(status: u16) -> SpiritError {
+    match status {
+        401 | 403 => SpiritError::new(
+            SpiritErrorCode::Auth,
+            "engine_auth: the StackSpirit Engine rejected the request credential",
+        )
+        .with_hint("Re-pair or re-enter the engine credential and retry."),
+        404 => session_lost_error(),
+        409 => chat_busy_error(),
+        429 => SpiritError::new(SpiritErrorCode::Limit, "The provider rate limit is active.")
+            .retryable()
+            .with_hint("Wait and retry the turn."),
+        500..=599 => SpiritError::new(
+            SpiritErrorCode::Engine,
+            "The orchestrator failed the request.",
+        )
+        .retryable()
+        .with_hint("Restart the engine or retry the turn."),
+        _ => SpiritError::new(
+            SpiritErrorCode::Engine,
+            format!("the local engine returned HTTP {status}"),
+        )
+        .retryable()
+        .with_hint("Restart the engine or retry the turn."),
+    }
+}
+
+/// Maps a provider status carried inside an HTTP 200 response.
+#[must_use]
+pub fn map_provider_error(status: Option<u16>) -> SpiritError {
+    match status {
+        Some(401 | 403) => SpiritError::new(
+            SpiritErrorCode::Auth,
+            "engine_auth: the model provider rejected the credential",
+        )
+        .with_hint("Check the provider key in Settings → Engine."),
+        Some(429) => SpiritError::new(SpiritErrorCode::Limit, "The provider rate limit is active.")
+            .retryable()
+            .with_hint("Wait and retry the turn."),
+        _ => SpiritError::new(
+            SpiritErrorCode::Engine,
+            "provider_error: the model provider failed the turn",
+        )
+        .retryable()
+        .with_hint("Retry the turn or choose another model."),
+    }
+}
+
+fn engine_unavailable_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Engine,
+        "engine_unavailable: the StackSpirit Engine is not reachable",
+    )
+    .retryable()
+    .with_hint("Restart StackSpirit Engine in Settings → Advanced and retry.")
+}
+
+fn engine_external_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Engine,
+        "engine_external: the setup assistant needs the bundled StackSpirit Engine",
+    )
+    .with_hint("Switch to the bundled engine in Settings → Advanced.")
+}
+
+fn engine_not_ready_error(detail: impl Into<String>) -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Engine,
+        format!("engine_not_ready: {}", detail.into()),
+    )
+    .retryable()
+    .with_hint("Restart StackSpirit Engine in Settings → Advanced and retry.")
+}
+
+fn engine_request_error(detail: &str) -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Engine,
+        format!("the StackSpirit Engine failed the request: {detail}"),
+    )
+    .retryable()
+}
+
+fn no_model_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Engine,
+        "no_model: choose a model in Settings → Engine",
+    )
+    .with_hint("Select a model for the setup assistant and retry.")
+}
+
+fn chat_gated_error(detail: &str) -> SpiritError {
+    SpiritError::new(SpiritErrorCode::Gate, format!("chat_gated: {detail}"))
+        .with_hint("Server and project chat wait for VOWP 0.5's orchestrator endpoint.")
+}
+
+fn chat_not_started_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Conflict,
+        "chat_not_started: start the conversation first",
+    )
+    .with_hint("Start or attach the conversation, then retry.")
+}
+
+fn chat_busy_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Conflict,
+        "chat_busy: wait for the current reply or stop it",
+    )
+    .with_hint("Send one turn at a time.")
+}
+
+fn session_lost_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::NotFound,
+        "session_lost: the orchestrator's app session was recreated",
+    )
+    .with_hint("For setup, start a new conversation. The old log stays in Sessions.")
+}
+
+fn turn_timeout_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::RemoteTimeout,
+        "turn_timeout: the turn did not finish in time",
+    )
+    .retryable()
+    .with_hint("Stop the turn and retry.")
+}
+
+fn stream_lost_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::RemoteTimeout,
+        "stream_lost: live updates stopped; reconnect to continue",
+    )
+    .retryable()
+    .with_hint("Reattach the conversation to continue.")
+}
+
+fn permission_required_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Refused,
+        "permission_required: this turn needs tool approval in OpenCode; StackSpirit does not auto-approve",
+    )
+    .with_hint("Open the OpenCode app and start a new turn.")
+}
+
+fn stop_unconfirmed_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Conflict,
+        "stop_unconfirmed: the turn may still be running on the orchestrator",
+    )
+    .retryable()
+    .with_hint("Check the OpenCode app; StackSpirit does not pretend the turn stopped.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_status_mapping_is_safe() {
+        for status in [401, 403, 404, 409, 429, 500, 418] {
+            let error = map_http_status(status);
+            assert!(!error.message.contains("127.0.0.1"));
+            assert!(!error.message.contains("http://"));
+            assert!(!error.message.contains('/'));
+        }
+        assert_eq!(map_http_status(401).code, SpiritErrorCode::Auth);
+        assert_eq!(map_http_status(404).code, SpiritErrorCode::NotFound);
+        assert_eq!(map_http_status(409).code, SpiritErrorCode::Conflict);
+        assert_eq!(map_http_status(429).code, SpiritErrorCode::Limit);
+    }
+
+    #[test]
+    fn parser_reads_both_log_shapes_and_skips_tool_parts() {
+        let now = Timestamp::epoch();
+        let body = br#"[
+          {"info":{"id":"m1","role":"user","time":{"created":1000}},"parts":[{"type":"text","text":"Hi"}]},
+          {"info":{"id":"m2","role":"assistant","time":{"created":2000}},"parts":[{"type":"tool","text":"{}"},{"type":"text","text":"Hello"}]},
+          {"info":{"id":"m3","role":"assistant"},"parts":[]}
+        ]"#;
+        let messages = parse_log(body, now);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].joined_text(), "Hi");
+        assert_eq!(messages[1].joined_text(), "Hello");
+        assert_eq!(messages[0].origin, ChatMessageOrigin::User);
+        assert_eq!(messages[1].origin, ChatMessageOrigin::Model);
+    }
+
+    #[test]
+    fn assistant_response_error_in_200_is_typed_and_has_no_body_text() {
+        let outcome = parse_assistant_response(
+            br#"{"info":{"error":{"statusCode":401,"message":"Invalid API key"}}}"#,
+            Timestamp::epoch(),
+        );
+        let AssistantOutcome::Failed(error) = outcome else {
+            panic!("expected a typed failure");
+        };
+        assert_eq!(error.code, SpiritErrorCode::Auth);
+        assert!(!error.message.contains("Invalid API key"));
+        assert!(!error.message.contains('/'));
+    }
+
+    #[test]
+    fn log_pages_move_backward_without_duplicates() {
+        let now = Timestamp::epoch();
+        let messages: Vec<ChatMessage> = (0..120)
+            .map(|index| ChatMessage::user(format!("m{index}"), &format!("t{index}"), now))
+            .collect();
+        let first = page_messages(
+            messages.clone(),
+            &ChatLogQuery {
+                cursor: None,
+                limit: Some(50),
+            },
+        )
+        .unwrap();
+        assert_eq!(first.messages.len(), 50);
+        assert_eq!(first.messages[0].id, "m70");
+        assert_eq!(first.next.as_deref(), Some("50"));
+        let second = page_messages(
+            messages.clone(),
+            &ChatLogQuery {
+                cursor: first.next,
+                limit: Some(50),
+            },
+        )
+        .unwrap();
+        assert_eq!(second.messages[0].id, "m20");
+        assert_eq!(second.next.as_deref(), Some("100"));
+        let third = page_messages(
+            messages,
+            &ChatLogQuery {
+                cursor: second.next,
+                limit: Some(50),
+            },
+        )
+        .unwrap();
+        assert_eq!(third.messages.len(), 20);
+        assert_eq!(third.messages[0].id, "m0");
+        assert!(third.next.is_none());
+    }
+
+    #[test]
+    fn header_values_cannot_inject_a_newline() {
+        let value = header_value(Path::new("/tmp/space\nInjected: yes"));
+        assert!(!value.contains('\n'));
+        assert!(value.contains("Injected: yes"));
+    }
+
+    #[test]
+    fn native_ids_reject_path_characters() {
+        assert!(safe_native_id("ses_abc-123").is_ok());
+        assert!(safe_native_id("../escape").is_err());
+        assert!(safe_native_id("ses/a").is_err());
+        assert!(safe_native_id("").is_err());
+    }
+}

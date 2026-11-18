@@ -252,6 +252,116 @@ impl EngineLogBuffer {
     }
 }
 
+/// The app-private tree from `docs/ORCHESTRATOR-CHAT.md` §2.1.3.
+///
+/// All directories are created `0700` and the setup `AGENTS.md` is `0600`. The renderer
+/// never receives these paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateEngineTree {
+    /// `engine/data`, exported as `XDG_DATA_HOME`.
+    pub data: PathBuf,
+    /// `engine/state`, exported as `XDG_STATE_HOME`.
+    pub state: PathBuf,
+    /// `engine/config`, exported as `XDG_CONFIG_HOME`.
+    pub config: PathBuf,
+    /// The setup workspace and the child's current directory.
+    pub setup_workspace: PathBuf,
+    /// The reserved global workspace.
+    pub global_workspace: PathBuf,
+    /// The parent of per-project workspaces.
+    pub project_workspace_root: PathBuf,
+}
+
+impl PrivateEngineTree {
+    /// Creates the private tree under `app_data` and returns its resolved paths.
+    pub fn prepare(app_data: &Path) -> Result<Self, SpiritError> {
+        let engine = app_data.join("engine");
+        let workspaces = engine.join("workspaces");
+        let tree = Self {
+            data: engine.join("data"),
+            state: engine.join("state"),
+            config: engine.join("config"),
+            setup_workspace: workspaces.join("setup"),
+            global_workspace: workspaces.join("global"),
+            project_workspace_root: workspaces.join("project"),
+        };
+        for directory in [
+            &engine,
+            &tree.data,
+            &tree.state,
+            &tree.config,
+            &workspaces,
+            &tree.setup_workspace,
+            &tree.global_workspace,
+            &tree.project_workspace_root,
+        ] {
+            create_private_directory(directory)?;
+        }
+        write_setup_agents(&tree.setup_workspace)?;
+        Ok(tree)
+    }
+}
+
+/// The setup workspace prompt. It contains no secret and no machine path.
+const SETUP_AGENTS_MD: &str = "# StackSpirit setup assistant\n\n\
+You are the StackSpirit setup assistant. Never ask for a password, token or key in chat. \
+Use the secure server card. Do not claim a server is connected until StackSpirit confirms \
+a verified key-only login. Ask one short question at a time.\n";
+
+fn create_private_directory(path: &Path) -> Result<(), SpiritError> {
+    std::fs::create_dir_all(path).map_err(|_| {
+        SpiritError::new(
+            SpiritErrorCode::Engine,
+            "could not create the private StackSpirit Engine state tree",
+        )
+        .with_hint("Check that the StackSpirit app-data directory is writable.")
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|_| {
+            SpiritError::new(
+                SpiritErrorCode::Engine,
+                "could not secure the private StackSpirit Engine state tree",
+            )
+            .with_hint("Check the app-data directory permissions.")
+        })?;
+    }
+    Ok(())
+}
+
+fn write_setup_agents(setup_workspace: &Path) -> Result<(), SpiritError> {
+    let path = setup_workspace.join("AGENTS.md");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    let mut file = options.open(&path).map_err(|_| {
+        SpiritError::new(
+            SpiritErrorCode::Engine,
+            "could not write the private setup workspace instructions",
+        )
+        .with_hint("Check that the StackSpirit app-data directory is writable.")
+    })?;
+    file.write_all(SETUP_AGENTS_MD.as_bytes()).map_err(|_| {
+        SpiritError::new(
+            SpiritErrorCode::Engine,
+            "could not write the private setup workspace instructions",
+        )
+        .with_hint("Check that the StackSpirit app-data directory is writable.")
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|_| {
+            SpiritError::new(
+                SpiritErrorCode::Engine,
+                "could not secure the private setup workspace instructions",
+            )
+            .with_hint("Check the app-data directory permissions.")
+        })?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ProcessState {
     child: Option<Child>,
@@ -262,6 +372,7 @@ pub struct ProcessEngineRuntime {
     locator: EngineBinaryLocator,
     explicit_binary: Option<PathBuf>,
     key_source: Option<Arc<dyn Keychain>>,
+    private_state: Option<PathBuf>,
     state: Mutex<ProcessState>,
     logs: Arc<Mutex<EngineLogBuffer>>,
 }
@@ -271,6 +382,7 @@ impl std::fmt::Debug for ProcessEngineRuntime {
         f.debug_struct("ProcessEngineRuntime")
             .field("binary", &self.explicit_binary)
             .field("directories", &self.locator.directories())
+            .field("private_state", &self.private_state.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -283,6 +395,7 @@ impl ProcessEngineRuntime {
             locator,
             explicit_binary: None,
             key_source: None,
+            private_state: None,
             state: Mutex::new(ProcessState { child: None }),
             logs: Arc::new(Mutex::new(EngineLogBuffer::default())),
         }
@@ -295,9 +408,21 @@ impl ProcessEngineRuntime {
             locator: EngineBinaryLocator::default(),
             explicit_binary: Some(binary),
             key_source: None,
+            private_state: None,
             state: Mutex::new(ProcessState { child: None }),
             logs: Arc::new(Mutex::new(EngineLogBuffer::default())),
         }
+    }
+
+    /// Starts the bundled child with an app-private XDG tree and setup workspace.
+    ///
+    /// This is the §2.1.3 isolation: the child never reads or writes the owner's
+    /// OpenCode sessions, configuration or state. The desktop passes its app-data
+    /// directory here; tests pass a temporary directory.
+    #[must_use]
+    pub fn with_private_state(mut self, app_data: PathBuf) -> Self {
+        self.private_state = Some(app_data);
+        self
     }
 
     /// Supplies the local keychain used to make stored BYOK keys available to the
@@ -363,6 +488,18 @@ impl ProcessEngineRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The pinned 1.19.5 build honors OPENCODE_SERVER_PASSWORD/USERNAME as HTTP Basic
+        // auth for every route. This launch has no server auth and the client sends none,
+        // so never inherit a credential from the desktop process environment.
+        Command::env_remove(&mut command, "OPENCODE_SERVER_PASSWORD");
+        Command::env_remove(&mut command, "OPENCODE_SERVER_USERNAME");
+        if let Some(app_data) = &self.private_state {
+            let tree = PrivateEngineTree::prepare(app_data)?;
+            Command::env(&mut command, "XDG_DATA_HOME", &tree.data);
+            Command::env(&mut command, "XDG_STATE_HOME", &tree.state);
+            Command::env(&mut command, "XDG_CONFIG_HOME", &tree.config);
+            command.current_dir(&tree.setup_workspace);
+        }
         if let Some(auth_content) = auth_content {
             // The engine reads this as an in-memory auth document. It is an environment
             // value for the child only; StackSpirit never writes it to a file or a log.

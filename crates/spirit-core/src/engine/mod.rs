@@ -1,6 +1,7 @@
 //! Local StackSpirit Engine types: choice, state, status and model access.
 
 pub mod catalog;
+pub mod chat;
 pub mod config;
 pub mod external;
 pub mod gate;
@@ -17,6 +18,12 @@ use serde::{Deserialize, Serialize};
 use crate::time::Timestamp;
 
 pub use catalog::{CatalogEntry, CatalogVerification, ModelCatalog, bundled_catalog};
+pub use chat::{
+    ChatCloseReason, ChatEngine, ChatEvent, ChatEventApplier, ChatEventBus, ChatLogPage,
+    ChatLogQuery, ChatMessage, ChatModelView, ChatSendReceipt, ChatSessionId, ChatSessionLocation,
+    ChatSessionState, ChatSessionView, ChatStartInput, ChatTransport, LocalChatProvider,
+    StreamSupport,
+};
 pub use config::{EnginePreferences, EnginePreferencesStore, JsonEnginePreferences};
 pub use external::{ExternalHarness, HarnessProbe, PathHarnessProbe, scan_external_harnesses};
 pub use gate::{
@@ -35,8 +42,8 @@ pub use local::{
     LocalOrchestratorState, LocalPathMapStatus, local_orchestrator_action_enabled, refusal,
 };
 pub use process::{
-    EngineBinaryLocator, EngineLogBuffer, ProcessEngineRuntime, current_target_triple,
-    loopback_host, reserve_loopback_port, serve_args, sidecar_file_name,
+    EngineBinaryLocator, EngineLogBuffer, PrivateEngineTree, ProcessEngineRuntime,
+    current_target_triple, loopback_host, reserve_loopback_port, serve_args, sidecar_file_name,
 };
 pub use runtime::{
     EngineHealth, EngineRuntime, EngineRuntimeInfo, FakeEngineRuntime, KeyVerification,
