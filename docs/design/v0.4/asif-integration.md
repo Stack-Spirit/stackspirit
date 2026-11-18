@@ -7,9 +7,10 @@ time of writing.
 
 - ASIF: `0.4` (review draft dated 5 October 2026), pinned at
   `652d9e23ddbe5656b9ceea311df7e09e93c1cd2f`.
-- Adapter: public `vowp-asif` `0.1.1`, tag `v0.1.1`, commit
-  `466ebb81f58646febb80996874b46c11288d5a97`, pinned by `rev` in `Cargo.toml` and
-  `Cargo.lock`.
+- Adapter: public `vowp-asif` `0.1.1` from crates.io, declared as `vowp-asif = "=0.1.1"` in
+  `Cargo.toml` and resolved from `registry+https://github.com/rust-lang/crates.io-index` in
+  `Cargo.lock`. The reviewed adapter source is tag `v0.1.1`, commit
+  `466ebb81f58646febb80996874b46c11288d5a97`.
 - VOWP target: protocol version `1`, capsule version `1`, the v0.2 session-directory
   layout and the v0.3 daemon API.
 - Native bundle: `vowp-bundle-v1` remains the default and is not changed.
@@ -24,7 +25,7 @@ The core facade (`vowp_core::session::asif`), the CLI (`vowp session export|impo
 asif`), the daemon download/report/import routes and the `/import` page are in the tree. The
 command and route surface below is the one those slices implement; `docs/design/cli.md` and
 `docs/design/v0.3/http-api.md` hold the command-local and route-local details. The independent
-verification job (E) and a crates.io release of the pinned adapter are still open; see §9.
+verification job (E) is still open; the adapter is published on crates.io. See §9.
 
 ---
 
@@ -365,26 +366,20 @@ The hidden stream is an internal CLI-to-CLI protocol, not a public API. It is do
 
 ### 4.2 Recommendation
 
-**Primary:** depend on the published crate `vowp-asif = "=0.1.1"` once the owner publishes
-it to crates.io. This is the only option that is both one implementation and compatible with
-the existing `scripts/release/check-packages.sh` / `publish-crates.sh` gates.
+**Primary:** depend on the published crate `vowp-asif = "=0.1.1"` from crates.io. This is the
+only option that is both one implementation and compatible with the existing
+`scripts/release/check-packages.sh` / `publish-crates.sh` gates.
 
-**Until that publication:** use the public git dependency pinned by commit in
-`crates/vowp-core/Cargo.toml`. This is the dependency in the current tree:
+**Current dependency:** `vowp-asif 0.1.1` is published on crates.io and all three manifests
+name it as a registry dependency:
 
 ```toml
-vowp-asif = { git = "https://github.com/syver777/vowp-asif", rev = "466ebb81f58646febb80996874b46c11288d5a97", version = "0.1.1" }
+vowp-asif = "=0.1.1"
 ```
 
-The build job must verify the tag before committing with:
-
-```sh
-git ls-remote https://github.com/syver777/vowp-asif 'refs/tags/v0.1.1*'
-```
-
-The peeled `^{}` line must be `466ebb81f58646febb80996874b46c11288d5a97`. Pin the commit,
-not the tag: tags are movable; `Cargo.lock` then records both the URL and the exact revision.
-The version `0.1.1`, ASIF `0.4` and the ASIF commit are recorded in the integration doc and
+`Cargo.lock` resolves it from `registry+https://github.com/rust-lang/crates.io-index` and
+records no git source. The exact pin keeps an adapter patch update explicit, as §4.4
+requires. The version `0.1.1`, ASIF `0.4` and the ASIF pin are recorded in this document and
 asserted in the adapter-version test.
 
 **Rejected for now:**
@@ -400,27 +395,25 @@ asserted in the adapter-version test.
 
 - **Build:** `vowp-core` is the only runtime crate that names `vowp-asif`; `vowp-cli` and
   `vowp-daemon` consume the core facade, and `vowp-cli` also names it as a dev-dependency for
-  fixture construction. `cargo add -p vowp-core --git <url> --rev <sha>` edits the crate
-  manifest and `Cargo.lock`; no handwritten version is added.
-- **Offline:** a cold checkout needs network access to fetch the git object. CI and the
+  fixture construction. The manifest line is `vowp-asif = "=0.1.1"`; a version change edits
+  the crate manifest and `Cargo.lock`.
+- **Offline:** a cold checkout needs network access to fetch the registry crate. CI and the
   release workflow already have network. `cargo fetch --locked` warms the cache; after that
-  `--offline` works. This is worse than a crates.io dependency and better than a vendored
-  copy only in maintenance terms. At runtime the adapter is offline: schemas are embedded at
-  compile time and export/validate/import make no network call.
-- **Release:** `cargo publish -p vowp-core` (and therefore `vowp-daemon`/`vowp-cli`) cannot
-  pass while the dependency is a git source. The build job must not hide this by removing
-  `vowp-core` from `check-packages.sh` or by adding `publish = false`. The verification job
-  records the exact failure and the owner decision. If the owner publishes `vowp-asif 0.1.1`
-  to crates.io, switch the manifest line to `vowp-asif = "=0.1.1"`; no code changes.
-  **Outcome in this tree:** the dependency is still the git source, so the release block in
-  §9.1 is live and `scripts/release/check-packages.sh` is expected to fail for the three
-  crates until the adapter is published.
+  `--offline` works. At runtime the adapter is offline: schemas are embedded at compile time
+  and export/validate/import make no network call.
+- **Release:** with a git source, `cargo publish -p vowp-core` (and therefore
+  `vowp-daemon`/`vowp-cli`) could not pass. The build job did not hide this by removing
+  `vowp-core` from `check-packages.sh` or by adding `publish = false`. `vowp-asif 0.1.1` is
+  now published on crates.io; the manifests use `vowp-asif = "=0.1.1"` and no code changes
+  were needed. **Outcome in this tree:** `Cargo.lock` resolves the adapter from
+  `registry+https://github.com/rust-lang/crates.io-index` with no git source, and
+  `scripts/release/check-packages.sh` packages and dry-run publishes all nine workspace
+  crates cleanly.
 - **Licence:** the adapter is MIT. It vendors the two ASIF schemas and fixtures under MIT
   with upstream notices. Regenerate `THIRD-PARTY-LICENSES.md` with
   `python3 scripts/release/generate-third-party-licenses.py` and keep the `--check` gate.
-  The release bundle must contain the adapter licence and ASIF notices; if the generator
-  cannot read a git dependency's licence files, that is a release blocker, not a reason to
-  omit the text.
+  The release bundle contains the adapter licence and ASIF notices from the crates.io
+  package.
 - **CI:** the adapter's own CI runs fmt, clippy and tests. VOWP adds a `cargo test -p
   vowp-core --test asif` gate and a `cargo tree -p vowp-core -i vowp-asif` evidence line so
   the exact dependency is visible in the build log. The ASIF pin is reviewed in `Cargo.lock`
@@ -431,7 +424,8 @@ asserted in the adapter-version test.
 There is **no `asif` Cargo feature in the first slice**. A default-off feature would create
 builds where the command exists but the format does not, which is a worse user contract than
 a present command. If offline/minimal builds become a requirement, add a default-on `asif`
-feature later; it does not solve the crates.io packaging problem.
+feature later; the adapter is a registry dependency and that choice is independent of the
+feature.
 
 Versioning:
 
@@ -871,8 +865,7 @@ in a path the job changed. A new finding in the job's own diff fails the job.
 6. Add the ASIF report documents to `schema::all_schemas()` and the protocol API tests.
 7. Update `docs/design/types.md` with the new report types and
    `docs/design/crates/vowp-core.md` with the module/API, in the same change.
-8. Regenerate `THIRD-PARTY-LICENSES.md` and keep the generator check green or report the git
-   dependency's licence entry as a blocker.
+8. Regenerate `THIRD-PARTY-LICENSES.md` and keep the generator check green.
 
 **Gates**
 
@@ -1021,9 +1014,9 @@ also read the test and confirm:
 - the report's loss list and unsupported list match this doc;
 - no `jobs`, `gates`, `leases`, native transcript or continuation object is in the package.
 
-Finally run `scripts/release/check-packages.sh` and record the exact result. With the git
-dependency it is expected to fail for `vowp-core`/`vowp-daemon`/`vowp-cli`; that is a release
-blocker, not a pass. If the owner publishes the adapter crate first, it must pass.
+Finally run `scripts/release/check-packages.sh` and record the exact result. With
+`vowp-asif = "=0.1.1"` resolved from crates.io it must pass for every workspace crate,
+including `vowp-core`/`vowp-daemon`/`vowp-cli`.
 
 ---
 
@@ -1034,15 +1027,16 @@ recommended: one new idle session per successful import, the source project kept
 null, token-free download, strict as `Blocking`/`Integrity` only, a summary-only remote
 stream with `--report` refused over `--node`, the adapter's 272 MiB web cap, safe web
 defaults, the document staying under `docs/design/v0.4/`, and event-id conflict on a repeat
-import. 9 is enforced in the CLI, the web copy and this document. 1 and 12 remain release
-and packaging constraints: the dependency is still a pinned git source, so crates.io
-publishing is blocked until the adapter is published; no `asif` Cargo feature was added.
+import. 9 is enforced in the CLI, the web copy and this document. 1 is resolved:
+`vowp-asif 0.1.1` is published on crates.io and the workspace uses `vowp-asif = "=0.1.1"`.
+12 remains a versioning constraint; no `asif` Cargo feature was added.
 
-1. **Public git dependency vs release pin.** A git `rev` dependency blocks crates.io
-   publishing of `vowp-core`, `vowp-daemon` and `vowp-cli`. Recommended: publish
-   `vowp-asif 0.1.1` to crates.io (owner action), then use `=0.1.1`; until then use the git
-   `rev` and record the release block. Fallback if that is impossible: vendor the exact
-   adapter source with licence and a sync check. Do not silently drop the publish gate.
+1. **Public git dependency vs release pin.** A git `rev` dependency would block crates.io
+   publishing of `vowp-core`, `vowp-daemon` and `vowp-cli`. Resolved: `vowp-asif 0.1.1` is
+   published on crates.io and every manifest uses `vowp-asif = "=0.1.1"`; `Cargo.lock`
+   records only the registry source, and `scripts/release/check-packages.sh` passes for all
+   nine workspace crates. The vendoring fallback is no longer needed. Do not silently drop
+   the publish gate.
 2. **Does upload create a session or only validate it?** Recommended: create one new idle
    session per successful upload, with no auto-run, because that matches `session import`
    and gives the user something to open. Validate-only is safer but makes the page a preview
@@ -1087,7 +1081,7 @@ publishing is blocked until the adapter is published; no `asif` Cargo feature wa
     the command is either fully present or absent, and the dependency is pinned to adapter
     `0.1.x` / ASIF `0.4`. A new ASIF draft or adapter minor is a new VOWP minor, never a
     silent reinterpretation. Revisit a default-on feature only if offline/minimal builds
-    become a requirement; it does not fix the crates.io packaging issue.
+    become a requirement; the adapter's registry dependency is independent of that choice.
 
 ---
 
@@ -1104,5 +1098,5 @@ The plan is specific enough to create the jobs when:
 - the owner decisions above are answered or explicitly defaulted.
 
 For this slice, A, B, C and D meet those criteria and the gates recorded in §8. The
-independent verification job (E) is the open item, and the crates.io release block in §4.3
-remains an owner action.
+independent verification job (E) is the open item; the crates.io release block in §4.3 is
+resolved.

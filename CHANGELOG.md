@@ -26,9 +26,10 @@ export/import is a review draft. The upgrade path and the known limits are in
 **ASIF 0.4 interchange (review draft)**
 
 - `vowp session export <id> --format asif` writes one deterministic `.asif.zip` through the
-  pinned `vowp-asif 0.1.1` adapter. The default path is `./<resolved-id>.asif.zip`; `--out -`
-  writes the exact package bytes and is refused on a terminal, and `--json` conflicts with it.
-  Export is read-only: it writes no capsule, takes no session lock and moves no lease.
+  published `vowp-asif 0.1.1` adapter from crates.io. The default path is
+  `./<resolved-id>.asif.zip`; `--out -` writes the exact package bytes and is refused on a
+  terminal, and `--json` conflicts with it. Export is read-only: it writes no capsule, takes no
+  session lock and moves no lease.
 - Export redaction: repeatable `--redact` literals and `--redact-file` (read locally, one
   literal per line). Host paths are scrubbed by default; `--keep-host-paths` is opt-in.
 - `vowp session import <file> --format asif` imports a `.asif.zip`, a standalone `session.json`,
@@ -57,8 +58,9 @@ export/import is a review draft. The upgrade path and the known limits are in
 
 ASIF 0.4 is a review draft. The slice reports declared losses and does not claim ASIF
 conformance, an exact or lossless round trip, portable continuation or native-harness import.
-The adapter is pinned as a git dependency for now; that is the release blocker recorded in
-[`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md) §4.3, not a pass.
+The adapter is the published `vowp-asif = "=0.1.1"` crate from crates.io, recorded in
+[`docs/design/v0.4/asif-integration.md`](docs/design/v0.4/asif-integration.md) §4.3; all nine
+workspace crates pass `scripts/release/check-packages.sh`.
 
 **v0.4 local orchestrator: agent nodes, local chat, offload and the local opencode surface**
 
