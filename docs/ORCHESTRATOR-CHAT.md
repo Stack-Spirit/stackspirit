@@ -1,6 +1,7 @@
 # Orchestrator chat contract: bundled OpenCode server and the VOWP 0.5 endpoint
 
-Status: implementation contract, 2026-11-18. This job changes no production code.
+Status: implementation contract, 2026-11-18; live-probe facts applied 2026-11-18. This job
+changes no production code.
 Audience: the follow-up chat jobs named in §8, the VOWP owner, and the desktop reviewer.
 
 This document specifies how the Meadow shell's orchestrator chat moves from the preview store
@@ -16,10 +17,12 @@ in `packages/spirit-ui/src/next/conversations.ts` onto a real OpenCode server:
 5. small, disjoint follow-up jobs with `owns` and `needs`, and an explicit split between
    what can land now and what is blocked on VOWP `0.5`.
 
-The document is deliberately precise about what the current tree proves, what is assumed
-from the pinned OpenCode version and what still needs a runtime probe. The pinned sidecar
-was **not present in this job worktree**, so no command below was run against it. Do not
-turn an assumption into a claim until the probe in §2.4–§2.5 records evidence.
+The document is deliberately precise about what the current tree proves, what the live
+probe of the pinned `opencode` `1.19.5` sidecar proved, and what still needs an owner model
+turn or a server endpoint. The live probe (ss-43) fetched the manifest-pinned sidecar,
+ran the repository probe in a private XDG tree, and fetched `/doc`; §2.5 records its
+answers. Do not turn an unproven delta cadence or a real-turn runtime behavior into a
+claim.
 
 Contents: §1 vocabulary and rules; §2 local engine and v1 HTTP/SSE contract; §3 server
 endpoint and SSH forward; §4 bridge types, methods and state machine; §5 security; §6
@@ -28,7 +31,7 @@ questions; §11 references.
 
 | Surface | State on 2026-11-18 |
 |---|---|
-| Setup assistant on the bundled engine | Contract complete; core/view jobs can land after the probe; no VOWP dependency |
+| Setup assistant on the bundled engine | Contract complete; the live probe pinned the v1 surface; core/view jobs can land; no VOWP dependency |
 | `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint` or the owner-approved forward (§3.3) |
 | `global`/`project` on this Mac | **Gated** on VOWP's local endpoint and mirroring; the bundled engine is not silently used |
 | Local/Server switch | Out of scope; `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6) |
@@ -44,6 +47,7 @@ questions; §11 references.
 | Engine lifecycle and process | `crates/spirit-core/src/engine/{process,runtime,mod,supervisor}.rs` | Read in this job |
 | Desktop engine commands and state | `apps/spirit-desktop/src-tauri/src/commands/engine.rs`, `state.rs` | Read in this job |
 | Bundled engine pin | `engine/manifest.json`: product `opencode`, version `1.19.5`, MIT, loopback host `127.0.0.1`, health `/global/health` | Read in this job |
+| Live pinned-engine probe | `.vowp/jobs/ss-43-open-chat-probe-live/report.md`: `opencode` `1.19.5` on `x86_64-unknown-linux-gnu`; `serve --help`, `GET /doc` (OpenAPI 3.1.0, 162 paths), session/message/abort shapes, SSE and restart facts | Read in this job; incorporated in §2.1–§2.5 |
 | Fetch/verify script | `scripts/fetch-engine.mjs` (downloads and verifies the pinned sidecar) | Read in this job |
 | VOWP installed locally | `vowp 0.4.0` | Read-only `vowp --version` |
 | VOWP `0.5` scope | `vowp` repository `docs/design/v0.5/scope.md`, accepted 2026-11-18; `orchestrator endpoint` and `orchestrator move` are **planned** | Read in this job |
@@ -112,15 +116,38 @@ The command is exactly:
 <BUNDLED_OPENCODE> serve --hostname 127.0.0.1 --port <RESERVED_PORT>
 ```
 
-`serve_args` in `crates/spirit-core/src/engine/process.rs` is the source of truth. There
-are no extra arguments, no `--print-logs`, no `service set hostname`, no `pair`, no
-`--server` and no `--auth` flag. The child starts with:
+`serve_args` in `crates/spirit-core/src/engine/process.rs` is the source of truth. The live
+`serve --help` of the pinned `1.19.5` sidecar lists exactly these options:
+
+```text
+-h, --help
+-v, --version
+--print-logs
+--log-level
+--pure
+--port
+--hostname
+--mdns
+--mdns-domain
+--cors
+```
+
+`--port` defaults to `0` (ephemeral), `--hostname` to `127.0.0.1`, `--mdns` to `false`
+(enabling it "defaults hostname to 0.0.0.0"), `--mdns-domain` to `opencode.local` and
+`--cors` to `[]`. There is **no** `--auth`, `--password`, `--token` or `--secret` flag, and
+the help text contains none of those words. The launch uses only `serve --hostname
+127.0.0.1 --port <RESERVED_PORT>` and must never add `--mdns`, `--cors`, `--print-logs` or
+`--pure`. The child starts with:
 
 - `stdin = null`, `stdout`/`stderr` piped to the bounded, redacted `EngineLogBuffer`
   (200 lines, 1,000 characters per line);
 - `OPENCODE_AUTH_CONTENT` in the child environment **only** when the OS keychain holds
   one or more provider keys. That value is a provider-auth document, not a server token.
   It never appears in argv, a request URL, a file written by StackSpirit or a log line;
+- **no** `OPENCODE_SERVER_PASSWORD` or `OPENCODE_SERVER_USERNAME`. The bundled engine keeps
+  the optional HTTP Basic credential unset and relies on loopback plus the private XDG tree
+  (see §2.1.2). Because the current spawn inherits the desktop environment, `chat-core`
+  must remove these two variables explicitly;
 - no `current_dir` in the current code. The working directory is therefore inherited from
   the desktop process, which is not a stable workspace (see §2.1.3). The chat job sets it
   to the private setup workspace.
@@ -150,16 +177,40 @@ child itself.
 
 #### 2.1.2 Auth and health
 
-- **Local auth:** none. The current `serve` launch has no server password and no token.
-  The trust boundary is the OS user plus loopback. `OPENCODE_AUTH_CONTENT` is provider
-  auth; do not mistake it for a server credential, and never add it to a request.
+- **Local auth:** the pinned `1.19.5` build has **no CLI auth, password or token flag**.
+  It does honor an optional HTTP Basic credential from the environment:
+  - **`OPENCODE_SERVER_PASSWORD` set:** every HTTP route, including
+    `GET /global/health`, requires HTTP Basic. Without credentials it returns `401` with
+    `WWW-Authenticate: Basic realm="Secure Area"`; the correct password returns `200`; a
+    wrong password or another user returns `401`. The default username is `opencode`;
+    `OPENCODE_SERVER_USERNAME` replaces it.
+  - **Both variables unset:** unauthenticated `GET /global/health` returns `200`, and
+    startup prints this exact warning on **stdout** before the listening line:
+
+    ```text
+    Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.
+    opencode server listening on http://127.0.0.1:<PORT>
+    ```
+
+    With the password set, the warning is absent. Startup stderr is empty in both cases.
+  - **StackSpirit decision:** the bundled engine leaves both variables unset and relies on
+    loopback plus the app-private XDG tree. The app does not implement Basic auth for the
+    bundled engine yet. The "server is unsecured" warning is the expected startup line and
+    must not be treated as an engine failure; it is captured by the existing stdout reader.
+    Because the current spawn inherits the desktop environment, `chat-core` must
+    **explicitly remove** `OPENCODE_SERVER_PASSWORD` and `OPENCODE_SERVER_USERNAME` from the
+    child env. If the desktop itself is launched with the password set and the child
+    inherits it, the app's unauthenticated health check would 401. This is a required
+    change, not optional hardening.
+  - `OPENCODE_AUTH_CONTENT` is provider auth, not a server credential; never mistake it for
+    one, never add it to a request, and never log it.
 - **Health:** `GET http://127.0.0.1:<PORT>/global/health` with a 3 s read timeout. The
   body must contain `"healthy": true`; `"version"` is optional and is surfaced as the
   engine version. A non-2xx status, a non-JSON body or `healthy != true` is an engine
-  error.
+  error. The live probe returned `200` with `{ "healthy": true, "version": "1.19.5" }`.
 - **Other proven engine reads:** `GET /provider` (10 s timeout; the document can be
   several MiB) and `GET /config/providers` (3 s). These are for the model catalog and
-  provider list, not chat.
+  provider list, not chat. `GET /doc` is an OpenAPI document, not a chat read.
 - **No CORS and no browser fetch:** the renderer never calls the engine. All requests go
   through `spirit-core` and Tauri commands.
 
@@ -184,12 +235,20 @@ The core chat job must start the bundled child with an app-private tree:
 
 All directories are created `0700`; any generated `AGENTS.md` is `0600`. The child's
 `current_dir` is set to `<APP_DATA>/engine/workspaces/setup`, so the setup assistant has a
-deterministic single workspace even if the directory header in §2.2.2 is unsupported. The
-engine's data, state and config roots are the app-private tree; it does not use the
-owner's OpenCode session, config or state directories. The provider key still arrives only
-through `OPENCODE_AUTH_CONTENT`. This is a change to `ProcessEngineRuntime` and needs a
-regression test that the env and `current_dir` are set on the child and that a session
-created in one app run is still listed after an engine restart (probe §2.5).
+deterministic single workspace; the directory header in §2.2.2 is honored, but the setup
+assistant still uses one workspace. The engine's data, state and config roots are the
+app-private tree; it does not use the owner's OpenCode session, config or state
+directories. The provider key still arrives only through `OPENCODE_AUTH_CONTENT`. This is
+a change to `ProcessEngineRuntime` and needs a regression test that the env and
+`current_dir` are set on the child and that a session created in one app run is still
+listed after an engine restart.
+
+The live probe verified the persistence half with the pinned binary: a session was created
+in a private `HOME`/`XDG_*` tree, the child was stopped with SIGTERM (no forced kill), the
+server restarted on the same tree and port, and all created sessions were still listed and
+retrievable. The owner's OpenCode data, config, state and cache roots were unchanged
+across the run. The regression test itself is still missing in the current tree; this is
+the contract for `chat-core`, not a claim that the current spawn already does it.
 
 The runtime needs the app-data root at construction (for example
 `ProcessEngineRuntime::with_private_state(<APP_DATA>)`); `AppState::new` already receives
@@ -272,26 +331,34 @@ session to clean up; `stop` only aborts the turn and detaches.
 
 ### 2.2 OpenCode HTTP contract
 
-The pinned OpenCode `1.19.5` uses the **v1** API: `/global/health`, `/provider`,
-`/config/providers`, `/session`, `/session/{id}/message`, `/event`. This is not the
-`2.0.28` API under `/api/...` that the VOWP spike used. Do not mix the two. The v2 spike
-is useful for event semantics and security lessons only; its paths are not evidence for
-the pinned sidecar.
+The pinned OpenCode `1.19.5` uses the **v1** contract: `/global/health`, `/provider`,
+`/config/providers`, `/session`, `/session/{id}/message`, `/session/{id}/abort`, `/event`
+and `/doc`. The live `/doc` also lists many `/api/...` paths in this build. Their presence
+is **not** proof that a server is the `2.0.28` v2 dialect; the client chooses this v1
+contract and gates on `GET /global/health` (§3.4). Do not mix v1 and v2 paths at runtime.
+The v2 spike is useful for event semantics and security lessons only; its paths are not
+evidence for the pinned sidecar.
 
 #### 2.2.1 Endpoint table
 
 | Purpose | Request | Response (expected) | Status |
 |---|---|---|---|
-| Health | `GET /global/health` | `{ "healthy": true, "version": "<VERSION>" }` | **Proven** by `process.rs` and its fake engine |
-| Create session | `POST /session` with `{ "title": "<TITLE>" }` | A `Session`: `{ "id", "slug", "projectID", "directory", "title", "version", "time": { "created", "updated" } }` | Request **proven** with `{}`; response shape **assumed** |
-| List sessions | `GET /session` | `Session[]` | **Assumed** |
-| Get session | `GET /session/{id}` | `Session` | **Assumed** |
-| Send a turn | `POST /session/{id}/message` with `{ "messageID"?: "<USER_MESSAGE_ID>", "model"?: { "providerID", "modelID" }, "parts": [{ "type": "text", "text": "<PROMPT>" }] }` | `{ "info": AssistantMessage, "parts": Part[] }` | Request **proven** by `verify_against_engine`; `messageID` and the response **partly proven** (the fake engine returns this envelope; the real parser tolerates it) |
-| Read the log | `GET /session/{id}/message` | `Array<{ "info": Message, "parts": Part[] }>` or a flat `Message[]` | **Assumed**; parser is tolerant |
-| Abort a turn | `POST /session/{id}/abort` | `boolean` | **Assumed** |
-| Live events | `GET /event`, `Accept: text/event-stream` | SSE frames with `data: { "type", "properties" }` | **Assumed** |
-| OpenAPI | `GET /doc` | An OpenAPI document, if the build serves it | **Probe** |
+| Health | `GET /global/health` | `{ "healthy": true, "version": "<VERSION>" }` | **Proven live**: 200 with `healthy: true`, `version: "1.19.5"` |
+| Create session | `POST /session` with `{ "title": "<TITLE>" }` | A `Session`: `{ "id", "slug", "projectID", "directory", "title", "version", "time": { "created", "updated" } }` | **Proven live**: 200; the runtime object also carried `cost`, `path` and `tokens` |
+| List sessions | `GET /session` | `Session[]` | **Proven live**: every created session was listed |
+| Get session | `GET /session/{id}` | `Session` | **Proven live** |
+| Send a turn | `POST /session/{id}/message` with `{ "messageID"?: "<USER_MESSAGE_ID>", "model"?: { "providerID", "modelID" }, "parts": [{ "type": "text", "text": "<PROMPT>" }] }` | `{ "info": AssistantMessage, "parts": Part[] }` | Request **proven** by `verify_against_engine`; body keys and response **pinned by `/doc`** (`parts` is the only required field, `messageID` and `model` are optional); a real turn and `messageID` log preservation remain **owner-turn** |
+| Read the log | `GET /session/{id}/message` | `Array<{ "info": Message, "parts": Part[] }>` | **Proven live**: `[]` for a new session; `/doc` requires both `info` and `parts`; it is **not** a flat `Message[]`. The endpoint accepts `directory`, `workspace`, `limit` and `before` query parameters. The parser stays tolerant. |
+| Abort a turn | `POST /session/{id}/abort` | `boolean` | **Proven live**: idle abort returns 200 `true`; the session still exists afterwards |
+| Live events | `GET /event`, `Accept: text/event-stream` | SSE frames with `data: { "id", "type", "properties" }` | **Proven live**: 200 `text/event-stream`; first `server.connected`; `server.heartbeat` about every 10 s |
+| OpenAPI | `GET /doc` | OpenAPI 3.1.0 document with 162 paths | **Proven live**: 200 `application/json`, 479,667 bytes |
 | Delete session | `DELETE /session/{id}` | `{ "ok": true }` | **Proven** by the key-verification cleanup; chat must **not** use it |
+
+The runtime `Session` keys were `cost`, `directory`, `id`, `path`, `projectID`, `slug`,
+`time`, `title`, `tokens` and `version`. `/doc` also allows optional `agent`, `metadata`,
+`model`, `parentID`, `permission`, `revert`, `share`, `summary` and `workspaceID`, and
+`time` may also carry `compacting` and `archived`. The required subset above is correct;
+keep ignoring unknown fields and keep `directory` core-only.
 
 The `model` field is optional in the request. Use it for the local setup turn: split the
 selected `ModelChoice.id` at the first `/` into `providerID`/`modelID` exactly as
@@ -305,24 +372,27 @@ session, uses a 10-minute turn cap, and aborts instead of deleting.
 
 #### 2.2.2 Workspace / directory selection
 
-An OpenCode server has a default directory. The VOWP spike found that the managed
-service defaults to the caller's home while a foreground `serve` defaults to its start
-directory. StackSpirit needs a session in a specific workspace, so the core must select
-the directory per session. The v1 client convention is the `x-opencode-directory` request
-header (the SDK's `directory` option); some builds also accept a `directory` query
-parameter. The exact mechanism for the pinned `1.19.5` is **unproven**.
+An OpenCode server has a default directory. The live probe confirmed that a foreground
+`serve` defaults a new session's `directory` to the child's `cwd` (the private `base`
+workspace), and that both selectors work on the pinned `1.19.5`:
+
+- `POST /session` with `x-opencode-directory: <WORKSPACE>` created a session whose
+  `directory` was that workspace, and `GET /session/{id}` with the same header returned
+  200. The header is honored but **not documented** in `/doc`.
+- `POST /session?directory=<WORKSPACE>` also created a session in that workspace; `/doc`
+  documents the `directory` query on create, list and message reads.
 
 The implementation rule:
 
 1. The core sends `x-opencode-directory: <WORKSPACE>` on session create/list/message/log
    requests. `<WORKSPACE>` is resolved in core; the renderer never supplies it.
-2. The probe in §2.5 checks whether the header is honored, whether the query form is
-   required, or whether neither works.
-3. If neither works, the setup assistant still works because it uses a single workspace
-   (the private setup directory). Project/global local sessions are then gated on a VOWP
-   local orchestrator that starts its own server in the right directory, or on a later
-   one-server-per-workspace change. Do not ship a project session that silently writes to
-   the app's inherited working directory.
+2. The pinned build honors the header on create/get, so keep it first. If a later build or
+   an endpoint rejects it, fall back to the documented `directory` query rather than
+   guessing.
+3. The setup assistant still uses a single private workspace (the setup directory).
+   Project/global local sessions remain gated by §3 and §7 on the VOWP endpoint and
+   mirroring, not by directory selection. Do not ship a project session that silently
+   writes to the app's inherited working directory.
 
 The session response's `directory` field is core-only. The core must drop it before any
 `ChatSessionView` is serialized. It is a raw local path, and the renderer must never see
@@ -335,39 +405,58 @@ per endpoint reads it and fans out to the matching chat sessions. The pump must 
 one SSE connection per `ChatView`. It ignores events for sessions it does not own,
 including the temporary session used by key verification.
 
-Expected frame shape (tolerant parser):
+Expected frame shape (tolerant parser; the pinned `/doc` includes an `id` that the parser
+ignores):
 
 ```text
-data: {"type":"server.connected","properties":{}}
+data: {"id":"<EVENT_ID>","type":"server.connected","properties":{}}
 
-data: {"type":"message.updated","properties":{"info":{"id":"<MESSAGE_ID>","role":"assistant","time":{"created":0,"completed":null},"error":null}}}
+data: {"id":"<EVENT_ID>","type":"server.heartbeat","properties":{}}
 
-data: {"type":"message.part.updated","properties":{"part":{"id":"<PART_ID>","messageID":"<MESSAGE_ID>","sessionID":"<NATIVE_SESSION_ID>","type":"text","text":"<TEXT_SO_FAR>"}}}
+data: {"id":"<EVENT_ID>","type":"message.updated","properties":{"info":{"id":"<MESSAGE_ID>","role":"assistant","time":{"created":0,"completed":null},"error":null}}}
 
-data: {"type":"session.idle","properties":{"sessionID":"<NATIVE_SESSION_ID>"}}
+data: {"id":"<EVENT_ID>","type":"message.part.updated","properties":{"sessionID":"<NATIVE_SESSION_ID>","part":{"id":"<PART_ID>","messageID":"<MESSAGE_ID>","sessionID":"<NATIVE_SESSION_ID>","type":"text","text":"<TEXT_SO_FAR>"},"time":0}}
+
+data: {"id":"<EVENT_ID>","type":"message.part.delta","properties":{"sessionID":"<NATIVE_SESSION_ID>","messageID":"<MESSAGE_ID>","partID":"<PART_ID>","field":"text","delta":"<DELTA>"}}
+
+data: {"id":"<EVENT_ID>","type":"session.idle","properties":{"sessionID":"<NATIVE_SESSION_ID>"}}
 ```
 
 The parser accepts `data:` lines, concatenates multi-line data until a blank line, ignores
 comments (`:`), and ignores unknown event types. It may accept an `event:` field but does
-not require one. The event type is `type` and the payload is `properties`; if the build
-uses a different envelope, the probe in §2.5 pins it before the core job ships.
+not require one. The pinned build uses `{ "id", "type", "properties" }`; the parser ignores
+`id` and still accepts a missing one. The event type is `type` and the payload is
+`properties`.
 
 | OpenCode event | Chat action |
 |---|---|
 | `server.connected` | Mark the pump connected; no UI message. |
+| `server.heartbeat` | Liveness only; `properties` is empty. Explicitly ignore it; do not render it or log a line per heartbeat. Any byte still counts under the 60 s rule in §2.2.4. |
 | `session.updated` | Refresh the session title/metadata if present; no text. |
 | `message.updated` with `info.role == "assistant"` | Create or update the assistant message shell (`id` from `info.id`, `origin: "model"`, `streaming: true`). If `info.error` is non-null, map it to the error rules in §6 and stop the turn. |
-| `message.part.updated` with `part.type == "text"` | Compute the append-only delta from the last text for `(messageID, partID)`. If the new text starts with the old text, emit a `delta` for the suffix. If it does not (a rewrite, shrink or non-prefix update), emit a `message` event with the full replacement text. |
+| `message.part.updated` with `part.type == "text"` | The cumulative `TextPart.text` source. Set the part text to the new `text` (never append it) and compute the append-only delta from the last text for `(messageID, partID)`. If the new text starts with the old text, emit a `delta` for the suffix. If it does not (a rewrite, shrink or non-prefix update), emit a `message` event with the full replacement text. |
+| `message.part.delta` with `field == "text"` | Append `delta` to that `(messageID, partID)`. A `field` other than `text` is ignored. The pinned probe cannot prove the emission cadence without a model turn; the core may apply deltas or explicitly ignore them and rely on `message.part.updated` plus the `session.idle` log backfill. It must pick one behavior and must not claim token-by-token streaming. |
 | `message.part.removed` | Remove that part's text; if the message has no text left and no error, remove the placeholder. |
-| `session.idle` | Read the log once if the assistant text may be incomplete, then emit `done` for the active assistant message; set the session `ready`. |
+| `message.removed` | Minor note only: a full-message removal is not reflected in the rendered log until the next log read; `session.idle`/reattach/reconnect backfill covers it. The pump may drop the message if present, but must not treat the event as the durable deletion. |
+| `session.idle` | Read the log once if the assistant text may be incomplete, then emit `done` for the active assistant message; set the session `ready`. This is the reconciliation point when deltas are ignored. |
 | `session.error` | Emit `error`; set the session `error`. Do not show the raw error object. |
-| `permission.updated` | Emit `permission_required`; never approve. The turn is left to the owner in the OpenCode app; if abort is available, abort it. |
+| `permission.asked` | Emit `permission_required`; never approve. The turn is left to the owner in the OpenCode app; if abort is available, abort it. |
 | `permission.replied` | Ignore; there is no approval UI in this contract. |
 | Everything else | Ignore. Do not render tool JSON, step internals or delta-only UI events. |
 
-Some builds put a `delta` field on the part event. If only `delta` is present, append it.
-If both `delta` and cumulative `text` are present, the cumulative `text` wins and the delta
-is ignored, so a delta is never applied twice.
+`permission.updated` is **not** in the pinned `/doc`; the v1 event name is
+`permission.asked`. Watching only `permission.updated` would make a permission request
+invisible and could hang the turn. `permission.v2.asked`/`permission.v2.replied` are
+v2-only and belong to a later v2 adapter, not this pump.
+
+`message.part.updated` is the cumulative source of truth: set the text to the part's
+`text`, never append it. `message.part.delta` is a separate event; when the core applies
+it, append only the `delta` for `field == "text"`. The pinned `TextPart` has no `delta`
+field. The probe cannot prove whether the delta event is emitted per token, per part, or
+at all during a real turn, so the core has two honest choices: apply deltas and reconcile
+them against cumulative updates, or explicitly ignore deltas and rely on
+`message.part.updated` plus the `session.idle` log backfill. Pick one and do not describe
+either as token-by-token streaming.
 
 The event stream is not a durable log. The pump is allowed to miss frames. Every
 `start`/`attach`/reconnect reads `GET /session/{id}/message` and replaces the rendered
@@ -389,9 +478,15 @@ the engine stops, the host disconnects or the app exits.
 | `POST /session/{id}/message` | The Tauri command returns a receipt after the request is accepted locally. The background task may wait up to **10 minutes** for the turn. There is no 20 s chat timeout; the key-verification 20 s is not the chat contract. |
 | Abort | 3 s; one retry |
 | SSE connect | 700 ms TCP, 5 s to response headers |
-| SSE idle | 60 s without a byte → treat as disconnected and reconnect. The server may send comments or `server.connected`; both count as liveness. |
+| SSE idle | 60 s without a byte → treat as disconnected and reconnect. The server sends comments, `server.connected` and a `server.heartbeat` data event with empty `properties` about every 10 s; any byte, including a comment, counts as liveness. |
 | SSE reconnect | 5 attempts with 250 ms, 500 ms, 1 s, 2 s, 4 s (jittered); then `stream_lost`, state `error`, manual Retry. |
 | Log page | 3 s; at most 200 messages per page; 50 by default |
+
+The live probe saw `server.connected` first (about 11 ms after connect) and
+`server.heartbeat` at about 10.6, 20.7, 30.7, 40.7, 50.8 and 60.8 s. A 3 s SSE window cannot
+establish that interval; the 65 s observation did. `server.heartbeat` is an undocumented
+runtime data event (it is not in `/doc`) and is explicitly ignored, but it still satisfies
+the liveness rule. The 60 s rule is unchanged.
 
 Cancellation:
 
@@ -425,8 +520,8 @@ Reconnect:
    empty/too long (`invalid_input`).
 2. Trim the text, cap it at 32,000 characters, and create the user `ChatMessage` with
    `origin: "user"`, `role: "user"`, `created_at` now and a `local:<ULID>` id. Send that
-   id as `messageID` when the message endpoint accepts it (the probe checks); otherwise
-   reconcile it on log backfill per §4.6.
+   id as `messageID`; `/doc` accepts the field, but preservation in a real turn's log is
+   still an owner-turn unknown, so reconcile it on log backfill per §4.6.
 3. Set the session `streaming` and emit a `session` event.
 4. Start (or reuse) the endpoint's event pump. If the pump cannot start within 5 s, mark
    `streaming_supported: false` and continue with the final-response path.
@@ -448,43 +543,49 @@ The `ChatEvent.delta` only appends. A non-prefix rewrite is represented by a `me
 event that replaces the message's text. The renderer must replace, not append, on that
 event.
 
-### 2.3 Proven, assumed and probe-only
+### 2.3 Proven, live-probed and still unknown
 
 | Claim | Status | Evidence / probe |
 |---|---|---|
 | The bundled binary is chosen only from the sidecar/resource dirs, never `PATH` | **Proven** | `EngineBinaryLocator` and its test |
 | The argv is `serve --hostname 127.0.0.1 --port <ephemeral>` | **Proven** | `serve_args`, `spawn_child`, test asserting no `0.0.0.0` |
 | The port is reserved by binding `127.0.0.1:0` and dropping the listener | **Proven** | `reserve_loopback_port` |
-| Health is `GET /global/health` with `healthy: true` | **Proven** | `ProcessEngineRuntime::health` and fake engine |
-| `POST /session` with `{}` creates a session | **Proven** | `verify_against_engine` |
-| `POST /session/{id}/message` accepts `{ model, parts }` | **Proven** at request level | `verify_against_engine`; fake engine returns `{info,parts}` |
-| `messageID` is accepted on the message request and preserved in the log | **Assumed** | Probe §2.5; fallback is the role/text/time reconciliation in §4.6 |
+| Health is `GET /global/health` with `healthy: true` | **Proven live** | `ProcessEngineRuntime::health`, fake engine, and the probe: 200 with `healthy: true` and `version: "1.19.5"` |
+| `POST /session` with `{}` creates a session | **Proven live** | `verify_against_engine` and the probe (`{"title":"<TITLE>"}`); the live response was a `Session` |
+| `POST /session/{id}/message` accepts `{ model, parts }` | **Proven at request level; body pinned by `/doc`** | `verify_against_engine`; `/doc`: `parts` is the only required body field, `messageID` and `model` are optional, response is `{info,parts}` |
+| `messageID` is accepted on the message request and preserved in the log | **Accepted by schema; log preservation owner-turn** | `/doc` request body; the probe ran no model turn. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
 | `DELETE /session/{id}` exists | **Proven** | key-verification cleanup |
-| A provider error can arrive in an HTTP 200 body (`info.error.statusCode`) | **Proven** | `classify_message_response` |
+| A provider error can arrive in an HTTP 200 body (`info.error.statusCode`) | **Proven** | `classify_message_response`; `/doc` types `AssistantMessage.error` as the provider-error union |
 | The child is killed on stop/drop; no orphan | **Proven** | process tests |
 | The engine is a singleton and `ensure_engine_setup` restarts an unhealthy `Ready` engine | **Proven** | `state.rs` |
 | `store_key` restarts a live bundled engine | **Proven** | `commands/engine.rs` |
-| `GET /session`, `GET /session/{id}`, `GET /session/{id}/message` shapes | **Assumed** | Probe §2.5; the client parser accepts both `{info,parts}[]` and a flat list |
-| `GET /event` SSE path, event names and `{type,properties}` envelope | **Assumed** | Probe §2.5; the spike is v2, not evidence |
-| `message.part.updated` carries cumulative text, not only deltas | **Assumed** | Probe; the client derives deltas and also handles a `delta` field if present |
-| `POST /session/{id}/abort` exists and cancels a turn | **Assumed** | Probe; fallback is `stop_unconfirmed` |
-| `x-opencode-directory` selects the workspace | **Assumed** | Probe; fallback is one workspace for setup and a gate for project/global |
-| A private `XDG_*` tree isolates sessions and config | **Assumed** | Probe: create a session, restart, list it; check the owner's tree is untouched |
-| The local `serve` has no server password | **Assumed from the current launch** | Probe: inspect `serve --help` and the startup output; never print a password |
-| The server orchestrator uses OpenCode v1 | **Assumed** | Probe/version gate; the v2 spike is not evidence |
+| `GET /session`, `GET /session/{id}`, `GET /session/{id}/message` shapes | **Proven live** | Probe and `/doc`: `Session[]` and `{info,parts}[]`; the message log is not a flat list. Keep the tolerant parser |
+| `GET /event` SSE path, event names and `{id,type,properties}` envelope | **Proven live** | 200 `text/event-stream`; first `server.connected`; `server.heartbeat` about every 10 s; the spike is v2, not evidence |
+| `message.part.updated` carries cumulative text, not only deltas | **Proven by `/doc`; real-turn payload/cadence owner-turn** | `/doc` `TextPart.text` is cumulative and has no `delta`; the separate `message.part.delta` event is also pinned |
+| `message.part.delta` is a separate append event | **Proven by `/doc`; cadence owner-turn** | `/doc`: `{sessionID,messageID,partID,field,delta}`; `field == "text"` appends. The probe cannot prove emission without a model turn |
+| `POST /session/{id}/abort` exists and cancels a turn | **Proven live** | 200 boolean `true`; an idle abort is safe and the session still exists |
+| `x-opencode-directory` selects the workspace | **Proven live** | Honored on create/get (undocumented); the documented `?directory=` query is also honored |
+| A private `XDG_*` tree isolates sessions and config | **Proven live** | Probe: create, SIGTERM, restart with the same tree, list/retrieve every session; the owner's OpenCode roots were unchanged. The `ProcessEngineRuntime` regression test is still required by §2.1.3 |
+| The local `serve` has no CLI auth flag, but `OPENCODE_SERVER_PASSWORD` is an optional env credential | **Proven live** | `serve --help` has no auth flag; set: 401 / 200 with Basic; unset: expected "server is unsecured" warning and 200 unauthenticated |
+| The server orchestrator uses OpenCode v1 | **Assumed** | Health/version gate; the live 1.19.5 `/doc` also lists `/api/...` paths, but their presence is not proof of v2 |
 | VOWP `0.5` `orchestrator endpoint` ships with auth metadata | **Planned, not shipped** | VOWP `0.5` scope; `vowp 0.4.0 --help` has no endpoint command |
 | VOWP can attach a surface to an already-running StackSpirit Engine | **Not available in 0.4.0** | `vowp agent --help` has no `surface` command; PLAN §9.8 says no attach command |
 | `vowp orchestrator move` preserves the native session | **Planned, not shipped** | VOWP `0.5` scope; HANDOFF §5 step 6 |
-| `POST /session/{id}/message` accepts an omitted `model` | **Assumed** | Probe/owner server turn; if it fails, the server path is gated |
-| `GET /doc` exposes OpenAPI | **Probe** | The fastest way to pin every shape without a model call |
+| `POST /session/{id}/message` accepts an omitted `model` | **Schema confirms optional; runtime server/owner** | `/doc` marks `model` optional; a successful server turn is still an owner/server check |
+| `GET /doc` exposes OpenAPI | **Proven live** | 200 `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes |
+| `permission.asked` is the v1 permission event | **Proven by `/doc`** | `permission.updated` is absent; `permission.replied` and v2-only `permission.v2.*` are separate |
+| `server.heartbeat` is a liveness data event | **Proven live; undocumented in `/doc`** | Empty `properties`, about every 10 s; explicitly ignored, any byte counts |
+| `message.removed` exists | **Proven by `/doc`; minor** | `{sessionID,messageID}`; a full removal is covered by the next log read/backfill |
 
 ### 2.4 Probe commands
 
 Run these only against the **pinned** sidecar, never the `opencode` on `PATH`, and never
-with a provider key or a paid model turn. The commands use a temporary private XDG tree,
-disable model fetching and autoupdate, and use loopback only. Replace
-`<TARGET_TRIPLE>` with the host triple. Do not commit the probe transcript if it contains
-a real path or session id; the probe report uses placeholders.
+with a provider key or a paid model turn. The probe job ran these commands (or the
+equivalent repository probe) against the pinned `1.19.5` sidecar; keep them for a manual
+re-probe. The commands use a temporary private XDG tree, disable model fetching and
+autoupdate, and use loopback only. Replace `<TARGET_TRIPLE>` with the host triple. Do not
+commit the probe transcript if it contains a real path or session id; the probe report
+uses placeholders.
 
 ```sh
 BIN="apps/spirit-desktop/src-tauri/binaries/opencode-<TARGET_TRIPLE>"
@@ -495,6 +596,9 @@ export XDG_STATE_HOME="$PROBE_ROOT/state"
 export XDG_CONFIG_HOME="$PROBE_ROOT/config"
 export OPENCODE_DISABLE_MODELS_FETCH=1
 export OPENCODE_DISABLE_AUTOUPDATE=1
+# The pinned server honors this optional HTTP Basic credential on every route. Leave it
+# unset for the unauthenticated loopback case; otherwise every curl below returns 401.
+unset OPENCODE_SERVER_PASSWORD OPENCODE_SERVER_USERNAME
 mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
 
 "$BIN" --version
@@ -533,7 +637,8 @@ python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("directory")
 curl -fsS "http://127.0.0.1:$PORT/session"
 curl -fsS "http://127.0.0.1:$PORT/session/$SESSION_ID/message"
 
-# SSE hello: this only proves framing/heartbeat, not a model turn.
+# SSE hello: proves framing and server.connected. A 3 s window cannot show the ~10 s
+# server.heartbeat; use a 65 s window for that.
 timeout 3 curl -fsS -N -H 'Accept: text/event-stream' "http://127.0.0.1:$PORT/event" || true
 
 # Abort on an idle session: proves the route exists without starting a model turn.
@@ -554,32 +659,48 @@ rm -rf "$PROBE_ROOT"
 ```
 
 Do not run `POST /session/{id}/message` in the probe. A real turn needs a model; the
-brief forbids a paid model. The message request/response shape is already partly proven by
-the key-verification path and its fake engine. The owner live verification in §9 runs one
-free included model turn and records the real `message.part.updated`/`session.idle` names.
+brief forbids a paid model. The request body and the `{info,parts}` response are now pinned
+by `/doc`, but `messageID` log preservation and the real `message.part.updated` payload are
+not. The owner live verification in §9 runs one free included model turn and records the
+real delta cadence, `session.idle` ordering and `messageID` preservation.
 
-### 2.5 What the probe must answer
+### 2.5 Live probe answers and remaining owner-turn unknowns
 
-The probe job must record, with placeholders instead of real ids/paths:
+The live probe (ss-43) ran the pinned `opencode` `1.19.5` sidecar in a private XDG tree.
+These answers are pinned; the items that need a model turn or a server endpoint stay
+explicitly unknown below. Any answer that contradicts §2.2 is a contract change to this
+document, not a runtime guess.
 
-1. The exact `serve --help` flags and whether a server password/auth flag exists.
-2. The exact `GET /session` and `GET /session/{id}/message` JSON shapes; whether the log
-   is an array of `{info,parts}` or a flat list.
-3. Whether `GET /event` exists, its content type, heartbeat interval and the first event
-   (`server.connected`).
-4. Whether `POST /session/{id}/abort` exists and its response; whether aborting an idle
-   session is safe.
-5. Whether `x-opencode-directory` or `?directory=` changes the session's workspace.
-6. Whether a session survives an engine restart with the same private XDG tree.
-7. Whether the private XDG tree keeps the owner's own OpenCode state untouched.
-8. The exact `message.part.updated` payload: cumulative text, delta field, both.
-9. Whether the `POST /session/{id}/message` response is `{info,parts}`, whether
-   `info.error` is used for provider failures, and whether `messageID` is accepted and
-   preserved in the log.
-10. Whether `/doc` exists and what it says about the above.
+| # | Question | Live answer |
+|---|---|---|
+| 1 | `serve --help` flags and auth | The flags are exactly `-h/--help`, `-v/--version`, `--print-logs`, `--log-level`, `--pure`, `--port` (default `0`), `--hostname` (default `127.0.0.1`), `--mdns` (default `false`; it defaults the hostname to `0.0.0.0`), `--mdns-domain` (default `opencode.local`) and `--cors` (default `[]`). There is no `--auth`, `--password`, `--token` or `--secret` flag. `OPENCODE_SERVER_PASSWORD` (with optional `OPENCODE_SERVER_USERNAME`, default `opencode`) turns on HTTP Basic on every route: 401 without credentials, 200 with the right ones. Unset, the server prints `Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.` and serves 200 unauthenticated. `--mdns` must stay off. |
+| 2 | Session and message JSON | `POST /session` returns a `Session` with `id`, `slug`, `projectID`, `directory`, `title`, `version` and `time`; the runtime also had `cost`, `path` and `tokens`. `GET /session` is `Session[]`. `GET /session/{id}/message` is an array of `{info, parts}` (not a flat list); it was `[]` for a new session. |
+| 3 | `GET /event` | 200 `text/event-stream`; the first frame is `server.connected` at about 11 ms. The envelope is `{id, type, properties}`. `server.heartbeat` is a data event with empty `properties` about every 10 s (observed at 10.6, 20.7, 30.7, 40.7, 50.8 and 60.8 s). A 3 s window cannot establish the interval. |
+| 4 | Abort | `POST /session/{id}/abort` exists and returns 200 with boolean `true` on an idle session; the session still exists afterwards, so an idle abort is safe. |
+| 5 | Directory selection | A foreground `serve` defaults a new session to the child's `cwd`. `x-opencode-directory` is honored on create/get but is not documented in `/doc`; the documented `?directory=` query is also honored on create/list/message. |
+| 6 | Restart persistence | With the same private XDG tree, a SIGTERM/restart (clean, no forced kill) kept all created sessions listed and retrievable. |
+| 7 | Owner isolation | The child received a private `HOME`/`XDG_*`/`TMPDIR` tree; the owner's OpenCode data, config, state and cache roots were unchanged. The private tree was removed on exit. |
+| 8 | `message.part.updated` payload | `/doc` pins cumulative `TextPart.text` and no `delta` field on the part. The pinned build has a separate `message.part.delta` with `{sessionID, messageID, partID, field, delta}`; `field == "text"` appends. The **real-turn payload and emission cadence are owner-turn unknowns**. |
+| 9 | `POST /session/{id}/message` | `/doc` pins the body keys (`agent`, `format`, `messageID`, `model`, `noReply`, `parts`, `system`, `tools`, `variant`; only `parts` required), the optional `messageID` and `model`, the 200 `{info, parts}` response, and `AssistantMessage.error` as the provider-error union. `messageID` preservation in the log and a real omitted-`model` turn are **owner-turn/server unknowns**. |
+| 10 | `/doc` | Present: 200 `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes. It confirms the v1 paths and shapes and also lists `/api/...` paths (not proof of a v2 server). It does not document `x-opencode-directory` or `server.heartbeat`. |
 
-Any answer that contradicts §2.2 is a contract change to this document, not a runtime
-guess.
+Still unknown without an owner model turn or a server endpoint:
+
+- The `message.part.updated` and `message.part.delta` emission cadence, and whether the
+  delta event is emitted at all during a real turn.
+- The real `message.part.updated` payload in a live turn. The schema is pinned; the runtime
+  contents and timing are not.
+- `session.idle` ordering relative to the final `message.part.updated`.
+- `messageID` preservation in `GET /session/{id}/message`.
+- Runtime `info.error` behavior in a real provider failure. The 200-with-error envelope is
+  already proven by the key-verification path; the probe did not repeat it.
+- `POST /session/{id}/message` with an omitted `model` against a server-hosted orchestrator.
+- Whether `x-opencode-directory` is required on `GET /session` and
+  `GET /session/{id}/message`. It is proven on create/get; the query form is documented on
+  all three.
+
+These are deferred to the §9 owner verification. They are not blockers for the setup chat
+contract and must not be turned into claims in code or UI.
 
 ## 3. Server path
 
@@ -757,8 +878,9 @@ endpoint command is the supported read.
 
 ### 3.4 Version gate: v1 vs v2
 
-The pinned StackSpirit Engine is `1.19.5` (v1 API). The VOWP spike used opencode `2.0.28`
-(v2 API under `/api/...`). A server orchestrator may be either. The client must not guess:
+The pinned StackSpirit Engine is `1.19.5` (v1 contract). The VOWP spike used opencode
+`2.0.28` (v2 API under `/api/...`). A server orchestrator may be either. The client must
+not guess:
 
 - Probe `GET /global/health` on the endpoint. Success → v1 dialect; use this contract.
 - If it returns 404 and `GET /api/...` style health succeeds, the server is v2. Return
@@ -766,6 +888,9 @@ The pinned StackSpirit Engine is `1.19.5` (v1 API). The VOWP spike used opencode
   `1.19.5` sidecar or wait for the v2 adapter.
 - The VOWP `0.5` endpoint should report an app version/dialect. If it does, use it; if it
   does not, the health probe above is authoritative.
+- The live `1.19.5` `/doc` lists many `/api/...` paths alongside the v1 paths. Do not
+  treat their presence as proof of v2; a health-200 server still uses this v1 contract.
+  The client gates on `/global/health`, not on the absence of `/api/...`.
 - The v2 spike's `/api/session`, `/api/event` and Basic-auth findings are not evidence
   for the pinned sidecar. A v2 adapter is a separate job, not a runtime branch in this
   contract.
@@ -792,7 +917,7 @@ The pinned StackSpirit Engine is `1.19.5` (v1 API). The VOWP spike used opencode
 
 | Path | State on 2026-11-18 | Gate |
 |---|---|---|
-| Setup assistant on the bundled engine | Can land now | Probe §2.5 answers the v1 API details; no VOWP dependency |
+| Setup assistant on the bundled engine | Can land now | The live probe §2.5 pins the v1 API details; no VOWP dependency |
 | `global`/`project` on the server, VOWP endpoint | Blocked | VOWP `0.5` `orchestrator endpoint` (not shipped) |
 | `global`/`project` on the server, app-owned forward | Blocked | Explicit owner approval + secure remote port/credential input + v1 server |
 | `global`/`project` Local on a VOWP local orchestrator | Blocked | `vowp agent orchestrator endpoint` (0.5) and a VOWP way to use the StackSpirit Engine as the app binary; `vowp 0.4.0` has no `agent surface` command and `orchestrator new` has no app-path flag |
@@ -1545,8 +1670,11 @@ error object.
 - `MockBridge` chat scenarios and the preview labels; the details-panel demo.
 - The core local client for the bundled engine, including the private XDG tree, the
   session/log/message/abort/SSE adapter, the event pump, reconnect/backfill, and the Tauri
-  commands. It is tested against a fake HTTP/SSE engine (no real model) and the probe
-  commands are documented. The real setup turn is owner-verified, not CI.
+  commands. It is tested against a fake HTTP/SSE engine (no real model). The live probe
+  pins the v1 paths, session/log shapes, abort, directory selection, restart persistence
+  and `server.heartbeat`, so the adapter no longer depends on guesses for those. Delta
+  cadence, the real `message.part.updated` payload and `messageID` preservation remain
+  owner-turn checks; the real setup turn is owner-verified, not CI.
 - `ChatView`/`conversations.ts` wiring for the **setup assistant** and the honest
   `chat_unavailable`/`engine_*` states. The global/project surfaces show the gate until
   the server path opens; they do not show preview replies when `bridge.preview` is false.
@@ -1749,9 +1877,11 @@ model. Use one free included model turn and the setup assistant.
    the setup assistant from the welcome page.
 2. Confirm the engine starts/reuses the existing process (no second `opencode` child;
    `ps` shows one bundled child), health is green and the chip is `Local · this Mac`.
-3. Send one short message using a free included model. Confirm text streams in (or the
-   honest "reply appears when the turn completes" note if SSE is unsupported), and the
-   reply is not labelled Preview.
+3. Send one short message using a free included model. Confirm text appears progressively
+   (or the honest "reply appears when the turn completes" note if SSE is unsupported), and
+   the reply is not labelled Preview. Record whether `message.part.delta` is emitted, the
+   real `message.part.updated` payload, and the `session.idle` ordering; do not describe
+   the result as token-by-token unless it was observed.
 4. Press Stop during a long turn. Confirm `stopped`, no duplicate assistant message, and
    either a clean abort or the honest `stop_unconfirmed` note.
 5. Reload/restart the app. Confirm the setup session reattaches and the log is intact; no
@@ -1806,6 +1936,12 @@ model. Use one free included model turn and the setup assistant.
 - The chip says Local when the transport is Server, or vice versa.
 
 ## 10. Open questions for VOWP and the owner
+
+The §2.5 live-probe questions are answered in §2.5 and are no longer open here. The
+remaining §2.5 owner-turn items (delta cadence, `session.idle` ordering, the real
+`message.part.updated` payload, `messageID` preservation, a real provider error and an
+omitted `model` on a server) are listed there. The questions below are still open for
+VOWP/the owner.
 
 These are not blockers for this document; they are blockers for specific follow-up jobs.
 Record the answers in the VOWP contract or the job report, not by guessing in code.
