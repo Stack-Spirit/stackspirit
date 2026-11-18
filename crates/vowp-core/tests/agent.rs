@@ -437,6 +437,11 @@ impl Gateway {
         self.output.wait_frame(predicate, Duration::from_secs(2))
     }
 
+    /// Waits up to `timeout` for a frame matching `predicate`.
+    fn expect_within(&self, predicate: impl Fn(&AgentFrame) -> bool, timeout: Duration) -> AgentFrame {
+        self.output.wait_frame(predicate, timeout)
+    }
+
     fn frame_count(&self) -> usize {
         self.output.frames().len()
     }
@@ -456,20 +461,39 @@ impl Gateway {
 }
 
 fn authenticate(gateway: &Gateway, name: &NodeName, key: &SigningKey) {
+    authenticate_within(gateway, name, key, Duration::from_secs(2));
+}
+
+/// Authenticates one connection, waiting up to `timeout` for each handshake frame.
+///
+/// Most tests keep the short default; the heartbeat dispatch test passes the same
+/// generous bound as its dispatch wait because a workspace gate runs this suite
+/// beside every other test binary and the gateway thread can be starved between
+/// the challenge and the welcome.
+fn authenticate_within(gateway: &Gateway, name: &NodeName, key: &SigningKey, timeout: Duration) {
     gateway.send(&hello(name, key));
     let AgentFrame::HomeChallenge {
         nonce,
         home_id,
         connection_id,
         ..
-    } = gateway.expect(|frame| matches!(frame, AgentFrame::HomeChallenge { .. }))
+    } = gateway.expect_within(|frame| matches!(frame, AgentFrame::HomeChallenge { .. }), timeout)
     else {
         panic!("expected HomeChallenge");
     };
     let signature = signature_hex(key, &nonce, &home_id, &connection_id);
     gateway.send(&AgentFrame::AgentAuth { signature });
-    gateway.expect(|frame| matches!(frame, AgentFrame::HomeWelcome { .. }));
+    gateway.expect_within(|frame| matches!(frame, AgentFrame::HomeWelcome { .. }), timeout);
 }
+
+/// Longest a test waits for one gateway dispatch pass on a loaded host.
+///
+/// The pass itself takes milliseconds when the host is idle. A workspace gate
+/// runs this suite beside every other test binary and other agents, and a
+/// deliberately single-core loaded run took 2.30 s, so a two-second budget was
+/// too tight. This is a hang guard, not a paced delay: the waits below finish as
+/// soon as their observable condition holds.
+const GATEWAY_WAIT: Duration = Duration::from_secs(30);
 
 fn wait_until(condition: impl FnMut() -> bool) {
     wait_until_for(condition, Duration::from_secs(2));
@@ -2920,6 +2944,89 @@ fn offload_heartbeat(busy_slots: u32, max_slots: u32) -> AgentFrame {
     }
 }
 
+/// Waits for one heartbeat's dispatch pass to settle.
+///
+/// The caller sends the heartbeat and then a `Ping`. Frames are processed in
+/// order on one connection thread, so the `Pong` is written only after the
+/// heartbeat's enqueue, claim and send pass has finished. `start` is the frame
+/// count before the heartbeat, which separates this pass's `AssignRun` frames
+/// from earlier ones.
+///
+/// The wait is condition-based and bounded for a loaded host, but it never waits
+/// past an over-dispatch: one more `AssignRun` frame or `sent` row than the
+/// slots allow panics immediately with the dispatch state.
+fn wait_for_dispatch(
+    gateway: &Gateway,
+    store: &Store,
+    name: &NodeName,
+    start: usize,
+    expected_assigns: usize,
+    expected_sent: usize,
+) {
+    let deadline = Instant::now() + GATEWAY_WAIT;
+    loop {
+        let frames = gateway.output.frames();
+        let window = &frames[start.min(frames.len())..];
+        let assigns = window
+            .iter()
+            .filter(|frame| matches!(frame, AgentFrame::AssignRun { .. }))
+            .count();
+        let sent = store
+            .assignments_for_node(name)
+            .expect("assignments")
+            .iter()
+            .filter(|assignment| assignment.state == vowp_store::repo_offload::AgentAssignmentState::Sent)
+            .count();
+        assert!(
+            assigns <= expected_assigns && sent <= expected_sent,
+            "the node admitted more runs than its slots: expected at most {expected_assigns} new AssignRun \
+             frames and {expected_sent} sent rows, saw {assigns} and {sent}; {}",
+            dispatch_state(gateway, store, name)
+        );
+        if window.iter().any(|frame| matches!(frame, AgentFrame::Pong)) {
+            assert_eq!(
+                assigns,
+                expected_assigns,
+                "the dispatch settled with the wrong number of new runs: {}",
+                dispatch_state(gateway, store, name)
+            );
+            assert_eq!(
+                sent,
+                expected_sent,
+                "the dispatch settled with the wrong number of sent rows: {}",
+                dispatch_state(gateway, store, name)
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dispatch did not settle within {GATEWAY_WAIT:?}: {}",
+            dispatch_state(gateway, store, name)
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Formats the frames and durable assignments for a failed dispatch wait.
+fn dispatch_state(gateway: &Gateway, store: &Store, name: &NodeName) -> String {
+    let frames = gateway.output.frames();
+    let assigns = frames
+        .iter()
+        .filter(|frame| matches!(frame, AgentFrame::AssignRun { .. }))
+        .count();
+    let rows = store
+        .assignments_for_node(name)
+        .map(|assignments| {
+            assignments
+                .iter()
+                .map(|assignment| format!("{}={}", assignment.payload.job, assignment.state.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|error| format!("<store error: {error}>"));
+    format!("{assigns} AssignRun frames sent; assignments: [{rows}]")
+}
+
 #[test]
 fn heartbeat_dispatches_at_most_the_node_slots() {
     let key = signing_key();
@@ -2962,8 +3069,8 @@ fn heartbeat_dispatches_at_most_the_node_slots() {
     // Keep the fleet cap above the node's two slots so this test measures the node limit.
     config.offload.max_remote_runs = 3;
     let gateway = Gateway::start_with_config(home.path(), clock.clone(), config);
-    authenticate(&gateway, &name, &key);
-    gateway.send(&offload_heartbeat(0, 2));
+    let store = gateway.store();
+    authenticate_within(&gateway, &name, &key, GATEWAY_WAIT);
 
     let count_assign = |gateway: &Gateway| {
         gateway
@@ -2973,16 +3080,23 @@ fn heartbeat_dispatches_at_most_the_node_slots() {
             .filter(|frame| matches!(frame, AgentFrame::AssignRun { .. }))
             .count()
     };
-    wait_until(|| count_assign(&gateway) == 2);
-    thread::sleep(Duration::from_millis(150));
+
+    // The heartbeat and the Ping are queued together. The connection handles
+    // frames in order, so the Pong proves this heartbeat's enqueue/claim/send
+    // pass has finished; the wait then checks the runs and sent rows it made.
+    let start = gateway.frame_count();
+    gateway.send(&offload_heartbeat(0, 2));
+    gateway.send(&AgentFrame::Ping);
+    wait_for_dispatch(&gateway, &store, &name, start, 2, 2);
     assert_eq!(count_assign(&gateway), 2, "one heartbeat sends only the free slots");
 
     // The two sent rows occupy the slots even though the agent reports idle capacity.
+    let start = gateway.frame_count();
     gateway.send(&offload_heartbeat(0, 2));
-    thread::sleep(Duration::from_millis(150));
+    gateway.send(&AgentFrame::Ping);
+    wait_for_dispatch(&gateway, &store, &name, start, 0, 2);
     assert_eq!(count_assign(&gateway), 2, "a second heartbeat must not over-dispatch");
 
-    let store = gateway.store();
     let assignments = store.assignments_for_node(&name).expect("assignments");
     assert_eq!(assignments.len(), 3, "all three jobs are durably queued");
     assert_eq!(
@@ -2990,7 +3104,8 @@ fn heartbeat_dispatches_at_most_the_node_slots() {
             .iter()
             .filter(|assignment| assignment.state == vowp_store::repo_offload::AgentAssignmentState::Sent)
             .count(),
-        2
+        2,
+        "only the claimed rows are sent"
     );
     gateway.finish().expect("gateway");
 }
