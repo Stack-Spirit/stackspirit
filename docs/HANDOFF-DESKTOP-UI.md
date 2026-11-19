@@ -9,12 +9,10 @@ sessions, what is real versus preview, and what to do next. `AGENTS.md` still ap
 
 | What | Where |
 |---|---|
-| New desktop shell (default) | `packages/spirit-ui/src/next/` (`NextShell.tsx` is the entry) |
+| Desktop shell | `packages/spirit-ui/src/next/NextShell.tsx` is the only shell; the classic frame and its classic-shell switch were retired (`ss-52`, `aba207d`) |
 | Theme tokens and all shell CSS | `packages/spirit-ui/src/next/theme.css` |
 | Shell unit tests | `packages/spirit-ui/src/test/next/nextShell.test.tsx` |
 | Shell e2e + axe | `apps/spirit-desktop/e2e/next-shell.spec.ts` |
-| Classic cockpit (still shipped) | `packages/spirit-ui/src/app/AppShell.tsx` and `views/` |
-| Shell switch | `apps/spirit-desktop/src/main.tsx` (`?ui=classic` or `VITE_SPIRIT_UI=classic`) |
 | Brand sheet, logo sources, icon builders | `design/brand/` (see its `README.md`) |
 | App icons | `apps/spirit-desktop/src-tauri/icons/` (built by `design/brand/tools/app_icon.py`) |
 | Preview servers for Claude Code | `.claude/launch.json` (`desktop-mock`, `brand`, `baseline`) |
@@ -258,25 +256,32 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
      recovery action (`vowp backup --restore` + `vowp up` + switching StackSpirit's active
      Home profile) when Home is unreachable.
 8. **Full Meadow Cutover — retire the classic shell & complete Meadow E2E (owner decision
-   2026-11-18):**
-   - Remove `?ui=classic` / `VITE_SPIRIT_UI=classic` from `apps/spirit-desktop/src/main.tsx`
-     and delete the legacy classic shell frame (`packages/spirit-ui/src/app/AppShell.tsx`,
-     `TopBar.tsx`, `StatusStrip.tsx`, `Drawers.tsx` and unused classic-only styles/tests)
-     so **Meadow (`NextShell.tsx`) is the sole UI**.
-   - Keep and restyle the shared operational drawers/views still used by Meadow
-     (`AddHostWizard`, `InboxDrawer`, `SessionsDrawer`, `RawDocumentDrawer`, and the
-     Workers `Board` lane view) strictly under Meadow tokens (WCAG 2.2 AA in both light
-     and dark themes).
-   - Migrate all Playwright e2e suites (`shell.spec.ts`, `sessions-asif.spec.ts`,
-     `local-orchestrator-gated.spec.ts`, `local-orchestrator-ready.spec.ts`) onto the
-     Meadow shell and add e2e coverage for the new Meadow flows (live chat, onboarding/
-     password-login, server secrets, Local/Server switch, Add project, and cluster view)
-     so `npm run test:e2e` passes 100% on Meadow with axe WCAG 2.2 AA green.
+   2026-11-18) — landed (`ss-52`, `aba207d`; `ss-53`, `6f2a568`, `9d7d357`, `dde41d9`;
+   `ss-56`, `a80775e`).** Meadow (`NextShell.tsx`) is the only shell. The classic frame
+   (`AppShell.tsx`, `TopBar.tsx`, `StatusStrip.tsx`, `Drawers.tsx`), its tests, the
+   `AppShell`/`TopBar`/`StatusStrip` exports, the classic-shell switch, and the unused
+   classic CSS were removed; `scenarios.test.tsx` now drives Meadow's `EngineView` and
+   `GateCard`. The shared operational drawers/views Meadow still uses (`AddHostWizard`,
+   `InboxDrawer`, `SessionsDrawer`, `RawDocumentDrawer`, and the Workers `Board` lane view)
+   stay under Meadow tokens. Desktop Playwright now runs on the default Meadow shell:
+   `playwright.config.ts` has no classic env and no `testIgnore`, and the stale classic
+   `apps/spirit-desktop/src/test/e2e/fleet.spec.ts` was deleted rather than skipped. `ss-53`
+   also fixed two WCAG AA contrast misses in `packages/spirit-ui/src/next/theme.css`
+   (`.badge--accent` and `.btn--danger:hover`) and added coverage for onboarding
+   password-login, the Server secrets card, the read-only location chip and the `chat_gated`
+   composer. Proven green: `ss-56` (`a80775e`) ran
+   `npm run test:e2e -w @stackspirit/desktop` at **18/18 on two consecutive runs** (2.6 m
+   and 1.9 m), with zero failed, skipped or flaky tests, no waivers, and no spec or config
+   change. Steps 6–7 (Local/Server switch, live Server chat, Add project, clusters) remain
+   pending and are not claimed here.
 
 ## 6. Known gaps and cautions
 
-- e2e status (updated 2026-11-18): Meadow desktop specs, web specs (`ss-27`), and classic
-  cockpit WCAG contrast specs (`ss-26`, `88be044`) are all green.
+- e2e status (updated 2026-11-19): the Meadow desktop suite passed 18/18 on two
+  consecutive runs (`ss-56`, `a80775e`; 2.6 m and 1.9 m, zero failed, skipped or flaky,
+  no waivers and no spec or config change). The specs are `next-shell`, `meadow-flows`,
+  `meadow-bridge-flows`, `sessions-asif`, `local-orchestrator-gated` and
+  `local-orchestrator-ready`.
 - **Setup chat is non-streaming for now.** The production transport reports
   `streaming_supported: false`: the pinned v1 event names and schema are recorded, but the
   runtime cadence and ordering of `message.part.updated`, `message.part.delta` and
@@ -293,10 +298,10 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
   `node scripts/fetch-engine.mjs` first), and `--checklist` prints the §9 steps. No owner
   model turn has been recorded, so the streaming cadence and the Server-mirroring half
   remain unverified.
-- The newer Settings surfaces have component coverage, not a new Playwright flow:
-  `ss-33`'s Password login card and `ss-35`'s Server secrets card were gated by
-  `npm test`/UI tests, and neither job added or re-ran an e2e spec. The e2e statement
-  above is the last recorded run, not coverage for these cards.
+- The Password login and Server secrets cards now have Playwright coverage in
+  `meadow-bridge-flows.spec.ts` (`ss-53`, `6f2a568`), including the three password-login
+  outcomes, masked `last4`, Revoke, the read-only location chip and the `chat_gated`
+  composer, with axe scans in light and dark.
 - VOWP `0.4.0` does not report the vault storage mode and does not encrypt the vault at
   rest. The Server secrets card shows the mode as not reported, and
   [`SECURITY.md`](../SECURITY.md) records the exact prompt-gated set path and limits;
