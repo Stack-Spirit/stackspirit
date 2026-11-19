@@ -62,7 +62,6 @@ python3 docs/reference/check-reference.py
 | `GateResult` | [gate-result.md](gate-result.md) |
 | `GateResultPage` | [gate-result-page.md](gate-result-page.md) |
 | `GcClassReport` | [gc-class-report.md](gc-class-report.md) |
-| `GcRefused` | [gc-refused.md](gc-refused.md) |
 | `GcReport` | [gc-report.md](gc-report.md) |
 | `Health` | [health.md](health.md) |
 | `HostSample` | [host-sample.md](host-sample.md) |

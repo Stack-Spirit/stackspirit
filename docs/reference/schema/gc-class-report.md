@@ -74,20 +74,6 @@ Exported by `vowp schema GcClassReport` and generated from the protocol types in
       "$ref": "#/$defs/CatalogClass",
       "description": "Class the totals describe."
     },
-    "eligible_bytes": {
-      "default": 0,
-      "description": "Bytes those files currently occupy; an estimate of what a dry run would free.",
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "eligible_files": {
-      "default": 0,
-      "description": "Files an apply pass would delete or compact now; compression is not counted.",
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
-    },
     "files": {
       "description": "Number of files.",
       "format": "uint64",

@@ -33,9 +33,9 @@ pub mod compact;
 pub mod gc;
 
 pub use backup::{BackupOptions, backup, restore};
-pub use classes::{class_name, classify, parse_class};
+pub use classes::{GcRefused, class_name, classify, parse_class};
 pub use compact::{CompactReport, compact_session};
-pub use gc::{GcOptions, MAX_OLDER_THAN, gc, parse_older_than};
+pub use gc::{GcClassOutcome, GcOptions, GcOutcome, MAX_OLDER_THAN, gc, gc_with_window, parse_older_than};
 
 /// Largest raw run-output file kept on disk; older bytes are trimmed from the front.
 pub const RUN_OUTPUT_CAP_BYTES: u64 = 50 * 1024 * 1024;

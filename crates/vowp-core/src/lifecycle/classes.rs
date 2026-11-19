@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use vowp_protocol::{
-    CatalogClass, CatalogFilter, GcRefused, JobId, JobState, Project, ProjectName, Session, SessionId, SessionRole,
-    SessionState, Timestamp, VowpConfig,
+    CatalogClass, CatalogFilter, JobId, JobState, Project, ProjectName, Session, SessionId, SessionRole, SessionState,
+    Timestamp, VowpConfig,
 };
 use vowp_store::{JobFilter, SessionFilter, Store};
 
@@ -78,6 +79,19 @@ impl Default for Retention {
             run_output: RUN_OUTPUT_MAX_AGE,
         }
     }
+}
+
+/// One candidate a GC pass left alone because a session is still owned or active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GcRefused {
+    /// Class the refused candidate belongs to.
+    pub class: CatalogClass,
+    /// Session that was refused, when the candidate is a session.
+    pub session_id: Option<SessionId>,
+    /// Path or row identity that was refused.
+    pub path: String,
+    /// Why the candidate stays.
+    pub reason: String,
 }
 
 /// The classification result: entries to report and candidates a guard refused.

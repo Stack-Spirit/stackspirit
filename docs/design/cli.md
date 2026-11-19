@@ -491,8 +491,9 @@ can see what a later `--apply` would remove.
 
 A session that holds a live lease, belongs to a job that still holds its lock (`running`,
 `stalled`, `gating`, `reviewing`, `fixing` or `merging`), or is a running orchestrator is listed
-under `refused` and is not compacted, in both the dry run and `--apply`. The JSON report adds
-`GcRefused` entries and the per-class `eligible_files`/`eligible_bytes` fields.
+under `refused` and is not compacted, in both the dry run and `--apply`. The JSON report carries
+one `refused` entry per candidate, with its class, session, path and reason, and the per-class
+`eligible_files`/`eligible_bytes` fields.
 
 ### 6.8 `vowp backup` (v0.2 forms)
 
