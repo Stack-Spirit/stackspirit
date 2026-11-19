@@ -67,7 +67,7 @@ test("server chat shows the honest VOWP gate, not a fake reply", async ({ page }
   await expect(gate).toBeVisible();
   await expect(gate).toHaveAttribute("data-gate", "true");
   await expect(gate).toContainText("Server chat needs VOWP 0.5's `vowp orchestrator endpoint`");
-  await expect(gate).toContainText("or an owner-approved SSH forward");
+  await expect(gate).toContainText("the app-owned SSH forward is not approved");
   await expect(page.getByTestId("session-location")).toContainText("Not connected");
   await expect(page.getByRole("textbox", { name: "Message" })).toBeDisabled();
   await expect(page.getByText(/Preview reply\./)).toHaveCount(0);

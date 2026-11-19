@@ -71,6 +71,9 @@ session shows where it runs with a chip (green **Server · name**, blue **Local 
 Mac**) and a one-click switch. The session log always lives on the server. Today
 sessions run on the server; the owner wants **Local by default later**, once VOWP's
 local orchestrator works, so agents get local-machine context.
+- Server chat transport is decision **A** (2026-11-19): wait for VOWP `0.5`'s
+  `vowp orchestrator endpoint`; the app-owned SSH forward is **not approved**; Local chat
+  on the bundled engine is the working path. Revisit only if the owner asks.
 
 **Several servers (Pooled-Compute + Failover Clusters)**: independent by default (sidebar
 lets you switch between saved servers). When a second server is added, offer **"Form a
@@ -166,9 +169,9 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 
 Gated, not preview: Server `global`/`project` chat shows a typed gate (`chat_gated`)
 with the composer disabled and no assistant reply. The blocker is VOWP `0.5`'s
-`vowp orchestrator endpoint` or the owner-approved app-owned SSH forward
-(`docs/ORCHESTRATOR-CHAT.md` §3.6 and §7.2). The Local/Server location is a read-only chip
-derived from the transport; there is no live switch. Moving a session is
+`vowp orchestrator endpoint` (`docs/ORCHESTRATOR-CHAT.md` §3.6 and §7.2); the app-owned
+SSH forward is not approved (owner decision A, 2026-11-19). The Local/Server location is
+a read-only chip derived from the transport; there is no live switch. Moving a session is
 `vowp orchestrator move` (VOWP `0.5`, §5 step 6), so it stays pending too.
 
 ## 5. Next steps (suggested order, updated 2026-11-19)
@@ -204,9 +207,11 @@ derived from the transport; there is no live switch. Moving a session is
    orchestrator's OpenCode server, not a new chat store or a per-turn `vowp chat`
    shell-out. **The Server `global`/`project` half and the Local/Server switch are still
    pending.** VOWP `0.4.0` has no `vowp orchestrator endpoint`, so Server chat returns the
-   typed `chat_gated` gate until VOWP `0.5` ships the endpoint or the owner approves the
-   app-owned SSH forward; the switch still needs VOWP `0.5` `vowp orchestrator move`
-   (step 6). The contract is [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
+   typed `chat_gated` gate until VOWP `0.5` ships the endpoint. The owner chose that
+   endpoint (decision **A**, recorded with `ss-50` on 2026-11-19) and did **not** approve
+   the app-owned SSH forward; the `chat_gated` behavior is unchanged. The switch still
+   needs VOWP `0.5` `vowp orchestrator move` (step 6). The contract is
+   [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
    §9; the owner checklist is
    [`scripts/verify-orchestrator-chat.mjs`](../scripts/verify-orchestrator-chat.mjs).
 5. **Server secret store over `vowp secret` + `SECURITY.md`** — **landed (`ss-38`,

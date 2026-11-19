@@ -213,7 +213,7 @@ describe("NextShell", () => {
     await renderConnected("chat-server-gated");
     const error = await screen.findByTestId("chat-error");
     expect(error).toHaveTextContent(
-      "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`, or an owner-approved SSH forward.",
+      "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`.",
     );
     expect(error).toHaveAttribute("data-gate", "true");
     expect(within(error).queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();

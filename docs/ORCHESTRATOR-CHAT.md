@@ -9,8 +9,9 @@ in `packages/spirit-ui/src/next/conversations.ts` onto a real OpenCode server:
 
 1. the exact local command, port policy, auth, health check, reuse rule and HTTP/SSE
    surface for the bundled StackSpirit Engine;
-2. the server path through VOWP `0.5`'s planned `vowp orchestrator endpoint`, with the
-   app-owned SSH loopback forward as the owner-approved fallback;
+2. the server path through VOWP `0.5`'s planned `vowp orchestrator endpoint`; the
+   app-owned SSH loopback forward is designed but **not approved** (decision A,
+   2026-11-19);
 3. the bridge types, methods, event flow, state machine and `MockBridge` behavior;
 4. the security rules that keep provider keys, surface tokens, SSH key paths, endpoint
    URLs and remote paths out of the renderer;
@@ -32,7 +33,7 @@ questions; §11 references.
 | Surface | State on 2026-11-18 |
 |---|---|
 | Setup assistant on the bundled engine | Contract complete; the live probe pinned the v1 surface; core/view jobs can land; no VOWP dependency |
-| `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint` or the owner-approved forward (§3.3) |
+| `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint`; the app-owned forward (§3.3) is not approved |
 | `global`/`project` on this Mac | **Gated** on VOWP's local endpoint and mirroring; the bundled engine is not silently used |
 | Local/Server switch | Out of scope; `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6) |
 | Preview chat in `MockBridge` | Stays, explicitly `origin: "preview"` |
@@ -705,8 +706,9 @@ contract and must not be turned into claims in code or UI.
 ## 3. Server path
 
 > **Gate:** the Server path is **not enabled** until VOWP `0.5`'s
-> `vowp orchestrator endpoint` ships **or** the owner approves the app-owned SSH forward
-> in §3.3. Until then the UI shows a typed `chat_gated` error and never a fake reply. The
+> `vowp orchestrator endpoint` ships. The owner declined the app-owned SSH forward in
+> §3.3 (decision A, 2026-11-19), so it is not a gate option. Until the endpoint ships the
+> UI shows a typed `chat_gated` error and never a fake reply. The
 > same gate applies to a Local `global`/`project` session, which needs VOWP's local
 > endpoint and mirroring.
 
@@ -851,10 +853,14 @@ If the owner already runs VOWP's tunnel manager, `vowp --json tunnel open <NAME>
 not StackSpirit's app-private known_hosts and pin. Use it only as an explicitly
 owner-managed alternative, and never assume its local port in the app's own flow.
 
-### 3.3 The owner-approved fallback without VOWP 0.5
+### 3.3 The app-owned SSH forward (designed, **not approved** by the owner on 2026-11-19)
 
-Until the endpoint ships, the server path can be enabled only by an explicit owner
-approval. The approval is not a secret and is not a default:
+**Appendix only:** decision **A** (`ss-50`, 2026-11-19) closed this path — Server chat
+waits for VOWP `0.5`'s `vowp orchestrator endpoint`. The design below is kept for
+reference and is not a live fallback.
+
+The design assumed the server path could be enabled only by an explicit owner approval.
+That approval is not a secret and is not a default:
 
 1. The owner enables the forward in Settings → Advanced → Chat (the separate
    `chat-settings` job). The chat gate banner links there; the chat panel carries no
@@ -868,9 +874,9 @@ approval. The approval is not a secret and is not a default:
    healthy, it probes `GET /global/health` **before sending any turn**. A v2 `/api/...`
    server is closed and reported as `protocol_unsupported` until a v2 adapter job ships
    (see §8). The probe never sends a model turn.
-4. If the owner does not approve, the server path stays gated. The UI says exactly:
-   "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`, or an owner-approved SSH
-   forward." It does not show a fake reply.
+4. The owner did not approve this path (decision A), so the server path stays gated. The
+   UI says exactly: "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`." It does
+   not show a fake reply.
 
 Do not parse VOWP's internal `host.json`, `service.json` or snapshot files in this
 fallback. They are internal, may contain a password, and are not a stable contract. The
@@ -919,7 +925,7 @@ not guess:
 |---|---|---|
 | Setup assistant on the bundled engine | Can land now | The live probe §2.5 pins the v1 API details; no VOWP dependency |
 | `global`/`project` on the server, VOWP endpoint | Blocked | VOWP `0.5` `orchestrator endpoint` (not shipped) |
-| `global`/`project` on the server, app-owned forward | Blocked | Explicit owner approval + secure remote port/credential input + v1 server |
+| `global`/`project` on the server, app-owned forward | Not approved | Owner decision A (2026-11-19): designed but declined; Server chat waits for VOWP `0.5` `orchestrator endpoint` |
 | `global`/`project` Local on a VOWP local orchestrator | Blocked | `vowp agent orchestrator endpoint` (0.5) and a VOWP way to use the StackSpirit Engine as the app binary; `vowp 0.4.0` has no `agent surface` command and `orchestrator new` has no app-path flag |
 | Real Local/Server switch | Blocked | `vowp orchestrator move` (0.5) and HANDOFF §5 step 6 |
 | Live chat through the bundled engine for setup | Ready for the core job | §2 |
@@ -1620,7 +1626,7 @@ The UI shows `errorTitle(error)` plus the message and hint; it never shows a raw
 
 | State / code | Trigger | UI | Retry |
 |---|---|---|---|
-| `gate` — `chat_gated` | Server path has no VOWP 0.5 endpoint and no owner approval; local orchestrator has no VOWP endpoint; VOWP `0.5` missing | Gate banner naming the exact missing piece; composer disabled | After VOWP 0.5 or owner approval |
+| `gate` — `chat_gated` | Server path has no VOWP 0.5 endpoint (the app-owned forward is not approved); local orchestrator has no VOWP endpoint; VOWP `0.5` missing | Gate banner naming the exact missing piece; composer disabled | After VOWP 0.5 |
 | `gate` — `chat_unavailable` | `bridge.chat` is absent (Web) or the bridge cannot run chat | "Chat is not available in this client." | No |
 | `gate` — `chat_unsupported_app` | The orchestrator's `app` is `claude-code` or `chat`, not `opencode` | "This orchestrator uses <app>; the OpenCode chat contract does not apply." | No (different app) |
 | `gate` — `chat_not_configured` | No orchestrator card for the global/project session | "Create the orchestrator in VOWP first." | Refresh after creation |
@@ -1682,7 +1688,7 @@ error object.
 - The `ChatMessageView` card flow, the secure server card and the onboarding actions are
   unchanged and real.
 
-### 7.2 Blocked on VOWP 0.5 (or an explicit owner approval)
+### 7.2 Blocked on VOWP 0.5
 
 The transport code for these paths can be built and fake-tested behind the `chat_gated`
 switch; what is blocked is enabling the live path and claiming it works.
@@ -1698,8 +1704,8 @@ switch; what is blocked is enabling the live path and claiming it works.
 
 ### 7.3 Rules this contract enforces
 
-- The Server path is not silently enabled. The owner must either wait for VOWP 0.5 or
-  approve the forward in §3.3. The app shows the exact gate.
+- The Server path is not silently enabled. It waits for VOWP 0.5's endpoint; the
+  app-owned forward in §3.3 is not approved (decision A). The app shows the exact gate.
 - The Local chip for `global`/`project` appears only when VOWP reports a local orchestrator
   and the turn is mirrored to the home. A UI-only Local label is forbidden.
 - The setup assistant remains local-only. It is not a VOWP session and does not claim a
@@ -1803,8 +1809,8 @@ except the doc job that owns it. Code jobs also run the repository's standard ga
   integration edits to `lib.rs`/`state.rs`/`commands/chat.rs` after `chat-core` merges.
 - **needs:** `chat-core`. The endpoint read and forward can land behind the `chat_gated`
   switch with fake tests, but the **live** server path stays disabled until VOWP `0.5`
-  ships `vowp orchestrator endpoint` **or** the owner approves the forward. The job must
-  not implement the consent UI.
+  ships `vowp orchestrator endpoint`; the owner did not approve the forward (decision A).
+  The job must not implement the consent UI.
 - **work:** add the endpoint read to the VOWP client (tolerant JSON, redacted parse
   errors, no values), the local agent endpoint read, the loopback URL validation, the
   version gate, the app-owned `ssh -N -L` forward with `SshOptions`, the ref-counted
@@ -1815,7 +1821,10 @@ except the doc job that owns it. Code jobs also run the repository's standard ga
   fake server endpoint works end to end. If the live path is still gated, the report names
   the exact missing gate; it does not block the fake-testable code.
 
-### 8.6 `chat-settings` (required for the owner-approved fallback)
+### 8.6 `chat-settings` (not scheduled — the owner declined the fallback)
+
+**Not scheduled:** decision **A** (2026-11-19) did not approve the app-owned forward, so
+this consent surface is not built. The design is kept for reference.
 
 - **owns:** `packages/spirit-ui/src/next/SettingsView.tsx` and the one settings test file.
 - **needs:** `chat-server`.
@@ -1831,7 +1840,7 @@ except the doc job that owns it. Code jobs also run the repository's standard ga
   `.vowp/jobs/<id>/report.md`.
 - **needs:** `chat-view` for the local setup half; `chat-server` for the server half.
   Blocked on the owner running the app with a real free included model and, for the server
-  half, VOWP 0.5 or the approved forward.
+  half, VOWP `0.5`'s `vowp orchestrator endpoint`.
 - **work:** run §9; capture redacted evidence; verify one free model turn, streaming, stop,
   reload/reattach, engine restart, server log mirroring, no token/path in DOM/log/errors,
   and no local fallback on disconnect. Do not run a paid model; do not create a surface or
@@ -1899,7 +1908,8 @@ model. Use one free included model turn and the setup assistant.
 
 ### 9.2 Server chat
 
-1. With VOWP 0.5 or the owner-approved forward, open the global orchestrator. Confirm the
+1. With VOWP `0.5`'s `vowp orchestrator endpoint` (the app-owned forward is not
+   approved), open the global orchestrator. Confirm the
    chip is `Server · <label>` and the composer is enabled only after `ready`.
 2. Send one short message. Confirm streaming/done, then run the server-side read
    (redacted):
@@ -1964,8 +1974,9 @@ Record the answers in the VOWP contract or the job report, not by guessing in co
    `native_session_id` is the minimum proof; the owner verification checks the log.
 6. **`orchestrator move`:** does the 0.5 move preserve the exact native OpenCode session
    id, or only the VOWP session id? The chat mapping must know which one survives.
-7. **Server path approval:** does the owner approve the app-owned SSH forward (§3.3), or
-   wait for VOWP 0.5? If approved, the consent UI job is `chat-settings`.
+7. **Server path approval (resolved 2026-11-19):** decision **A** — wait for VOWP `0.5`'s
+   `vowp orchestrator endpoint`; the app-owned SSH forward (§3.3) is not approved. Revisit
+   only if the owner asks.
 8. **Setup transcript retention:** should the local setup transcript survive an app
    restart, or be cleared when onboarding completes? This contract keeps it in the
    private engine tree until the owner clears it; the UI does not claim it is a server

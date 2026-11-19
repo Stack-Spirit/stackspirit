@@ -1770,7 +1770,7 @@ execution remains gated.
 | Surface | Status | Evidence |
 |---|---|---|
 | Local setup assistant chat | Landed on the bundled engine; non-streaming (`streaming_supported: false`) until the owner turn pins the event cadence | `ss-42`, `cc83371`; `ss-45`, `fe6d6e5`; `ss-46`, `c1e2402`; `scripts/verify-orchestrator-chat.mjs` (`ss-47`, `76b48ac`) |
-| Server `global`/`project` chat | Gated on VOWP `0.5` `vowp orchestrator endpoint` or the owner-approved SSH forward; no fake reply | `docs/ORCHESTRATOR-CHAT.md` §3.6, §7.2 |
+| Server `global`/`project` chat | Gated on VOWP `0.5` `vowp orchestrator endpoint` (owner decision A, `ss-50`, 2026-11-19: the app-owned SSH forward is not approved); no fake reply | `docs/ORCHESTRATOR-CHAT.md` §3.6, §7.2 |
 | Local/Server switch | Gated on VOWP `0.5` `vowp orchestrator move` (HANDOFF §5 step 6); the chip is read-only | `docs/ORCHESTRATOR-CHAT.md` §3.5 |
 
 The Server/VOWP `0.5` and pooled-compute cluster ordering in HANDOFF §5 steps 6–7 is

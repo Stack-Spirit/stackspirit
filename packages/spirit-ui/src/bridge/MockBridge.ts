@@ -1710,8 +1710,8 @@ export class MockBridge implements SpiritBridge {
     if (this.scenario === "chat-server-gated" && session !== "setup") {
       throw errorDto(
         "chat_gated",
-        "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`, or an owner-approved SSH forward.",
-        "Update VOWP or approve the forward in Settings → Advanced → Chat.",
+        "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`.",
+        "Update to VOWP 0.5, then retry; the app-owned SSH forward is not approved.",
       );
     }
     if (this.scenario === "chat-session-lost" && session !== "setup") {
