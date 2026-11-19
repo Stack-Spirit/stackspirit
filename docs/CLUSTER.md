@@ -309,8 +309,8 @@ The desktop half is the optional `SpiritBridge.cluster` namespace (`form`, `heal
 Cluster state is not part of `fleetStore`. `clusterStore` reads the bridge and host list
 from `fleetStore` so the shell has one bridge instance, and keeps the saved cluster beside
 the fleet snapshot: a failed health read drops the last pooled health instead of dimming
-the connected fleet view. The saved record is the app-private `cluster.json` and holds no
-path, backup destination or credential.
+the connected fleet view. The saved record is app-private and holds no path, backup
+destination or credential.
 
 ### Form a cluster
 
