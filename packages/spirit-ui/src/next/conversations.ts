@@ -171,7 +171,7 @@ function normalizeMessage(message: ChatMessage): ChatMessageView {
 function baseView(session: SessionId): ChatSessionView {
   return {
     session,
-    location: session === "setup" ? "local" : "server",
+    location: "local",
     state: "idle",
     attached: false,
     streaming_supported: false,
@@ -541,7 +541,7 @@ async function doOpen(
   resume: boolean | undefined,
 ): Promise<ChatSessionView | null> {
   const chat = bridge.chat;
-  const desired: SessionLocation = session === "setup" ? "local" : (location ?? "server");
+  const desired: SessionLocation = session === "setup" ? "local" : (location ?? "local");
   const current = useConversations.getState().views[session];
 
   if (!chat) {
@@ -643,7 +643,7 @@ export const useConversations = create<ConversationState>((set, get) => ({
     runOpen(
       session,
       projectFor(session),
-      session === "setup" ? "local" : "server",
+      "local",
       false,
     ),
 
