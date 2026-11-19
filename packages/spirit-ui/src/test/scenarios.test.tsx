@@ -1,16 +1,18 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { TopBar } from "../app/TopBar";
+import type { GateSnapshot } from "../bridge/wire";
 import { gateStateLabel } from "../domain/connection";
+import { CapacityRail } from "../views/capacity/CapacityRail";
+import { EngineView } from "../views/engine/EngineView";
+import { GateCard } from "../views/engine/GateCard";
+import { FleetCanvas } from "../views/fleet/FleetCanvas";
 import { seedStore } from "./render";
 import {
   PLAN_10_2_SCENARIOS,
   SCENARIO_FIXTURES,
   scenario,
 } from "./scenarios/fixtures";
-import { FleetCanvas } from "../views/fleet/FleetCanvas";
-import { CapacityRail } from "../views/capacity/CapacityRail";
 
 const FLEET_EXPECTATIONS: Partial<Record<(typeof PLAN_10_2_SCENARIOS)[number], RegExp>> = {
   "fresh-single": /8 worker slots, 3 busy, 5 idle/,
@@ -28,23 +30,51 @@ const FLEET_EXPECTATIONS: Partial<Record<(typeof PLAN_10_2_SCENARIOS)[number], R
   "disk-disagreement": /source capacity report/,
 };
 
-const APP_EXPECTATIONS: Partial<Record<(typeof PLAN_10_2_SCENARIOS)[number], RegExp>> = {
-  "engine-included": /Engine ready/,
-  "engine-no-included": /Engine stopped/,
-  "engine-external": /External: opencode/,
-  "gate-phase3-waiting": /Local · Waiting/,
-  "gate-phase3-ready": /Local · Ready/,
-  "gate-asif-waiting": /ASIF · Waiting/,
-  "gate-asif-ready": /ASIF · Ready/,
+type AppExpectation =
+  | { surface: "engine"; text: RegExp }
+  | { surface: "gate"; kind: "local" | "asif"; title: string; state: string };
+
+// Meadow has no top bar. The old classic chrome expectations map to the Engine
+// surface: engine status comes from EngineView's status card/onboarding, and the
+// local/ASIF gate cards carry the same gateStateLabel copy.
+const APP_EXPECTATIONS: Partial<
+  Record<(typeof PLAN_10_2_SCENARIOS)[number], AppExpectation>
+> = {
+  "engine-included": { surface: "engine", text: /Engine ready/ },
+  "engine-no-included": { surface: "engine", text: /Engine stopped/ },
+  "engine-external": { surface: "engine", text: /External: opencode/ },
+  "gate-phase3-waiting": {
+    surface: "gate",
+    kind: "local",
+    title: "Local orchestrator",
+    state: "Waiting",
+  },
+  "gate-phase3-ready": {
+    surface: "gate",
+    kind: "local",
+    title: "Local orchestrator",
+    state: "Ready",
+  },
+  "gate-asif-waiting": {
+    surface: "gate",
+    kind: "asif",
+    title: ".asif.zip sessions",
+    state: "Waiting",
+  },
+  "gate-asif-ready": {
+    surface: "gate",
+    kind: "asif",
+    title: ".asif.zip sessions",
+    state: "Ready",
+  },
 };
 
-function renderTopBar() {
+function renderGateCards(gates: GateSnapshot) {
   return render(
-    <TopBar
-      onNavigate={() => undefined}
-      onOpenInbox={() => undefined}
-      onOpenCapacity={() => undefined}
-    />,
+    <>
+      <GateCard kind="local" gates={gates} onDetails={() => undefined} />
+      <GateCard kind="asif" gates={gates} onDetails={() => undefined} />
+    </>,
   );
 }
 
@@ -55,15 +85,26 @@ describe("PLAN §10.2 scenario suite", () => {
     );
   });
 
-  it.each(PLAN_10_2_SCENARIOS)("renders the %s scenario", (name) => {
+  it.each(PLAN_10_2_SCENARIOS)("renders the %s scenario", async (name) => {
     const fixture = scenario(name);
     seedStore(fixture.fleet, {
       engine: fixture.engine ?? null,
       gates: fixture.gates ?? null,
     });
-    if (APP_EXPECTATIONS[name]) {
-      renderTopBar();
-      expect(screen.getAllByText(APP_EXPECTATIONS[name]).length).toBeGreaterThan(0);
+    const expectation = APP_EXPECTATIONS[name];
+    if (expectation) {
+      if (expectation.surface === "engine") {
+        render(<EngineView />);
+        expect(
+          (await screen.findAllByText(expectation.text)).length,
+        ).toBeGreaterThan(0);
+      } else {
+        if (!fixture.gates) throw new Error(`${name} has no gates fixture`);
+        renderGateCards(fixture.gates);
+        const card = await screen.findByTestId(`gate-card-${expectation.kind}`);
+        expect(within(card).getByText(expectation.title)).toBeInTheDocument();
+        expect(within(card).getByText(expectation.state)).toBeInTheDocument();
+      }
       return;
     }
     render(

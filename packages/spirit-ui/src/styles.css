@@ -392,10 +392,6 @@ pre {
   gap: var(--space-2);
 }
 
-.canvas__capacity-toggle {
-  display: none;
-}
-
 .page-title {
   margin-top: 2px;
   font-size: var(--text-2xl);
@@ -441,17 +437,6 @@ pre {
   margin-right: var(--space-2);
 }
 
-.topbar__mark {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: var(--text-md);
-}
-
 .topbar__wordmark {
   font-size: var(--text-lg);
   font-weight: 700;
@@ -487,37 +472,6 @@ pre {
   white-space: nowrap;
 }
 
-.topbar__latency {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.topbar__latency span {
-  white-space: nowrap;
-}
-
-.topbar__connect {
-  min-width: 86px;
-}
-
-.topbar__project .select {
-  min-width: 120px;
-}
-
-.topbar__gates {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.topbar__capacity {
-  display: none;
-}
-
 /* ---------- status strip ---------- */
 
 .status-strip {
@@ -544,25 +498,8 @@ pre {
   color: var(--state-warn);
 }
 
-.status-strip__item--danger {
-  max-width: 420px;
-  overflow: hidden;
-  color: var(--state-danger);
-  text-overflow: ellipsis;
-}
-
 .status-strip__spacer {
   flex: 1;
-}
-
-.status-strip__details {
-  flex-basis: 100%;
-  padding: var(--space-2);
-  border-top: 1px solid var(--border);
-}
-
-.status-strip__details p {
-  margin-top: 2px;
 }
 
 .status-strip .btn {
@@ -1828,13 +1765,6 @@ pre {
 
 /* ---------- responsive ---------- */
 
-@media (max-width: 1360px) {
-  .topbar__supervisor,
-  .topbar__gates {
-    display: none;
-  }
-}
-
 @media (max-width: 1200px) {
   .app-body {
     grid-template-columns: 280px minmax(0, 1fr);
@@ -1842,11 +1772,6 @@ pre {
 
   .rail--right {
     display: none;
-  }
-
-  .canvas__capacity-toggle,
-  .topbar__capacity {
-    display: inline-flex;
   }
 
   .lane-preview {
@@ -1857,10 +1782,6 @@ pre {
 @media (max-width: 980px) {
   .app-body {
     grid-template-columns: 240px minmax(0, 1fr);
-  }
-
-  .topbar__project {
-    display: none;
   }
 
   .host-manager__list {
