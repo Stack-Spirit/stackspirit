@@ -166,6 +166,14 @@ log or an error. The card shows `name`, `•••• last4`, the update time an
 when VOWP reports one; VOWP `0.4.0` reports none, so the card says so instead of
 guessing. See [`SECURITY.md`](../SECURITY.md) for the exact path and limits.
 
+Chat has three surfaces (see §5 step 4): **setup chat** on the bundled engine (below);
+**Local `global`/`project`** through `vowp agent orchestrator endpoint`, real when the
+installed VOWP reports a local orchestrator and `chat_not_configured` otherwise
+(endpoint-verified on the owner's Mac; not live on this Linux host's VOWP `0.4.0`, which
+has no local orchestrator record); and **Server `global`/`project`**, gated (`chat_gated`,
+decision A). The shell opens `global`/`project` on Local (`a62c6e8`); Server remains the
+gated path.
+
 The setup assistant's chat is real on the bundled StackSpirit Engine (`ss-42`, `cc83371`;
 `ss-45`, `fe6d6e5`; `ss-46`, `c1e2402`). It creates or resumes its private local session,
 sends one turn through `bridge.chat`, and renders the real final model reply; it never
@@ -188,9 +196,13 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 Gated, not preview: Server `global`/`project` chat shows a typed gate (`chat_gated`)
 with the composer disabled and no assistant reply. The blocker is VOWP `0.5`'s
 `vowp orchestrator endpoint` (`docs/ORCHESTRATOR-CHAT.md` §3.6 and §7.2); the app-owned
-SSH forward is not approved (owner decision A, 2026-11-19). The Local/Server location is
-a read-only chip derived from the transport; there is no live switch. Moving a session is
-`vowp orchestrator move` (VOWP `0.5`, §5 step 6), so it stays pending too.
+SSH forward is not approved (owner decision A, 2026-11-19). Local `global`/`project` is
+not gated when the installed VOWP reports an endpoint: it attaches there, continues the
+newest host session when no native id is reported, and never creates a session or falls
+back to the bundled engine (`ss-61`, `66563cd`; `ss-62`, `0237770`, `147e153`). The
+Local/Server location is a read-only chip derived from the transport; there is no live
+switch. Moving a session is `vowp orchestrator move` (VOWP `0.5`, §5 step 6), so it stays
+pending too.
 
 ## 5. Next steps (suggested order, updated 2026-11-19)
 
@@ -214,24 +226,43 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
    `vowp agent status` (`connection: connected`) is still an owner check, the live agent
    reports `agent_version: 0.3.0`, and the gate therefore stays `Waiting` with D6
    actions disabled.
-4. **Live orchestrator chat via the paired OpenCode engine (`opencode serve`) — local setup
-   half landed (`ss-39`, `8980bd9`; `ss-40`, `07dbd2d`; probe `ss-41`, `4785839`; live
-   probe `ss-43`; facts `ss-44`, `ff89ea6`; core `ss-42`, `cc83371`; host/bridge `ss-45`,
-   `fe6d6e5`; view `ss-46`, `c1e2402`; owner verification script `ss-47`, `76b48ac`).**
-   The setup assistant now runs on the bundled engine through `bridge.chat`: it creates or
-   resumes its private local session, sends one turn, and renders the real final reply
-   (see the non-streaming caveat in §6). It never spawns a second engine and never shows a
-   preview reply when `bridge.preview` is false. The owner decision stands: use the
+4. **Live orchestrator chat via the paired OpenCode engine (`opencode serve`) — three
+   surfaces (`ss-39`, `8980bd9`; `ss-40`, `07dbd2d`; probe `ss-41`, `4785839`; live probe
+   `ss-43`; facts `ss-44`, `ff89ea6`; setup core `ss-42`, `cc83371`; host/bridge `ss-45`,
+   `fe6d6e5`; view `ss-46`, `c1e2402`; owner verification script `ss-47`, `76b48ac`;
+   Local endpoint `ss-61`, `66563cd`; newest-session continuity `ss-62`, `0237770`,
+   `147e153`; live verification `ss-63`, `1528aba`).** The owner decision stands: use the
    orchestrator's OpenCode server, not a new chat store or a per-turn `vowp chat`
-   shell-out. **The Server `global`/`project` half and the Local/Server switch are still
-   pending.** VOWP `0.4.0` has no `vowp orchestrator endpoint`, so Server chat returns the
-   typed `chat_gated` gate until VOWP `0.5` ships the endpoint. The owner chose that
-   endpoint (decision **A**, recorded with `ss-50` on 2026-11-19) and did **not** approve
-   the app-owned SSH forward; the `chat_gated` behavior is unchanged. The switch still
-   needs VOWP `0.5` `vowp orchestrator move` (step 6). The contract is
-   [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
+   shell-out.
+   - **Setup chat** — real on the bundled StackSpirit Engine through `bridge.chat`: it
+     creates or resumes its private local session, sends one turn, and renders the real
+     final reply. It never spawns a second engine and never shows a preview reply when
+     `bridge.preview` is false. It is unchanged, and remains non-streaming for now (see
+     the caveat in §6).
+   - **Local `global`/`project`** — landed and version-gated. It attaches when the
+     installed VOWP provides `vowp agent orchestrator endpoint <name> --json`;
+     `crates/spirit-core/src/engine/chat/endpoint.rs` runs it with argv only, a bounded
+     timeout and typed refusals (`chat_not_configured`, `chat_gated`). When the endpoint
+     reports `native_session_id: null`, the app continues the newest host session
+     (`GET /api/session`, greatest `time.updated`); it never creates a native session and
+     never falls back to the bundled engine. The owner's Mac endpoint document was
+     live-verified 2026-11-19 (`app: opencode`, loopback URL, Basic auth,
+     `native_session_id: null`; no id, URL or port is recorded here). This Linux host runs
+     VOWP `0.4.0` with no local orchestrator record, so it honestly returns
+     `chat_not_configured`; Local chat is not live here. The §9.1b owner run in the
+     checklist is still outstanding.
+   - **Server `global`/`project`** — still gated. VOWP `0.4.0` has no
+     `vowp orchestrator endpoint`, so Server chat returns the typed `chat_gated` gate
+     until VOWP `0.5` ships the endpoint. The owner chose that endpoint (decision **A**,
+     recorded with `ss-50` on 2026-11-19) and did **not** approve the app-owned SSH
+     forward; the `chat_gated` behavior is unchanged. The **Local/Server switch** still
+     needs VOWP `0.5` `vowp orchestrator move` (step 6); the location chip stays
+     read-only.
+   The contract is [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
    §9; the owner checklist is
-   [`scripts/verify-orchestrator-chat.mjs`](../scripts/verify-orchestrator-chat.mjs).
+   [`scripts/verify-orchestrator-chat.mjs`](../scripts/verify-orchestrator-chat.mjs), and
+   `node scripts/verify-orchestrator-chat.mjs --check` passes (static preconditions; the
+   §9.1b owner run is outstanding).
 5. **Server secret store over `vowp secret` + `SECURITY.md`** — **landed (`ss-38`,
    `bf45d31`; `ss-34`, `def3538`; `ss-35`, `506d9d2`).** Settings → Advanced → **Server
    secrets** reads `vowp --json secret ls`, stores with `vowp --json secret set <NAME>`

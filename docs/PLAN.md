@@ -1769,8 +1769,9 @@ execution remains gated.
 
 | Surface | Status | Evidence |
 |---|---|---|
-| Local setup assistant chat | Landed on the bundled engine; non-streaming (`streaming_supported: false`) until the owner turn pins the event cadence | `ss-42`, `cc83371`; `ss-45`, `fe6d6e5`; `ss-46`, `c1e2402`; `scripts/verify-orchestrator-chat.mjs` (`ss-47`, `76b48ac`) |
-| Server `global`/`project` chat | Gated on VOWP `0.5` `vowp orchestrator endpoint` (owner decision A, `ss-50`, 2026-11-19: the app-owned SSH forward is not approved); no fake reply | `docs/ORCHESTRATOR-CHAT.md` §3.6, §7.2 |
+| Setup chat (bundled engine) | Landed; non-streaming (`streaming_supported: false`) until the owner turn pins the event cadence | `docs/ORCHESTRATOR-CHAT.md` §2, §6; `ss-42`, `cc83371`; `ss-45`, `fe6d6e5`; `ss-46`, `c1e2402`; `scripts/verify-orchestrator-chat.mjs` (`ss-47`, `76b48ac`) |
+| Local `global`/`project` chat | Landed; endpoint document live-verified on the owner's Mac 2026-11-19; version-gated on the installed VOWP's `vowp agent orchestrator endpoint`, and continues the newest host session when the endpoint reports no native id; never creates a session or falls back to the bundled engine; `chat_not_configured` on this Linux host (VOWP `0.4.0`, no local orchestrator record) | `docs/ORCHESTRATOR-CHAT.md` §3, §4.3; `ss-61`, `66563cd`; `ss-62`, `0237770`, `147e153`; `ss-63`, `1528aba` |
+| Server `global`/`project` chat | Gated on VOWP `0.5` `vowp orchestrator endpoint` (owner decision A, `ss-50`, 2026-11-19: the app-owned SSH forward is not approved); no fake reply | `docs/ORCHESTRATOR-CHAT.md` §3.1, §3.6, §7.2 |
 | Local/Server switch | Gated on VOWP `0.5` `vowp orchestrator move` (HANDOFF §5 step 6); the chip is read-only | `docs/ORCHESTRATOR-CHAT.md` §3.5 |
 
 The Server/VOWP `0.5` and pooled-compute cluster ordering in HANDOFF §5 steps 6–7 is
