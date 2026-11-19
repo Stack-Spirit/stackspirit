@@ -472,13 +472,27 @@ that is given a value can print it. The full contract is
 ### 6.7 `vowp gc`
 
 ```
-vowp gc [--apply] [--class <class>] [--now <RFC3339>]
+vowp gc [--apply] [--class <class>] [--older-than <duration>] [--now <RFC3339>]
 ```
 
-Dry run by default: lists eligible files per lifecycle class (`production`, `truth`, `open_work`,
-`secrets`, `closed_sessions`, `run_output`, `worktrees`, `samples`, `cache`). `--apply` deletes
-only the eligible classes; production, truth, open work and secrets are never touched. A nightly
+Dry run by default: lists files per lifecycle class (`production`, `truth`, `open_work`,
+`secrets`, `closed_sessions`, `run_output`, `worktrees`, `samples`, `cache`), the bytes they
+occupy and how many of those bytes an `--apply` would free now. `--apply` deletes only the
+eligible classes; production, truth, open work and secrets are never touched. A nightly
 `gc-nightly` schedule runs `--apply` by default. `--now` is a test clock override.
+
+`--older-than` overrides the retention window for `closed_session` (default 30 days) and
+`run_output` (default 14 days) without changing any other class or the nightly pass. It accepts
+a positive whole number followed by `s`, `m`, `h`, `d` or `w`, so `36h`, `7d` and `2w` are valid.
+Zero, negative, unterminated and larger-than-ten-year values exit 2. With `--class`, the override
+is accepted only for `closed_session` and `run_output`; naming any other class with it also exits
+2. A dry run prints the same class totals plus `ELIGIBLE` and `ELIGIBLE BYTES`, so the operator
+can see what a later `--apply` would remove.
+
+A session that holds a live lease, belongs to a job that still holds its lock (`running`,
+`stalled`, `gating`, `reviewing`, `fixing` or `merging`), or is a running orchestrator is listed
+under `refused` and is not compacted, in both the dry run and `--apply`. The JSON report adds
+`GcRefused` entries and the per-class `eligible_files`/`eligible_bytes` fields.
 
 ### 6.8 `vowp backup` (v0.2 forms)
 

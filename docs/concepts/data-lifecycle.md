@@ -16,8 +16,8 @@ class. Four classes are permanent by construction; five are disposable and colle
 | **truth** | global and project databases, capsules, passing gate evidence, decisions and ledger, backups, archived project data | **Never auto-deleted**; backed up | database files, `capsules/`, `gate_results`, `catalog` |
 | **open work** | worktrees of unmerged or unpushed jobs, active or open sessions, orchestrator sessions, the live lock and heartbeat | **Never auto-deleted** | `jobs` state and worktree, `sessions` state, `orchestrators/` |
 | **secrets** | `~/.vowp/secrets/`, vault files | **Never auto-deleted**; **never backed up in plain text** | secrets directory, mode file |
-| **closed session** | `log.jsonl` and blobs of an idle session whose job is done, or an explicitly closed session | Kept 30 days after the last update, then compacted to a capsule and summary | `sessions.state='closed'` or a done job |
-| **run output** | `runs/*.jsonl`, `*.stderr` | 14 days; gzip after 1 day | `runs/` and the run rows |
+| **closed session** | `log.jsonl` and blobs of an idle session whose job is done, or an explicitly closed session | Kept 30 days after the last update, then compacted to a capsule and summary; `gc --older-than` can shorten one pass | `sessions.state='closed'` or a done job |
+| **run output** | `runs/*.jsonl`, `*.stderr` | 14 days; gzip after 1 day; `gc --older-than` can shorten one pass | `runs/` and the run rows |
 | **worktree** | a job worktree | Removed after merge; a failed, cancelled or replanned job's worktree is kept 7 days | job state and worktree path |
 | **sample** | `host_samples` | One row per supervisor tick, kept for 24 hours; no automatic one-minute rollup | the table |
 | **cache** | disposable `tmp/` files | 24 hours | `tmp/` |
@@ -55,6 +55,13 @@ refuses to delete a classified catalog or run-output path outside the home; work
 outside the home and is checked against the main checkout instead. The `--class` filter narrows a pass
 to one class, and `--json` prints the report. `--now` exists for tests and takes an RFC 3339 instant.
 
+`--older-than <duration>` overrides the 30-day closed-session and 14-day run-output windows for one
+pass. It accepts a positive whole number followed by `s`, `m`, `h`, `d` or `w` (`36h`, `7d`, `2w`);
+zero, negative, malformed and larger-than-ten-year values exit 2, and combining it with `--class` for
+any other class also exits 2. A pass refuses and lists a session that holds a live lease, belongs to a
+job that still holds its lock (running, stalled, gating, reviewing, fixing or merging), or is a running
+orchestrator. The default retention and the nightly schedule are unchanged.
+
 A nightly L9 schedule, `gc-nightly`, runs vowp `gc --apply` every 24 hours for each project. The supervisor
 creates the schedule once per project if it is missing. The same tick enforces the 50 MB raw run-output
 cap; vowp `gc --apply` forces a cap scan as well.
@@ -66,7 +73,10 @@ The report has one row per class and the totals:
   "generated_at": "2026-11-10T14:02:11.000Z",
   "dry_run": true,
   "classes": [
-    {"class": "closed_session", "files": 2, "bytes": 18342, "sample_paths": ["…/log.jsonl"]}
+    {"class": "closed_session", "files": 2, "bytes": 18342, "eligible_files": 1, "eligible_bytes": 9211, "sample_paths": ["…/log.jsonl"]}
+  ],
+  "refused": [
+    {"class": "closed_session", "session_id": "01J…", "path": "…/log.jsonl", "reason": "holds a live lease (chat on local, heartbeat 2026-11-10T14:00:00.000Z)"}
   ],
   "deleted_files": 0,
   "freed_bytes": 0,
@@ -93,6 +103,10 @@ an export from a compacted session carries its latest capsule, an empty event ta
 set, while the command's human output is the output path (or the bundle itself with `--out -`). There is
 no full-log replay after compaction, which is the point of the class. vowp `reindex` skips a session
 with no log and reports it; it never deletes the row.
+
+`vowp gc --older-than <duration>` applies the same compaction steps to a closed session younger than 30
+days when it is older than the given window. The live-lease, active-job and running-orchestrator guards
+still apply, and a refused session appears in the report instead of being compacted.
 
 ### Run output
 

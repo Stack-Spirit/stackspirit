@@ -102,6 +102,7 @@ const LISTED_TYPES: &[&str] = &[
     "CatalogEntry",
     "GcReport",
     "GcClassReport",
+    "GcRefused",
     "BackupReport",
     "BackupFile",
     "SecretInfo",

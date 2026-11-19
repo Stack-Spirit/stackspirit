@@ -1612,9 +1612,17 @@ pub struct CatalogEntry {
     pub bytes: Option<u64>, pub expires_at: Option<Timestamp>, pub note: String,
     pub created_at: Timestamp, pub updated_at: Timestamp, pub deleted_at: Option<Timestamp>,
 }
-pub struct GcClassReport { pub class: CatalogClass, pub files: u64, pub bytes: u64, pub sample_paths: Vec<String> }
+pub struct GcClassReport {
+    pub class: CatalogClass, pub files: u64, pub bytes: u64,
+    pub eligible_files: u64, pub eligible_bytes: u64, pub sample_paths: Vec<String>,
+}
+pub struct GcRefused {
+    pub class: CatalogClass, pub session_id: Option<SessionId>,
+    pub path: String, pub reason: String,
+}
 pub struct GcReport {
     pub generated_at: Timestamp, pub dry_run: bool, pub classes: Vec<GcClassReport>,
+    pub refused: Vec<GcRefused>,
     pub deleted_files: u64, pub freed_bytes: u64, pub compacted_sessions: u64,
     pub errors: Vec<String>,
 }

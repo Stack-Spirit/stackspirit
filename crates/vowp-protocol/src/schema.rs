@@ -27,7 +27,7 @@ use crate::capacity::{
     HostSample, RunUsage, RunningCapacity, UsageEstimate, WaitReason, WaitingJob,
 };
 use crate::capsule::{Capsule, CapsuleDraft};
-use crate::catalog::{BackupFile, BackupReport, CatalogEntry, GcClassReport, GcReport};
+use crate::catalog::{BackupFile, BackupReport, CatalogEntry, GcClassReport, GcRefused, GcReport};
 use crate::config::VowpConfig;
 use crate::cost::Cost;
 use crate::event::EventEnvelope;
@@ -139,6 +139,7 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("CatalogEntry", schema_value::<CatalogEntry>());
     schemas.insert("GcReport", schema_value::<GcReport>());
     schemas.insert("GcClassReport", schema_value::<GcClassReport>());
+    schemas.insert("GcRefused", schema_value::<GcRefused>());
     schemas.insert("BackupReport", schema_value::<BackupReport>());
     schemas.insert("BackupFile", schema_value::<BackupFile>());
     schemas.insert("SecretInfo", schema_value::<SecretInfo>());

@@ -9,16 +9,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use vowp_protocol::{
-    CatalogClass, CatalogFilter, JobId, JobState, Project, ProjectName, Session, SessionId, SessionRole, SessionState,
-    Timestamp, VowpConfig,
+    CatalogClass, CatalogFilter, GcRefused, JobId, JobState, Project, ProjectName, Session, SessionId, SessionRole,
+    SessionState, Timestamp, VowpConfig,
 };
 use vowp_store::{JobFilter, SessionFilter, Store};
 
 use crate::CoreError;
 use crate::deps::Deps;
+use crate::surface::lease::is_live;
 
 use super::{
     CACHE_RETENTION, CLOSED_SESSION_RETENTION, ClassifiedFile, FAILED_WORKTREE_RETENTION, RUN_OUTPUT_COMPRESS_AFTER,
@@ -58,9 +59,39 @@ pub(crate) struct ClassifiedItem {
     pub(crate) action: ItemAction,
 }
 
+/// Effective retention windows for one classification pass.
+///
+/// The defaults are the constants in [`super`]; only an explicit `vowp gc --older-than`
+/// changes the two overridable classes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Retention {
+    /// How long a closed session's full log and blobs are kept.
+    pub(crate) closed_session: Duration,
+    /// How long raw run output is kept.
+    pub(crate) run_output: Duration,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            closed_session: CLOSED_SESSION_RETENTION,
+            run_output: RUN_OUTPUT_MAX_AGE,
+        }
+    }
+}
+
+/// The classification result: entries to report and candidates a guard refused.
+pub(crate) struct Classification {
+    /// Classified files and their actions.
+    pub(crate) items: Vec<ClassifiedItem>,
+    /// Session candidates kept by a live lease, an active job or a running orchestrator.
+    pub(crate) refused: Vec<GcRefused>,
+}
+
 /// Classifies every known node file by lifecycle class.
 pub fn classify(deps: &Deps, store: &Store, now: Timestamp) -> Result<Vec<ClassifiedFile>, CoreError> {
-    Ok(classify_items(deps, store, now)?
+    Ok(classify_items(deps, store, now, Retention::default())?
+        .items
         .into_iter()
         .map(|item| item.file)
         .collect())
@@ -137,8 +168,13 @@ fn worktree_expiry(now: Timestamp, job: &vowp_protocol::Job) -> (CatalogClass, O
 }
 
 /// Classifies every known file and returns the internal entries used by `gc`.
-pub(crate) fn classify_items(deps: &Deps, store: &Store, now: Timestamp) -> Result<Vec<ClassifiedItem>, CoreError> {
-    let mut classifier = Classifier::new(deps, store, now);
+pub(crate) fn classify_items(
+    deps: &Deps,
+    store: &Store,
+    now: Timestamp,
+    retention: Retention,
+) -> Result<Classification, CoreError> {
+    let mut classifier = Classifier::new(deps, store, now, retention);
     classifier.add_node_files()?;
     classifier.add_projects()?;
     classifier.add_sessions()?;
@@ -154,7 +190,9 @@ struct Classifier<'a> {
     deps: &'a Deps,
     store: &'a Store,
     now: Timestamp,
+    retention: Retention,
     items: Vec<ClassifiedItem>,
+    refused: Vec<GcRefused>,
     by_path: BTreeMap<String, usize>,
     protected_blobs: BTreeSet<String>,
     projects: BTreeMap<ProjectName, Project>,
@@ -162,12 +200,14 @@ struct Classifier<'a> {
 }
 
 impl<'a> Classifier<'a> {
-    fn new(deps: &'a Deps, store: &'a Store, now: Timestamp) -> Self {
+    fn new(deps: &'a Deps, store: &'a Store, now: Timestamp, retention: Retention) -> Self {
         Self {
             deps,
             store,
             now,
+            retention,
             items: Vec::new(),
+            refused: Vec::new(),
             by_path: BTreeMap::new(),
             protected_blobs: BTreeSet::new(),
             projects: BTreeMap::new(),
@@ -175,11 +215,16 @@ impl<'a> Classifier<'a> {
         }
     }
 
-    fn finish(mut self) -> Result<Vec<ClassifiedItem>, CoreError> {
+    fn finish(mut self) -> Result<Classification, CoreError> {
         self.items.sort_by(|left, right| {
             (class_rank(left.file.class), &left.file.path).cmp(&(class_rank(right.file.class), &right.file.path))
         });
-        Ok(self.items)
+        self.refused
+            .sort_by(|left, right| (class_rank(left.class), &left.path).cmp(&(class_rank(right.class), &right.path)));
+        Ok(Classification {
+            items: self.items,
+            refused: self.refused,
+        })
     }
 
     /// Adds or merges one entry. A protected class always wins over a disposable one.
@@ -452,10 +497,33 @@ impl<'a> Classifier<'a> {
         );
         let closed = !live && (session.state == SessionState::Closed || job_done);
         let (class, expires_at, action) = if orchestrator || !closed {
+            if orchestrator
+                && matches!(
+                    session.state,
+                    SessionState::Running | SessionState::Switching | SessionState::Blocked
+                )
+            {
+                let expiry = session.updated_at.plus(self.retention.closed_session);
+                if self.now >= expiry {
+                    self.refuse(
+                        session,
+                        CatalogClass::OpenWork,
+                        format!("is a running orchestrator ({})", session_state_name(session.state)),
+                    );
+                }
+            }
             (CatalogClass::OpenWork, None, ItemAction::Keep)
         } else {
-            let expiry = session.updated_at.plus(CLOSED_SESSION_RETENTION);
-            let action = if self.now >= expiry {
+            let expiry = session.updated_at.plus(self.retention.closed_session);
+            let reasons = if self.now >= expiry {
+                self.refusal_reasons(session)
+            } else {
+                Vec::new()
+            };
+            if !reasons.is_empty() {
+                self.refuse(session, CatalogClass::ClosedSession, reasons.join("; "));
+            }
+            let action = if self.now >= expiry && reasons.is_empty() {
                 ItemAction::CompactSession(session.id.clone())
             } else {
                 ItemAction::Keep
@@ -512,6 +580,38 @@ impl<'a> Classifier<'a> {
                 ItemAction::Keep,
             );
         }
+    }
+
+    /// Records a session candidate that a guard keeps out of collection.
+    fn refuse(&mut self, session: &Session, class: CatalogClass, reason: String) {
+        self.refused.push(GcRefused {
+            class,
+            session_id: Some(session.id.clone()),
+            path: self.deps.paths.log_path(&session.id).display().to_string(),
+            reason,
+        });
+    }
+
+    /// Returns why a closed session must stay, or an empty list when it may be collected.
+    fn refusal_reasons(&self, session: &Session) -> Vec<String> {
+        let mut reasons = Vec::new();
+        match self.store.lease(&session.id) {
+            Ok(Some(lease)) if is_live(self.now, &lease) => reasons.push(format!(
+                "holds a live lease ({holder} on {node}, heartbeat {heartbeat})",
+                holder = lease.holder,
+                node = lease.node,
+                heartbeat = lease.heartbeat_at.as_rfc3339()
+            )),
+            Ok(_) => {}
+            Err(error) => reasons.push(format!("lease state could not be read: {error}")),
+        }
+        if let Some(job_id) = &session.job_id
+            && let Some(state) = self.jobs.get(job_id)
+            && state.holds_lock()
+        {
+            reasons.push(format!("belongs to job {job_id}, which is {}", job_state_name(*state)));
+        }
+        reasons
     }
 
     fn add_session_blobs(
@@ -577,7 +677,7 @@ impl<'a> Classifier<'a> {
             }
             let compressed = name.ends_with(".gz");
             let mtime = file_mtime(&path, self.now);
-            let expiry = mtime.plus(RUN_OUTPUT_MAX_AGE);
+            let expiry = mtime.plus(self.retention.run_output);
             let action = if self.now >= expiry {
                 ItemAction::DeleteFile
             } else if !compressed && self.now >= mtime.plus(RUN_OUTPUT_COMPRESS_AFTER) {
@@ -652,7 +752,7 @@ impl<'a> Classifier<'a> {
             }
             let expires_at = entry
                 .expires_at
-                .or_else(|| default_catalog_expiry(entry.class, entry.created_at));
+                .or_else(|| default_catalog_expiry(entry.class, entry.created_at, self.retention));
             let (action, reason) = if is_protected(entry.class) {
                 (
                     ItemAction::Keep,
@@ -845,10 +945,10 @@ fn stronger_action(left: &ItemAction, right: &ItemAction) -> ItemAction {
 }
 
 /// Default expiry for a catalog row that did not carry one.
-fn default_catalog_expiry(class: CatalogClass, created_at: Timestamp) -> Option<Timestamp> {
+fn default_catalog_expiry(class: CatalogClass, created_at: Timestamp, retention: Retention) -> Option<Timestamp> {
     match class {
-        CatalogClass::ClosedSession => Some(created_at.plus(CLOSED_SESSION_RETENTION)),
-        CatalogClass::RunOutput => Some(created_at.plus(RUN_OUTPUT_MAX_AGE)),
+        CatalogClass::ClosedSession => Some(created_at.plus(retention.closed_session)),
+        CatalogClass::RunOutput => Some(created_at.plus(retention.run_output)),
         CatalogClass::Worktree => Some(created_at.plus(FAILED_WORKTREE_RETENTION)),
         CatalogClass::Sample => Some(created_at.plus(SAMPLE_FULL_RETENTION)),
         CatalogClass::Cache => Some(created_at.plus(CACHE_RETENTION)),
@@ -872,5 +972,16 @@ fn job_state_name(state: JobState) -> &'static str {
         JobState::Parked => "parked",
         JobState::Replanned => "replanned",
         JobState::Cancelled => "cancelled",
+    }
+}
+
+/// Returns a human name for a session state in a reason string.
+fn session_state_name(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Idle => "idle",
+        SessionState::Running => "running",
+        SessionState::Blocked => "blocked",
+        SessionState::Switching => "switching",
+        SessionState::Closed => "closed",
     }
 }

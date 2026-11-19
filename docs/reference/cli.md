@@ -2517,17 +2517,43 @@ List lifecycle classes and collect garbage
 Usage: vowp gc [OPTIONS]
 
 Options:
-      --apply                Delete eligible files instead of only reporting
-      --json                 Print one machine-readable JSON document on stdout
-      --class <CLASS>        Restrict to one lifecycle class
-      --node <NAME>          Run the command on that node over ssh
-      --now <RFC3339>        Clock override for tests (RFC 3339)
-      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
-      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
-      --no-color             Disable colour even when stdout is a terminal
-  -q, --quiet                Suppress non-essential human output
-  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
-  -h, --help                 Print help
+      --apply
+          Delete eligible files instead of only reporting
+
+      --json
+          Print one machine-readable JSON document on stdout
+
+      --class <CLASS>
+          Restrict to one lifecycle class
+
+      --node <NAME>
+          Run the command on that node over ssh
+
+      --older-than <DURATION>
+          Collect closed sessions and run output older than this window (for example 7d, 36h, 2w).
+          
+          Applies only to `closed_session` and `run_output`; every other class keeps its default.
+
+      --project <NAME|PATH>
+          Project name or path; defaults to the nearest ancestor with `vowp.toml`
+
+      --home <DIR>
+          Node home (default `$VOWP_HOME`, else `~/.vowp`)
+
+      --now <RFC3339>
+          Clock override for tests (RFC 3339)
+
+      --no-color
+          Disable colour even when stdout is a terminal
+
+  -q, --quiet
+          Suppress non-essential human output
+
+  -v, --verbose...
+          Increase log verbosity (`-v`, `-vv`)
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 ### `vowp tunnel`

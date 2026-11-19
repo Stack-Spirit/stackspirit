@@ -3,7 +3,8 @@
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §10.2. `--apply` deletes only
 //! `closed_session`, `run_output`, `worktree`, `sample` and `cache` entries whose expiry has
 //! passed. Production, truth, open work and secrets are never deleted, even when a catalog row
-//! carries an expiry.
+//! carries an expiry. `--older-than` shortens the closed-session and run-output windows for one
+//! explicit pass; a live lease, an active job or a running orchestrator keeps its session.
 //!
 //! The run-output cap and rotation from `docs/design/architecture.md` §3 live here and in
 //! [`super::tick`]: completed run files are capped at 50 MB, gzip after one day and removed after
@@ -16,15 +17,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use vowp_protocol::{CatalogClass, CatalogEntry, GcClassReport, GcReport, Timestamp};
+use vowp_protocol::{CatalogClass, CatalogEntry, GcClassReport, GcRefused, GcReport, Timestamp};
 use vowp_store::Store;
 
 use crate::CoreError;
 use crate::deps::{CommandSpec, Deps};
 
-use super::classes::{self, ClassifiedItem, ItemAction};
+use super::classes::{self, ClassifiedItem, ItemAction, Retention};
 use super::compact::compact_session;
-use super::{RUN_OUTPUT_CAP_BYTES, SAMPLE_FULL_RETENTION, SAMPLE_MINUTE_RETENTION};
+use super::{
+    CLOSED_SESSION_RETENTION, RUN_OUTPUT_CAP_BYTES, RUN_OUTPUT_MAX_AGE, SAMPLE_FULL_RETENTION, SAMPLE_MINUTE_RETENTION,
+};
 
 /// Last wall-clock cap check per node home. Using wall time keeps the supervisor tick cheap and
 /// makes the cap independent of the injected test clock.
@@ -33,6 +36,12 @@ static CAP_CHECKS: OnceLock<Mutex<BTreeMap<PathBuf, Instant>>> = OnceLock::new()
 /// Minimum wall-clock gap between automatic cap scans for one home.
 const CAP_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Largest accepted `--older-than` window.
+///
+/// Ten years is far past any real retention period and keeps an input typo such as
+/// `999999999d` from silently disabling collection.
+pub const MAX_OLDER_THAN: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+
 /// Options for `vowp gc`.
 #[derive(Debug, Clone, Default)]
 pub struct GcOptions {
@@ -40,14 +49,95 @@ pub struct GcOptions {
     pub apply: bool,
     /// Restrict to one class.
     pub class: Option<CatalogClass>,
+    /// Override the closed-session and run-output retention window.
+    ///
+    /// The override applies only to [`CatalogClass::ClosedSession`] and
+    /// [`CatalogClass::RunOutput`]; every other class keeps its default retention.
+    pub older_than: Option<Duration>,
     /// Clock override for tests.
     pub now: Option<Timestamp>,
+}
+
+/// Parses a duration such as `36h`, `7d` or `2w`.
+///
+/// Supported units are seconds (`s`), minutes (`m`), hours (`h`), days (`d`) and weeks
+/// (`w`). The value must be a positive whole number; zero, negative, unterminated and
+/// larger-than-[`MAX_OLDER_THAN`] inputs are rejected.
+pub fn parse_older_than(text: &str) -> Result<Duration, CoreError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::Invalid(
+            "--older-than needs a duration such as 7d".to_owned(),
+        ));
+    }
+    if trimmed.starts_with('-') {
+        return Err(CoreError::Invalid(format!(
+            "--older-than must be positive, not {trimmed:?}"
+        )));
+    }
+    let mut chars = trimmed.chars();
+    let unit = chars
+        .next_back()
+        .ok_or_else(|| CoreError::Invalid("--older-than needs a duration such as 7d".to_owned()))?;
+    let digits = chars.as_str();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CoreError::Invalid(format!(
+            "--older-than {trimmed:?} must be a whole number followed by s, m, h, d or w (for example 7d)"
+        )));
+    }
+    let value: u64 = digits
+        .parse()
+        .map_err(|_| CoreError::Invalid(format!("--older-than {trimmed:?} is too large")))?;
+    if value == 0 {
+        return Err(CoreError::Invalid("--older-than must be greater than zero".to_owned()));
+    }
+    let seconds_per_unit = match unit.to_ascii_lowercase() {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
+        'w' => 7 * 24 * 60 * 60,
+        other => {
+            return Err(CoreError::Invalid(format!(
+                "--older-than {trimmed:?} has unknown unit {other:?}; expected s, m, h, d or w"
+            )));
+        }
+    };
+    let seconds = value
+        .checked_mul(seconds_per_unit)
+        .ok_or_else(|| CoreError::Invalid(format!("--older-than {trimmed:?} is too large")))?;
+    let age = Duration::from_secs(seconds);
+    if age > MAX_OLDER_THAN {
+        return Err(CoreError::Invalid(format!(
+            "--older-than {trimmed:?} is absurd; the maximum is 3650d"
+        )));
+    }
+    Ok(age)
 }
 
 /// Runs one GC pass.
 pub fn gc(deps: &Deps, store: &Store, opts: &GcOptions) -> Result<GcReport, CoreError> {
     let now = opts.now.unwrap_or_else(|| deps.clock.now());
     let mut errors = Vec::new();
+
+    if let Some(older_than) = opts.older_than {
+        if older_than.is_zero() {
+            return Err(CoreError::Invalid("--older-than must be greater than zero".to_owned()));
+        }
+        if older_than > MAX_OLDER_THAN {
+            return Err(CoreError::Invalid(
+                "--older-than is absurd; the maximum is ten years".to_owned(),
+            ));
+        }
+        if let Some(class) = opts.class
+            && !matches!(class, CatalogClass::ClosedSession | CatalogClass::RunOutput)
+        {
+            return Err(CoreError::Invalid(format!(
+                "--older-than applies only to closed_session and run_output, not {}",
+                classes::class_name(class)
+            )));
+        }
+    }
 
     if opts.apply && opts.class.is_none_or(|class| class == CatalogClass::RunOutput) {
         match enforce_run_output_cap(deps, store, true) {
@@ -56,16 +146,49 @@ pub fn gc(deps: &Deps, store: &Store, opts: &GcOptions) -> Result<GcReport, Core
         }
     }
 
-    let items = classes::classify_items(deps, store, now)?;
-    let selected: Vec<ClassifiedItem> = items
+    let closed_retention = match (opts.older_than, opts.class) {
+        (Some(age), None | Some(CatalogClass::ClosedSession)) => age,
+        _ => CLOSED_SESSION_RETENTION,
+    };
+    let run_output_retention = match (opts.older_than, opts.class) {
+        (Some(age), None | Some(CatalogClass::RunOutput)) => age,
+        _ => RUN_OUTPUT_MAX_AGE,
+    };
+    let outcome = classes::classify_items(
+        deps,
+        store,
+        now,
+        Retention {
+            closed_session: closed_retention,
+            run_output: run_output_retention,
+        },
+    )?;
+    let selected: Vec<ClassifiedItem> = outcome
+        .items
         .into_iter()
         .filter(|item| opts.class.is_none_or(|class| item.file.class == class))
         .collect();
+    let refused: Vec<GcRefused> = outcome
+        .refused
+        .into_iter()
+        .filter(|entry| opts.class.is_none_or(|class| entry.class == class))
+        .collect();
+
+    let needs_open_runs = selected.iter().any(|item| {
+        matches!(item.action, ItemAction::CompressRunOutput)
+            || (item.action == ItemAction::DeleteFile && item.file.class == CatalogClass::RunOutput)
+    });
+    let open_runs = if needs_open_runs {
+        open_run_stems(deps, store).unwrap_or(None)
+    } else {
+        Some(BTreeSet::new())
+    };
 
     let mut report = GcReport {
         generated_at: now,
         dry_run: !opts.apply,
-        classes: class_reports(&selected),
+        classes: class_reports(&selected, now, open_runs.as_ref()),
+        refused,
         deleted_files: 0,
         freed_bytes: 0,
         compacted_sessions: 0,
@@ -77,15 +200,6 @@ pub fn gc(deps: &Deps, store: &Store, opts: &GcOptions) -> Result<GcReport, Core
 
     let mut compacted = BTreeSet::new();
     let mut samples_pruned = false;
-    let needs_open_runs = selected.iter().any(|item| {
-        matches!(item.action, ItemAction::CompressRunOutput)
-            || (item.action == ItemAction::DeleteFile && item.file.class == CatalogClass::RunOutput)
-    });
-    let open_runs = if needs_open_runs {
-        open_run_stems(deps, store).unwrap_or(None)
-    } else {
-        Some(BTreeSet::new())
-    };
     for item in &selected {
         if item.action == ItemAction::Keep || classes::is_protected(item.file.class) {
             continue;
@@ -184,27 +298,54 @@ pub fn gc(deps: &Deps, store: &Store, opts: &GcOptions) -> Result<GcReport, Core
 }
 
 /// Groups the selected entries into one report row per class, most protective first.
-fn class_reports(items: &[ClassifiedItem]) -> Vec<GcClassReport> {
-    let mut totals: BTreeMap<u8, (CatalogClass, u64, u64, Vec<String>)> = BTreeMap::new();
+fn class_reports(items: &[ClassifiedItem], now: Timestamp, open_runs: Option<&BTreeSet<String>>) -> Vec<GcClassReport> {
+    let mut totals: BTreeMap<u8, GcClassReport> = BTreeMap::new();
     for item in items {
         let entry = totals
             .entry(classes::class_rank(item.file.class))
-            .or_insert_with(|| (item.file.class, 0, 0, Vec::with_capacity(5)));
-        entry.1 = entry.1.saturating_add(1);
-        entry.2 = entry.2.saturating_add(item.file.bytes);
-        if entry.3.len() < 5 {
-            entry.3.push(item.file.path.display().to_string());
+            .or_insert_with(|| GcClassReport {
+                class: item.file.class,
+                files: 0,
+                bytes: 0,
+                eligible_files: 0,
+                eligible_bytes: 0,
+                sample_paths: Vec::with_capacity(5),
+            });
+        entry.files = entry.files.saturating_add(1);
+        entry.bytes = entry.bytes.saturating_add(item.file.bytes);
+        if collectable(item, now, open_runs) {
+            entry.eligible_files = entry.eligible_files.saturating_add(1);
+            entry.eligible_bytes = entry.eligible_bytes.saturating_add(item.file.bytes);
+        }
+        if entry.sample_paths.len() < 5 {
+            entry.sample_paths.push(item.file.path.display().to_string());
         }
     }
-    totals
-        .into_values()
-        .map(|(class, files, bytes, sample_paths)| GcClassReport {
-            class,
-            files,
-            bytes,
-            sample_paths,
-        })
-        .collect()
+    totals.into_values().collect()
+}
+
+/// Returns true when an apply pass would delete or compact this item now.
+///
+/// Compression is excluded because it keeps the bytes; a run whose writer is still open or
+/// whose open-run list is unknown is excluded because the apply pass skips it.
+fn collectable(item: &ClassifiedItem, now: Timestamp, open_runs: Option<&BTreeSet<String>>) -> bool {
+    let action_removes = matches!(
+        item.action,
+        ItemAction::DeleteFile
+            | ItemAction::CompactSession(_)
+            | ItemAction::RemoveWorktree { .. }
+            | ItemAction::PruneSamples
+    );
+    if !action_removes || item.expires_at.is_none_or(|expires_at| now < expires_at) {
+        return false;
+    }
+    if item.file.class == CatalogClass::RunOutput
+        && let Some(stem) = run_stem(&item.file.path)
+        && open_runs.is_none_or(|open| open.contains(stem))
+    {
+        return false;
+    }
+    true
 }
 
 /// Deletes one regular file inside the node home.

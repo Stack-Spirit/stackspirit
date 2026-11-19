@@ -134,7 +134,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     `"Capsule"`, `"CapsuleDraft"`, `"CatalogEntry"`, `"Cost"`, `"CostReport"`, `"CostRow"`,
     `"CostTotal"`, `"Edge"`, `"EventEnvelope"`, `"EventPage"`,
     `"Evidence"`, `"FleetQueueRow"`, `"FleetStatus"`, `"Gate"`, `"GateFailureCard"`, `"GateResult"`,
-    `"GcClassReport"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxAnswerRequest"`,
+    `"GcClassReport"`, `"GcRefused"`, `"GcReport"`, `"Health"`, `"HostSample"`, `"InboxAnswerRequest"`,
     `"InboxItem"`, `"InboxPage"`, `"InboxSummary"`,
     `"IngestAck"`, `"Job"`, `"JobAction"`, `"JobActionResponse"`, `"JobPage"`, `"JobPatch"`,
     `"JoinInstructions"`, `"Lease"`, `"LeaseStatus"`,

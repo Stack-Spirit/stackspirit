@@ -73,6 +73,20 @@ Exported by `vowp schema GcReport` and generated from the protocol types in
           "$ref": "#/$defs/CatalogClass",
           "description": "Class the totals describe."
         },
+        "eligible_bytes": {
+          "default": 0,
+          "description": "Bytes those files currently occupy; an estimate of what a dry run would free.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eligible_files": {
+          "default": 0,
+          "description": "Files an apply pass would delete or compact now; compression is not counted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "files": {
           "description": "Number of files.",
           "format": "uint64",
@@ -94,6 +108,44 @@ Exported by `vowp schema GcReport` and generated from the protocol types in
         "sample_paths"
       ],
       "type": "object"
+    },
+    "GcRefused": {
+      "description": "One candidate GC left alone because a session is still owned or active.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/CatalogClass",
+          "description": "Class the refused candidate belongs to."
+        },
+        "path": {
+          "description": "Path or row identity that was refused.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the candidate stays.",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Session that was refused, when the candidate is a session."
+        }
+      },
+      "required": [
+        "class",
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "SessionId": {
+      "description": "Session id: 26-character ULID.",
+      "type": "string"
     },
     "Timestamp": {
       "description": "A UTC instant with millisecond precision.\n\nThe wire/DB form is RFC 3339 with a `Z` suffix and exactly three fractional digits,\nfor example `2026-11-08T19:25:47.123Z`.",
@@ -142,6 +194,14 @@ Exported by `vowp schema GcReport` and generated from the protocol types in
     "generated_at": {
       "$ref": "#/$defs/Timestamp",
       "description": "When the report was generated."
+    },
+    "refused": {
+      "default": [],
+      "description": "Candidates a live lease, an active job or a running orchestrator protected.",
+      "items": {
+        "$ref": "#/$defs/GcRefused"
+      },
+      "type": "array"
     }
   },
   "required": [

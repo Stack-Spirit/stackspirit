@@ -11,14 +11,16 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use proptest::prelude::*;
 use tempfile::TempDir;
-use vowp_core::lifecycle::{self, GcOptions, RUN_OUTPUT_CAP_BYTES, class_name, compact_session, gc, tick};
+use vowp_core::lifecycle::{
+    self, GcOptions, RUN_OUTPUT_CAP_BYTES, class_name, compact_session, gc, parse_older_than, tick,
+};
 use vowp_core::{AdapterRegistry, Deps, FixedRng, SystemGit, SystemRunner};
 use vowp_protocol::{
     Actor, CAPSULE_VERSION, Capsule, CapsuleId, CapsuleState, CapsuleTelemetry, CapsuleTrigger, CatalogClass,
-    CatalogEntry, CatalogFilter, Cost, EventId, EventIndexRow, EventType, Executor, ExecutorRef, FakeClock,
-    HarnessKind, HostSample, Job, JobId, JobKind, JobState, MemoryLog, NewJob, NodeName, Project, ProjectName, Role,
-    Run, RunId, RunPurpose, RunRole, SampleSource, Session, SessionId, SessionRole, SessionState, Timestamp,
-    VowpConfig,
+    CatalogEntry, CatalogFilter, Cost, EventBody, EventId, EventIndexRow, EventSource, EventType, Executor,
+    ExecutorRef, FakeClock, HarnessKind, HostSample, Job, JobId, JobKind, JobState, MemoryLog, NewJob, NodeName,
+    Project, ProjectName, Role, Run, RunId, RunPurpose, RunRole, SampleSource, Session, SessionCreated, SessionId,
+    SessionRole, SessionState, Timestamp, VowpConfig,
 };
 use vowp_store::session_files::list_capsule_files;
 use vowp_store::session_log::SessionLog;
@@ -112,6 +114,16 @@ impl TestNode {
     }
 
     fn session(&self, state: SessionState, role: SessionRole, updated_at: Timestamp) -> SessionId {
+        self.session_for_job(state, role, updated_at, None)
+    }
+
+    fn session_for_job(
+        &self,
+        state: SessionState,
+        role: SessionRole,
+        updated_at: Timestamp,
+        job: Option<&JobId>,
+    ) -> SessionId {
         let id = SessionId::new();
         std::fs::create_dir_all(self.paths.blobs_dir(&id)).expect("blobs dir");
         std::fs::create_dir_all(self.paths.capsules_dir(&id)).expect("capsules dir");
@@ -120,7 +132,7 @@ impl TestNode {
         let session = Session {
             id: id.clone(),
             project: Some(self.project.clone()),
-            job_id: None,
+            job_id: job.cloned(),
             role: Some(role),
             title: format!("session {id}"),
             parent_session_id: None,
@@ -136,6 +148,20 @@ impl TestNode {
         };
         self.store().upsert_session(&session).expect("session row");
         id
+    }
+
+    fn hold_lease(&self, session: &SessionId, heartbeat_at: Timestamp) {
+        let lease = vowp_protocol::Lease {
+            session_id: session.clone(),
+            surface_id: None,
+            surface_kind: vowp_protocol::SurfaceKind::Api,
+            node: NodeName::parse("local").expect("node"),
+            holder: "test-surface".to_owned(),
+            token: vowp_protocol::surface::new_lease_token(),
+            acquired_at: heartbeat_at,
+            heartbeat_at,
+        };
+        self.store().take_lease(&lease).expect("lease row");
     }
 
     fn add_event(&self, session: &SessionId, seq: u64, at: Timestamp, event_type: EventType) {
@@ -770,6 +796,7 @@ fn gc_class_filter_limits_report_and_apply() {
         &GcOptions {
             apply: true,
             class: Some(CatalogClass::RunOutput),
+            older_than: None,
             now: Some(ts_now()),
         },
     )
@@ -778,6 +805,305 @@ fn gc_class_filter_limits_report_and_apply() {
     assert_eq!(report.classes[0].class, CatalogClass::RunOutput);
     assert!(!run.exists());
     assert!(tmp.exists(), "a run_output filter must not touch cache");
+}
+
+#[test]
+fn older_than_duration_parser_accepts_units_and_rejects_bad_input() {
+    assert_eq!(parse_older_than("30s").expect("seconds"), Duration::from_secs(30));
+    assert_eq!(parse_older_than("90m").expect("minutes"), Duration::from_secs(90 * 60));
+    assert_eq!(parse_older_than("36h").expect("hours"), hours(36));
+    assert_eq!(parse_older_than("7d").expect("days"), days(7));
+    assert_eq!(parse_older_than("2w").expect("weeks"), days(14));
+    assert_eq!(parse_older_than(" 7D ").expect("trimmed and case-insensitive"), days(7));
+    assert_eq!(parse_older_than("3650d").expect("maximum"), days(3650));
+
+    for bad in [
+        "",
+        "   ",
+        "0d",
+        "0s",
+        "-7d",
+        "+7d",
+        "7",
+        "7x",
+        "1.5d",
+        "7 d",
+        "999999999999999999999d",
+        "3651d",
+    ] {
+        let error = parse_older_than(bad).expect_err(bad);
+        assert!(
+            matches!(error.kind(), vowp_protocol::ErrorKind::InvalidInput),
+            "{bad:?}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn gc_older_than_dry_run_lists_eligible_and_changes_nothing() {
+    let node = TestNode::new();
+    let store = node.store();
+    let old_session = node.session(SessionState::Closed, SessionRole::Worker, ts_now().minus(days(10)));
+    let old_blob = node.blob(&old_session, &"a".repeat(64), b"old blob");
+    let young_session = node.session(SessionState::Closed, SessionRole::Worker, ts_now().minus(days(3)));
+    let old_run = node.write_run("old.jsonl", ts_now().minus(days(10)), b"old run\n");
+    let young_run = node.write_run("young.jsonl", ts_now().minus(days(2)), b"young run\n");
+
+    let report = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            older_than: Some(days(7)),
+            ..GcOptions::default()
+        },
+    )
+    .expect("dry run");
+
+    assert!(report.dry_run);
+    assert_eq!(report.deleted_files, 0);
+    assert_eq!(report.freed_bytes, 0);
+    assert_eq!(report.compacted_sessions, 0);
+    let closed = report_class(&report, CatalogClass::ClosedSession).expect("closed sessions");
+    assert_eq!(closed.files, 3, "{closed:?}");
+    assert_eq!(closed.eligible_files, 2, "{closed:?}");
+    assert!(closed.eligible_bytes >= 11, "{closed:?}");
+    let runs = report_class(&report, CatalogClass::RunOutput).expect("run output");
+    assert_eq!(runs.files, 2, "{runs:?}");
+    assert_eq!(runs.eligible_files, 1, "{runs:?}");
+    assert!(runs.eligible_bytes >= 8, "{runs:?}");
+
+    for path in [
+        &old_blob,
+        &node.paths.log_path(&old_session),
+        &node.paths.log_path(&young_session),
+        &old_run,
+        &young_run,
+    ] {
+        assert!(path.exists(), "dry run changed {}", path.display());
+    }
+}
+
+#[test]
+fn gc_older_than_apply_compacts_old_sessions_and_reindex_stays_consistent() {
+    let node = TestNode::new();
+    let store = node.store();
+    let old = node.session(SessionState::Closed, SessionRole::Worker, ts_now().minus(days(10)));
+    let older = node.session(SessionState::Closed, SessionRole::Worker, ts_now().minus(days(20)));
+    let young = node.session(SessionState::Closed, SessionRole::Worker, ts_now().minus(days(3)));
+    let stale_tmp = node.write_tmp("stale", ts_now().minus(days(3)));
+    node.add_event(&old, 1, ts_now().minus(days(11)), EventType::TurnStarted);
+    node.add_event(&old, 2, ts_now().minus(days(10)), EventType::TurnEnded);
+    let old_blob = node.blob(&old, &"a".repeat(64), b"blob for the old session");
+    let older_blob = node.blob(&older, &"b".repeat(64), b"blob for the older session");
+    let young_log = node.paths.log_path(&young);
+
+    // Replace the minimal fixture line with a valid session.created event, so the post-gc
+    // `reindex` proves a remaining session is still readable rather than merely tolerated.
+    std::fs::remove_file(&young_log).expect("remove minimal log");
+    let log = SessionLog::create(&node.paths, &young, Arc::new(node.clock.clone())).expect("young log");
+    log.append(vowp_store::session_log::NewEvent {
+        actor: Actor::System,
+        source: EventSource {
+            harness: HarnessKind::Vowp,
+            model: None,
+            node: None,
+            native_session_id: None,
+        },
+        body: EventBody::SessionCreated(SessionCreated {
+            title: "young session".to_owned(),
+            cwd: node.repo.display().to_string(),
+            project: Some(node.project.clone()),
+            job_id: None,
+            role: Some(SessionRole::Worker),
+            parent_session_id: None,
+        }),
+        raw: None,
+        ts: Some(ts_now().minus(days(3))),
+    })
+    .expect("session.created event");
+    log.sync().expect("sync young log");
+    drop(log);
+
+    let report = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            apply: true,
+            older_than: Some(days(7)),
+            ..GcOptions::default()
+        },
+    )
+    .expect("apply");
+
+    assert!(!report.dry_run);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    assert_eq!(report.compacted_sessions, 2, "{report:?}");
+    assert!(report.freed_bytes > 0, "{report:?}");
+    assert!(!node.paths.log_path(&old).exists());
+    assert!(!node.paths.log_path(&older).exists());
+    assert!(!old_blob.exists());
+    assert!(!older_blob.exists());
+    assert!(!stale_tmp.exists(), "other classes keep their default retention");
+    assert!(young_log.exists(), "a session younger than the window stays");
+    assert!(node.paths.session_dir(&old).join("summary.md").is_file());
+    assert!(node.paths.session_dir(&older).join("summary.md").is_file());
+    for session in [&old, &older, &young] {
+        assert!(
+            store.require_session(session).is_ok(),
+            "session row {session} must stay"
+        );
+        assert!(
+            store.latest_capsule(session).expect("capsule query").is_some() || session == &young,
+            "each compacted session keeps a capsule"
+        );
+    }
+
+    // Compaction removes log.jsonl; reindex still has to succeed, keep every session row and
+    // leave the remaining session readable.
+    let reindexed = vowp_store::reindex::reindex(&store, &node.paths, None).expect("reindex");
+    assert!(reindexed.sessions >= 1, "{reindexed:?}");
+    for session in [&old, &older, &young] {
+        assert!(store.require_session(session).is_ok(), "reindex dropped {session}");
+    }
+    assert!(young_log.exists());
+    assert!(vowp_store::session_log::SessionLog::open_read(&node.paths, &young).is_ok());
+}
+
+#[test]
+fn gc_older_than_refuses_a_live_lease() {
+    let node = TestNode::new();
+    let store = node.store();
+    let session = node.session(SessionState::Closed, SessionRole::Worker, ts_now().minus(days(10)));
+    node.hold_lease(&session, ts_now());
+    let log = node.paths.log_path(&session);
+
+    let report = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            apply: true,
+            older_than: Some(days(7)),
+            ..GcOptions::default()
+        },
+    )
+    .expect("apply");
+
+    assert_eq!(report.compacted_sessions, 0, "{report:?}");
+    assert!(log.exists(), "a live lease must keep the log");
+    let refusal = report
+        .refused
+        .iter()
+        .find(|entry| entry.session_id.as_ref() == Some(&session))
+        .unwrap_or_else(|| panic!("live lease not listed: {:?}", report.refused));
+    assert_eq!(refusal.class, CatalogClass::ClosedSession);
+    assert!(refusal.reason.contains("live lease"), "{refusal:?}");
+}
+
+#[test]
+fn gc_older_than_refuses_a_running_or_reviewing_job() {
+    let node = TestNode::new();
+    let store = node.store();
+    let running = node.job("running-old", JobState::Running, ts_now().minus(hours(2)), None);
+    let reviewing = node.job("reviewing-old", JobState::Reviewing, ts_now().minus(hours(1)), None);
+    let running_session = node.session_for_job(
+        SessionState::Closed,
+        SessionRole::Worker,
+        ts_now().minus(days(10)),
+        Some(&running.id),
+    );
+    let reviewing_session = node.session_for_job(
+        SessionState::Closed,
+        SessionRole::Worker,
+        ts_now().minus(days(10)),
+        Some(&reviewing.id),
+    );
+
+    let report = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            apply: true,
+            older_than: Some(days(7)),
+            ..GcOptions::default()
+        },
+    )
+    .expect("apply");
+
+    assert_eq!(report.compacted_sessions, 0, "{report:?}");
+    assert!(node.paths.log_path(&running_session).exists());
+    assert!(node.paths.log_path(&reviewing_session).exists());
+    let running_refusal = report
+        .refused
+        .iter()
+        .find(|entry| entry.session_id.as_ref() == Some(&running_session))
+        .unwrap_or_else(|| panic!("running job not listed: {:?}", report.refused));
+    assert!(running_refusal.reason.contains("running"), "{running_refusal:?}");
+    let reviewing_refusal = report
+        .refused
+        .iter()
+        .find(|entry| entry.session_id.as_ref() == Some(&reviewing_session))
+        .unwrap_or_else(|| panic!("reviewing job not listed: {:?}", report.refused));
+    assert!(reviewing_refusal.reason.contains("reviewing"), "{reviewing_refusal:?}");
+}
+
+#[test]
+fn gc_older_than_refuses_a_running_orchestrator() {
+    let node = TestNode::new();
+    let store = node.store();
+    let orchestrator = node.session(
+        SessionState::Running,
+        SessionRole::Orchestrator,
+        ts_now().minus(days(10)),
+    );
+
+    let report = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            apply: true,
+            older_than: Some(days(7)),
+            ..GcOptions::default()
+        },
+    )
+    .expect("apply");
+
+    assert!(node.paths.log_path(&orchestrator).exists());
+    let refusal = report
+        .refused
+        .iter()
+        .find(|entry| entry.session_id.as_ref() == Some(&orchestrator))
+        .unwrap_or_else(|| panic!("running orchestrator not listed: {:?}", report.refused));
+    assert_eq!(refusal.class, CatalogClass::OpenWork);
+    assert!(refusal.reason.contains("running orchestrator"), "{refusal:?}");
+}
+
+#[test]
+fn gc_older_than_rejects_zero_and_unsupported_classes() {
+    let node = TestNode::new();
+    let store = node.store();
+    let error = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            older_than: Some(Duration::ZERO),
+            ..GcOptions::default()
+        },
+    )
+    .expect_err("zero window");
+    assert!(matches!(error, vowp_core::CoreError::Invalid(_)), "{error:?}");
+
+    let error = gc(
+        &node.deps,
+        &store,
+        &GcOptions {
+            older_than: Some(days(7)),
+            class: Some(CatalogClass::Cache),
+            ..GcOptions::default()
+        },
+    )
+    .expect_err("unsupported class");
+    assert!(matches!(error, vowp_core::CoreError::Invalid(_)), "{error:?}");
 }
 
 #[test]

@@ -73,8 +73,27 @@ pub struct GcClassReport {
     pub files: u64,
     /// Total bytes.
     pub bytes: u64,
+    /// Files an apply pass would delete or compact now; compression is not counted.
+    #[serde(default)]
+    pub eligible_files: u64,
+    /// Bytes those files currently occupy; an estimate of what a dry run would free.
+    #[serde(default)]
+    pub eligible_bytes: u64,
     /// Up to five example paths.
     pub sample_paths: Vec<String>,
+}
+
+/// One candidate GC left alone because a session is still owned or active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GcRefused {
+    /// Class the refused candidate belongs to.
+    pub class: CatalogClass,
+    /// Session that was refused, when the candidate is a session.
+    pub session_id: Option<SessionId>,
+    /// Path or row identity that was refused.
+    pub path: String,
+    /// Why the candidate stays.
+    pub reason: String,
 }
 
 /// Output of `vowp gc`.
@@ -86,6 +105,9 @@ pub struct GcReport {
     pub dry_run: bool,
     /// Totals per class.
     pub classes: Vec<GcClassReport>,
+    /// Candidates a live lease, an active job or a running orchestrator protected.
+    #[serde(default)]
+    pub refused: Vec<GcRefused>,
     /// Number of files deleted (zero on a dry run).
     pub deleted_files: u64,
     /// Bytes freed (zero on a dry run).

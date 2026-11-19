@@ -4,7 +4,7 @@
 //! deletes only the disposable classes and compacts closed sessions. `--now` exists for tests.
 
 use clap::Args;
-use vowp_core::lifecycle::{GcOptions, class_name, gc, parse_class};
+use vowp_core::lifecycle::{GcOptions, class_name, gc, parse_class, parse_older_than};
 use vowp_protocol::Timestamp;
 
 use crate::output::{Table, print_json};
@@ -19,6 +19,11 @@ pub struct GcArgs {
     /// Restrict to one lifecycle class.
     #[arg(long, value_name = "CLASS")]
     pub class: Option<String>,
+    /// Collect closed sessions and run output older than this window (for example 7d, 36h, 2w).
+    ///
+    /// Applies only to `closed_session` and `run_output`; every other class keeps its default.
+    #[arg(long, value_name = "DURATION")]
+    pub older_than: Option<String>,
     /// Clock override for tests (RFC 3339).
     #[arg(long, value_name = "RFC3339")]
     pub now: Option<String>,
@@ -27,10 +32,12 @@ pub struct GcArgs {
 /// Runs `vowp gc`.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &GcArgs) -> Result<i32, CliError> {
     let class = args.class.as_deref().map(parse_class).transpose()?;
+    let older_than = args.older_than.as_deref().map(parse_older_than).transpose()?;
     let now = args.now.as_deref().map(Timestamp::parse).transpose()?;
     let opts = GcOptions {
         apply: args.apply,
         class,
+        older_than,
         now,
     };
     let store = ctx.store()?;
@@ -47,12 +54,14 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &GcArgs) -> Result<i32, CliE
     if report.classes.is_empty() {
         writeln!(io.out(), "no lifecycle files to collect")?;
     } else {
-        let mut table = Table::new(&["CLASS", "FILES", "BYTES"]);
+        let mut table = Table::new(&["CLASS", "FILES", "BYTES", "ELIGIBLE", "ELIGIBLE BYTES"]);
         for class in &report.classes {
             table.row(vec![
                 class_name(class.class).to_owned(),
                 class.files.to_string(),
                 class.bytes.to_string(),
+                class.eligible_files.to_string(),
+                class.eligible_bytes.to_string(),
             ]);
         }
         writeln!(io.out(), "{}", table.render(ctx.color()))?;
@@ -69,6 +78,17 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &GcArgs) -> Result<i32, CliE
         }
     }
 
+    if !report.refused.is_empty() {
+        writeln!(io.out(), "refused {} candidate(s):", report.refused.len())?;
+        for entry in &report.refused {
+            let class = class_name(entry.class);
+            match &entry.session_id {
+                Some(session) => writeln!(io.out(), "  {class} session {session}: {}", entry.reason)?,
+                None => writeln!(io.out(), "  {class} {}: {}", entry.path, entry.reason)?,
+            }
+        }
+    }
+
     if report.dry_run {
         writeln!(
             io.out(),
@@ -77,7 +97,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &GcArgs) -> Result<i32, CliE
     } else {
         writeln!(
             io.out(),
-            "deleted {} files, freed {} bytes, compacted {} sessions",
+            "applied: deleted {} files, freed {} bytes, compacted {} sessions",
             report.deleted_files,
             report.freed_bytes,
             report.compacted_sessions

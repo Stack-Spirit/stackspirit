@@ -265,13 +265,25 @@ Every file VOWP creates belongs to a lifecycle class:
 vowp gc
 vowp gc --class run_output
 vowp gc --apply
+vowp gc --older-than 7d
+vowp gc --older-than 7d --class closed_session --apply
 ```
 
-`vowp gc` is a dry run by default: it lists files per class, bytes and a sample of paths, and changes
-nothing. `--apply` deletes only `closed_session` (after writing a final capsule and `summary.md`),
-`run_output`, `worktree`, `sample` and expired `cache` entries. It never deletes production, truth,
-open work or secrets. The nightly `gc-nightly` schedule runs `vowp gc --apply` once per day per
-project.
+`vowp gc` is a dry run by default: it lists files per class, bytes and a sample of paths, plus the
+files and bytes an `--apply` would collect now, and changes nothing. `--apply` deletes only
+`closed_session` (after writing a final capsule and `summary.md`), `run_output`, `worktree`, `sample`
+and expired `cache` entries. It never deletes production, truth, open work or secrets. The nightly
+`gc-nightly` schedule runs `vowp gc --apply` once per day per project.
+
+`--older-than <duration>` shortens the window for `closed_session` and `run_output` only, for one
+explicit pass; it does not change the defaults or the nightly schedule. Durations are a positive whole
+number followed by `s`, `m`, `h`, `d` or `w` (`36h`, `7d`, `2w`); zero, negative, malformed and
+larger-than-ten-year values exit 2. With `--class`, only `closed_session` and `run_output` accept the
+override. A dry run prints `ELIGIBLE` and `ELIGIBLE BYTES` next to each class, so review those before
+adding `--apply`. The pass refuses and lists any session with a live lease, a job that still holds its
+lock (running, stalled, gating, reviewing, fixing or merging), or a running orchestrator. Compaction
+still leaves the session row, capsule and `summary.md`, so `vowp reindex` and `vowp session show`
+continue to work for every remaining session.
 
 After compaction, `session show --events` and `session tail` on that session exit 3 with
 `session compacted to capsule <id>; use 'session show --capsule'`. `session show --capsule` and
