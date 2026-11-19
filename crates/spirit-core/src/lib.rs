@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod cluster;
 pub mod connection;
 pub mod engine;
 pub mod error;
@@ -21,6 +22,13 @@ pub mod view;
 pub mod vowp;
 pub mod wire;
 
+pub use cluster::{
+    BackupPolicy, CLUSTER_BACKUP_SCHEDULE, ClusterAgentState, ClusterCapacityTotals, ClusterConfig,
+    ClusterFormRequest, ClusterFormed, ClusterHealth, ClusterHostHealth, ClusterHostRole,
+    ClusterProject, ClusterService, ClusterTotalsSource, ClusterWorker, ClusterWorkerProject,
+    ClusterWorkerRole, HostProfileId, PROMOTE_CONFIRMATION_TOKEN, PromoteOutcome, PromoteRequest,
+    enable_pooled_compute,
+};
 pub use connection::{
     ConnectStage, ConnectionManager, ConnectionSnapshot, ConnectionState, LatencyStats, PollPolicy,
     PollScheduler, Revision, SpiritEvent,
