@@ -31,11 +31,12 @@ endpoint and SSH forward; §4 bridge types, methods and state machine; §5 secur
 error states; §7 what can land now; §8 follow-up jobs; §9 owner verification; §10 open
 questions; §11 references.
 
-| Surface | State on 2026-11-18 |
+| Surface | State on 2026-11-19 |
 |---|---|
 | Setup assistant on the bundled engine | Contract complete; the live probe pinned the v1 surface; core/view jobs can land; no VOWP dependency |
 | `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint`; the app-owned forward (§3.3) is not approved |
-| `global`/`project` on this Mac | Attaches when the installed VOWP provides `vowp agent orchestrator endpoint` (0.5); otherwise `chat_not_configured`. The bundled engine is not silently used. Hermetic proof only until an owner Mac has VOWP 0.5 |
+| `global`/`project` Local on the owner's Mac | **Live**, verified 2026-11-19: the installed VOWP returns a `global` endpoint document (loopback URL, Basic auth, `native_session_id: null`), and the ss-62 continuity rule attaches to the newest host session. |
+| `global`/`project` Local on this Linux host | **Still `chat_not_configured`** — not live. `/home/dev/.local/bin/vowp` is `0.4.0`; its `agent orchestrator` subcommand has no local orchestrator record on this host (`vowp agent orchestrator endpoint global --json` exits `3` with `not_found`), so there is no endpoint to attach to. The bundled engine is not silently used as a fallback. |
 | Local/Server switch | Out of scope; `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6) |
 | Preview chat in `MockBridge` | Stays, explicitly `origin: "preview"` |
 
