@@ -12,8 +12,14 @@ features deliberately left out of v0.4 are in [`docs/roadmap.md`](docs/roadmap.m
 
 ## [Unreleased]
 
-The six v0.5 slices are implemented and gated in the tree, but **no version has been cut**: there
-is no 0.5.0 tag, version bump or release date. The latest release remains 0.4.0 (2026-11-18).
+The six v0.5 slices are implemented and gated in the tree. The workspace version is now `0.5.1-dev`;
+`0.5.0` is the private snapshot tag (`snapshot/0.5.0-private`), not a release. No release date has
+been cut and the latest public release remains 0.4.0 (2026-11-18).
+
+### Changed
+
+- The workspace, crate, packaging and version-test strings now report `0.5.1-dev`, so
+  `vowp --version` prints `vowp 0.5.1-dev` instead of `vowp 0.4.0`.
 
 ### Added
 
