@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  // Meadow is the only shell. `src/test/e2e/fleet.spec.ts` still drives the retired
-  // classic cockpit and is outside this job's ownership, so it is not collected.
+  // Meadow is the only shell. Playwright owns the flows under e2e/; the desktop
+  // Vitest files under src/ are a separate runner.
   testDir: ".",
-  testIgnore: ["src/**"],
+  testMatch: ["e2e/**/*.spec.ts"],
   timeout: 30_000,
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

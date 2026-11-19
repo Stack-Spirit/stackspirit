@@ -2917,3 +2917,28 @@ button.nx-node:hover {
   border-radius: var(--nx-radius-lg);
   background: var(--nx-panel);
 }
+
+/*
+ * Reused classic controls under Meadow tokens.
+ *
+ * The accent badge inherits `--accent` (the button fill), which is too light for
+ * 12%-tinted badge text. Use the darker accent ink instead: at least 5.1:1 light and
+ * 6.8:1 dark.
+ *
+ * The classic danger button's 14% hover tint left its 11px label at 4.48:1 in light
+ * mode. Lower only the light-mode tint to 10% (4.77:1); the dark hover keeps the
+ * original tint.
+ */
+:root[data-ui="next"] .badge--accent {
+  color: var(--nx-accent);
+}
+
+:root[data-ui="next"]:not([data-theme="dark"]) .btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--state-danger) 10%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="next"]:not([data-theme]) .btn--danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--state-danger) 14%, transparent);
+  }
+}
