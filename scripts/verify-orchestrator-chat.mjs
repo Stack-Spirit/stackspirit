@@ -9,8 +9,9 @@
 //     environment with no provider or server credential.
 //   * --checklist prints owner-run steps and redacted evidence placeholders. It does
 //     not execute them.
-//   * the server half is printed as BLOCKED on VOWP 0.5 `vowp orchestrator endpoint`
-//     or the owner-approved SSH forward. It is never run by this script.
+//   * the server half is printed as BLOCKED on VOWP 0.5 `vowp orchestrator endpoint`;
+//     the app-owned SSH forward is not approved (decision A). It is never run by this
+//     script.
 //   * no `.env` file, provider key, token or keychain entry is read; no VOWP command is
 //     invoked; no VOWP session or surface is created.
 //
@@ -77,9 +78,10 @@ usage:
       sidecar is absent.
 
   node scripts/verify-orchestrator-chat.mjs --checklist
-      Print the owner-run §9.1 local setup steps and the §9.2 server steps with exact
-      commands and redacted evidence placeholders. The server section is blocked on VOWP
-      0.5 or the owner-approved SSH forward and must not be run yet.
+      Print the owner-run §9.1 local setup steps, the §9.1b local global/project steps
+      and the §9.2 server steps with exact commands and redacted evidence placeholders.
+      The server section is blocked on VOWP 0.5's "vowp orchestrator endpoint"; the
+      app-owned SSH forward is not approved (decision A) and must not be run yet.
 
   node scripts/verify-orchestrator-chat.mjs --help
 
@@ -169,6 +171,32 @@ function stripTestModules(text) {
   return marker >= 0 ? text.slice(0, marker) : text;
 }
 
+// Returns the brace-balanced body of the first `fn <name>(` definition that has a body.
+// Trait declarations and other body-less signatures are skipped, so a check can assert a
+// call's presence and a forbidden call's absence on one path without pinning a whole line.
+function functionBody(text, name) {
+  const pattern = new RegExp(`\\bfn\\s+${escapeRegExp(name)}\\s*[<(]`, "g");
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const braceStart = text.indexOf("{", match.index);
+    if (braceStart < 0) return null;
+    const semicolon = text.indexOf(";", match.index);
+    if (semicolon >= 0 && semicolon < braceStart) continue;
+    let depth = 0;
+    for (let index = braceStart; index < text.length; index += 1) {
+      const character = text[index];
+      if (character === "{") {
+        depth += 1;
+      } else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) return text.slice(braceStart, index + 1);
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
 function sha256File(path) {
   const hash = createHash("sha256");
   hash.update(readFileSync(path));
@@ -237,6 +265,27 @@ function checkSourcePolicy(label, requirements, detail = "") {
     for (const pattern of requirement.forbiddenPatterns ?? []) {
       if (pattern.test(haystack)) {
         problems.push(`${requirement.file} matches forbidden ${pattern}`);
+      }
+    }
+    for (const definition of requirement.functions ?? []) {
+      const body = functionBody(haystack, definition.name);
+      if (body === null) {
+        problems.push(`${requirement.file} has no ${definition.name}() body`);
+        continue;
+      }
+      for (const token of definition.required ?? []) {
+        if (!body.includes(token)) {
+          problems.push(
+            `${requirement.file} ${definition.name}() is missing ${JSON.stringify(token)}`,
+          );
+        }
+      }
+      for (const token of definition.forbidden ?? []) {
+        if (body.includes(token)) {
+          problems.push(
+            `${requirement.file} ${definition.name}() contains forbidden ${JSON.stringify(token)}`,
+          );
+        }
       }
     }
   }
@@ -513,6 +562,60 @@ function checkSidecarVersion(binary, manifest) {
 // Static policy checks
 // ---------------------------------------------------------------------------
 
+function checkEndpointResolver() {
+  checkSourcePolicy(
+    "local endpoint resolver",
+    [
+      {
+        file: "crates/spirit-core/src/engine/chat/endpoint.rs",
+        ignoreTests: true,
+        required: [
+          "pub struct VowpEndpointResolver",
+          'Command::new("vowp")',
+          '.args(["agent", "orchestrator", "endpoint", name, "--json"])',
+          "tokio::process::Command::env_clear(&mut command)",
+          "tokio::time::timeout(ENDPOINT_TIMEOUT, child.wait_with_output())",
+          "Some(2) => not_configured(",
+          "no `agent orchestrator endpoint` command",
+          "has no loopback endpoint; start or resume it in VOWP",
+          "StackSpirit chat only speaks opencode",
+          "reported a different home session than the attached log",
+        ],
+        forbidden: [
+          'Command::new("sh")',
+          'Command::new("bash")',
+          'Command::new("/bin/sh")',
+          'Command::new("cmd")',
+        ],
+        functions: [
+          {
+            name: "run",
+            required: [
+              'Command::new("vowp")',
+              '.args(["agent", "orchestrator", "endpoint", name, "--json"])',
+              "env_clear(&mut command)",
+              "tokio::time::timeout(ENDPOINT_TIMEOUT",
+              "map_err(|_| not_configured(",
+              "the installed VOWP agent command failed",
+              "the installed VOWP agent command timed out",
+            ],
+            forbidden: ['"sh"', '"/bin/sh"', '"bash"', '"-c"'],
+          },
+          {
+            name: "not_configured",
+            required: ['"chat_not_configured:'],
+          },
+          {
+            name: "gated",
+            required: ['"chat_gated:'],
+          },
+        ],
+      },
+    ],
+    "the Local endpoint is read with argv only, a bounded timeout and typed chat_not_configured/chat_gated refusals; an absent subcommand is chat_not_configured",
+  );
+}
+
 function checkBundledResolution() {
   checkSourcePolicy(
     "bundled engine resolution",
@@ -563,13 +666,38 @@ function checkSingleEngine() {
           ".with_private_state(app_data_dir.clone())",
           "LocalChatProvider::new(",
           "DesktopChatEngine::new(engine.clone())",
+          "setup_workspace",
         ],
+        forbidden: ["ProcessEngineRuntime::spawn(", "reserve_loopback_port("],
       },
       {
         file: "crates/spirit-core/src/engine/chat/local.rs",
         ignoreTests: true,
         required: ["pub trait ChatEngine", "async fn ensure_ready"],
-        forbidden: ["Command::new("],
+        forbidden: [
+          "Command::new(",
+          "ProcessEngineRuntime::spawn(",
+          "reserve_loopback_port(",
+        ],
+        functions: [
+          {
+            name: "ensure_engine",
+            required: [
+              "EngineChoice::External",
+              "engine_external_error()",
+              "self.engine.ensure_ready().await",
+            ],
+          },
+          {
+            name: "start_setup",
+            required: [
+              "ensure_engine().await",
+              "ChatEndpoint::engine(port, &self.inner.workspace)",
+              "create_native_session(&endpoint).await?",
+            ],
+            forbidden: ["resolve_local_endpoint"],
+          },
+        ],
       },
       {
         file: "apps/spirit-desktop/src-tauri/src/commands/chat.rs",
@@ -581,7 +709,104 @@ function checkSingleEngine() {
         ],
       },
     ],
-    "chat shares the one supervisor and never spawns a second engine",
+    "setup uses the one bundled supervisor; Local global/project only attaches and never starts a second engine",
+  );
+}
+
+function checkLocalOrchestrator() {
+  checkSourcePolicy(
+    "local orchestrator attach",
+    [
+      {
+        file: "crates/spirit-core/src/engine/chat/local.rs",
+        ignoreTests: true,
+        required: [
+          "resolve_local_endpoint(name, existing.as_deref())",
+          "discover_native_session(&endpoint, name).await?",
+          "entry_updated(entry)",
+        ],
+        functions: [
+          {
+            name: "start",
+            required: [
+              "self.start_setup(input).await",
+              "self.start_orchestrator(input).await",
+            ],
+            forbidden: [
+              "create_native_session",
+              "ensure_engine",
+              "ChatEndpoint::engine",
+              '"POST"',
+            ],
+          },
+          {
+            name: "orchestrator_name",
+            required: [
+              'ChatSessionId::Global => Some("global")',
+              "ChatSessionId::Project(name) => Some(name)",
+            ],
+          },
+          {
+            name: "start_orchestrator",
+            required: [
+              "if !input.resumes()",
+              "resolve_local_endpoint(name, existing.as_deref())",
+              ".open_orchestrator(name, &input.session, resolved)",
+            ],
+            forbidden: [
+              "create_native_session",
+              "ensure_engine",
+              "ChatEndpoint::engine",
+              '"POST"',
+            ],
+          },
+          {
+            name: "open_orchestrator",
+            required: [
+              "Some(native) => native",
+              "discover_native_session(&endpoint, name).await?",
+              "get_native_session(&endpoint, &native).await",
+            ],
+            forbidden: [
+              "create_native_session",
+              "ensure_engine",
+              "ChatEndpoint::engine",
+              '"POST"',
+            ],
+          },
+          {
+            name: "attach_orchestrator",
+            required: [
+              "resolve_local_endpoint(name, existing.as_deref())",
+              "open_orchestrator(name, session, resolved)",
+            ],
+            forbidden: [
+              "create_native_session",
+              "ensure_engine",
+              "ChatEndpoint::engine",
+              '"POST"',
+            ],
+          },
+          {
+            name: "discover_native_session",
+            required: ['"/api/session"'],
+            forbidden: ['"POST"', "create_native_session"],
+          },
+          {
+            name: "parse_discovered_session",
+            required: [
+              "entry_updated(entry)",
+              "newest.as_ref().is_none_or(|(best, _, _)| updated > *best)",
+            ],
+          },
+          {
+            name: "entry_updated",
+            required: ['.get("time")', '.get("updated")'],
+          },
+        ],
+      },
+    ],
+    "Local global/project resolves the VOWP endpoint, continues the newest host session when no native id is reported, and never creates a native session or starts the bundled engine",
   );
 }
 
@@ -733,10 +958,23 @@ function checkServerGate() {
     [
       {
         file: "crates/spirit-core/src/engine/chat/local.rs",
-        required: [
-          "(ChatSessionId::Setup, ChatSessionLocation::Server)",
-          "(ChatSessionId::Global | ChatSessionId::Project(_), _)",
-          "chat_gated_error(",
+        ignoreTests: true,
+        functions: [
+          {
+            name: "validate_start",
+            required: [
+              "(ChatSessionId::Setup, ChatSessionLocation::Server) => Err(chat_gated_error(",
+              "(ChatSessionId::Global | ChatSessionId::Project(_), ChatSessionLocation::Server) => {",
+              "this transport does not open SSH",
+            ],
+            forbidden: [
+              "(ChatSessionId::Global | ChatSessionId::Project(_), ChatSessionLocation::Server) => Ok(",
+            ],
+          },
+          {
+            name: "chat_gated_error",
+            required: ['format!("chat_gated: {detail}")'],
+          },
         ],
       },
       {
@@ -744,7 +982,7 @@ function checkServerGate() {
         required: ["`global` and `project:<name>` stay gated"],
       },
     ],
-    "setup is local-only; global/project reject with chat_gated until VOWP 0.5 or the owner-approved forward",
+    "server global/project return the typed chat_gated gate (decision A); the setup assistant is local-only",
   );
 }
 
@@ -809,10 +1047,16 @@ function checkServerTransport() {
   const sshForward = existsSync(
     repoFile(join("crates", "spirit-core", "src", "ssh", "forward.rs")),
   );
-  if (serverTransport || sshForward) {
-    warn(
+  const chatModule = readRepoText(
+    join("crates", "spirit-core", "src", "engine", "chat", "mod.rs"),
+  ) ?? "";
+  const sshModule = readRepoText(join("crates", "spirit-core", "src", "ssh", "mod.rs")) ?? "";
+  const wired =
+    /pub\s+mod\s+server\b/.test(chatModule) || /pub\s+mod\s+forward\b/.test(sshModule);
+  if (serverTransport || sshForward || wired) {
+    fail(
       "server transport",
-      "server/forward files are present; re-check the gate before running the server checklist",
+      "server/forward files or module wiring are present; the server half must stay gated until a new owner decision",
     );
     return;
   }
@@ -834,12 +1078,14 @@ function checkContract() {
           "### 9.2 Server chat",
           "### 9.4 Fail criteria",
           "vowp orchestrator endpoint",
-          "owner-approved",
-          "app-owned SSH forward",
+          "vowp agent orchestrator endpoint",
+          "not approved",
+          "decision **A**",
         ],
+        forbidden: ["owner-approved"],
       },
     ],
-    "the checklist follows the pinned contract sections",
+    "the checklist follows the pinned contract sections and decision A: the app-owned SSH forward is not approved",
   );
 }
 
@@ -890,8 +1136,10 @@ function printSummary() {
   console.log(
     "No model turn, network download, VOWP command, secret read or surface pairing was performed.",
   );
-  console.log("Server half: BLOCKED on VOWP 0.5 `vowp orchestrator endpoint` or the");
-  console.log("owner-approved SSH forward. This check did not run a server turn.");
+  console.log("Server half: BLOCKED on VOWP 0.5 `vowp orchestrator endpoint`;");
+  console.log(
+    "the app-owned SSH forward is not approved (decision A). This check did not run a server turn.",
+  );
   return failed > 0 ? 1 : 0;
 }
 
@@ -906,7 +1154,9 @@ function runCheck() {
   checkSidecarVersion(binary, manifest);
 
   checkBundledResolution();
+  checkEndpointResolver();
   checkSingleEngine();
+  checkLocalOrchestrator();
   checkPrivateTree();
   checkSettingsDiagnostics();
   checkChatDiagnostics();
@@ -1016,8 +1266,8 @@ A6. Scan the DOM, console, network and visible error text.
     Open DevTools in the desktop app. In the console, copy the live DOM:
       copy(document.documentElement.outerHTML)
     Search the DOM, console, network panel and error text for all of:
-      http://127.0.0.1
-      http://localhost
+      127.0.0.1
+      localhost
       :<PORT> (replace <PORT> with the chat port seen in Settings; never paste it)
       Authorization
       Basic
@@ -1025,7 +1275,7 @@ A6. Scan the DOM, console, network and visible error text.
       provider-token prefixes (sk-, pk_, ghp_, xox)
       -----BEGIN
       AKIA
-      OPENCODE_SERVER_PASSWORD
+      <SERVER_CREDENTIAL_ENV_NAME> (the engine server credential variable)
       OPENCODE_AUTH_CONTENT
       opencode-
       binaries
@@ -1036,7 +1286,7 @@ A6. Scan the DOM, console, network and visible error text.
       engine/state
       engine/config
       workspaces
-      ses_
+      <NATIVE_SESSION_ID> (any id with the native session-id prefix)
     Expected: the chat panel, message text, console, network panel and Tauri errors
     contain none of them. Only Settings → Advanced → Engine → Advanced details may show
     the loopback port and bundled binary path; that is an existing engine diagnostic.
@@ -1069,23 +1319,108 @@ A8. Select an external harness in Settings and reopen setup chat.
       setup chat error: <ENGINE_EXTERNAL>
       bundled engine restored: <YES_NO>
 
+=== A-Local. Local global/project (§9.1b) — OWNER-RUN ON A MAC ===
+
+Run this block only on the Mac that hosts the VOWP local agent, with VOWP's
+"vowp agent orchestrator endpoint <name> --json" command available. This is the live
+Local global/project flow added by ss-61/ss-62. It never creates a VOWP session, pairs a
+surface or runs a paid model. Use one free included model turn.
+
+L1. Confirm VOWP can resolve the local orchestrator endpoint (command presence only):
+      vowp agent orchestrator endpoint <ORCHESTRATOR_NAME> --json
+    Expected: a JSON endpoint document. Do not paste its URL, port, auth, VOWP session id
+    or native id. A missing subcommand or a command failure must show chat_not_configured
+    in StackSpirit, not a local fallback.
+
+L2. Open Local "global" in StackSpirit.
+    UI: choose the Local orchestrator named "global".
+    Expected: the chip is Local · this Mac; the existing orchestrator conversation loads;
+    the composer is enabled only after ready. No new conversation is created.
+    Evidence:
+      chip: Local · this Mac
+      existing conversation loaded: <YES_NO>
+      state: <READY_OR_CONNECTING>
+      messages shown: <N>
+
+L3. Capture the native session id before the turn from the same endpoint read:
+      vowp agent orchestrator endpoint global --json
+    Read only the native session id; never paste any other field. If VOWP reports no
+    native id, the app continues the newest host session instead of creating one.
+    Evidence:
+      native id reported: <YES_NO>
+      native id before: <REDACTED_NATIVE_ID>
+
+L4. Send one short message with the free included model.
+    Prompt (copy exactly):
+      Reply with exactly: STACKSPIRIT-CHAT-OK
+    Expected: a model-origin reply, not Preview; the existing conversation continues in
+    place. The app creates no native session.
+    Evidence:
+      selected model: <FREE_INCLUDED_MODEL_LABEL>
+      reply: <ASSISTANT_REPLY>
+      origin: model (preview must be absent)
+      progressive text: <YES_NO>
+
+L5. Read the same endpoint again after the turn and compare only the native id:
+      vowp agent orchestrator endpoint global --json
+    Expected: the native id is byte-for-byte equal to L3. Open the host's session list in
+    the orchestrator UI and confirm no new session appeared for this turn.
+    Evidence:
+      native id after: <REDACTED_NATIVE_ID>
+      same as before: <YES>
+      new host session in list: <NO>
+
+L6. Repeat L2-L5 for one project orchestrator "project:<PROJECT_NAME>".
+    Expected: Local "project:<PROJECT_NAME>" resolves the endpoint name "<PROJECT_NAME>"
+    (not the literal prefix), continues the same conversation, and creates no host
+    session.
+    Evidence:
+      project: <PROJECT_NAME>
+      existing conversation loaded: <YES_NO>
+      native id same before/after: <YES>
+      new host session in list: <NO>
+
+L7. Scan the chat DOM, console, app logs and Tauri error text for these markers:
+      <LOOPBACK_URL> (any loopback URL, including its scheme)
+      <LOOPBACK_PORT> (any chat port)
+      Authorization
+      Basic
+      Bearer
+      <NATIVE_SESSION_ID> (any native session id)
+      <VOWP_SESSION_ID> (any VOWP session id)
+      -----BEGIN
+      AKIA
+      sk-
+      OPENCODE_AUTH_CONTENT
+      <SERVER_CREDENTIAL_ENV_NAME>
+      /Users/
+      /home/
+      C:\
+      engine/data
+      engine/state
+      engine/config
+      workspaces
+    Expected: none appear in the chat panel, message text, console, app logs, network
+    panel or Tauri errors. Only Settings → Advanced → Engine → Advanced details may show
+    the loopback port and bundled binary path.
+    Evidence:
+      DOM matches: <0>
+      console matches: <0>
+      logs matches: <0>
+      network matches: <0>
+      error-text matches: <0>
+
 === B. Server chat (§9.2) — BLOCKED, DO NOT RUN YET ===
 
-Blocker: VOWP 0.5 "vowp orchestrator endpoint" has not shipped, and the owner has not
-approved the app-owned SSH forward in §3.3. The contract records VOWP 0.4.0, which has
-no orchestrator endpoint; the planned command is:
+Blocker: decision A (2026-11-19, ss-51) did not approve the app-owned SSH forward in
+§3.3, and VOWP 0.5's server-side "vowp orchestrator endpoint" has not shipped. The
+contract records VOWP 0.4.0, whose endpoint surface is the local agent read used by
+§9.1b. The server half therefore stays gated: the app must show the typed chat_gated
+error and must not run a server turn. Do not create a VOWP session or pair a surface for
+this checklist. The server rows stay BLOCKED in the evidence table; they are not
+failures.
 
-      vowp --json orchestrator endpoint <ORCHESTRATOR_NAME>
-
-For a Mac-hosted orchestrator the planned local read is:
-
-      vowp --json agent orchestrator endpoint <ORCHESTRATOR_NAME>
-
-Until one of those gates opens, the app must show the typed chat_gated error and must
-not run a server turn. Do not create a VOWP session or pair a surface for this checklist.
-The server rows stay BLOCKED in the evidence table; they are not failures.
-
-When the gate opens, run only this sequence:
+When both gates open, run only this sequence:
 
 B1. Open the global orchestrator. Expected: chip Server · <HOST_LABEL>; the composer is
     enabled only after ready.
@@ -1103,13 +1438,12 @@ B4. Confirm the VOWP endpoint/forward is absent from the DOM, console and Tauri 
 
 B5. If the server runs a v2 OpenCode, expect protocol_unsupported and no partial chat.
 
-=== C. Local global/project (§9.3) — ALSO BLOCKED ===
+=== C. Local global/project move (§9.3 step 4) — NOT RUN ===
 
-This path needs VOWP 0.5's local endpoint and "vowp agent orchestrator endpoint", plus
-VOWP mirroring to the home log. Do not run it yet. When it opens, verify the chip is
-Local · this Mac only when VOWP reports that endpoint and the turn is in the home log;
-then run "vowp orchestrator move" and confirm the session and chip follow the actual
-location without duplicates. This is the step-6 switch, not a chat toggle.
+The live Local global/project flow is §9.1b above. The "vowp orchestrator move" step in
+doc §9.3 step 4 is a separate switch test; this checklist does not run it and must not
+claim it verified. When the owner runs it, confirm the same VOWP session continues, the
+chip follows the actual new location, and no duplicate messages appear.
 
 === D. Fail criteria (§9.4) — any one is a FAIL ===
 
@@ -1138,12 +1472,19 @@ unverified. Do not turn a NOT RUN row into PASS from the source code or unit tes
 | A6 | NOT RUN | DOM/console/network/error matches 0; advanced engine port+binary only |
 | A7 | NOT RUN | reattached without duplicates; engine_not_ready; no fallback |
 | A8 | NOT RUN | engine_external; bundled restored |
-| B1 | BLOCKED | VOWP 0.5 endpoint or owner-approved forward required |
+| L1 | NOT RUN | local endpoint command present; no fallback |
+| L2 | NOT RUN | chip Local · this Mac; existing conversation loaded; no new conversation |
+| L3 | NOT RUN | native id reported <...>; before <REDACTED_NATIVE_ID> |
+| L4 | NOT RUN | model <...>; reply <...>; origin model; no native session created |
+| L5 | NOT RUN | native id after <REDACTED_NATIVE_ID>; same as before; no new host session |
+| L6 | NOT RUN | project <...>; same native id before/after; no new host session |
+| L7 | NOT RUN | DOM/console/logs/network/error matches 0; advanced engine port+binary only |
+| B1 | BLOCKED | decision A; VOWP 0.5 endpoint required |
 | B2 | BLOCKED | server log read not run |
 | B3 | BLOCKED | disconnect check not run |
 | B4 | BLOCKED | endpoint/forward leak scan not run |
 | B5 | BLOCKED | v1/v2 check not run |
-| C1 | BLOCKED | VOWP 0.5 local endpoint and move required |
+| C1 | NOT RUN | local move switch (doc §9.3 step 4) not run |
 
 Do not mark a row PASS unless the expected result was observed in the real desktop build.
 A MockBridge or VITE_SPIRIT_MOCK=1 observation is not owner verification.`;
