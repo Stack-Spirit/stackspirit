@@ -9,10 +9,8 @@ Capacity is not a spending budget and it never kills a running job. Cost is repo
 [providers and failover](providers-and-failover.md).
 
 > **Status: current.** The sampler, admission, brakes, targets, advisor and the `capacity` commands are
-> implemented on `main`. The v0.5 per-host admission split and additive `cluster` totals are
-> implemented in the tree; no v0.5 release has been cut. The binding specification is
-> [`docs/design/v0.2/home-and-surfaces.md`](../design/v0.2/home-and-surfaces.md) §6 and
-> [`docs/design/v0.5/scope.md`](../design/v0.5/scope.md) §6.
+> implemented on `main`. The binding specification is
+> [`docs/design/v0.2/home-and-surfaces.md`](../design/v0.2/home-and-surfaces.md) §6.
 
 ## The three layers
 
