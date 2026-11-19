@@ -4861,6 +4861,55 @@ fn agent_orchestrator_endpoint_corrupt_private_file_exits_three_and_names_it() {
     }
 }
 
+#[test]
+fn agent_orchestrator_endpoint_without_a_session_names_the_orchestrator() {
+    let home = TempDir::new().expect("agent home");
+    let state_dir = home.path().join(".vowp-agent");
+    ls_create_private_dir(&state_dir);
+    let name = "nosession";
+    let dir = OrchestratorHost::dir(&state_dir, name).expect("orchestrator dir");
+    ls_create_private_dir(&dir);
+    let config = OrchestratorConfig {
+        name: name.to_owned(),
+        app: OrchestratorApp::Opencode,
+        project: None,
+        session: None,
+        surface: None,
+        command: None,
+        args: Vec::new(),
+        working_dir: None,
+        service_json: None,
+    };
+    let config_path = OrchestratorHost::config_path(&state_dir, name).expect("config path");
+    write_private_file(&config_path, &serde_json::to_vec(&config).expect("config JSON"));
+
+    let envs = [("VOWP_AGENT_HOME", state_dir.display().to_string())];
+    let (code, stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", name], &envs);
+    let text = format!("{stdout}\n{stderr}");
+    assert_eq!(
+        code, 3,
+        "a config with no paired session is a local-record failure: {text}"
+    );
+    assert!(text.contains(name), "the error names the orchestrator: {text}");
+    assert!(
+        text.contains("no paired session"),
+        "the error names the failure class: {text}"
+    );
+    assert!(
+        !text.contains(&state_dir.display().to_string()),
+        "the error leaked a path: {text}"
+    );
+
+    let (code, stdout, stderr) = run_binary_with(
+        home.path(),
+        &["--json", "agent", "orchestrator", "endpoint", name],
+        &envs,
+    );
+    let text = format!("{stdout}\n{stderr}");
+    assert_eq!(code, 3, "the JSON error keeps the exit class: {text}");
+    assert!(text.contains(name), "the JSON error names the orchestrator: {text}");
+}
+
 /// Creates one 0700 directory, ignoring an existing one.
 fn ls_create_private_dir(dir: &Path) {
     std::fs::create_dir_all(dir).expect("private dir");

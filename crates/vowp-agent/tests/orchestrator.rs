@@ -2181,6 +2181,42 @@ fn agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only() {
 }
 
 #[test]
+fn agent_orchestrator_endpoint_without_a_session_names_the_orchestrator() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let name = "nosession";
+    write_config(
+        &state,
+        &OrchestratorConfig {
+            name: name.to_owned(),
+            app: OrchestratorApp::Opencode,
+            project: None,
+            session: None,
+            surface: None,
+            command: None,
+            args: Vec::new(),
+            working_dir: None,
+            service_json: None,
+        },
+    );
+    let host = OrchestratorHost::new(&state);
+
+    let error = host
+        .endpoint(name)
+        .expect_err("a config without a paired session is typed");
+    assert_eq!(error.code, "config_invalid");
+    let text = format!("{}: {}", error.code, error.message);
+    assert!(text.contains(name), "the error names the orchestrator: {text}");
+    assert!(
+        text.contains("no paired session"),
+        "the error names the failure class: {text}"
+    );
+    for forbidden in [state.display().to_string(), "config.json".to_owned()] {
+        assert!(!text.contains(&forbidden), "the error leaked a forbidden value: {text}");
+    }
+}
+
+#[test]
 fn agent_orchestrator_endpoint_errors_never_echo_a_path_or_password() {
     let root = tempfile::tempdir().expect("temp dir");
     let state = agent_state(root.path());

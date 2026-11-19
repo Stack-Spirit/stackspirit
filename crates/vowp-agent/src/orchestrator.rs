@@ -424,7 +424,7 @@ impl OrchestratorHost {
         let session = live
             .and_then(|live| live.session.clone())
             .or_else(|| config.session.clone())
-            .ok_or_else(|| config_error("the local orchestrator has no paired session"))?;
+            .ok_or_else(|| endpoint_error(name, config_error("the local orchestrator has no paired session")))?;
         let mut endpoint = OrchestratorEndpoint {
             name: name.to_owned(),
             app: config.app,
